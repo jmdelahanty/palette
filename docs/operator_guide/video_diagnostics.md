@@ -151,10 +151,12 @@ For `cams/*.mp4`, the tool looks for a sibling `*_meta.csv` file, for example:
 
 It validates:
 
-- required columns: `frame_id`, `timestamp`, `timestamp_sys`
+- required columns: `recording_frame_id`, `timestamp`, `timestamp_sys`
+- legacy aliases: `frame_id` and `local_frame_id` are accepted for
+  `recording_frame_id`
 - row count
-- `frame_id` monotonicity
-- `frame_id` contiguity
+- `recording_frame_id` monotonicity
+- `recording_frame_id` contiguity
 - `timestamp` monotonicity
 - `timestamp_sys` monotonicity
 - row-count match against the video frame count, when available
@@ -165,12 +167,15 @@ For `raw/*.mp4`, this section is skipped.
 
 ### Decode
 
-By default the tool attempts both:
+By default the tool attempts:
 
 - OpenCV
-- Decord
 
-This is useful because one backend can fail even when the media is fine.
+Decord remains available with `--backend decord` or `--backend all` for manual
+compatibility checks, but it is no longer the default preflight backend. Current
+pipeline decode work has moved toward PyNvVideoCodec, and a Decord failure
+should not block current recording imports unless an operator explicitly asks
+to validate that backend.
 
 The organizer and `backfill_hevc_keyframe_flags.py` now reuse the same shared container-check logic as the unified video diagnostics.
 

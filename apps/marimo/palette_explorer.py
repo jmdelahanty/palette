@@ -27,9 +27,18 @@ def _():
         build_arena_heatmap,
         build_controls as build_goodcopbadcop_controls,
         build_controls_panel_from_widgets as build_goodcopbadcop_controls_panel_from_widgets,
+        build_cra_near_field_output,
+        build_cra_primary_endpoint_output,
         build_debug_tables as build_goodcopbadcop_debug_tables,
         build_detection_occupancy_output,
         build_distance_figure,
+        build_egocentric_alignment_output,
+        build_egocentric_bearing_output,
+        build_egocentric_polar_heatmap_output,
+        build_egocentric_static_polar_output,
+        build_epoch_summary_output,
+        build_escape_freeze_output,
+        build_fish_heading_output,
         build_spatial_occupancy_output,
         build_summary as build_goodcopbadcop_summary,
         is_goodcopbadcop_option,
@@ -38,28 +47,43 @@ def _():
     )
     from apps.marimo.components.provenance import build_spec_provenance_panel
     from apps.marimo.components.registry import (
+        discover_protocol_recording_options,
         discover_interactive_spec_options,
         group_options_by_renderer,
+        infer_recordings_root_from_zarr_path,
         renderer_registration_for,
         supported_renderer_ids,
     )
     from apps.marimo.components.static_artifacts import build_static_artifacts_panel
+    from fisheye.visualization.goodcopbadcop_interactive import GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER
 
     return (
         Path,
+        GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
         build_arena_heatmap,
         build_detection_occupancy_output,
         build_distance_figure,
+        build_egocentric_alignment_output,
+        build_egocentric_bearing_output,
+        build_egocentric_polar_heatmap_output,
+        build_egocentric_static_polar_output,
+        build_epoch_summary_output,
+        build_escape_freeze_output,
+        build_fish_heading_output,
         build_goodcopbadcop_controls_panel_from_widgets,
         build_goodcopbadcop_controls,
+        build_cra_near_field_output,
+        build_cra_primary_endpoint_output,
         build_goodcopbadcop_debug_tables,
         build_goodcopbadcop_summary,
         build_spatial_occupancy_output,
         build_spec_provenance_panel,
         build_static_artifacts_panel,
+        discover_protocol_recording_options,
         discover_interactive_spec_options,
         go,
         group_options_by_renderer,
+        infer_recordings_root_from_zarr_path,
         is_goodcopbadcop_option,
         load_goodcopbadcop_view,
         mo,
@@ -73,9 +97,11 @@ def _():
 
 
 @app.cell
-def _(Path, discover_interactive_spec_options, mo):
+def _(GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER, Path, discover_protocol_recording_options, mo):
     cli_args = mo.cli_args()
     zarr_path_raw = cli_args.get("zarr-path")
+    recordings_root_raw = cli_args.get("recordings-root")
+    recording_name_contains = cli_args.get("recording-name-contains", "GoodCopBadCop")
     initial_renderer = cli_args.get("renderer")
     initial_run_path = cli_args.get("run-path")
     initial_artifact = cli_args.get("artifact")
@@ -85,16 +111,105 @@ def _(Path, discover_interactive_spec_options, mo):
             "scripts/py -m marimo run apps/marimo/palette_explorer.py -- "
             "--zarr-path <archive.zarr>"
         )
-    zarr_path = Path(str(zarr_path_raw))
+    seed_zarr_path = Path(str(zarr_path_raw))
+    recording_selector_renderer = (
+        str(initial_renderer) if initial_renderer else GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER
+    )
+    recording_options = discover_protocol_recording_options(
+        seed_zarr_path,
+        recordings_root=Path(str(recordings_root_raw)) if recordings_root_raw else None,
+        renderer_filter=recording_selector_renderer,
+        run_path_filter=str(initial_run_path) if initial_run_path else None,
+        artifact_filter=str(initial_artifact) if initial_artifact else None,
+        name_contains=str(recording_name_contains) if recording_name_contains else None,
+    )
+    if not recording_options:
+        raise ValueError(
+            "No matching persisted interactive visualization specs were found for "
+            f"{seed_zarr_path} or sibling recordings."
+        )
+    return (
+        initial_artifact,
+        initial_renderer,
+        initial_run_path,
+        recording_options,
+        recording_selector_renderer,
+        seed_zarr_path,
+    )
+
+
+@app.cell
+def _(infer_recordings_root_from_zarr_path, mo, recording_options, seed_zarr_path):
+    recording_label_to_option = {
+        f"{index + 1}. {option.label}": option
+        for index, option in enumerate(recording_options)
+    }
+    seed_resolved = seed_zarr_path.expanduser().resolve()
+    default_recording_label = next(
+        (
+            label
+            for label, option in recording_label_to_option.items()
+            if option.zarr_path.expanduser().resolve() == seed_resolved
+        ),
+        next(iter(recording_label_to_option)),
+    )
+    recording_picker = mo.ui.dropdown(
+        options=list(recording_label_to_option),
+        value=default_recording_label,
+        label="Recording",
+    )
+    recording_summary = {
+        "recordings_root": str(infer_recordings_root_from_zarr_path(seed_zarr_path)),
+        "recording_count": len(recording_options),
+        "initial_zarr_path": str(seed_zarr_path),
+        "recordings": [
+            {
+                "recording_id": option.recording_id,
+                "zarr_path": str(option.zarr_path),
+                "interactive_specs": option.interactive_spec_count,
+                "supported_specs": option.supported_spec_count,
+                "renderers": dict(option.renderer_counts),
+            }
+            for option in recording_options
+        ],
+    }
+    recording_selector_output = mo.vstack(
+        [
+            mo.md("# Palette Explorer"),
+            recording_picker,
+            mo.tree(recording_summary),
+        ]
+    )
+    recording_selector_output
+    return recording_label_to_option, recording_picker
+
+
+@app.cell
+def _(recording_label_to_option, recording_picker):
+    selected_recording_option = recording_label_to_option[recording_picker.value]
+    zarr_path = selected_recording_option.zarr_path
+    return selected_recording_option, zarr_path
+
+
+@app.cell
+def _(
+    discover_interactive_spec_options,
+    initial_artifact,
+    initial_renderer,
+    initial_run_path,
+    recording_selector_renderer,
+    zarr_path,
+):
+    renderer_filter = str(initial_renderer) if initial_renderer else str(recording_selector_renderer)
     spec_options = discover_interactive_spec_options(
         zarr_path,
-        renderer_filter=str(initial_renderer) if initial_renderer else None,
+        renderer_filter=renderer_filter if renderer_filter else None,
         run_path_filter=str(initial_run_path) if initial_run_path else None,
         artifact_filter=str(initial_artifact) if initial_artifact else None,
     )
     if not spec_options:
         raise ValueError(f"No persisted interactive visualization specs were found in {zarr_path}.")
-    return initial_artifact, initial_renderer, initial_run_path, spec_options, zarr_path
+    return (spec_options,)
 
 
 @app.cell
@@ -125,7 +240,7 @@ def _(group_options_by_renderer, mo, renderer_registration_for, spec_options, su
     selected_registration_preview = renderer_registration_for(selected_preview.renderer)
     overview = mo.vstack(
         [
-            mo.md(f"# Palette Explorer\n\n`{zarr_path}`"),
+            mo.md(f"## Interactive Views\n\n`{zarr_path}`"),
             mo.hstack(
                 [
                     mo.stat(label="Interactive specs", value=f"{len(spec_options):,}"),
@@ -209,6 +324,7 @@ def _(build_goodcopbadcop_controls, gcb_loaded, mo):
         gcb_epoch_options = gcb_controls.epoch_options
         gcb_heatmap_bins = gcb_controls.heatmap_bins
         gcb_chaser_overlay = gcb_controls.chaser_overlay
+        gcb_chaser_picker = gcb_controls.chaser_picker
         gcb_spatial_zone_set_picker = gcb_controls.spatial_zone_set_picker
     else:
         gcb_controls = None
@@ -218,9 +334,11 @@ def _(build_goodcopbadcop_controls, gcb_loaded, mo):
         gcb_epoch_options = {}
         gcb_heatmap_bins = None
         gcb_chaser_overlay = None
+        gcb_chaser_picker = None
         gcb_spatial_zone_set_picker = None
     return (
         gcb_chaser_overlay,
+        gcb_chaser_picker,
         gcb_controls,
         gcb_distance_series_picker,
         gcb_epoch_options,
@@ -235,6 +353,7 @@ def _(build_goodcopbadcop_controls, gcb_loaded, mo):
 def _(
     build_goodcopbadcop_controls_panel_from_widgets,
     gcb_chaser_overlay,
+    gcb_chaser_picker,
     gcb_distance_series_picker,
     gcb_epoch_options,
     gcb_epoch_picker,
@@ -249,6 +368,7 @@ def _(
         and gcb_time_range is not None
         and gcb_heatmap_bins is not None
         and gcb_chaser_overlay is not None
+        and gcb_chaser_picker is not None
     ):
         gcb_controls_output = build_goodcopbadcop_controls_panel_from_widgets(
             mo,
@@ -258,6 +378,7 @@ def _(
             epoch_options=gcb_epoch_options,
             heatmap_bins=gcb_heatmap_bins,
             chaser_overlay=gcb_chaser_overlay,
+            chaser_picker=gcb_chaser_picker,
             spatial_zone_set_picker=gcb_spatial_zone_set_picker,
         )
     else:
@@ -300,6 +421,97 @@ def _(build_distance_figure, gcb_distance_series_picker, gcb_loaded, gcb_time_wi
         gcb_visible_distance_df = pd.DataFrame()
     gcb_distance_output
     return (gcb_visible_distance_df,)
+
+
+@app.cell
+def _(build_epoch_summary_output, gcb_chaser_picker, gcb_loaded, go, mo):
+    if gcb_loaded is not None:
+        gcb_epoch_summary_output = build_epoch_summary_output(
+            mo,
+            go,
+            loaded=gcb_loaded,
+            chaser_picker=gcb_chaser_picker,
+        )
+    else:
+        gcb_epoch_summary_output = mo.md("")
+    gcb_epoch_summary_output
+    return
+
+
+@app.cell
+def _(build_egocentric_bearing_output, gcb_chaser_picker, gcb_loaded, gcb_time_window, go, mo):
+    if gcb_loaded is not None and gcb_time_window is not None:
+        gcb_egocentric_bearing_output = build_egocentric_bearing_output(
+            mo,
+            go,
+            loaded=gcb_loaded,
+            window=gcb_time_window,
+            chaser_picker=gcb_chaser_picker,
+        )
+    else:
+        gcb_egocentric_bearing_output = mo.md("")
+    gcb_egocentric_bearing_output
+    return
+
+
+@app.cell
+def _(build_egocentric_polar_heatmap_output, gcb_chaser_picker, gcb_loaded, gcb_time_window, go, mo):
+    if gcb_loaded is not None and gcb_time_window is not None:
+        gcb_egocentric_polar_heatmap_output = build_egocentric_polar_heatmap_output(
+            mo,
+            go,
+            loaded=gcb_loaded,
+            window=gcb_time_window,
+            chaser_picker=gcb_chaser_picker,
+        )
+    else:
+        gcb_egocentric_polar_heatmap_output = mo.md("")
+    gcb_egocentric_polar_heatmap_output
+    return
+
+
+@app.cell
+def _(build_egocentric_static_polar_output, gcb_loaded, mo):
+    if gcb_loaded is not None:
+        gcb_egocentric_static_polar_output = build_egocentric_static_polar_output(
+            mo,
+            loaded=gcb_loaded,
+        )
+    else:
+        gcb_egocentric_static_polar_output = mo.md("")
+    gcb_egocentric_static_polar_output
+    return
+
+
+@app.cell
+def _(build_fish_heading_output, gcb_loaded, gcb_time_window, go, mo):
+    if gcb_loaded is not None and gcb_time_window is not None:
+        gcb_fish_heading_output = build_fish_heading_output(
+            mo,
+            go,
+            loaded=gcb_loaded,
+            window=gcb_time_window,
+        )
+    else:
+        gcb_fish_heading_output = mo.md("")
+    gcb_fish_heading_output
+    return
+
+
+@app.cell
+def _(build_egocentric_alignment_output, gcb_chaser_picker, gcb_loaded, gcb_time_window, go, mo):
+    if gcb_loaded is not None and gcb_time_window is not None:
+        gcb_egocentric_alignment_output = build_egocentric_alignment_output(
+            mo,
+            go,
+            loaded=gcb_loaded,
+            window=gcb_time_window,
+            chaser_picker=gcb_chaser_picker,
+        )
+    else:
+        gcb_egocentric_alignment_output = mo.md("")
+    gcb_egocentric_alignment_output
+    return
 
 
 @app.cell
@@ -361,6 +573,47 @@ def _(build_spatial_occupancy_output, gcb_loaded, gcb_spatial_zone_set_picker, g
     else:
         gcb_spatial_occupancy_output = mo.md("")
     gcb_spatial_occupancy_output
+    return
+
+
+@app.cell
+def _(build_cra_primary_endpoint_output, gcb_loaded, go, mo):
+    if gcb_loaded is not None:
+        gcb_cra_primary_endpoint_output = build_cra_primary_endpoint_output(
+            mo,
+            go,
+            loaded=gcb_loaded,
+        )
+    else:
+        gcb_cra_primary_endpoint_output = mo.md("")
+    gcb_cra_primary_endpoint_output
+    return
+
+
+@app.cell
+def _(build_cra_near_field_output, gcb_loaded, go, mo):
+    if gcb_loaded is not None:
+        gcb_cra_near_field_output = build_cra_near_field_output(
+            mo,
+            go,
+            loaded=gcb_loaded,
+        )
+    else:
+        gcb_cra_near_field_output = mo.md("")
+    gcb_cra_near_field_output
+    return
+
+
+@app.cell
+def _(build_escape_freeze_output, gcb_loaded, mo):
+    if gcb_loaded is not None:
+        gcb_escape_freeze_output = build_escape_freeze_output(
+            mo,
+            loaded=gcb_loaded,
+        )
+    else:
+        gcb_escape_freeze_output = mo.md("")
+    gcb_escape_freeze_output
     return
 
 

@@ -103,9 +103,11 @@ def load_chaser_metrics(
         stim_to_camera=stim_to_camera,
     )
 
-    metrics_parent = analysis_group.require_group("chaser_fish_metrics")
+    metrics_parent = analysis_group.get("chaser_fish_metrics")
     metrics_run_resolved: Optional[str]
-    if metrics_run is not None:
+    if metrics_parent is None:
+        metrics_run_resolved = metrics_run
+    elif metrics_run is not None:
         metrics_run_resolved = metrics_run
     else:
         metrics_run_resolved = _resolve_latest(metrics_parent)
@@ -117,7 +119,7 @@ def load_chaser_metrics(
         "chaser_index": int(chaser_index),
     }
 
-    if metrics_run_resolved and metrics_run_resolved in metrics_parent:
+    if metrics_parent is not None and metrics_run_resolved and metrics_run_resolved in metrics_parent:
         metrics_group = metrics_parent[metrics_run_resolved]
         offline_fields = _extract_offline_fields(
             metrics_group=metrics_group,

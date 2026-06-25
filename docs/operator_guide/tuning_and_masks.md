@@ -72,6 +72,34 @@ to the recorded `source_video_path` and tunes in the analysis/inference
 coordinate space by default. Use `--full` only when you intentionally want to
 save full-resolution coordinates.
 
+### Tune missing masks from the registry
+
+You can omit the positional zarr path and let `mask_tuner` query the registry
+for analysis zarrs that still need masks:
+
+```bash
+scripts/py -m fisheye.tune.mask_tuner \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --path-contains GoodCopBadCop \
+  --missing-only
+```
+
+This opens the same interactive tuner one zarr at a time. Closing one tuner
+window returns to the terminal, where Enter advances to the next candidate and
+`q` exits the batch. Add `--list-only` to print the selected zarr paths without
+opening the GUI:
+
+```bash
+scripts/py -m fisheye.tune.mask_tuner \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --path-contains GoodCopBadCop \
+  --missing-only \
+  --list-only
+```
+
+Shell continuation matters: the trailing `\` must be at the end of the line it
+continues. A line containing only `\` does not continue the previous command.
+
 ### Propagate to other recordings
 
 Dish masks are grouped by `experimental_chamber` (dish type). The batch apply

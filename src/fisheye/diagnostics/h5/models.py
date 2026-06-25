@@ -67,6 +67,11 @@ class FrameMetadataInfo:
     mean_stimulus_per_camera: Optional[float] = None
     median_stimulus_per_camera: Optional[float] = None
     expected_ratio: float = 2.0
+    expected_ratio_source: Optional[str] = None
+    inferred_camera_fps: Optional[float] = None
+    inferred_stimulus_fps: Optional[float] = None
+    mean_camera_frame_step: Optional[float] = None
+    expected_camera_frame_step: Optional[float] = None
     ratio_warn_count: int = 0
     ratio_warn_fraction: Optional[float] = None
     max_ratio_warn_run_length: int = 0

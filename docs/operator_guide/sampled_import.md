@@ -135,16 +135,30 @@ newer manifest stream inventory is absent, it falls back to Orange external
 recorder summary sidecars. Use a fixed `--frame-step` only when you explicitly
 want the same interval for every recording or as a fallback for recordings with
 no frame-count metadata.
+
+New sampled training imports default to `--decode-backend pynvvc-luma`. This is
+the current canonical-candidate path: PyNvVideoCodec decodes the source video,
+Palette stores the raw NV12 Y/luma plane as `uint8`, writes
+`raw_video/original_frame_indices`, and stamps
+`pixel_contract_name = orange_mono_pynvvc_luma_uint8_v1`. The backend is
+GPU-only and fails before publishing the final Zarr if CUDA/PyNvVideoCodec is
+unavailable. Use `--gpu-id <id>` when a cluster job needs to pin PyNvVC decode
+to a specific visible GPU; the chosen device is stamped in `raw_video.attrs`.
 Use `--recursive` only for genuinely nested recording layouts; for the standard
 `<recordings_root>/<recording>/raw/*.h5` layout, the shallow scan is much faster
 on PRFS.
 Use `--limit 1` for the first wrapper-managed smoke import.
 
-Current sampled imports use the legacy Decord-derived pixel path in
-`capture.import_video`; the stored `raw_video` attrs include
-`decode_contract_status = "legacy_decord_pending_pynvvc_unification"`. Bulk
-`--apply` via the wrapper requires `--allow-legacy-decode-contract` so this
-choice is explicit before creating long-lived training assets.
+The older Decord-derived path remains available only for explicit legacy
+backfills:
+
+```bash
+scripts/py -m fisheye.utils.import_recordings_training /groups/johnson/johnsonlab/jeremy/recordings \
+  --decode-backend legacy-decord \
+  --allow-legacy-decode-contract \
+  --target-sampled-frames 200 \
+  --apply
+```
 
 Current GoodCopBadCop smoke:
 
@@ -157,7 +171,6 @@ scripts/py -m fisheye.utils.import_recordings_training /groups/johnson/johnsonla
   --stimulus-quiet \
   --register \
   --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
-  --allow-legacy-decode-contract \
   --apply
 ```
 

@@ -354,6 +354,35 @@ dependency equivalent to `-w done(<crop_jobid>)`, so it remains pending until
 the crop job exits successfully. If the crop job fails, the cache job does not
 start.
 
+For multi-recording LSF batches, use the fan-out wrapper:
+
+```bash
+scripts/submit_crop_flat_roi_cache_batches_bsub.sh \
+  --file-list /path/to/analysis_zarrs.txt \
+  --workflow-id <workflow_id> \
+  --public-cache-root /groups/johnson/johnsonlab/jeremy/recordings/tmp/palette_roi_cache \
+  --cache-queue gpu_l4 \
+  --cache-gpus 1
+```
+
+The fan-out wrapper defers crop-job registry writes by default. Each crop job
+sets `PALETTE_DISABLE_REGISTRY_WRITES=1`, writes its crop run into the analysis
+Zarr, and emits a per-recording crop status JSON. Each dependent cache job
+publishes the flat cache payload and emits a cache status JSON. After all cache
+jobs finish, the wrapper submits one CPU-only registry finalizer job:
+
+```bash
+scripts/py -m fisheye.utils.finalize_crop_flat_roi_cache_batch_registry \
+  <batch-run-root> \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --apply
+```
+
+This serial finalizer verifies the crop/cache pairing, verifies the crop run is
+complete, refreshes `crop_quality`, and marks `crop=ok` in
+`recording_step_status`. Avoid `--inline-registry` for multi-recording batches:
+parallel SQLite writes to the shared PRFS registry can corrupt the database.
+
 For local workstation batches, use the Python wrapper instead of submitting LSF
 jobs:
 

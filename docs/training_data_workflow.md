@@ -43,26 +43,30 @@ Contract reference: `docs/recording_analysis_pipeline_contract.md`.
 ## Recommended Workflow
 
 ### 1) Sampled import for training frames (full + downsampled)
-Use a config with `import.resolutions: both` (e.g. `configs/fisheye/import_local.yaml` or `configs/fisheye/default.yaml`).
+Use the batch wrapper for new sampled training Zarrs. Its default backend is
+`--decode-backend pynvvc-luma`, which decodes with PyNvVideoCodec, stores raw
+NV12 Y/luma frames as `uint8`, writes `raw_video/original_frame_indices`, and
+stamps the `orange_mono_pynvvc_luma_uint8_v1` pixel contract.
+
+The direct `capture.import_video --training-data` path is retained as a legacy
+Decord-derived path, not the preferred path for new long-lived training assets.
 
 ```bash
-scripts/py -m fisheye.capture.import_video /path/to/video.mp4 \
-  --config configs/fisheye/import_local.yaml \
-  --training-data \
-  --frame-step 100 \
-  --zarr-path /path/to/recording/zarr/<recording>_training.zarr
+scripts/py -m fisheye.utils.import_recordings_training /path/to/recordings \
+  --target-sampled-frames 200 \
+  --dry-run
 ```
 
 Notes:
-- `--training-data` **requires** `--frame-step`.
+- `--target-sampled-frames` resolves a per-recording `frame_step` from source
+  frame-count metadata.
 - The import stores `raw_video/original_frame_indices`, mapping sampled frames back to original video indices.
 - Keep the sampled Zarr in the recording’s `zarr/` folder or a dedicated training workspace.
-- Current sampled imports are materialized by `capture.import_video`, which still
-  uses Decord-derived RGB frames and BT.601 RGB-to-gray conversion. The resulting
-  `raw_video` attrs are stamped with
-  `decode_contract_status = "legacy_decord_pending_pynvvc_unification"`. Treat
-  these as explicit legacy-decode training assets until the pynvvc canonical
-  import path lands.
+- PyNvVC sampled imports are GPU-only and fail before creating the final Zarr if
+  CUDA/PyNvVideoCodec is unavailable.
+- The older Decord path is still available as
+  `--decode-backend legacy-decord --allow-legacy-decode-contract` for explicit
+  legacy backfills only.
 
 ### Batch import from `recordings/` layout (camera videos)
 If recordings are organized as:
@@ -89,7 +93,6 @@ scripts/py -m fisheye.utils.import_recordings_training /nvme1/recordings \
   --target-sampled-frames 200 \
   --register \
   --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
-  --allow-legacy-decode-contract \
   --apply
 ```
 
@@ -123,7 +126,6 @@ scripts/py -m fisheye.utils.import_recordings_training /nvme1/recordings \
   --target-sampled-frames 200 \
   --register \
   --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
-  --allow-legacy-decode-contract \
   --apply
 ```
 
@@ -136,7 +138,6 @@ scripts/py -m fisheye.utils.import_recordings_training /nvme1/recordings \
   --stimulus-quiet \
   --register \
   --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
-  --allow-legacy-decode-contract \
   --apply
 ```
 
@@ -153,7 +154,6 @@ scripts/py -m fisheye.utils.import_recordings_training /groups/johnson/johnsonla
   --stimulus-quiet \
   --register \
   --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
-  --allow-legacy-decode-contract \
   --apply
 ```
 

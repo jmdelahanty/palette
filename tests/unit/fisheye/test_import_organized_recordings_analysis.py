@@ -13,6 +13,19 @@ def _recording(root: Path, name: str = "2026-05-29T18-11-16Z_arena_1_GoodCopBadC
     (rec / "raw").mkdir(parents=True, exist_ok=True)
     (rec / "cams" / "Cam2010093_2026-05-29T18-11-16Z_arena_1.mp4").touch()
     (rec / "raw" / f"{name}.h5").touch()
+    (rec / "recording_manifest.json").write_text(
+        json.dumps(
+            {
+                "recording_name": name,
+                "recording_type": "behavior",
+                "recording_subtype": "free",
+                "behavior_mode": "free",
+                "artifact_schema_id": "orange_external_ipc_single_clip_v1",
+                "preflight": {"status": "not_run", "checked_at_utc": None, "video": None, "h5": None},
+            }
+        ),
+        encoding="utf-8",
+    )
     return rec
 
 
@@ -89,6 +102,9 @@ def test_main_apply_uses_import_only_process(monkeypatch, tmp_path: Path) -> Non
 
     assert rc == 0
     assert calls == [(rec.resolve(), True)]
+    manifest = json.loads((rec / "recording_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["import_status"] == "ok"
+    assert manifest["analysis_zarr_path"].endswith(f"{rec.name}_analysis.zarr")
 
 
 def test_main_apply_syncs_successful_import_when_registry_is_provided(monkeypatch, tmp_path: Path) -> None:
@@ -129,6 +145,9 @@ def test_main_apply_syncs_successful_import_when_registry_is_provided(monkeypatc
     assert rc == 0
     assert process_calls == [rec.resolve()]
     assert registry_calls == [(registry_path.resolve(), expected_zarr)]
+    manifest = json.loads((rec / "recording_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["import_status"] == "ok"
+    assert manifest["registry_dataset_id"] == "dataset-1"
 
 
 def test_main_syncs_skipped_existing_zarr_when_registry_is_provided(monkeypatch, tmp_path: Path) -> None:
@@ -167,6 +186,9 @@ def test_main_syncs_skipped_existing_zarr_when_registry_is_provided(monkeypatch,
 
     assert rc == 0
     assert registry_calls == [zarr_path.resolve()]
+    manifest = json.loads((rec / "recording_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["import_status"] == "ok"
+    assert manifest["registry_dataset_id"] == "dataset-existing"
 
 
 def test_main_registry_sync_failure_marks_run_failed(monkeypatch, tmp_path: Path) -> None:
@@ -205,6 +227,18 @@ def test_main_recording_only_discovers_video_recording(monkeypatch, tmp_path: Pa
     rec = tmp_path / "video_only"
     (rec / "cams").mkdir(parents=True)
     (rec / "cams" / "Cam2010093_video_only.mp4").touch()
+    (rec / "recording_manifest.json").write_text(
+        json.dumps(
+            {
+                "recording_name": rec.name,
+                "recording_type": "behavior",
+                "recording_subtype": "free",
+                "behavior_mode": "free",
+                "artifact_schema_id": "video_only_v1",
+            }
+        ),
+        encoding="utf-8",
+    )
     calls: list[tuple[Path, object]] = []
 
     def _fake_process(plan, opts, **_kwargs):

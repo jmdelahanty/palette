@@ -151,6 +151,9 @@ The `/video_metadata/frame_metadata` checker reports:
 - row count
 - `stimulus_frame_num` monotonicity
 - `triggering_camera_frame_id` nondecreasing behavior
+- current timestamp field: `timestamp_ns_epoch`
+- legacy timestamp aliases accepted for older files: `timestamp_ns`,
+  `timestamp_ns_session`, `relative_timestamp_ns`
 - unique camera frame count
 - missing camera frame count across the observed range
 - mean and median stimulus-rows-per-camera-frame
@@ -160,6 +163,21 @@ The `/video_metadata/frame_metadata` checker reports:
 The current heuristic is intentionally tolerant of sparse compensated `1/3` or
 `3/1` per-camera mappings when there is no missing-frame behavior and cumulative
 drift stays low.
+
+When acquisition metadata is available, the checker infers the expected
+stimulus-to-camera cadence instead of assuming a fixed `2.0` ratio. It uses:
+
+- camera FPS from acquisition metadata, currently
+  `/associated_cameras/camera_metadata/<camera>/camera_frame_rate_configured_hz`
+  or the recording snapshot fallback;
+- stimulus metadata FPS from `frame_metadata` timestamp deltas.
+
+For cameras slower than the stimulus clock, healthy metadata may alternate
+between adjacent row counts. For example, `120 Hz / 100 FPS = 1.2`, so a normal
+recording can have mostly one metadata row per camera frame and occasional two
+row frames. For cameras faster than the stimulus clock, many camera frame IDs
+will not have a metadata row; the checker validates the expected camera-frame
+step between metadata rows instead of treating those gaps as dropped frames.
 
 ### Tracking
 

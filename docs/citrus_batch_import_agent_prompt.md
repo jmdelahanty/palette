@@ -138,10 +138,13 @@ scripts/py -m fisheye.utils.organize_recordings \
   --rename-cams
 ```
 
-This organize step writes `recording_manifest.json` with
-`preflight.status="not_run"` unless the wrapper is extended to pass
-`--run-video-diagnostics` and/or `--run-h5-diagnostics`; the downstream import
-gate only blocks stored `preflight.status="fail"`.
+This organize step writes `recording_manifest.json`. The cluster submitter now
+passes `--run-video-diagnostics` and `--run-h5-diagnostics` by default, so new
+imports should persist a concrete manifest `preflight.status` unless the job is
+submitted with `--no-run-video-diagnostics` and/or `--no-run-h5-diagnostics`.
+The automatic video preflight uses OpenCV decode smoke by default; Decord is an
+explicit manual compatibility backend, not the current import gate.
+The downstream import gate only blocks stored `preflight.status="fail"`.
 
 then:
 
@@ -162,11 +165,15 @@ Optional registry refresh is explicit:
 ```bash
 scripts/submit_citrus_session_import_bsub.sh \
   --session-dir "$SESSION_DIR" \
-  --register \
   --registry /path/to/palette_registry.sqlite
 ```
 
-If enabled, the submitted job passes `--registry` to
+Registry refresh is enabled by default in the cluster submitter and uses
+`$PALETTE_REGISTRY` or
+`/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite` unless
+overridden. Pass `--no-register` only for deliberate import-only testing.
+
+The submitted job passes `--registry` to
 `fisheye.utils.import_organized_recordings_analysis`. The import wrapper scans
 successful imports and skipped existing analysis Zarrs before reporting each
 recording complete.

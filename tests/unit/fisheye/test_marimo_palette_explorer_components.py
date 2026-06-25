@@ -2,15 +2,26 @@ from __future__ import annotations
 
 import time
 
+import numpy as np
+import polars as pl
 import plotly.express as px
 import plotly.graph_objects as go
+import zarr
 
 from apps.marimo.components.goodcopbadcop_chaser import (
     GoodCopBadCopTimeWindow,
     build_arena_heatmap,
     build_controls,
     build_controls_panel_from_widgets,
+    build_cra_near_field_output,
+    build_cra_primary_endpoint_output,
     build_detection_occupancy_output,
+    build_egocentric_alignment_output,
+    build_egocentric_bearing_output,
+    build_egocentric_polar_heatmap_output,
+    build_egocentric_static_polar_output,
+    build_epoch_summary_output,
+    build_fish_heading_output,
     build_spatial_occupancy_output,
     is_goodcopbadcop_option,
     load_goodcopbadcop_view,
@@ -18,23 +29,161 @@ from apps.marimo.components.goodcopbadcop_chaser import (
 from apps.marimo.components.registry import (
     artifact_path_for,
     discover_interactive_spec_options,
+    discover_protocol_recording_options,
+    infer_recordings_root_from_zarr_path,
+    recording_id_from_analysis_zarr,
     supported_renderer_ids,
 )
+from fisheye.analysis.cra_primary_endpoint import (
+    build_cra_primary_endpoint_result,
+    write_cra_primary_endpoint_component,
+)
+from fisheye.analysis.cra_near_field import (
+    build_cra_near_field_result,
+    write_cra_near_field_component,
+)
 from fisheye.analysis.chaser_distance_runs import write_chaser_distance_run
+from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
 from fisheye.visualization.goodcopbadcop_interactive import (
     DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT,
     GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
 )
+from fisheye.analysis.chaser_egocentric_bearing import (
+    PRE_POST_POLAR_POINT_CLOUD_PNG_ARTIFACT_NAME,
+    PRE_POST_POLAR_PNG_ARTIFACT_NAME,
+    build_chaser_egocentric_bearing_result,
+    write_chaser_egocentric_bearing_component,
+)
+from fisheye.analysis.goodcopbadcop_epoch_behavior_summary import (
+    build_goodcopbadcop_epoch_behavior_summary_result,
+    write_goodcopbadcop_epoch_behavior_summary_component,
+)
+from tests.unit.fisheye.test_chaser_egocentric_bearing import _add_track_kinematics_run
+from tests.unit.fisheye.test_cra_near_field import _add_circle_geometry
 from tests.unit.fisheye.test_goodcopbadcop_interactive import (
     _make_archive_with_detection_occupancy,
     _make_chaser_result,
 )
+from tests.unit.fisheye.test_export_cross_recording_analytics import _add_goodcopbadcop_cra_protocol_metadata
 
 
 def _make_archive_with_goodcopbadcop_spec(tmp_path):
     zarr_path = _make_archive_with_detection_occupancy(tmp_path)
     write_chaser_distance_run(zarr_path, _make_chaser_result(zarr_path), overwrite=True)
     return zarr_path
+
+
+def _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path):
+    zarr_path = _make_archive_with_goodcopbadcop_spec(tmp_path)
+    _add_track_kinematics_run(zarr_path)
+    result = build_chaser_egocentric_bearing_result(
+        zarr_path,
+        chaser_distance_run="chaser_distance_1",
+        track_kinematics_run="tk_1",
+    )
+    write_chaser_egocentric_bearing_component(zarr_path, result, overwrite=True)
+    return zarr_path
+
+
+def _add_swim_bout_run(zarr_path):
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    track = root["analysis/track_kinematics_runs/offline/tk_1/tracks/id_0"]
+    track.create_array(
+        "speed_filtered_mm",
+        data=np.asarray([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0], dtype=np.float32),
+        chunks=(8,),
+        overwrite=True,
+    )
+    tk_run = root["analysis/track_kinematics_runs/offline/tk_1"]
+    tk_run.attrs["fps"] = 10.0
+    tk_run.attrs["pixel_to_mm"] = 0.02
+
+    parent = root["analysis"].require_group("swim_bout_runs")
+    parent.attrs["latest"] = "bouts_1"
+    run = parent.create_group("bouts_1")
+    run.attrs.update(
+        {
+            "default_level": "filtered",
+            "source_track_kinematics_run": "tk_1",
+            "track_id": 0,
+            "detection_method": "threshold",
+        }
+    )
+    level = run.create_group("speed_filtered")
+    level.attrs["n_bouts"] = 4
+
+    bout_dtype = np.dtype(
+        [
+            ("bout_id", np.int32),
+            ("peak_time_s", np.float64),
+            ("start_time_s", np.float64),
+            ("end_time_s", np.float64),
+            ("start_frame", np.int64),
+            ("end_frame", np.int64),
+            ("duration_s", np.float64),
+            ("path_length_mm", np.float64),
+        ]
+    )
+    bouts = np.zeros(4, dtype=bout_dtype)
+    bouts["bout_id"] = [0, 1, 2, 3]
+    bouts["peak_time_s"] = [0.10, 0.20, 0.45, 0.70]
+    bouts["start_time_s"] = [0.08, 0.18, 0.42, 0.68]
+    bouts["end_time_s"] = [0.12, 0.24, 0.50, 0.76]
+    bouts["start_frame"] = [0, 1, 4, 7]
+    bouts["end_frame"] = [1, 2, 5, 8]
+    bouts["duration_s"] = [0.04, 0.06, 0.08, 0.08]
+    bouts["path_length_mm"] = [0.2, 0.3, 0.4, 0.5]
+    write_columnar_dataset(level, "bouts", bouts, {"n_bouts": 4})
+
+    interval_dtype = np.dtype(
+        [
+            ("interval_id", np.int32),
+            ("valid", bool),
+            ("prev_end_time_s", np.float64),
+            ("next_start_time_s", np.float64),
+            ("interval_s", np.float64),
+        ]
+    )
+    intervals = np.zeros(2, dtype=interval_dtype)
+    intervals["interval_id"] = [0, 1]
+    intervals["valid"] = [True, True]
+    intervals["prev_end_time_s"] = [0.12, 0.50]
+    intervals["next_start_time_s"] = [0.18, 0.68]
+    intervals["interval_s"] = [0.06, 0.18]
+    write_columnar_dataset(level, "inter_bout_intervals", intervals, {"n_intervals": 2})
+
+
+def _make_archive_with_goodcopbadcop_cra_spec(tmp_path):
+    zarr_path = _make_archive_with_goodcopbadcop_spec(tmp_path)
+    _add_goodcopbadcop_cra_protocol_metadata(zarr_path)
+    result = build_cra_primary_endpoint_result(zarr_path, chaser_distance_run="chaser_distance_1")
+    write_cra_primary_endpoint_component(zarr_path, result, overwrite=True)
+    return zarr_path
+
+
+def _make_archive_with_goodcopbadcop_cra_near_field_spec(tmp_path):
+    zarr_path = _make_archive_with_goodcopbadcop_cra_spec(tmp_path)
+    _add_circle_geometry(zarr_path)
+    result = build_cra_near_field_result(
+        zarr_path,
+        chaser_distance_run="chaser_distance_1",
+        cra_primary_endpoint_component="object_relative_pre_post_v1",
+        r_zone_mm=2.0,
+        r_in_mm=2.0,
+        r_out_mm=3.0,
+        percentile_values=(5.0, 10.0),
+        radial_bin_edges_mm=(0.0, 2.0, 4.0, 8.0),
+        cdf_thresholds_mm=(2.0, 4.0),
+        perimeter_band_mm=2.0,
+    )
+    write_cra_near_field_component(zarr_path, result, overwrite=True)
+    return zarr_path
+
+
+def _make_recording_archive_with_goodcopbadcop_spec(recordings_root, recording_id):
+    zarr_dir = recordings_root / recording_id / "zarr"
+    zarr_dir.mkdir(parents=True)
+    return _make_archive_with_goodcopbadcop_spec(zarr_dir)
 
 
 def test_palette_explorer_registry_discovers_goodcopbadcop_interactive_spec(tmp_path) -> None:
@@ -63,6 +212,41 @@ def test_palette_explorer_registry_discovers_goodcopbadcop_interactive_spec(tmp_
     assert discover_interactive_spec_options(zarr_path, renderer_filter="missing-renderer") == []
 
 
+def test_palette_explorer_discovers_sibling_goodcopbadcop_recordings(tmp_path) -> None:
+    recordings_root = tmp_path / "recordings"
+    first = _make_recording_archive_with_goodcopbadcop_spec(
+        recordings_root,
+        "2026-06-14T21-12-08Z_arena_1_GoodCopBadCop",
+    )
+    second = _make_recording_archive_with_goodcopbadcop_spec(
+        recordings_root,
+        "2026-06-14T21-12-08Z_arena_2_GoodCopBadCop",
+    )
+    other_dir = recordings_root / "2026-06-14T21-12-08Z_arena_3_OtherProtocol" / "zarr"
+    other_dir.mkdir(parents=True)
+    _make_archive_with_goodcopbadcop_spec(other_dir)
+
+    assert infer_recordings_root_from_zarr_path(first) == recordings_root
+    assert recording_id_from_analysis_zarr(first) == "2026-06-14T21-12-08Z_arena_1_GoodCopBadCop"
+
+    options = discover_protocol_recording_options(
+        first,
+        recordings_root=recordings_root,
+        renderer_filter=GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
+    )
+
+    assert [option.recording_id for option in options] == [
+        "2026-06-14T21-12-08Z_arena_1_GoodCopBadCop",
+        "2026-06-14T21-12-08Z_arena_2_GoodCopBadCop",
+    ]
+    assert {option.zarr_path for option in options} == {first, second}
+    assert all(option.supported_spec_count == 1 for option in options)
+    assert all(
+        option.renderer_counts == {GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER: 1}
+        for option in options
+    )
+
+
 def test_goodcopbadcop_component_loads_selected_registry_option(tmp_path) -> None:
     zarr_path = _make_archive_with_goodcopbadcop_spec(tmp_path)
     option = discover_interactive_spec_options(zarr_path)[0]
@@ -76,7 +260,325 @@ def test_goodcopbadcop_component_loads_selected_registry_option(tmp_path) -> Non
     assert loaded.position_df["fish_valid"].tolist() == [True, True, True, True, False, True, True, True, True]
     assert loaded.spatial_occupancy_df["zone_set_id"].unique().tolist() == ["image_quadrants_v1"]
     assert loaded.spatial_occupancy_df["frame_count"].tolist() == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    assert loaded.epoch_summary_df.height == 6
     assert loaded.load_duration_ms >= 0.0
+
+
+def test_goodcopbadcop_component_summarizes_swim_bouts_by_epoch(tmp_path) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
+    _add_swim_bout_run(zarr_path)
+    option = discover_interactive_spec_options(zarr_path)[0]
+
+    loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
+    pre_chaser_0 = loaded.epoch_summary_df.filter(
+        (pl.col("window_label") == "pre_event") & (pl.col("chaser_index") == 0)
+    ).row(0, named=True)
+
+    assert loaded.epoch_summary_source == "analysis/swim_bout_runs/bouts_1"
+    assert pre_chaser_0["bout_count"] == 2
+    assert pre_chaser_0["inter_bout_interval_count"] == 1
+    assert pre_chaser_0["median_inter_bout_interval_s"] == 0.06
+    assert pre_chaser_0["speed_sample_count"] == 3
+    assert pre_chaser_0["mean_speed_mm_s"] == 20.0
+    assert np.isfinite(pre_chaser_0["median_distance_mm"])
+
+    class _Ui:
+        @staticmethod
+        def table(frame, selection=None, page_size=10):
+            return frame
+
+    class _Mo:
+        ui = _Ui()
+
+        @staticmethod
+        def md(text):
+            return text
+
+        @staticmethod
+        def stat(*, label, value):
+            return {"label": label, "value": value}
+
+        @staticmethod
+        def hstack(items):
+            return list(items)
+
+        @staticmethod
+        def vstack(items):
+            return list(items)
+
+    class _ChaserPicker:
+        value = "chaser 1"
+
+    output = build_epoch_summary_output(_Mo, loaded=loaded, chaser_picker=_ChaserPicker())
+    table = output[-1]
+    assert table["chaser_index"].tolist() == [1, 1, 1]
+    assert table["bout_count"].tolist() == [2, 1, 1]
+
+
+def test_goodcopbadcop_component_prefers_persisted_epoch_behavior_summary(tmp_path) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
+    _add_swim_bout_run(zarr_path)
+    result = build_goodcopbadcop_epoch_behavior_summary_result(
+        zarr_path,
+        chaser_distance_run="chaser_distance_1",
+    )
+    component_path = write_goodcopbadcop_epoch_behavior_summary_component(
+        zarr_path,
+        result,
+        overwrite=True,
+    )
+    option = discover_interactive_spec_options(zarr_path)[0]
+
+    loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
+    pre_chaser_0 = loaded.epoch_summary_df.filter(
+        (pl.col("window_label") == "pre_event") & (pl.col("chaser_index") == 0)
+    ).row(0, named=True)
+
+    assert loaded.epoch_behavior is not None
+    assert loaded.epoch_summary_source == component_path
+    assert loaded.epoch_summary_error is None
+    assert loaded.epoch_summary_computed_in_viewer is False
+    assert loaded.epoch_behavior.per_epoch_fish_df.height == 3
+    assert pre_chaser_0["bout_count"] == 2
+    assert pre_chaser_0["mean_inter_bout_interval_s"] == 0.06
+
+    class _Ui:
+        @staticmethod
+        def table(frame, selection=None, page_size=10):
+            return frame
+
+    class _Mo:
+        ui = _Ui()
+
+        @staticmethod
+        def md(text):
+            return text
+
+        @staticmethod
+        def stat(*, label, value):
+            return {"label": label, "value": value}
+
+        @staticmethod
+        def hstack(items):
+            return list(items)
+
+        @staticmethod
+        def vstack(items):
+            return list(items)
+
+    output = build_epoch_summary_output(_Mo, go, loaded=loaded)
+
+    assert "persisted zarr component" in output[0]
+    summary_plots = output[2]
+    distribution_plots = output[4]
+    assert [figure.layout.title.text for figure in summary_plots] == [
+        "Bout Rate by Epoch",
+        "Bout Count by Epoch",
+        "Inter-Bout Interval Count by Epoch",
+        "Mean Inter-Bout Interval by Epoch",
+        "Mean Bout Duration by Epoch",
+        "Mean Bout Distance by Epoch",
+        "Mean Net Bout Heading Change by Epoch",
+        "Mean Absolute Net Bout Heading Change by Epoch",
+    ]
+    assert output[3] == "## Swim Bout Distributions"
+    assert [figure.layout.title.text for figure in distribution_plots] == [
+        "Swim Bout Duration Distribution",
+        "Swim Bout Distance Distribution",
+        "Swim Bout Net Heading Change Distribution",
+        "Swim Bout Absolute Net Heading Change Distribution",
+        "Swim Bout Heading Path Distribution",
+    ]
+    assert summary_plots[0].layout.yaxis.title.text == "Bouts / min"
+    assert summary_plots[1].layout.yaxis.title.text == "Bouts"
+    assert "bout_rate_per_min" in output[-1].columns
+    assert "tracking_dropout_fraction" in output[-1].columns
+    assert "mean_bout_duration_s" in output[-1].columns
+    assert "mean_bout_path_length_mm" in output[-1].columns
+    assert "mean_bout_net_heading_change_deg" in output[-1].columns
+    assert "mean_abs_bout_net_heading_change_deg" in output[-1].columns
+    assert "mean_inter_bout_interval_s" in output[-1].columns
+    assert output[-1]["mean_inter_bout_interval_s"].tolist()[0] == 0.06
+
+
+def test_goodcopbadcop_component_loads_and_renders_egocentric_static_polar_png(tmp_path) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
+    option = discover_interactive_spec_options(zarr_path)[0]
+
+    loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
+
+    assert loaded.data.egocentric_component_path is not None
+    assert loaded.egocentric_pre_post_polar_png_path is not None
+    assert loaded.egocentric_pre_post_polar_png_path.endswith(
+        f"/visualizations/{PRE_POST_POLAR_PNG_ARTIFACT_NAME}"
+    )
+    assert loaded.egocentric_pre_post_polar_png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    assert loaded.egocentric_pre_post_polar_png_error is None
+    assert loaded.egocentric_pre_post_polar_point_cloud_png_path is not None
+    assert loaded.egocentric_pre_post_polar_point_cloud_png_path.endswith(
+        f"/visualizations/{PRE_POST_POLAR_POINT_CLOUD_PNG_ARTIFACT_NAME}"
+    )
+    assert loaded.egocentric_pre_post_polar_point_cloud_png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    assert loaded.egocentric_pre_post_polar_point_cloud_png_error is None
+
+    class _Mo:
+        @staticmethod
+        def md(text):
+            return text
+
+        @staticmethod
+        def vstack(items):
+            return list(items)
+
+    output = build_egocentric_static_polar_output(_Mo, loaded=loaded)
+
+    assert "Persisted Egocentric Bearing Point Clouds" in output[0]
+    assert PRE_POST_POLAR_POINT_CLOUD_PNG_ARTIFACT_NAME in output[0]
+    assert "data:image/png;base64," in output[1]
+    assert "Persisted Egocentric Bearing Circular Histograms" in output[2]
+    assert PRE_POST_POLAR_PNG_ARTIFACT_NAME in output[2]
+    assert "data:image/png;base64," in output[3]
+
+
+def test_goodcopbadcop_component_loads_and_renders_cra_endpoint(tmp_path) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_cra_spec(tmp_path)
+    option = discover_interactive_spec_options(zarr_path)[0]
+
+    loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
+
+    endpoint = loaded.cra_endpoint
+    assert endpoint is not None
+    assert endpoint.component_path.endswith("/cra_primary_endpoint/object_relative_pre_post_v1")
+    assert endpoint.summary["delta_occ_agg"] == -1.0
+    assert endpoint.summary["pre_aggressive_quadrant"] == "top_left"
+    assert endpoint.summary["post_aggressive_quadrant"] == "bottom_right"
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    component = root[endpoint.component_path]
+    stored_object_x = np.asarray(component["object_phase/object_x_px"][:], dtype=float).reshape(-1)
+    stored_occupancy = np.asarray(component["per_object_phase/occupancy_fraction"][:], dtype=float).reshape(-1)
+    loaded_object_rows = endpoint.object_phase_df.sort(["phase_index", "object_index"])
+    loaded_metric_rows = endpoint.per_object_phase_df.sort(["phase_index", "object_index"])
+    np.testing.assert_allclose(loaded_object_rows["object_x_px"].to_numpy(), stored_object_x)
+    np.testing.assert_allclose(loaded_metric_rows["occupancy_fraction"].to_numpy(), stored_occupancy)
+    assert loaded_object_rows["object_quadrant"].to_list() == [
+        "top_left",
+        "top_right",
+        "bottom_right",
+        "bottom_left",
+    ]
+
+    class _Ui:
+        @staticmethod
+        def table(data, *, selection=None, page_size=10):
+            return data
+
+    class _Mo:
+        ui = _Ui()
+
+        @staticmethod
+        def md(text):
+            return text
+
+        @staticmethod
+        def hstack(items):
+            return list(items)
+
+        @staticmethod
+        def vstack(items):
+            return list(items)
+
+        @staticmethod
+        def stat(*, label, value):
+            return {"label": label, "value": value}
+
+        @staticmethod
+        def accordion(items):
+            return dict(items)
+
+    output = build_cra_primary_endpoint_output(_Mo, go, loaded=loaded)
+    figures = [item for item in output if hasattr(item, "data")]
+
+    assert "CRA Primary Endpoint" in output[0]
+    assert [figure.layout.title.text for figure in figures[:2]] == [
+        "CRA Primary Endpoint: Median Distance",
+        "CRA Primary Endpoint: Object-Quadrant Occupancy",
+    ]
+    assert [figure.layout.title.text for figure in figures[2:]] == [
+        "CRA Object-Relative Quadrants (pre_static)",
+        "CRA Object-Relative Quadrants (post_static)",
+    ]
+    assert figures[2].layout.yaxis.autorange == "reversed"
+
+
+def test_goodcopbadcop_component_loads_and_renders_cra_near_field(tmp_path) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_cra_near_field_spec(tmp_path)
+    option = discover_interactive_spec_options(zarr_path)[0]
+
+    loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
+
+    near_field = loaded.cra_near_field
+    assert near_field is not None
+    assert near_field.component_path.endswith("/cra_near_field/object_relative_near_field_v1")
+    assert near_field.geometry_status == "circle"
+    assert near_field.arena_shape == "circle"
+    assert near_field.summary["nearzone_occ_delta_agg"] == -1.0
+    assert "approach_p05_mm" in near_field.per_object_phase_df.columns
+    assert "approach_p05_cdf_fraction" in near_field.per_object_phase_df.columns
+    assert "object_distance_to_wall_mm" in near_field.per_object_phase_df.columns
+    assert near_field.radial_density_df.height == 12
+    assert "radial_density_wall_excluded_per_mm2" in near_field.radial_density_df.columns
+    assert near_field.cdf_df.height == 8
+    assert near_field.control_reference_radial_density_df.height == 6
+    assert near_field.control_reference_cdf_df.height == 4
+    assert near_field.control_reference_phase_df.height == 2
+    assert near_field.thigmotaxis_df.height == 2
+    assert "mean_speed_mm_s" in near_field.thigmotaxis_df.columns
+
+    class _Ui:
+        @staticmethod
+        def table(data, *, selection=None, page_size=10):
+            return data
+
+    class _Mo:
+        ui = _Ui()
+
+        @staticmethod
+        def md(text):
+            return text
+
+        @staticmethod
+        def hstack(items):
+            return list(items)
+
+        @staticmethod
+        def vstack(items):
+            return list(items)
+
+        @staticmethod
+        def stat(*, label, value):
+            return {"label": label, "value": value}
+
+        @staticmethod
+        def accordion(items):
+            return dict(items)
+
+    output = build_cra_near_field_output(_Mo, go, loaded=loaded)
+    figures = [item for item in output if hasattr(item, "data")]
+
+    assert "CRA Near-Field Avoidance" in output[0]
+    assert [figure.layout.title.text for figure in figures] == [
+        "CRA Near-Field: Close-Approach Distance",
+        "CRA Near-Field: Near-Zone Occupancy",
+        "CRA Near-Field: Near-Zone Entry Rate",
+        "CRA Near-Field: Radial Occupancy Density",
+        "CRA Near-Field: Wall-Band-Excluded Radial Density",
+        "CRA Near-Field: Distance CDF",
+        "CRA Near-Field: Dish-Center Control Radial Density",
+        "CRA Near-Field: Dish-Center Control CDF",
+        "CRA Near-Field: Global-State QC",
+    ]
+    assert figures[5].layout.yaxis.range == (0, 1)
 
 
 def test_goodcopbadcop_controls_do_not_read_widget_values_during_creation(tmp_path) -> None:
@@ -122,7 +624,7 @@ def test_goodcopbadcop_controls_do_not_read_widget_values_during_creation(tmp_pa
 
     controls = build_controls(_Mo, loaded=loaded)
 
-    assert len(controls.view) == 6
+    assert len(controls.view) == 7
 
 
 def test_goodcopbadcop_spatial_figures_use_image_y_axis(tmp_path) -> None:
@@ -249,6 +751,100 @@ def test_goodcopbadcop_spatial_occupancy_panel_marks_prepost_chaser_zones(tmp_pa
     assert [row[4] for row in post_fig.data[0].customdata] == ["none", "none", "chaser 1", "chaser 0"]
 
 
+def test_goodcopbadcop_egocentric_panels_render_from_linked_component(tmp_path) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
+    option = discover_interactive_spec_options(zarr_path)[0]
+    loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
+    window = GoodCopBadCopTimeWindow(
+        selected_epoch_id=2,
+        selected_epoch_label="post_event",
+        start_s=0.6,
+        stop_s=0.9,
+    )
+
+    class _Mo:
+        @staticmethod
+        def md(text):
+            return text
+
+        @staticmethod
+        def vstack(items):
+            return list(items)
+
+    class _ChaserPicker:
+        value = "chaser 1"
+
+    bearing_fig = build_egocentric_bearing_output(
+        _Mo,
+        go,
+        loaded=loaded,
+        window=window,
+    )
+    density_figures = build_egocentric_polar_heatmap_output(
+        _Mo,
+        go,
+        loaded=loaded,
+        window=window,
+    )
+    heading_fig = build_fish_heading_output(
+        _Mo,
+        go,
+        loaded=loaded,
+        window=window,
+    )
+    alignment_fig = build_egocentric_alignment_output(
+        _Mo,
+        go,
+        loaded=loaded,
+        window=window,
+    )
+    single_bearing_fig = build_egocentric_bearing_output(
+        _Mo,
+        go,
+        loaded=loaded,
+        window=window,
+        chaser_picker=_ChaserPicker(),
+    )
+    single_density_fig = build_egocentric_polar_heatmap_output(
+        _Mo,
+        go,
+        loaded=loaded,
+        window=window,
+        chaser_picker=_ChaserPicker(),
+    )
+    single_alignment_fig = build_egocentric_alignment_output(
+        _Mo,
+        go,
+        loaded=loaded,
+        window=window,
+        chaser_picker=_ChaserPicker(),
+    )
+
+    assert loaded.data.egocentric_component_name == "track_offline_tk_1_id_0_smoothed"
+    assert loaded.egocentric_bearing_df.height > 0
+    assert loaded.egocentric_heading_df.height > 0
+    assert [trace.name for trace in bearing_fig.data] == ["chaser 0", "chaser 1"]
+    assert bearing_fig.layout.polar.angularaxis.rotation == 90
+    assert list(bearing_fig.layout.polar.angularaxis.ticktext) == [
+        "behind",
+        "right",
+        "front",
+        "left",
+        "behind",
+    ]
+    assert len(density_figures) == 2
+    assert [figure.data[0].type for figure in density_figures] == ["barpolar", "barpolar"]
+    assert density_figures[0].layout.polar.angularaxis.rotation == 90
+    assert heading_fig.data[0].type == "scattergl"
+    assert heading_fig.data[0].mode == "markers"
+    assert heading_fig.layout.yaxis.title.text == "Fish heading (deg)"
+    assert [trace.mode for trace in alignment_fig.data] == ["lines+markers", "lines+markers"]
+    assert alignment_fig.layout.yaxis.title.text == "Mean cos(bearing)"
+    assert [trace.name for trace in single_bearing_fig.data] == ["chaser 1"]
+    assert single_density_fig.data[0].name == "chaser 1"
+    assert [trace.name for trace in single_alignment_fig.data] == ["chaser 1"]
+
+
 def test_goodcopbadcop_controls_show_time_slider_only_for_custom_window() -> None:
     class _Widget:
         def __init__(self, value):
@@ -260,6 +856,7 @@ def test_goodcopbadcop_controls_show_time_slider_only_for_custom_window() -> Non
             return list(items)
 
     distance_picker = _Widget(["distance_mm_chaser_0"])
+    chaser_picker = _Widget("All chasers")
     time_slider = _Widget([0.0, 10.0])
     epoch_picker = _Widget("Custom time window")
     bins = _Widget(80)
@@ -269,22 +866,24 @@ def test_goodcopbadcop_controls_show_time_slider_only_for_custom_window() -> Non
     custom_items = build_controls_panel_from_widgets(
         _Mo,
         distance_series_picker=distance_picker,
+        chaser_picker=chaser_picker,
         time_window=time_slider,
         epoch_picker=epoch_picker,
         epoch_options=epoch_options,
         heatmap_bins=bins,
         chaser_overlay=overlay,
     )
-    assert custom_items == [distance_picker, epoch_picker, time_slider, bins, overlay]
+    assert custom_items == [distance_picker, chaser_picker, epoch_picker, time_slider, bins, overlay]
 
     epoch_picker.value = "post_event"
     epoch_items = build_controls_panel_from_widgets(
         _Mo,
         distance_series_picker=distance_picker,
+        chaser_picker=chaser_picker,
         time_window=time_slider,
         epoch_picker=epoch_picker,
         epoch_options=epoch_options,
         heatmap_bins=bins,
         chaser_overlay=overlay,
     )
-    assert epoch_items == [distance_picker, epoch_picker, bins, overlay]
+    assert epoch_items == [distance_picker, chaser_picker, epoch_picker, bins, overlay]

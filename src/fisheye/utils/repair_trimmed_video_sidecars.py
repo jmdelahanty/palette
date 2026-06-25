@@ -387,7 +387,7 @@ def _diagnostic_finding_codes(findings: list[object], limit: int = 3) -> list[st
 
 
 def _persist_video_preflight(recording_dir: Path) -> str:
-    return _persist_video_preflight_with_options(recording_dir, decode_backend="all")
+    return _persist_video_preflight_with_options(recording_dir, decode_backend="opencv")
 
 
 def _persist_video_preflight_with_options(recording_dir: Path, *, decode_backend: str) -> str:
@@ -533,7 +533,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--video-preflight-decode-backend",
         choices=["all", "opencv", "decord", "none"],
-        default="all",
+        default="opencv",
         help=(
             "Decode backend for the post-repair video preflight. Use 'none' for huge HEVC files "
             "when probe/timing/GOP/camera-CSV checks are enough."

@@ -7,7 +7,10 @@ from statistics import median
 from .models import CameraCsvInfo, Finding
 from .probe import classify_video_source
 
-REQUIRED_CAMERA_CSV_COLUMNS = ("frame_id", "timestamp", "timestamp_sys")
+REQUIRED_CAMERA_CSV_COLUMNS = ("recording_frame_id", "timestamp", "timestamp_sys")
+CAMERA_CSV_COLUMN_ALIASES = {
+    "recording_frame_id": ("frame_id", "local_frame_id"),
+}
 
 
 def expected_camera_csv_path(video_path: Path) -> Path:
@@ -45,6 +48,15 @@ def _parse_int(value: object, *, field_name: str, row_number: int) -> int:
         raise ValueError(f"Row {row_number}: invalid integer for {field_name}: {text}") from exc
 
 
+def _resolve_column(fieldnames: list[str], column: str) -> str | None:
+    if column in fieldnames:
+        return column
+    for alias in CAMERA_CSV_COLUMN_ALIASES.get(column, ()):
+        if alias in fieldnames:
+            return alias
+    return None
+
+
 def inspect_camera_csv(
     video_path: Path,
     *,
@@ -77,7 +89,15 @@ def inspect_camera_csv(
         with csv_path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
             fieldnames = [str(name).strip() for name in (reader.fieldnames or [])]
-            missing_columns = [name for name in REQUIRED_CAMERA_CSV_COLUMNS if name not in fieldnames]
+            resolved_columns = {
+                name: _resolve_column(fieldnames, name)
+                for name in REQUIRED_CAMERA_CSV_COLUMNS
+            }
+            missing_columns = [
+                name
+                for name, resolved_name in resolved_columns.items()
+                if resolved_name is None
+            ]
             info.schema_ok = not missing_columns
             info.missing_columns = missing_columns
             if missing_columns:
@@ -93,13 +113,19 @@ def inspect_camera_csv(
                 )
                 return info, findings
 
+            frame_id_column = resolved_columns["recording_frame_id"]
+            timestamp_column = resolved_columns["timestamp"]
+            timestamp_sys_column = resolved_columns["timestamp_sys"]
+            if frame_id_column is None or timestamp_column is None or timestamp_sys_column is None:
+                raise AssertionError("resolved camera CSV columns unexpectedly missing")
+
             frame_ids: list[int] = []
             timestamps: list[int] = []
             timestamps_sys: list[int] = []
             for row_number, row in enumerate(reader, start=2):
-                frame_ids.append(_parse_int(row.get("frame_id"), field_name="frame_id", row_number=row_number))
-                timestamps.append(_parse_int(row.get("timestamp"), field_name="timestamp", row_number=row_number))
-                timestamps_sys.append(_parse_int(row.get("timestamp_sys"), field_name="timestamp_sys", row_number=row_number))
+                frame_ids.append(_parse_int(row.get(frame_id_column), field_name=frame_id_column, row_number=row_number))
+                timestamps.append(_parse_int(row.get(timestamp_column), field_name=timestamp_column, row_number=row_number))
+                timestamps_sys.append(_parse_int(row.get(timestamp_sys_column), field_name=timestamp_sys_column, row_number=row_number))
     except ValueError as exc:
         info.status = "fail"
         info.error = str(exc)

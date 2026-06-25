@@ -869,8 +869,13 @@ def write_chaser_distance_run(
             {
                 "fish_centroid_img_xy_coordinate_frame": "source_image_px",
                 "fish_centroid_arena_xy_coordinate_frame": "arena_relative_canvas_px",
+                "fish_centroid_arena_xy_coordinate_origin": "top_left_of_active_arena",
                 "chaser_arena_xy_coordinate_frame": result.coordinate_frame,
                 "chaser_arena_xy_coordinate_origin": result.coordinate_origin,
+                "coordinate_frame": "arena_relative_canvas_px",
+                "coordinate_origin": "top_left_of_active_arena",
+                "x_axis_direction": "right",
+                "y_axis_direction": "down",
                 "axis_order": {
                     "fish_centroid_img_xy": ["camera_frame", "xy"],
                     "fish_centroid_arena_xy": ["camera_frame", "xy"],
@@ -980,6 +985,8 @@ def write_chaser_distance_run(
             "pixels_per_mm_projector": float(result.pixels_per_mm_projector),
             "coordinate_frame": "arena_relative_canvas_px",
             "coordinate_origin": "top_left_of_active_arena",
+            "x_axis_direction": "right",
+            "y_axis_direction": "down",
             "arena_origin_in_canvas_xy": list(result.arena_origin_in_canvas_xy),
             "source_refs": source_refs,
             "parameters": parameters,

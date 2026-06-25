@@ -243,6 +243,15 @@ def test_chaser_distance_writer_adds_goodcopbadcop_interactive_spec(tmp_path: Pa
 
     root = zarr.open_group(str(zarr_path), mode="r")
     run = root[run_path]
+    assert run.attrs["coordinate_frame"] == "arena_relative_canvas_px"
+    assert run.attrs["coordinate_origin"] == "top_left_of_active_arena"
+    assert run.attrs["x_axis_direction"] == "right"
+    assert run.attrs["y_axis_direction"] == "down"
+    assert run["positions"].attrs["coordinate_frame"] == "arena_relative_canvas_px"
+    assert run["positions"].attrs["coordinate_origin"] == "top_left_of_active_arena"
+    assert run["positions"].attrs["x_axis_direction"] == "right"
+    assert run["positions"].attrs["y_axis_direction"] == "down"
+    assert run["positions"].attrs["fish_centroid_arena_xy_coordinate_origin"] == "top_left_of_active_arena"
     visualizations = run["visualizations"]
     spec_group = visualizations[DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT]
     assert spec_group.attrs["artifact_schema_id"] == INTERACTIVE_SPEC_SCHEMA_ID

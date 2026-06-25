@@ -24,6 +24,8 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 
 from fisheye.analysis.bout_kinematics import resolve_bout_kinematics_tables
+from fisheye.analysis.cra_primary_endpoint import QUADRANT_LABELS, quadrant_code_for_xy
+from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
 from fisheye.analysis.swim_bout_io import (
     SwimBoutIOError,
     load_default_swim_bout_tables,
@@ -51,9 +53,30 @@ DEFAULT_TABLES = (
 GOODCOPBADCOP_TABLES = (
     "goodcopbadcop_spatial_occupancy_zones",
     "goodcopbadcop_chaser_epoch_summary",
+    "goodcopbadcop_epoch_behavior_summary",
+    "goodcopbadcop_epoch_bout_distribution",
+    "goodcopbadcop_epoch_center_distance_histogram",
+    "goodcopbadcop_epoch_speed_summary",
+    "goodcopbadcop_speed_distance_bins",
     "goodcopbadcop_chaser_distance_histogram",
+    "goodcopbadcop_cra_primary_endpoint_summary",
+    "goodcopbadcop_cra_primary_endpoint_object_phase",
+    "goodcopbadcop_cra_quadrant_occupancy",
+    "goodcopbadcop_cra_near_field_summary",
+    "goodcopbadcop_cra_near_field_object_phase",
+    "goodcopbadcop_cra_near_field_radial_density",
+    "goodcopbadcop_cra_near_field_distance_cdf",
+    "goodcopbadcop_egocentric_epoch_summary",
+    "goodcopbadcop_egocentric_distance_bearing_histogram",
 )
 AVAILABLE_TABLES = DEFAULT_TABLES + GOODCOPBADCOP_TABLES
+
+CRA_PRIMARY_ENDPOINT_COMPONENT_PARENT = "cra_primary_endpoint"
+CRA_PRIMARY_ENDPOINT_ALLOWED_STATUSES = {"computed", "complete"}
+CRA_NEAR_FIELD_COMPONENT_PARENT = "cra_near_field"
+CRA_NEAR_FIELD_ALLOWED_STATUSES = {"computed", "complete"}
+EPOCH_BEHAVIOR_COMPONENT_PARENT = "epoch_behavior_summary"
+EPOCH_BEHAVIOR_SCHEMA_ID = "palette.goodcopbadcop.epoch_behavior_summary.v1"
 
 
 @dataclass(frozen=True)
@@ -1503,6 +1526,702 @@ def _load_goodcopbadcop_chaser_epoch_summary(
     return rows
 
 
+def _latest_epoch_behavior_component(
+    run_group: Any,
+    *,
+    run_name: str,
+) -> tuple[Any | None, str | None, str | None]:
+    if not _has_child(run_group, EPOCH_BEHAVIOR_COMPONENT_PARENT):
+        return None, None, "missing epoch_behavior_summary component parent"
+    parent = run_group[EPOCH_BEHAVIOR_COMPONENT_PARENT]
+    keys = set(_group_names(parent))
+    for attr_name in ("latest_complete", "latest"):
+        candidate = str(_attrs_dict(parent).get(attr_name) or "").strip()
+        if candidate and candidate in keys:
+            component = parent[candidate]
+            attrs = _attrs_dict(component)
+            if str(attrs.get("schema_id") or "") in {"", EPOCH_BEHAVIOR_SCHEMA_ID}:
+                return (
+                    component,
+                    candidate,
+                    f"analysis/chaser_distance_runs/{run_name}/{EPOCH_BEHAVIOR_COMPONENT_PARENT}/{candidate}",
+                )
+
+    complete_candidates: list[str] = []
+    for name in sorted(keys):
+        try:
+            component = parent[name]
+        except Exception:
+            continue
+        attrs = _attrs_dict(component)
+        if str(attrs.get("status") or "").strip() == "complete" and str(attrs.get("schema_id") or "") in {
+            "",
+            EPOCH_BEHAVIOR_SCHEMA_ID,
+        }:
+            complete_candidates.append(name)
+    if not complete_candidates:
+        return None, None, "no complete epoch_behavior_summary component"
+    selected = complete_candidates[-1]
+    return (
+        parent[selected],
+        selected,
+        f"analysis/chaser_distance_runs/{run_name}/{EPOCH_BEHAVIOR_COMPONENT_PARENT}/{selected}",
+    )
+
+
+def _load_goodcopbadcop_epoch_behavior_summary(
+    root: Any,
+    *,
+    export_run_id: str,
+    zarr_path: Path,
+    recording_id: str,
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    table = "goodcopbadcop_epoch_behavior_summary"
+    if table not in tables:
+        return []
+
+    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
+    if run_group is None or run_name is None:
+        diagnostics.append({"table": table, "status": "skipped", "reason": error})
+        return []
+
+    component, component_name, component_path_or_error = _latest_epoch_behavior_component(
+        run_group,
+        run_name=run_name,
+    )
+    if component is None or component_name is None:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": component_path_or_error,
+            "chaser_distance_run": run_name,
+        })
+        return []
+    component_path = str(component_path_or_error)
+    try:
+        records, _records_attrs = load_structured_dataset(component, "per_epoch_fish")
+    except Exception as exc:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": f"failed to load per_epoch_fish: {exc}",
+            "chaser_distance_run": run_name,
+            "epoch_behavior_component": component_name,
+        })
+        return []
+    if records.size == 0 or records.dtype.names is None:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "empty per_epoch_fish table",
+            "chaser_distance_run": run_name,
+            "epoch_behavior_component": component_name,
+        })
+        return []
+
+    run_common, source_refs, _run_parameters = _chaser_common_run_fields(run_group, run_name)
+    component_attrs = _attrs_dict(component)
+    component_source_refs = _json_mapping_attr(component_attrs, "source_refs")
+    component_parameters = _json_mapping_attr(component_attrs, "parameters")
+
+    rows: list[dict[str, Any]] = []
+    for record in records:
+        record_row = {
+            name: _scalar_for_parquet(record[name])
+            for name in records.dtype.names
+        }
+        lineage = {
+            "zarr_path": str(zarr_path),
+            "chaser_distance_run": run_name,
+            "epoch_behavior_component": component_name,
+            "source_detection_path": source_refs.get("source_detection_path"),
+            "source_stimulus_run": source_refs.get("source_stimulus_run"),
+            "source_stimulus_epoch_run": source_refs.get("source_stimulus_epoch_run"),
+            "window_id": record_row.get("window_id"),
+        }
+        row = _common_row(
+            export_run_id=export_run_id,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            table=table,
+            lineage=lineage,
+        )
+        row.update(run_common)
+        row.update({
+            "epoch_behavior_component": component_name,
+            "epoch_behavior_path": component_path,
+            "epoch_behavior_schema_id": component_attrs.get("schema_id"),
+            "epoch_behavior_schema_version": _safe_int(component_attrs.get("schema_version")),
+            "epoch_behavior_method": component_attrs.get("method"),
+            "epoch_behavior_method_version": component_attrs.get("method_version"),
+            "epoch_behavior_status": component_attrs.get("status"),
+            "epoch_behavior_created_at_utc": component_attrs.get("created_at_utc"),
+            "epoch_behavior_source_refs_json": _source_refs_json(component_source_refs),
+            "epoch_behavior_parameters_json": _json_dumps_safe(component_parameters),
+            "source_track_kinematics_run": component_source_refs.get("source_track_kinematics_run"),
+            "source_track_kinematics_scope": component_source_refs.get("source_track_kinematics_scope"),
+            "source_track_kinematics_track_id": _safe_int(
+                component_source_refs.get("source_track_kinematics_track_id")
+            ),
+            "source_track_kinematics_track_path": component_source_refs.get("source_track_kinematics_track_path"),
+            "source_swim_bout_run": component_source_refs.get("source_swim_bout_run"),
+            "source_swim_bout_path": component_source_refs.get("source_swim_bout_path"),
+            "source_swim_bout_level_path": component_source_refs.get("source_swim_bout_level_path"),
+            "source_speed_level": component_parameters.get("speed_level"),
+            "swim_bout_signal_level": component_parameters.get("swim_bout_signal_level"),
+        })
+        row.update(record_row)
+        rows.append(row)
+    return rows
+
+
+def _load_goodcopbadcop_epoch_bout_distribution(
+    root: Any,
+    *,
+    export_run_id: str,
+    zarr_path: Path,
+    recording_id: str,
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    table = "goodcopbadcop_epoch_bout_distribution"
+    if table not in tables:
+        return []
+
+    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
+    if run_group is None or run_name is None:
+        diagnostics.append({"table": table, "status": "skipped", "reason": error})
+        return []
+
+    component, component_name, component_path_or_error = _latest_epoch_behavior_component(
+        run_group,
+        run_name=run_name,
+    )
+    if component is None or component_name is None:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": component_path_or_error,
+            "chaser_distance_run": run_name,
+        })
+        return []
+    component_path = str(component_path_or_error)
+    try:
+        records, _records_attrs = load_structured_dataset(component, "per_epoch_bouts")
+    except Exception as exc:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": f"failed to load per_epoch_bouts: {exc}",
+            "chaser_distance_run": run_name,
+            "epoch_behavior_component": component_name,
+        })
+        return []
+    if records.size == 0 or records.dtype.names is None:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "empty per_epoch_bouts table",
+            "chaser_distance_run": run_name,
+            "epoch_behavior_component": component_name,
+        })
+        return []
+
+    run_common, source_refs, _run_parameters = _chaser_common_run_fields(run_group, run_name)
+    component_attrs = _attrs_dict(component)
+    component_source_refs = _json_mapping_attr(component_attrs, "source_refs")
+    component_parameters = _json_mapping_attr(component_attrs, "parameters")
+
+    rows: list[dict[str, Any]] = []
+    for record in records:
+        record_row = {
+            name: _scalar_for_parquet(record[name])
+            for name in records.dtype.names
+        }
+        lineage = {
+            "zarr_path": str(zarr_path),
+            "chaser_distance_run": run_name,
+            "epoch_behavior_component": component_name,
+            "source_detection_path": source_refs.get("source_detection_path"),
+            "source_stimulus_run": source_refs.get("source_stimulus_run"),
+            "source_stimulus_epoch_run": source_refs.get("source_stimulus_epoch_run"),
+            "window_id": record_row.get("window_id"),
+            "bout_source_row": record_row.get("bout_source_row"),
+            "bout_id": record_row.get("bout_id"),
+        }
+        row = _common_row(
+            export_run_id=export_run_id,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            table=table,
+            lineage=lineage,
+        )
+        row.update(run_common)
+        row.update({
+            "epoch_behavior_component": component_name,
+            "epoch_behavior_path": component_path,
+            "epoch_behavior_schema_id": component_attrs.get("schema_id"),
+            "epoch_behavior_schema_version": _safe_int(component_attrs.get("schema_version")),
+            "epoch_behavior_method": component_attrs.get("method"),
+            "epoch_behavior_method_version": component_attrs.get("method_version"),
+            "epoch_behavior_status": component_attrs.get("status"),
+            "epoch_behavior_created_at_utc": component_attrs.get("created_at_utc"),
+            "epoch_behavior_source_refs_json": _source_refs_json(component_source_refs),
+            "epoch_behavior_parameters_json": _json_dumps_safe(component_parameters),
+            "source_track_kinematics_run": component_source_refs.get("source_track_kinematics_run"),
+            "source_track_kinematics_scope": component_source_refs.get("source_track_kinematics_scope"),
+            "source_track_kinematics_track_id": _safe_int(
+                component_source_refs.get("source_track_kinematics_track_id")
+            ),
+            "source_track_kinematics_track_path": component_source_refs.get("source_track_kinematics_track_path"),
+            "source_swim_bout_run": component_source_refs.get("source_swim_bout_run"),
+            "source_swim_bout_path": component_source_refs.get("source_swim_bout_path"),
+            "source_swim_bout_level_path": component_source_refs.get("source_swim_bout_level_path"),
+            "source_speed_level": component_parameters.get("speed_level"),
+            "swim_bout_signal_level": component_parameters.get("swim_bout_signal_level"),
+        })
+        row.update(record_row)
+        rows.append(row)
+    return rows
+
+
+def _load_goodcopbadcop_epoch_center_distance_histogram(
+    root: Any,
+    *,
+    export_run_id: str,
+    zarr_path: Path,
+    recording_id: str,
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    table = "goodcopbadcop_epoch_center_distance_histogram"
+    if table not in tables:
+        return []
+
+    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
+    if run_group is None or run_name is None:
+        diagnostics.append({"table": table, "status": "skipped", "reason": error})
+        return []
+
+    component, component_name, component_path_or_error = _latest_epoch_behavior_component(
+        run_group,
+        run_name=run_name,
+    )
+    if component is None or component_name is None:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": component_path_or_error,
+            "chaser_distance_run": run_name,
+        })
+        return []
+    component_path = str(component_path_or_error)
+    try:
+        records, _records_attrs = load_structured_dataset(component, "center_distance_histogram")
+    except Exception as exc:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": f"failed to load center_distance_histogram: {exc}",
+            "chaser_distance_run": run_name,
+            "epoch_behavior_component": component_name,
+        })
+        return []
+    if records.size == 0 or records.dtype.names is None:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "empty center_distance_histogram table",
+            "chaser_distance_run": run_name,
+            "epoch_behavior_component": component_name,
+        })
+        return []
+
+    run_common, source_refs, _run_parameters = _chaser_common_run_fields(run_group, run_name)
+    component_attrs = _attrs_dict(component)
+    component_source_refs = _json_mapping_attr(component_attrs, "source_refs")
+    component_parameters = _json_mapping_attr(component_attrs, "parameters")
+
+    rows: list[dict[str, Any]] = []
+    for record in records:
+        record_row = {
+            name: _scalar_for_parquet(record[name])
+            for name in records.dtype.names
+        }
+        lineage = {
+            "zarr_path": str(zarr_path),
+            "chaser_distance_run": run_name,
+            "epoch_behavior_component": component_name,
+            "source_detection_path": source_refs.get("source_detection_path"),
+            "source_stimulus_run": source_refs.get("source_stimulus_run"),
+            "source_stimulus_epoch_run": source_refs.get("source_stimulus_epoch_run"),
+            "window_id": record_row.get("window_id"),
+            "bin_index": record_row.get("bin_index"),
+        }
+        row = _common_row(
+            export_run_id=export_run_id,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            table=table,
+            lineage=lineage,
+        )
+        row.update(run_common)
+        row.update({
+            "epoch_behavior_component": component_name,
+            "epoch_behavior_path": component_path,
+            "epoch_behavior_schema_id": component_attrs.get("schema_id"),
+            "epoch_behavior_schema_version": _safe_int(component_attrs.get("schema_version")),
+            "epoch_behavior_method": component_attrs.get("method"),
+            "epoch_behavior_method_version": component_attrs.get("method_version"),
+            "epoch_behavior_status": component_attrs.get("status"),
+            "epoch_behavior_created_at_utc": component_attrs.get("created_at_utc"),
+            "epoch_behavior_source_refs_json": _source_refs_json(component_source_refs),
+            "epoch_behavior_parameters_json": _json_dumps_safe(component_parameters),
+            "source_track_kinematics_run": component_source_refs.get("source_track_kinematics_run"),
+            "source_swim_bout_run": component_source_refs.get("source_swim_bout_run"),
+        })
+        row.update(record_row)
+        rows.append(row)
+    return rows
+
+
+def _epoch_speed_values_mm_s(
+    fish_xy: np.ndarray,
+    fish_valid: np.ndarray,
+    *,
+    start_frame: int | None,
+    end_frame: int | None,
+    fps: float | None,
+    pixels_per_mm: float | None,
+) -> np.ndarray:
+    if fps is None or fps <= 0 or pixels_per_mm is None or pixels_per_mm <= 0:
+        return np.asarray([], dtype=np.float64)
+    if start_frame is None or end_frame is None:
+        return np.asarray([], dtype=np.float64)
+    xy = np.asarray(fish_xy, dtype=np.float64)
+    valid = np.asarray(fish_valid, dtype=bool).reshape(-1)
+    if xy.ndim != 2 or xy.shape[1] != 2 or valid.shape[0] != xy.shape[0]:
+        return np.asarray([], dtype=np.float64)
+    start = max(0, int(start_frame))
+    end = min(int(end_frame), int(xy.shape[0]) - 1)
+    if end <= start:
+        return np.asarray([], dtype=np.float64)
+    segment = xy[start : end + 1]
+    segment_valid = valid[start : end + 1] & np.isfinite(segment).all(axis=1)
+    pair_valid = segment_valid[:-1] & segment_valid[1:]
+    if not np.any(pair_valid):
+        return np.asarray([], dtype=np.float64)
+    displacement_px = np.linalg.norm(np.diff(segment, axis=0), axis=1)
+    speeds = displacement_px[pair_valid] / float(pixels_per_mm) * float(fps)
+    return speeds[np.isfinite(speeds)]
+
+
+def _load_goodcopbadcop_epoch_speed_summary(
+    root: Any,
+    *,
+    export_run_id: str,
+    zarr_path: Path,
+    recording_id: str,
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    table = "goodcopbadcop_epoch_speed_summary"
+    if table not in tables:
+        return []
+
+    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
+    if run_group is None or run_name is None:
+        diagnostics.append({"table": table, "status": "skipped", "reason": error})
+        return []
+    if not _has_child(run_group, "epoch_summary") or not _has_child(run_group, "positions"):
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "missing epoch_summary or positions group",
+            "chaser_distance_run": run_name,
+        })
+        return []
+
+    positions = run_group["positions"]
+    fish_xy = _read_array(positions, "fish_centroid_arena_xy")
+    fish_valid = _read_array(positions, "fish_valid")
+    if fish_xy is None or fish_valid is None:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "missing positions/fish_centroid_arena_xy or positions/fish_valid",
+            "chaser_distance_run": run_name,
+        })
+        return []
+
+    run_common, source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
+    fps = _safe_float(run_common.get("fps"))
+    pixels_per_mm = _safe_float(run_common.get("pixels_per_mm_projector"))
+    windows = _epoch_summary_window_rows(run_group)
+    if not windows:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "no epoch_summary windows",
+            "chaser_distance_run": run_name,
+        })
+        return []
+
+    fish_xy = np.asarray(fish_xy)
+    fish_valid = np.asarray(fish_valid, dtype=bool).reshape(-1)
+    finite_position = np.isfinite(fish_xy).all(axis=1) if fish_xy.ndim == 2 else np.zeros(fish_valid.shape, dtype=bool)
+    usable_fish = fish_valid & finite_position
+    rows: list[dict[str, Any]] = []
+    for window_index, raw_window in enumerate(windows):
+        window = _fill_chaser_window_times(raw_window, fps=fps)
+        start_frame = _safe_int(window.get("start_frame"))
+        end_frame = _safe_int(window.get("end_frame"))
+        start = max(0, int(start_frame)) if start_frame is not None else 0
+        end = min(int(end_frame), int(fish_valid.shape[0]) - 1) if end_frame is not None else -1
+        total_span_frames = max(0, end - start + 1) if end >= start else 0
+        valid_frame_count = int(np.count_nonzero(usable_fish[start : end + 1])) if total_span_frames else 0
+        speeds = _epoch_speed_values_mm_s(
+            fish_xy,
+            fish_valid,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            fps=fps,
+            pixels_per_mm=pixels_per_mm,
+        )
+        lineage = {
+            "zarr_path": str(zarr_path),
+            "chaser_distance_run": run_name,
+            "source_detection_path": source_refs.get("source_detection_path"),
+            "source_stimulus_run": source_refs.get("source_stimulus_run"),
+            "source_stimulus_epoch_run": source_refs.get("source_stimulus_epoch_run"),
+            "window_id": window.get("window_id"),
+        }
+        row = _common_row(
+            export_run_id=export_run_id,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            table=table,
+            lineage=lineage,
+        )
+        row.update(run_common)
+        row.update({
+            "window_index": _safe_int(window.get("window_index")),
+            "window_id": _safe_int(window.get("window_id")),
+            "window_label": window.get("window_label"),
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "start_time_s": _safe_float(window.get("start_time_s")),
+            "end_time_s": _safe_float(window.get("end_time_s")),
+            "duration_s": _safe_float(window.get("duration_s")),
+            "source_position_path": f"analysis/chaser_distance_runs/{run_name}/positions/fish_centroid_arena_xy",
+            "speed_definition": "consecutive valid fish_centroid_arena_xy displacement / pixels_per_mm_projector * fps; pairs must remain within epoch",
+            "total_span_frames": total_span_frames,
+            "valid_frame_count": valid_frame_count,
+            "missing_frame_count": max(0, total_span_frames - valid_frame_count),
+            "tracking_dropout_fraction": (
+                float(max(0, total_span_frames - valid_frame_count)) / float(total_span_frames)
+                if total_span_frames > 0
+                else None
+            ),
+            "speed_sample_count": int(speeds.size),
+            "mean_speed_mm_s": float(np.mean(speeds)) if speeds.size else None,
+            "median_speed_mm_s": float(np.median(speeds)) if speeds.size else None,
+            "p05_speed_mm_s": float(np.percentile(speeds, 5)) if speeds.size else None,
+            "p95_speed_mm_s": float(np.percentile(speeds, 95)) if speeds.size else None,
+            "max_speed_mm_s": float(np.max(speeds)) if speeds.size else None,
+            "total_path_mm": float(np.sum(speeds) / float(fps)) if speeds.size and fps is not None and fps > 0 else None,
+        })
+        rows.append(row)
+    return rows
+
+
+def _frame_speed_mm_s(
+    fish_xy: np.ndarray,
+    fish_valid: np.ndarray,
+    *,
+    fps: float | None,
+    pixels_per_mm: float | None,
+) -> np.ndarray:
+    xy = np.asarray(fish_xy, dtype=np.float64)
+    valid = np.asarray(fish_valid, dtype=bool).reshape(-1)
+    speeds = np.full(valid.shape[0], np.nan, dtype=np.float64)
+    if fps is None or fps <= 0 or pixels_per_mm is None or pixels_per_mm <= 0:
+        return speeds
+    if xy.ndim != 2 or xy.shape[1] != 2 or valid.shape[0] != xy.shape[0] or xy.shape[0] < 2:
+        return speeds
+    finite = valid & np.isfinite(xy).all(axis=1)
+    pair_valid = finite[:-1] & finite[1:]
+    if not np.any(pair_valid):
+        return speeds
+    displacement_px = np.linalg.norm(np.diff(xy, axis=0), axis=1)
+    speeds[:-1][pair_valid] = displacement_px[pair_valid] / float(pixels_per_mm) * float(fps)
+    return speeds
+
+
+def _load_goodcopbadcop_speed_distance_bins(
+    root: Any,
+    *,
+    export_run_id: str,
+    zarr_path: Path,
+    recording_id: str,
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    table = "goodcopbadcop_speed_distance_bins"
+    if table not in tables:
+        return []
+
+    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
+    if run_group is None or run_name is None:
+        diagnostics.append({"table": table, "status": "skipped", "reason": error})
+        return []
+    required = ("epoch_summary", "positions", "distances")
+    missing = [name for name in required if not _has_child(run_group, name)]
+    if missing:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": f"missing chaser-distance group(s): {missing}",
+            "chaser_distance_run": run_name,
+        })
+        return []
+
+    positions = run_group["positions"]
+    distances_group = run_group["distances"]
+    fish_xy = _read_array(positions, "fish_centroid_arena_xy")
+    fish_valid = _read_array(positions, "fish_valid")
+    distance_mm = _read_array(distances_group, "distance_mm")
+    if fish_xy is None or fish_valid is None or distance_mm is None:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "missing positions/fish_centroid_arena_xy, positions/fish_valid, or distances/distance_mm",
+            "chaser_distance_run": run_name,
+        })
+        return []
+
+    distance_mm = np.asarray(distance_mm, dtype=np.float64)
+    if distance_mm.ndim != 2:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "distances/distance_mm is not 2D",
+            "chaser_distance_run": run_name,
+        })
+        return []
+
+    run_common, source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
+    fps = _safe_float(run_common.get("fps"))
+    pixels_per_mm = _safe_float(run_common.get("pixels_per_mm_projector"))
+    frame_speed = _frame_speed_mm_s(fish_xy, fish_valid, fps=fps, pixels_per_mm=pixels_per_mm)
+    windows = _epoch_summary_window_rows(run_group)
+    if not windows:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "no epoch_summary windows",
+            "chaser_distance_run": run_name,
+        })
+        return []
+
+    bin_edges = None
+    if _has_child(run_group, "epoch_distributions"):
+        bin_edges = _read_1d_array(run_group["epoch_distributions"], "bin_edges_mm")
+    if bin_edges is None or np.asarray(bin_edges).size < 2:
+        finite = distance_mm[np.isfinite(distance_mm)]
+        max_distance = float(np.nanmax(finite)) if finite.size else 2.0
+        max_edge = max(2.0, float(math.ceil(max_distance / 2.0) * 2.0))
+        bin_edges = np.arange(0.0, max_edge + 1.0, 2.0, dtype=np.float32)
+    bin_edges = np.asarray(bin_edges, dtype=np.float64).reshape(-1)
+    if bin_edges.size < 2:
+        return []
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+    chaser_indices = _chaser_indices_for_run(run_group, fallback_count=int(distance_mm.shape[1]))
+
+    rows: list[dict[str, Any]] = []
+    for window_index, raw_window in enumerate(windows):
+        window = _fill_chaser_window_times(raw_window, fps=fps)
+        start_frame = _safe_int(window.get("start_frame"))
+        end_frame = _safe_int(window.get("end_frame"))
+        start = max(0, int(start_frame)) if start_frame is not None else 0
+        # Speeds are stored at the first frame in a t->t+1 movement pair, so
+        # the last inclusive epoch frame cannot start a within-epoch speed.
+        end = min(int(end_frame) - 1, int(distance_mm.shape[0]) - 1) if end_frame is not None else -1
+        base_window = {
+            "window_index": _safe_int(window.get("window_index")),
+            "window_id": _safe_int(window.get("window_id")),
+            "window_label": window.get("window_label"),
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "start_time_s": _safe_float(window.get("start_time_s")),
+            "end_time_s": _safe_float(window.get("end_time_s")),
+            "duration_s": _safe_float(window.get("duration_s")),
+        }
+        for chaser_column_index in range(int(distance_mm.shape[1])):
+            chaser_index = (
+                chaser_indices[chaser_column_index]
+                if chaser_column_index < len(chaser_indices)
+                else chaser_column_index
+            )
+            if end >= start:
+                distances = distance_mm[start : end + 1, chaser_column_index]
+                speeds = frame_speed[start : end + 1]
+                valid = np.isfinite(distances) & np.isfinite(speeds)
+            else:
+                distances = np.asarray([], dtype=np.float64)
+                speeds = np.asarray([], dtype=np.float64)
+                valid = np.asarray([], dtype=bool)
+            for bin_index in range(int(bin_edges.size) - 1):
+                left = float(bin_edges[bin_index])
+                right = float(bin_edges[bin_index + 1])
+                if bin_index == int(bin_edges.size) - 2:
+                    bin_mask = valid & (distances >= left) & (distances <= right)
+                else:
+                    bin_mask = valid & (distances >= left) & (distances < right)
+                values = speeds[bin_mask]
+                lineage = {
+                    "zarr_path": str(zarr_path),
+                    "chaser_distance_run": run_name,
+                    "source_detection_path": source_refs.get("source_detection_path"),
+                    "source_stimulus_run": source_refs.get("source_stimulus_run"),
+                    "source_stimulus_epoch_run": source_refs.get("source_stimulus_epoch_run"),
+                    "window_id": window.get("window_id"),
+                    "chaser_index": chaser_index,
+                    "distance_bin_index": bin_index,
+                }
+                row = _common_row(
+                    export_run_id=export_run_id,
+                    zarr_path=zarr_path,
+                    recording_id=recording_id,
+                    table=table,
+                    lineage=lineage,
+                )
+                row.update(run_common)
+                row.update(base_window)
+                row.update({
+                    "source_position_path": f"analysis/chaser_distance_runs/{run_name}/positions/fish_centroid_arena_xy",
+                    "source_distance_path": f"analysis/chaser_distance_runs/{run_name}/distances/distance_mm",
+                    "speed_distance_definition": "speed at frame t from fish position t->t+1, distance to chaser at frame t, pairs constrained within epoch",
+                    "chaser_column_index": chaser_column_index,
+                    "chaser_index": _safe_int(chaser_index),
+                    "distance_bin_index": bin_index,
+                    "distance_bin_left_mm": left,
+                    "distance_bin_right_mm": right,
+                    "distance_bin_center_mm": float(bin_centers[bin_index]),
+                    "distance_bin_width_mm": right - left,
+                    "speed_sample_count": int(values.size),
+                    "speed_sum_mm_s": float(np.sum(values)) if values.size else 0.0,
+                    "mean_speed_mm_s": float(np.mean(values)) if values.size else None,
+                    "median_speed_mm_s": float(np.median(values)) if values.size else None,
+                    "p05_speed_mm_s": float(np.percentile(values, 5)) if values.size else None,
+                    "p95_speed_mm_s": float(np.percentile(values, 95)) if values.size else None,
+                })
+                rows.append(row)
+    return rows
+
+
 def _load_goodcopbadcop_chaser_distance_histogram(
     root: Any,
     *,
@@ -1641,6 +2360,1617 @@ def _load_goodcopbadcop_chaser_distance_histogram(
     return rows
 
 
+def _latest_egocentric_component(
+    run_group: Any,
+) -> tuple[Any | None, str | None, str | None]:
+    if not _has_child(run_group, "egocentric_bearing"):
+        return None, None, "missing egocentric_bearing group"
+    parent = run_group["egocentric_bearing"]
+    parent_attrs = _attrs_dict(parent)
+    candidate = (
+        str(parent_attrs.get("latest_complete") or "").strip()
+        or str(parent_attrs.get("latest") or "").strip()
+    )
+    group_names = _group_names(parent)
+    if not candidate and group_names:
+        candidate = group_names[-1]
+    if not candidate or candidate not in group_names:
+        return None, None, "no egocentric_bearing component found"
+    component = parent[candidate]
+    component_attrs = _attrs_dict(component)
+    status = str(component_attrs.get("status") or "").strip().lower()
+    if status and status != "complete":
+        return None, None, f"egocentric_bearing component is not complete: {candidate}"
+    return component, candidate, None
+
+
+def _egocentric_chaser_indices(component: Any, *, fallback_count: int) -> list[int]:
+    if _has_child(component, "per_chaser"):
+        arr = _read_1d_array(component["per_chaser"], "chaser_index")
+        if arr is not None and arr.size:
+            return [_safe_int(value) if _safe_int(value) is not None else int(idx) for idx, value in enumerate(arr)]
+    if _has_child(component, "distance_bearing_histogram"):
+        arr = _read_1d_array(component["distance_bearing_histogram"], "chaser_index")
+        if arr is not None and arr.size:
+            return [_safe_int(value) if _safe_int(value) is not None else int(idx) for idx, value in enumerate(arr)]
+    return list(range(int(fallback_count)))
+
+
+def _egocentric_common_fields(
+    *,
+    component: Any,
+    component_name: str,
+    run_name: str,
+    run_path: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    attrs = _attrs_dict(component)
+    source_refs = _json_mapping_attr(attrs, "source_refs")
+    parameters = _json_mapping_attr(attrs, "parameters")
+    common = {
+        "egocentric_component_name": component_name,
+        "egocentric_component_path": f"{run_path}/egocentric_bearing/{component_name}",
+        "egocentric_schema_id": attrs.get("schema_id"),
+        "egocentric_schema_version": _safe_int(attrs.get("schema_version")),
+        "egocentric_method": attrs.get("method"),
+        "egocentric_method_version": attrs.get("method_version"),
+        "egocentric_created_at_utc": attrs.get("created_at_utc"),
+        "egocentric_source_refs_json": _source_refs_json(source_refs),
+        "egocentric_parameters_json": _source_refs_json(parameters),
+        "source_chaser_distance_run": source_refs.get("source_chaser_distance_run") or run_name,
+        "source_chaser_distance_path": source_refs.get("source_chaser_distance_path") or run_path,
+        "source_track_kinematics_run": source_refs.get("source_track_kinematics_run"),
+        "source_track_kinematics_scope": source_refs.get("source_track_kinematics_scope"),
+        "source_track_kinematics_track_id": _safe_int(source_refs.get("source_track_kinematics_track_id")),
+        "source_track_kinematics_track_path": source_refs.get("source_track_kinematics_track_path"),
+        "source_heading_array": source_refs.get("source_heading_array"),
+        "heading_level": parameters.get("heading_level"),
+        "angle_convention": parameters.get("angle_convention"),
+        "distance_bin_width_mm": _safe_float(parameters.get("distance_bin_width_mm")),
+        "bearing_bin_width_deg": _safe_float(parameters.get("bearing_bin_width_deg")),
+    }
+    return common, source_refs, parameters
+
+
+def _latest_cra_primary_endpoint_component(
+    run_group: Any,
+) -> tuple[Any | None, str | None, str | None]:
+    if not _has_child(run_group, CRA_PRIMARY_ENDPOINT_COMPONENT_PARENT):
+        return None, None, f"missing {CRA_PRIMARY_ENDPOINT_COMPONENT_PARENT} group"
+    parent = run_group[CRA_PRIMARY_ENDPOINT_COMPONENT_PARENT]
+    parent_attrs = _attrs_dict(parent)
+    candidate = (
+        str(parent_attrs.get("latest_complete") or "").strip()
+        or str(parent_attrs.get("latest") or "").strip()
+    )
+    group_names = _group_names(parent)
+    if not candidate and group_names:
+        candidate = group_names[-1]
+    if not candidate or candidate not in group_names:
+        return None, None, "no CRA primary endpoint component found"
+    component = parent[candidate]
+    component_attrs = _attrs_dict(component)
+    status = str(component_attrs.get("status") or "").strip().lower()
+    if status and status not in CRA_PRIMARY_ENDPOINT_ALLOWED_STATUSES:
+        return None, None, f"CRA primary endpoint component is not computed: {candidate}"
+    return component, candidate, None
+
+
+def _latest_cra_near_field_component(
+    run_group: Any,
+) -> tuple[Any | None, str | None, str | None]:
+    if not _has_child(run_group, CRA_NEAR_FIELD_COMPONENT_PARENT):
+        return None, None, f"missing {CRA_NEAR_FIELD_COMPONENT_PARENT} group"
+    parent = run_group[CRA_NEAR_FIELD_COMPONENT_PARENT]
+    parent_attrs = _attrs_dict(parent)
+    candidate = (
+        str(parent_attrs.get("latest_complete") or "").strip()
+        or str(parent_attrs.get("latest") or "").strip()
+    )
+    group_names = _group_names(parent)
+    if not candidate and group_names:
+        candidate = group_names[-1]
+    if not candidate or candidate not in group_names:
+        return None, None, "no CRA near-field component found"
+    component = parent[candidate]
+    component_attrs = _attrs_dict(component)
+    status = str(component_attrs.get("status") or "").strip().lower()
+    if status and status not in CRA_NEAR_FIELD_ALLOWED_STATUSES:
+        return None, None, f"CRA near-field component is not computed: {candidate}"
+    return component, candidate, None
+
+
+def _cra_primary_endpoint_common_fields(
+    *,
+    component: Any,
+    component_name: str,
+    run_name: str,
+    run_path: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    attrs = _attrs_dict(component)
+    source_refs = _json_mapping_attr(attrs, "source_refs")
+    parameters = _json_mapping_attr(attrs, "parameters")
+    component_path = f"{run_path}/{CRA_PRIMARY_ENDPOINT_COMPONENT_PARENT}/{component_name}"
+    fingerprint = (
+        attrs.get("source_fingerprint")
+        or attrs.get("source_lineage_hash")
+        or attrs.get("lineage_hash")
+    )
+    common = {
+        "cra_primary_endpoint_component": component_name,
+        "cra_primary_endpoint_path": component_path,
+        "source_cra_primary_endpoint_component": component_name,
+        "source_cra_primary_endpoint_path": component_path,
+        "source_component_schema_id": attrs.get("schema_id"),
+        "source_component_schema_version": _safe_int(attrs.get("schema_version")),
+        "source_component_fingerprint": fingerprint,
+        "source_component_fingerprint_status": attrs.get("fingerprint_status"),
+        "cra_primary_endpoint_schema_id": attrs.get("schema_id"),
+        "cra_primary_endpoint_schema_version": _safe_int(attrs.get("schema_version")),
+        "cra_primary_endpoint_method": attrs.get("method"),
+        "cra_primary_endpoint_method_version": attrs.get("method_version"),
+        "cra_primary_endpoint_created_at_utc": attrs.get("created_at_utc"),
+        "endpoint_status": attrs.get("status"),
+        "cra_primary_endpoint_source_refs_json": _source_refs_json(source_refs),
+        "cra_primary_endpoint_parameters_json": _source_refs_json(parameters),
+        "qc_warnings_json": _json_dumps_safe(_parse_jsonish(attrs.get("qc_warnings")) or []),
+        "diagnostics_json": _json_dumps_safe(_parse_jsonish(attrs.get("diagnostics")) or {}),
+        "source_chaser_distance_run": source_refs.get("source_chaser_distance_run") or run_name,
+        "source_chaser_distance_path": source_refs.get("source_chaser_distance_path") or run_path,
+        "source_stimulus_run": source_refs.get("source_stimulus_run"),
+        "source_stimulus_path": source_refs.get("source_stimulus_path"),
+        "source_stimulus_epoch_run": source_refs.get("source_stimulus_epoch_run"),
+        "source_stimulus_epoch_path": source_refs.get("source_stimulus_epoch_path"),
+        "coordinate_frame": attrs.get("coordinate_frame"),
+        "coordinate_origin": attrs.get("coordinate_origin"),
+        "x_axis_direction": attrs.get("x_axis_direction"),
+        "y_axis_direction": attrs.get("y_axis_direction"),
+        "quadrant_bounds_source": attrs.get("quadrant_bounds_source"),
+        "quadrant_width_px": _safe_float(attrs.get("quadrant_width_px")),
+        "quadrant_height_px": _safe_float(attrs.get("quadrant_height_px")),
+        "pixels_per_mm_projector": _safe_float(attrs.get("pixels_per_mm_projector")),
+    }
+    return common, source_refs, parameters
+
+
+def _cra_near_field_common_fields(
+    *,
+    component: Any,
+    component_name: str,
+    run_name: str,
+    run_path: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    attrs = _attrs_dict(component)
+    source_refs = _json_mapping_attr(attrs, "source_refs")
+    parameters = _json_mapping_attr(attrs, "parameters")
+    component_path = f"{run_path}/{CRA_NEAR_FIELD_COMPONENT_PARENT}/{component_name}"
+    fingerprint = (
+        attrs.get("source_fingerprint")
+        or attrs.get("source_lineage_hash")
+        or attrs.get("lineage_hash")
+    )
+    common = {
+        "cra_near_field_component": component_name,
+        "cra_near_field_path": component_path,
+        "source_cra_near_field_component": component_name,
+        "source_cra_near_field_path": component_path,
+        "source_component_schema_id": attrs.get("schema_id"),
+        "source_component_schema_version": _safe_int(attrs.get("schema_version")),
+        "source_component_fingerprint": fingerprint,
+        "source_component_fingerprint_status": attrs.get("fingerprint_status"),
+        "cra_near_field_schema_id": attrs.get("schema_id"),
+        "cra_near_field_schema_version": _safe_int(attrs.get("schema_version")),
+        "cra_near_field_method": attrs.get("method"),
+        "cra_near_field_method_version": attrs.get("method_version"),
+        "cra_near_field_created_at_utc": attrs.get("created_at_utc"),
+        "endpoint_status": attrs.get("status"),
+        "cra_near_field_source_refs_json": _source_refs_json(source_refs),
+        "cra_near_field_parameters_json": _source_refs_json(parameters),
+        "qc_warnings_json": _json_dumps_safe(_parse_jsonish(attrs.get("qc_warnings")) or []),
+        "diagnostics_json": _json_dumps_safe(_parse_jsonish(attrs.get("diagnostics")) or {}),
+        "source_chaser_distance_run": source_refs.get("source_chaser_distance_run") or run_name,
+        "source_chaser_distance_path": source_refs.get("source_chaser_distance_path") or run_path,
+        "source_cra_primary_endpoint_component": source_refs.get("source_cra_primary_endpoint_component"),
+        "source_cra_primary_endpoint_path": source_refs.get("source_cra_primary_endpoint_path"),
+        "source_stimulus_run": source_refs.get("source_stimulus_run"),
+        "source_stimulus_path": source_refs.get("source_stimulus_path"),
+        "source_stimulus_epoch_run": source_refs.get("source_stimulus_epoch_run"),
+        "source_stimulus_epoch_path": source_refs.get("source_stimulus_epoch_path"),
+        "coordinate_frame": attrs.get("coordinate_frame"),
+        "coordinate_origin": attrs.get("coordinate_origin"),
+        "x_axis_direction": attrs.get("x_axis_direction"),
+        "y_axis_direction": attrs.get("y_axis_direction"),
+        "pixels_per_mm_projector": _safe_float(attrs.get("pixels_per_mm_projector")),
+        "geometry_status": attrs.get("geometry_status") or parameters.get("geometry_status") or parameters.get("geometry_mode"),
+        "arena_shape": attrs.get("arena_shape") or parameters.get("arena_shape"),
+        "arena_geometry_source": attrs.get("arena_geometry_source") or parameters.get("arena_geometry_source"),
+        "arena_center_x_px": _safe_float(attrs.get("arena_center_x_px") or parameters.get("arena_center_x_px")),
+        "arena_center_y_px": _safe_float(attrs.get("arena_center_y_px") or parameters.get("arena_center_y_px")),
+        "arena_radius_px": _safe_float(attrs.get("arena_radius_px") or parameters.get("arena_radius_px")),
+        "arena_width_px": _safe_float(attrs.get("arena_width_px")),
+        "arena_height_px": _safe_float(attrs.get("arena_height_px")),
+        "r_zone_mm": _safe_float(parameters.get("r_zone_mm")),
+        "r_in_mm": _safe_float(parameters.get("r_in_mm")),
+        "r_out_mm": _safe_float(parameters.get("r_out_mm")),
+        "perimeter_band_mm": _safe_float(parameters.get("perimeter_band_mm")),
+    }
+    return common, source_refs, parameters
+
+
+def _cra_summary_mapping_from_component(component: Any) -> dict[str, Any]:
+    attrs = _attrs_dict(component)
+    summary = _json_mapping_attr(attrs, "summary")
+    if summary:
+        return {str(key): _scalar_for_parquet(value) for key, value in summary.items()}
+    if not _has_child(component, "summary"):
+        return {}
+    group = component["summary"]
+    out: dict[str, Any] = {}
+    for name in _array_names(group):
+        values = _read_array(group, name)
+        if values is None or np.asarray(values).shape[0] < 1:
+            continue
+        key = str(name)
+        if key.endswith("_bytes"):
+            decoded = _decode_text_column(values[:1], fallback_count=1)
+            out[key[: -len("_bytes")]] = decoded[0] if decoded else None
+        else:
+            out[key] = _array_scalar(values, 0)
+    return out
+
+
+def _load_goodcopbadcop_cra_primary_endpoint_summary(
+    root: Any,
+    *,
+    export_run_id: str,
+    zarr_path: Path,
+    recording_id: str,
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    table = "goodcopbadcop_cra_primary_endpoint_summary"
+    if table not in tables:
+        return []
+
+    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
+    if run_group is None or run_name is None:
+        diagnostics.append({"table": table, "status": "skipped", "reason": error})
+        return []
+    component, component_name, component_error = _latest_cra_primary_endpoint_component(run_group)
+    if component is None or component_name is None:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": component_error,
+            "chaser_distance_run": run_name,
+        })
+        return []
+
+    run_common, _source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
+    run_path = str(run_common["chaser_distance_path"])
+    component_common, cra_refs, _cra_parameters = _cra_primary_endpoint_common_fields(
+        component=component,
+        component_name=component_name,
+        run_name=run_name,
+        run_path=run_path,
+    )
+    summary = _cra_summary_mapping_from_component(component)
+    if not summary:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "missing CRA primary endpoint summary",
+            "chaser_distance_run": run_name,
+            "cra_primary_endpoint_component": component_name,
+        })
+        return []
+
+    lineage = {
+        "zarr_path": str(zarr_path),
+        "chaser_distance_run": run_name,
+        "cra_primary_endpoint_component": component_name,
+        "source_component_fingerprint": component_common.get("source_component_fingerprint"),
+        "source_detection_path": run_common.get("source_detection_path"),
+        "source_stimulus_run": cra_refs.get("source_stimulus_run"),
+        "source_stimulus_epoch_run": cra_refs.get("source_stimulus_epoch_run"),
+        "fish_id": summary.get("fish_id"),
+    }
+    row = _common_row(
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        table=table,
+        lineage=lineage,
+    )
+    row.update(run_common)
+    row.update(component_common)
+    summary_for_row = dict(summary)
+    component_recording_id = summary_for_row.pop("recording_id", None)
+    row.update(summary_for_row)
+    row["cra_summary_recording_id"] = component_recording_id
+    return [row]
+
+
+def _load_goodcopbadcop_cra_primary_endpoint_object_phase(
+    root: Any,
+    *,
+    export_run_id: str,
+    zarr_path: Path,
+    recording_id: str,
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    table = "goodcopbadcop_cra_primary_endpoint_object_phase"
+    if table not in tables:
+        return []
+
+    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
+    if run_group is None or run_name is None:
+        diagnostics.append({"table": table, "status": "skipped", "reason": error})
+        return []
+    component, component_name, component_error = _latest_cra_primary_endpoint_component(run_group)
+    if component is None or component_name is None:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": component_error,
+            "chaser_distance_run": run_name,
+        })
+        return []
+    required = ("objects", "phases", "object_phase", "per_object_phase")
+    missing = [name for name in required if not _has_child(component, name)]
+    if missing:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": f"missing CRA primary endpoint group(s): {missing}",
+            "chaser_distance_run": run_name,
+            "cra_primary_endpoint_component": component_name,
+        })
+        return []
+
+    run_common, _source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
+    run_path = str(run_common["chaser_distance_path"])
+    component_common, cra_refs, _cra_parameters = _cra_primary_endpoint_common_fields(
+        component=component,
+        component_name=component_name,
+        run_name=run_name,
+        run_path=run_path,
+    )
+    objects = component["objects"]
+    phases = component["phases"]
+    object_phase = component["object_phase"]
+    per_object = component["per_object_phase"]
+
+    object_indices = _read_1d_array(objects, "object_index")
+    object_roles = _decode_text_column(_read_array(objects, "object_role_label_bytes"))
+    raw_colors = _decode_text_column(_read_array(objects, "raw_color_hex_bytes"))
+    enable_chase = _read_1d_array(objects, "enable_chase")
+    behavior_mode = _read_1d_array(objects, "behavior_mode")
+    start_preset = _decode_text_column(_read_array(objects, "start_position_preset_bytes"))
+    end_preset = _decode_text_column(_read_array(objects, "end_position_preset_bytes"))
+
+    phase_indices = _read_1d_array(phases, "phase_index")
+    phase_labels = _decode_text_column(_read_array(phases, "phase_label_bytes"))
+    source_window_labels = _decode_text_column(_read_array(phases, "source_window_label_bytes"))
+    source_start = _read_1d_array(phases, "source_start_frame")
+    source_end = _read_1d_array(phases, "source_end_frame")
+    effective_start = _read_1d_array(phases, "effective_start_frame")
+    effective_end = _read_1d_array(phases, "effective_end_frame")
+    settle_excluded = _read_1d_array(phases, "settle_excluded_frame_count")
+
+    object_x_px = _read_array(object_phase, "object_x_px")
+    if object_x_px is None or np.asarray(object_x_px).ndim != 2:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "object_phase/object_x_px missing or not 2D",
+            "chaser_distance_run": run_name,
+            "cra_primary_endpoint_component": component_name,
+        })
+        return []
+    object_x_px = np.asarray(object_x_px)
+    n_phases, n_objects = int(object_x_px.shape[0]), int(object_x_px.shape[1])
+    object_y_px = _read_array(object_phase, "object_y_px")
+    object_x_mm = _read_array(object_phase, "object_x_mm")
+    object_y_mm = _read_array(object_phase, "object_y_mm")
+    quadrant_code = _read_array(object_phase, "object_quadrant_code")
+    quadrant_labels = _decode_text_column(_read_array(object_phase, "object_quadrant_label_bytes"))
+    sample_count = _read_array(object_phase, "object_position_sample_count")
+    max_drift = _read_array(object_phase, "object_max_drift_mm")
+    median_drift = _read_array(object_phase, "object_median_drift_mm")
+
+    median_distance = _read_array(per_object, "median_distance_mm")
+    mean_distance = _read_array(per_object, "mean_distance_mm")
+    occupancy = _read_array(per_object, "occupancy_fraction")
+    occupancy_epoch = _read_array(per_object, "occupancy_fraction_of_epoch")
+    valid_count = _read_array(per_object, "valid_frame_count")
+    distance_valid_count = _read_array(per_object, "distance_valid_frame_count")
+    total_count = _read_array(per_object, "total_frame_count")
+    missing_count = _read_array(per_object, "missing_frame_count")
+    dropout = _read_array(per_object, "tracking_dropout_fraction")
+
+    rows: list[dict[str, Any]] = []
+    for phase_idx in range(n_phases):
+        for object_col in range(n_objects):
+            q_code = _array_int(quadrant_code, phase_idx, object_col)
+            q_label = (
+                quadrant_labels[q_code]
+                if q_code is not None and 0 <= q_code < len(quadrant_labels)
+                else None
+            )
+            object_index = _array_int(object_indices, object_col)
+            object_role = object_roles[object_col] if object_col < len(object_roles) else None
+            lineage = {
+                "zarr_path": str(zarr_path),
+                "chaser_distance_run": run_name,
+                "cra_primary_endpoint_component": component_name,
+                "source_component_fingerprint": component_common.get("source_component_fingerprint"),
+                "source_detection_path": run_common.get("source_detection_path"),
+                "source_stimulus_run": cra_refs.get("source_stimulus_run"),
+                "source_stimulus_epoch_run": cra_refs.get("source_stimulus_epoch_run"),
+                "phase_index": phase_idx,
+                "object_index": object_index,
+                "object_role": object_role,
+            }
+            row = _common_row(
+                export_run_id=export_run_id,
+                zarr_path=zarr_path,
+                recording_id=recording_id,
+                table=table,
+                lineage=lineage,
+            )
+            row.update(run_common)
+            row.update(component_common)
+            row.update({
+                "phase_axis_index": phase_idx,
+                "phase_index": _array_int(phase_indices, phase_idx),
+                "phase_label": phase_labels[phase_idx] if phase_idx < len(phase_labels) else None,
+                "source_window_label": (
+                    source_window_labels[phase_idx]
+                    if phase_idx < len(source_window_labels)
+                    else None
+                ),
+                "source_start_frame": _array_int(source_start, phase_idx),
+                "source_end_frame": _array_int(source_end, phase_idx),
+                "effective_start_frame": _array_int(effective_start, phase_idx),
+                "effective_end_frame": _array_int(effective_end, phase_idx),
+                "settle_excluded_frame_count": _array_int(settle_excluded, phase_idx),
+                "object_column_index": object_col,
+                "object_index": object_index,
+                "object_role": object_role,
+                "raw_color_hex": raw_colors[object_col] if object_col < len(raw_colors) else None,
+                "enable_chase": _scalar_for_parquet(_array_scalar(enable_chase, object_col)),
+                "behavior_mode": _array_int(behavior_mode, object_col),
+                "start_position_preset": start_preset[object_col] if object_col < len(start_preset) else None,
+                "end_position_preset": end_preset[object_col] if object_col < len(end_preset) else None,
+                "object_x_px": _array_float(object_x_px, phase_idx, object_col),
+                "object_y_px": _array_float(object_y_px, phase_idx, object_col),
+                "object_x_mm": _array_float(object_x_mm, phase_idx, object_col),
+                "object_y_mm": _array_float(object_y_mm, phase_idx, object_col),
+                "object_quadrant_code": q_code,
+                "object_quadrant_label": q_label,
+                "object_position_sample_count": _array_int(sample_count, phase_idx, object_col),
+                "object_max_drift_mm": _array_float(max_drift, phase_idx, object_col),
+                "object_median_drift_mm": _array_float(median_drift, phase_idx, object_col),
+                "median_distance_mm": _array_float(median_distance, phase_idx, object_col),
+                "mean_distance_mm": _array_float(mean_distance, phase_idx, object_col),
+                "occupancy_fraction": _array_float(occupancy, phase_idx, object_col),
+                "occupancy_fraction_of_epoch": _array_float(occupancy_epoch, phase_idx, object_col),
+                "valid_frame_count": _array_int(valid_count, phase_idx, object_col),
+                "distance_valid_frame_count": _array_int(distance_valid_count, phase_idx, object_col),
+                "total_frame_count": _array_int(total_count, phase_idx, object_col),
+                "missing_frame_count": _array_int(missing_count, phase_idx, object_col),
+                "tracking_dropout_fraction": _array_float(dropout, phase_idx, object_col),
+            })
+            rows.append(row)
+    return rows
+
+
+def _load_goodcopbadcop_cra_quadrant_occupancy(
+    root: Any,
+    *,
+    export_run_id: str,
+    zarr_path: Path,
+    recording_id: str,
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    table = "goodcopbadcop_cra_quadrant_occupancy"
+    if table not in tables:
+        return []
+
+    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
+    if run_group is None or run_name is None:
+        diagnostics.append({"table": table, "status": "skipped", "reason": error})
+        return []
+    component, component_name, component_error = _latest_cra_primary_endpoint_component(run_group)
+    if component is None or component_name is None:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": component_error,
+            "chaser_distance_run": run_name,
+        })
+        return []
+    if not _has_child(run_group, "positions"):
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "chaser-distance run missing positions group",
+            "chaser_distance_run": run_name,
+            "cra_primary_endpoint_component": component_name,
+        })
+        return []
+    required_component = ("objects", "phases", "object_phase")
+    missing_component = [name for name in required_component if not _has_child(component, name)]
+    required_positions = ("fish_centroid_arena_xy", "fish_valid")
+    missing_positions = [name for name in required_positions if not _has_child(run_group["positions"], name)]
+    if missing_component or missing_positions:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": f"missing group/array(s): component={missing_component}, positions={missing_positions}",
+            "chaser_distance_run": run_name,
+            "cra_primary_endpoint_component": component_name,
+        })
+        return []
+
+    run_common, _source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
+    run_path = str(run_common["chaser_distance_path"])
+    component_common, cra_refs, _cra_parameters = _cra_primary_endpoint_common_fields(
+        component=component,
+        component_name=component_name,
+        run_name=run_name,
+        run_path=run_path,
+    )
+    width_px = _safe_float(component_common.get("quadrant_width_px"))
+    height_px = _safe_float(component_common.get("quadrant_height_px"))
+    if width_px is None or height_px is None or width_px <= 0 or height_px <= 0:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "CRA primary endpoint lacks positive quadrant dimensions",
+            "chaser_distance_run": run_name,
+            "cra_primary_endpoint_component": component_name,
+        })
+        return []
+
+    objects = component["objects"]
+    phases = component["phases"]
+    object_phase = component["object_phase"]
+    positions = run_group["positions"]
+
+    object_indices = _read_1d_array(objects, "object_index")
+    object_roles = _decode_text_column(_read_array(objects, "object_role_label_bytes"))
+    raw_colors = _decode_text_column(_read_array(objects, "raw_color_hex_bytes"))
+    aggressive_cols = [idx for idx, role in enumerate(object_roles) if role == "aggressive"]
+    if len(aggressive_cols) != 1:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": f"expected exactly one aggressive object role, found {len(aggressive_cols)}",
+            "chaser_distance_run": run_name,
+            "cra_primary_endpoint_component": component_name,
+        })
+        return []
+    aggressive_col = int(aggressive_cols[0])
+
+    phase_indices = _read_1d_array(phases, "phase_index")
+    phase_labels = _decode_text_column(_read_array(phases, "phase_label_bytes"))
+    source_window_labels = _decode_text_column(_read_array(phases, "source_window_label_bytes"))
+    source_start = _read_1d_array(phases, "source_start_frame")
+    source_end = _read_1d_array(phases, "source_end_frame")
+    effective_start = _read_1d_array(phases, "effective_start_frame")
+    effective_end = _read_1d_array(phases, "effective_end_frame")
+    settle_excluded = _read_1d_array(phases, "settle_excluded_frame_count")
+    object_x_px = _read_array(object_phase, "object_x_px")
+    object_y_px = _read_array(object_phase, "object_y_px")
+    object_quadrant_code = _read_array(object_phase, "object_quadrant_code")
+    if object_quadrant_code is None or np.asarray(object_quadrant_code).ndim != 2:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "object_phase/object_quadrant_code missing or not 2D",
+            "chaser_distance_run": run_name,
+            "cra_primary_endpoint_component": component_name,
+        })
+        return []
+
+    try:
+        fish_xy = np.asarray(positions["fish_centroid_arena_xy"][:], dtype=np.float64)
+        fish_valid = np.asarray(positions["fish_valid"][:], dtype=bool).reshape(-1)
+    except Exception as exc:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": f"failed reading fish positions: {exc}",
+            "chaser_distance_run": run_name,
+            "cra_primary_endpoint_component": component_name,
+        })
+        return []
+    if fish_xy.ndim != 2 or fish_xy.shape[1] != 2 or fish_xy.shape[0] != fish_valid.shape[0]:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "fish_centroid_arena_xy/fish_valid shape mismatch",
+            "chaser_distance_run": run_name,
+            "cra_primary_endpoint_component": component_name,
+        })
+        return []
+
+    def _label_for_code(code: int | None) -> str | None:
+        if code is None or code < 0 or code >= len(QUADRANT_LABELS):
+            return None
+        return QUADRANT_LABELS[int(code)]
+
+    total_frames = int(fish_xy.shape[0])
+    rows: list[dict[str, Any]] = []
+    n_phases = len(phase_labels) if phase_labels else int(np.asarray(object_quadrant_code).shape[0])
+    for phase_idx in range(n_phases):
+        start = _array_int(effective_start, phase_idx)
+        end = _array_int(effective_end, phase_idx)
+        if start is None or end is None:
+            continue
+        start = max(0, int(start))
+        end = min(total_frames - 1, int(end))
+        if end < start:
+            phase_len = 0
+            phase_xy = np.zeros((0, 2), dtype=np.float64)
+            phase_valid = np.zeros(0, dtype=bool)
+        else:
+            phase_len = int(end - start + 1)
+            phase_xy = fish_xy[start : end + 1]
+            phase_valid = fish_valid[start : end + 1] & np.isfinite(phase_xy).all(axis=1)
+
+        quadrant_codes = np.asarray(
+            [
+                quadrant_code_for_xy(float(x), float(y), width_px=float(width_px), height_px=float(height_px))
+                for x, y in phase_xy
+            ],
+            dtype=np.int16,
+        )
+        valid_in_arena = phase_valid & (quadrant_codes >= 0)
+        valid_frame_count = int(np.count_nonzero(phase_valid))
+        quadrant_valid_frame_count = int(np.count_nonzero(valid_in_arena))
+        out_of_bounds_frame_count = max(0, valid_frame_count - quadrant_valid_frame_count)
+        missing_frame_count = max(0, phase_len - valid_frame_count)
+        counts = np.bincount(quadrant_codes[valid_in_arena].astype(np.int64), minlength=len(QUADRANT_LABELS))[
+            : len(QUADRANT_LABELS)
+        ]
+        occupancy = np.divide(
+            counts.astype(np.float64),
+            float(quadrant_valid_frame_count),
+            out=np.full(len(QUADRANT_LABELS), np.nan, dtype=np.float64),
+            where=quadrant_valid_frame_count > 0,
+        )
+        occupancy_epoch = np.divide(
+            counts.astype(np.float64),
+            float(phase_len),
+            out=np.full(len(QUADRANT_LABELS), np.nan, dtype=np.float64),
+            where=phase_len > 0,
+        )
+
+        chaser_quadrant_code = _array_int(object_quadrant_code, phase_idx, aggressive_col)
+        chaser_quadrant_label = _label_for_code(chaser_quadrant_code)
+        chaser_quadrant_occ = (
+            float(occupancy[int(chaser_quadrant_code)])
+            if chaser_quadrant_code is not None
+            and 0 <= int(chaser_quadrant_code) < len(QUADRANT_LABELS)
+            and math.isfinite(float(occupancy[int(chaser_quadrant_code)]))
+            else None
+        )
+        for quadrant_code, quadrant_label in enumerate(QUADRANT_LABELS):
+            lineage = {
+                "zarr_path": str(zarr_path),
+                "chaser_distance_run": run_name,
+                "cra_primary_endpoint_component": component_name,
+                "source_component_fingerprint": component_common.get("source_component_fingerprint"),
+                "source_detection_path": run_common.get("source_detection_path"),
+                "source_stimulus_run": cra_refs.get("source_stimulus_run"),
+                "source_stimulus_epoch_run": cra_refs.get("source_stimulus_epoch_run"),
+                "phase_index": phase_idx,
+                "quadrant_code": quadrant_code,
+                "object_role": "aggressive",
+            }
+            row = _common_row(
+                export_run_id=export_run_id,
+                zarr_path=zarr_path,
+                recording_id=recording_id,
+                table=table,
+                lineage=lineage,
+            )
+            row.update(run_common)
+            row.update(component_common)
+            value = float(occupancy[quadrant_code])
+            epoch_value = float(occupancy_epoch[quadrant_code])
+            row.update({
+                "fish_id": "0",
+                "phase_axis_index": phase_idx,
+                "phase_index": _array_int(phase_indices, phase_idx),
+                "phase_label": phase_labels[phase_idx] if phase_idx < len(phase_labels) else None,
+                "source_window_label": (
+                    source_window_labels[phase_idx]
+                    if phase_idx < len(source_window_labels)
+                    else None
+                ),
+                "source_start_frame": _array_int(source_start, phase_idx),
+                "source_end_frame": _array_int(source_end, phase_idx),
+                "effective_start_frame": _array_int(effective_start, phase_idx),
+                "effective_end_frame": _array_int(effective_end, phase_idx),
+                "settle_excluded_frame_count": _array_int(settle_excluded, phase_idx),
+                "quadrant_code": quadrant_code,
+                "quadrant_id": quadrant_label,
+                "quadrant_label": quadrant_label.replace("_", " ").title(),
+                "display_order": quadrant_code,
+                "frame_count": int(counts[quadrant_code]),
+                "occupancy_fraction": value if math.isfinite(value) else None,
+                "fraction_of_detected": value if math.isfinite(value) else None,
+                "occupancy_fraction_of_epoch": epoch_value if math.isfinite(epoch_value) else None,
+                "fraction_of_epoch": epoch_value if math.isfinite(epoch_value) else None,
+                "total_frame_count": int(phase_len),
+                "valid_frame_count": valid_frame_count,
+                "quadrant_valid_frame_count": quadrant_valid_frame_count,
+                "missing_frame_count": missing_frame_count,
+                "out_of_bounds_frame_count": out_of_bounds_frame_count,
+                "tracking_dropout_fraction": (
+                    float(missing_frame_count) / float(phase_len)
+                    if phase_len > 0
+                    else None
+                ),
+                "chaser_object_index": _array_int(object_indices, aggressive_col),
+                "chaser_object_role": "aggressive",
+                "chaser_raw_color_hex": (
+                    raw_colors[aggressive_col] if aggressive_col < len(raw_colors) else None
+                ),
+                "chaser_x_px": _array_float(object_x_px, phase_idx, aggressive_col),
+                "chaser_y_px": _array_float(object_y_px, phase_idx, aggressive_col),
+                "chaser_quadrant_code": chaser_quadrant_code,
+                "chaser_quadrant_label": chaser_quadrant_label,
+                "chaser_quadrant_occ": chaser_quadrant_occ,
+                "is_chaser_quadrant": bool(chaser_quadrant_code == quadrant_code),
+                "series_role": "chaser" if chaser_quadrant_code == quadrant_code else "non_chaser",
+            })
+            rows.append(row)
+    return rows
+
+
+def _load_goodcopbadcop_cra_near_field_summary(
+    root: Any,
+    *,
+    export_run_id: str,
+    zarr_path: Path,
+    recording_id: str,
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    table = "goodcopbadcop_cra_near_field_summary"
+    if table not in tables:
+        return []
+
+    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
+    if run_group is None or run_name is None:
+        diagnostics.append({"table": table, "status": "skipped", "reason": error})
+        return []
+    component, component_name, component_error = _latest_cra_near_field_component(run_group)
+    if component is None or component_name is None:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": component_error,
+            "chaser_distance_run": run_name,
+        })
+        return []
+
+    run_common, _source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
+    run_path = str(run_common["chaser_distance_path"])
+    component_common, near_refs, _near_parameters = _cra_near_field_common_fields(
+        component=component,
+        component_name=component_name,
+        run_name=run_name,
+        run_path=run_path,
+    )
+    summary = _cra_summary_mapping_from_component(component)
+    if not summary:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "missing CRA near-field summary",
+            "chaser_distance_run": run_name,
+            "cra_near_field_component": component_name,
+        })
+        return []
+
+    lineage = {
+        "zarr_path": str(zarr_path),
+        "chaser_distance_run": run_name,
+        "cra_near_field_component": component_name,
+        "source_component_fingerprint": component_common.get("source_component_fingerprint"),
+        "source_cra_primary_endpoint_path": near_refs.get("source_cra_primary_endpoint_path"),
+        "source_detection_path": run_common.get("source_detection_path"),
+        "source_stimulus_run": near_refs.get("source_stimulus_run"),
+        "source_stimulus_epoch_run": near_refs.get("source_stimulus_epoch_run"),
+        "fish_id": summary.get("fish_id"),
+    }
+    row = _common_row(
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        table=table,
+        lineage=lineage,
+    )
+    row.update(run_common)
+    row.update(component_common)
+    summary_for_row = dict(summary)
+    component_recording_id = summary_for_row.pop("recording_id", None)
+    row.update(summary_for_row)
+    row["cra_near_field_summary_recording_id"] = component_recording_id
+    return [row]
+
+
+def _near_field_percentile_columns(component: Any, approach: np.ndarray | None) -> list[tuple[int, str, float | None]]:
+    percentiles = None
+    if _has_child(component, "config"):
+        percentiles = _read_1d_array(component["config"], "percentile_values")
+    out: list[tuple[int, str, float | None]] = []
+    n_percentiles = int(np.asarray(approach).shape[2]) if approach is not None and np.asarray(approach).ndim == 3 else 0
+    for index in range(n_percentiles):
+        value = _array_float(percentiles, index)
+        if value is None:
+            key = f"p{index:02d}"
+        elif math.isclose(float(value), round(float(value))):
+            key = f"p{int(round(float(value))):02d}"
+        else:
+            text = f"{float(value):g}".replace(".", "_").replace("-", "m")
+            key = f"p{text}"
+        out.append((index, f"approach_{key}_mm", value))
+    return out
+
+
+def _load_goodcopbadcop_cra_near_field_object_phase(
+    root: Any,
+    *,
+    export_run_id: str,
+    zarr_path: Path,
+    recording_id: str,
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    table = "goodcopbadcop_cra_near_field_object_phase"
+    if table not in tables:
+        return []
+
+    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
+    if run_group is None or run_name is None:
+        diagnostics.append({"table": table, "status": "skipped", "reason": error})
+        return []
+    component, component_name, component_error = _latest_cra_near_field_component(run_group)
+    if component is None or component_name is None:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": component_error,
+            "chaser_distance_run": run_name,
+        })
+        return []
+    required = ("objects", "phases", "per_object_phase")
+    missing = [name for name in required if not _has_child(component, name)]
+    if missing:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": f"missing CRA near-field group(s): {missing}",
+            "chaser_distance_run": run_name,
+            "cra_near_field_component": component_name,
+        })
+        return []
+
+    run_common, _source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
+    run_path = str(run_common["chaser_distance_path"])
+    component_common, near_refs, _near_parameters = _cra_near_field_common_fields(
+        component=component,
+        component_name=component_name,
+        run_name=run_name,
+        run_path=run_path,
+    )
+    objects = component["objects"]
+    phases = component["phases"]
+    per_object = component["per_object_phase"]
+
+    object_indices = _read_1d_array(objects, "object_index")
+    object_roles = _decode_text_column(_read_array(objects, "object_role_label_bytes"))
+    raw_colors = _decode_text_column(_read_array(objects, "raw_color_hex_bytes"))
+    object_role_code = _read_1d_array(objects, "object_role_code")
+
+    phase_indices = _read_1d_array(phases, "phase_index")
+    phase_labels = _decode_text_column(_read_array(phases, "phase_label_bytes"))
+    effective_start = _read_1d_array(phases, "effective_start_frame")
+    effective_end = _read_1d_array(phases, "effective_end_frame")
+    total_frame_count = _read_1d_array(phases, "total_frame_count")
+
+    approach = _read_array(per_object, "approach_percentile_mm")
+    near_zone_occupancy = _read_array(per_object, "near_zone_occupancy_fraction")
+    if near_zone_occupancy is None or np.asarray(near_zone_occupancy).ndim != 2:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "per_object_phase/near_zone_occupancy_fraction missing or not 2D",
+            "chaser_distance_run": run_name,
+            "cra_near_field_component": component_name,
+        })
+        return []
+    near_zone_occupancy = np.asarray(near_zone_occupancy)
+    n_phases, n_objects = int(near_zone_occupancy.shape[0]), int(near_zone_occupancy.shape[1])
+    percentile_columns = _near_field_percentile_columns(component, approach)
+    near_zone_epoch = _read_array(per_object, "near_zone_occupancy_fraction_of_epoch")
+    near_zone_dwell_s = _read_array(per_object, "near_zone_dwell_s")
+    near_zone_density = _read_array(per_object, "near_zone_density_per_mm2")
+    near_zone_area = _read_array(per_object, "near_zone_available_area_mm2")
+    entry_count = _read_array(per_object, "near_zone_entry_count")
+    entry_rate = _read_array(per_object, "near_zone_entry_rate_per_min")
+    visit_median_dwell = _read_array(per_object, "near_zone_visit_median_dwell_s")
+    visit_total_dwell = _read_array(per_object, "near_zone_visit_total_dwell_s")
+    valid_count = _read_array(per_object, "valid_distance_count")
+    missing_count = _read_array(per_object, "missing_frame_count")
+    dropout = _read_array(per_object, "tracking_dropout_fraction")
+
+    rows: list[dict[str, Any]] = []
+    for phase_idx in range(n_phases):
+        for object_col in range(n_objects):
+            object_index = _array_int(object_indices, object_col)
+            object_role = object_roles[object_col] if object_col < len(object_roles) else None
+            lineage = {
+                "zarr_path": str(zarr_path),
+                "chaser_distance_run": run_name,
+                "cra_near_field_component": component_name,
+                "source_component_fingerprint": component_common.get("source_component_fingerprint"),
+                "source_cra_primary_endpoint_path": near_refs.get("source_cra_primary_endpoint_path"),
+                "source_detection_path": run_common.get("source_detection_path"),
+                "source_stimulus_run": near_refs.get("source_stimulus_run"),
+                "source_stimulus_epoch_run": near_refs.get("source_stimulus_epoch_run"),
+                "phase_index": phase_idx,
+                "object_index": object_index,
+                "object_role": object_role,
+            }
+            row = _common_row(
+                export_run_id=export_run_id,
+                zarr_path=zarr_path,
+                recording_id=recording_id,
+                table=table,
+                lineage=lineage,
+            )
+            row.update(run_common)
+            row.update(component_common)
+            row.update({
+                "phase_axis_index": phase_idx,
+                "phase_index": _array_int(phase_indices, phase_idx),
+                "phase_label": phase_labels[phase_idx] if phase_idx < len(phase_labels) else None,
+                "effective_start_frame": _array_int(effective_start, phase_idx),
+                "effective_end_frame": _array_int(effective_end, phase_idx),
+                "total_frame_count": _array_int(total_frame_count, phase_idx),
+                "object_column_index": object_col,
+                "object_index": object_index,
+                "object_role": object_role,
+                "object_role_code": _array_int(object_role_code, object_col),
+                "raw_color_hex": raw_colors[object_col] if object_col < len(raw_colors) else None,
+                "near_zone_occupancy_fraction": _array_float(near_zone_occupancy, phase_idx, object_col),
+                "near_zone_occupancy_fraction_of_epoch": _array_float(near_zone_epoch, phase_idx, object_col),
+                "near_zone_dwell_s": _array_float(near_zone_dwell_s, phase_idx, object_col),
+                "near_zone_density_per_mm2": _array_float(near_zone_density, phase_idx, object_col),
+                "near_zone_available_area_mm2": _array_float(near_zone_area, phase_idx, object_col),
+                "near_zone_entry_count": _array_int(entry_count, phase_idx, object_col),
+                "near_zone_entry_rate_per_min": _array_float(entry_rate, phase_idx, object_col),
+                "near_zone_visit_median_dwell_s": _array_float(visit_median_dwell, phase_idx, object_col),
+                "near_zone_visit_total_dwell_s": _array_float(visit_total_dwell, phase_idx, object_col),
+                "valid_distance_count": _array_int(valid_count, phase_idx, object_col),
+                "missing_frame_count": _array_int(missing_count, phase_idx, object_col),
+                "tracking_dropout_fraction": _array_float(dropout, phase_idx, object_col),
+            })
+            for percentile_axis, column_name, percentile_value in percentile_columns:
+                row[column_name] = _array_float(approach, phase_idx, object_col, percentile_axis)
+                row[f"{column_name}_percentile"] = percentile_value
+            rows.append(row)
+    return rows
+
+
+def _load_goodcopbadcop_cra_near_field_radial_density(
+    root: Any,
+    *,
+    export_run_id: str,
+    zarr_path: Path,
+    recording_id: str,
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    table = "goodcopbadcop_cra_near_field_radial_density"
+    if table not in tables:
+        return []
+
+    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
+    if run_group is None or run_name is None:
+        diagnostics.append({"table": table, "status": "skipped", "reason": error})
+        return []
+    component, component_name, component_error = _latest_cra_near_field_component(run_group)
+    if component is None or component_name is None:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": component_error,
+            "chaser_distance_run": run_name,
+        })
+        return []
+    required = ("objects", "phases", "config", "radial_density")
+    missing = [name for name in required if not _has_child(component, name)]
+    if missing:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": f"missing CRA near-field radial group(s): {missing}",
+            "chaser_distance_run": run_name,
+            "cra_near_field_component": component_name,
+        })
+        return []
+
+    run_common, _source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
+    run_path = str(run_common["chaser_distance_path"])
+    component_common, near_refs, _near_parameters = _cra_near_field_common_fields(
+        component=component,
+        component_name=component_name,
+        run_name=run_name,
+        run_path=run_path,
+    )
+    objects = component["objects"]
+    phases = component["phases"]
+    config = component["config"]
+    radial = component["radial_density"]
+
+    object_indices = _read_1d_array(objects, "object_index")
+    object_roles = _decode_text_column(_read_array(objects, "object_role_label_bytes"))
+    raw_colors = _decode_text_column(_read_array(objects, "raw_color_hex_bytes"))
+    phase_indices = _read_1d_array(phases, "phase_index")
+    phase_labels = _decode_text_column(_read_array(phases, "phase_label_bytes"))
+    effective_start = _read_1d_array(phases, "effective_start_frame")
+    effective_end = _read_1d_array(phases, "effective_end_frame")
+    total_frame_count = _read_1d_array(phases, "total_frame_count")
+
+    bin_edges = _read_1d_array(config, "radial_bin_edges_mm")
+    bin_centers = _read_1d_array(config, "radial_bin_centers_mm")
+    density = _read_array(radial, "radial_density_per_mm2")
+    if density is None or np.asarray(density).ndim != 3:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "radial_density/radial_density_per_mm2 missing or not 3D",
+            "chaser_distance_run": run_name,
+            "cra_near_field_component": component_name,
+        })
+        return []
+    density = np.asarray(density)
+    n_phases, n_objects, n_bins = int(density.shape[0]), int(density.shape[1]), int(density.shape[2])
+    radial_count = _read_array(radial, "radial_count")
+    radial_fraction = _read_array(radial, "radial_fraction")
+    radial_area = _read_array(radial, "radial_available_area_mm2")
+    radial_count_wall_excluded = _read_array(radial, "radial_count_wall_excluded")
+    radial_fraction_wall_excluded = _read_array(radial, "radial_fraction_wall_excluded")
+    radial_density_wall_excluded = _read_array(radial, "radial_density_wall_excluded_per_mm2")
+    radial_area_wall_excluded = _read_array(radial, "radial_available_area_wall_excluded_mm2")
+    radial_wall_excluded_valid_count = _read_array(radial, "radial_wall_excluded_valid_count")
+
+    rows: list[dict[str, Any]] = []
+    for phase_idx in range(n_phases):
+        for object_col in range(n_objects):
+            object_index = _array_int(object_indices, object_col)
+            object_role = object_roles[object_col] if object_col < len(object_roles) else None
+            for bin_idx in range(n_bins):
+                left = _array_float(bin_edges, bin_idx)
+                right = _array_float(bin_edges, bin_idx + 1)
+                center = _array_float(bin_centers, bin_idx)
+                if center is None and left is not None and right is not None:
+                    center = (float(left) + float(right)) / 2.0
+                width = None if left is None or right is None else float(right) - float(left)
+                lineage = {
+                    "zarr_path": str(zarr_path),
+                    "chaser_distance_run": run_name,
+                    "cra_near_field_component": component_name,
+                    "source_component_fingerprint": component_common.get("source_component_fingerprint"),
+                    "source_cra_primary_endpoint_path": near_refs.get("source_cra_primary_endpoint_path"),
+                    "source_detection_path": run_common.get("source_detection_path"),
+                    "source_stimulus_run": near_refs.get("source_stimulus_run"),
+                    "source_stimulus_epoch_run": near_refs.get("source_stimulus_epoch_run"),
+                    "phase_index": phase_idx,
+                    "object_index": object_index,
+                    "object_role": object_role,
+                    "radial_bin_index": bin_idx,
+                }
+                row = _common_row(
+                    export_run_id=export_run_id,
+                    zarr_path=zarr_path,
+                    recording_id=recording_id,
+                    table=table,
+                    lineage=lineage,
+                )
+                row.update(run_common)
+                row.update(component_common)
+                row.update({
+                    "phase_axis_index": phase_idx,
+                    "phase_index": _array_int(phase_indices, phase_idx),
+                    "phase_label": phase_labels[phase_idx] if phase_idx < len(phase_labels) else None,
+                    "effective_start_frame": _array_int(effective_start, phase_idx),
+                    "effective_end_frame": _array_int(effective_end, phase_idx),
+                    "total_frame_count": _array_int(total_frame_count, phase_idx),
+                    "object_column_index": object_col,
+                    "object_index": object_index,
+                    "object_role": object_role,
+                    "raw_color_hex": raw_colors[object_col] if object_col < len(raw_colors) else None,
+                    "radial_bin_index": bin_idx,
+                    "radial_bin_left_mm": left,
+                    "radial_bin_right_mm": right,
+                    "radial_bin_center_mm": center,
+                    "radial_bin_width_mm": width,
+                    "radial_count": _array_int(radial_count, phase_idx, object_col, bin_idx),
+                    "radial_fraction": _array_float(radial_fraction, phase_idx, object_col, bin_idx),
+                    "radial_density_per_mm2": _array_float(density, phase_idx, object_col, bin_idx),
+                    "radial_available_area_mm2": _array_float(radial_area, phase_idx, object_col, bin_idx),
+                    "radial_count_wall_excluded": _array_int(radial_count_wall_excluded, phase_idx, object_col, bin_idx),
+                    "radial_fraction_wall_excluded": _array_float(radial_fraction_wall_excluded, phase_idx, object_col, bin_idx),
+                    "radial_density_wall_excluded_per_mm2": _array_float(radial_density_wall_excluded, phase_idx, object_col, bin_idx),
+                    "radial_available_area_wall_excluded_mm2": _array_float(radial_area_wall_excluded, phase_idx, object_col, bin_idx),
+                    "radial_wall_excluded_valid_count": _array_int(radial_wall_excluded_valid_count, phase_idx, object_col, bin_idx),
+                })
+                rows.append(row)
+    return rows
+
+
+def _load_goodcopbadcop_cra_near_field_distance_cdf(
+    root: Any,
+    *,
+    export_run_id: str,
+    zarr_path: Path,
+    recording_id: str,
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    table = "goodcopbadcop_cra_near_field_distance_cdf"
+    if table not in tables:
+        return []
+
+    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
+    if run_group is None or run_name is None:
+        diagnostics.append({"table": table, "status": "skipped", "reason": error})
+        return []
+    component, component_name, component_error = _latest_cra_near_field_component(run_group)
+    if component is None or component_name is None:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": component_error,
+            "chaser_distance_run": run_name,
+        })
+        return []
+    required = ("objects", "phases", "config", "distance_cdf")
+    missing = [name for name in required if not _has_child(component, name)]
+    if missing:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": f"missing CRA near-field CDF group(s): {missing}",
+            "chaser_distance_run": run_name,
+            "cra_near_field_component": component_name,
+        })
+        return []
+
+    run_common, _source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
+    run_path = str(run_common["chaser_distance_path"])
+    component_common, near_refs, _near_parameters = _cra_near_field_common_fields(
+        component=component,
+        component_name=component_name,
+        run_name=run_name,
+        run_path=run_path,
+    )
+    objects = component["objects"]
+    phases = component["phases"]
+    config = component["config"]
+    cdf_group = component["distance_cdf"]
+
+    object_indices = _read_1d_array(objects, "object_index")
+    object_roles = _decode_text_column(_read_array(objects, "object_role_label_bytes"))
+    raw_colors = _decode_text_column(_read_array(objects, "raw_color_hex_bytes"))
+    phase_indices = _read_1d_array(phases, "phase_index")
+    phase_labels = _decode_text_column(_read_array(phases, "phase_label_bytes"))
+    effective_start = _read_1d_array(phases, "effective_start_frame")
+    effective_end = _read_1d_array(phases, "effective_end_frame")
+    total_frame_count = _read_1d_array(phases, "total_frame_count")
+
+    thresholds = _read_1d_array(config, "cdf_thresholds_mm")
+    cdf = _read_array(cdf_group, "cdf_fraction")
+    if cdf is None or np.asarray(cdf).ndim != 3:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "distance_cdf/cdf_fraction missing or not 3D",
+            "chaser_distance_run": run_name,
+            "cra_near_field_component": component_name,
+        })
+        return []
+    cdf = np.asarray(cdf)
+    n_phases, n_objects, n_thresholds = int(cdf.shape[0]), int(cdf.shape[1]), int(cdf.shape[2])
+
+    rows: list[dict[str, Any]] = []
+    for phase_idx in range(n_phases):
+        for object_col in range(n_objects):
+            object_index = _array_int(object_indices, object_col)
+            object_role = object_roles[object_col] if object_col < len(object_roles) else None
+            for threshold_idx in range(n_thresholds):
+                threshold = _array_float(thresholds, threshold_idx)
+                lineage = {
+                    "zarr_path": str(zarr_path),
+                    "chaser_distance_run": run_name,
+                    "cra_near_field_component": component_name,
+                    "source_component_fingerprint": component_common.get("source_component_fingerprint"),
+                    "source_cra_primary_endpoint_path": near_refs.get("source_cra_primary_endpoint_path"),
+                    "source_detection_path": run_common.get("source_detection_path"),
+                    "source_stimulus_run": near_refs.get("source_stimulus_run"),
+                    "source_stimulus_epoch_run": near_refs.get("source_stimulus_epoch_run"),
+                    "phase_index": phase_idx,
+                    "object_index": object_index,
+                    "object_role": object_role,
+                    "cdf_threshold_index": threshold_idx,
+                }
+                row = _common_row(
+                    export_run_id=export_run_id,
+                    zarr_path=zarr_path,
+                    recording_id=recording_id,
+                    table=table,
+                    lineage=lineage,
+                )
+                row.update(run_common)
+                row.update(component_common)
+                row.update({
+                    "phase_axis_index": phase_idx,
+                    "phase_index": _array_int(phase_indices, phase_idx),
+                    "phase_label": phase_labels[phase_idx] if phase_idx < len(phase_labels) else None,
+                    "effective_start_frame": _array_int(effective_start, phase_idx),
+                    "effective_end_frame": _array_int(effective_end, phase_idx),
+                    "total_frame_count": _array_int(total_frame_count, phase_idx),
+                    "object_column_index": object_col,
+                    "object_index": object_index,
+                    "object_role": object_role,
+                    "raw_color_hex": raw_colors[object_col] if object_col < len(raw_colors) else None,
+                    "cdf_threshold_index": threshold_idx,
+                    "distance_threshold_mm": threshold,
+                    "cdf_fraction": _array_float(cdf, phase_idx, object_col, threshold_idx),
+                })
+                rows.append(row)
+    return rows
+
+
+def _load_goodcopbadcop_egocentric_epoch_summary(
+    root: Any,
+    *,
+    export_run_id: str,
+    zarr_path: Path,
+    recording_id: str,
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    table = "goodcopbadcop_egocentric_epoch_summary"
+    if table not in tables:
+        return []
+
+    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
+    if run_group is None or run_name is None:
+        diagnostics.append({"table": table, "status": "skipped", "reason": error})
+        return []
+    component, component_name, component_error = _latest_egocentric_component(run_group)
+    if component is None or component_name is None:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": component_error,
+            "chaser_distance_run": run_name,
+        })
+        return []
+    if not _has_child(component, "epoch_summary"):
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "missing egocentric epoch_summary group",
+            "chaser_distance_run": run_name,
+            "egocentric_component_name": component_name,
+        })
+        return []
+
+    run_common, source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
+    run_path = str(run_common["chaser_distance_path"])
+    component_common, egocentric_refs, _egocentric_parameters = _egocentric_common_fields(
+        component=component,
+        component_name=component_name,
+        run_name=run_name,
+        run_path=run_path,
+    )
+    summary = component["epoch_summary"]
+    valid_frame_count = _read_array(summary, "valid_frame_count")
+    if valid_frame_count is None or np.asarray(valid_frame_count).ndim != 2:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "egocentric epoch_summary/valid_frame_count missing or not 2D",
+            "chaser_distance_run": run_name,
+            "egocentric_component_name": component_name,
+        })
+        return []
+
+    valid_frame_count = np.asarray(valid_frame_count)
+    n_windows, n_chasers = int(valid_frame_count.shape[0]), int(valid_frame_count.shape[1])
+    chaser_indices = _egocentric_chaser_indices(component, fallback_count=n_chasers)
+    windows = _epoch_summary_window_rows(component)
+    fps = _safe_float(run_common.get("fps"))
+    circular_mean = _read_array(summary, "circular_mean_bearing_deg")
+    resultant = _read_array(summary, "circular_resultant_length")
+    mean_alignment = _read_array(summary, "mean_alignment_cos")
+    mean_lateral = _read_array(summary, "mean_lateral_sin")
+    fraction_front = _read_array(summary, "fraction_front_45")
+    fraction_lateral = _read_array(summary, "fraction_lateral_45")
+    fraction_behind = _read_array(summary, "fraction_behind_45")
+    summary_attrs = _attrs_dict(summary)
+
+    rows: list[dict[str, Any]] = []
+    for window_index in range(n_windows):
+        raw_window = (
+            windows[window_index]
+            if window_index < len(windows)
+            else {
+                "window_index": window_index,
+                "window_id": window_index,
+                "window_label": None,
+                "start_frame": None,
+                "end_frame": None,
+                "start_time_s": None,
+                "end_time_s": None,
+                "duration_s": None,
+            }
+        )
+        window = _fill_chaser_window_times(raw_window, fps=fps)
+        for chaser_column_index in range(n_chasers):
+            chaser_index = (
+                chaser_indices[chaser_column_index]
+                if chaser_column_index < len(chaser_indices)
+                else chaser_column_index
+            )
+            lineage = {
+                "zarr_path": str(zarr_path),
+                "chaser_distance_run": run_name,
+                "egocentric_component_name": component_name,
+                "source_detection_path": source_refs.get("source_detection_path"),
+                "source_stimulus_run": source_refs.get("source_stimulus_run"),
+                "source_stimulus_epoch_run": source_refs.get("source_stimulus_epoch_run"),
+                "source_track_kinematics_run": egocentric_refs.get("source_track_kinematics_run"),
+                "source_track_kinematics_track_id": egocentric_refs.get("source_track_kinematics_track_id"),
+                "source_heading_array": egocentric_refs.get("source_heading_array"),
+                "window_id": window.get("window_id"),
+                "chaser_index": chaser_index,
+            }
+            row = _common_row(
+                export_run_id=export_run_id,
+                zarr_path=zarr_path,
+                recording_id=recording_id,
+                table=table,
+                lineage=lineage,
+            )
+            row.update(run_common)
+            row.update(component_common)
+            row.update({
+                "window_index": _safe_int(window.get("window_index")),
+                "window_id": _safe_int(window.get("window_id")),
+                "window_label": window.get("window_label"),
+                "start_frame": _safe_int(window.get("start_frame")),
+                "end_frame": _safe_int(window.get("end_frame")),
+                "start_time_s": _safe_float(window.get("start_time_s")),
+                "end_time_s": _safe_float(window.get("end_time_s")),
+                "duration_s": _safe_float(window.get("duration_s")),
+                "chaser_column_index": chaser_column_index,
+                "chaser_index": _safe_int(chaser_index),
+                "valid_frame_count": _array_int(valid_frame_count, window_index, chaser_column_index),
+                "circular_mean_bearing_deg": _array_float(circular_mean, window_index, chaser_column_index),
+                "circular_resultant_length": _array_float(resultant, window_index, chaser_column_index),
+                "mean_alignment_cos": _array_float(mean_alignment, window_index, chaser_column_index),
+                "mean_lateral_sin": _array_float(mean_lateral, window_index, chaser_column_index),
+                "fraction_front_45": _array_float(fraction_front, window_index, chaser_column_index),
+                "fraction_lateral_45": _array_float(fraction_lateral, window_index, chaser_column_index),
+                "fraction_behind_45": _array_float(fraction_behind, window_index, chaser_column_index),
+                "front_definition": summary_attrs.get("front_definition"),
+                "lateral_definition": summary_attrs.get("lateral_definition"),
+                "behind_definition": summary_attrs.get("behind_definition"),
+            })
+            rows.append(row)
+    return rows
+
+
+def _load_goodcopbadcop_egocentric_distance_bearing_histogram(
+    root: Any,
+    *,
+    export_run_id: str,
+    zarr_path: Path,
+    recording_id: str,
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    table = "goodcopbadcop_egocentric_distance_bearing_histogram"
+    if table not in tables:
+        return []
+
+    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
+    if run_group is None or run_name is None:
+        diagnostics.append({"table": table, "status": "skipped", "reason": error})
+        return []
+    component, component_name, component_error = _latest_egocentric_component(run_group)
+    if component is None or component_name is None:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": component_error,
+            "chaser_distance_run": run_name,
+        })
+        return []
+    if not _has_child(component, "distance_bearing_histogram"):
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "missing distance_bearing_histogram group",
+            "chaser_distance_run": run_name,
+            "egocentric_component_name": component_name,
+        })
+        return []
+
+    run_common, source_refs, _parameters = _chaser_common_run_fields(run_group, run_name)
+    run_path = str(run_common["chaser_distance_path"])
+    component_common, egocentric_refs, _egocentric_parameters = _egocentric_common_fields(
+        component=component,
+        component_name=component_name,
+        run_name=run_name,
+        run_path=run_path,
+    )
+    hist = component["distance_bearing_histogram"]
+    hist_counts = _read_array(hist, "hist_counts")
+    if hist_counts is None or np.asarray(hist_counts).ndim != 4:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "distance_bearing_histogram/hist_counts missing or not 4D",
+            "chaser_distance_run": run_name,
+            "egocentric_component_name": component_name,
+        })
+        return []
+
+    hist_counts = np.asarray(hist_counts)
+    n_windows, n_chasers, n_distance_bins, n_bearing_bins = (
+        int(hist_counts.shape[0]),
+        int(hist_counts.shape[1]),
+        int(hist_counts.shape[2]),
+        int(hist_counts.shape[3]),
+    )
+    hist_probability = _read_array(hist, "hist_probability")
+    valid_frame_count = None
+    if _has_child(component, "epoch_summary"):
+        valid_frame_count = _read_array(component["epoch_summary"], "valid_frame_count")
+    chaser_indices = _egocentric_chaser_indices(component, fallback_count=n_chasers)
+    windows = _epoch_summary_window_rows(component)
+    fps = _safe_float(run_common.get("fps"))
+    distance_edges = _read_1d_array(hist, "distance_bin_edges_mm")
+    distance_centers = _read_1d_array(hist, "distance_bin_centers_mm")
+    bearing_edges = _read_1d_array(hist, "bearing_bin_edges_deg")
+    bearing_centers = _read_1d_array(hist, "bearing_bin_centers_deg")
+    hist_attrs = _attrs_dict(hist)
+    distance_bin_width = _safe_float(component_common.get("distance_bin_width_mm"))
+    bearing_bin_width = _safe_float(component_common.get("bearing_bin_width_deg"))
+
+    rows: list[dict[str, Any]] = []
+    for window_index in range(n_windows):
+        raw_window = (
+            windows[window_index]
+            if window_index < len(windows)
+            else {
+                "window_index": window_index,
+                "window_id": window_index,
+                "window_label": None,
+                "start_frame": None,
+                "end_frame": None,
+                "start_time_s": None,
+                "end_time_s": None,
+                "duration_s": None,
+            }
+        )
+        window = _fill_chaser_window_times(raw_window, fps=fps)
+        for chaser_column_index in range(n_chasers):
+            chaser_index = (
+                chaser_indices[chaser_column_index]
+                if chaser_column_index < len(chaser_indices)
+                else chaser_column_index
+            )
+            valid_count = _array_int(valid_frame_count, window_index, chaser_column_index)
+            for distance_bin_index in range(n_distance_bins):
+                distance_left = _array_float(distance_edges, distance_bin_index)
+                distance_right = _array_float(distance_edges, distance_bin_index + 1)
+                distance_center = _array_float(distance_centers, distance_bin_index)
+                if distance_center is None and distance_left is not None and distance_right is not None:
+                    distance_center = (distance_left + distance_right) / 2.0
+                effective_distance_width = distance_bin_width
+                if effective_distance_width is None and distance_left is not None and distance_right is not None:
+                    effective_distance_width = distance_right - distance_left
+                for bearing_bin_index in range(n_bearing_bins):
+                    bearing_left = _array_float(bearing_edges, bearing_bin_index)
+                    bearing_right = _array_float(bearing_edges, bearing_bin_index + 1)
+                    bearing_center = _array_float(bearing_centers, bearing_bin_index)
+                    if bearing_center is None and bearing_left is not None and bearing_right is not None:
+                        bearing_center = (bearing_left + bearing_right) / 2.0
+                    effective_bearing_width = bearing_bin_width
+                    if effective_bearing_width is None and bearing_left is not None and bearing_right is not None:
+                        effective_bearing_width = bearing_right - bearing_left
+                    lineage = {
+                        "zarr_path": str(zarr_path),
+                        "chaser_distance_run": run_name,
+                        "egocentric_component_name": component_name,
+                        "source_detection_path": source_refs.get("source_detection_path"),
+                        "source_stimulus_run": source_refs.get("source_stimulus_run"),
+                        "source_stimulus_epoch_run": source_refs.get("source_stimulus_epoch_run"),
+                        "source_track_kinematics_run": egocentric_refs.get("source_track_kinematics_run"),
+                        "source_track_kinematics_track_id": egocentric_refs.get("source_track_kinematics_track_id"),
+                        "source_heading_array": egocentric_refs.get("source_heading_array"),
+                        "window_id": window.get("window_id"),
+                        "chaser_index": chaser_index,
+                        "distance_bin_index": distance_bin_index,
+                        "bearing_bin_index": bearing_bin_index,
+                    }
+                    row = _common_row(
+                        export_run_id=export_run_id,
+                        zarr_path=zarr_path,
+                        recording_id=recording_id,
+                        table=table,
+                        lineage=lineage,
+                    )
+                    row.update(run_common)
+                    row.update(component_common)
+                    row.update({
+                        "window_index": _safe_int(window.get("window_index")),
+                        "window_id": _safe_int(window.get("window_id")),
+                        "window_label": window.get("window_label"),
+                        "start_frame": _safe_int(window.get("start_frame")),
+                        "end_frame": _safe_int(window.get("end_frame")),
+                        "start_time_s": _safe_float(window.get("start_time_s")),
+                        "end_time_s": _safe_float(window.get("end_time_s")),
+                        "duration_s": _safe_float(window.get("duration_s")),
+                        "chaser_column_index": chaser_column_index,
+                        "chaser_index": _safe_int(chaser_index),
+                        "distance_bin_index": distance_bin_index,
+                        "distance_bin_left_mm": distance_left,
+                        "distance_bin_right_mm": distance_right,
+                        "distance_bin_center_mm": distance_center,
+                        "distance_bin_width_mm": effective_distance_width,
+                        "bearing_bin_index": bearing_bin_index,
+                        "bearing_bin_left_deg": bearing_left,
+                        "bearing_bin_right_deg": bearing_right,
+                        "bearing_bin_center_deg": bearing_center,
+                        "bearing_bin_width_deg": effective_bearing_width,
+                        "hist_count": _array_int(
+                            hist_counts,
+                            window_index,
+                            chaser_column_index,
+                            distance_bin_index,
+                            bearing_bin_index,
+                        ),
+                        "hist_probability": _array_float(
+                            hist_probability,
+                            window_index,
+                            chaser_column_index,
+                            distance_bin_index,
+                            bearing_bin_index,
+                        ),
+                        "valid_sample_count": valid_count,
+                        "probability_normalization": hist_attrs.get("probability_normalization"),
+                    })
+                    rows.append(row)
+    return rows
+
+
 def export_one_zarr(zarr_path: str | Path, *, tables: Sequence[str], export_run_id: str) -> SourceExportResult:
     zarr_path = Path(zarr_path).expanduser().resolve()
     recording_id = _recording_id_from_path(zarr_path)
@@ -1746,6 +4076,71 @@ def export_one_zarr(zarr_path: str | Path, *, tables: Sequence[str], export_run_
             goodcopbadcop_chaser_summary_rows
         )
 
+    goodcopbadcop_epoch_behavior_rows = _load_goodcopbadcop_epoch_behavior_summary(
+        root,
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+    )
+    if goodcopbadcop_epoch_behavior_rows:
+        result.rows_by_table.setdefault("goodcopbadcop_epoch_behavior_summary", []).extend(
+            goodcopbadcop_epoch_behavior_rows
+        )
+
+    goodcopbadcop_epoch_bout_distribution_rows = _load_goodcopbadcop_epoch_bout_distribution(
+        root,
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+    )
+    if goodcopbadcop_epoch_bout_distribution_rows:
+        result.rows_by_table.setdefault("goodcopbadcop_epoch_bout_distribution", []).extend(
+            goodcopbadcop_epoch_bout_distribution_rows
+        )
+
+    goodcopbadcop_epoch_center_distance_histogram_rows = _load_goodcopbadcop_epoch_center_distance_histogram(
+        root,
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+    )
+    if goodcopbadcop_epoch_center_distance_histogram_rows:
+        result.rows_by_table.setdefault("goodcopbadcop_epoch_center_distance_histogram", []).extend(
+            goodcopbadcop_epoch_center_distance_histogram_rows
+        )
+
+    goodcopbadcop_epoch_speed_rows = _load_goodcopbadcop_epoch_speed_summary(
+        root,
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+    )
+    if goodcopbadcop_epoch_speed_rows:
+        result.rows_by_table.setdefault("goodcopbadcop_epoch_speed_summary", []).extend(
+            goodcopbadcop_epoch_speed_rows
+        )
+
+    goodcopbadcop_speed_distance_rows = _load_goodcopbadcop_speed_distance_bins(
+        root,
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+    )
+    if goodcopbadcop_speed_distance_rows:
+        result.rows_by_table.setdefault("goodcopbadcop_speed_distance_bins", []).extend(
+            goodcopbadcop_speed_distance_rows
+        )
+
     goodcopbadcop_chaser_histogram_rows = _load_goodcopbadcop_chaser_distance_histogram(
         root,
         export_run_id=export_run_id,
@@ -1757,6 +4152,123 @@ def export_one_zarr(zarr_path: str | Path, *, tables: Sequence[str], export_run_
     if goodcopbadcop_chaser_histogram_rows:
         result.rows_by_table.setdefault("goodcopbadcop_chaser_distance_histogram", []).extend(
             goodcopbadcop_chaser_histogram_rows
+        )
+
+    goodcopbadcop_cra_summary_rows = _load_goodcopbadcop_cra_primary_endpoint_summary(
+        root,
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+    )
+    if goodcopbadcop_cra_summary_rows:
+        result.rows_by_table.setdefault("goodcopbadcop_cra_primary_endpoint_summary", []).extend(
+            goodcopbadcop_cra_summary_rows
+        )
+
+    goodcopbadcop_cra_object_phase_rows = _load_goodcopbadcop_cra_primary_endpoint_object_phase(
+        root,
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+    )
+    if goodcopbadcop_cra_object_phase_rows:
+        result.rows_by_table.setdefault("goodcopbadcop_cra_primary_endpoint_object_phase", []).extend(
+            goodcopbadcop_cra_object_phase_rows
+        )
+
+    goodcopbadcop_cra_quadrant_rows = _load_goodcopbadcop_cra_quadrant_occupancy(
+        root,
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+    )
+    if goodcopbadcop_cra_quadrant_rows:
+        result.rows_by_table.setdefault("goodcopbadcop_cra_quadrant_occupancy", []).extend(
+            goodcopbadcop_cra_quadrant_rows
+        )
+
+    goodcopbadcop_cra_near_field_summary_rows = _load_goodcopbadcop_cra_near_field_summary(
+        root,
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+    )
+    if goodcopbadcop_cra_near_field_summary_rows:
+        result.rows_by_table.setdefault("goodcopbadcop_cra_near_field_summary", []).extend(
+            goodcopbadcop_cra_near_field_summary_rows
+        )
+
+    goodcopbadcop_cra_near_field_object_phase_rows = _load_goodcopbadcop_cra_near_field_object_phase(
+        root,
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+    )
+    if goodcopbadcop_cra_near_field_object_phase_rows:
+        result.rows_by_table.setdefault("goodcopbadcop_cra_near_field_object_phase", []).extend(
+            goodcopbadcop_cra_near_field_object_phase_rows
+        )
+
+    goodcopbadcop_cra_near_field_radial_rows = _load_goodcopbadcop_cra_near_field_radial_density(
+        root,
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+    )
+    if goodcopbadcop_cra_near_field_radial_rows:
+        result.rows_by_table.setdefault("goodcopbadcop_cra_near_field_radial_density", []).extend(
+            goodcopbadcop_cra_near_field_radial_rows
+        )
+
+    goodcopbadcop_cra_near_field_cdf_rows = _load_goodcopbadcop_cra_near_field_distance_cdf(
+        root,
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+    )
+    if goodcopbadcop_cra_near_field_cdf_rows:
+        result.rows_by_table.setdefault("goodcopbadcop_cra_near_field_distance_cdf", []).extend(
+            goodcopbadcop_cra_near_field_cdf_rows
+        )
+
+    goodcopbadcop_egocentric_summary_rows = _load_goodcopbadcop_egocentric_epoch_summary(
+        root,
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+    )
+    if goodcopbadcop_egocentric_summary_rows:
+        result.rows_by_table.setdefault("goodcopbadcop_egocentric_epoch_summary", []).extend(
+            goodcopbadcop_egocentric_summary_rows
+        )
+
+    goodcopbadcop_egocentric_histogram_rows = _load_goodcopbadcop_egocentric_distance_bearing_histogram(
+        root,
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+    )
+    if goodcopbadcop_egocentric_histogram_rows:
+        result.rows_by_table.setdefault("goodcopbadcop_egocentric_distance_bearing_histogram", []).extend(
+            goodcopbadcop_egocentric_histogram_rows
         )
 
     for table in table_set:

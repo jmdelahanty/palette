@@ -78,7 +78,7 @@ def build_video_report(
     include_camera_csv: bool = True,
     full_scan: bool = False,
     sample_frames: int = 1000,
-    decode_backend: str = "all",
+    decode_backend: str = "opencv",
     decode_frames: int = 100,
     seek_samples: int = 20,
 ) -> VideoDiagnosticsReport:

@@ -1,7 +1,9 @@
 import argparse
+import sqlite3
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -20,6 +22,14 @@ mask_mode = "circle"
 
 from fisheye.utils.zarr_io import open_zarr_root
 from fisheye.utils.dish_mask_registry_sync import sync_dish_mask_registry_status
+
+
+@dataclass(frozen=True)
+class DishMaskRegistryCandidate:
+    dataset_id: str
+    recording_id: Optional[str]
+    zarr_path: str
+    dish_mask_status: Optional[str]
 
 
 def _as_positive_int(value: Any) -> Optional[int]:
@@ -483,6 +493,105 @@ def _sync_registry_after_save(
     return result.to_dict()
 
 
+def _query_registry_dish_mask_candidates(
+    registry_path: str | Path,
+    *,
+    path_contains: Sequence[str] = (),
+    missing_only: bool = False,
+    limit: Optional[int] = None,
+) -> tuple[DishMaskRegistryCandidate, ...]:
+    """Return analysis zarrs selected from registry dish-mask status."""
+
+    registry = Path(registry_path).expanduser()
+    clauses = [
+        "d.zarr_path IS NOT NULL",
+        "TRIM(d.zarr_path) != ''",
+        "COALESCE(d.status, '') NOT IN ('missing', 'deleted')",
+        "COALESCE(d.zarr_use, 'analysis') = 'analysis'",
+    ]
+    params: list[object] = []
+
+    for needle in path_contains:
+        text = str(needle).strip()
+        if not text:
+            continue
+        clauses.append("LOWER(d.zarr_path) LIKE ?")
+        params.append(f"%{text.lower()}%")
+
+    if missing_only:
+        clauses.append("(rss.status IS NULL OR LOWER(rss.status) != 'ok')")
+
+    sql = f"""
+        SELECT
+            d.dataset_id AS dataset_id,
+            d.recording_id AS recording_id,
+            d.zarr_path AS zarr_path,
+            rss.status AS dish_mask_status
+        FROM datasets d
+        LEFT JOIN recording_step_status rss
+          ON rss.dataset_id = d.dataset_id
+         AND rss.step_name = 'dish_mask'
+        WHERE {" AND ".join(clauses)}
+        ORDER BY d.zarr_path
+    """
+    if limit is not None:
+        if limit <= 0:
+            return ()
+        sql += " LIMIT ?"
+        params.append(int(limit))
+
+    conn = sqlite3.connect(str(registry))
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(sql, params).fetchall()
+    finally:
+        conn.close()
+
+    return tuple(
+        DishMaskRegistryCandidate(
+            dataset_id=str(row["dataset_id"]),
+            recording_id=None if row["recording_id"] is None else str(row["recording_id"]),
+            zarr_path=str(row["zarr_path"]),
+            dish_mask_status=None
+            if row["dish_mask_status"] is None
+            else str(row["dish_mask_status"]),
+        )
+        for row in rows
+    )
+
+
+def _run_registry_candidate_loop(
+    candidates: Sequence[DishMaskRegistryCandidate],
+    *,
+    use_full_res: bool = False,
+    frame_idx: Optional[int] = None,
+    config_path: Optional[str] = None,
+    mode: str = "auto",
+    registry_path: Optional[str] = None,
+) -> None:
+    total = len(candidates)
+    for index, candidate in enumerate(candidates, start=1):
+        status = candidate.dish_mask_status or "missing"
+        print("\n" + "=" * 80)
+        print(f"Dish-mask candidate {index}/{total}")
+        print(f"dataset_id={candidate.dataset_id} recording_id={candidate.recording_id or '<unset>'}")
+        print(f"dish_mask_status={status}")
+        print(candidate.zarr_path)
+        print("=" * 80)
+        main(
+            candidate.zarr_path,
+            use_full_res=use_full_res,
+            frame_idx=frame_idx,
+            config_path=config_path,
+            mode=mode,
+            registry_path=registry_path,
+        )
+        if index < total:
+            response = input("Press Enter for next missing dish mask, or type 'q' to quit: ")
+            if response.strip().lower() == "q":
+                break
+
+
 def load_from_zarr(zarr_path):
     """Load previously tuned mask parameters from Zarr if they exist"""
     try:
@@ -801,7 +910,12 @@ def main(zarr_path, use_full_res=False, frame_idx=None, config_path=None, mode="
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Interactively tune dish masks (circle or rectangle).")
-    parser.add_argument("zarr_path", type=str, help="Path to the Zarr file containing imported video.")
+    parser.add_argument(
+        "zarr_path",
+        nargs="?",
+        type=str,
+        help="Path to the Zarr file containing imported video. Omit when selecting from --registry.",
+    )
     parser.add_argument("--full", action="store_true", help="Use full resolution array instead of downsampled")
     parser.add_argument("--frame", type=int, help="Specific frame index to use")
     parser.add_argument("--config", type=str, help="Path to YAML config file (default: src/pipeline_config.yaml)")
@@ -839,7 +953,62 @@ if __name__ == "__main__":
         type=str,
         help="Optional registry SQLite path; on successful save, mark dish_mask ok for this dataset.",
     )
+    parser.add_argument(
+        "--path-contains",
+        action="append",
+        default=[],
+        metavar="TEXT",
+        help="When zarr_path is omitted, select registry zarr paths containing TEXT. May be repeated.",
+    )
+    parser.add_argument(
+        "--missing-only",
+        action="store_true",
+        help="When zarr_path is omitted, select only registry datasets without dish_mask=ok.",
+    )
+    parser.add_argument(
+        "--list-only",
+        action="store_true",
+        help="Print selected registry zarr paths and exit without launching the tuner.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help="Maximum number of registry-selected zarrs to list or tune.",
+    )
     args = parser.parse_args()
+
+    registry_selection_requested = bool(args.path_contains or args.missing_only or args.list_only)
+
+    if args.zarr_path is None:
+        if not registry_selection_requested:
+            parser.error("zarr_path is required unless selecting candidates with --registry.")
+        if not args.registry:
+            parser.error("--registry is required when zarr_path is omitted.")
+        if args.headless:
+            parser.error("--headless registry iteration is not supported; pass an explicit zarr_path.")
+
+        candidates = _query_registry_dish_mask_candidates(
+            args.registry,
+            path_contains=args.path_contains,
+            missing_only=bool(args.missing_only),
+            limit=args.limit,
+        )
+        if not candidates:
+            print("No matching registry zarrs found.")
+            raise SystemExit(0)
+        if args.list_only:
+            for candidate in candidates:
+                print(candidate.zarr_path)
+            raise SystemExit(0)
+        _run_registry_candidate_loop(
+            candidates,
+            use_full_res=args.full,
+            frame_idx=args.frame,
+            config_path=args.config,
+            mode=args.mode,
+            registry_path=args.registry,
+        )
+        raise SystemExit(0)
 
     if args.headless:
         if args.mode not in {"auto", "circle"}:

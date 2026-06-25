@@ -19,8 +19,20 @@ REQUIRED_EVENT_FIELDS = (
 REQUIRED_FRAME_METADATA_FIELDS = (
     "stimulus_frame_num",
     "triggering_camera_frame_id",
-    "timestamp_ns",
+    "timestamp_ns_epoch",
 )
+FRAME_METADATA_FIELD_ALIASES = {
+    "timestamp_ns_epoch": ("timestamp_ns", "timestamp_ns_session", "relative_timestamp_ns"),
+}
+
+
+def missing_required_frame_metadata_fields(fields: list[str]) -> list[str]:
+    missing: list[str] = []
+    for field in REQUIRED_FRAME_METADATA_FIELDS:
+        aliases = FRAME_METADATA_FIELD_ALIASES.get(field, ())
+        if field not in fields and not any(alias in fields for alias in aliases):
+            missing.append(field)
+    return missing
 
 
 def inspect_core(handle: h5py.File, *, profile: str = "palette-import") -> tuple[CoreInfo, list[Finding]]:
@@ -79,9 +91,7 @@ def inspect_core(handle: h5py.File, *, profile: str = "palette-import") -> tuple
         )
     else:
         info.frame_metadata_rows = dataset_row_count(frame_metadata)
-        missing_fields = [
-            field for field in REQUIRED_FRAME_METADATA_FIELDS if field not in dataset_fields(frame_metadata)
-        ]
+        missing_fields = missing_required_frame_metadata_fields(dataset_fields(frame_metadata))
         info.missing_frame_metadata_fields = missing_fields
         if missing_fields:
             info.status = "fail"

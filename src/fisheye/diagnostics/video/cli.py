@@ -51,8 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument(
         "--backend",
         choices=["opencv", "decord", "all"],
-        default="all",
-        help="Decode backend selection for decode checks (default: all).",
+        default="opencv",
+        help="Decode backend selection for decode checks (default: opencv).",
     )
     _add_output_arguments(report)
 
@@ -75,8 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
     decode.add_argument(
         "--backend",
         choices=["opencv", "decord", "all"],
-        default="all",
-        help="Decode backend selection (default: all).",
+        default="opencv",
+        help="Decode backend selection (default: opencv).",
     )
     _add_output_arguments(decode)
 
@@ -86,8 +86,8 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument(
         "--backend",
         choices=["opencv", "decord", "all"],
-        default="all",
-        help="Decode backend selection for decode checks (default: all).",
+        default="opencv",
+        help="Decode backend selection for decode checks (default: opencv).",
     )
     batch.add_argument(
         "--no-recursive",
@@ -127,7 +127,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         kwargs = {
             "full_scan": bool(getattr(args, "full_scan", False)),
             "sample_frames": int(getattr(args, "max_frames", DEFAULT_SAMPLE_FRAMES)),
-            "decode_backend": str(getattr(args, "backend", "all")),
+            "decode_backend": str(getattr(args, "backend", "opencv")),
             "decode_frames": DEFAULT_DECODE_FRAMES,
             "seek_samples": DEFAULT_SEEK_SAMPLES,
             "include_probe": True,
@@ -158,7 +158,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     kwargs = {
         "full_scan": bool(getattr(args, "full_scan", False)),
         "sample_frames": int(getattr(args, "max_frames", DEFAULT_SAMPLE_FRAMES)),
-        "decode_backend": str(getattr(args, "backend", "all")),
+        "decode_backend": str(getattr(args, "backend", "opencv")),
         "decode_frames": DEFAULT_DECODE_FRAMES,
         "seek_samples": DEFAULT_SEEK_SAMPLES,
     }

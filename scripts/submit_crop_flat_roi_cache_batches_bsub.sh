@@ -18,6 +18,8 @@ SOURCE_TYPE="refined"
 SOURCE_PATH=""
 SELECTION_POLICY="full_recording"
 FORCE_NEW=0
+DEFER_REGISTRY=1
+SUBMIT_REGISTRY_FINALIZER=1
 
 CROP_QUEUE="short"
 CROP_NCORES=4
@@ -35,6 +37,12 @@ ROI_LIVE_ACCELERATION="gpu"
 ROI_LIVE_GPU_CHUNK_FRAMES=32
 SHA256=0
 OVERWRITE=0
+
+REGISTRY_FINALIZER_QUEUE="short"
+REGISTRY_FINALIZER_NCORES=1
+REGISTRY_FINALIZER_MEM_GB=16
+REGISTRY_FINALIZER_WALLTIME="1:00"
+
 DRY_RUN=0
 
 usage() {
@@ -62,6 +70,10 @@ Crop/cache:
   --selection-policy POLICY   Crop selection policy (default: full_recording)
   --force-new                 Force new crop runs
   --overwrite                 Overwrite existing published cache files
+  --inline-registry           Let each crop job write registry status directly
+                              (not recommended for multi-recording batches)
+  --no-registry-finalizer     Defer crop-job registry writes but do not submit
+                              the serial registry finalizer
 
 Resources:
   --crop-queue NAME           LSF queue for crop geometry (default: short)
@@ -78,6 +90,10 @@ Resources:
   --roi-live-acceleration N   cpu|gpu|auto for live ROI reads (default: gpu)
   --roi-live-gpu-chunk-frames N
   --sha256                    Record payload sha256 in each manifest
+  --registry-finalizer-queue NAME
+  --registry-finalizer-ncores N
+  --registry-finalizer-mem-gb N
+  --registry-finalizer-walltime H:MM
 
 General:
   --log-dir PATH              Submission log dir (default: <root>/logs/crop_flat_roi_cache_bsub)
@@ -111,6 +127,8 @@ while [[ $# -gt 0 ]]; do
     --source-path) SOURCE_PATH="$2"; shift 2;;
     --selection-policy) SELECTION_POLICY="$2"; shift 2;;
     --force-new) FORCE_NEW=1; shift;;
+    --inline-registry) DEFER_REGISTRY=0; SUBMIT_REGISTRY_FINALIZER=0; shift;;
+    --no-registry-finalizer) SUBMIT_REGISTRY_FINALIZER=0; shift;;
     --crop-queue) CROP_QUEUE="$2"; shift 2;;
     --crop-ncores) CROP_NCORES="$2"; shift 2;;
     --crop-mem-gb) CROP_MEM_GB="$2"; shift 2;;
@@ -125,6 +143,10 @@ while [[ $# -gt 0 ]]; do
     --roi-live-acceleration) ROI_LIVE_ACCELERATION="$2"; shift 2;;
     --roi-live-gpu-chunk-frames) ROI_LIVE_GPU_CHUNK_FRAMES="$2"; shift 2;;
     --sha256) SHA256=1; shift;;
+    --registry-finalizer-queue) REGISTRY_FINALIZER_QUEUE="$2"; shift 2;;
+    --registry-finalizer-ncores) REGISTRY_FINALIZER_NCORES="$2"; shift 2;;
+    --registry-finalizer-mem-gb) REGISTRY_FINALIZER_MEM_GB="$2"; shift 2;;
+    --registry-finalizer-walltime) REGISTRY_FINALIZER_WALLTIME="$2"; shift 2;;
     --overwrite) OVERWRITE=1; shift;;
     --log-dir) LOG_DIR="$2"; shift 2;;
     --run-id) RUN_ID="$2"; shift 2;;
@@ -234,8 +256,14 @@ else
   echo "Public cache dir: ${PUBLIC_CACHE_ROOT%/}/${WORKFLOW_ID}/roi_cache"
 fi
 echo "Target list: $PATHS_FILE"
+echo "Defer registry writes: $DEFER_REGISTRY"
+if [[ "$DEFER_REGISTRY" == "1" ]]; then
+  echo "Submit registry finalizer: $SUBMIT_REGISTRY_FINALIZER"
+  echo "Registry path: $REGISTRY"
+fi
 
 submitted=0
+cache_jobids=()
 while IFS= read -r zarr_path; do
   [[ -z "$zarr_path" ]] && continue
   stem="$(basename "$zarr_path")"
@@ -267,13 +295,23 @@ while IFS= read -r zarr_path; do
   if [[ -n "$PUBLIC_CACHE_DIR" ]]; then args+=(--public-cache-dir "$PUBLIC_CACHE_DIR"); fi
   if [[ -n "$SOURCE_PATH" ]]; then args+=(--source-path "$SOURCE_PATH"); fi
   if [[ "$FORCE_NEW" == "1" ]]; then args+=(--force-new); fi
+  if [[ "$DEFER_REGISTRY" == "1" ]]; then args+=(--defer-registry); fi
   if [[ "$SHA256" == "1" ]]; then args+=(--sha256); fi
   if [[ "$OVERWRITE" == "1" ]]; then args+=(--overwrite); fi
   if [[ "$DRY_RUN" == "1" ]]; then args+=(--dry-run); fi
 
   printf '%q ' "${args[@]}" >> "$COMMANDS_FILE"
   printf '\n' >> "$COMMANDS_FILE"
-  "${args[@]}"
+  submit_output="$("${args[@]}")"
+  echo "$submit_output"
+  if [[ "$DRY_RUN" != "1" ]]; then
+    cache_jobid="$(printf '%s\n' "$submit_output" | sed -n 's/^cache_jobid=//p' | tail -1)"
+    if [[ -n "$cache_jobid" ]]; then
+      cache_jobids+=("$cache_jobid")
+    else
+      echo "Warning: could not parse cache job id for $zarr_path" >&2
+    fi
+  fi
   submitted=$((submitted + 1))
 done < "$PATHS_FILE"
 
@@ -282,4 +320,77 @@ if [[ "$DRY_RUN" == "1" ]]; then
   echo "Dry run only; no bsub jobs submitted."
 else
   echo "Submitted crop/cache workflows: $submitted"
+fi
+
+if [[ "$DRY_RUN" != "1" && "$DEFER_REGISTRY" == "1" && "$SUBMIT_REGISTRY_FINALIZER" == "1" ]]; then
+  if [[ "${#cache_jobids[@]}" == "0" ]]; then
+    echo "No cache job ids were parsed; not submitting registry finalizer." >&2
+    exit 1
+  fi
+
+  FINALIZER_SCRIPT="${RUN_ROOT}/run_registry_finalizer.sh"
+  RUN_ROOT_Q="$(printf '%q' "$RUN_ROOT")"
+  REGISTRY_Q="$(printf '%q' "$REGISTRY")"
+
+  cat > "$FINALIZER_SCRIPT" <<JOBSCRIPT
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(pwd)"
+
+RUN_ROOT=${RUN_ROOT_Q}
+REGISTRY=${REGISTRY_Q}
+JOB_ID="\${LSB_JOBID:-manual_registry_finalizer}"
+REPORT_JSON="\${RUN_ROOT}/registry_finalizer.\${JOB_ID}.json"
+
+echo "repo=\$(pwd)"
+echo "host=\$(hostname)"
+echo "job_id=\$JOB_ID"
+echo "run_root=\$RUN_ROOT"
+echo "registry=\$REGISTRY"
+echo "report_json=\$REPORT_JSON"
+
+scripts/py -m fisheye.utils.finalize_crop_flat_roi_cache_batch_registry \\
+  "\$RUN_ROOT" \\
+  --registry "\$REGISTRY" \\
+  --apply \\
+  --output-json "\$REPORT_JSON"
+JOBSCRIPT
+  chmod +x "$FINALIZER_SCRIPT"
+
+  dep_expr=""
+  for jobid in "${cache_jobids[@]}"; do
+    if [[ -n "$dep_expr" ]]; then
+      dep_expr+="&&"
+    fi
+    dep_expr+="done(${jobid})"
+  done
+
+  FINALIZER_BSUB_ARGS=(
+    -J "crop_cache_registry_finalizer_${RUN_ID}"
+    -n "$REGISTRY_FINALIZER_NCORES"
+    -W "$REGISTRY_FINALIZER_WALLTIME"
+    -R "rusage[mem=${REGISTRY_FINALIZER_MEM_GB}G]"
+    -oo "${RUN_ROOT}/registry_finalizer_%J.out"
+    -eo "${RUN_ROOT}/registry_finalizer_%J.err"
+    -w "$dep_expr"
+  )
+  if [[ -n "$REGISTRY_FINALIZER_QUEUE" ]]; then
+    FINALIZER_BSUB_ARGS+=(-q "$REGISTRY_FINALIZER_QUEUE")
+  fi
+
+  printf -v FINALIZER_BSUB_ARGS_SHELL '%q ' "${FINALIZER_BSUB_ARGS[@]}"
+  echo "bsub ${FINALIZER_BSUB_ARGS_SHELL}bash $(printf '%q' "$FINALIZER_SCRIPT")" >> "$COMMANDS_FILE"
+  echo "Registry finalizer script: $FINALIZER_SCRIPT"
+  echo "Registry finalizer dependency: $dep_expr"
+
+  finalizer_submit_output="$(bsub "${FINALIZER_BSUB_ARGS[@]}" bash "$FINALIZER_SCRIPT")"
+  echo "$finalizer_submit_output"
+  finalizer_jobid="$(printf '%s\n' "$finalizer_submit_output" | sed -n 's/.*Job <\([0-9][0-9]*\)>.*/\1/p' | head -1)"
+  if [[ -n "$finalizer_jobid" ]]; then
+    echo "registry_finalizer_jobid=${finalizer_jobid}"
+  fi
+elif [[ "$DRY_RUN" != "1" && "$DEFER_REGISTRY" == "1" ]]; then
+  echo "Registry writes were deferred. Run this finalizer manually after cache jobs complete:"
+  echo "  scripts/py -m fisheye.utils.finalize_crop_flat_roi_cache_batch_registry $(printf '%q' "$RUN_ROOT") --registry $(printf '%q' "$REGISTRY") --apply"
 fi

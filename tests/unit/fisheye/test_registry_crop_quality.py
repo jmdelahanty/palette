@@ -11,6 +11,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry
 from fisheye.shared.roi_pixel_contract import crop_run_pixel_contract
+from fisheye.shared.zarr_run_completion import mark_run_complete
+from fisheye.utils.finalize_crop_flat_roi_cache_batch_registry import (
+    finalize_crop_flat_roi_cache_batch_registry,
+)
 
 
 def _create_crop_archive(path: Path, *, session_uuid: str) -> None:
@@ -280,4 +284,121 @@ def test_crop_step_status_refreshes_crop_quality_pixel_contract(
     assert captured_details["crop_quality_refresh_status"] == "ok"
     assert captured_details["crop_quality_refresh_run"] == "crop_new"
     assert captured_details["crop_quality_refresh_run_present"] is True
+    registry.close()
+
+
+def test_crop_step_status_defer_env_skips_registry_write(monkeypatch, tmp_path: Path) -> None:
+    from fisheye.tracking import crop as crop_module
+
+    zarr_path = tmp_path / "recordings" / "rec_defer" / "zarr" / "rec_defer_analysis.zarr"
+    _create_crop_archive(zarr_path, session_uuid="rec_defer_uuid")
+    monkeypatch.setenv("PALETTE_DISABLE_REGISTRY_WRITES", "1")
+
+    called = False
+
+    def fake_emit_stage_completion(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("registry write should be deferred")
+
+    monkeypatch.setattr(crop_module, "emit_stage_completion", fake_emit_stage_completion)
+    crop_module._emit_crop_step_status(
+        root=zarr.open_group(str(zarr_path), mode="r"),
+        zarr_path=str(zarr_path),
+        status="ok",
+        run_name="crop_new",
+        method="pytest",
+        coverage_pct=100.0,
+        review_status=None,
+        details={"reason": "present"},
+        console=None,
+    )
+
+    assert called is False
+
+
+def test_finalize_crop_flat_roi_cache_batch_registry_syncs_crop_status(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    zarr_path = tmp_path / "recordings" / "rec_finalizer" / "zarr" / "rec_finalizer_analysis.zarr"
+    _create_crop_archive(zarr_path, session_uuid="rec_finalizer_uuid")
+
+    root = zarr.open_group(str(zarr_path), mode="a")
+    crop_parent = root["crop_runs"]
+    mark_run_complete(crop_parent["crop_new"], parent_group=crop_parent, run_name="crop_new")
+
+    run_root = tmp_path / "batch_run"
+    status_dir = run_root / "per_recording" / "rec_finalizer"
+    status_dir.mkdir(parents=True)
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    cache_manifest = cache_dir / "rec_finalizer_analysis.flat_roi_cache.json"
+    cache_payload = cache_dir / "rec_finalizer_analysis.flat_roi_cache.bin"
+    cache_payload.write_bytes(b"cache")
+    cache_manifest.write_text(
+        json.dumps({"schema": "palette_roi_cache_flat_bin_v1", "layout": "flat_bin_v1"}),
+        encoding="utf-8",
+    )
+
+    crop_status = {
+        "status": "ok",
+        "stage": "crop_geometry",
+        "job_id": "crop123",
+        "host": "pytest-host",
+        "finished_at_utc": "2026-06-22T00:00:00+00:00",
+        "zarr_path": str(zarr_path.resolve()),
+        "latest_any": "crop_new",
+        "latest_any_attrs": {
+            "crop_storage_mode": "materialized",
+            "detection_source_type": "manual",
+            "detection_source_path": "refined_detect_runs/refined_001/manual",
+            "total_detections": 4,
+        },
+    }
+    (status_dir / "rec_finalizer.crop.123.json").write_text(
+        json.dumps(crop_status),
+        encoding="utf-8",
+    )
+    cache_status = {
+        "status": "ok",
+        "stage": "flat_roi_cache_publish",
+        "finished_at_utc": "2026-06-22T00:01:00+00:00",
+        "published_manifest": str(cache_manifest),
+        "published_bin": str(cache_payload),
+        "published_bin_size_bytes": cache_payload.stat().st_size,
+        "layout": "flat_bin_v1",
+        "source": {
+            "archive_path": str(zarr_path.resolve()),
+            "crop_run_name": "crop_new",
+        },
+    }
+    (status_dir / "rec_finalizer.cache.456.json").write_text(
+        json.dumps(cache_status),
+        encoding="utf-8",
+    )
+
+    report = finalize_crop_flat_roi_cache_batch_registry(
+        run_root,
+        registry_path=registry_path,
+        apply=True,
+    )
+
+    assert report["status"] == "ok"
+    assert report["finalized_count"] == 1
+    assert report["upserted_status_rows"] == 1
+    registry = Registry(registry_path)
+    row = registry.conn.execute(
+        """
+        SELECT status, run_name, source
+        FROM recording_step_status
+        WHERE step_name = 'crop';
+        """
+    ).fetchone()
+    assert dict(row) == {
+        "status": "ok",
+        "run_name": "crop_new",
+        "source": "serial_crop_flat_roi_cache_batch_finalizer",
+    }
+    quality = registry.conn.execute("SELECT crop_run FROM crop_quality_current;").fetchone()
+    assert quality is not None
+    assert str(quality["crop_run"]) == "crop_new"
     registry.close()

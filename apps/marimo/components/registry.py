@@ -13,7 +13,10 @@ import zarr
 from fisheye.shared.plot_artifacts import INTERACTIVE_SPEC_SCHEMA_ID, SPEC_MEDIA_TYPE
 from fisheye.utils.view_zarr_visualization import iter_visualization_artifacts
 from fisheye.utils.zarr_io import open_zarr_root
-from fisheye.visualization.goodcopbadcop_interactive import GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER
+from fisheye.visualization.goodcopbadcop_interactive import (
+    DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT,
+    GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
+)
 
 from .common import join_path, normalize_path
 
@@ -40,6 +43,16 @@ class InteractiveSpecOption:
     is_supported: bool
     attrs: Mapping[str, Any]
     spec: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class RecordingSpecOption:
+    zarr_path: Path
+    recording_id: str
+    label: str
+    interactive_spec_count: int
+    supported_spec_count: int
+    renderer_counts: Mapping[str, int]
 
 
 DEFAULT_RENDERER_REGISTRY: dict[str, RendererRegistration] = {
@@ -75,6 +88,16 @@ def _group_contains(group: object, key: str) -> bool:
         return key in group  # type: ignore[operator]
     except Exception:
         return False
+
+
+def _group_names(group: object) -> list[str]:
+    group_keys = getattr(group, "group_keys", None)
+    if callable(group_keys):
+        try:
+            return sorted(str(name) for name in group_keys())
+        except Exception:
+            return []
+    return []
 
 
 def _json_from_uint8_array(array: zarr.Array) -> Mapping[str, Any]:
@@ -168,6 +191,55 @@ def _read_option(root: zarr.Group, zarr_path: Path, artifact_path: str) -> Optio
     )
 
 
+def _discover_goodcopbadcop_chaser_specs_fast(
+    root: zarr.Group,
+    archive: Path,
+    *,
+    run_path_filter: Optional[str],
+    artifact_filter: Optional[str],
+) -> list[InteractiveSpecOption]:
+    run_path_wanted = normalize_path(str(run_path_filter)) if run_path_filter else None
+    artifact_wanted = normalize_path(str(artifact_filter)) if artifact_filter else None
+    default_artifact = DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT
+
+    if artifact_wanted and "/" not in artifact_wanted and artifact_wanted != default_artifact:
+        return []
+
+    candidate_paths: list[str]
+    if artifact_wanted and "/" in artifact_wanted:
+        candidate_paths = [artifact_wanted]
+    elif run_path_wanted:
+        candidate_paths = [artifact_path_for(run_path_wanted, default_artifact)]
+    else:
+        try:
+            parent = root["analysis/chaser_distance_runs"]
+        except Exception:
+            return []
+        candidate_paths = [
+            artifact_path_for(f"analysis/chaser_distance_runs/{run_name}", default_artifact)
+            for run_name in _group_names(parent)
+        ]
+
+    options: list[InteractiveSpecOption] = []
+    seen: set[str] = set()
+    for artifact_path in candidate_paths:
+        normalized_path = normalize_path(artifact_path)
+        if not normalized_path or normalized_path in seen:
+            continue
+        seen.add(normalized_path)
+        option = _read_option(root, archive, normalized_path)
+        if option is None:
+            continue
+        if option.renderer != GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER:
+            continue
+        if run_path_wanted and option.run_path != run_path_wanted:
+            continue
+        if artifact_wanted and artifact_wanted not in {option.artifact_name, option.artifact_path}:
+            continue
+        options.append(option)
+    return sorted(options, key=lambda item: (not item.is_supported, item.renderer, item.run_path, item.artifact_name))
+
+
 def discover_interactive_spec_options(
     zarr_path: Path | str,
     *,
@@ -182,6 +254,13 @@ def discover_interactive_spec_options(
     renderer_wanted = str(renderer_filter).strip() if renderer_filter else None
     run_path_wanted = normalize_path(str(run_path_filter)) if run_path_filter else None
     artifact_wanted = normalize_path(str(artifact_filter)) if artifact_filter else None
+    if renderer_wanted == GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER:
+        return _discover_goodcopbadcop_chaser_specs_fast(
+            root,
+            archive,
+            run_path_filter=run_path_wanted,
+            artifact_filter=artifact_wanted,
+        )
     options: list[InteractiveSpecOption] = []
     for artifact in iter_visualization_artifacts(root):
         try:
@@ -201,6 +280,121 @@ def discover_interactive_spec_options(
             continue
         options.append(option)
     return sorted(options, key=lambda item: (not item.is_supported, item.renderer, item.run_path, item.artifact_name))
+
+
+def recording_id_from_analysis_zarr(zarr_path: Path | str) -> str:
+    archive = Path(zarr_path)
+    if archive.parent.name == "zarr" and archive.parent.parent.name:
+        return archive.parent.parent.name
+    name = archive.name
+    if name.endswith(".zarr"):
+        name = name[:-5]
+    if name.endswith("_analysis"):
+        name = name[:-9]
+    return name or str(archive)
+
+
+def infer_recordings_root_from_zarr_path(zarr_path: Path | str) -> Path:
+    archive = Path(zarr_path).expanduser()
+    if archive.parent.name == "zarr" and archive.parent.parent.parent.name:
+        return archive.parent.parent.parent
+    if archive.parent.name:
+        return archive.parent
+    return archive
+
+
+def _candidate_analysis_zarrs(
+    recordings_root: Path,
+    *,
+    name_contains: Optional[str],
+) -> list[Path]:
+    root = recordings_root.expanduser()
+    if root.name.endswith(".zarr") and root.is_dir():
+        return [root]
+
+    needle = str(name_contains or "").strip().lower()
+    candidates: set[Path] = set()
+
+    def add_from_zarr_dir(zarr_dir: Path) -> None:
+        if zarr_dir.is_dir():
+            candidates.update(path for path in zarr_dir.glob("*_analysis.zarr") if path.is_dir())
+
+    if (root / "zarr").is_dir():
+        add_from_zarr_dir(root / "zarr")
+
+    try:
+        children = sorted(path for path in root.iterdir() if path.is_dir())
+    except OSError:
+        children = []
+
+    for child in children:
+        haystack = f"{child.name} {child}".lower()
+        if needle and needle not in haystack:
+            continue
+        if child.name.endswith(".zarr"):
+            candidates.add(child)
+            continue
+        add_from_zarr_dir(child / "zarr")
+        candidates.update(path for path in child.glob("*_analysis.zarr") if path.is_dir())
+
+    if not candidates and root.is_dir():
+        candidates.update(
+            path
+            for path in root.rglob("*_analysis.zarr")
+            if path.is_dir() and (not needle or needle in f"{path.name} {path}".lower())
+        )
+
+    return sorted(candidates)
+
+
+def discover_protocol_recording_options(
+    seed_zarr_path: Path | str,
+    *,
+    recordings_root: Optional[Path | str] = None,
+    renderer_filter: Optional[str] = None,
+    run_path_filter: Optional[str] = None,
+    artifact_filter: Optional[str] = None,
+    name_contains: Optional[str] = "GoodCopBadCop",
+) -> list[RecordingSpecOption]:
+    """Find sibling recordings with matching interactive specs.
+
+    The common organized-recording layout is:
+    ``<recordings_root>/<recording_id>/zarr/<recording_id>_analysis.zarr``.
+    The seed archive is always included as a candidate so explicit Zarr paths
+    continue to work even when no sibling root can be inferred.
+    """
+
+    seed = Path(seed_zarr_path).expanduser()
+    root = Path(recordings_root).expanduser() if recordings_root else infer_recordings_root_from_zarr_path(seed)
+    candidates = {seed}
+    candidates.update(_candidate_analysis_zarrs(root, name_contains=name_contains))
+
+    options: list[RecordingSpecOption] = []
+    for archive in sorted(candidates):
+        spec_options = discover_interactive_spec_options(
+            archive,
+            renderer_filter=renderer_filter,
+            run_path_filter=run_path_filter,
+            artifact_filter=artifact_filter,
+        )
+        if not spec_options:
+            continue
+        renderer_counts: dict[str, int] = {}
+        for spec in spec_options:
+            renderer_counts[spec.renderer or "unknown"] = renderer_counts.get(spec.renderer or "unknown", 0) + 1
+        recording_id = recording_id_from_analysis_zarr(archive)
+        supported_count = sum(1 for spec in spec_options if spec.is_supported)
+        options.append(
+            RecordingSpecOption(
+                zarr_path=archive,
+                recording_id=recording_id,
+                label=f"{recording_id} ({supported_count}/{len(spec_options)} supported specs)",
+                interactive_spec_count=len(spec_options),
+                supported_spec_count=supported_count,
+                renderer_counts=renderer_counts,
+            )
+        )
+    return sorted(options, key=lambda item: item.recording_id)
 
 
 def group_options_by_renderer(options: Iterable[InteractiveSpecOption]) -> dict[str, list[InteractiveSpecOption]]:

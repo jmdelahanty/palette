@@ -53,7 +53,12 @@ class TrackKinematicsTrackTables:
     time_seconds: Optional[np.ndarray]
     heading_degrees: Optional[np.ndarray]
     smoothed_heading_degrees: Optional[np.ndarray]
+    delta_heading_degrees: Optional[np.ndarray]
+    delta_heading_smoothed_degrees: Optional[np.ndarray]
     angular_velocity_deg_s: Optional[np.ndarray]
+    angular_velocity_smoothed_deg_s: Optional[np.ndarray]
+    angular_speed_raw_deg_s: Optional[np.ndarray]
+    angular_speed_smoothed_deg_s: Optional[np.ndarray]
     detection_source: Optional[np.ndarray]
     positions_mm: Optional[np.ndarray]
     positions_px: Optional[np.ndarray]
@@ -298,7 +303,12 @@ def load_track_kinematics_track(
         time_seconds=_optional_array(track_group, "time_seconds"),
         heading_degrees=_optional_array(track_group, "heading_degrees"),
         smoothed_heading_degrees=_optional_array(track_group, "smoothed_heading_degrees"),
+        delta_heading_degrees=_optional_array(track_group, "delta_heading_degrees"),
+        delta_heading_smoothed_degrees=_optional_array(track_group, "delta_heading_smoothed_degrees"),
         angular_velocity_deg_s=_optional_array(track_group, "angular_velocity_deg_s"),
+        angular_velocity_smoothed_deg_s=_optional_array(track_group, "angular_velocity_smoothed_deg_s"),
+        angular_speed_raw_deg_s=_optional_array(track_group, "angular_speed_raw_deg_s"),
+        angular_speed_smoothed_deg_s=_optional_array(track_group, "angular_speed_smoothed_deg_s"),
         detection_source=_optional_array(track_group, "detection_source"),
         positions_mm=_optional_array(track_group, "positions_mm"),
         positions_px=_optional_array(track_group, "positions_px"),

@@ -33,6 +33,14 @@ analysis/chaser_distance_runs/goodcopbadcop_chaser_distance_v1_20260617
   framewise fish-to-chaser distances, epoch summaries, and distributions
 ```
 
+Planned protocol-specific components under the chaser-distance run include
+CRA primary endpoint metrics, egocentric bearing metrics, near-field
+avoidance metrics, and epoch behavior summaries. See
+[`goodcopbadcop_cra_near_field_design.md`](goodcopbadcop_cra_near_field_design.md)
+for the near-field implementation plan and
+[`goodcopbadcop_viewer_dataset_cleanup_checklist.md`](goodcopbadcop_viewer_dataset_cleanup_checklist.md)
+for the viewer/dataset cleanup plan.
+
 The key design rule is that event-window semantics live once in
 `analysis/stimulus_epoch_runs`. Detection occupancy and chaser distance consume
 that run instead of independently redefining what "pre", "training", and
@@ -49,6 +57,9 @@ that run instead of independently redefining what "pre", "training", and
 | How far was the fish from each chaser over time? | `analysis/chaser_distance_runs/<run>/distances/distance_mm` |
 | What is the median/quantile distance per epoch? | `analysis/chaser_distance_runs/<run>/epoch_summary/*` |
 | What is the full distance distribution per epoch? | `analysis/chaser_distance_runs/<run>/epoch_distributions/*` |
+| What are per-epoch speed, bout, and IBI summaries? | `analysis/chaser_distance_runs/<run>/epoch_behavior_summary/<component>/per_epoch_fish/*` when written |
+| What are chaser-specific epoch distance summaries paired with behavior rows? | `analysis/chaser_distance_runs/<run>/epoch_behavior_summary/<component>/per_epoch_chaser/*` when written |
+| What are lower-tail near-field avoidance metrics? | `analysis/chaser_distance_runs/<run>/cra_near_field/<component>/*` when written |
 | Which refined detections were used? | `attrs["source_detection_path"]` and `attrs["source_refs"]` on each derived run |
 
 For distance distributions, prefer the stored histogram arrays under
@@ -89,9 +100,44 @@ scripts/py -m fisheye.utils.run_goodcopbadcop_chaser_distance_analysis \
   --overwrite
 ```
 
-Both wrappers are registry-based. They select active analysis zarrs whose
-recording IDs match GoodCopBadCop and whose detection coverage passes the
-threshold.
+Write or refresh CRA near-field avoidance components for the current
+GoodCopBadCop `/groups` batch:
+
+```bash
+scripts/py -m fisheye.utils.run_goodcopbadcop_cra_near_field \
+  --recordings-root /groups/johnson/johnsonlab/jeremy/recordings \
+  --recording-like '2026-06-14%GoodCopBadCop%' \
+  --limit 12 \
+  --apply \
+  --overwrite
+```
+
+The detection-occupancy and chaser-distance wrappers are registry-based. The
+near-field wrapper can also scan an explicit recording root, which is useful
+when the current `/groups` batch already has chaser-distance and CRA endpoint
+components but is not selected by the registry coverage views.
+
+Write or refresh per-epoch behavior summaries for speed, bouts, and
+inter-bout intervals:
+
+```bash
+scripts/py -m fisheye.utils.run_goodcopbadcop_epoch_behavior_summary \
+  --recordings-root /groups/johnson/johnsonlab/jeremy/recordings \
+  --recording-like '2026-06-14%GoodCopBadCop%' \
+  --limit 12
+```
+
+The command above is a dry run. Add `--apply --overwrite` after the dry run
+looks right:
+
+```bash
+scripts/py -m fisheye.utils.run_goodcopbadcop_epoch_behavior_summary \
+  --recordings-root /groups/johnson/johnsonlab/jeremy/recordings \
+  --recording-like '2026-06-14%GoodCopBadCop%' \
+  --limit 12 \
+  --apply \
+  --overwrite
+```
 
 ## Visualization Artifacts
 
@@ -129,6 +175,21 @@ The interactive dashboard spec is a small JSON artifact stored beside the
 chaser-distance PNGs. It points to canonical source arrays in the
 chaser-distance run, the matched detection-occupancy run, and the shared
 stimulus-epoch run. It does not introduce a separate visualization run family.
+
+Epoch behavior summaries should be stored as a component under the
+chaser-distance run:
+
+```text
+analysis/chaser_distance_runs/<run>/epoch_behavior_summary/<component>/
+  per_epoch_fish/
+  per_epoch_chaser/
+```
+
+This component is the intended source for named per-epoch speed, bout count,
+bout rate, inter-bout interval count, and mean/median inter-bout interval
+values. Palette Explorer may temporarily compute these values as a
+`computed_in_viewer` fallback while older recordings are being backfilled, but
+that fallback is not the analysis contract.
 
 Export any single artifact:
 
@@ -187,4 +248,5 @@ coordinate attrs are present.
 - `docs/detection_analysis_run_surfaces.md`
 - `docs/spatial_occupancy_zone_summary_design.md`
 - `docs/chaser_distance_run_contract.md`
+- `docs/goodcopbadcop_cra_near_field_design.md`
 - `docs/artifact_storage_map.md`

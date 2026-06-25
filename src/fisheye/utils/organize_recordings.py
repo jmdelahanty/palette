@@ -1700,7 +1700,7 @@ def _run_video_diagnostics_for_plan(
             source="all",
             full_scan=False,
             sample_frames=_VIDEO_DIAGNOSTICS_SAMPLE_FRAMES,
-            decode_backend="all",
+            decode_backend="opencv",
             decode_frames=_VIDEO_DIAGNOSTICS_DECODE_FRAMES,
             seek_samples=_VIDEO_DIAGNOSTICS_SEEK_SAMPLES,
             include_probe=True,

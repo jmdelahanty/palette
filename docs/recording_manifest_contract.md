@@ -67,7 +67,7 @@ Example shape:
       "media_status": "pass",
       "tooling_status": "error",
       "videos_scanned": 2,
-      "finding_codes": ["video.decord_unavailable"]
+      "finding_codes": ["video.opencv_unavailable"]
     },
     "h5": {
       "status": "pass",
@@ -94,10 +94,75 @@ Semantics:
   fields.
 - tooling-only problems may produce `warn` without indicating bad media or an
   unimportable H5.
+- Automatic video preflight uses the OpenCV decode smoke by default. Decord
+  remains available as an explicit manual diagnostic backend, but it is not the
+  default gate for current imports.
+- Current Citrus/Orange frame metadata uses `timestamp_ns_epoch` in
+  `/video_metadata/frame_metadata`; legacy `timestamp_ns`,
+  `timestamp_ns_session`, and `relative_timestamp_ns` are compatibility aliases.
+- Current camera metadata CSVs use `recording_frame_id`; legacy `frame_id` and
+  `local_frame_id` are compatibility aliases when validating older sidecars.
 
 Downstream import commands currently block only when `preflight.status=fail`,
 and allow `warn` by default. Commands that enforce this gate expose an explicit
 `--allow-preflight-failures` override.
+
+## Optional Analysis Import Status
+
+`recording_manifest.json` may include machine-written fields that describe the
+folder-local analysis import state. These fields are intentionally duplicated
+from central registry state so a copied recording folder remains self-describing.
+
+Recommended shape after a successful analysis import:
+
+```json
+{
+  "import_status": "ok",
+  "import_log": "/groups/.../import_organized_recordings_analysis_20260621T231809Z_746229.jsonl",
+  "imported_at_utc": "2026-06-21T23:18:53.512193+00:00",
+  "analysis_zarr_path": "/groups/.../zarr/<recording>_analysis.zarr",
+  "analysis_import": {
+    "status": "ok",
+    "zarr_path": "/groups/.../zarr/<recording>_analysis.zarr",
+    "import_log": "/groups/.../import_organized_recordings_analysis_20260621T231809Z_746229.jsonl",
+    "imported_at_utc": "2026-06-21T23:18:53.512193+00:00",
+    "run_id": "20260621T231809Z_746229",
+    "registry_path": "/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite",
+    "registry_dataset_id": "dataset_..."
+  }
+}
+```
+
+Semantics:
+
+- `import_status="ok"` means the analysis zarr exists and the import wrapper
+  reached `recording_ok`, or an existing analysis zarr was verified during a
+  registry-sync repair pass.
+- `imported_at_utc` should be the `recording_ok.ts_utc` timestamp when
+  backfilled from an original import JSONL. For a new import run, it is written
+  by `fisheye.utils.import_organized_recordings_analysis`.
+- `analysis_zarr_path` is folder-local provenance only. The registry remains the
+  query authority for cross-recording workflows.
+- `registry_dataset_id` and `registry_path` are optional and only written when a
+  registry sync ran successfully.
+
+Backfill from existing import logs:
+
+```bash
+scripts/py -m fisheye.utils.recording_manifest_import_status \
+  --file-list /path/to/import_logs.txt \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --apply
+```
+
+Refresh preflight diagnostics for already-organized recordings:
+
+```bash
+scripts/py -m fisheye.utils.refresh_recording_preflight \
+  /groups/johnson/johnsonlab/jeremy/recordings \
+  --recursive \
+  --apply
+```
 
 ## Controlled Vocabulary
 

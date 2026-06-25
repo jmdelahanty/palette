@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GoodCopBadCop Group Analytics</title>
+    <link rel="stylesheet" href="/static/group_viewer.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <h1>GoodCopBadCop Group Analytics</h1>
+        <p id="export-line">Loading export...</p>
+      </div>
+      <div id="health-pill" class="pill muted">Checking</div>
+    </header>
+
+    <main>
+      <section class="summary-band">
+        <div class="summary-item">
+          <span>Recordings</span>
+          <strong id="summary-recordings">--</strong>
+        </div>
+        <div class="summary-item">
+          <span>Spatial rows</span>
+          <strong id="summary-spatial">--</strong>
+        </div>
+        <div class="summary-item">
+          <span>Chaser rows</span>
+          <strong id="summary-chaser">--</strong>
+        </div>
+        <div class="summary-item">
+          <span>Behavior rows</span>
+          <strong id="summary-epoch-speed">--</strong>
+        </div>
+        <div class="summary-item">
+          <span>Speed-distance rows</span>
+          <strong id="summary-speed-distance">--</strong>
+        </div>
+        <div class="summary-item">
+          <span>Histogram rows</span>
+          <strong id="summary-histogram">--</strong>
+        </div>
+        <div class="summary-item">
+          <span>CRA rows</span>
+          <strong id="summary-cra">--</strong>
+        </div>
+        <div class="summary-item">
+          <span>CRA phase rows</span>
+          <strong id="summary-cra-object-phase">--</strong>
+        </div>
+        <div class="summary-item">
+          <span>CRA quadrant rows</span>
+          <strong id="summary-cra-quadrant">--</strong>
+        </div>
+        <div class="summary-item">
+          <span>Near-field rows</span>
+          <strong id="summary-cra-near-field">--</strong>
+        </div>
+        <div class="summary-item">
+          <span>Near-field phase rows</span>
+          <strong id="summary-cra-near-field-object-phase">--</strong>
+        </div>
+        <div class="summary-item">
+          <span>Egocentric rows</span>
+          <strong id="summary-egocentric">--</strong>
+        </div>
+        <div class="summary-item">
+          <span>Polar bins</span>
+          <strong id="summary-egocentric-histogram">--</strong>
+        </div>
+        <div class="summary-item">
+          <span>Diagnostics</span>
+          <strong id="summary-diagnostics">--</strong>
+        </div>
+        <div class="summary-item">
+          <span>Stats rows</span>
+          <strong id="summary-statistics">--</strong>
+        </div>
+      </section>
+
+      <section class="toolbar">
+        <label>
+          Spatial metric
+          <select id="spatial-metric"></select>
+        </label>
+        <label>
+          Spatial value
+          <select id="spatial-value-mode">
+            <option value="auto">Auto</option>
+            <option value="total">Total</option>
+            <option value="mean">Mean per recording</option>
+          </select>
+        </label>
+        <label>
+          Chaser metric
+          <select id="chaser-metric"></select>
+        </label>
+        <label>
+          Chaser stat
+          <select id="chaser-stat">
+            <option value="mean">Mean</option>
+            <option value="median">Median</option>
+          </select>
+        </label>
+        <label>
+          Speed metric
+          <select id="epoch-speed-metric"></select>
+        </label>
+        <label>
+          Speed stat
+          <select id="epoch-speed-stat">
+            <option value="mean">Mean</option>
+            <option value="median">Median</option>
+          </select>
+        </label>
+        <label>
+          CRA metric
+          <select id="cra-metric"></select>
+        </label>
+        <label>
+          CRA stat
+          <select id="cra-stat">
+            <option value="mean">Mean</option>
+            <option value="median">Median</option>
+          </select>
+        </label>
+        <label>
+          Near-field metric
+          <select id="cra-near-field-metric"></select>
+        </label>
+        <label>
+          Near-field stat
+          <select id="cra-near-field-stat">
+            <option value="mean">Mean</option>
+            <option value="median">Median</option>
+          </select>
+        </label>
+        <label>
+          Egocentric metric
+          <select id="egocentric-metric"></select>
+        </label>
+        <label>
+          Egocentric stat
+          <select id="egocentric-stat">
+            <option value="mean">Mean</option>
+            <option value="median">Median</option>
+          </select>
+        </label>
+        <label>
+          Plot epoch
+          <select id="hist-window">
+            <option value="">All epochs</option>
+          </select>
+        </label>
+        <label>
+          Speed-distance chaser
+          <select id="speed-distance-chaser">
+            <option value="">All chasers</option>
+          </select>
+        </label>
+        <button id="refresh-button" type="button">Refresh</button>
+      </section>
+
+      <section class="panel-grid">
+        <section class="panel wide">
+          <div class="panel-title">
+            <h2>Spatial Occupancy</h2>
+            <span id="spatial-meta"></span>
+          </div>
+          <div id="spatial-chart" class="chart"></div>
+          <div id="spatial-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>Chaser Distance Summary</h2>
+            <span id="chaser-meta"></span>
+          </div>
+          <div id="chaser-chart" class="chart compact"></div>
+          <div id="chaser-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>Pooled Distance Distribution</h2>
+            <span id="hist-meta"></span>
+          </div>
+          <div id="histogram-chart" class="chart compact"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>Average Speed by Epoch</h2>
+            <span id="epoch-speed-meta"></span>
+          </div>
+          <div id="epoch-speed-chart" class="chart compact"></div>
+          <div id="epoch-speed-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel wide">
+          <div class="panel-title">
+            <h2>Speed vs Distance to Chaser</h2>
+            <span id="speed-distance-meta"></span>
+          </div>
+          <div id="speed-distance-chart" class="chart compact"></div>
+          <div id="speed-distance-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel wide">
+          <div class="panel-title">
+            <h2>CRA Specificity Contrasts</h2>
+            <span id="cra-specificity-meta"></span>
+          </div>
+          <div id="cra-specificity-chart" class="chart density"></div>
+          <div id="cra-specificity-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>CRA Object-Relative Endpoint</h2>
+            <span id="cra-meta"></span>
+          </div>
+          <div id="cra-chart" class="chart compact"></div>
+          <div id="cra-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>CRA Deltas</h2>
+            <span id="cra-summary-meta"></span>
+          </div>
+          <div id="cra-summary-table" class="table-wrap"></div>
+          <div id="cra-recording-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>CRA Statistics</h2>
+            <span id="cra-statistics-meta"></span>
+          </div>
+          <div id="cra-statistics-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel wide">
+          <div class="panel-title">
+            <h2>CRA Quadrant Occupancy Density (Descriptive)</h2>
+            <span id="cra-quadrant-density-meta"></span>
+          </div>
+          <div id="cra-quadrant-density-chart" class="chart density"></div>
+          <div id="cra-quadrant-density-table" class="table-wrap"></div>
+          <div id="cra-quadrant-density-paired-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel wide">
+          <div class="panel-title">
+            <h2>CRA Near-Field Curves</h2>
+            <span id="cra-near-field-curves-meta"></span>
+          </div>
+          <div id="cra-near-field-curves-chart" class="chart density"></div>
+          <div id="cra-near-field-curves-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>CRA Near-Field Comparison</h2>
+            <span id="cra-near-field-meta"></span>
+          </div>
+          <div id="cra-near-field-chart" class="chart compact"></div>
+          <div id="cra-near-field-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>CRA Near-Field Deltas</h2>
+            <span id="cra-near-field-summary-meta"></span>
+          </div>
+          <div id="cra-near-field-summary-table" class="table-wrap"></div>
+          <div id="cra-near-field-recording-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>CRA Near-Field Statistics</h2>
+            <span id="cra-near-field-statistics-meta"></span>
+          </div>
+          <div id="cra-near-field-statistics-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>Egocentric Bearing Summary</h2>
+            <span id="egocentric-meta"></span>
+          </div>
+          <div id="egocentric-chart" class="chart compact"></div>
+          <div id="egocentric-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>Pooled Bearing-Distance Bins</h2>
+            <span id="egocentric-hist-meta"></span>
+          </div>
+          <div id="egocentric-histogram-chart" class="chart compact"></div>
+          <div id="egocentric-histogram-table" class="table-wrap"></div>
+        </section>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">
+          <h2>Group Statistics</h2>
+          <span id="statistics-meta"></span>
+        </div>
+        <div id="statistics-table" class="table-wrap tall"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">
+          <h2>Recordings</h2>
+          <span id="recording-meta"></span>
+        </div>
+        <div id="recording-table" class="table-wrap"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">
+          <h2>Provenance</h2>
+          <span id="provenance-meta"></span>
+        </div>
+        <pre id="provenance-json"></pre>
+      </section>
+    </main>
+
+    <script src="/static/group_viewer.js"></script>
+  </body>
+</html>

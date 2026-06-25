@@ -12,12 +12,12 @@ RUN_ID=""
 DRY_RUN=0
 DEST_ROOT="/groups/johnson/johnsonlab/jeremy/recordings"
 JOB_DRY_RUN=0
-REGISTER=0
-REGISTRY=""
+REGISTER=1
+REGISTRY="${PALETTE_REGISTRY:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
 RECORDING_ONLY=0
 ALLOW_PREFLIGHT_FAILURES=0
-RUN_VIDEO_DIAGNOSTICS=0
-RUN_H5_DIAGNOSTICS=0
+RUN_VIDEO_DIAGNOSTICS=1
+RUN_H5_DIAGNOSTICS=1
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
@@ -47,12 +47,16 @@ Options:
                                 (default: /groups/johnson/johnsonlab/jeremy/recordings)
   --job-dry-run                  Submit a cluster job that plans but does not
                                 modify recordings/Zarrs
-  --register                     Scan imported/skipped analysis Zarrs into registry
+  --register                     Scan imported/skipped analysis Zarrs into registry (default)
+  --no-register                  Do not scan imported/skipped analysis Zarrs
   --registry PATH                Registry SQLite path used with --register
+                                (default: $PALETTE_REGISTRY or /groups/.../palette_registry.sqlite)
   --recording-only               Import camera-video-only recordings without H5
   --allow-preflight-failures     Do not block import on manifest preflight fail
-  --run-video-diagnostics        Persist video preflight diagnostics in manifests
-  --run-h5-diagnostics           Persist H5 preflight diagnostics in manifests
+  --run-video-diagnostics        Persist video preflight diagnostics in manifests (default)
+  --no-run-video-diagnostics     Skip video preflight diagnostics
+  --run-h5-diagnostics           Persist H5 preflight diagnostics in manifests (default)
+  --no-run-h5-diagnostics        Skip H5 preflight diagnostics
   --dry-run                      Print files and submit command; do not submit
   -h, --help                     Show this message
 USAGE
@@ -71,11 +75,14 @@ while [[ $# -gt 0 ]]; do
     --dest-root) DEST_ROOT="$2"; shift 2;;
     --job-dry-run) JOB_DRY_RUN=1; shift;;
     --register) REGISTER=1; shift;;
+    --no-register) REGISTER=0; shift;;
     --registry) REGISTRY="$2"; shift 2;;
     --recording-only) RECORDING_ONLY=1; shift;;
     --allow-preflight-failures) ALLOW_PREFLIGHT_FAILURES=1; shift;;
     --run-video-diagnostics) RUN_VIDEO_DIAGNOSTICS=1; shift;;
+    --no-run-video-diagnostics) RUN_VIDEO_DIAGNOSTICS=0; shift;;
     --run-h5-diagnostics) RUN_H5_DIAGNOSTICS=1; shift;;
+    --no-run-h5-diagnostics) RUN_H5_DIAGNOSTICS=0; shift;;
     --dry-run) DRY_RUN=1; shift;;
     -h|--help) usage; exit 0;;
     --*) echo "Unknown arg: $1" >&2; usage; exit 2;;

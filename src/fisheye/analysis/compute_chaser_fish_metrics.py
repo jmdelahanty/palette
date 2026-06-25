@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """
-Compute chaser ↔ fish geometric metrics using offline keypoints and store them in analysis.
+Deprecated legacy chaser/fish geometric metrics writer.
+
+Do not use this module for current GoodCopBadCop/CRA analyses. It predates the
+registered chaser-distance stack and mixes image-space displacement with the
+newer math-y-up heading convention. Use
+``fisheye.analysis.chaser_distance_runs`` plus
+``fisheye.analysis.chaser_egocentric_bearing`` instead.
 
 Metrics:
     - distance between fish centroid and chaser (pixels, millimetres if calibration available)
@@ -31,6 +37,15 @@ from ..utils.calibration import load_run_calibration
 
 
 DEFAULT_FISH_LABEL_PRIORITY = ("bladder", "body", "center", "midpoint", "spine", "spine_base")
+DEPRECATED_MESSAGE = (
+    "fisheye.analysis.compute_chaser_fish_metrics is deprecated and must not be used for "
+    "current GoodCopBadCop/CRA analyses. Use fisheye.analysis.chaser_distance_runs plus "
+    "fisheye.analysis.chaser_egocentric_bearing instead."
+)
+
+
+def _raise_deprecated() -> None:
+    raise RuntimeError(DEPRECATED_MESSAGE)
 
 
 def _resolve_zarr(path: Path) -> zarr.Group:
@@ -244,6 +259,7 @@ def compute_metrics(
     overwrite: bool,
     console: Console,
 ) -> None:
+    _raise_deprecated()
     analysis_root = zarr_root.require_group("analysis")
     stim_group = _require_group(analysis_root, f"stimulus_runs/{stimulus_run}")
     tracking_group = _require_group(stim_group, "tracking_data")
@@ -493,6 +509,7 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     args = _parse_args(argv)
+    raise SystemExit(DEPRECATED_MESSAGE)
     console = Console()
 
     root = _resolve_zarr(Path(args.zarr_path))

@@ -11,6 +11,9 @@ state without mutating the imported stimulus run or the refined detection run.
 
 For the current GoodCopBadCop workflow and user-facing review commands, see
 [`goodcopbadcop_analysis_surfaces.md`](goodcopbadcop_analysis_surfaces.md).
+For the detailed active coordinate-frame workflow, including the current
+homography direction caveat, see
+[`goodcopbadcop_coordinate_frame_workflow.md`](goodcopbadcop_coordinate_frame_workflow.md).
 
 ## Boundary
 
@@ -105,6 +108,8 @@ analysis/chaser_distance_runs.attrs["latest_complete"] = <run>
 - `coordinate_frame`: output frame for distance measurements, currently
   `"arena_relative_canvas_px"`.
 - `coordinate_origin`: currently `"top_left_of_active_arena"`.
+- `x_axis_direction`: currently `"right"`.
+- `y_axis_direction`: currently `"down"`.
 - `arena_origin_in_canvas_xy`: active-arena origin used to convert canvas
   coordinates to arena-local coordinates.
 - `source_refs`, `parameters`, `summary`, `provenance`, and run-lineage
@@ -118,6 +123,8 @@ Current external-IPC GoodCopBadCop stimulus imports store
 ```text
 coordinate_frame = "arena_relative_canvas_px"
 coordinate_origin = "top_left_of_active_arena"
+x_axis_direction = "right"
+y_axis_direction = "down"
 position_fields = "chaser_pos_x,chaser_pos_y,..."
 ```
 

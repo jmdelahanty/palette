@@ -13,6 +13,12 @@ an SSH tunnel from a laptop.
 Options:
   --zarr-path PATH   Analysis Zarr to open.
                     (default: first backfilled GoodCopBadCop /groups archive)
+  --recordings-root PATH
+                    Root containing sibling recording directories. The explorer
+                    uses this for the top-level recording selector.
+  --recording-name-contains TEXT
+                    Recording path/name filter for the selector.
+                    (default: GoodCopBadCop)
   --port PORT        Local workstation port for marimo. (default: 2720)
   --host HOST        Host interface for marimo. (default: 127.0.0.1)
   --renderer ID      Initial renderer filter passed to the explorer.
@@ -59,7 +65,7 @@ while [[ $# -gt 0 ]]; do
       HOST="$2"
       shift 2
       ;;
-    --renderer|--run-path|--artifact)
+    --renderer|--run-path|--artifact|--recordings-root|--recording-name-contains)
       APP_ARGS+=("$1" "$2")
       shift 2
       ;;
@@ -144,4 +150,3 @@ exec env \
     apps/marimo/palette_explorer.py -- \
     --zarr-path "$ZARR_PATH" \
     "${APP_ARGS[@]}"
-

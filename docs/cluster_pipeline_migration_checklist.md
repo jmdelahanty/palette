@@ -43,7 +43,7 @@ Palette already has the first layer of cluster support:
 | Detect-quality-refine submitter | present | `scripts/submit_detect_quality_refine_bsub.sh` chains detect, detect_quality, and refined_detect through LSF `done(<jobid>)` dependencies. |
 | Detect artifact-quality-refine submitter | present | `scripts/submit_detect_artifact_quality_refine_bsub.sh` submits per-recording scratch artifact detect jobs plus dependent import/validate/quality/refine CPU jobs. |
 | Crop submitter | present | `scripts/submit_crop_batches_bsub.sh` wraps `fisheye.utils.crop_batch`. |
-| Crop + flat ROI cache submitter | present | `scripts/submit_crop_flat_roi_cache_bsub.sh` submits crop geometry and dependent flat-cache publish jobs. |
+| Crop + flat ROI cache submitter | present | `scripts/submit_crop_flat_roi_cache_bsub.sh` submits crop geometry and dependent flat-cache publish jobs; `scripts/submit_crop_flat_roi_cache_batches_bsub.sh` now defers per-job registry writes and submits one serial registry finalizer after cache jobs complete. |
 | Clipped collection flat ROI cache submitter | present | `scripts/submit_clipped_collection_flat_roi_cache_bsub.sh` submits finalized clipped collection cache materialization and manifest-last publish. |
 | Keypoint submitter | present | `scripts/submit_keypoints_batches_bsub.sh` wraps registry-resolved keypoint runs, supports `--gpus N`, and defaults GPU jobs to `--device 0` unless the operator overrides `--device`. |
 | Eye-mask submitter | present | `scripts/submit_eye_masks_batches_bsub.sh` wraps `fisheye.utils.run_eye_masks_batch`. |
@@ -349,6 +349,11 @@ Remaining:
 - [ ] Verify the crop status JSON or collection cache progress JSONL, flat
   cache manifest, row-index parquet, published payload size, and
   `open_flat_roi_cache` validation.
+- [x] Make multi-recording crop+flat-cache batches safe for the shared PRFS
+  registry: crop jobs set `PALETTE_DISABLE_REGISTRY_WRITES=1`, cache jobs publish
+  status JSONs, and one dependent
+  `fisheye.utils.finalize_crop_flat_roi_cache_batch_registry --apply` job
+  serially refreshes `crop_quality` and `recording_step_status`.
 - [x] Add detailed phase telemetry for cache build and publish: video open,
   decode, crop extraction, local write, PRFS copy, manifest publish, and
   validation.

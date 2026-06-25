@@ -1,7 +1,10 @@
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import h5py
+import pytest
 
 from fisheye.utils import import_recordings_training as mod
 
@@ -58,6 +61,26 @@ def test_build_plans_targets_training_zarr_and_computes_frame_step(tmp_path: Pat
     assert plan.estimated_sampled_frames == 200
     assert plan.source_frame_count == 139_877
     assert plan.frame_count_source == "recording_manifest.video_streams.full.frame_count"
+
+
+def test_build_plans_can_require_source_frame_count_for_pynvvc(tmp_path: Path) -> None:
+    _write_recording(tmp_path, "rec_missing_count_GoodCopBadCop")
+
+    plans = mod._build_plans(
+        tmp_path,
+        recursive=False,
+        skip_existing=True,
+        check_stimulus=False,
+        requested_frame_step=10,
+        target_sampled_frames=None,
+        skip_tail_frames=0,
+        path_contains="GoodCopBadCop",
+        require_source_frame_count=True,
+    )
+
+    assert len(plans) == 1
+    assert plans[0].status == "missing"
+    assert "source frame count" in (plans[0].reason or "")
 
 
 def test_build_plans_reads_legacy_external_summary_frame_count(tmp_path: Path) -> None:
@@ -143,3 +166,62 @@ def test_build_plans_limit_applies_after_path_filter(tmp_path: Path) -> None:
 
     assert len(plans) == 1
     assert plans[0].recording_dir == target
+
+
+def test_run_import_uses_pynvvc_backend_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    rec = _write_recording(tmp_path, "rec_pynvvc_GoodCopBadCop", frame_count=100)
+    plan = mod._build_plans(
+        tmp_path,
+        recursive=False,
+        skip_existing=True,
+        check_stimulus=False,
+        requested_frame_step=10,
+        target_sampled_frames=None,
+        skip_tail_frames=0,
+        path_contains="GoodCopBadCop",
+        require_source_frame_count=True,
+    )[0]
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], check: bool = False) -> subprocess.CompletedProcess:
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+    success, returncode = mod._run_import(
+        plan,
+        config_path=Path("configs/fisheye/import_local.yaml"),
+        overwrite=False,
+        skip_tail_frames=0,
+        decode_backend=mod.DECODE_BACKEND_PYNVVC_LUMA,
+        gpu_id=2,
+    )
+
+    assert success is True
+    assert returncode == 0
+    cmd = calls[0]
+    assert cmd[:3] == [sys.executable, "-m", "fisheye.utils.import_sampled_training_pynvvc"]
+    assert str(rec / "cams" / "Cam2010093_demo.mp4") in cmd
+    assert "--source-frame-count" in cmd
+    assert "100" in cmd
+    assert "--frame-step" in cmd
+    assert "10" in cmd
+    assert "--gpu-id" in cmd
+    assert "2" in cmd
+
+
+def test_legacy_decord_apply_requires_explicit_ack(tmp_path: Path) -> None:
+    _write_recording(tmp_path, "rec_legacy_GoodCopBadCop", frame_count=100)
+
+    rc = mod.main([
+        str(tmp_path),
+        "--path-contains",
+        "GoodCopBadCop",
+        "--decode-backend",
+        mod.DECODE_BACKEND_LEGACY_DECORD,
+        "--apply",
+        "--no-log",
+    ])
+
+    assert rc == 2

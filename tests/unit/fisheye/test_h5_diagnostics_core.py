@@ -26,6 +26,11 @@ FRAME_METADATA_DTYPE = np.dtype([
     ("triggering_camera_frame_id", "<i8"),
     ("timestamp_ns", "<i8"),
 ])
+FRAME_METADATA_EPOCH_DTYPE = np.dtype([
+    ("stimulus_frame_num", "<i8"),
+    ("triggering_camera_frame_id", "<i8"),
+    ("timestamp_ns_epoch", "<i8"),
+])
 CHASER_DTYPE = np.dtype([
     ("stimulus_frame_num", "<i8"),
     ("chaser_pos_x", "<f4"),
@@ -45,18 +50,38 @@ def _write_scalar_text(group: h5py.Group, name: str, payload: str) -> None:
     group.create_dataset(name, data=np.bytes_(payload))
 
 
-def _build_frame_metadata(camera_counts: list[int]) -> np.ndarray:
+def _build_frame_metadata(
+    camera_counts: list[int],
+    *,
+    dtype: np.dtype = FRAME_METADATA_DTYPE,
+    timestamp_step_ns: int = 10,
+) -> np.ndarray:
     rows = sum(camera_counts)
-    frame_metadata = np.zeros(rows, dtype=FRAME_METADATA_DTYPE)
+    frame_metadata = np.zeros(rows, dtype=dtype)
     stimulus_frame = 0
     offset = 0
+    timestamp_field = "timestamp_ns_epoch" if "timestamp_ns_epoch" in dtype.names else "timestamp_ns"
     for camera_frame_id, count in enumerate(camera_counts, start=1):
         end = offset + count
         frame_metadata["stimulus_frame_num"][offset:end] = np.arange(stimulus_frame, stimulus_frame + count, dtype=np.int64)
         frame_metadata["triggering_camera_frame_id"][offset:end] = camera_frame_id
-        frame_metadata["timestamp_ns"][offset:end] = np.arange(offset, end, dtype=np.int64) * 10
+        frame_metadata[timestamp_field][offset:end] = np.arange(offset, end, dtype=np.int64) * int(timestamp_step_ns)
         stimulus_frame += count
         offset = end
+    return frame_metadata
+
+
+def _build_frame_metadata_for_camera_ids(
+    camera_frame_ids: list[int],
+    *,
+    dtype: np.dtype = FRAME_METADATA_EPOCH_DTYPE,
+    timestamp_step_ns: int = 8_333_333,
+) -> np.ndarray:
+    frame_metadata = np.zeros(len(camera_frame_ids), dtype=dtype)
+    timestamp_field = "timestamp_ns_epoch" if "timestamp_ns_epoch" in dtype.names else "timestamp_ns"
+    frame_metadata["stimulus_frame_num"] = np.arange(len(camera_frame_ids), dtype=np.int64)
+    frame_metadata["triggering_camera_frame_id"] = np.asarray(camera_frame_ids, dtype=np.int64)
+    frame_metadata[timestamp_field] = np.arange(len(camera_frame_ids), dtype=np.int64) * int(timestamp_step_ns)
     return frame_metadata
 
 
@@ -66,6 +91,10 @@ def _create_recording_h5(
     include_frame_metadata: bool = True,
     malformed_tracking: bool = False,
     camera_counts: list[int] | None = None,
+    frame_metadata_dtype: np.dtype = FRAME_METADATA_DTYPE,
+    camera_frame_ids: list[int] | None = None,
+    camera_frame_rate_hz: float | None = None,
+    timestamp_step_ns: int = 10,
 ) -> Path:
     recording_dir = base / "2026-01-01T00-00-00Z_example_DefaultScreen"
     raw_dir = recording_dir / "raw"
@@ -92,7 +121,26 @@ def _create_recording_h5(
         if include_frame_metadata:
             counts = camera_counts or [2, 2, 2]
             video_metadata = h5.require_group("video_metadata")
-            video_metadata.create_dataset("frame_metadata", data=_build_frame_metadata(counts))
+            if camera_frame_ids is not None:
+                frame_metadata = _build_frame_metadata_for_camera_ids(
+                    camera_frame_ids,
+                    dtype=frame_metadata_dtype,
+                    timestamp_step_ns=timestamp_step_ns,
+                )
+            else:
+                frame_metadata = _build_frame_metadata(
+                    counts,
+                    dtype=frame_metadata_dtype,
+                    timestamp_step_ns=timestamp_step_ns,
+                )
+            video_metadata.create_dataset(
+                "frame_metadata",
+                data=frame_metadata,
+            )
+
+        if camera_frame_rate_hz is not None:
+            camera_group = h5.require_group("associated_cameras/camera_metadata/2010093")
+            camera_group.attrs["camera_frame_rate_configured_hz"] = float(camera_frame_rate_hz)
 
         tracking = h5.require_group("tracking_data")
         if malformed_tracking:
@@ -142,6 +190,55 @@ def test_h5_report_passes_on_minimal_palette_importable_recording(tmp_path: Path
     assert report.tracking.datasets["chaser_states"].status == "pass"
     assert report.snapshots.protocol_json_parseable is True
     assert report.enums.dataset_counts["events"] == 2
+
+
+def test_h5_report_passes_on_current_epoch_frame_metadata_timestamp(tmp_path: Path) -> None:
+    recording_dir = _create_recording_h5(tmp_path, frame_metadata_dtype=FRAME_METADATA_EPOCH_DTYPE)
+    report = build_h5_report(recording_dir)
+    assert report.overall_status == "pass"
+    assert report.core_status == "pass"
+    assert report.core.missing_frame_metadata_fields == []
+    assert report.frame_metadata.status == "pass"
+
+
+def test_h5_report_infers_fractional_stimulus_camera_ratio_from_metadata(tmp_path: Path) -> None:
+    recording_dir = _create_recording_h5(
+        tmp_path,
+        frame_metadata_dtype=FRAME_METADATA_EPOCH_DTYPE,
+        camera_counts=[1, 1, 1, 1, 2] * 5,
+        camera_frame_rate_hz=100.0,
+        timestamp_step_ns=8_333_333,
+    )
+    report = build_h5_report(recording_dir)
+    assert report.overall_status == "pass"
+    assert report.frame_metadata.status == "pass"
+    assert report.frame_metadata.expected_ratio_source == "inferred_from_timestamps_and_acquisition_metadata"
+    assert report.frame_metadata.inferred_camera_fps == 100.0
+    assert report.frame_metadata.inferred_stimulus_fps is not None
+    assert abs(report.frame_metadata.expected_ratio - 1.2) < 0.01
+    assert report.frame_metadata.ratio_warn_count == 0
+    assert not any(f.code == "h5.frame_metadata_alignment_irregular" for f in report.findings)
+
+
+def test_h5_report_infers_high_camera_fps_sparse_metadata_cadence(tmp_path: Path) -> None:
+    camera_ids = [1, 7, 13, 18, 24, 30, 36, 42, 47, 53, 59, 65]
+    recording_dir = _create_recording_h5(
+        tmp_path,
+        frame_metadata_dtype=FRAME_METADATA_EPOCH_DTYPE,
+        camera_frame_ids=camera_ids,
+        camera_frame_rate_hz=700.0,
+        timestamp_step_ns=8_333_333,
+    )
+    report = build_h5_report(recording_dir)
+    assert report.overall_status == "pass"
+    assert report.frame_metadata.status == "pass"
+    assert report.frame_metadata.expected_ratio_source == "inferred_from_timestamps_and_acquisition_metadata"
+    assert report.frame_metadata.expected_ratio < 1.0
+    assert report.frame_metadata.missing_camera_frames > 0
+    assert report.frame_metadata.mean_camera_frame_step is not None
+    assert report.frame_metadata.expected_camera_frame_step is not None
+    assert abs(report.frame_metadata.mean_camera_frame_step - report.frame_metadata.expected_camera_frame_step) < 0.5
+    assert not any(f.code == "h5.frame_metadata_alignment_irregular" for f in report.findings)
 
 
 def test_h5_report_fails_when_frame_metadata_missing_for_palette_import(tmp_path: Path) -> None:

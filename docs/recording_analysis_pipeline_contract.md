@@ -278,6 +278,12 @@ provenance.
     additionally upserts `recording_step_status.dish_mask=ok` for the matching
     dataset. Without `--registry`, the next registry maintenance/backfill pass
     can discover the Zarr attr.
+  - To step through registry datasets that are still missing masks:
+    `scripts/py -m fisheye.tune.mask_tuner --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite --path-contains GoodCopBadCop --missing-only`
+  - Add `--list-only` to print the selected zarrs without opening the GUI.
+    When splitting this command across lines, put each trailing `\` at the end
+    of the continued line; a standalone `\` line does not continue the previous
+    command.
 - Batch import-only apply for newly organized recordings:
   - `scripts/py -m fisheye.utils.import_organized_recordings_analysis --organize-log "$ORGANIZE_LOG" --registry /nvme1/palette_registry.sqlite --apply`
   - This creates/updates analysis zarrs and keeps registry-backed review lists

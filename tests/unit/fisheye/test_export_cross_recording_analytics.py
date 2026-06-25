@@ -8,6 +8,24 @@ import pyarrow.parquet as pq
 import zarr
 
 from fisheye.analysis.chaser_distance_runs import write_chaser_distance_run
+from fisheye.analysis.chaser_egocentric_bearing import (
+    build_chaser_egocentric_bearing_result,
+    write_chaser_egocentric_bearing_component,
+)
+from fisheye.analysis.cra_primary_endpoint import (
+    DEFAULT_COMPONENT_NAME as DEFAULT_CRA_COMPONENT_NAME,
+    build_cra_primary_endpoint_result,
+    write_cra_primary_endpoint_component,
+)
+from fisheye.analysis.cra_near_field import (
+    DEFAULT_COMPONENT_NAME as DEFAULT_CRA_NEAR_FIELD_COMPONENT_NAME,
+    build_cra_near_field_result,
+    write_cra_near_field_component,
+)
+from fisheye.analysis.goodcopbadcop_epoch_behavior_summary import (
+    build_goodcopbadcop_epoch_behavior_summary_result,
+    write_goodcopbadcop_epoch_behavior_summary_component,
+)
 from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
 from fisheye.analysis.stimulus_response import (
     ConcentricStepData,
@@ -25,10 +43,132 @@ from tests.unit.fisheye.test_goodcopbadcop_interactive import (
     _make_archive_with_detection_occupancy,
     _make_chaser_result,
 )
+from tests.unit.fisheye.test_chaser_egocentric_bearing import _add_track_kinematics_run
+from tests.unit.fisheye.test_cra_near_field import _add_circle_geometry
 
 
 def _array(group, name: str, values) -> None:
     group.create_array(name, data=np.asarray(values), overwrite=True)
+
+
+def _add_goodcopbadcop_cra_protocol_metadata(zarr_path: Path) -> None:
+    root = zarr.open_group(str(zarr_path), mode="a")
+    stimulus = root["analysis/stimulus_runs/stimulus_1"]
+    stimulus.attrs["protocol_json"] = json.dumps(
+        {
+            "steps": [
+                {
+                    "parameters": {
+                        "position_transition_duration_s": 0.1,
+                        "pre_period_duration_s": 0.3,
+                        "training_period_duration_s": 0.3,
+                        "post_period_duration_s": 0.3,
+                        "pixels_per_mm": 2.0,
+                        "chasers": [
+                            {
+                                "enable_chase": True,
+                                "behavior_mode": 0,
+                                "color_r": 1.0,
+                                "color_g": 0.0,
+                                "color_b": 0.0,
+                                "color_a": 1.0,
+                                "start_position_preset": "top_left",
+                                "end_position_preset": "bottom_right",
+                            },
+                            {
+                                "enable_chase": False,
+                                "behavior_mode": 1,
+                                "color_r": 0.0,
+                                "color_g": 0.0,
+                                "color_b": 1.0,
+                                "color_a": 1.0,
+                                "start_position_preset": "top_right",
+                                "end_position_preset": "bottom_left",
+                            },
+                        ],
+                    }
+                }
+            ]
+        }
+    )
+    coords = stimulus.require_group("stimulus_coordinates")
+    if "arena_1" in coords:
+        del coords["arena_1"]
+    arena = coords.create_group("arena_1")
+    arena.attrs.update(
+        {
+            "texture_width_px": 20.0,
+            "texture_height_px": 20.0,
+            "texture_origin": "top_left",
+        }
+    )
+
+
+def _add_goodcopbadcop_swim_bout_run(zarr_path: Path) -> None:
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    track = root["analysis/track_kinematics_runs/offline/tk_1/tracks/id_0"]
+    track.create_array(
+        "speed_filtered_mm",
+        data=np.asarray([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0], dtype=np.float32),
+        chunks=(8,),
+        overwrite=True,
+    )
+    tk_run = root["analysis/track_kinematics_runs/offline/tk_1"]
+    tk_run.attrs["fps"] = 10.0
+    tk_run.attrs["pixel_to_mm"] = 0.02
+
+    parent = root["analysis"].require_group("swim_bout_runs")
+    parent.attrs["latest"] = "bouts_1"
+    run = parent.create_group("bouts_1")
+    run.attrs.update(
+        {
+            "default_level": "filtered",
+            "source_track_kinematics_run": "tk_1",
+            "track_id": 0,
+            "detection_method": "threshold",
+        }
+    )
+    level = run.create_group("speed_filtered")
+    level.attrs["n_bouts"] = 4
+    bouts = np.zeros(
+        4,
+        dtype=[
+            ("bout_id", np.int32),
+            ("peak_time_s", np.float64),
+            ("start_time_s", np.float64),
+            ("end_time_s", np.float64),
+            ("start_frame", np.int64),
+            ("end_frame", np.int64),
+            ("duration_s", np.float64),
+            ("path_length_mm", np.float64),
+        ],
+    )
+    bouts["bout_id"] = [0, 1, 2, 3]
+    bouts["peak_time_s"] = [0.10, 0.20, 0.45, 0.70]
+    bouts["start_time_s"] = [0.08, 0.18, 0.42, 0.68]
+    bouts["end_time_s"] = [0.12, 0.24, 0.50, 0.76]
+    bouts["start_frame"] = [0, 1, 4, 7]
+    bouts["end_frame"] = [1, 2, 5, 8]
+    bouts["duration_s"] = [0.04, 0.06, 0.08, 0.08]
+    bouts["path_length_mm"] = [0.2, 0.3, 0.4, 0.5]
+    write_columnar_dataset(level, "bouts", bouts, {"n_bouts": 4})
+
+    intervals = np.zeros(
+        2,
+        dtype=[
+            ("interval_id", np.int32),
+            ("valid", bool),
+            ("prev_end_time_s", np.float64),
+            ("next_start_time_s", np.float64),
+            ("interval_s", np.float64),
+        ],
+    )
+    intervals["interval_id"] = [0, 1]
+    intervals["valid"] = [True, True]
+    intervals["prev_end_time_s"] = [0.12, 0.50]
+    intervals["next_start_time_s"] = [0.18, 0.68]
+    intervals["interval_s"] = [0.06, 0.18]
+    write_columnar_dataset(level, "inter_bout_intervals", intervals, {"n_intervals": 2})
 
 
 def _make_source_zarr(path: Path) -> Path:
@@ -532,7 +672,39 @@ def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) ->
 
 def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: Path) -> None:
     source = _make_archive_with_detection_occupancy(tmp_path)
+    _add_goodcopbadcop_cra_protocol_metadata(source)
     write_chaser_distance_run(source, _make_chaser_result(source), overwrite=True)
+    cra_result = build_cra_primary_endpoint_result(source, chaser_distance_run="chaser_distance_1")
+    write_cra_primary_endpoint_component(source, cra_result, overwrite=True)
+    _add_circle_geometry(source)
+    near_field_result = build_cra_near_field_result(
+        source,
+        chaser_distance_run="chaser_distance_1",
+        cra_primary_endpoint_component="object_relative_pre_post_v1",
+        r_zone_mm=2.0,
+        r_in_mm=2.0,
+        r_out_mm=3.0,
+        percentile_values=(5.0, 10.0),
+        radial_bin_edges_mm=(0.0, 2.0, 4.0, 8.0),
+        cdf_thresholds_mm=(2.0, 4.0),
+        perimeter_band_mm=2.0,
+    )
+    write_cra_near_field_component(source, near_field_result, overwrite=True)
+    _add_track_kinematics_run(source)
+    _add_goodcopbadcop_swim_bout_run(source)
+    epoch_behavior_result = build_goodcopbadcop_epoch_behavior_summary_result(
+        source,
+        chaser_distance_run="chaser_distance_1",
+    )
+    write_goodcopbadcop_epoch_behavior_summary_component(source, epoch_behavior_result, overwrite=True)
+    egocentric_result = build_chaser_egocentric_bearing_result(
+        source,
+        chaser_distance_run="chaser_distance_1",
+        track_kinematics_run="tk_1",
+        distance_bin_width_mm=2.0,
+        bearing_bin_width_deg=90.0,
+    )
+    write_chaser_egocentric_bearing_component(source, egocentric_result, overwrite=True)
     output = tmp_path / "exports" / "palette_analytics"
 
     manifest = export_sources(
@@ -542,14 +714,42 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
         tables=(
             "goodcopbadcop_spatial_occupancy_zones",
             "goodcopbadcop_chaser_epoch_summary",
+            "goodcopbadcop_epoch_behavior_summary",
+            "goodcopbadcop_epoch_bout_distribution",
+            "goodcopbadcop_epoch_center_distance_histogram",
+            "goodcopbadcop_epoch_speed_summary",
+            "goodcopbadcop_speed_distance_bins",
             "goodcopbadcop_chaser_distance_histogram",
+            "goodcopbadcop_cra_primary_endpoint_summary",
+            "goodcopbadcop_cra_primary_endpoint_object_phase",
+            "goodcopbadcop_cra_quadrant_occupancy",
+            "goodcopbadcop_cra_near_field_summary",
+            "goodcopbadcop_cra_near_field_object_phase",
+            "goodcopbadcop_cra_near_field_radial_density",
+            "goodcopbadcop_cra_near_field_distance_cdf",
+            "goodcopbadcop_egocentric_epoch_summary",
+            "goodcopbadcop_egocentric_distance_bearing_histogram",
         ),
         jobs=1,
     )
 
     assert manifest["row_counts_by_table"]["goodcopbadcop_spatial_occupancy_zones"] == 12
     assert manifest["row_counts_by_table"]["goodcopbadcop_chaser_epoch_summary"] == 6
+    assert manifest["row_counts_by_table"]["goodcopbadcop_epoch_behavior_summary"] == 3
+    assert manifest["row_counts_by_table"]["goodcopbadcop_epoch_bout_distribution"] == 4
+    assert manifest["row_counts_by_table"]["goodcopbadcop_epoch_center_distance_histogram"] == 9
+    assert manifest["row_counts_by_table"]["goodcopbadcop_epoch_speed_summary"] == 3
+    assert manifest["row_counts_by_table"]["goodcopbadcop_speed_distance_bins"] == 18
     assert manifest["row_counts_by_table"]["goodcopbadcop_chaser_distance_histogram"] == 18
+    assert manifest["row_counts_by_table"]["goodcopbadcop_cra_primary_endpoint_summary"] == 1
+    assert manifest["row_counts_by_table"]["goodcopbadcop_cra_primary_endpoint_object_phase"] == 4
+    assert manifest["row_counts_by_table"]["goodcopbadcop_cra_quadrant_occupancy"] == 8
+    assert manifest["row_counts_by_table"]["goodcopbadcop_cra_near_field_summary"] == 1
+    assert manifest["row_counts_by_table"]["goodcopbadcop_cra_near_field_object_phase"] == 4
+    assert manifest["row_counts_by_table"]["goodcopbadcop_cra_near_field_radial_density"] == 12
+    assert manifest["row_counts_by_table"]["goodcopbadcop_cra_near_field_distance_cdf"] == 8
+    assert manifest["row_counts_by_table"]["goodcopbadcop_egocentric_epoch_summary"] == 6
+    assert manifest["row_counts_by_table"]["goodcopbadcop_egocentric_distance_bearing_histogram"] == 72
 
     spatial_rows = _read_dataset(
         output,
@@ -600,6 +800,104 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
     assert post_chaser_1["p50_distance_mm"] == 6.0
     np.testing.assert_allclose(post_chaser_1["duration_s"], 0.3)
 
+    epoch_behavior_rows = _read_dataset(
+        output,
+        "goodcopbadcop_epoch_behavior_summary",
+        "goodcopbadcop_export",
+    )
+    assert len(epoch_behavior_rows) == 3
+    pre_behavior = next(row for row in epoch_behavior_rows if row["window_label"] == "pre_event")
+    assert pre_behavior["epoch_behavior_component"] == "kinematics_bouts_v1"
+    assert pre_behavior["epoch_behavior_path"].endswith("/epoch_behavior_summary/kinematics_bouts_v1")
+    assert pre_behavior["source_swim_bout_run"] == "bouts_1"
+    assert pre_behavior["source_track_kinematics_run"] == "tk_1"
+    assert pre_behavior["source_speed_level"] == "filtered"
+    assert pre_behavior["bout_count"] == 2
+    assert "mean_bout_duration_s" in pre_behavior
+    assert "mean_bout_path_length_mm" in pre_behavior
+    assert "mean_bout_net_heading_change_deg" in pre_behavior
+    assert "mean_abs_bout_net_heading_change_deg" in pre_behavior
+    assert "wall_fraction" in pre_behavior
+    assert pre_behavior["inter_bout_interval_count"] == 1
+    np.testing.assert_allclose(pre_behavior["mean_inter_bout_interval_s"], 0.06)
+    np.testing.assert_allclose(pre_behavior["mean_speed_mm_s"], 20.0)
+
+    epoch_bout_rows = _read_dataset(
+        output,
+        "goodcopbadcop_epoch_bout_distribution",
+        "goodcopbadcop_export",
+    )
+    assert len(epoch_bout_rows) == 4
+    pre_bout_rows = [row for row in epoch_bout_rows if row["window_label"] == "pre_event"]
+    assert len(pre_bout_rows) == 2
+    assert pre_bout_rows[0]["epoch_behavior_component"] == "kinematics_bouts_v1"
+    assert pre_bout_rows[0]["source_swim_bout_run"] == "bouts_1"
+    assert pre_bout_rows[0]["source_track_kinematics_run"] == "tk_1"
+    assert pre_bout_rows[0]["bout_source_row"] == 0
+    np.testing.assert_allclose(
+        [row["bout_duration_s"] for row in pre_bout_rows],
+        [0.04, 0.06],
+    )
+    np.testing.assert_allclose(
+        [row["bout_path_length_mm"] for row in pre_bout_rows],
+        [0.2, 0.3],
+    )
+    assert "bout_net_heading_change_deg" in pre_bout_rows[0]
+    assert "abs_bout_net_heading_change_deg" in pre_bout_rows[0]
+
+    center_hist_rows = _read_dataset(
+        output,
+        "goodcopbadcop_epoch_center_distance_histogram",
+        "goodcopbadcop_export",
+    )
+    assert len(center_hist_rows) == 9
+    pre_center_hist = [row for row in center_hist_rows if row["window_label"] == "pre_event"]
+    assert sum(row["hist_count"] for row in pre_center_hist) == 3
+    assert pre_center_hist[0]["geometry_status"] == "circle"
+    assert pre_center_hist[0]["arena_radius_mm"] == 7.5
+
+    speed_rows = _read_dataset(
+        output,
+        "goodcopbadcop_epoch_speed_summary",
+        "goodcopbadcop_export",
+    )
+    assert len(speed_rows) == 3
+    pre_speed = next(row for row in speed_rows if row["window_label"] == "pre_event")
+    assert pre_speed["speed_sample_count"] == 2
+    np.testing.assert_allclose(pre_speed["mean_speed_mm_s"], 5.0)
+    assert pre_speed["valid_frame_count"] == 3
+    assert pre_speed["source_position_path"].endswith("/positions/fish_centroid_arena_xy")
+    training_speed = next(row for row in speed_rows if row["window_label"] == "training_event")
+    assert training_speed["speed_sample_count"] == 0
+    assert training_speed["mean_speed_mm_s"] is None
+    np.testing.assert_allclose(training_speed["tracking_dropout_fraction"], 1.0 / 3.0)
+
+    speed_distance_rows = _read_dataset(
+        output,
+        "goodcopbadcop_speed_distance_bins",
+        "goodcopbadcop_export",
+    )
+    pre_chaser_0_bin_0_speed = next(
+        row
+        for row in speed_distance_rows
+        if row["window_label"] == "pre_event"
+        and row["chaser_index"] == 0
+        and row["distance_bin_index"] == 0
+    )
+    assert pre_chaser_0_bin_0_speed["speed_sample_count"] == 2
+    np.testing.assert_allclose(pre_chaser_0_bin_0_speed["mean_speed_mm_s"], 5.0)
+    np.testing.assert_allclose(pre_chaser_0_bin_0_speed["speed_sum_mm_s"], 10.0)
+    assert pre_chaser_0_bin_0_speed["source_distance_path"].endswith("/distances/distance_mm")
+    training_chaser_0_bin_0_speed = next(
+        row
+        for row in speed_distance_rows
+        if row["window_label"] == "training_event"
+        and row["chaser_index"] == 0
+        and row["distance_bin_index"] == 0
+    )
+    assert training_chaser_0_bin_0_speed["speed_sample_count"] == 0
+    assert training_chaser_0_bin_0_speed["mean_speed_mm_s"] is None
+
     histogram_rows = _read_dataset(
         output,
         "goodcopbadcop_chaser_distance_histogram",
@@ -618,6 +916,224 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
     assert pre_chaser_0_bin_0["hist_count"] == 1
     assert pre_chaser_0_bin_0["valid_sample_count"] == 3
     assert len({row["source_lineage_hash"] for row in histogram_rows}) == 18
+
+    cra_summary_rows = _read_dataset(
+        output,
+        "goodcopbadcop_cra_primary_endpoint_summary",
+        "goodcopbadcop_export",
+    )
+    assert len(cra_summary_rows) == 1
+    cra_summary = cra_summary_rows[0]
+    assert cra_summary["export_run_id"] == "goodcopbadcop_export"
+    assert cra_summary["cra_primary_endpoint_component"] == DEFAULT_CRA_COMPONENT_NAME
+    assert cra_summary["cra_primary_endpoint_schema_id"] == "palette.goodcopbadcop.cra_primary_endpoint.v1"
+    assert cra_summary["source_component_schema_id"] == "palette.goodcopbadcop.cra_primary_endpoint.v1"
+    assert len(cra_summary["source_component_fingerprint"]) == 64
+    assert cra_summary["source_cra_primary_endpoint_path"].endswith(
+        f"/cra_primary_endpoint/{DEFAULT_CRA_COMPONENT_NAME}"
+    )
+    assert cra_summary["source_chaser_distance_run"] == "chaser_distance_1"
+    assert cra_summary["fish_id"] == "0"
+    assert cra_summary["aggressive_color"] == "#ff0000"
+    assert cra_summary["benign_color"] == "#0000ff"
+    assert cra_summary["pre_aggressive_quadrant"] == "top_left"
+    assert cra_summary["post_aggressive_quadrant"] == "bottom_right"
+    assert cra_summary["pre_benign_quadrant"] == "top_right"
+    assert cra_summary["post_benign_quadrant"] == "bottom_left"
+    np.testing.assert_allclose(cra_summary["delta_occ_agg"], -1.0)
+    np.testing.assert_allclose(cra_summary["occ_post_benign"], 1.0)
+    assert len(cra_summary["source_lineage_hash"]) == 64
+
+    cra_object_phase_rows = _read_dataset(
+        output,
+        "goodcopbadcop_cra_primary_endpoint_object_phase",
+        "goodcopbadcop_export",
+    )
+    post_aggressive = next(
+        row
+        for row in cra_object_phase_rows
+        if row["phase_label"] == "post_static" and row["object_role"] == "aggressive"
+    )
+    assert post_aggressive["export_run_id"] == "goodcopbadcop_export"
+    assert post_aggressive["cra_primary_endpoint_component"] == DEFAULT_CRA_COMPONENT_NAME
+    assert post_aggressive["source_cra_primary_endpoint_path"] == cra_summary["source_cra_primary_endpoint_path"]
+    assert post_aggressive["source_component_fingerprint"] == cra_summary["source_component_fingerprint"]
+    assert post_aggressive["object_index"] == 0
+    assert post_aggressive["raw_color_hex"] == "#ff0000"
+    assert post_aggressive["enable_chase"] is True
+    assert post_aggressive["source_window_label"] == "post_event"
+    assert post_aggressive["effective_start_frame"] == 7
+    assert post_aggressive["effective_end_frame"] == 8
+    assert post_aggressive["settle_excluded_frame_count"] == 1
+    assert post_aggressive["object_quadrant_label"] == "bottom_right"
+    np.testing.assert_allclose(post_aggressive["object_x_px"], 15.0)
+    np.testing.assert_allclose(post_aggressive["object_y_px"], 15.0)
+    np.testing.assert_allclose(post_aggressive["occupancy_fraction"], 0.0)
+    assert post_aggressive["valid_frame_count"] == 2
+    assert len({row["source_lineage_hash"] for row in cra_object_phase_rows}) == 4
+
+    cra_quadrant_rows = _read_dataset(
+        output,
+        "goodcopbadcop_cra_quadrant_occupancy",
+        "goodcopbadcop_export",
+    )
+    assert len(cra_quadrant_rows) == 8
+    pre_chaser_quadrant = next(
+        row
+        for row in cra_quadrant_rows
+        if row["phase_label"] == "pre_static" and row["is_chaser_quadrant"] is True
+    )
+    assert pre_chaser_quadrant["quadrant_id"] == "top_left"
+    assert pre_chaser_quadrant["chaser_quadrant_label"] == "top_left"
+    np.testing.assert_allclose(pre_chaser_quadrant["occupancy_fraction"], 1.0)
+    assert pre_chaser_quadrant["quadrant_valid_frame_count"] == 3
+    assert pre_chaser_quadrant["source_cra_primary_endpoint_path"] == cra_summary["source_cra_primary_endpoint_path"]
+    post_chaser_quadrant = next(
+        row
+        for row in cra_quadrant_rows
+        if row["phase_label"] == "post_static" and row["is_chaser_quadrant"] is True
+    )
+    assert post_chaser_quadrant["quadrant_id"] == "bottom_right"
+    assert post_chaser_quadrant["chaser_quadrant_label"] == "bottom_right"
+    assert post_chaser_quadrant["effective_start_frame"] == 7
+    np.testing.assert_allclose(post_chaser_quadrant["occupancy_fraction"], 0.0)
+    for phase_label in ("pre_static", "post_static"):
+        total = sum(
+            float(row["occupancy_fraction"])
+            for row in cra_quadrant_rows
+            if row["phase_label"] == phase_label
+        )
+        np.testing.assert_allclose(total, 1.0)
+    assert len({row["source_lineage_hash"] for row in cra_quadrant_rows}) == 8
+
+    near_field_summary_rows = _read_dataset(
+        output,
+        "goodcopbadcop_cra_near_field_summary",
+        "goodcopbadcop_export",
+    )
+    assert len(near_field_summary_rows) == 1
+    near_field_summary = near_field_summary_rows[0]
+    assert near_field_summary["cra_near_field_component"] == DEFAULT_CRA_NEAR_FIELD_COMPONENT_NAME
+    assert near_field_summary["cra_near_field_schema_id"] == "palette.goodcopbadcop.cra_near_field.v1"
+    assert near_field_summary["source_cra_primary_endpoint_path"] == cra_summary["source_cra_primary_endpoint_path"]
+    assert near_field_summary["geometry_status"] == "circle"
+    assert near_field_summary["arena_shape"] == "circle"
+    np.testing.assert_allclose(near_field_summary["nearzone_occ_delta_agg"], -1.0)
+    np.testing.assert_allclose(near_field_summary["nearzone_occ_specificity"], -1.0)
+    assert len(near_field_summary["source_lineage_hash"]) == 64
+
+    near_field_object_phase_rows = _read_dataset(
+        output,
+        "goodcopbadcop_cra_near_field_object_phase",
+        "goodcopbadcop_export",
+    )
+    near_field_post_aggressive = next(
+        row
+        for row in near_field_object_phase_rows
+        if row["phase_label"] == "post_static" and row["object_role"] == "aggressive"
+    )
+    assert near_field_post_aggressive["export_run_id"] == "goodcopbadcop_export"
+    assert near_field_post_aggressive["cra_near_field_component"] == DEFAULT_CRA_NEAR_FIELD_COMPONENT_NAME
+    assert near_field_post_aggressive["source_cra_near_field_path"] == near_field_summary["source_cra_near_field_path"]
+    assert near_field_post_aggressive["source_cra_primary_endpoint_path"] == cra_summary["source_cra_primary_endpoint_path"]
+    assert near_field_post_aggressive["object_index"] == 0
+    assert near_field_post_aggressive["raw_color_hex"] == "#ff0000"
+    assert near_field_post_aggressive["phase_label"] == "post_static"
+    np.testing.assert_allclose(near_field_post_aggressive["near_zone_occupancy_fraction"], 0.0)
+    np.testing.assert_allclose(near_field_post_aggressive["approach_p05_mm"], float(near_field_result.approach_percentile_mm[1, 0, 0]))
+    assert near_field_post_aggressive["valid_distance_count"] == 2
+    assert len({row["source_lineage_hash"] for row in near_field_object_phase_rows}) == 4
+
+    near_field_radial_rows = _read_dataset(
+        output,
+        "goodcopbadcop_cra_near_field_radial_density",
+        "goodcopbadcop_export",
+    )
+    assert len(near_field_radial_rows) == 12
+    pre_radial_aggressive = next(
+        row
+        for row in near_field_radial_rows
+        if row["phase_label"] == "pre_static" and row["object_role"] == "aggressive" and row["radial_bin_index"] == 0
+    )
+    assert pre_radial_aggressive["cra_near_field_component"] == DEFAULT_CRA_NEAR_FIELD_COMPONENT_NAME
+    assert pre_radial_aggressive["source_cra_primary_endpoint_path"] == cra_summary["source_cra_primary_endpoint_path"]
+    assert pre_radial_aggressive["radial_bin_left_mm"] == 0.0
+    assert pre_radial_aggressive["radial_bin_right_mm"] == 2.0
+    assert pre_radial_aggressive["radial_density_per_mm2"] is not None
+
+    near_field_cdf_rows = _read_dataset(
+        output,
+        "goodcopbadcop_cra_near_field_distance_cdf",
+        "goodcopbadcop_export",
+    )
+    assert len(near_field_cdf_rows) == 8
+    pre_cdf_aggressive = next(
+        row
+        for row in near_field_cdf_rows
+        if row["phase_label"] == "pre_static" and row["object_role"] == "aggressive" and row["cdf_threshold_index"] == 0
+    )
+    assert pre_cdf_aggressive["distance_threshold_mm"] == 2.0
+    assert pre_cdf_aggressive["cdf_fraction"] is not None
+    assert pre_cdf_aggressive["source_cra_near_field_path"] == near_field_summary["source_cra_near_field_path"]
+
+    egocentric_rows = _read_dataset(
+        output,
+        "goodcopbadcop_egocentric_epoch_summary",
+        "goodcopbadcop_export",
+    )
+    post_egocentric_chaser_1 = next(
+        row
+        for row in egocentric_rows
+        if row["window_label"] == "post_event" and row["chaser_index"] == 1
+    )
+    assert post_egocentric_chaser_1["egocentric_component_name"] == "track_offline_tk_1_id_0_smoothed"
+    assert post_egocentric_chaser_1["egocentric_component_path"].endswith(
+        "/egocentric_bearing/track_offline_tk_1_id_0_smoothed"
+    )
+    assert post_egocentric_chaser_1["source_track_kinematics_run"] == "tk_1"
+    assert post_egocentric_chaser_1["source_track_kinematics_scope"] == "offline"
+    assert post_egocentric_chaser_1["source_track_kinematics_track_id"] == 0
+    assert post_egocentric_chaser_1["source_heading_array"].endswith(
+        "/tracks/id_0/smoothed_heading_degrees"
+    )
+    assert post_egocentric_chaser_1["heading_level"] == "smoothed"
+    assert post_egocentric_chaser_1["valid_frame_count"] == int(
+        egocentric_result.epoch_valid_frame_count[2, 1]
+    )
+    np.testing.assert_allclose(
+        post_egocentric_chaser_1["mean_alignment_cos"],
+        float(egocentric_result.epoch_mean_alignment_cos[2, 1]),
+    )
+    assert post_egocentric_chaser_1["front_definition"] == "abs(bearing_deg) <= 45"
+
+    egocentric_histogram_rows = _read_dataset(
+        output,
+        "goodcopbadcop_egocentric_distance_bearing_histogram",
+        "goodcopbadcop_export",
+    )
+    pre_egocentric_chaser_0_bin = next(
+        row
+        for row in egocentric_histogram_rows
+        if row["window_label"] == "pre_event"
+        and row["chaser_index"] == 0
+        and row["distance_bin_index"] == 0
+        and row["bearing_bin_index"] == 0
+    )
+    assert pre_egocentric_chaser_0_bin["distance_bin_left_mm"] == 0.0
+    assert pre_egocentric_chaser_0_bin["distance_bin_right_mm"] == 2.0
+    assert pre_egocentric_chaser_0_bin["bearing_bin_left_deg"] == -180.0
+    assert pre_egocentric_chaser_0_bin["bearing_bin_right_deg"] == -90.0
+    assert pre_egocentric_chaser_0_bin["hist_count"] == int(
+        egocentric_result.histogram_counts[0, 0, 0, 0]
+    )
+    np.testing.assert_allclose(
+        pre_egocentric_chaser_0_bin["hist_probability"],
+        float(egocentric_result.histogram_probability[0, 0, 0, 0]),
+    )
+    assert pre_egocentric_chaser_0_bin["valid_sample_count"] == int(
+        egocentric_result.epoch_valid_frame_count[0, 0]
+    )
+    assert len({row["source_lineage_hash"] for row in egocentric_histogram_rows}) == 72
 
 
 def test_export_cross_recording_analytics_uses_bout_kinematics_source_refs_fallback(

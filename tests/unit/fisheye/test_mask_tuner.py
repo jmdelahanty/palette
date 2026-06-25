@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -195,3 +196,103 @@ def test_sync_registry_after_save_records_expected_payload(
         "array_name": "images_ds",
         "frame_index": 5,
     }
+
+
+def test_query_registry_dish_mask_candidates_filters_missing_analysis_paths(
+    tmp_path: Path,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    conn = sqlite3.connect(registry_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE datasets (
+                dataset_id TEXT PRIMARY KEY,
+                recording_id TEXT,
+                zarr_path TEXT,
+                zarr_use TEXT,
+                status TEXT
+            );
+            CREATE TABLE recording_step_status (
+                dataset_id TEXT,
+                step_name TEXT,
+                status TEXT
+            );
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO datasets (dataset_id, recording_id, zarr_path, zarr_use, status)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "missing_goodcop",
+                    "rec1",
+                    "/groups/recordings/arena_1_GoodCopBadCop/zarr/arena_1_analysis.zarr",
+                    "analysis",
+                    "ok",
+                ),
+                (
+                    "error_goodcop",
+                    "rec2",
+                    "/groups/recordings/arena_2_GoodCopBadCop/zarr/arena_2_analysis.zarr",
+                    "analysis",
+                    "ok",
+                ),
+                (
+                    "ok_goodcop",
+                    "rec3",
+                    "/groups/recordings/arena_3_GoodCopBadCop/zarr/arena_3_analysis.zarr",
+                    "analysis",
+                    "ok",
+                ),
+                (
+                    "other_name",
+                    "rec4",
+                    "/groups/recordings/other/zarr/other_analysis.zarr",
+                    "analysis",
+                    "ok",
+                ),
+                (
+                    "training_goodcop",
+                    "rec5",
+                    "/groups/recordings/arena_5_GoodCopBadCop/zarr/training.zarr",
+                    "training",
+                    "ok",
+                ),
+                (
+                    "deleted_goodcop",
+                    "rec6",
+                    "/groups/recordings/arena_6_GoodCopBadCop/zarr/deleted_analysis.zarr",
+                    "analysis",
+                    "deleted",
+                ),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO recording_step_status (dataset_id, step_name, status)
+            VALUES (?, ?, ?)
+            """,
+            [
+                ("error_goodcop", "dish_mask", "error"),
+                ("ok_goodcop", "dish_mask", "ok"),
+                ("missing_goodcop", "detect", "ok"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    candidates = mod._query_registry_dish_mask_candidates(
+        registry_path,
+        path_contains=("GoodCopBadCop",),
+        missing_only=True,
+    )
+
+    assert [candidate.dataset_id for candidate in candidates] == [
+        "missing_goodcop",
+        "error_goodcop",
+    ]
+    assert [candidate.dish_mask_status for candidate in candidates] == [None, "error"]

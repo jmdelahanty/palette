@@ -7,6 +7,7 @@ SOURCE_TYPE="refined"
 SOURCE_PATH=""
 SELECTION_POLICY=""
 FORCE_NEW=0
+DEFER_REGISTRY=0
 
 PUBLIC_CACHE_ROOT="/misc/public/palette_cache"
 PUBLIC_CACHE_DIR=""
@@ -55,6 +56,8 @@ Crop options:
   --source-path PATH                Explicit detection source path
   --selection-policy POLICY         Selection policy passed to crop_batch
   --force-new                       Force a new crop run even if a matching one exists
+  --defer-registry                  Do not let the crop job write the central registry;
+                                    use the batch registry finalizer instead
   --crop-queue NAME                 LSF queue for crop job (default: short)
   --crop-ncores N                   CPU slots for crop job (default: 4)
   --crop-mem-gb N                   Memory for crop job in GB (default: 32)
@@ -94,6 +97,7 @@ while [[ $# -gt 0 ]]; do
     --source-path) SOURCE_PATH="$2"; shift 2;;
     --selection-policy) SELECTION_POLICY="$2"; shift 2;;
     --force-new) FORCE_NEW=1; shift;;
+    --defer-registry) DEFER_REGISTRY=1; shift;;
     --crop-queue) CROP_QUEUE="$2"; shift 2;;
     --crop-ncores) CROP_NCORES="$2"; shift 2;;
     --crop-mem-gb) CROP_MEM_GB="$2"; shift 2;;
@@ -194,6 +198,7 @@ RUN_DIR_Q="$(printf '%q' "$RUN_DIR")"
 PUBLIC_CACHE_DIR_Q="$(printf '%q' "$PUBLIC_CACHE_DIR")"
 SAFE_LABEL_Q="$(printf '%q' "$SAFE_LABEL")"
 OVERWRITE_Q="$(printf '%q' "$OVERWRITE")"
+DEFER_REGISTRY_Q="$(printf '%q' "$DEFER_REGISTRY")"
 ZARR_PATH_Q="$(printf '%q' "$ZARR_PATH")"
 
 cat > "$CROP_SCRIPT" <<JOBSCRIPT
@@ -204,6 +209,7 @@ cd "$(pwd)"
 
 RUN_DIR=${RUN_DIR_Q}
 RUN_LABEL=${SAFE_LABEL_Q}
+DEFER_REGISTRY=${DEFER_REGISTRY_Q}
 ZARR_PATH=${ZARR_PATH_Q}
 JOB_ID="\${LSB_JOBID:-manual_crop}"
 STATUS_JSON="\${RUN_DIR}/\${RUN_LABEL}.crop.\${JOB_ID}.json"
@@ -215,6 +221,9 @@ else
   export PALETTE_JOB_CACHE="\${TMPDIR:-/tmp}/palette_crop_geometry_\${JOB_ID}/palette_cache"
 fi
 export MPLBACKEND=Agg
+if [[ "\${DEFER_REGISTRY}" == "1" ]]; then
+  export PALETTE_DISABLE_REGISTRY_WRITES=1
+fi
 mkdir -p "\$PALETTE_JOB_CACHE" "\$RUN_DIR"
 
 echo "repo=\$(pwd)"
@@ -222,6 +231,7 @@ echo "host=\$(hostname)"
 echo "job_id=\$JOB_ID"
 echo "zarr=\$ZARR_PATH"
 echo "palette_job_cache=\$PALETTE_JOB_CACHE"
+echo "defer_registry=\$DEFER_REGISTRY"
 echo "status_json=\$STATUS_JSON"
 
 scripts/py -m fisheye.utils.crop_batch ${CROP_ARGS_SHELL}
@@ -438,6 +448,7 @@ echo "Cache script: $CACHE_SCRIPT"
 echo "Crop status JSON: ${RUN_DIR}/${SAFE_LABEL}.crop.<JOBID>.json"
 echo "Cache status JSON: ${RUN_DIR}/${SAFE_LABEL}.cache.<JOBID>.json"
 echo "Public cache dir: $PUBLIC_CACHE_DIR"
+echo "Defer registry writes: $DEFER_REGISTRY"
 echo "Expected manifest: ${PUBLIC_CACHE_DIR}/${SAFE_LABEL}.flat_roi_cache.json"
 echo "Expected payload: ${PUBLIC_CACHE_DIR}/${SAFE_LABEL}.flat_roi_cache.bin"
 echo "Crop command: scripts/py -m fisheye.utils.crop_batch ${CROP_ARGS_SHELL}"

@@ -43,6 +43,34 @@ def test_inspect_camera_csv_passes_on_matching_metadata(tmp_path: Path) -> None:
     assert info.timestamp_offset_drift_ns == 0
 
 
+def test_inspect_camera_csv_passes_on_current_recording_frame_id_metadata(tmp_path: Path) -> None:
+    cams_dir = tmp_path / "session" / "cams"
+    cams_dir.mkdir(parents=True)
+    video_path = cams_dir / "Cam1.mp4"
+    csv_path = cams_dir / "Cam1_meta.csv"
+    video_path.write_bytes(b"video")
+    csv_path.write_text(
+        "\n".join(
+            [
+                "recording_frame_id,timestamp,timestamp_sys",
+                "1,100,1100",
+                "2,200,1200",
+                "3,300,1300",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    info, findings = mod.inspect_camera_csv(video_path, expected_frame_count=3)
+
+    assert findings == []
+    assert info.status == "pass"
+    assert info.schema_ok is True
+    assert info.frame_id_first == 1
+    assert info.frame_id_last == 3
+
+
 def test_inspect_camera_csv_warns_when_missing(tmp_path: Path) -> None:
     cams_dir = tmp_path / "session" / "cams"
     cams_dir.mkdir(parents=True)

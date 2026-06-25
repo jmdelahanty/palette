@@ -1,0 +1,75 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import torch
+import zarr
+
+from fisheye.shared.roi_pixel_contract import ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
+from fisheye.utils.import_sampled_training_pynvvc import import_sampled_training_pynvvc
+
+
+class _FakePynvvcReader:
+    def __init__(self, video_path: Path, *, start_frame: int = 0, gpu_id: int = 0) -> None:
+        assert start_frame == 0
+        self.source_height = 4
+        self.source_width = 5
+        self.closed = False
+
+    def iter_frames(self):
+        for idx in range(10):
+            yield torch.full((4, 5), idx, dtype=torch.uint8)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_import_sampled_training_pynvvc_writes_luma_training_zarr(tmp_path: Path) -> None:
+    video = tmp_path / "Cam2010093_demo.mp4"
+    video.write_bytes(b"placeholder")
+    config = tmp_path / "import.yaml"
+    config.write_text(
+        """
+import:
+  resolutions: both
+  chunk_size: 2
+  downsampled:
+    size: [2, 3]
+    method: nearest
+    preserve_aspect: false
+    chunk_size: 2
+""",
+        encoding="utf-8",
+    )
+    out = tmp_path / "demo_training.zarr"
+
+    result = import_sampled_training_pynvvc(
+        video_path=video,
+        zarr_path=out,
+        source_frame_count=10,
+        frame_step=3,
+        skip_tail_frames=1,
+        config_path=config,
+        camera_id="2010093",
+        recording_dir=tmp_path,
+        h5_path=tmp_path / "raw" / "demo.h5",
+        require_cuda=False,
+        reader_factory=_FakePynvvcReader,
+    )
+
+    assert result.imported_frame_count == 3
+    assert result.decode_backend == "pynvvc_luma"
+    root = zarr.open_group(str(out), mode="r")
+    raw = root["raw_video"]
+    assert root.attrs["zarr_purpose"] == "training"
+    assert raw.attrs["decode_backend"] == "pynvvc_luma"
+    assert raw.attrs["pixel_contract_name"] == ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
+    assert raw.attrs["color_range"] == "tv"
+    assert raw.attrs["frame_step"] == 3
+    assert raw.attrs["source_frame_count"] == 10
+    assert raw["original_frame_indices"][:].tolist() == [0, 3, 6]
+    assert raw["images_full"].shape == (3, 4, 5)
+    assert raw["images_ds"].shape == (3, 2, 3)
+    np.testing.assert_array_equal(raw["images_full"][:, 0, 0], np.array([0, 3, 6], dtype=np.uint8))
+    np.testing.assert_array_equal(raw["images_ds"][:, 0, 0], np.array([0, 3, 6], dtype=np.uint8))

@@ -1,0 +1,188 @@
+{
+  "schema": "palette_labeling_web_real_zarr_smoke.v1",
+  "notes": "Copy this file, replace placeholder paths/payloads with backed-up mutable zarrs, then set PALETTE_LABELING_WEB_REAL_ZARR_SMOKE_SPEC to the copied file.",
+  "cases": [
+    {
+      "name": "keypoint state/nav/save smoke",
+      "user": "replace-with-labeler-user",
+      "recording_id": "replace-with-recording-id",
+      "task_id": "smoke-keypoints",
+      "workflow_kind": "keypoints",
+      "dataset_id": "replace-with-training-dataset-id",
+      "zarr_use": "training",
+      "stage_group": "refined_keypoints_runs",
+      "scope": {
+        "zarr_path": "/replace/with/backed-up/training.zarr",
+        "include_all": true,
+        "target_roi_indices": [
+          0
+        ],
+        "auto_advance_on_save": false
+      },
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/state"
+        },
+        {
+          "method": "POST",
+          "path": "/nav",
+          "body": {
+            "position": 0
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/save",
+          "body": {
+            "points": [
+              [
+                10.0,
+                10.0
+              ],
+              [
+                12.0,
+                12.0
+              ]
+            ],
+            "advance": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "detect training state/nav/save smoke",
+      "user": "replace-with-labeler-user",
+      "recording_id": "replace-with-recording-id",
+      "task_id": "smoke-detect-training",
+      "workflow_kind": "detect_training",
+      "dataset_id": "replace-with-training-dataset-id",
+      "zarr_use": "training",
+      "stage_group": "refined_detect_runs",
+      "scope": {
+        "zarr_path": "/replace/with/backed-up/training.zarr",
+        "include_all": true,
+        "max_items": 1,
+        "auto_advance_on_save": false
+      },
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/state"
+        },
+        {
+          "method": "POST",
+          "path": "/nav",
+          "body": {
+            "position": 0
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/save",
+          "body": {
+            "bbox_norm": [
+              0.25,
+              0.25,
+              0.5,
+              0.5
+            ],
+            "advance": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "detect analysis editable state/nav/save smoke",
+      "user": "replace-with-labeler-user",
+      "recording_id": "replace-with-recording-id",
+      "task_id": "smoke-detect-analysis",
+      "workflow_kind": "detect_analysis",
+      "dataset_id": "replace-with-analysis-dataset-id",
+      "zarr_use": "analysis",
+      "stage_group": "refined_detect_runs",
+      "scope": {
+        "zarr_path": "/replace/with/backed-up/analysis.zarr",
+        "editable": true,
+        "target_frames": [
+          0
+        ],
+        "auto_advance_on_save": false
+      },
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/state"
+        },
+        {
+          "method": "POST",
+          "path": "/nav",
+          "body": {
+            "position": 0
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/save",
+          "body": {
+            "bbox_norm": [
+              0.25,
+              0.25,
+              0.5,
+              0.5
+            ],
+            "advance": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "subject mask component state/nav/save smoke",
+      "user": "replace-with-labeler-user",
+      "recording_id": "replace-with-recording-id",
+      "task_id": "smoke-subject-mask",
+      "workflow_kind": "subject_mask_component",
+      "dataset_id": "replace-with-training-dataset-id",
+      "zarr_use": "training",
+      "stage_group": "refined_subject_masks_runs",
+      "component_name": "body",
+      "scope": {
+        "zarr_path": "/replace/with/backed-up/training.zarr",
+        "component_name": "body",
+        "target_roi_indices": [
+          0
+        ],
+        "auto_advance_on_save": false
+      },
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/state"
+        },
+        {
+          "method": "POST",
+          "path": "/nav",
+          "body": {
+            "position": 0
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/save",
+          "body": {
+            "mask": {
+              "encoding": "base64_raw",
+              "dtype": "uint8",
+              "shape": [
+                1,
+                1
+              ],
+              "pixels": "replace-with-base64-raw-uint8-mask-bytes"
+            },
+            "advance": false
+          }
+        }
+      ]
+    }
+  ]
+}
