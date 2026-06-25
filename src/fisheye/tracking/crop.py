@@ -72,6 +72,7 @@ from ..shared.zarr.chunk_profiles import create_geometry_preload_array
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
 _CROP_STATUS_SOURCE = "runtime_crop"
+_DISABLE_REGISTRY_WRITES_ENV = "PALETTE_DISABLE_REGISTRY_WRITES"
 
 # Dask imports
 import dask
@@ -425,6 +426,14 @@ def _emit_crop_step_status(
     details: Dict[str, Any],
     console: Optional[Console],
 ) -> None:
+    if os.environ.get(_DISABLE_REGISTRY_WRITES_ENV, "").strip().lower() in {"1", "true", "yes", "on"}:
+        if console is not None:
+            console.print(
+                "[cyan]Registry status write deferred[/cyan] "
+                f"({_DISABLE_REGISTRY_WRITES_ENV}=1); batch finalizer must sync crop status."
+            )
+        return
+
     zarr_file = Path(zarr_path).expanduser().resolve()
     status_details = dict(details)
     if status == "ok" and run_name:
