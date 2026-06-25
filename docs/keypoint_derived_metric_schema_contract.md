@@ -124,6 +124,7 @@ Derived metric definitions should live in config files separate from pose
 schemas, for example:
 
 - `configs/fisheye/keypoint_metric_schemas/traditional_v2.json`
+- `configs/fisheye/keypoint_metric_schemas/traditional_v3.json`
 
 This separation is intentional:
 
@@ -386,6 +387,22 @@ Optional later:
 - `snout_to_eye_right`
 - `left_eye_to_tail_tip`
 - `right_eye_to_tail_tip`
+
+## Traditional V3 Initial Recommendation
+
+`traditional_v3` extends the `traditional_v2` metric set with tail-segment and
+pectoral-fin distances:
+
+- `anterior_tail_segment`
+- `posterior_tail_segment`
+- `right_pectoral_fin_length`
+- `left_pectoral_fin_length`
+- `right_pectoral_insertion_to_eye`
+- `left_pectoral_insertion_to_eye`
+
+These metrics are schema-specific and should remain inside derived-metric arrays
+and profile payloads until a skeleton-aware registry/query projection policy is
+defined.
 
 ## Deferred Items
 

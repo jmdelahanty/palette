@@ -1,0 +1,98 @@
+{
+  "schema_name": "traditional_v3_derived_metrics",
+  "schema_version": "v1",
+  "skeleton_id": "pose_skel_traditional_v3",
+  "source_pose_schema": "traditional_v3",
+  "metrics": [
+    {
+      "name": "total_length",
+      "type": "distance",
+      "from_label": "snout_tip",
+      "to_label": "tail_tip",
+      "units": "px",
+      "normalization": "roi_diagonal",
+      "description": "Full body axis distance from snout tip to tail tip."
+    },
+    {
+      "name": "tail_length",
+      "type": "distance",
+      "from_label": "swim_bladder",
+      "to_label": "tail_tip",
+      "units": "px",
+      "normalization": "roi_diagonal",
+      "description": "Posterior body distance from swim bladder to tail tip."
+    },
+    {
+      "name": "head_length",
+      "type": "distance",
+      "from_label": "snout_tip",
+      "to_label": "swim_bladder",
+      "units": "px",
+      "normalization": "roi_diagonal",
+      "description": "Anterior body distance from snout tip to swim bladder."
+    },
+    {
+      "name": "eye_span",
+      "type": "distance",
+      "from_label": "eye_left",
+      "to_label": "eye_right",
+      "units": "px",
+      "normalization": "roi_diagonal",
+      "description": "Distance between left and right eye centers."
+    },
+    {
+      "name": "anterior_tail_segment",
+      "type": "distance",
+      "from_label": "swim_bladder",
+      "to_label": "mid_tail",
+      "units": "px",
+      "normalization": "roi_diagonal",
+      "description": "Distance from swim bladder to mid-tail landmark."
+    },
+    {
+      "name": "posterior_tail_segment",
+      "type": "distance",
+      "from_label": "mid_tail",
+      "to_label": "tail_tip",
+      "units": "px",
+      "normalization": "roi_diagonal",
+      "description": "Distance from mid-tail landmark to tail tip."
+    },
+    {
+      "name": "right_pectoral_fin_length",
+      "type": "distance",
+      "from_label": "right_pectoral_fin_insertion",
+      "to_label": "right_pectoral_fin_tip",
+      "units": "px",
+      "normalization": "roi_diagonal",
+      "description": "Right pectoral fin insertion-to-tip distance."
+    },
+    {
+      "name": "left_pectoral_fin_length",
+      "type": "distance",
+      "from_label": "left_pectoral_fin_insertion",
+      "to_label": "left_pectoral_fin_tip",
+      "units": "px",
+      "normalization": "roi_diagonal",
+      "description": "Left pectoral fin insertion-to-tip distance."
+    },
+    {
+      "name": "right_pectoral_insertion_to_eye",
+      "type": "distance",
+      "from_label": "right_pectoral_fin_insertion",
+      "to_label": "eye_right",
+      "units": "px",
+      "normalization": "roi_diagonal",
+      "description": "Right eye to right pectoral fin insertion distance."
+    },
+    {
+      "name": "left_pectoral_insertion_to_eye",
+      "type": "distance",
+      "from_label": "left_pectoral_fin_insertion",
+      "to_label": "eye_left",
+      "units": "px",
+      "normalization": "roi_diagonal",
+      "description": "Left eye to left pectoral fin insertion distance."
+    }
+  ]
+}

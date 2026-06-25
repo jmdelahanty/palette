@@ -14,6 +14,8 @@ This is the broad policy needed to handle:
 
 - legacy `traditional_v1` raw runs
 - migrated `traditional_v2_seed` refined runs
+- `traditional_v3` seed/refined runs with appended mid-tail and pectoral-fin
+  landmarks
 - future richer skeletons
 - archives where multiple skeletons coexist intentionally
 

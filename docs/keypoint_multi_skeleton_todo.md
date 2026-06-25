@@ -27,6 +27,10 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
   outputs or compatibility/QC arrays, not the shared storage contract.
 - `traditional_v2` seed runs can now be created from `traditional_v1` refined
   runs and completed manually.
+- `traditional_v3` is now packaged as a 10-point schema that extends
+  `traditional_v2` with `mid_tail` and pectoral-fin insertion/tip landmarks.
+  It is intended for new manual labeling/model training and should be seeded
+  as a new run, not applied by mutating existing `traditional_v2` runs.
 - schema-driven derived metrics can now be stored on refined runs and surfaced
   in keypoint profile payloads.
 - historical keypoint/refined-keypoint runs can now be normalized in place to
