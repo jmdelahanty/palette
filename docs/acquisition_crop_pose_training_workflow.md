@@ -153,6 +153,40 @@ assigns deterministic run names and passes the refined keypoint run directly to
 subject-mask inference/finalization. It does not parse `latest` from shell or
 use inline Python snippets.
 
+The wrapper creates the full set of review surfaces expected by current web
+review flows:
+
+```text
+keypoints_runs/keypoints_training_review_<run_id>
+refined_keypoints_runs/refined_keypoints_training_review_<run_id>
+subject_mask_runs/subject_masks_training_review_<run_id>
+refined_subject_masks_runs/refined_subject_masks_training_review_<run_id>
+```
+
+The refined subject-mask run is dense `uint8` by design for training review.
+Analysis-zarr production runs may use `mask_bitpacked` or `mask_rle`, but
+training zarrs should stay materialized/dense so review, painting, and export
+tools do not need compact-mask mutation semantics.
+
+This bootstrap makes the training Zarr reviewable for crop-based pose and
+subject-mask work. It does not make the same Zarr reviewable for full-frame
+detection-box assignment. Detection-box review still requires
+`detect_runs/<run>` plus an explicit curated
+`refined_detect_runs/<run>/instances` surface. For sampled training Zarrs,
+create that surface with `fisheye.refinement.refine_detect --detect-run ...`
+using sampled-import passthrough; see `docs/detection_refinement_workflow.md`.
+
+Registry rows should be written against the canonical source-recording dataset
+ID for the training zarr, not the bare recording/session ID. For RedScare arena
+1 the validated smoke used:
+
+```text
+training_zarr=/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-01-09Z_arena_1_RedScare/zarr/2026-06-23T16-01-09Z_arena_1_RedScare_training.zarr
+dataset_id=2026-06-23T16-01-09Z_arena_1:z92f469b75d66
+crop_run=crop_red_scare_acquisition_crop_video_training_2026-06-23T16-01-09Z_arena_1_RedScare
+run_id=red_scare_training_review_20260625_05
+```
+
 Smaller-input models are a valid future speed optimization, but train/export
 metadata must record the model input size and transform. Do not silently mix
 native `348/384/512` crop sizes in one model contract without an explicit

@@ -8,6 +8,7 @@ from typing import Any, Mapping, Optional
 import zarr
 
 from ..registry.stage_complete import emit_stage_completion
+from ..registry.stage_complete import RegistryInput
 from .type_conversions import clean_mapping, normalize_attr
 
 try:
@@ -23,6 +24,7 @@ def emit_subject_mask_stage_completion(
     run_group: zarr.Group,
     run_name: str,
     source: str,
+    registry: RegistryInput = None,
     console: Optional[Console] = None,
     invalidate_on_ok: bool = True,
 ) -> bool:
@@ -59,6 +61,7 @@ def emit_subject_mask_stage_completion(
         coverage_pct=None,
         review_status_json=review_payload,
         details_json=details,
+        registry=registry,
         console=console,
         warning_label="subject_masks",
         invalidate_on_ok=invalidate_on_ok,
@@ -72,6 +75,7 @@ def emit_refined_subject_mask_stage_completion(
     run_group: zarr.Group,
     run_name: str,
     source: str,
+    registry: RegistryInput = None,
     console: Optional[Console] = None,
     invalidate_on_ok: bool = True,
 ) -> bool:
@@ -106,6 +110,7 @@ def emit_refined_subject_mask_stage_completion(
         coverage_pct=None,
         review_status_json=review_payload,
         details_json=details,
+        registry=registry,
         console=console,
         warning_label="refined_subject_masks",
         invalidate_on_ok=invalidate_on_ok,

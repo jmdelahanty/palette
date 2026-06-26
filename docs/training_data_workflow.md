@@ -245,6 +245,137 @@ scripts/submit_import_recordings_training_bsub.sh \
 
 Contract reference: `docs/acquisition_crop_pose_training_workflow.md`.
 
+### Bootstrap review surfaces for a sampled training zarr
+
+After a sampled acquisition-crop training zarr exists, create the reviewable
+prediction surfaces with the managed bootstrap wrapper. Do not hand-code shell
+handoffs that parse `latest`; the wrapper passes deterministic run names between
+stages:
+
+```bash
+scripts/submit_training_review_bootstrap_bsub.sh \
+  --zarr "$TRAINING_ZARR" \
+  --crop-run "$CROP_RUN" \
+  --pose-model "$POSE_MODEL" \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --run-id red_scare_training_review_YYYYMMDD_NN \
+  --keypoint-imgsz 512 \
+  --subject-model-input-size 512 \
+  --model-input-transform auto \
+  --submit
+```
+
+This creates, in the same training zarr:
+
+- `keypoints_runs/keypoints_training_review_<run_id>`
+- `refined_keypoints_runs/refined_keypoints_training_review_<run_id>`
+- `subject_mask_runs/subject_masks_training_review_<run_id>`
+- `refined_subject_masks_runs/refined_subject_masks_training_review_<run_id>`
+
+Training zarr review surfaces intentionally use dense `uint8` mask arrays. The
+compact `mask_bitpacked` and `mask_rle` storage modes are analysis-zarr
+production options; web/manual training review should consume dense
+`masks_roi` surfaces.
+
+### Detection boxes vs acquisition crop-video review
+
+Do not treat acquisition crop-video review readiness as detection-box review
+readiness. They are related, but they use different source surfaces.
+
+Pose/mask review from acquisition crops uses:
+
+```text
+crop_runs/<acquisition_crop_video_run>/roi_images
+keypoints_runs/<run>
+refined_keypoints_runs/<run>
+subject_mask_runs/<run>
+refined_subject_masks_runs/<run>
+```
+
+This path is appropriate when Orange produced runtime crop videos and crop
+metadata. The keypoint and subject-mask bootstrap wrapper consumes the explicit
+crop run directly. It does not require `refined_detect_runs/`, because the crop
+pixels and crop geometry are already materialized in `crop_runs/<run>`.
+
+Full-frame detection-box review uses:
+
+```text
+raw_video/images_ds or source video pixels
+detect_runs/<seed_or_model_run>
+refined_detect_runs/<review_run>/instances
+refined_detect_runs/<review_run>/source_detections
+```
+
+This path is appropriate when the task is to curate detector bounding boxes on
+full sampled frames. The web detection assignment layer should require an
+explicit `refined_detect_runs/<run>` before creating a `detect_training` task.
+`detect_runs/<run>` alone is raw model output and is not the editable curated
+authority.
+
+For sampled training Zarrs such as RedScare, initialize the assignment-ready
+surface by running refined-detect passthrough on the seed detector output:
+
+```bash
+scripts/py -m fisheye.refinement.refine_detect "$TRAINING_ZARR" \
+  --detect-run detect_red_scare_training_seed_v004_20260626_01 \
+  --per-frame-top-k 1 \
+  --run-name refined_detect_training_review_red_scare_training_review_YYYYMMDD_NN
+```
+
+Sampled training Zarrs do not need a preceding `detect_quality` run for this
+step. `refine_detect` recognizes sampled-import training archives, disables
+temporal jump/blip filtering, preserves all raw candidates in
+`source_detections`, and writes the curated sparse `instances` surface for
+manual/web review. When there are multiple raw boxes per sampled frame,
+`--per-frame-top-k 1` accepts the highest-confidence candidate into
+`instances` while retaining non-top candidates in provenance as duplicates.
+
+Current RedScare implication: a training Zarr can be ready for pose/mask web
+assignment because it has acquisition crop runs and dense mask/keypoint review
+surfaces, while still being skipped for detection-box assignment as
+`not_detect_training_reviewable` until `refined_detect_runs/<explicit_run>` is
+created.
+
+Registry note: source-recording training zarrs use canonical dataset IDs of the
+form `<session_uuid>:z<path_hash_prefix>` when `session_uuid` is available.
+Stage completion now writes status rows under that canonical ID. If a legacy
+duplicate `dataset_id == session_uuid` row exists for the same `zarr_path`,
+consolidate it before assigning web tasks.
+
+After cluster bootstrap completion, refresh the review-surface status rows with
+the managed audit/repair wrapper instead of hand-building a long
+`registry.maintenance` command. It dry-runs by default:
+
+```bash
+scripts/py -m fisheye.utils.refresh_training_review_status \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --run-id red_scare_training_review_YYYYMMDD_NN \
+  --path-contains RedScare \
+  --zarr-use training \
+  --stamp-completion-markers \
+  --refresh-step-status
+```
+
+If the dry-run shows valid unmarked runs or stale registry rows, apply the same
+command with `--apply`. The wrapper selects matching training datasets,
+validates deterministic review run groups, stamps missing Zarr completion
+markers only after stage-array validation, and then backfills
+`recording_step_status` for the exact selected Zarr paths.
+
+Validated RedScare smoke, 2026-06-25:
+
+```text
+training_zarr=/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-01-09Z_arena_1_RedScare/zarr/2026-06-23T16-01-09Z_arena_1_RedScare_training.zarr
+dataset_id=2026-06-23T16-01-09Z_arena_1:z92f469b75d66
+crop_run=crop_red_scare_acquisition_crop_video_training_2026-06-23T16-01-09Z_arena_1_RedScare
+run_id=red_scare_training_review_20260625_05
+keypoints=keypoints_training_review_red_scare_training_review_20260625_05
+refined_keypoints=refined_keypoints_training_review_red_scare_training_review_20260625_05
+subject_masks=subject_masks_training_review_red_scare_training_review_20260625_05
+refined_subject_masks=refined_subject_masks_training_review_red_scare_training_review_20260625_05
+rows=200
+```
+
 ### 2) Run YOLO detection directly on the raw video
 This creates a **detection-only** Zarr with `source_video_path` metadata.
 

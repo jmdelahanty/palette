@@ -70,7 +70,7 @@ from ..shared.subject_mask_chunks import (
     refined_subject_mask_storage_chunks,
 )
 from ..shared.subject_mask_registry_status import emit_refined_subject_mask_stage_completion
-from ..shared.zarr_run_completion import require_runs_parent
+from ..shared.zarr_run_completion import mark_run_complete, require_runs_parent
 from ..tune.refined_subject_mask_review import (
     DEFAULT_REVIEW_INTENDED_USE,
     DEFAULT_REVIEW_METHOD,
@@ -4152,7 +4152,7 @@ def finalize_subject_mask_run(
     run_group.attrs["worker_process_count"] = normalized_num_workers
     run_group.attrs["dask_chunk_size"] = int(worker_chunk_size)
     run_group.attrs["dask_version"] = getattr(dask, "__version__", "unknown")
-    refined_parent.attrs["latest"] = target_run
+    mark_run_complete(run_group, parent_group=refined_parent, run_name=target_run)
     refined_parent.attrs["refined_subject_mask_review_status_latest"] = target_run
 
     summary.update(
@@ -4219,6 +4219,7 @@ def finalize_subject_masks(
     dry_run: bool = False,
     assignment_keypoint_group: Optional[str] = None,
     assignment_keypoints_run: Optional[str] = None,
+    registry: str | Path | None = None,
     defer_registry_status: bool = False,
     progress_jsonl: str | Path | None = None,
     console: Any = None,
@@ -4259,6 +4260,7 @@ def finalize_subject_masks(
             run_group=refined_group,
             run_name=run_name,
             source=_REFINED_SUBJECT_MASKS_STATUS_SOURCE,
+            registry=registry,
             console=console,
             invalidate_on_ok=True,
         )
@@ -4419,6 +4421,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--assignment-keypoints-run",
         help="Explicit keypoint run to use for eyes_union -> eye_left/eye_right assignment.",
     )
+    parser.add_argument(
+        "--registry",
+        type=Path,
+        help="Registry database to update when emitting refined_subject_masks completion status.",
+    )
     parser.add_argument("--json", action="store_true", help="Emit the summary as JSON.")
     parser.add_argument(
         "--progress-jsonl",
@@ -4463,6 +4470,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         dry_run=bool(args.dry_run),
         assignment_keypoint_group=args.assignment_keypoint_group,
         assignment_keypoints_run=args.assignment_keypoints_run,
+        registry=args.registry,
         defer_registry_status=bool(args.defer_registry_status),
         progress_jsonl=args.progress_jsonl,
     )

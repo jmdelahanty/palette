@@ -56,6 +56,19 @@ Rule:
 - If an immutable value is wrong, create a corrective migration/repair entry path.
 - Do not silently mutate immutable values during routine backfill/rescan.
 
+Current source-recording dataset-ID policy:
+- For source-recording zarrs under `/recordings/`, the canonical dataset ID is
+  path-disambiguated: `<session_uuid>:z<path_hash_prefix>`.
+- `session_uuid` remains the biological/acquisition session identity, but it is
+  not sufficient as the registry primary key once one recording can have both
+  analysis and training zarrs, or multiple relocated materializations.
+- Live stage completion and full registry scans should both resolve to the same
+  effective dataset ID before writing dependent rows.
+- If a legacy duplicate `dataset_id == session_uuid` row points to the same
+  `zarr_path`/`path_hash` as a canonical `:z...` row, remove it only through an
+  explicit duplicate-repair transaction that first moves or drops dependent rows
+  deterministically and creates a registry backup.
+
 ### Mutable (can change as workflows progress)
 
 Operational/state fields:

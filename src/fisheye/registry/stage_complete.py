@@ -352,19 +352,29 @@ def emit_stage_completion(
                 resolved_path,
                 resolve_dataset_id_fn=resolve_dataset_id_fn,
             )
+        metadata_session_uuid = getattr(metadata, "session_uuid", None)
+        metadata_recording_id = getattr(metadata, "recording_id", None)
+        dataset_id = metadata.dataset_id
+        resolve_effective_dataset_id = getattr(registry_db, "resolve_effective_dataset_id", None)
+        if callable(resolve_effective_dataset_id):
+            dataset_id = resolve_effective_dataset_id(
+                metadata.dataset_id,
+                session_uuid=metadata_session_uuid,
+                zarr_path=resolved_path,
+            )
         if upsert_dataset_row:
             registry_db.upsert_dataset(
-                metadata.dataset_id,
-                session_uuid=metadata.session_uuid,
+                dataset_id,
+                session_uuid=metadata_session_uuid,
                 zarr_path=resolved_path,
-                recording_id=metadata.recording_id,
-                zarr_use=metadata.zarr_use,
-                zarr_purpose=metadata.zarr_purpose,
+                recording_id=metadata_recording_id,
+                zarr_use=getattr(metadata, "zarr_use", None),
+                zarr_purpose=getattr(metadata, "zarr_purpose", None),
             )
         upsert_step_status_fn(
             registry_db,
-            dataset_id=metadata.dataset_id,
-            recording_id=metadata.recording_id,
+            dataset_id=dataset_id,
+            recording_id=metadata_recording_id,
             step_name=step_name,
             status=status,
             run_name=run_name,
@@ -378,10 +388,10 @@ def emit_stage_completion(
         if invalidate_on_ok and status == "ok":
             invalidate_steps_fn(
                 registry_db,
-                dataset_id=metadata.dataset_id,
+                dataset_id=dataset_id,
                 step_name=step_name,
                 source=source,
-                recording_id=metadata.recording_id,
+                recording_id=metadata_recording_id,
                 trigger_run_name=trigger_run_name if trigger_run_name is not None else run_name,
             )
         return True

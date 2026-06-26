@@ -109,6 +109,32 @@ row that would need to be moved. `conflicting_rows > 0` means a direct update
 would collide with an existing primary-key or unique-index row, most commonly
 `recording_step_status(dataset_id, step_name)`.
 
+Live stage-completion writes should now use the same effective dataset ID as
+`register_from_root`: for source-recording zarrs under `/recordings/`, the
+canonical form is `<session_uuid>:z<path_hash_prefix>`. If you see both a bare
+session/recording ID and a `:z...` ID for the same exact `zarr_path`, the bare
+ID is a legacy duplicate unless it points to a different path hash.
+
+Quick check for one path:
+
+```bash
+sqlite3 -header -column "$REG" "
+SELECT dataset_id, recording_id, zarr_use, artifact_kind, status
+FROM datasets
+WHERE zarr_path = '/path/to/recording_training.zarr'
+ORDER BY dataset_id;
+
+SELECT dataset_id, step_name, status, run_name, source, updated_utc
+FROM recording_step_status_latest
+WHERE zarr_path = '/path/to/recording_training.zarr'
+ORDER BY step_name, dataset_id;
+"
+```
+
+Expected after consolidation: exactly one active `datasets` row for the path,
+no dependent rows referencing the duplicate ID, and all current
+`recording_step_status_latest` rows under the canonical `:z...` ID.
+
 After backup and review, apply the generic merge:
 
 ```bash
@@ -638,3 +664,21 @@ Follow-up guardrail applied in code:
 - `Registry._resolve_effective_dataset_id()` now prefers canonical source IDs
   (`{session_uuid}:z<path-hash>`) for recording-source artifacts.
 - Verified by rescanning `/nvme1/recordings`: no legacy IDs were recreated.
+
+## Runtime Status Guardrail Note (2026-06-25)
+
+The same canonical-ID rule now applies to live stage completion via
+`emit_stage_completion()`. This closes the failure mode where runtime stage
+writers inserted `recording_step_status` under `dataset_id=session_uuid` while
+full scans and targeted refreshes used `dataset_id=session_uuid:z<path-hash>`.
+
+RedScare training-zarr repair validated the operator pattern:
+
+- canonical dataset:
+  `2026-06-23T16-01-09Z_arena_1:z92f469b75d66`
+- duplicate bare dataset:
+  `2026-06-23T16-01-09Z_arena_1`
+- all current step-status rows, status history, and keypoint-performance rows
+  were consolidated under the canonical ID
+- the duplicate dataset row was removed after verifying zero remaining
+  dependent references

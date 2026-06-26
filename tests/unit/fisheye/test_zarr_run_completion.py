@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+from hashlib import sha256
 import warnings
 
 import numpy as np
@@ -1891,6 +1892,59 @@ def test_emit_stage_completion_accepts_complete_opted_in_run(tmp_path: Path) -> 
     assert captured["details_json"]["stage_array_validation_warnings"] == [  # type: ignore[index]
         "detect: missing optional array 'centers_px'"
     ]
+
+
+def test_emit_stage_completion_uses_effective_recording_dataset_id(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "session_a" / "zarr" / "session_a_training.zarr"
+    zarr_path.parent.mkdir(parents=True, exist_ok=True)
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.attrs["session_uuid"] = "session_a"
+    root.attrs["recording_id"] = "session_a"
+    root.attrs["zarr_use"] = "training"
+    detect_parent = root.create_group("detect_runs")
+    detect_run = detect_parent.create_group("detect_001")
+    detect_run.create_array("frame_indices", data=np.asarray([0, 1], dtype=np.int32), overwrite=True)
+    detect_run.create_array("bbox_norm_coords", data=np.zeros((2, 4), dtype=np.float32), overwrite=True)
+    detect_run.create_array("scores", data=np.ones((2,), dtype=np.float32), overwrite=True)
+    detect_run.create_array("class_ids", data=np.zeros((2,), dtype=np.int32), overwrite=True)
+    detect_run.create_array("frame_counts", data=np.asarray([1, 1, 0], dtype=np.int32), overwrite=True)
+    detect_run.create_array("n_detections", data=np.asarray([1, 1, 0], dtype=np.int32), overwrite=True)
+    mark_run_complete(detect_run, parent_group=detect_parent, run_name="detect_001")
+
+    wrote = emit_stage_completion(
+        root,
+        zarr_path,
+        step_name="detect",
+        status="ok",
+        source="unit_test",
+        run_name="detect_001",
+        registry=registry,
+        auto_registry_from_env=False,
+        invalidate_on_ok=False,
+    )
+
+    assert wrote is True
+    expected_dataset_id = f"session_a:z{sha256(str(zarr_path.resolve()).encode('utf-8')).hexdigest()[:12]}"
+    rows = registry.conn.execute(
+        """
+        SELECT dataset_id, step_name, status, run_name
+        FROM recording_step_status
+        ORDER BY dataset_id, step_name;
+        """
+    ).fetchall()
+    assert [dict(row) for row in rows] == [
+        {
+            "dataset_id": expected_dataset_id,
+            "step_name": "detect",
+            "status": "ok",
+            "run_name": "detect_001",
+        }
+    ]
+    assert registry.conn.execute(
+        "SELECT COUNT(*) FROM recording_step_status WHERE dataset_id = 'session_a';"
+    ).fetchone()[0] == 0
+    registry.close()
 
 
 def test_emit_stage_completion_non_ok_status_bypasses_run_validation(tmp_path: Path) -> None:

@@ -56,3 +56,4 @@ def test_bootstrap_training_review_surfaces_uses_deterministic_run_handoffs(
     assert calls["finalize"]["subject_run"] == result.subject_masks_run
     assert calls["finalize"]["assignment_keypoints_run"] == result.refined_keypoints_run
     assert calls["finalize"]["refined_run"] == result.refined_subject_masks_run
+    assert calls["finalize"]["registry"] == (tmp_path / "registry.sqlite").resolve()

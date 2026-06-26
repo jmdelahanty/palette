@@ -76,6 +76,24 @@ This is the current detect workflow as of 2026-04-07.
    ```
    Non-top clean candidates are marked as `duplicate` with reason
    `per_frame_top_k_excluded`; they are not discarded from provenance.
+
+   For web detection assignment on sampled training Zarrs, this refined run is
+   the required review surface. Assignment infrastructure should skip a Zarr
+   that has only `detect_runs/<run>` and no `refined_detect_runs/<run>`, because
+   raw detections are not the editable curated authority. A RedScare-style
+   explicit run should look like:
+   ```bash
+   scripts/py -m fisheye.refinement.refine_detect \
+     /path/to/RedScare_training.zarr \
+     --detect-run detect_red_scare_training_seed_v004_20260626_01 \
+     --per-frame-top-k 1 \
+     --run-name refined_detect_training_review_red_scare_training_review_YYYYMMDD_NN
+   ```
+   This is independent of acquisition crop-video pose/mask review. A training
+   Zarr may have `crop_runs/<acquisition_crop_video_run>` plus keypoint and
+   subject-mask review surfaces, and therefore be ready for pose/mask tasks,
+   while still not being ready for `detect_training` assignment until the
+   refined detect run above exists.
 4. Edit the curated refined surface if needed.
    ```bash
    scripts/py -m fisheye.tune.detect_review /path/to/zarr

@@ -13,6 +13,13 @@ from fisheye.diagnostics.benchmark_subject_mask_full_finalizer import (
 from fisheye.refinement import finalize_subject_masks as mod
 from fisheye.shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from fisheye.shared.mask_store import open_mask_store, write_component_rle_mask_store_from_dense
+from fisheye.shared.zarr_run_completion import (
+    RUN_COMPLETION_CONTRACT,
+    RUN_COMPLETION_CONTRACT_ATTR,
+    RUN_COMPLETION_STATUS_ATTR,
+    RUN_LATEST_COMPLETE_ATTR,
+    RUN_STATUS_COMPLETE,
+)
 from fisheye.shared.zarr.stage_arrays import REFINED_SUBJECT_MASKS_SPEC, validate_run
 from fisheye.tune import refined_subject_mask_review as review_mod
 
@@ -170,6 +177,11 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert summary["review_counts"]["subject_body"]["needs_review"] >= 1
 
     run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_001"]
+    parent = root["refined_subject_masks_runs"]
+    assert run.attrs[RUN_COMPLETION_CONTRACT_ATTR] == RUN_COMPLETION_CONTRACT
+    assert run.attrs[RUN_COMPLETION_STATUS_ATTR] == RUN_STATUS_COMPLETE
+    assert parent.attrs[RUN_LATEST_COMPLETE_ATTR] == "refined_subject_masks_smart_001"
+    assert parent.attrs["latest"] == "refined_subject_masks_smart_001"
     assert run.attrs["method"] == "smart_finalize_subject_masks_v1"
     assert run.attrs["finalization_semantics"] == "smart_probability_to_refined_candidate"
     assert run.attrs["smart_finalizer_chunk_count"] == 2

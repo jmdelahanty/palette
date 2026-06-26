@@ -6360,13 +6360,28 @@ class Registry(RegistryMigrationMixin):
         # Extremely unlikely fallback: use full hash to guarantee uniqueness.
         return f"{session_uuid}:z{current_hash}"
 
+    def resolve_effective_dataset_id(
+        self,
+        base_dataset_id: str,
+        *,
+        session_uuid: Optional[str],
+        zarr_path: Path,
+    ) -> str:
+        """Resolve the canonical registry dataset ID for one Zarr path."""
+
+        return self._resolve_effective_dataset_id(
+            base_dataset_id=base_dataset_id,
+            session_uuid=session_uuid,
+            zarr_path=zarr_path,
+        )
+
     def register_from_root(self, root: zarr.Group, zarr_path: Path) -> str:
         metadata = extract_dataset_metadata(root, zarr_path)
         base_dataset_id = metadata.dataset_id
         session_uuid = metadata.session_uuid
         zarr_purpose = metadata.zarr_purpose
-        dataset_id = self._resolve_effective_dataset_id(
-            base_dataset_id=base_dataset_id,
+        dataset_id = self.resolve_effective_dataset_id(
+            base_dataset_id,
             session_uuid=session_uuid,
             zarr_path=zarr_path,
         )

@@ -177,6 +177,7 @@ def bootstrap_training_review_surfaces(
         dense_mask_row_chunk=int(dense_mask_row_chunk),
         assignment_keypoint_group="refined_keypoints_runs",
         assignment_keypoints_run=refined_keypoints_run,
+        registry=registry,
         overwrite=bool(overwrite_refined_subject_masks),
         progress_jsonl=progress_jsonl,
         console=console,

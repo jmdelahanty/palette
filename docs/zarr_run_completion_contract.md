@@ -1,7 +1,7 @@
 # Zarr Run Completion Contract
 
 Status: active  
-Last verified: 2026-05-21
+Last verified: 2026-06-25
 
 Palette run parents such as `detect_runs`, `crop_runs`,
 `refined_detect_runs`, `keypoints_runs`, and nested `quality_reports` must not
@@ -30,10 +30,26 @@ new run until the run is complete. On success, writers call
 `mark_run_complete(..., parent_group=<parent>, run_name=<name>)`, which updates
 both `latest_complete` and `latest`.
 
+Writers that create refined outputs in multiple phases must call
+`mark_run_complete` only after every required array, component subgroup,
+review-status attr, and provenance payload has been written. For example,
+`finalize_subject_masks` creates `refined_subject_masks_runs/<run>`, writes the
+component masks/metrics/geometry, and only then stamps the refined run complete
+before registry stage completion is emitted. Directly assigning
+`parent.attrs["latest"]` is not sufficient and will be rejected by registry
+completion validation.
+
 ## Registry Completion Rule
 
 Zarr stage writers should report successful stage completion through
 `fisheye.registry.stage_complete.emit_stage_completion`.
+
+`emit_stage_completion` resolves the registry's effective dataset ID before
+writing `recording_step_status`. For source-recording paths under
+`/recordings/`, this means live stage-completion rows use the same canonical
+path-disambiguated IDs as full registry scans, e.g.
+`<session_uuid>:z<path_hash_prefix>`, instead of reintroducing legacy
+`dataset_id == session_uuid` rows for training zarrs.
 
 For `status="ok"` with a `run_name`, that helper is fail-closed on this
 contract:
