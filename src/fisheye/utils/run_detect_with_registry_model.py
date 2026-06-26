@@ -11,8 +11,6 @@ from typing import Any, Optional
 
 import zarr
 
-from fisheye.detection.detect_yolo import DECODE_BACKEND_CHOICES
-from fisheye.detection.detect_yolo import detect_yolo
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.registry.stage_complete import emit_stage_completion
 from fisheye.shared.type_conversions import normalize_attr
@@ -21,6 +19,15 @@ from fisheye.utils.resolve_detect_model import Candidate, TargetProfile
 from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_profile, _resolve_recording_id
 
 _DETECT_STATUS_SOURCE = "runtime_detect_with_registry_model"
+
+DECODE_BACKEND_CHOICES = (
+    "auto",
+    "pynvvc_nv12_rgb",
+    "pynvvc_luma_rgb",
+    "decord_gpu",
+    "decord_cpu",
+    "opencv",
+)
 
 
 def _emit_detect_step_status(
@@ -475,6 +482,8 @@ def run_detect_with_registry_model(
         )
 
     try:
+        from fisheye.detection.detect_yolo import detect_yolo
+
         run_name = detect_yolo(
             video_path=str(resolved_video_path),
             model_path=best.model_path,

@@ -14,8 +14,6 @@ from typing import Callable, Iterable, List, Optional, Sequence
 from fisheye.cli.shared_args import add_apply_dry_run_args
 from fisheye.cli.shared_args import add_log_args
 from fisheye.cli.shared_args import add_registry_discovery_args
-from fisheye.detection.detect_yolo import DECODE_BACKEND_CHOICES
-from fisheye.detection.detect_yolo import detect_yolo
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
@@ -48,6 +46,15 @@ STATUS_OK = "ok"
 STATUS_SKIPPED = "skipped"
 STATUS_MISSING = "missing"
 STATUS_FAILED = "failed"
+
+DECODE_BACKEND_CHOICES = (
+    "auto",
+    "pynvvc_nv12_rgb",
+    "pynvvc_luma_rgb",
+    "decord_gpu",
+    "decord_cpu",
+    "opencv",
+)
 
 REASON_ANALYSIS_ZARR_MISSING = "analysis_zarr_missing"
 REASON_ANALYSIS_ZARR_OPEN_FAILED = "analysis_zarr_open_failed"
@@ -691,6 +698,8 @@ def _run_detect_plan(
     selected = resolved_model.payload.get("selected", {})
     selected_payload = selected if isinstance(selected, dict) else {}
     try:
+        from fisheye.detection.detect_yolo import detect_yolo
+
         run_name = detect_yolo(
             video_path=str(plan.video_path),
             model_path=resolved_model.model_path,
