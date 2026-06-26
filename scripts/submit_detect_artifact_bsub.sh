@@ -243,7 +243,7 @@ CAMERA_SERIAL=${CAMERA_SERIAL_Q}
 JOB_ID="\${LSB_JOBID:-manual}"
 
 scratch_user="\${USER:-\$(id -un)}"
-if [[ -n "\${LSB_JOBID:-}" && -d "/scratch/\${scratch_user}" ]]; then
+if [[ -n "\${LSB_JOBID:-}" && -d "/scratch/\${scratch_user}" && -w "/scratch/\${scratch_user}" ]]; then
   SCRATCH_ROOT="/scratch/\${scratch_user}/\${LSB_JOBID}"
 else
   SCRATCH_ROOT="\${TMPDIR:-/tmp}/palette_detect_artifact_\${JOB_ID}"
