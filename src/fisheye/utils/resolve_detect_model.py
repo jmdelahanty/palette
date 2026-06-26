@@ -144,9 +144,10 @@ def _resolve_recording_id(
             "SELECT recording_id FROM recordings WHERE recording_id = ?;",
             (str(recording_id),),
         ).fetchone()
-        if row is None:
+        if row is not None:
+            return str(row["recording_id"])
+        if recording_dir is None:
             raise SystemExit(f"Recording not found: {recording_id}")
-        return str(row["recording_id"])
 
     if recording_dir is None:
         raise SystemExit("Provide --recording-id or --recording-dir.")

@@ -189,6 +189,38 @@ def test_matches_task_identifies_eye_mask_candidates() -> None:
     )
 
 
+def test_resolve_recording_id_falls_back_to_recording_dir_for_alias(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    rec_dir = tmp_path / "recordings" / "2026-06-23T16-01-09Z_arena_2_RedScare"
+    rec_dir.mkdir(parents=True)
+    try:
+        registry.conn.execute(
+            """
+            INSERT INTO recordings (
+                recording_id, session_uuid, recording_name, recording_path,
+                created_utc, updated_utc
+            ) VALUES (?, ?, ?, ?, datetime('now'), datetime('now'));
+            """,
+            (
+                "2026-06-23T16-01-09Z_arena_2",
+                "2026-06-23T16-01-09Z_arena_2",
+                "2026-06-23T16-01-09Z_arena_2_RedScare",
+                str(rec_dir),
+            ),
+        )
+        registry.conn.commit()
+
+        resolved = mod._resolve_recording_id(  # noqa: SLF001
+            registry,
+            recording_id="2026-06-23T16-01-09Z_arena_2_RedScare",
+            recording_dir=rec_dir,
+        )
+    finally:
+        registry.close()
+
+    assert resolved == "2026-06-23T16-01-09Z_arena_2"
+
+
 def test_load_target_profile_prefers_dataset_context_current(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     try:
