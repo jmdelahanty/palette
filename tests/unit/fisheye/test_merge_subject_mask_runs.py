@@ -25,6 +25,7 @@ def _create_subject_run(
     frame_indices: np.ndarray | None = None,
     frame_counts: np.ndarray | None = None,
     detection_indices: np.ndarray | None = None,
+    source_crop_row_ids: np.ndarray | None = None,
     detection_source: np.ndarray | None = None,
     source_keypoints_run: str = "refined_keypoints_001",
     source_keypoint_group: str = "refined_keypoints_runs",
@@ -62,6 +63,11 @@ def _create_subject_run(
     detection_indices_arr = (
         np.asarray([5, 6], dtype=np.int32) if detection_indices is None else np.asarray(detection_indices, dtype=np.int32)
     )
+    source_crop_row_ids_arr = (
+        np.arange(frame_indices_arr.shape[0], dtype=np.int64)
+        if source_crop_row_ids is None
+        else np.asarray(source_crop_row_ids, dtype=np.int64)
+    )
     detection_source_arr = (
         np.asarray([0, 1], dtype=np.int8) if detection_source is None else np.asarray(detection_source, dtype=np.int8)
     )
@@ -69,6 +75,7 @@ def _create_subject_run(
     run.create_array("frame_indices", data=frame_indices_arr, overwrite=True)
     run.create_array("frame_counts", data=frame_counts_arr, overwrite=True)
     run.create_array("detection_indices", data=detection_indices_arr, overwrite=True)
+    run.create_array("source_crop_row_ids", data=source_crop_row_ids_arr, overwrite=True)
     run.create_array("detection_source", data=detection_source_arr, overwrite=True)
     run.create_array(
         "masks_roi",

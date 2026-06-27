@@ -23,8 +23,14 @@ from fisheye.shared.subject_mask_chunks import (
 from fisheye.tune import refined_subject_mask_review as mod
 
 
-def _build_subject_review_root():
+def _build_subject_review_root(
+    *,
+    frame_indices: tuple[int, int] = (10, 11),
+    frame_counts: tuple[int, ...] = (1, 1),
+):
     root = zarr.group()
+    frame_indices_arr = np.asarray(frame_indices, dtype=np.int32)
+    source_crop_row_ids = np.arange(frame_indices_arr.shape[0], dtype=np.int64)
 
     crop_parent = root.create_group("crop_runs")
     crop_parent.attrs["latest"] = "crop_001"
@@ -37,7 +43,8 @@ def _build_subject_review_root():
     roi_images[0, 1:7, 1:7] = 70
     roi_images[1, 2:6, 2:6] = 120
     crop.create_array("roi_images", data=roi_images)
-    crop.create_array("frame_indices", data=np.asarray([10, 11], dtype=np.int32))
+    crop.create_array("frame_indices", data=frame_indices_arr)
+    crop.create_array("roi_coordinates_full", data=np.asarray([[2, 3], [4, 5]], dtype=np.int32))
 
     subject_parent = root.create_group("subject_mask_runs")
     subject_parent.attrs["latest"] = "subject_masks_001"
@@ -53,9 +60,10 @@ def _build_subject_review_root():
     subject.attrs["source_keypoint_group"] = "refined_keypoints_runs"
     subject.attrs["source_keypoints_run"] = "refined_kp_001"
     subject.create_array("detection_source", data=np.zeros((2,), dtype=np.int8))
-    subject.create_array("frame_indices", data=np.asarray([10, 11], dtype=np.int32))
+    subject.create_array("frame_indices", data=frame_indices_arr)
     subject.create_array("detection_indices", data=np.asarray([0, 1], dtype=np.int32))
-    subject.create_array("frame_counts", data=np.asarray([1, 1], dtype=np.int32))
+    subject.create_array("frame_counts", data=np.asarray(frame_counts, dtype=np.int32))
+    subject.create_array("source_crop_row_ids", data=source_crop_row_ids)
     subject.create_array("available_channels", data=np.asarray([True, True, True, False], dtype=np.bool_))
 
     masks = np.zeros((2, 4, 8, 8), dtype=np.uint8)
@@ -649,6 +657,32 @@ def test_prepare_refined_subject_run_creates_body_swim_editor_run(monkeypatch) -
     assert provenance["inputs"]["source_detect_review_status_ref"] == "refined_detect_runs/refined_detect_001/review_status"
     assert provenance["inputs"]["source_keypoints_run"] == "refined_kp_001"
     assert provenance["inputs"]["source_keypoint_group"] == "refined_keypoints_runs"
+
+
+def test_prepare_refined_subject_run_preserves_same_frame_crop_row_lineage(monkeypatch) -> None:
+    root = _build_subject_review_root(frame_indices=(10, 10), frame_counts=(2,))
+    _patch_review_provenance(monkeypatch)
+
+    _source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_same_frame_001",
+        components=("subject_body", "swim_bladder"),
+    )
+
+    run = refined.group
+    np.testing.assert_array_equal(
+        np.asarray(run["frame_indices"][:], dtype=np.int32),
+        np.asarray([10, 10], dtype=np.int32),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(run["frame_counts"][:], dtype=np.int32),
+        np.asarray([2], dtype=np.int32),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(run["source_crop_row_ids"][:], dtype=np.int64),
+        np.asarray([0, 1], dtype=np.int64),
+    )
 
 
 def test_prepare_existing_refined_subject_run_skips_eager_component_metric_backfill(monkeypatch) -> None:

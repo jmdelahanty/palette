@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-06-19
+last_verified: 2026-06-25
 -->
 
 Purpose: define the runtime/storage contract for editable, refined
@@ -465,7 +465,12 @@ Example batch result from the 2026-04-25 recording migration:
 refined_subject_masks_runs/
   attrs:
     latest                                  "<run_id>"
+    latest_complete                         "<run_id>"
   <run_id>/
+    attrs:
+      palette_run_completion_contract       "palette.zarr_run_completion.v1"
+      palette_run_completion_status         "complete"
+      palette_run_name                      "<run_id>"
     frame_indices                           (N,) int32
     frame_counts                            (F,) int32           # recommended
     detection_indices                       (N,) int32           # recommended
@@ -1237,6 +1242,12 @@ The registry must be able to distinguish:
 - refined body/swim-bladder availability
 - refined eye availability projected from unified refined-subject component rows
 - specialized refined eye availability during the transition period
+
+Registry stage completion is valid only after the refined run carries a complete
+Zarr run-completion marker. `emit_stage_completion(..., status="ok",
+step_name="refined_subject_masks", run_name=<run>)` refuses to write `ok` if
+`refined_subject_masks_runs/<run>` is missing, incomplete, or only published via
+`latest` without `palette_run_completion_status = "complete"`.
 
 ## Migration Policy
 

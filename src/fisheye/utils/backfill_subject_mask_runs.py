@@ -21,7 +21,11 @@ from fisheye.shared.provenance_attrs import (
     build_source_keypoints_attrs,
     resolve_source_keypoints_run,
 )
-from fisheye.shared.row_lineage import ROW_LINEAGE_ARRAYS
+from fisheye.shared.row_lineage import (
+    ROW_LINEAGE_ARRAYS,
+    SOURCE_CROP_ROW_IDS_ARRAY,
+    resolve_source_crop_row_ids,
+)
 from fisheye.shared.subject_mask_chunks import subject_mask_storage_chunks
 from fisheye.shared.subject_mask_component_provenance import write_subject_mask_component_provenance
 from fisheye.shared.type_conversions import normalize_attr
@@ -330,6 +334,48 @@ def _copy_array(group: zarr.Group, name: str, source: zarr.Array) -> None:
     group.create_array(name, data=data, **kwargs)
 
 
+def _resolve_source_crop_rows(
+    root: zarr.Group,
+    source: ResolvedSource,
+    *,
+    source_crop_run: Optional[str],
+    total_rows: int,
+    frame_indices: Optional[zarr.Array],
+) -> object | None:
+    crop_group = None
+    if source_crop_run:
+        crop_parent = root.get("crop_runs")
+        if crop_parent is not None and source_crop_run in crop_parent:
+            crop_group = crop_parent[source_crop_run]
+    return resolve_source_crop_row_ids(
+        source.run_group,
+        crop_group,
+        total_rois=total_rows,
+        frame_indices=frame_indices,
+    )
+
+
+def _write_source_crop_row_ids(
+    group: zarr.Group,
+    source_crop_row_ids: object | None,
+    *,
+    total_rows: int,
+) -> None:
+    if source_crop_row_ids is None:
+        raise ValueError(
+            "Could not resolve source_crop_row_ids for subject-mask projection; "
+            "source run and crop run are not direct-row aligned."
+        )
+    if hasattr(source_crop_row_ids, "__getitem__"):
+        data = np.asarray(source_crop_row_ids[:], dtype=np.int64)
+    else:
+        data = np.asarray(source_crop_row_ids, dtype=np.int64)
+    data = data.reshape(-1)
+    if int(data.shape[0]) != int(total_rows):
+        raise ValueError(f"source_crop_row_ids length {data.shape[0]} does not match source rows {total_rows}.")
+    group.create_array(SOURCE_CROP_ROW_IDS_ARRAY, data=data, overwrite=True)
+
+
 def _decode_probabilities(batch: np.ndarray, *, encoding: str) -> np.ndarray:
     source_dtype = batch.dtype
     decoded = batch.astype(np.float32, copy=False)
@@ -588,6 +634,15 @@ def backfill_subject_mask_run(
         source_array = _resolve_lineage_array(root, source, source_crop_run=source_crop_run, array_name=name)
         if source_array is not None:
             _copy_array(run_group, name, source_array)
+    if SOURCE_CROP_ROW_IDS_ARRAY not in run_group:
+        source_crop_rows = _resolve_source_crop_rows(
+            root,
+            source,
+            source_crop_run=source_crop_run,
+            total_rows=total_rows,
+            frame_indices=run_group.get("frame_indices"),
+        )
+        _write_source_crop_row_ids(run_group, source_crop_rows, total_rows=total_rows)
 
     detection_source_array = _resolve_lineage_array(root, source, source_crop_run=source_crop_run, array_name="detection_source")
     if detection_source_array is None:

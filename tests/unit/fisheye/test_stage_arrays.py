@@ -36,6 +36,7 @@ from fisheye.shared.zarr.stage_arrays import (
     REFINED_SUBJECT_MASKS_SPEC,
     STAGES,
     STIMULUS_SPEC,
+    SUBJECT_MASKS_SPEC,
     SUBJECT_SHAPE_SPEC,
     TAIL_POSTURE_VIEW_SPEC,
     TAIL_KINEMATICS_SPEC,
@@ -125,6 +126,8 @@ def _dtype_for_spec(dtype_text: str):
     if token.startswith("uint"):
         return np.uint8 if token == "uint8" else np.uint32
     if token.startswith("int"):
+        if token == "int64":
+            return np.int64
         return np.int8 if token == "int8" else np.int32
     if token.startswith("float"):
         if token == "float16":
@@ -384,6 +387,18 @@ def test_validate_run_accepts_current_refined_mask_specs() -> None:
 
         result = validate_run(group, stage_spec)
         assert result.valid, f"{stage_spec.stage_name} errors: {result.errors}"
+
+
+def test_validate_run_requires_source_crop_row_ids_for_subject_mask_stages() -> None:
+    for stage_spec in (SUBJECT_MASKS_SPEC, REFINED_SUBJECT_MASKS_SPEC):
+        group = zarr.group()
+        _write_required_arrays(group, stage_spec)
+        del group["source_crop_row_ids"]
+
+        result = validate_run(group, stage_spec)
+
+        assert not result.valid
+        assert any("missing required array 'source_crop_row_ids'" in message for message in result.errors)
 
 
 def test_validate_run_accepts_refined_subject_masks_with_rle_store_without_dense_masks() -> None:
