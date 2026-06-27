@@ -35,6 +35,7 @@ POST_WALLTIME="1:00"
 QUALITY_THRESHOLD=100.0
 QUALITY_THRESHOLD_MODE="scaled"
 QUALITY_THRESHOLD_REFERENCE_WIDTH=640.0
+QUALITY_EXPECTED_SUBJECT_COUNT=""
 REFINE_SAVE_VISUALS=0
 
 SUBMIT=0
@@ -92,6 +93,10 @@ Postprocess options:
   --quality-threshold-mode MODE  scaled, pixels, or normalized (default: scaled)
   --quality-threshold-reference-width VALUE
                                   Reference width for scaled threshold (default: 640.0)
+  --quality-expected-subject-count N
+                                  Expected total subjects per frame. Use for
+                                  multi-arena recordings, e.g. 4 fish in 4
+                                  square sub-arenas.
   --refine-save-visuals          Ask refine_detect_batch to save visuals
 
 Execution:
@@ -134,6 +139,7 @@ while [[ $# -gt 0 ]]; do
     --quality-threshold) QUALITY_THRESHOLD="$2"; shift 2;;
     --quality-threshold-mode) QUALITY_THRESHOLD_MODE="$2"; shift 2;;
     --quality-threshold-reference-width) QUALITY_THRESHOLD_REFERENCE_WIDTH="$2"; shift 2;;
+    --quality-expected-subject-count) QUALITY_EXPECTED_SUBJECT_COUNT="$2"; shift 2;;
     --refine-save-visuals) REFINE_SAVE_VISUALS=1; shift;;
     --submit) SUBMIT=1; shift;;
     -h|--help) usage; exit 0;;
@@ -423,16 +429,21 @@ scripts/py -m fisheye.utils.validate_imported_run_group "\$ZARR" \\
   --target-group-path "detect_runs/\$DETECT_RUN_NAME" \\
   > "\$TARGET_POST_DIR/validate_imported_run_group.json"
 
-scripts/py -m fisheye.utils.detect_quality_batch "\$ZARR" \\
-  --apply \\
-  --json \\
-  --detect-run "\$DETECT_RUN_NAME" \\
-  --quality-run-name "\$QUALITY_RUN_NAME" \\
-  --threshold "$QUALITY_THRESHOLD" \\
-  --threshold-mode "$QUALITY_THRESHOLD_MODE" \\
-  --threshold-reference-width "$QUALITY_THRESHOLD_REFERENCE_WIDTH" \\
-  --log-dir "\$QUALITY_LOG_DIR" \\
-  > "\$TARGET_POST_DIR/detect_quality.stdout.jsonl"
+quality_cmd=(
+  scripts/py -m fisheye.utils.detect_quality_batch "\$ZARR"
+  --apply
+  --json
+  --detect-run "\$DETECT_RUN_NAME"
+  --quality-run-name "\$QUALITY_RUN_NAME"
+  --threshold "$QUALITY_THRESHOLD"
+  --threshold-mode "$QUALITY_THRESHOLD_MODE"
+  --threshold-reference-width "$QUALITY_THRESHOLD_REFERENCE_WIDTH"
+  --log-dir "\$QUALITY_LOG_DIR"
+)
+if [[ -n "$QUALITY_EXPECTED_SUBJECT_COUNT" ]]; then
+  quality_cmd+=(--expected-subject-count "$QUALITY_EXPECTED_SUBJECT_COUNT")
+fi
+"\${quality_cmd[@]}" > "\$TARGET_POST_DIR/detect_quality.stdout.jsonl"
 
 refine_cmd=(
   scripts/py -m fisheye.utils.refine_detect_batch "\$ZARR"

@@ -137,6 +137,21 @@ def test_build_cmd_includes_explicit_quality_run_name(tmp_path: Path) -> None:
     assert "detect_quality_custom" in cmd
 
 
+def test_build_cmd_includes_expected_subject_count(tmp_path: Path) -> None:
+    args = argparse.Namespace(
+        threshold=123.5,
+        threshold_mode="scaled",
+        threshold_reference_width=640.0,
+        quality_run_name=None,
+        expected_subject_count=4,
+        no_save=False,
+    )
+    zarr_path = tmp_path / "rec.zarr"
+    cmd = _build_cmd(args, zarr_path, detect_run="detect_2026_01")
+    assert "--expected-subject-count" in cmd
+    assert "4" in cmd
+
+
 def test_build_cmd_respects_no_save(tmp_path: Path) -> None:
     args = argparse.Namespace(
         threshold=100.0,

@@ -31,6 +31,7 @@ QUALITY_WALLTIME="1:00"
 QUALITY_THRESHOLD=100.0
 QUALITY_THRESHOLD_MODE="scaled"
 QUALITY_THRESHOLD_REFERENCE_WIDTH=640.0
+QUALITY_EXPECTED_SUBJECT_COUNT=""
 
 REFINE_QUEUE="short"
 REFINE_NCORES=4
@@ -88,6 +89,10 @@ Quality/refine job options:
   --quality-threshold-mode MODE  scaled, pixels, or normalized (default: scaled)
   --quality-threshold-reference-width VALUE
                                   Reference width for scaled threshold (default: 640.0)
+  --quality-expected-subject-count N
+                                  Expected total subjects per frame. Use for
+                                  multi-arena recordings, e.g. 4 fish in 4
+                                  square sub-arenas.
   --refine-queue NAME            LSF queue for refine_detect (default: short)
   --refine-ncores N              Cores for refine_detect (default: 4)
   --refine-mem-gb N              Memory for refine_detect (default: 16)
@@ -130,6 +135,7 @@ while [[ $# -gt 0 ]]; do
     --quality-threshold) QUALITY_THRESHOLD="$2"; shift 2;;
     --quality-threshold-mode) QUALITY_THRESHOLD_MODE="$2"; shift 2;;
     --quality-threshold-reference-width) QUALITY_THRESHOLD_REFERENCE_WIDTH="$2"; shift 2;;
+    --quality-expected-subject-count) QUALITY_EXPECTED_SUBJECT_COUNT="$2"; shift 2;;
     --refine-queue) REFINE_QUEUE="$2"; shift 2;;
     --refine-ncores) REFINE_NCORES="$2"; shift 2;;
     --refine-mem-gb) REFINE_MEM_GB="$2"; shift 2;;
@@ -223,13 +229,19 @@ mapfile -t zarr_paths < "$RECORDINGS_FILE"
 mkdir -p "$QUALITY_LOG_DIR"
 for zarr_path in "\${zarr_paths[@]}"; do
   [[ -z "\$zarr_path" ]] && continue
-  scripts/py -m fisheye.utils.detect_quality_batch "\$zarr_path" \\
-    --apply \\
-    --json \\
-    --log-dir "$QUALITY_LOG_DIR" \\
-    --threshold "$QUALITY_THRESHOLD" \\
-    --threshold-mode "$QUALITY_THRESHOLD_MODE" \\
+  quality_cmd=(
+    scripts/py -m fisheye.utils.detect_quality_batch "\$zarr_path"
+    --apply
+    --json
+    --log-dir "$QUALITY_LOG_DIR"
+    --threshold "$QUALITY_THRESHOLD"
+    --threshold-mode "$QUALITY_THRESHOLD_MODE"
     --threshold-reference-width "$QUALITY_THRESHOLD_REFERENCE_WIDTH"
+  )
+  if [[ -n "$QUALITY_EXPECTED_SUBJECT_COUNT" ]]; then
+    quality_cmd+=(--expected-subject-count "$QUALITY_EXPECTED_SUBJECT_COUNT")
+  fi
+  "\${quality_cmd[@]}"
 done
 JOBSCRIPT
 chmod +x "$QUALITY_SCRIPT"

@@ -43,6 +43,22 @@ This is the current detect workflow as of 2026-04-07.
    later refined-detect review approval. Skip this for sampled training Zarrs:
    `refine_detect` automatically uses sampled-import passthrough mode and does
    not require a detect-quality report there.
+
+   For fixed multi-subject recordings, pass the expected total subject count:
+   ```bash
+   scripts/py -m fisheye.refinement.detect_quality \
+     /path/to/zarr \
+     --expected-subject-count 4
+   ```
+   This keeps frames with four detections clean, labels only
+   `frame_counts > 4` as quality label `4`, and skips global temporal jump/blip
+   artifact labeling because raw rows interleave multiple subjects before
+   arena or identity assignment. Use arena-assignment and
+   `single_subject_per_arena` to reject duplicate detections within a specific
+   sub-arena.
+
+   The cluster wrappers expose the same policy as
+   `--quality-expected-subject-count N`.
 3. Initialize the curated refined run.
    ```bash
    scripts/py -m fisheye.refinement.refine_detect /path/to/zarr

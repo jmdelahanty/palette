@@ -334,6 +334,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=5,
         help="Number of model candidates to persist in detect run provenance (registry mode).",
     )
+    parser.add_argument(
+        "--expected-subject-count",
+        type=int,
+        default=None,
+        help=(
+            "Expected total subjects per frame for detect_quality. For example, "
+            "use 4 for four one-fish square sub-arenas in one camera view."
+        ),
+    )
 
     parser.add_argument(
         "--import-stimulus",
@@ -451,6 +460,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             model_source=str(args.model_source),
             import_stimulus=bool(args.import_stimulus),
             allow_preflight_failures=bool(args.allow_preflight_failures),
+            expected_subject_count=args.expected_subject_count,
             refine_detect=bool(args.refine_detect),
             keypoints=bool(args.keypoints),
             refine_keypoints=bool(args.refine_keypoints),
@@ -510,6 +520,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         require_unique=bool(args.require_unique),
         include_non_success=bool(args.include_non_success),
         top_k=int(args.top_k),
+        expected_subject_count=args.expected_subject_count,
         refine_detect=bool(args.refine_detect),
         refine_config=args.refine_config,
         register=bool(args.register),

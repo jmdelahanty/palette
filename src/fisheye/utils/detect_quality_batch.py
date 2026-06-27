@@ -207,6 +207,9 @@ def _build_cmd(args: argparse.Namespace, zarr_path: Path, detect_run: Optional[s
     quality_run_name = getattr(args, "quality_run_name", None)
     if quality_run_name:
         cmd.extend(["--quality-run-name", quality_run_name])
+    expected_subject_count = getattr(args, "expected_subject_count", None)
+    if expected_subject_count is not None:
+        cmd.extend(["--expected-subject-count", str(expected_subject_count)])
     if args.no_save:
         cmd.append("--no-save")
     else:
@@ -258,6 +261,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         type=float,
         default=640.0,
         help="Reference width for scaled threshold mode (default: 640).",
+    )
+    parser.add_argument(
+        "--expected-subject-count",
+        type=int,
+        default=None,
+        help=(
+            "Expected total subjects per frame. Use this for multi-arena "
+            "recordings so global multi-detection labels mean over-expected, "
+            "not more than one."
+        ),
     )
     parser.add_argument("--no-save", action="store_true", help="Analyze only; do not write quality report.")
     parser.add_argument("--json", action="store_true", help="Emit JSON lines for plan/results.")
@@ -311,6 +324,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         threshold=float(args.threshold),
         threshold_mode=str(args.threshold_mode),
         threshold_reference_width=float(args.threshold_reference_width),
+        expected_subject_count=args.expected_subject_count,
         quality_run_name=args.quality_run_name,
         skip_existing=bool(skip_existing),
         no_save=bool(args.no_save),

@@ -160,6 +160,18 @@ def _get_expected_subject_count(root: zarr.Group) -> Optional[int]:
     return None
 
 
+def _resolve_expected_subject_count(
+    root: zarr.Group,
+    explicit_count: Optional[int],
+) -> Optional[int]:
+    if explicit_count is not None:
+        expected = _as_positive_int(explicit_count)
+        if expected is None:
+            raise ValueError("--expected-subject-count must be a positive integer")
+        return expected
+    return _get_expected_subject_count(root)
+
+
 def _as_positive_int(value: object) -> Optional[int]:
     try:
         ivalue = int(value)  # type: ignore[arg-type]
@@ -443,6 +455,8 @@ def calculate_sampled_quality_score(
     frame_counts: np.ndarray,
     expected_count: Optional[int],
     bbox_validation: Dict,
+    *,
+    mode: str = "sampled",
 ) -> Dict:
     """
     Calculate quality score for sampled imports (training data).
@@ -484,10 +498,11 @@ def calculate_sampled_quality_score(
     return {
         "coverage_score": float(coverage_score),
         "expected_count_score": float(expected_score),
+        "artifact_score": 100.0,
         "bbox_score": float(bbox_score),
         "overall_score": float(overall_score),
         "grade": grade,
-        "mode": "sampled",
+        "mode": mode,
         "expected_count": expected_count,
     }
 
@@ -560,6 +575,19 @@ def save_quality_report(
     }
     if "sampling" in quality_report:
         quality_group.attrs["sampling"] = quality_report["sampling"]
+    expected_subject_count = _as_positive_int(quality_report["coverage"].get("expected_count"))
+    count_policy = {
+        "expected_subject_count": expected_subject_count,
+        "over_expected_label": 4,
+        "over_expected_rule": (
+            f"frame_counts > {expected_subject_count}"
+            if expected_subject_count is not None
+            else "frame_counts > 1"
+        ),
+    }
+    quality_group.attrs["count_policy"] = count_policy
+    if expected_subject_count is not None:
+        quality_group.attrs["expected_subject_count"] = expected_subject_count
 
     # Load detection data
     frame_indices = detect_group["frame_indices"][:].astype(np.int64, copy=False)
@@ -597,8 +625,10 @@ def save_quality_report(
         if 0 <= frame_idx < n_frames:
             quality_flags[frame_idx] = 3
 
-    # Mark multi-detection frames (will be 0 if max_fish=1)
-    multi_det_frames = np.where(frame_counts > 1)[0]
+    # Mark frames that exceed the configured expected subject count.
+    # Without an expected count, preserve legacy single-subject semantics.
+    expected_threshold = expected_subject_count if expected_subject_count is not None else 1
+    multi_det_frames = np.where(frame_counts > expected_threshold)[0]
     quality_flags[multi_det_frames] = 4
 
     # ============================================================================
@@ -633,6 +663,18 @@ def save_quality_report(
         "blip_detections": n_blip_detections,
         "jump_detections": n_jump_detections,
         "multi_detections": n_multi_detections,
+        "expected_subject_count": expected_subject_count,
+        "frames_over_expected": int(np.sum(frame_counts > expected_threshold)),
+        "frames_with_expected_count": (
+            int(np.sum(frame_counts == expected_subject_count))
+            if expected_subject_count is not None
+            else None
+        ),
+        "frames_under_expected": (
+            int(np.sum((frame_counts > 0) & (frame_counts < expected_subject_count)))
+            if expected_subject_count is not None
+            else None
+        ),
         "clean_percentage": float(n_clean_detections / total_detections * 100) if total_detections > 0 else 0.0,
     }
 
@@ -647,6 +689,9 @@ def save_quality_report(
         'jump_threshold_mode': quality_report['artifacts'].get('jump_threshold_mode', 'pixels'),
         'jump_threshold_pixels_effective': quality_report['artifacts'].get('jump_threshold_pixels_effective'),
         'jump_threshold_reference_width': quality_report['artifacts'].get('jump_threshold_reference_width'),
+        'expected_subject_count': expected_subject_count,
+        'count_policy': count_policy,
+        'temporal_artifact_policy': quality_report['artifacts'].get('temporal_artifact_policy'),
     }
     
     # ============================================================================
@@ -741,6 +786,7 @@ def analyze_detect_quality(
     blip_gap_threshold: int = 10,
     threshold_mode: str = "pixels",
     threshold_reference_width: float = 640.0,
+    expected_subject_count: Optional[int] = None,
 ) -> Dict:
     """
     Comprehensive detection quality analysis.
@@ -758,7 +804,7 @@ def analyze_detect_quality(
     root = zarr.open(zarr_path, mode="r")
     detect_family_path = _normalize_group_path(detect_family_path)
     sampled, sampled_meta = _read_sampled_import_meta(root)
-    expected_count = _get_expected_subject_count(root)
+    expected_count = _resolve_expected_subject_count(root, expected_subject_count)
 
     # Get detect run
     if run_name is None:
@@ -795,11 +841,20 @@ def analyze_detect_quality(
     all_gaps = identify_gaps(presence_mask)
     gap_categories = categorize_gaps(all_gaps)
 
-    # Multi-detection frames (should be 0 for single-fish)
-    multi_detection_frames = int(np.sum(frame_counts > 1))
+    # "Multi-detection" is legacy terminology. With an expected subject count,
+    # label only frames over the expected global count; arena-level conflicts
+    # are handled later by arena_assignment/single_subject_per_arena.
+    expected_threshold = expected_count if expected_count and expected_count > 0 else 1
+    multi_detection_frames = int(np.sum(frame_counts > expected_threshold))
 
     # Temporal artifact detection
+    skip_temporal_reason = None
     if sampled:
+        skip_temporal_reason = "skipped_sampled_import"
+    elif expected_count is not None and expected_count > 1:
+        skip_temporal_reason = "skipped_expected_subject_count_gt_1"
+
+    if skip_temporal_reason is not None:
         artifacts = {
             "blips": [],
             "jumps": [],
@@ -813,6 +868,7 @@ def analyze_detect_quality(
             "jump_threshold_reference_width": (
                 float(threshold_reference_width) if threshold_mode == "scaled" else None
             ),
+            "temporal_artifact_policy": skip_temporal_reason,
         }
     else:
         artifacts = identify_temporal_artifacts(
@@ -829,17 +885,19 @@ def analyze_detect_quality(
         artifacts["jump_threshold_reference_width"] = (
             float(threshold_reference_width) if threshold_mode == "scaled" else None
         )
+        artifacts["temporal_artifact_policy"] = "global_row_sequence"
 
     # Bounding box validation
     bbox_validation = validate_bboxes(bbox_coords, frame_indices)
 
     # Quality score
-    if sampled:
+    if sampled or (expected_count is not None and expected_count > 1):
         quality_score = calculate_sampled_quality_score(
             coverage_stats,
             frame_counts,
             expected_count,
             bbox_validation,
+            mode="sampled" if sampled else "expected_count",
         )
     else:
         quality_score = calculate_quality_score(
@@ -944,6 +1002,16 @@ Examples:
         help="Reference width for scaled threshold mode (default: 640).",
     )
     parser.add_argument(
+        "--expected-subject-count",
+        type=int,
+        default=None,
+        help=(
+            "Expected total subjects per frame. When >1, global temporal "
+            "jump/blip labeling is skipped and quality label 4 is reserved "
+            "for frames above this count."
+        ),
+    )
+    parser.add_argument(
         "--save", action="store_true", default=True, help="Save quality report to zarr (default: True)"
     )
     parser.add_argument(
@@ -990,6 +1058,7 @@ Examples:
             jump_threshold=args.threshold,
             threshold_mode=args.threshold_mode,
             threshold_reference_width=args.threshold_reference_width,
+            expected_subject_count=args.expected_subject_count,
         )
 
         # Print detailed summary
@@ -998,6 +1067,11 @@ Examples:
         console.print(f"  Total frames: {cov['total_frames']}")
         console.print(f"  Detected: {cov['present_frames']} ({cov['coverage_percent']:.1f}%)")
         console.print(f"  Multi-detection: {cov['multi_detection_frames']}")
+        if cov.get("expected_count") is not None:
+            console.print(f"  Expected subjects/frame: {cov['expected_count']}")
+            console.print(f"  Frames with expected count: {cov['frames_with_expected_count']}")
+            console.print(f"  Frames under expected: {cov['frames_under_expected']}")
+            console.print(f"  Frames over expected: {cov['frames_over_expected']}")
 
         console.print("\n[bold yellow]GAPS[/bold yellow]")
         gaps = cov["gaps"]

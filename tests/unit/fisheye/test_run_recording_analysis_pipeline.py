@@ -20,6 +20,7 @@ def _opts(tmp_path: Path) -> mod.RecordingPipelineOptions:
         require_unique=False,
         include_non_success=False,
         top_k=5,
+        expected_subject_count=None,
         refine_detect=False,
         refine_config=None,
         register=False,
@@ -158,6 +159,7 @@ def test_run_detect_quality_builds_expected_command(monkeypatch, tmp_path: Path)
         zarr_path=tmp_path / "rec" / "zarr" / "rec_analysis.zarr",
     )
     opts = _opts(tmp_path)
+    opts.expected_subject_count = 4
 
     ok, rc, cmd = mod.run_detect_quality(plan, opts)
 
@@ -168,6 +170,8 @@ def test_run_detect_quality_builds_expected_command(monkeypatch, tmp_path: Path)
     assert "-m" in cmd
     assert "fisheye.refinement.detect_quality" in cmd
     assert str(plan.zarr_path) in cmd
+    assert "--expected-subject-count" in cmd
+    assert "4" in cmd
 
 
 def test_main_defaults_to_dry_run_and_does_not_create_archive(monkeypatch, tmp_path: Path) -> None:

@@ -42,7 +42,7 @@ Label values:
 | `0` | Clean | Frame has a clean, valid detection |
 | `2` | Blip | Detection appears after a long gap |
 | `3` | Jump | Detection position jumps too far from the last valid position |
-| `4` | Multi-detection | Frame has multiple detections |
+| `4` | Over-expected detections | Frame has more detections than the configured expected subject count |
 
 Example:
 
@@ -71,7 +71,7 @@ Label values:
 | `0` | Clean | Valid detection |
 | `2` | Blip | Detection after a long gap |
 | `3` | Jump | Detection with unrealistic position change |
-| `4` | Multi-detection | Detection from a multi-detection frame |
+| `4` | Over-expected detections | Detection from a frame with too many detections |
 
 There is no per-detection `-1`; empty frames have no detection rows.
 
@@ -177,6 +177,18 @@ Typical workflow:
    This writes `quality_flags` and `detection_quality_labels` for the selected
    raw detect run.
 
+   For fixed multi-subject recordings where the expected total subject count is
+   known, pass that count explicitly:
+
+   ```bash
+   scripts/py -m fisheye.refinement.detect_quality /path/to/zarr --expected-subject-count 4
+   ```
+
+   With `--expected-subject-count 4`, frames with four detections remain clean
+   and label `4` is reserved for frames with five or more detections. Global
+   jump/blip labeling is skipped in this mode because raw detection rows
+   interleave subjects before arena/identity assignment.
+
 3. Build the sparse curated refined surface.
 
    ```bash
@@ -210,6 +222,9 @@ Typical workflow:
   `detection_quality_labels`.
 - For single-fish tracking (`max_fish=1`), `4` (multi-detection) should be
   uncommon or absent.
+- For fixed multi-subject recordings, use `--expected-subject-count N` so
+  label `4` means `frame_counts > N`; duplicate-in-arena conflicts should be
+  handled after arena assignment.
 - Quality labels are preserved through refine for traceability.
 - `detect_quality` is a raw detect artifact-labeling stage, not the refined
   detect approval stage.

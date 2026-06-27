@@ -43,6 +43,7 @@ class RecordingPipelineOptions:
     require_unique: bool
     include_non_success: bool
     top_k: int
+    expected_subject_count: Optional[int]
     refine_detect: bool
     refine_config: Optional[Path]
     register: bool
@@ -158,6 +159,8 @@ def run_detect_quality(plan: RecordingAnalysisPlan, opts: RecordingPipelineOptio
         "fisheye.refinement.detect_quality",
         str(plan.zarr_path),
     ]
+    if opts.expected_subject_count is not None:
+        cmd.extend(["--expected-subject-count", str(opts.expected_subject_count)])
     print(f"Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, check=False)
     return result.returncode == 0, result.returncode, cmd
@@ -343,6 +346,7 @@ def _build_pipeline_options(args: argparse.Namespace, registry_path: Path) -> Re
         require_unique=bool(args.require_unique),
         include_non_success=bool(args.include_non_success),
         top_k=int(args.top_k),
+        expected_subject_count=args.expected_subject_count,
         refine_detect=bool(args.refine_detect),
         refine_config=args.refine_config,
         register=bool(args.register),
@@ -387,6 +391,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Allow non-success training runs as candidates for registry model resolution.",
     )
     parser.add_argument("--top-k", type=int, default=5, help="Number of detect model candidates to persist.")
+    parser.add_argument(
+        "--expected-subject-count",
+        type=int,
+        default=None,
+        help=(
+            "Expected total subjects per frame for detect_quality. For example, "
+            "use 4 for four one-fish square sub-arenas in one camera view."
+        ),
+    )
 
     parser.add_argument(
         "--import-video-metadata",
