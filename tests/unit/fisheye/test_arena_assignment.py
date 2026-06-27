@@ -7,6 +7,7 @@ import pytest
 
 import fisheye.tracking.arena_assignment as mod
 from fisheye.tracking.arena_assignment import assign_arenas_spatial
+from fisheye.tracking.single_subject_per_arena import TrackingConflictError
 
 
 class _FakeArray:
@@ -31,10 +32,18 @@ class _FakeGroup(dict):
         self[name] = group
         return group
 
+    def require_group(self, name: str):
+        if name not in self:
+            return self.create_group(name)
+        return self[name]
+
     def create_array(self, name: str, data, **_kwargs):
         array = _FakeArray(np.asarray(data))
         self[name] = array
         return array
+
+    def group_keys(self) -> list[str]:
+        return [key for key, value in self.items() if isinstance(value, _FakeGroup)]
 
     def get(self, key: str, default=None):
         return super().get(key, default)
@@ -120,6 +129,70 @@ def _build_root() -> _FakeGroup:
 
     root.create_group("arena_assignment_runs")
     return root
+
+
+def _stub_assignment_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    root: _FakeGroup,
+) -> None:
+    def fake_open(_path: str, mode: str = "a"):
+        assert mode == "a"
+        return root
+
+    def fake_get_run_group(_root, _stage, _console):
+        assign_parent = _root["arena_assignment_runs"]
+        assign_group = assign_parent.create_group("arena_assignment_001")
+        return assign_group, "arena_assignment_001"
+
+    monkeypatch.setattr(mod, "open_zarr_root", fake_open)
+    monkeypatch.setattr(mod, "get_run_group", fake_get_run_group)
+    monkeypatch.setattr(mod, "emit_stage_completion", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "build_stage_provenance", lambda **kwargs: {"ok": True})
+    monkeypatch.setattr(mod, "write_stage_provenance", lambda *args, **kwargs: None)
+
+
+def _set_multiarena_crop_rows(
+    root: _FakeGroup,
+    *,
+    frame_indices: np.ndarray,
+    centers: np.ndarray,
+) -> None:
+    crop_run = root["crop_runs"]["crop_001"]
+    crop_run["frame_indices"] = _FakeArray(np.asarray(frame_indices, dtype=np.int32))
+    crop_run["bbox_norm_coords"] = _FakeArray(np.asarray(centers, dtype=np.float64))
+    n_frames = int(frame_indices.max()) + 1 if frame_indices.size else 0
+    crop_run["frame_counts"] = _FakeArray(
+        np.bincount(frame_indices, minlength=n_frames).astype(np.int32)
+    )
+
+
+def _four_square_rois() -> list[dict[str, object]]:
+    return [
+        {
+            "id": 10,
+            "roi_pixels": [0, 0, 50, 50],
+            "source": "test",
+            "image_shape": [100, 100],
+        },
+        {
+            "id": 20,
+            "roi_pixels": [50, 0, 50, 50],
+            "source": "test",
+            "image_shape": [100, 100],
+        },
+        {
+            "id": 30,
+            "roi_pixels": [0, 50, 50, 50],
+            "source": "test",
+            "image_shape": [100, 100],
+        },
+        {
+            "id": 40,
+            "roi_pixels": [50, 50, 50, 50],
+            "source": "test",
+            "image_shape": [100, 100],
+        },
+    ]
 
 
 def test_assign_arenas_spatial_prefers_sparse_refined_instances(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -289,6 +362,163 @@ def test_assign_arenas_spatial_can_track_explicit_crop_rowset(
     assert root["arena_assignment_runs"]["arena_assignment_001"].attrs["source_rowset_path"] == "crop_runs/crop_001"
     assert result["total_detections"] == 3
     assert result["assigned_detections"] == 3
+
+
+def test_assign_arenas_spatial_tracks_four_subjects_in_four_subarenas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _build_root()
+    _set_multiarena_crop_rows(
+        root,
+        frame_indices=np.array([0, 0, 0, 0], dtype=np.int32),
+        centers=np.array(
+            [
+                [0.25, 0.25, 0.10, 0.10],
+                [0.75, 0.25, 0.10, 0.10],
+                [0.25, 0.75, 0.10, 0.10],
+                [0.75, 0.75, 0.10, 0.10],
+            ],
+            dtype=np.float64,
+        ),
+    )
+    _stub_assignment_runtime(monkeypatch, root)
+    monkeypatch.setattr(
+        mod,
+        "infer_experiment_setup",
+        lambda _attrs: SimpleNamespace(
+            setup_type="multi_dish",
+            num_dishes=4,
+            source="experiment_setup",
+        ),
+    )
+
+    result = assign_arenas_spatial(
+        "/tmp/fake.zarr",
+        config={"assign_ids": {"sub_dish_rois": _four_square_rois()}},
+        console=None,
+        source_rowset_path="crop_runs/crop_001",
+    )
+
+    assign_group = root["arena_assignment_runs"]["arena_assignment_001"]
+    assert result["total_detections"] == 4
+    assert result["assigned_detections"] == 4
+    assert result["unassigned_detections"] == 0
+    assert assign_group["arena_ids"][:].tolist() == [10, 20, 30, 40]
+    assert assign_group["n_detections_per_arena"][:].tolist() == [[1, 1, 1, 1]]
+
+    track_parent = root["tracking_runs"]
+    track_group = track_parent[track_parent.attrs["latest"]]
+    assert track_group.attrs["source_rowset_path"] == "crop_runs/crop_001"
+    assert track_group.attrs["source_arena_assignment_run"] == "arena_assignment_001"
+    assert track_group["track_ids"][:].tolist() == [0, 1, 2, 3]
+    assert track_group["arena_ids"][:].tolist() == [10, 20, 30, 40]
+    assert track_group["track_arena_ids"][:].tolist() == [10, 20, 30, 40]
+    assert track_group.attrs["num_tracks"] == 4
+    assert track_group.attrs["tracking_qc_state"] == "ok"
+
+
+def test_assign_arenas_spatial_fails_tracks_on_same_frame_same_arena_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _build_root()
+    _set_multiarena_crop_rows(
+        root,
+        frame_indices=np.array([0, 0], dtype=np.int32),
+        centers=np.array(
+            [
+                [0.25, 0.25, 0.10, 0.10],
+                [0.35, 0.35, 0.10, 0.10],
+            ],
+            dtype=np.float64,
+        ),
+    )
+    emitted: list[dict[str, object]] = []
+    _stub_assignment_runtime(monkeypatch, root)
+    monkeypatch.setattr(
+        mod,
+        "infer_experiment_setup",
+        lambda _attrs: SimpleNamespace(
+            setup_type="multi_dish",
+            num_dishes=4,
+            source="experiment_setup",
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "emit_stage_completion",
+        lambda *args, **kwargs: emitted.append(kwargs),
+    )
+
+    with pytest.raises(TrackingConflictError, match="frame 0"):
+        assign_arenas_spatial(
+            "/tmp/fake.zarr",
+            config={"assign_ids": {"sub_dish_rois": _four_square_rois()}},
+            console=None,
+            source_rowset_path="crop_runs/crop_001",
+        )
+
+    assign_group = root["arena_assignment_runs"]["arena_assignment_001"]
+    assert assign_group["arena_ids"][:].tolist() == [10, 10]
+    assert "tracking_runs" not in root
+    status_by_step = {event["step_name"]: event["status"] for event in emitted}
+    reason_by_step = {
+        event["step_name"]: event["details_json"]["reason"]
+        for event in emitted
+    }
+    assert status_by_step == {"arena_assignment": "ok", "tracks": "error"}
+    assert reason_by_step["tracks"] == "tracking_generation_failed"
+
+
+def test_assign_arenas_spatial_keeps_unassigned_crop_rows_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _build_root()
+    _set_multiarena_crop_rows(
+        root,
+        frame_indices=np.array([0, 1, 2], dtype=np.int32),
+        centers=np.array(
+            [
+                [0.25, 0.25, 0.10, 0.10],
+                [0.75, 0.25, 0.10, 0.10],
+                [1.25, 0.25, 0.10, 0.10],
+            ],
+            dtype=np.float64,
+        ),
+    )
+    _stub_assignment_runtime(monkeypatch, root)
+    monkeypatch.setattr(
+        mod,
+        "infer_experiment_setup",
+        lambda _attrs: SimpleNamespace(
+            setup_type="multi_dish",
+            num_dishes=4,
+            source="experiment_setup",
+        ),
+    )
+
+    result = assign_arenas_spatial(
+        "/tmp/fake.zarr",
+        config={"assign_ids": {"sub_dish_rois": _four_square_rois()}},
+        console=None,
+        source_rowset_path="crop_runs/crop_001",
+    )
+
+    assign_group = root["arena_assignment_runs"]["arena_assignment_001"]
+    assert result["assigned_detections"] == 2
+    assert result["unassigned_detections"] == 1
+    assert assign_group["arena_ids"][:].tolist() == [10, 20, -1]
+    assert assign_group["n_detections_per_arena"][:].tolist() == [
+        [1, 0, 0, 0],
+        [0, 1, 0, 0],
+        [0, 0, 0, 0],
+    ]
+
+    track_parent = root["tracking_runs"]
+    track_group = track_parent[track_parent.attrs["latest"]]
+    assert track_group["track_ids"][:].tolist() == [0, 1, -1]
+    assert track_group["arena_ids"][:].tolist() == [10, 20, -1]
+    assert track_group.attrs["n_unassigned_rows"] == 1
+    assert track_group.attrs["tracking_qc_state"] == "warn"
 
 
 def test_assign_arenas_spatial_missing_single_dish_mask_returns_standard_summary(
