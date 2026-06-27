@@ -486,6 +486,44 @@ def test_check_zarr_reads_track_unassigned_warning_from_latest_run(tmp_path: Pat
     assert info["track_unassigned_rate_percent"] == pytest.approx(25.0)
 
 
+def test_check_zarr_requires_tracks_for_multi_subject_readiness(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "multi_subject_without_tracks_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.attrs["experiment_setup"] = {
+        "num_dishes": 4,
+        "fish_per_dish": 1,
+        "total_expected_fish": 4,
+    }
+    arena_parent = root.create_group("arena_assignment_runs")
+    arena_parent.attrs["latest"] = "arena_001"
+    arena_parent.create_group("arena_001")
+
+    info = mod._check_zarr(zarr_path, tuning_keys=[])  # noqa: SLF001
+
+    assert info["expected_subject_count"] == 4
+    assert info["arena_assignment_present"] is True
+    assert info["track_present"] is False
+    assert info["tracking_ready"] is False
+    assert info["tracking_readiness_reasons"] == ["tracks_missing_for_multi_subject"]
+
+
+def test_check_zarr_single_subject_tracking_readiness_does_not_require_tracks(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "single_subject_without_tracks_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.attrs["experiment_setup"] = {
+        "num_dishes": 1,
+        "fish_per_dish": 1,
+        "total_expected_fish": 1,
+    }
+
+    info = mod._check_zarr(zarr_path, tuning_keys=[])  # noqa: SLF001
+
+    assert info["expected_subject_count"] == 1
+    assert info["track_present"] is False
+    assert info["tracking_ready"] is True
+    assert info["tracking_readiness_reasons"] == []
+
+
 def test_check_zarr_reads_ready_eye_angle_analysis_run(tmp_path: Path) -> None:
     zarr_path = tmp_path / "eye_angle_ready_analysis.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")
@@ -877,6 +915,74 @@ def test_registry_status_payload_reads_subject_mask_status_and_components(tmp_pa
         "eye_right": "approved",
         "swim_bladder": "needs_review",
     }
+
+
+def test_registry_status_payload_requires_tracks_for_multi_subject_readiness(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "multi_subject_registry_analysis.zarr"
+    zarr.open_group(str(zarr_path), mode="w")
+
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "dataset_multi_subject",
+        session_uuid="session_multi_subject",
+        zarr_path=zarr_path,
+        recording_id="recording_multi_subject",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.upsert_provenance(
+        "dataset_multi_subject",
+        provenance={"subject_count": 4},
+        context={},
+        protocol_name=None,
+        protocol_hash=None,
+        acquisition={},
+        zarr_purpose="analysis",
+    )
+    upsert_recording_step_status(
+        registry,
+        dataset_id="dataset_multi_subject",
+        recording_id="recording_multi_subject",
+        step_name="arena_assignment",
+        status="ok",
+        run_name="arena_001",
+        source="unit_test",
+    )
+
+    payload = mod._registry_status_payload(  # noqa: SLF001
+        registry=registry,
+        zarr_path=zarr_path,
+        recording_id="recording_multi_subject",
+        tuning_keys=[],
+    )
+
+    assert payload["expected_subject_count"] == 4
+    assert payload["arena_assignment_present"] is True
+    assert payload["track_present"] is False
+    assert payload["tracking_ready"] is False
+    assert payload["tracking_readiness_reasons"] == ["tracks_missing_for_multi_subject"]
+
+    upsert_recording_step_status(
+        registry,
+        dataset_id="dataset_multi_subject",
+        recording_id="recording_multi_subject",
+        step_name="tracks",
+        status="ok",
+        run_name="tracks_001",
+        details_json={"summary_statistics": {"n_unassigned_rows": 0}},
+        source="unit_test",
+    )
+    payload = mod._registry_status_payload(  # noqa: SLF001
+        registry=registry,
+        zarr_path=zarr_path,
+        recording_id="recording_multi_subject",
+        tuning_keys=[],
+    )
+    registry.close()
+
+    assert payload["track_present"] is True
+    assert payload["tracking_ready"] is True
+    assert payload["tracking_readiness_reasons"] == []
 
 
 def test_registry_status_payload_overlays_component_registry_rows(tmp_path: Path) -> None:

@@ -180,6 +180,9 @@ class RecordingStatus:
     refined_subject_mask_drift_details: List[str]
     arena_assignment_present: bool
     track_present: bool
+    expected_subject_count: Optional[int]
+    tracking_ready: bool
+    tracking_readiness_reasons: List[str]
     track_qc_state: Optional[str]
     track_unassigned_rows: Optional[int]
     track_unassigned_rate_percent: Optional[float]
@@ -736,6 +739,9 @@ def _base_status_payload(*, tuning_keys: List[str], zarr_exists: bool) -> Dict[s
         "refined_subject_mask_drift_details": [],
         "arena_assignment_present": False,
         "track_present": False,
+        "expected_subject_count": None,
+        "tracking_ready": True,
+        "tracking_readiness_reasons": [],
         "track_qc_state": None,
         "track_unassigned_rows": None,
         "track_unassigned_rate_percent": None,
@@ -768,6 +774,65 @@ def _normalize_step_status(value: object) -> Optional[str]:
 
 def _step_row_status_ok(row: Optional[Dict[str, object]]) -> bool:
     return _normalize_step_status(row.get("status") if row else None) == "ok"
+
+
+def _expected_subject_count_from_attrs(attrs: object) -> Optional[int]:
+    mapping = _coerce_mapping(attrs) or {}
+    setup = _coerce_mapping(mapping.get("experiment_setup")) or {}
+    for key in ("total_expected_fish", "expected_subject_count", "subject_count"):
+        count = _coerce_int(setup.get(key))
+        if count is not None and count >= 1:
+            return count
+    for key in ("expected_subject_count", "subject_count"):
+        count = _coerce_int(mapping.get(key))
+        if count is not None and count >= 1:
+            return count
+    return None
+
+
+def _registry_expected_subject_count(
+    *,
+    registry: Registry,
+    zarr_path: Path,
+    recording_id: Optional[str],
+) -> Optional[int]:
+    try:
+        rows = registry.conn.execute(
+            """
+            SELECT subject_count_effective AS subject_count
+            FROM dataset_context_current
+            WHERE zarr_path = ?
+              AND (? IS NULL OR recording_id = ?)
+            ORDER BY
+              CASE WHEN subject_count_effective IS NULL THEN 1 ELSE 0 END,
+              dataset_id
+            LIMIT 1;
+            """,
+            (str(zarr_path), recording_id, recording_id),
+        ).fetchall()
+    except Exception:
+        return None
+    if not rows:
+        return None
+    return _coerce_int(dict(rows[0]).get("subject_count"))
+
+
+def _tracking_readiness(
+    *,
+    expected_subject_count: Optional[int],
+    arena_assignment_present: bool,
+    track_present: bool,
+) -> Dict[str, object]:
+    reasons: List[str] = []
+    if expected_subject_count is not None and expected_subject_count > 1:
+        if not arena_assignment_present:
+            reasons.append("arena_assignment_missing_for_multi_subject")
+        if not track_present:
+            reasons.append("tracks_missing_for_multi_subject")
+    return {
+        "ready": not reasons,
+        "reasons": reasons,
+    }
 
 
 def _parse_step_json(value: object) -> Optional[Dict[str, object]]:
@@ -1271,9 +1336,22 @@ def _registry_status_payload(
             "component_source_subject_mask_stale"
         ]
 
+    expected_subject_count = _registry_expected_subject_count(
+        registry=registry,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+    )
+    payload["expected_subject_count"] = expected_subject_count
     payload["arena_assignment_present"] = _step_row_status_ok(selected_rows.get("arena_assignment"))
     tracks_row = selected_rows.get("tracks")
     payload["track_present"] = _step_row_status_ok(tracks_row)
+    tracking_readiness = _tracking_readiness(
+        expected_subject_count=expected_subject_count,
+        arena_assignment_present=bool(payload["arena_assignment_present"]),
+        track_present=bool(payload["track_present"]),
+    )
+    payload["tracking_ready"] = bool(tracking_readiness["ready"])
+    payload["tracking_readiness_reasons"] = list(tracking_readiness["reasons"])  # type: ignore[arg-type]
     track_details = _parse_step_json(tracks_row.get("details_json") if tracks_row else None) or {}
     tracking_qc_details = _extract_tracking_qc_details(track_details)
     payload["track_qc_state"] = tracking_qc_details["track_qc_state"]
@@ -1422,6 +1500,9 @@ def _build_recording_status(
         refined_subject_mask_drift_details=list(zarr_info["refined_subject_mask_drift_details"]),  # type: ignore[arg-type]
         arena_assignment_present=bool(zarr_info["arena_assignment_present"]),
         track_present=bool(zarr_info["track_present"]),
+        expected_subject_count=zarr_info["expected_subject_count"],  # type: ignore[arg-type]
+        tracking_ready=bool(zarr_info["tracking_ready"]),
+        tracking_readiness_reasons=list(zarr_info["tracking_readiness_reasons"]),  # type: ignore[arg-type]
         track_qc_state=zarr_info["track_qc_state"],  # type: ignore[arg-type]
         track_unassigned_rows=zarr_info["track_unassigned_rows"],  # type: ignore[arg-type]
         track_unassigned_rate_percent=zarr_info["track_unassigned_rate_percent"],  # type: ignore[arg-type]
@@ -1484,6 +1565,11 @@ def _plan_compare_snapshot(plan: RecordingStatus, tuning_keys: List[str]) -> Dic
             plan.track_qc_state,
             plan.track_unassigned_rows,
             plan.track_unassigned_rate_percent,
+        ),
+        "tracking_ready": _tracking_ready_status_text(
+            plan.tracking_ready,
+            plan.expected_subject_count,
+            plan.tracking_readiness_reasons,
         ),
         "eye_angles": _eye_angle_status_text(
             plan.eye_angles_present,
@@ -2480,6 +2566,13 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
             else:
                 track_present = len(list(track_parent.keys())) > 0
 
+    expected_subject_count = _expected_subject_count_from_attrs(root.attrs)
+    tracking_readiness = _tracking_readiness(
+        expected_subject_count=expected_subject_count,
+        arena_assignment_present=arena_assignment_present,
+        track_present=track_present,
+    )
+
     eye_angle_readiness = _extract_eye_angle_readiness(run_name=None, run_group=None)
     analysis = root.get("analysis")
     eye_angle_parent = analysis.get("eye_angle_runs") if analysis is not None else None
@@ -2611,6 +2704,9 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
         "refined_subject_mask_drift_details": refined_subject_mask_drift_details,
         "arena_assignment_present": arena_assignment_present,
         "track_present": track_present,
+        "expected_subject_count": expected_subject_count,
+        "tracking_ready": bool(tracking_readiness["ready"]),
+        "tracking_readiness_reasons": list(tracking_readiness["reasons"]),
         "track_qc_state": track_qc_state,
         "track_unassigned_rows": track_unassigned_rows,
         "track_unassigned_rate_percent": track_unassigned_rate_percent,
@@ -2714,6 +2810,33 @@ def _track_status_rich(
             f"{_format_one_decimal(unassigned_row_rate_percent)}%)"
         )
     return f"[yellow]WARN[/yellow] ({n_unassigned_rows} unassigned)"
+
+
+def _tracking_ready_status_text(
+    ready: bool,
+    expected_subject_count: Optional[int],
+    readiness_reasons: List[str],
+) -> str:
+    if expected_subject_count is None or expected_subject_count <= 1:
+        return "N/A"
+    if ready:
+        return f"OK ({expected_subject_count} subjects)"
+    if readiness_reasons:
+        return f"WARN ({expected_subject_count} subjects; {'; '.join(readiness_reasons[:3])})"
+    return f"WARN ({expected_subject_count} subjects)"
+
+
+def _tracking_ready_status_rich(
+    ready: bool,
+    expected_subject_count: Optional[int],
+    readiness_reasons: List[str],
+) -> str:
+    text = _tracking_ready_status_text(ready, expected_subject_count, readiness_reasons)
+    if text == "N/A":
+        return "N/A"
+    if ready:
+        return f"[chartreuse1]{text}[/chartreuse1]"
+    return f"[yellow]{text}[/yellow]"
 
 
 def _eye_angle_status_text(
@@ -3310,6 +3433,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         table.add_column("Refined Subject Components (unified)")
         table.add_column("Arena Assignment")
         table.add_column("Track")
+        table.add_column("Tracking Ready")
         table.add_column("Eye Angles")
         table.add_column("Stimulus")
         table.add_column("Calib")
@@ -3388,6 +3512,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                     plan.track_qc_state,
                     plan.track_unassigned_rows,
                     plan.track_unassigned_rate_percent,
+                ),
+                _tracking_ready_status_rich(
+                    plan.tracking_ready,
+                    plan.expected_subject_count,
+                    plan.tracking_readiness_reasons,
                 ),
                 _eye_angle_status_rich(
                     plan.eye_angles_present,
@@ -3491,6 +3620,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(
                 "  track: "
                 f"{_track_status_text(plan.track_present, plan.track_qc_state, plan.track_unassigned_rows, plan.track_unassigned_rate_percent)}"
+            )
+            print(
+                "  tracking_ready: "
+                f"{_tracking_ready_status_text(plan.tracking_ready, plan.expected_subject_count, plan.tracking_readiness_reasons)}"
             )
             print(
                 "  eye_angles: "
