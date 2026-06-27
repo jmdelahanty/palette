@@ -1377,6 +1377,7 @@ ARENA_ASSIGNMENT_SPEC = StageSpec(
     zarr_group="arena_assignment_runs/<run>/",
     specs=(
         ArraySpec("arena_ids", "int32", ("n_detections",)),
+        ArraySpec("n_detections_per_arena", "int32", ("n_frames", "n_arenas")),
         ArraySpec("confidence", "float32", ("n_detections",), required=False),
     ),
 )

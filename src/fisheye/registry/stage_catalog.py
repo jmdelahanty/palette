@@ -142,9 +142,9 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
     StageSpec(
         id="arena_assignment",
         aliases=("assign_ids",),
-        depends_on=("refined_keypoints",),
+        depends_on=("refined_detect",),
         invalidates=("tracks",),
-        artifact_families=("analysis/arena_assignment_runs",),
+        artifact_families=("arena_assignment_runs",),
         description="Assignment of detected subjects to arena identities.",
     ),
     StageSpec(

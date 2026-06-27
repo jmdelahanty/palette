@@ -17,6 +17,7 @@ from fisheye.shared.mask_store import (
     write_component_rle_mask_store_from_dense,
 )
 from fisheye.shared.zarr.stage_arrays import (
+    ARENA_ASSIGNMENT_SPEC,
     BOUT_KINEMATICS_SPEC,
     BOUT_CLASSIFICATION_SPEC,
     CROP_SPEC,
@@ -66,6 +67,7 @@ DEFAULT_DIMS: Dict[str, int] = {
     "n_tail_angles": 10,
     "n_tail_samples": 10,
     "n_tracks": 2,
+    "n_arenas": 4,
     "n_metadata_frames": 6,
     "n_camera_frames": 4,
     "H": 8,
@@ -490,6 +492,30 @@ def test_validate_run_missing_optional_arrays_are_warnings() -> None:
     assert not result.errors
     assert any("optional array 'n_detections'" in msg for msg in result.warnings)
     assert any("optional array 'centers_px'" in msg for msg in result.warnings)
+
+
+def test_validate_run_requires_arena_assignment_counts_surface() -> None:
+    group = zarr.group()
+    group.create_array(
+        "arena_ids",
+        data=np.array([0, 1, -1], dtype=np.int32),
+        overwrite=True,
+    )
+
+    result = validate_run(group, ARENA_ASSIGNMENT_SPEC)
+
+    assert not result.valid
+    assert any("missing required array 'n_detections_per_arena'" in msg for msg in result.errors)
+
+
+def test_validate_run_accepts_arena_assignment_counts_surface() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, ARENA_ASSIGNMENT_SPEC)
+
+    result = validate_run(group, ARENA_ASSIGNMENT_SPEC)
+
+    assert result.valid, result.errors
+    assert not result.errors
 
 
 def test_legacy_count_aliases_are_not_required_for_current_specs() -> None:

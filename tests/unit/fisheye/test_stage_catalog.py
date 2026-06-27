@@ -115,6 +115,7 @@ def test_stage_catalog_dependency_and_invalidation_maps_are_canonical() -> None:
 
     assert deps["refined_detect"] == ("detect_quality",)
     assert invalidates["detect_quality"] == ("refined_detect",)
+    assert deps["arena_assignment"] == ("refined_detect",)
     assert deps["tracks"] == ("arena_assignment",)
     assert invalidates["arena_assignment"] == ("tracks",)
 
@@ -135,6 +136,8 @@ def test_stage_catalog_declared_artifact_families_are_unique() -> None:
                 f"{family!r} declared for both {families[family]!r} and {stage_id!r}"
             )
             families[family] = stage_id
+
+    assert artifact_family_map()["arena_assignment"] == ("arena_assignment_runs",)
 
 
 def test_current_pipeline_stage_names_resolve_or_are_intentionally_legacy() -> None:

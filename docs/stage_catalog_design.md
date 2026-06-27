@@ -47,15 +47,15 @@ The canonical source lives in `src/fisheye/registry/stage_catalog.py`.
 | `background` | core pipeline | | `raw` | `detect` |
 | `detect` | core pipeline | | `background` | `detect_quality` |
 | `detect_quality` | core pipeline | | `detect` | `refined_detect` |
-| `refined_detect` | core pipeline | `refine` | `detect_quality` | `crop` |
+| `refined_detect` | core pipeline | `refine` | `detect_quality` | `crop`, `arena_assignment` |
 | `crop` | core pipeline | | `refined_detect` | `keypoints`, `subject_masks` |
 | `keypoints` | core pipeline | | `crop` | `refined_keypoints` |
-| `refined_keypoints` | core pipeline | `keypoints_refine` | `keypoints` | `eye_masks`, `arena_assignment` |
+| `refined_keypoints` | core pipeline | `keypoints_refine` | `keypoints` | `eye_masks` |
 | `eye_masks` | core pipeline | | `refined_keypoints` | `refined_eye_masks` |
 | `refined_eye_masks` | core pipeline | | `eye_masks` | |
 | `subject_masks` | core pipeline | | `crop` | `refined_subject_masks` |
 | `refined_subject_masks` | core pipeline | | `subject_masks` | |
-| `arena_assignment` | core pipeline | `assign_ids` | `refined_keypoints` | `tracks` |
+| `arena_assignment` | core pipeline | `assign_ids` | `refined_detect` | `tracks` |
 | `tracks` | core pipeline | `track` | `arena_assignment` | |
 | `dish_mask` | tuning | `mask` | | |
 | `detection_tuning` | tuning | `threshold` | | |

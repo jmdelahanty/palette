@@ -17,9 +17,10 @@ KNOWN_PIPELINE_DEPENDENCY_OVERRIDES = {
     # INTENT: converge. Subject-mask refinement is exposed without its raw
     # subject-mask stage in the legacy pipeline launcher.
     "refined_subject_masks": ((), ("subject_masks",)),
-    # INTENT: converge. Arena assignment and tracking predate the
-    # refined-keypoint/arena catalog dependency chain.
-    "arena_assignment": (("detect",), ("refined_keypoints",)),
+    # INTENT: converge. Arena assignment in the legacy pipeline still starts
+    # from raw detect, while the catalog models the canonical refined-detect
+    # rowset.
+    "arena_assignment": (("detect",), ("refined_detect",)),
     "tracks": (("keypoints",), ("arena_assignment",)),
 }
 
