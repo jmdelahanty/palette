@@ -44,7 +44,8 @@ Strong semantic rules:
 The tracking run must bind to one exact source rowset:
 
 - `detect_runs/<run>`, or
-- `refined_detect_runs/<run>/<group>`
+- `refined_detect_runs/<run>/<group>`, or
+- `crop_runs/<run>`
 
 And one exact arena-assignment run:
 
@@ -56,6 +57,11 @@ Required lineage attrs to match:
 
 - `source_detect_run`
 - `source_refined_run` when applicable
+
+When downstream keypoints, masks, or kinematics are row-aligned to a crop run,
+`crop_runs/<run>` is the preferred source rowset. The crop row is the stable
+observation; arena and track assignment are editable interpretation layers over
+that rowset.
 
 ### Required source arrays
 
@@ -304,6 +310,19 @@ single-fish-per-dish workflow while preserving contracts that allow multiple
 rows per frame and future `multi_subject_within_arena` tracking. New mask,
 shape, QC, and viewer code should not hardcode one row per frame, even if the
 current tracker emits at most one real track per occupied arena.
+
+## Mutable Review Runs
+
+Tracking runs may be mutable review surfaces during active curation. Small
+arena/track corrections should patch touched rows, increment an
+`edit_revision`, and append an edit event rather than creating a new
+`tracking_runs` group for every edit.
+
+The source rowset remains fixed for the lifetime of the mutable run. Correcting
+an identity swap means editing `arena_ids` and/or `track_ids` for the affected
+source rows; it does not mean rewriting `crop_runs/<run>`.
+
+See [`mutable_review_runs_contract.md`](./mutable_review_runs_contract.md).
 
 ## Bottom Line
 

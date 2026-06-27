@@ -388,6 +388,16 @@ Both arena assignment and tracking should resolve inputs by exact provenance:
 
 Downstream consumers should stop loading "latest compatible enough" runs.
 
+### Observation rows are not identity edits
+
+Detection and crop rows are observations. Arena assignment and tracking are
+interpretation layers over those rows.
+
+For review workflows, correcting an arena or track mistake should mutate the
+assignment/tracking review run, not the bound observation rowset. The detailed
+mutable-run policy is documented in
+[`mutable_review_runs_contract.md`](./mutable_review_runs_contract.md).
+
 ### Unassigned is not a track
 
 `arena_id == -1` or equivalent may be a useful diagnostic state.

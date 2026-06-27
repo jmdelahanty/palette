@@ -66,6 +66,9 @@ decide whether a row is present or filtered.
 - Small manual or retune edits should patch only the touched sparse rows plus
   run-level metadata; full rematerialization is for initialization or explicit
   rematerialize flows.
+- During active review, row edits should increment an `edit_revision` and
+  append an edit event rather than creating a new refined-detect run for every
+  save. See [`mutable_review_runs_contract.md`](./mutable_review_runs_contract.md).
 - `accept_detect_review` / `set_detect_review_status` should normally resolve
   current runs to `resolved_group="refined"`.
 

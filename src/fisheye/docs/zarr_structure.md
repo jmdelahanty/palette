@@ -1205,6 +1205,11 @@ Unassigned rows remain explicit in `tracking_runs/` as `track_id == -1` for QA
 and provenance. They are excluded from public `analysis/track_kinematics_runs`
 outputs by default unless the diagnostic `--include-unassigned` path is used.
 
+During active review, `tracking_runs/<run>` may be a mutable review surface.
+Small corrections should patch touched rows, increment an `edit_revision`, and
+append an edit event while keeping `source_rowset_path` fixed. See
+`docs/mutable_review_runs_contract.md`.
+
 ---
 
 ## `calibration/`
