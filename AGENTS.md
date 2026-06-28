@@ -12,9 +12,12 @@
 ## Git Push Rule
 
 - Pushes from this repository require the Palette workstation SSH key and should run outside the Codex sandbox because sandbox DNS/network access can fail.
-- Use:
+- Preferred push path: use the tracked helper, which pushes the current branch and then fast-forwards the shared `/groups` checkout:
+  `scripts/push_and_update_groups_checkout.sh`
+- If you intentionally need to push without updating `/groups`, use:
   `GIT_SSH_COMMAND='ssh -i /home/delahantyj@hhmi.org/.ssh/delahantyj-ws1-git-id_ed25519 -o IdentitiesOnly=yes' git -C /home/delahantyj@hhmi.org/gitrepos/palette push`
 - Do not rely on plain `git push` for Palette; it may fail with `Permission denied (publickey)` or sandbox DNS errors.
+- The `/groups` fast-forward must fail closed: do not use merge commits, rebase, reset, or dirty-checkout workarounds unless the user explicitly approves.
 
 ## Sandbox Zarr Fallback Rule
 
