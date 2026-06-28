@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.utils import run_sam_subject_masks as mod
@@ -148,6 +149,32 @@ def _xyxy_to_norm_xywh(
         [cx / float(frame_width), cy / float(frame_height), w / float(frame_width), h / float(frame_height)],
         dtype=np.float32,
     )
+
+
+def test_detect_box_prompt_rejects_crop_frame_normalized_bbox_semantics() -> None:
+    inputs = mod.ResolvedSamInputs(
+        crop_run="crop_001",
+        keypoint_group="refined_keypoints_runs",
+        keypoint_run="refined_001",
+        roi_images=FakeArray(np.zeros((1, 20, 20), dtype=np.uint8)),
+        roi_coordinates_full=np.asarray([[100, 200]], dtype=np.int32),
+        bbox_norm_coords=np.asarray([[0.5, 0.5, 0.2, 0.2]], dtype=np.float32),
+        frame_indices=np.asarray([0], dtype=np.int32),
+        detection_indices=np.asarray([0], dtype=np.int32),
+        detection_source=np.asarray([0], dtype=np.int8),
+        keypoints_roi=np.asarray([[[10.0, 10.0]]], dtype=np.float32),
+        keypoint_labels=("swim_bladder",),
+        success_flags=None,
+        geometry_valid=None,
+        usable_keypoints=None,
+        frame_height=240,
+        frame_width=200,
+        warnings=(),
+        bbox_norm_coords_semantics="realtime_detection_bbox_xywh_normalized_to_crop_video_frame",
+    )
+
+    with pytest.raises(ValueError, match="requires crop_runs/<run>/bbox_norm_coords to be canonical"):
+        mod._build_detect_box_batch(inputs, np.asarray([0], dtype=np.int32))
 
 
 def _fake_crop_group(*, detection_source: np.ndarray | None = None) -> FakeGroup:

@@ -23,6 +23,11 @@ from fisheye.diagnostics.compare_realtime_offline_detections import (
     infer_recording_dir_from_zarr,
     resolve_crop_meta_path,
 )
+from fisheye.shared.crop_geometry import (
+    bbox_img_xyxy_to_norm_cxcywh,
+    bbox_roi_xyxy_to_img_xyxy,
+    resolve_full_frame_shape,
+)
 from fisheye.shared.pynvvc_luma_rgb import PynvvcLumaRgbReader
 from fisheye.shared.roi_pixel_contract import ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
@@ -118,7 +123,9 @@ class _Selection:
     keypoints_roi: np.ndarray
     keypoints_norm: np.ndarray
     bbox_roi_xyxy: np.ndarray
+    bbox_img_xyxy: np.ndarray
     bbox_norm_xywh: np.ndarray
+    bbox_crop_norm_xywh: np.ndarray
     realtime_detection_bbox_roi_xyxy: np.ndarray
     success: np.ndarray
 
@@ -411,6 +418,8 @@ def _select_rows(
     keypoints: _KeypointTable,
     crop_meta: _CropMetaTable,
     *,
+    frame_width: int,
+    frame_height: int,
     output_width: int,
     output_height: int,
     margin_px: float,
@@ -431,7 +440,9 @@ def _select_rows(
     keypoints_roi_all: list[np.ndarray] = []
     keypoints_norm_all: list[np.ndarray] = []
     bbox_roi_all: list[tuple[float, float, float, float]] = []
+    bbox_img_all: list[np.ndarray] = []
     bbox_norm_all: list[np.ndarray] = []
+    bbox_crop_norm_all: list[np.ndarray] = []
     realtime_bbox_roi_all: list[tuple[float, float, float, float]] = []
 
     for kp_row, frame in enumerate(keypoints.frame_indices.astype(np.int64, copy=False)):
@@ -478,7 +489,18 @@ def _select_rows(
         x2 = float(np.max(kp_roi[:, 0]))
         y2 = float(np.max(kp_roi[:, 1]))
         bbox_roi = np.asarray([[x1, y1, x2, y2]], dtype=np.float64)
-        bbox_norm = _bbox_xyxy_to_norm_xywh(bbox_roi, width=output_width, height=output_height)[0]
+        bbox_img = bbox_roi_xyxy_to_img_xyxy(
+            bbox_roi,
+            np.asarray([[crop_x, crop_y, crop_w, crop_h]], dtype=np.float64),
+            roi_width=int(output_width),
+            roi_height=int(output_height),
+        )
+        bbox_norm = bbox_img_xyxy_to_norm_cxcywh(
+            bbox_img,
+            width=int(frame_width),
+            height=int(frame_height),
+        )[0]
+        bbox_crop_norm = _bbox_xyxy_to_norm_xywh(bbox_roi, width=output_width, height=output_height)[0]
 
         det_x, det_y, det_w, det_h = crop_meta.detection_xywh[crop_row]
         if np.isfinite([det_x, det_y, det_w, det_h]).all() and det_w >= 0.0 and det_h >= 0.0:
@@ -499,7 +521,9 @@ def _select_rows(
         keypoints_norm[:, 1] /= float(output_height)
         keypoints_norm_all.append(keypoints_norm)
         bbox_roi_all.append((x1, y1, x2, y2))
+        bbox_img_all.append(bbox_img[0].astype(np.float64, copy=False))
         bbox_norm_all.append(bbox_norm)
+        bbox_crop_norm_all.append(bbox_crop_norm)
         realtime_bbox_roi_all.append(det_bbox)
 
     selected_kp = np.asarray(selected_keypoint_rows, dtype=np.int64)
@@ -508,14 +532,18 @@ def _select_rows(
         keypoints_roi = np.stack(keypoints_roi_all, axis=0)
         keypoints_norm = np.stack(keypoints_norm_all, axis=0)
         bbox_roi = np.asarray(bbox_roi_all, dtype=np.float32)
+        bbox_img = np.asarray(bbox_img_all, dtype=np.float32)
         bbox_norm = np.asarray(bbox_norm_all, dtype=np.float32)
+        bbox_crop_norm = np.asarray(bbox_crop_norm_all, dtype=np.float32)
         realtime_bbox_roi = np.asarray(realtime_bbox_roi_all, dtype=np.float32)
     else:
         k_count = int(keypoints.keypoints_img.shape[1])
         keypoints_roi = np.empty((0, k_count, 2), dtype=np.float64)
         keypoints_norm = np.empty((0, k_count, 2), dtype=np.float64)
         bbox_roi = np.empty((0, 4), dtype=np.float32)
+        bbox_img = np.empty((0, 4), dtype=np.float32)
         bbox_norm = np.empty((0, 4), dtype=np.float32)
+        bbox_crop_norm = np.empty((0, 4), dtype=np.float32)
         realtime_bbox_roi = np.empty((0, 4), dtype=np.float32)
 
     selection = _Selection(
@@ -530,7 +558,9 @@ def _select_rows(
         keypoints_roi=keypoints_roi,
         keypoints_norm=keypoints_norm,
         bbox_roi_xyxy=bbox_roi,
+        bbox_img_xyxy=bbox_img,
         bbox_norm_xywh=bbox_norm,
+        bbox_crop_norm_xywh=bbox_crop_norm,
         realtime_detection_bbox_roi_xyxy=realtime_bbox_roi,
         success=np.ones(selected_kp.shape[0], dtype=bool),
     )
@@ -564,12 +594,15 @@ def inspect_acquisition_crop_pose_training(
     crop_info = inspect_crop_video_stream(resolved_recording_dir, resolved_crop_meta, resolved_crop_video)
     crop_meta = load_crop_meta_table(resolved_crop_meta)
     root = _open_root(zarr_path, mode="r")
+    frame_height, frame_width = resolve_full_frame_shape(root)
     keypoints = _resolve_keypoint_table(root, keypoint_run=keypoint_run, keypoint_parent=keypoint_parent)
     output_width = int(crop_info.width or np.nanmedian(crop_meta.crop_xywh[:, 2]))
     output_height = int(crop_info.height or np.nanmedian(crop_meta.crop_xywh[:, 3]))
     selection, reject_counts = _select_rows(
         keypoints,
         crop_meta,
+        frame_width=int(frame_width),
+        frame_height=int(frame_height),
         output_width=output_width,
         output_height=output_height,
         margin_px=float(margin_px),
@@ -692,6 +725,8 @@ def _write_output_zarr(
     row_count = int(images.shape[0])
     height = int(images.shape[1])
     width = int(images.shape[2])
+    source_root = _open_root(zarr_path, mode="r")
+    frame_height, frame_width = resolve_full_frame_shape(source_root)
     vector_chunks = (max(1, min(8192, row_count)),)
     bbox_chunks = (max(1, min(8192, row_count)), 4)
     image_chunks = (max(1, min(64, row_count)), height, width)
@@ -711,7 +746,9 @@ def _write_output_zarr(
     _create_array(crop_group, "source_crop_xywh", selection.source_crop_xywh.astype(np.float32), chunks=bbox_chunks)
     _create_array(crop_group, "roi_coordinates_full", selection.source_crop_xywh[:, :2].astype(np.int32), chunks=(bbox_chunks[0], 2))
     _create_array(crop_group, "bbox_roi_xyxy", selection.bbox_roi_xyxy.astype(np.float32), chunks=bbox_chunks)
+    _create_array(crop_group, "bbox_img_xyxy", selection.bbox_img_xyxy.astype(np.float32), chunks=bbox_chunks)
     _create_array(crop_group, "bbox_norm_coords", selection.bbox_norm_xywh.astype(np.float32), chunks=bbox_chunks)
+    _create_array(crop_group, "bbox_crop_norm_coords", selection.bbox_crop_norm_xywh.astype(np.float32), chunks=bbox_chunks)
     _create_array(crop_group, "realtime_detection_bbox_roi_xyxy", selection.realtime_detection_bbox_roi_xyxy.astype(np.float32), chunks=bbox_chunks)
     _create_array(crop_group, "detection_indices", np.arange(row_count, dtype=np.int32), chunks=vector_chunks)
     _create_array(crop_group, "frame_counts", frame_counts, chunks=(max(1, min(65536, frame_counts.shape[0])),))
@@ -757,8 +794,15 @@ def _write_output_zarr(
         "roi_coordinates_full_source": "source_crop_xywh[:, :2]",
         "source_crop_video_frame_indices_semantics": "zero_based_frame_index_in_acquisition_crop_video",
         "source_crop_local_frame_ids_semantics": "orange_acquisition_local_frame_id_not_video_frame_index",
-        "bbox_norm_coords_semantics": "pose_bbox_from_keypoint_extents_xywh_normalized_to_crop_video_frame",
+        "bbox_img_xyxy_semantics": "pose_bbox_from_keypoint_extents_xyxy_full_frame_pixels",
+        "bbox_norm_coords_semantics": "bbox_xywh_normalized_to_full_frame",
+        "bbox_crop_norm_coords_semantics": "pose_bbox_from_keypoint_extents_xywh_normalized_to_crop_video_frame",
         "bbox_roi_xyxy_semantics": "pose_bbox_from_keypoint_extents_crop_video_pixels",
+        "bbox_norm_reference_width": int(frame_width),
+        "bbox_norm_reference_height": int(frame_height),
+        "bbox_norm_reference_space": "source_image",
+        "bbox_img_xyxy_reference_width": int(frame_width),
+        "bbox_img_xyxy_reference_height": int(frame_height),
         "frame_format_confirmation_status": "pending_orange_confirmation",
         "summary": asdict(report),
     }

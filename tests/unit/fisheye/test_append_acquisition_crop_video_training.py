@@ -14,7 +14,7 @@ def _write_training_zarr(path: Path, recording_dir: Path) -> None:
     raw = root.create_group("raw_video")
     raw.attrs["recording_dir"] = str(recording_dir)
     raw.create_array("original_frame_indices", data=np.asarray([0, 10, 20, 30], dtype=np.int64), chunks=(4,))
-    raw.create_array("images_full", data=np.zeros((4, 8, 8), dtype=np.uint8), chunks=(4, 8, 8))
+    raw.create_array("images_full", data=np.zeros((4, 240, 200), dtype=np.uint8), chunks=(4, 240, 200))
     raw.create_array("images_ds", data=np.zeros((4, 4, 4), dtype=np.uint8), chunks=(4, 4, 4))
 
 
@@ -156,4 +156,11 @@ def test_append_acquisition_crop_video_training_writes_crop_run(tmp_path, monkey
     np.testing.assert_allclose(crop["source_crop_xywh"][:], [[100.0, 200.0, 20.0, 20.0], [110.0, 210.0, 20.0, 20.0]])
     np.testing.assert_array_equal(crop["roi_coordinates_full"][:], [[100, 200], [110, 210]])
     np.testing.assert_allclose(crop["bbox_roi_xyxy"][:], [[4.0, 4.0, 12.0, 12.0], [6.0, 8.0, 10.0, 14.0]])
-    np.testing.assert_allclose(crop["bbox_norm_coords"][:], [[0.4, 0.4, 0.4, 0.4], [0.4, 0.55, 0.2, 0.3]])
+    np.testing.assert_allclose(crop["bbox_img_xyxy"][:], [[104.0, 204.0, 112.0, 212.0], [116.0, 218.0, 120.0, 224.0]])
+    np.testing.assert_allclose(
+        crop["bbox_norm_coords"][:],
+        [[0.54, 208.0 / 240.0, 0.04, 8.0 / 240.0], [0.59, 221.0 / 240.0, 0.02, 6.0 / 240.0]],
+    )
+    np.testing.assert_allclose(crop["bbox_crop_norm_coords"][:], [[0.4, 0.4, 0.4, 0.4], [0.4, 0.55, 0.2, 0.3]])
+    assert crop.attrs["bbox_norm_coords_semantics"] == "bbox_xywh_normalized_to_full_frame"
+    assert crop.attrs["bbox_crop_norm_coords_semantics"] == "realtime_detection_bbox_xywh_normalized_to_crop_video_frame"

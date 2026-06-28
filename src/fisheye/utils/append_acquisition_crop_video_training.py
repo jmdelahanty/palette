@@ -14,6 +14,7 @@ from typing import Any, Callable, Optional, Sequence
 import numpy as np
 import zarr
 
+from fisheye.shared.crop_geometry import bbox_img_xyxy_to_norm_cxcywh, resolve_full_frame_shape
 from fisheye.shared.roi_pixel_contract import ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
 from fisheye.shared.pynvvc_luma_rgb import PynvvcLumaRgbReader
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
@@ -24,7 +25,6 @@ from fisheye.shared.zarr_run_completion import (
 )
 from fisheye.utils.export_acquisition_crop_pose_training_zarr import (
     CropVideoStreamInfo,
-    _bbox_xyxy_to_norm_xywh,
     _read_selected_frames,
     inspect_crop_video_stream,
     load_crop_meta_table,
@@ -59,7 +59,9 @@ class _CropSelection:
     source_recording_frame_ids: np.ndarray
     source_crop_xywh: np.ndarray
     realtime_detection_bbox_roi_xyxy: np.ndarray
+    bbox_img_xyxy: np.ndarray
     bbox_norm_xywh: np.ndarray
+    bbox_crop_norm_xywh: np.ndarray
 
 
 def _utc_run_name(prefix: str) -> str:
@@ -98,8 +100,15 @@ def _load_training_frame_indices(root: zarr.Group) -> np.ndarray:
     return np.asarray(raw["original_frame_indices"][:], dtype=np.int64)
 
 
-def _select_crop_rows(root: zarr.Group, crop_meta_path: Path) -> tuple[_CropSelection, dict[str, int]]:
+def _select_crop_rows(
+    root: zarr.Group,
+    crop_meta_path: Path,
+    *,
+    crop_frame_width: int | None = None,
+    crop_frame_height: int | None = None,
+) -> tuple[_CropSelection, dict[str, int]]:
     source_frames = _load_training_frame_indices(root)
+    frame_height, frame_width = resolve_full_frame_shape(root)
     crop_meta = load_crop_meta_table(crop_meta_path)
     crop_pos_by_frame = {int(frame): idx for idx, frame in enumerate(crop_meta.frame_indices.tolist())}
     selected_training_rows: list[int] = []
@@ -111,7 +120,9 @@ def _select_crop_rows(root: zarr.Group, crop_meta_path: Path) -> tuple[_CropSele
         "nonfinite_crop_geometry": 0,
     }
     bbox_roi: list[tuple[float, float, float, float]] = []
+    bbox_img: list[tuple[float, float, float, float]] = []
     bbox_norm: list[np.ndarray] = []
+    bbox_crop_norm: list[np.ndarray] = []
 
     for train_row, source_frame in enumerate(source_frames.tolist()):
         crop_row = crop_pos_by_frame.get(int(source_frame))
@@ -131,31 +142,52 @@ def _select_crop_rows(root: zarr.Group, crop_meta_path: Path) -> tuple[_CropSele
 
         det_x, det_y, det_w, det_h = crop_meta.detection_xywh[crop_row]
         if np.isfinite([det_x, det_y, det_w, det_h]).all() and det_w >= 0.0 and det_h >= 0.0:
+            output_w = int(crop_frame_width or round(crop_w))
+            output_h = int(crop_frame_height or round(crop_h))
+            scale_x = float(output_w) / float(crop_w)
+            scale_y = float(output_h) / float(crop_h)
             det_bbox = (
-                float(det_x - crop_x),
-                float(det_y - crop_y),
-                float(det_x + det_w - crop_x),
-                float(det_y + det_h - crop_y),
+                float(det_x - crop_x) * scale_x,
+                float(det_y - crop_y) * scale_y,
+                float(det_x + det_w - crop_x) * scale_x,
+                float(det_y + det_h - crop_y) * scale_y,
             )
-            det_bbox_arr = np.asarray([det_bbox], dtype=np.float64)
-            norm = _bbox_xyxy_to_norm_xywh(det_bbox_arr, width=int(round(crop_w)), height=int(round(crop_h)))[0]
+            det_bbox_img = (float(det_x), float(det_y), float(det_x + det_w), float(det_y + det_h))
+            norm = bbox_img_xyxy_to_norm_cxcywh(
+                np.asarray([det_bbox_img], dtype=np.float64),
+                width=int(frame_width),
+                height=int(frame_height),
+            )[0]
+            crop_norm = bbox_img_xyxy_to_norm_cxcywh(
+                np.asarray([det_bbox], dtype=np.float64),
+                width=int(output_w),
+                height=int(output_h),
+            )[0]
         else:
             det_bbox = (float("nan"), float("nan"), float("nan"), float("nan"))
+            det_bbox_img = (float("nan"), float("nan"), float("nan"), float("nan"))
             norm = np.full((4,), np.nan, dtype=np.float32)
+            crop_norm = np.full((4,), np.nan, dtype=np.float32)
 
         selected_training_rows.append(train_row)
         selected_crop_rows.append(crop_row)
         bbox_roi.append(det_bbox)
+        bbox_img.append(det_bbox_img)
         bbox_norm.append(norm)
+        bbox_crop_norm.append(crop_norm)
 
     selected_train = np.asarray(selected_training_rows, dtype=np.int64)
     selected_crop = np.asarray(selected_crop_rows, dtype=np.int64)
     if selected_crop.size:
         bbox_roi_arr = np.asarray(bbox_roi, dtype=np.float32)
+        bbox_img_arr = np.asarray(bbox_img, dtype=np.float32)
         bbox_norm_arr = np.asarray(bbox_norm, dtype=np.float32)
+        bbox_crop_norm_arr = np.asarray(bbox_crop_norm, dtype=np.float32)
     else:
         bbox_roi_arr = np.empty((0, 4), dtype=np.float32)
+        bbox_img_arr = np.empty((0, 4), dtype=np.float32)
         bbox_norm_arr = np.empty((0, 4), dtype=np.float32)
+        bbox_crop_norm_arr = np.empty((0, 4), dtype=np.float32)
 
     selection = _CropSelection(
         source_training_rows=selected_train,
@@ -166,7 +198,9 @@ def _select_crop_rows(root: zarr.Group, crop_meta_path: Path) -> tuple[_CropSele
         source_recording_frame_ids=source_frames[selected_train].astype(np.int64, copy=False) + 1,
         source_crop_xywh=crop_meta.crop_xywh[selected_crop].astype(np.float32, copy=False),
         realtime_detection_bbox_roi_xyxy=bbox_roi_arr,
+        bbox_img_xyxy=bbox_img_arr,
         bbox_norm_xywh=bbox_norm_arr,
+        bbox_crop_norm_xywh=bbox_crop_norm_arr,
     )
     return selection, reject_counts
 
@@ -202,6 +236,7 @@ def _write_crop_run(
     row_count = int(images.shape[0])
     height = int(images.shape[1])
     width = int(images.shape[2])
+    frame_height, frame_width = resolve_full_frame_shape(root)
     vector_chunks = (max(1, min(8192, row_count)),)
     bbox_chunks = (max(1, min(8192, row_count)), 4)
     image_chunks = (max(1, min(64, row_count)), height, width)
@@ -221,7 +256,9 @@ def _write_crop_run(
     _create_array(crop_group, "source_crop_xywh", selection.source_crop_xywh.astype(np.float32), chunks=bbox_chunks)
     _create_array(crop_group, "roi_coordinates_full", selection.source_crop_xywh[:, :2].astype(np.int32), chunks=(bbox_chunks[0], 2))
     _create_array(crop_group, "bbox_roi_xyxy", selection.realtime_detection_bbox_roi_xyxy.astype(np.float32), chunks=bbox_chunks)
+    _create_array(crop_group, "bbox_img_xyxy", selection.bbox_img_xyxy.astype(np.float32), chunks=bbox_chunks)
     _create_array(crop_group, "bbox_norm_coords", selection.bbox_norm_xywh.astype(np.float32), chunks=bbox_chunks)
+    _create_array(crop_group, "bbox_crop_norm_coords", selection.bbox_crop_norm_xywh.astype(np.float32), chunks=bbox_chunks)
     _create_array(crop_group, "realtime_detection_bbox_roi_xyxy", selection.realtime_detection_bbox_roi_xyxy.astype(np.float32), chunks=bbox_chunks)
     _create_array(crop_group, "detection_indices", np.arange(row_count, dtype=np.int32), chunks=vector_chunks)
     _create_array(crop_group, "detection_success", np.ones(row_count, dtype=bool), chunks=vector_chunks)
@@ -257,8 +294,15 @@ def _write_crop_run(
             "rejected_blank_crop_frame": int(report.reject_counts.get("blank_crop_frame", 0)),
             "rejected_crop_has_no_detection": int(report.reject_counts.get("crop_has_no_detection", 0)),
             "rejected_nonfinite_crop_geometry": int(report.reject_counts.get("nonfinite_crop_geometry", 0)),
-            "bbox_roi_xyxy_semantics": "realtime_detection_bbox_in_crop_video_pixels",
-            "bbox_norm_coords_semantics": "realtime_detection_bbox_xywh_normalized_to_crop_video_frame",
+            "bbox_img_xyxy_semantics": "realtime_detection_bbox_xyxy_full_frame_pixels",
+            "bbox_roi_xyxy_semantics": "realtime_detection_bbox_xyxy_crop_video_pixels",
+            "bbox_norm_coords_semantics": "bbox_xywh_normalized_to_full_frame",
+            "bbox_crop_norm_coords_semantics": "realtime_detection_bbox_xywh_normalized_to_crop_video_frame",
+            "bbox_norm_reference_width": int(frame_width),
+            "bbox_norm_reference_height": int(frame_height),
+            "bbox_norm_reference_space": "source_image",
+            "bbox_img_xyxy_reference_width": int(frame_width),
+            "bbox_img_xyxy_reference_height": int(frame_height),
             "frame_format_confirmation_status": "pending_orange_confirmation",
             "summary": asdict(report),
         }
@@ -307,7 +351,12 @@ def append_acquisition_crop_video_training(
     crop_info = inspect_crop_video_stream(resolved_recording_dir, resolved_crop_meta, resolved_crop_video)
 
     root = zarr.open_group(str(training_zarr), mode="a", use_consolidated=False)
-    selection, reject_counts = _select_crop_rows(root, resolved_crop_meta)
+    selection, reject_counts = _select_crop_rows(
+        root,
+        resolved_crop_meta,
+        crop_frame_width=crop_info.width,
+        crop_frame_height=crop_info.height,
+    )
     source_sample_count = int(_load_training_frame_indices(root).shape[0])
     report = AcquisitionCropVideoAppendReport(
         training_zarr=str(training_zarr),

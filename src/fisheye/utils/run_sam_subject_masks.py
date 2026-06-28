@@ -62,6 +62,19 @@ DEFAULT_POSE_BOX_EXPAND_FRACTION = 0.10
 NEGATIVE_POINT_POLICY_CHOICES = ("none", "corners", "border8")
 DEFAULT_NEGATIVE_POINT_POLICY = "none"
 DEFAULT_NEGATIVE_POINT_MARGIN_FRACTION = 0.05
+CANONICAL_BBOX_NORM_SEMANTICS = "bbox_xywh_normalized_to_full_frame"
+LEGACY_CANONICAL_BBOX_NORM_SEMANTICS = {
+    "",
+    "bbox_xywh_normalized_to_full_frame",
+    "source_bbox_xywh_normalized_to_full_frame",
+    "source_crop_bbox_xywhn",
+    "source_crop_stage_bbox_xywhn",
+}
+CROP_LOCAL_BBOX_NORM_SEMANTICS = {
+    "realtime_detection_bbox_xywh_normalized_to_crop_video_frame",
+    "pose_bbox_from_keypoint_extents_xywh_normalized_to_crop_video_frame",
+    "bbox_xywh_normalized_to_crop_roi_frame",
+}
 DEFAULT_KEYPOINT_LABELS: tuple[str, ...] = ("swim_bladder", "eye_left", "eye_right")
 _SUBJECT_MASKS_STATUS_SOURCE = "runtime_run_sam_subject_masks"
 KEYPOINT_LABEL_ALIASES: dict[str, str] = {
@@ -103,6 +116,7 @@ class ResolvedSamInputs:
     frame_height: int
     frame_width: int
     warnings: tuple[str, ...]
+    bbox_norm_coords_semantics: str = ""
     pose_bbox_xyxy_roi: np.ndarray | None = None
     crop_group: zarr.Group | None = None
     crop_source: CropImageSource | None = None
@@ -579,6 +593,7 @@ def resolve_sam_subject_inputs(
 
         roi_images = crop_source
         roi_coordinates_full = np.asarray(crop_source.roi_coordinates_full, dtype=np.int32)
+        bbox_norm_coords_semantics = str(crop_group.attrs.get("bbox_norm_coords_semantics") or "")
         bbox_norm_coords = _load_2d(
             crop_group,
             "bbox_norm_coords",
@@ -697,6 +712,7 @@ def resolve_sam_subject_inputs(
             roi_images=roi_images,
             roi_coordinates_full=roi_coordinates_full.astype(np.int32, copy=False),
             bbox_norm_coords=bbox_norm_coords.astype(np.float32, copy=False),
+            bbox_norm_coords_semantics=bbox_norm_coords_semantics,
             frame_indices=frame_indices.astype(np.int32, copy=False),
             detection_indices=detection_indices.astype(np.int32, copy=False),
             detection_source=detection_source.astype(np.int8, copy=False),
@@ -1034,6 +1050,14 @@ def _build_detect_box_batch(
     inputs: ResolvedSamInputs,
     row_indices: np.ndarray,
 ) -> list[np.ndarray]:
+    semantics = str(inputs.bbox_norm_coords_semantics or "")
+    if semantics in CROP_LOCAL_BBOX_NORM_SEMANTICS or semantics not in LEGACY_CANONICAL_BBOX_NORM_SEMANTICS:
+        raise ValueError(
+            "box_prompt_source='detect' requires crop_runs/<run>/bbox_norm_coords to be canonical "
+            f"full-frame-normalized boxes; got bbox_norm_coords_semantics={semantics!r}. "
+            "Use box_prompt_source='roi_inset' or 'pose_roi', or repair the crop run to provide canonical "
+            "bbox_norm_coords plus local bbox_roi_xyxy/bbox_crop_norm_coords surfaces."
+        )
     rows = np.asarray(row_indices, dtype=np.int32).reshape(-1)
     boxes: list[np.ndarray] = []
     for idx in rows.tolist():

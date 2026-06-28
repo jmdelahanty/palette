@@ -57,6 +57,72 @@ def bbox_img_xyxy_to_norm_cxcywh(
     return np.stack((cx, cy, bw, bh), axis=1).astype(np.float64, copy=False)
 
 
+def resolve_full_frame_shape(root: zarr.Group) -> Tuple[int, int]:
+    """Resolve parent full-frame shape as ``(height, width)`` from common Zarr metadata."""
+    raw = root.get("raw_video")
+    if raw is not None:
+        for name in ("images_full", "images_ds_rgb", "images_ds"):
+            arr = raw.get(name)
+            shape = getattr(arr, "shape", None)
+            if shape is not None and len(shape) >= 3:
+                return int(shape[1]), int(shape[2])
+        for width_key, height_key in (
+            ("video_width", "video_height"),
+            ("source_video_width", "source_video_height"),
+            ("width", "height"),
+        ):
+            width = as_int(raw.attrs.get(width_key))
+            height = as_int(raw.attrs.get(height_key))
+            if width is not None and height is not None and width > 0 and height > 0:
+                return int(height), int(width)
+    for width_key, height_key in (
+        ("video_width", "video_height"),
+        ("source_video_width", "source_video_height"),
+        ("width", "height"),
+    ):
+        width = as_int(root.attrs.get(width_key))
+        height = as_int(root.attrs.get(height_key))
+        if width is not None and height is not None and width > 0 and height > 0:
+            return int(height), int(width)
+    raise ValueError("Could not resolve parent full-frame shape.")
+
+
+def bbox_roi_xyxy_to_img_xyxy(
+    bbox_roi_xyxy: np.ndarray,
+    source_crop_xywh: np.ndarray,
+    *,
+    roi_width: int,
+    roi_height: int,
+) -> np.ndarray:
+    """Project ROI-local ``xyxy`` boxes into full-image pixel coordinates.
+
+    ``source_crop_xywh`` is the source-image crop window that produced the ROI.
+    If the decoded ROI frame was resized relative to that source crop, the
+    local coordinates are scaled back into the source-image crop coordinate
+    system before the crop origin is added.
+    """
+    bbox = np.asarray(bbox_roi_xyxy, dtype=np.float64).reshape(-1, 4)
+    crops = np.asarray(source_crop_xywh, dtype=np.float64).reshape(-1, 4)
+    if crops.shape[0] != bbox.shape[0]:
+        raise ValueError(
+            "source_crop_xywh row count must match bbox_roi_xyxy row count "
+            f"({crops.shape[0]} != {bbox.shape[0]})."
+        )
+    roi_w = int(roi_width)
+    roi_h = int(roi_height)
+    if roi_w <= 0 or roi_h <= 0:
+        raise ValueError("roi_width and roi_height must be positive.")
+
+    scale_x = crops[:, 2] / float(roi_w)
+    scale_y = crops[:, 3] / float(roi_h)
+    out = np.empty_like(bbox, dtype=np.float64)
+    out[:, 0] = crops[:, 0] + bbox[:, 0] * scale_x
+    out[:, 1] = crops[:, 1] + bbox[:, 1] * scale_y
+    out[:, 2] = crops[:, 0] + bbox[:, 2] * scale_x
+    out[:, 3] = crops[:, 1] + bbox[:, 3] * scale_y
+    return out
+
+
 def compute_centered_roi_mapping(
     bbox_img_xyxy: np.ndarray,
     *,

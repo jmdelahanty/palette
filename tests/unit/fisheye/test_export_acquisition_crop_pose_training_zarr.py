@@ -30,6 +30,8 @@ def _write_crop_meta(path: Path) -> None:
 def _write_source_zarr(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     root = zarr.open_group(str(path), mode="w")
+    raw = root.create_group("raw_video")
+    raw.create_array("images_full", data=np.zeros((5, 240, 200), dtype=np.uint8), chunks=(5, 240, 200))
     parent = root.create_group("refined_keypoints_runs")
     run = parent.create_group("refined_kp")
     mark_run_started(run, run_name="refined_kp", stage="refined_keypoints")
@@ -116,7 +118,9 @@ def test_inspect_acquisition_crop_pose_training_selects_sufficient_rows(tmp_path
     np.testing.assert_allclose(selection.keypoints_roi, [[[5.0, 5.0], [15.0, 15.0]]])
     np.testing.assert_allclose(selection.keypoints_norm, [[[0.25, 0.25], [0.75, 0.75]]])
     np.testing.assert_allclose(selection.bbox_roi_xyxy, [[5.0, 5.0, 15.0, 15.0]])
-    np.testing.assert_allclose(selection.bbox_norm_xywh, [[0.5, 0.5, 0.5, 0.5]])
+    np.testing.assert_allclose(selection.bbox_img_xyxy, [[105.0, 205.0, 115.0, 215.0]])
+    np.testing.assert_allclose(selection.bbox_norm_xywh, [[0.55, 210.0 / 240.0, 0.05, 10.0 / 240.0]])
+    np.testing.assert_allclose(selection.bbox_crop_norm_xywh, [[0.5, 0.5, 0.5, 0.5]])
     np.testing.assert_allclose(selection.realtime_detection_bbox_roi_xyxy, [[4.0, 4.0, 12.0, 12.0]])
 
 
@@ -186,8 +190,12 @@ def test_export_acquisition_crop_pose_training_writes_training_zarr(tmp_path, mo
     np.testing.assert_allclose(crop["source_crop_xywh"][:], [[100.0, 200.0, 20.0, 20.0]])
     np.testing.assert_array_equal(crop["roi_coordinates_full"][:], [[100, 200]])
     np.testing.assert_allclose(crop["bbox_roi_xyxy"][:], [[5.0, 5.0, 15.0, 15.0]])
-    np.testing.assert_allclose(crop["bbox_norm_coords"][:], [[0.5, 0.5, 0.5, 0.5]])
+    np.testing.assert_allclose(crop["bbox_img_xyxy"][:], [[105.0, 205.0, 115.0, 215.0]])
+    np.testing.assert_allclose(crop["bbox_norm_coords"][:], [[0.55, 210.0 / 240.0, 0.05, 10.0 / 240.0]])
+    np.testing.assert_allclose(crop["bbox_crop_norm_coords"][:], [[0.5, 0.5, 0.5, 0.5]])
     np.testing.assert_allclose(crop["realtime_detection_bbox_roi_xyxy"][:], [[4.0, 4.0, 12.0, 12.0]])
+    assert crop.attrs["bbox_norm_coords_semantics"] == "bbox_xywh_normalized_to_full_frame"
+    assert crop.attrs["bbox_crop_norm_coords_semantics"] == "pose_bbox_from_keypoint_extents_xywh_normalized_to_crop_video_frame"
     assert crop["source_crop_video_frame_indices"][:].tolist() == [0]
     assert crop["source_crop_local_frame_ids"][:].tolist() == [5]
     assert crop.attrs["source_crop_video_frame_indices_semantics"] == "zero_based_frame_index_in_acquisition_crop_video"
