@@ -41,7 +41,7 @@ Relevant existing runs in that archive:
 The SAM3 repo notes already make the intended use clear:
 
 - use Palette ROI crops as the segmentation image domain
-- use the swim bladder keypoint as the required positive point prompt
+- use the available refined pose keypoints as positive point prompts
 - write whole-fish masks back into `subject_mask_runs`
 - treat SAM3 primarily as a teacher/pseudo-label generator, not necessarily the
   final production runtime segmenter
@@ -78,7 +78,7 @@ The canary should do only this:
 
 1. read ROI crops from the canary training zarr
 2. read aligned refined keypoints from the same zarr
-3. use the swim bladder keypoint as the automatic positive prompt
+3. use all available refined keypoints as automatic positive prompts
 4. run SAM segmentation on the ROI crop
 5. write a new `subject_mask_runs/<run>` containing only a `subject_body` mask
 6. record enough scores/metadata to decide whether the masks are worth curating
@@ -94,27 +94,63 @@ Deliberately out of scope for phase 1:
 
 ## Recommended Prompt Policy
 
-Use the swim bladder keypoint as the required positive prompt.
+Use all available refined keypoints as the default positive prompt set.
 
 Source array:
 
-- `refined_keypoints_runs/<run>/keypoints_roi[:, 0]`
+- `refined_keypoints_runs/<run>/keypoints_roi[:, :, :]`
 
 Why:
 
-- this is the strongest Palette-native anatomical anchor already available
-- it lies on the fish body
-- it avoids the weaker detection-center prompt
+- empirical canaries performed better with all available anatomical landmarks
+  than with swim-bladder-only prompting
+- multiple positive points constrain the body extent more strongly than a
+  single interior anchor
+- this still avoids the weaker detection-center prompt
 - it preserves a fully automatic workflow
 
 Optional later prompt additions:
 
 - detection-derived box prompt
 - negative points near ROI borders
+- prompt-label ablations, including swim-bladder-only prompting, for diagnostics
 
-But phase 1 should start with:
+Current runtime behavior:
 
-- one positive point only
+- omitting `--positive-keypoint-labels` uses all labels available on the
+  resolved keypoint run
+- pass `--positive-keypoint-labels swim_bladder` only for a diagnostic ablation,
+  not as the default body-mask canary policy
+
+### Crop-Local Prompt Coordinates
+
+SAM prompt construction for acquisition crop-video training rows is crop-local.
+If the prompt policy uses keypoints, ROI-inset boxes, or fixed border/corner
+negative points, full-frame dimensions are not needed for SAM inference. The
+inputs already live in the decoded crop frame, for example `384x384` luma
+images with `keypoints_roi` in the same pixel space.
+
+Full-frame dimensions are only required when a prompt source must project a
+full-frame detection box into ROI coordinates, such as a detector-normalized
+`bbox_norm_coords` path. Early RedScare acquisition crop-video runs currently
+carry crop-frame-normalized values in `bbox_norm_coords`; this is a known
+contract gap, not the target schema. Until those runs are backfilled, prompt
+code must reject noncanonical `bbox_norm_coords` for full-frame projection and
+use crop-local prompts such as keypoints, `bbox_roi_xyxy`, ROI-inset boxes, or a
+future `bbox_crop_norm_coords` instead.
+
+Even when SAM inference is crop-local, the written `subject_mask_runs/<run>`
+must preserve row and crop lineage so outputs can be placed back into the
+parent recording:
+
+- `source_crop_run`
+- `source_crop_row_ids`
+- `frame_indices`
+- `roi_coordinates_full` / full-frame `source_crop_xywh`
+- source crop-video frame indices and acquisition-local frame IDs when present
+
+That lineage is what lets downstream readers derive full-frame pixel or
+full-frame normalized geometry from ROI-local masks and keypoints.
 
 ## Recommended Output Policy
 
@@ -143,7 +179,9 @@ Segment a row only if all of the following are true:
 
 - the ROI exists
 - the refined keypoint row exists and aligns by row index
-- the swim bladder keypoint is finite
+- at least one selected positive keypoint is finite and in ROI bounds
+- for the preferred all-keypoint policy, the prompt-point count is recorded so
+  rows with partial prompts can be audited
 - the row is not otherwise marked unusable by refined keypoint validity policy
 
 Skip or mark failed if:
@@ -314,7 +352,7 @@ Recommended now:
 - implement a Palette-side SAM canary runtime
 - use the existing sibling `sam3` checkout
 - segment only `subject_body`
-- use the swim bladder keypoint as the positive prompt
+- use all available refined keypoints as positive prompts
 - keep the result in `subject_mask_runs`
 - defer the submodule decision until after the canary proves useful
 

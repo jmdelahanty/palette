@@ -228,7 +228,8 @@ crop_runs/<crop_run>/
   source_crop_local_frame_ids        int64, Orange/acquisition-local ids from crop_meta
   source_crop_xywh                   float32, full-frame crop geometry
   bbox_roi_xyxy                      float32, realtime detection bbox in crop pixels
-  bbox_norm_coords                   float32, realtime detection bbox as xywhn
+  bbox_norm_coords                   float32, canonical full-frame-normalized bbox (target contract)
+  bbox_crop_norm_coords              float32, optional crop-frame-normalized bbox for QC
   realtime_detection_bbox_roi_xyxy   float32, realtime bbox from crop_meta in crop pixels
   detection_indices                  int32
   frame_counts                       int32
@@ -237,9 +238,16 @@ crop_runs/<crop_run>/
 
 `source_crop_xywh` is intentionally retained. It is the reversible mapping back
 to the original source frame and is useful for QC, debugging, and comparing
-runtime crop sufficiency. `bbox_roi_xyxy` and `bbox_norm_coords` come from the
-realtime acquisition bbox projected into crop-video coordinates and are included
-for QC/visual checks.
+runtime crop sufficiency. `bbox_roi_xyxy` is the realtime acquisition bbox
+projected into crop-video coordinates for QC/visual checks.
+
+Known coordinate-contract repair: early RedScare crop-video writers stored
+crop-frame-normalized values in `bbox_norm_coords`. That conflicts with the
+canonical Palette meaning of `bbox_norm_coords` as full-frame-normalized bbox
+geometry. The repair plan is documented in
+`docs/diagnostics/crop_video_bbox_coordinate_contract_2026-06-28.md`: preserve
+local-normalized values as `bbox_crop_norm_coords`, derive `bbox_img_xyxy` in
+full-frame pixels, and make `bbox_norm_coords` full-frame-normalized again.
 
 The crop run attrs also persist the detection gate:
 

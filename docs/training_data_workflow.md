@@ -209,8 +209,12 @@ This creates:
 - only crop-video rows with `has_detection=true` and `blank_frame=false`; use
   `source_training_row_indices` because crop rows can be fewer than full-frame
   sampled rows.
-- crop QC boxes (`bbox_roi_xyxy`, `bbox_norm_coords`) from realtime crop-meta
-  detection geometry.
+- crop QC boxes from realtime crop-meta detection geometry. Target contract:
+  `bbox_roi_xyxy` is crop-local pixels and `bbox_norm_coords` remains canonical
+  full-frame-normalized geometry. Early RedScare crop-video runs used
+  crop-frame-normalized `bbox_norm_coords`; see
+  `docs/diagnostics/crop_video_bbox_coordinate_contract_2026-06-28.md` for the
+  repair plan.
 
 The crop-video pixel contract is currently `orange_mono_pynvvc_luma_uint8_v1`
 with `frame_format_confirmation_status=pending_orange_confirmation`; Orange
