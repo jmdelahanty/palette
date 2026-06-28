@@ -2681,6 +2681,7 @@ def test_recording_step_status_wide_view_formats_check_recording_steps_columns(t
     assert row["Eye Mask Review"] == "approved (manual, training)"
     assert row["Arena Assignment"] == "MISS"
     assert row["Track"] == "MISS"
+    assert row["Tracking Ready"] == "OK"
     assert row["Track Kinematics"] == "OK"
     assert row["Swim Bouts"] == "OK"
     assert row["Bout Kinematics"] == "OK"
@@ -3025,6 +3026,104 @@ def test_recording_step_status_wide_view_tracks_warn_even_for_high_unassigned_ra
     ).fetchone()
     assert row is not None
     assert row["Track"] == "WARN (1 unassigned, 25.0%)"
+    registry.close()
+
+
+def test_recording_step_status_wide_view_exposes_multi_subject_tracking_readiness(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        dataset_id="dataset_multi_subject_ready",
+        session_uuid="session_multi_subject_ready",
+        zarr_path=tmp_path / "recording_multi_subject_ready_analysis.zarr",
+        recording_id="recording_multi_subject_ready",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.upsert_provenance(
+        "dataset_multi_subject_ready",
+        provenance={"subject_count": 4},
+        context={"camera_id": "cam_multi"},
+        protocol_name=None,
+        protocol_hash=None,
+        acquisition={},
+        zarr_purpose="analysis",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recording_step_status (
+            dataset_id,
+            recording_id,
+            step_name,
+            status,
+            run_name,
+            source,
+            updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            "dataset_multi_subject_ready",
+            "recording_multi_subject_ready",
+            "arena_assignment",
+            "ok",
+            "arena_assignment_001",
+            "unit_test",
+            "2026-02-23T02:10:00+00:00",
+        ),
+    )
+    registry.conn.commit()
+
+    row = registry.conn.execute(
+        """
+        SELECT "Arena Assignment", "Track", "Tracking Ready"
+        FROM recording_step_status_wide
+        WHERE "Recording" = ?;
+        """,
+        ("recording_multi_subject_ready",),
+    ).fetchone()
+    assert row is not None
+    assert row["Arena Assignment"] == "OK"
+    assert row["Track"] == "MISS"
+    assert row["Tracking Ready"] == "BLOCKED (tracks)"
+
+    registry.conn.execute(
+        """
+        INSERT INTO recording_step_status (
+            dataset_id,
+            recording_id,
+            step_name,
+            status,
+            run_name,
+            source,
+            updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            "dataset_multi_subject_ready",
+            "recording_multi_subject_ready",
+            "tracks",
+            "ok",
+            "tracks_001",
+            "unit_test",
+            "2026-02-23T02:11:00+00:00",
+        ),
+    )
+    registry.conn.commit()
+
+    row = registry.conn.execute(
+        """
+        SELECT "Track", "Tracking Ready"
+        FROM recording_step_status_wide
+        WHERE "Recording" = ?;
+        """,
+        ("recording_multi_subject_ready",),
+    ).fetchone()
+    assert row is not None
+    assert row["Track"] == "OK"
+    assert row["Tracking Ready"] == "OK (4 subjects)"
     registry.close()
 
 

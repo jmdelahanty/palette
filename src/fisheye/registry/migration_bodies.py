@@ -2435,6 +2435,12 @@ class RegistryMigrationMixin:
         self._migration_038_subject_mask_component_partial_run_preference()
         self._migration_039_subject_mask_component_source_stale_views()
 
+    def _migration_058_tracking_readiness_guard_views(self) -> None:
+        """Refresh step-status views with multi-subject tracking readiness."""
+
+        self._migration_035_recording_step_status_latest_dataset_context_current()
+        self._migration_020_recording_step_status_wide_view()
+
     def _migration_015_eye_mask_performance_registry(self) -> None:
         cur = self.conn.cursor()
         cur.execute(
@@ -3220,6 +3226,7 @@ class RegistryMigrationMixin:
                 dcc.cross_id AS cross_id,
                 dcc.genotype AS genotype,
                 dcc.dpf_at_acquisition AS dpf_at_acquisition,
+                dcc.subject_count_effective AS subject_count_effective,
                 rss.step_name,
                 rss.status,
                 rss.run_name,
@@ -3393,6 +3400,7 @@ class RegistryMigrationMixin:
                     zarr_path,
                     zarr_use,
                     dataset_status,
+                    subject_count_effective,
                     lower(step_name) AS step_name,
                     lower(status) AS status,
                     run_name,
@@ -3410,6 +3418,7 @@ class RegistryMigrationMixin:
                     MAX(zarr_path) AS zarr_path,
                     MAX(zarr_use) AS zarr_use,
                     MAX(dataset_status) AS dataset_status,
+                    MAX(subject_count_effective) AS subject_count_effective,
                     {_recording_step_status_pivot_columns()},
                     MAX(CASE WHEN step_name = 'raw' THEN details_json END) AS raw_details_json,
                     MAX(CASE WHEN step_name = 'background' THEN details_json END) AS background_details_json,
@@ -3566,6 +3575,28 @@ class RegistryMigrationMixin:
                     CASE WHEN p.refined_subject_masks_status = 'ok' THEN 1 ELSE 0 END AS refined_subject_masks_present,
                     CASE WHEN p.arena_assignment_status = 'ok' THEN 1 ELSE 0 END AS arena_assignment_present,
                     CASE WHEN p.tracks_status = 'ok' THEN 1 ELSE 0 END AS track_present,
+                    CASE
+                        WHEN CAST(p.subject_count_effective AS INTEGER) > 1
+                            AND p.arena_assignment_status = 'ok'
+                            AND p.tracks_status = 'ok'
+                            THEN 1
+                        WHEN CAST(p.subject_count_effective AS INTEGER) > 1
+                            THEN 0
+                        ELSE 1
+                    END AS tracking_ready,
+                    CASE
+                        WHEN CAST(p.subject_count_effective AS INTEGER) > 1
+                            AND COALESCE(p.arena_assignment_status, '') != 'ok'
+                            AND COALESCE(p.tracks_status, '') != 'ok'
+                            THEN 'arena_assignment_missing_for_multi_subject,tracks_missing_for_multi_subject'
+                        WHEN CAST(p.subject_count_effective AS INTEGER) > 1
+                            AND COALESCE(p.arena_assignment_status, '') != 'ok'
+                            THEN 'arena_assignment_missing_for_multi_subject'
+                        WHEN CAST(p.subject_count_effective AS INTEGER) > 1
+                            AND COALESCE(p.tracks_status, '') != 'ok'
+                            THEN 'tracks_missing_for_multi_subject'
+                        ELSE ''
+                    END AS tracking_readiness_reasons,
                     CAST(
                         COALESCE(
                             json_extract(p.tracks_details_json, '$.n_unassigned_rows'),
@@ -4010,6 +4041,19 @@ class RegistryMigrationMixin:
                     WHEN lower(COALESCE(r.track_qc_state, '')) IN ('warn', 'block') THEN 'WARN'
                     ELSE 'OK'
                 END AS "Track",
+                CASE
+                    WHEN r.tracking_ready = 1
+                        AND CAST(r.subject_count_effective AS INTEGER) > 1
+                        THEN 'OK (' || CAST(CAST(r.subject_count_effective AS INTEGER) AS TEXT) || ' subjects)'
+                    WHEN r.tracking_ready = 1 THEN 'OK'
+                    WHEN r.tracking_readiness_reasons = 'arena_assignment_missing_for_multi_subject,tracks_missing_for_multi_subject'
+                        THEN 'BLOCKED (arena assignment; tracks)'
+                    WHEN r.tracking_readiness_reasons = 'arena_assignment_missing_for_multi_subject'
+                        THEN 'BLOCKED (arena assignment)'
+                    WHEN r.tracking_readiness_reasons = 'tracks_missing_for_multi_subject'
+                        THEN 'BLOCKED (tracks)'
+                    ELSE 'BLOCKED'
+                END AS "Tracking Ready",
                 CASE
                     WHEN r.track_kinematics_status = 'ok' THEN 'OK'
                     WHEN r.track_kinematics_status = 'na' THEN 'N/A'
@@ -6412,6 +6456,7 @@ class RegistryMigrationMixin:
                 dcc.cross_id AS cross_id,
                 dcc.genotype AS genotype,
                 dcc.dpf_at_acquisition AS dpf_at_acquisition,
+                dcc.subject_count_effective AS subject_count_effective,
                 rss.step_name,
                 rss.status,
                 rss.run_name,
