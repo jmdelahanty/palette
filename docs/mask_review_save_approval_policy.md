@@ -9,6 +9,9 @@ last_verified: 2026-04-02
 
 Document the current save and approval semantics for mask-oriented review
 workflows, and compare them against the existing detect/keypoint review model.
+The browser checkpoint/apply layer described below is target behavior for the
+web workflow unless a specific route already implements it; current direct CLI
+and legacy UI saves may still write canonical Zarr arrays immediately.
 
 This is not a contract for every review-status payload in the repo. Detect and
 keypoint review-status schema remains defined by
@@ -32,6 +35,31 @@ That means:
 - approval/review-state changes should write explicit review payloads
 - downstream consumers should gate on review payloads, not on the mere presence
   of a refined run
+
+For browser review, distinguish three user-visible states:
+
+- checkpointed session edits: durable enough to recover the browser/session
+  overlay, but not visible to ordinary canonical Zarr consumers
+- applied canonical edits: written back to the target review run and visible to
+  canonical consumers, while the assignment may still remain open
+- approved/completed work: an explicit review-status or task-completion action
+  after the saved/applied content is acceptable
+
+Users must not need to complete an assignment before saving/applying mask edits
+back to the Zarr review surface. They should be able to apply edits, leave the
+assignment open, and later continue from the applied Zarr state plus any newer
+unapplied session overlay.
+
+V1 browser storage decision:
+
+- checkpoint metadata and edit payload references should live in the web
+  labeling SQLite sidecar, not in the registry SQLite and not in canonical Zarr
+- for refined subject masks, the v1 apply payload should be a full replacement
+  dense ROI mask for one `(row, component)` at a time, rather than stroke-delta
+  replay
+- stroke/lasso deltas may remain UI-local implementation details, but the
+  durable checkpoint/apply payload should reconstruct the exact overlay and
+  canonical replacement mask without depending on browser event replay
 
 ## Comparison Matrix
 
@@ -145,7 +173,11 @@ References:
 Current policy:
 
 - `refined_subject_masks_runs/<run>` is the canonical editable working artifact
-- save writes are per-ROI and recompute sibling refined metadata immediately
+- current direct save writes are per-ROI and recompute sibling refined metadata
+  immediately
+- target browser behavior should use lightweight session checkpoints for
+  frequent paint/lasso changes, then explicitly apply/coalesce those edits back
+  to `refined_subject_masks_runs/<run>` without requiring task completion
 - approval is per-component, not whole-run
 - run-level review state is derived automatically from component review states
 
@@ -183,6 +215,9 @@ Operational implication:
   projected in only when needed
 - downstream gating should therefore prefer component review state when the
   consumer is component-specific
+- if a browser session has unapplied mask edits, component approval should be
+  blocked or should first require a successful apply-to-Zarr operation so the
+  approved component state matches the canonical masks
 
 Current swim-bladder policy note:
 
@@ -208,11 +243,33 @@ For mask workflows, the near-term policy should be:
 3. Keep subject-mask approval component-level.
 4. Treat component review state as the canonical gate for component-specific
    subject-mask exports and registry views.
-5. Continue using the shared state vocabulary:
+5. Allow applied mask edits before assignment completion, so reviewers can
+   leave and resume from canonical Zarr changes without marking the assignment
+   complete.
+6. Keep high-frequency browser checkpoints lightweight; coalesce and apply
+   edits to Zarr at explicit save/apply boundaries rather than on every
+   paint/drag operation.
+7. Continue using the shared state vocabulary:
    - `approved`
    - `pending`
    - `rejected`
    - `needs_review`
+
+## Acceptance Tests For Browser Checkpoint/Apply
+
+Minimum tests before making the browser session layer the default save path:
+
+- checkpointing a mask edit does not change canonical Zarr arrays or
+  `edit_revision`
+- reopening the same active session restores the checkpointed mask overlay
+- explicit apply writes the dense replacement mask to `masks_roi`
+- explicit apply increments `edit_revision` only after the canonical write
+  succeeds
+- retrying the same apply with the same `apply_id` is idempotent
+- applying with a stale `target_edit_revision` fails without partial writes
+- component approval is blocked or requires successful apply when unapplied
+  session edits exist
+- assignment completion is not required before a successful apply-to-Zarr
 
 ## Follow-Up Gaps
 

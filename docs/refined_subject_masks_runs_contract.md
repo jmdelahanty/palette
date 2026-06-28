@@ -214,6 +214,88 @@ Manual review/editor workflows and compatibility materialization are still
 transition-state surfaces, but the storage contract no longer treats LR eye
 components as future-only.
 
+## Interactive Review Save And Apply Semantics
+
+`refined_subject_masks_runs/<run>` is the canonical editable Zarr surface for
+subject-mask review, but browser paint/lasso interactions should not require a
+canonical Zarr rewrite for every small UI action.
+
+Recommended browser model:
+
+- checkpoint frequent UI edits into the labeling/session store so the browser
+  can recover an overlay after refresh, disconnect, or crash
+- for the web-labeling v1 implementation, use the labeling SQLite sidecar as
+  the checkpoint/session metadata store
+- render canonical `masks_roi` plus unapplied session edits in the UI
+- apply edits to the canonical Zarr run only on an explicit save/apply action,
+  submit, or finalize
+- do not treat browser close as an apply action
+- do not require assignment completion before applying mask edits to Zarr
+- keep approval/review-state changes explicit and separate from save/apply
+- represent v1 mask checkpoint/apply payloads as full replacement dense ROI
+  masks per `(row, component)`, not as stroke-delta replay
+
+This gives reviewers the desired "continue where I left off" behavior in two
+ways:
+
+- applied edits are durable in `refined_subject_masks_runs/<run>/masks_roi` and
+  visible when the same assignment is reopened later
+- unapplied checkpoints can still be recovered as a session overlay when the UI
+  is reopened before the next canonical apply
+
+Canonical apply must validate:
+
+- active assignment/session ownership
+- target run path
+- target `edit_revision`, treating a missing revision on older runs as `0`
+  before the first successful apply
+- row identity, using `source_crop_row_ids`, `frame_indices`, and any available
+  stable source/refined row IDs rather than trusting physical row position alone
+- component names and channel identity from `mask_labels`
+
+Canonical apply should coalesce edits by component, target array, and physical
+Zarr chunk before writing. After a successful apply:
+
+- increment `edit_revision`
+- append a durable edit event with a retry-stable `apply_id` or equivalent
+  idempotency key
+- update touched row/component metrics, reasons, contours, and geometry caches
+- refresh touched `mask_bitpacked` rows/components when `mask_bitpacked` exists
+- mark `mask_rle` stale when `mask_rle` exists unless it is explicitly
+  regenerated
+- refresh registry/QC summaries after apply, not after every session checkpoint
+
+When `mask_rle` is marked stale by an apply, writers should set at least:
+
+- `mask_rle_stale = true`
+- `mask_rle_stale_reason`
+- `mask_rle_stale_at_utc`
+- `mask_rle_stale_component_names`
+- `mask_rle_stale_row_count`
+- `mask_rle_stale_row_min` and `mask_rle_stale_row_max` when rows are present
+- `mask_rle_stale_since_edit_revision`
+
+Approval guard:
+
+- saving or applying pixels must not imply component approval
+- if unapplied session edits exist, component approval should either be blocked
+  with a clear message or require a successful apply first
+- subject-mask approval remains component-level, with run-level review state
+  derived from `component_review_statuses`
+
+Minimum browser-specific tests:
+
+- checkpointing a replacement mask does not mutate `masks_roi`
+- reopening the session restores the replacement-mask overlay
+- applying writes the replacement mask to `masks_roi`
+- applying increments `edit_revision` after success
+- retrying the same `apply_id` does not double-apply or double-increment
+  `edit_revision`
+- applying with a stale `target_edit_revision` fails cleanly
+- component approval is blocked or forced through apply when unapplied edits
+  exist
+- applied edits are allowed while the labeling assignment remains open
+
 ## Assembly And Finalization Semantics
 
 `refined_subject_masks_runs/<run>` is not merely a bag of assembled component

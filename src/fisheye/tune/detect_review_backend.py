@@ -26,6 +26,9 @@ class DetectReviewSession:
     total_frames: int
     height: int
     width: int
+    source_height: int
+    source_width: int
+    downsample_preserve_aspect: bool
     manual_score: float
     manual_class_id: int
 
@@ -92,6 +95,58 @@ def _finite_bbox_or_none(value: object) -> list[float] | None:
     return [float(v) for v in bbox.tolist()]
 
 
+def _resolution_hw(value: object) -> tuple[int, int] | None:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return None
+    if len(value) < 2:
+        return None
+    try:
+        height = int(value[0])  # type: ignore[index]
+        width = int(value[1])  # type: ignore[index]
+    except (TypeError, ValueError):
+        return None
+    if height <= 0 or width <= 0:
+        return None
+    return height, width
+
+
+def _bbox_display_transform(session: DetectReviewSession) -> dict[str, object]:
+    image_height = int(session.height)
+    image_width = int(session.width)
+    source_height = int(session.source_height)
+    source_width = int(session.source_width)
+    if session.downsample_preserve_aspect and source_height > 0 and source_width > 0:
+        scale = min(image_height / source_height, image_width / source_width)
+        content_width = source_width * scale
+        content_height = source_height * scale
+        content_x = (image_width - content_width) / 2.0
+        content_y = (image_height - content_height) / 2.0
+        projection = "letterbox"
+    else:
+        scale = None
+        content_x = 0.0
+        content_y = 0.0
+        content_width = float(image_width)
+        content_height = float(image_height)
+        projection = "stretch_or_same_aspect"
+    return {
+        "schema": "palette.detect_bbox_display_transform.v1",
+        "bbox_norm_coordinate_space": "source_image_xywhn",
+        "image_surface": "raw_video/images_ds",
+        "projection": projection,
+        "preserve_aspect": bool(session.downsample_preserve_aspect),
+        "source_height": source_height,
+        "source_width": source_width,
+        "image_height": image_height,
+        "image_width": image_width,
+        "content_x": float(content_x),
+        "content_y": float(content_y),
+        "content_width": float(content_width),
+        "content_height": float(content_height),
+        "scale": None if scale is None else float(scale),
+    }
+
+
 def _copy_payload(payload: Mapping[str, object]) -> dict[str, object]:
     copied: dict[str, object] = {}
     for key, value in payload.items():
@@ -140,6 +195,9 @@ def resolve_review_context(
     total_frames = int(images.shape[0])
     height = int(images.shape[1])
     width = int(images.shape[2])
+    raw_attrs = dict(raw_video.attrs)
+    source_height, source_width = _resolution_hw(raw_attrs.get("original_resolution")) or (height, width)
+    downsample_preserve_aspect = bool(raw_attrs.get("downsample_preserve_aspect", False))
 
     payload = detect_review_mod._load_dense_curated_edit_payload(  # type: ignore[attr-defined]
         refined_group,
@@ -174,6 +232,9 @@ def resolve_review_context(
         total_frames=total_frames,
         height=height,
         width=width,
+        source_height=source_height,
+        source_width=source_width,
+        downsample_preserve_aspect=downsample_preserve_aspect,
         manual_score=float(manual_score),
         manual_class_id=int(manual_class_id),
     )
@@ -212,6 +273,8 @@ def load_frame_payload(session: DetectReviewSession, position: int) -> Mapping[s
         "row_idx": row_idx,
         "frame_idx": frame_idx,
         "bbox_norm": bbox,
+        "bbox_norm_coordinate_space": "source_image_xywhn",
+        "bbox_display_transform": _bbox_display_transform(session),
         "status": {
             "status_label": _json_scalar(np.asarray(session.payload["status_labels"], dtype=object).reshape(-1)[row_idx]),
             "source_kind_label": _json_scalar(np.asarray(session.payload["source_kind_labels"], dtype=object).reshape(-1)[row_idx]),

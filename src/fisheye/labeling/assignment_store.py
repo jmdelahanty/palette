@@ -17,7 +17,9 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 STORE_ENV_VAR = "PALETTE_LABELING_STORE_PATH"
 DEFAULT_STORE_PATH = "~/.palette/labeling_work.sqlite"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
+LABELING_USER_ROLES = ("labeler", "operator", "admin")
+LABELING_USER_STATUSES = ("active", "inactive")
 LABELER_START_TASK_STATES = ("pending", "in_progress")
 USER_SUMMARY_REDACT_ABSOLUTE_PATH_RE = re.compile(r"(?<![\w])(?:/[^\s,;:'\"<>]+)+")
 USER_SUMMARY_REDACT_ZARR_TOKEN_RE = re.compile(r"(?<![\w./-])[\w./-]*\.zarr(?:[/\w.-]*)?")
@@ -53,7 +55,7 @@ def _json_loads(value: object) -> object:
 
 def _row_to_dict(row: sqlite3.Row | Mapping[str, object]) -> dict[str, object]:
     out = dict(row)
-    for key in ("scope_json", "target_json", "before_json", "after_json"):
+    for key in ("scope_json", "target_json", "before_json", "after_json", "payload_json", "metadata_json"):
         if key in out:
             decoded = _json_loads(out.get(key))
             out[key[:-5] if key.endswith("_json") else key] = decoded
@@ -315,6 +317,27 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                 created_at_utc TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS labeling_users (
+                user_id TEXT PRIMARY KEY,
+                display_name TEXT,
+                email TEXT,
+                role TEXT NOT NULL DEFAULT 'labeler',
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at_utc TEXT NOT NULL,
+                updated_at_utc TEXT NOT NULL,
+                notes TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS labeling_user_events (
+                event_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                actor_user TEXT,
+                event_type TEXT NOT NULL,
+                before_json TEXT,
+                after_json TEXT,
+                created_at_utc TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS labeling_task_definition_events (
                 event_id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL,
@@ -324,6 +347,32 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                 before_json TEXT,
                 after_json TEXT,
                 created_at_utc TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS labeling_session_checkpoints (
+                checkpoint_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                recording_id TEXT NOT NULL,
+                user TEXT NOT NULL,
+                workflow_kind TEXT NOT NULL,
+                target_run_path TEXT NOT NULL,
+                target_edit_revision INTEGER NOT NULL DEFAULT 0,
+                source_rowset_path TEXT,
+                roi_idx INTEGER NOT NULL,
+                component_name TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                metadata_json TEXT,
+                state TEXT NOT NULL DEFAULT 'active',
+                created_at_utc TEXT NOT NULL,
+                updated_at_utc TEXT NOT NULL,
+                applied_at_utc TEXT,
+                apply_id TEXT,
+                edit_revision_before INTEGER,
+                edit_revision_after INTEGER,
+                UNIQUE(task_id, roi_idx, component_name),
+                FOREIGN KEY(task_id) REFERENCES labeling_tasks(task_id) ON DELETE CASCADE,
+                FOREIGN KEY(session_id) REFERENCES labeling_sessions(session_id) ON DELETE CASCADE
             );
 
             CREATE INDEX IF NOT EXISTS idx_labeling_assignments_assignee
@@ -336,9 +385,42 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                 ON labeling_task_events(task_id, created_at_utc);
             CREATE INDEX IF NOT EXISTS idx_labeling_assignment_events_recording
                 ON labeling_assignment_events(recording_id, created_at_utc);
+            CREATE INDEX IF NOT EXISTS idx_labeling_users_status
+                ON labeling_users(status, role, user_id);
+            CREATE INDEX IF NOT EXISTS idx_labeling_user_events_user
+                ON labeling_user_events(user_id, created_at_utc);
             CREATE INDEX IF NOT EXISTS idx_labeling_task_definition_events_task
                 ON labeling_task_definition_events(task_id, created_at_utc);
+            CREATE INDEX IF NOT EXISTS idx_labeling_session_checkpoints_task_state
+                ON labeling_session_checkpoints(task_id, state, updated_at_utc);
+            CREATE INDEX IF NOT EXISTS idx_labeling_session_checkpoints_apply
+                ON labeling_session_checkpoints(task_id, apply_id, state);
             """
+        )
+        now = utc_now()
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO labeling_users (
+                user_id, display_name, email, role, status, created_at_utc, updated_at_utc, notes
+            )
+            SELECT
+                TRIM(assignee_user),
+                NULL,
+                NULL,
+                'labeler',
+                CASE
+                    WHEN MAX(CASE WHEN status = 'active' THEN 1 ELSE 0 END) > 0
+                    THEN 'active'
+                    ELSE 'inactive'
+                END,
+                COALESCE(MIN(assigned_at_utc), ?),
+                ?,
+                'Auto-created from existing recording assignments.'
+            FROM recording_assignments
+            WHERE TRIM(assignee_user) != ''
+            GROUP BY TRIM(assignee_user);
+            """,
+            (now, now),
         )
         cur.execute(
             """
@@ -823,6 +905,251 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         sql.append("ORDER BY assignee_user, recording_id")
         rows = self.conn.execute(" ".join(sql), params).fetchall()
         return [_row_to_dict(row) for row in rows]
+
+    def get_labeling_user(self, user_id: str) -> dict[str, object] | None:
+        self.initialize()
+        normalized_user = str(user_id or "").strip()
+        if not normalized_user:
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM labeling_users WHERE user_id = ?;",
+            (normalized_user,),
+        ).fetchone()
+        return _row_to_dict(row) if row is not None else None
+
+    def list_labeling_users(
+        self,
+        *,
+        status: str | None = None,
+        role: str | None = None,
+    ) -> list[dict[str, object]]:
+        self.initialize()
+        sql = ["SELECT * FROM labeling_users WHERE 1=1"]
+        params: list[object] = []
+        if status:
+            sql.append("AND status = ?")
+            params.append(str(status))
+        if role:
+            sql.append("AND role = ?")
+            params.append(str(role))
+        sql.append("ORDER BY status, role, user_id")
+        rows = self.conn.execute(" ".join(sql), params).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+    def upsert_labeling_user(
+        self,
+        *,
+        user_id: str,
+        display_name: str | None = None,
+        email: str | None = None,
+        role: str = "labeler",
+        status: str = "active",
+        notes: str | None = None,
+        actor_user: str | None = None,
+    ) -> dict[str, object]:
+        self.initialize()
+        normalized_user = str(user_id or "").strip()
+        if not normalized_user:
+            raise ValueError("user_id is required.")
+        role_value = str(role or "labeler").strip()
+        status_value = str(status or "active").strip()
+        if role_value not in LABELING_USER_ROLES:
+            raise ValueError(f"role must be one of: {', '.join(LABELING_USER_ROLES)}")
+        if status_value not in LABELING_USER_STATUSES:
+            raise ValueError(f"status must be one of: {', '.join(LABELING_USER_STATUSES)}")
+        target = {
+            "user_id": normalized_user,
+            "display_name": _normalize_optional_text(display_name),
+            "email": _normalize_optional_text(email),
+            "role": role_value,
+            "status": status_value,
+            "notes": _normalize_optional_text(notes),
+        }
+        existing = self.get_labeling_user(normalized_user)
+        existing_target = (
+            {
+                "user_id": existing.get("user_id"),
+                "display_name": existing.get("display_name"),
+                "email": existing.get("email"),
+                "role": existing.get("role"),
+                "status": existing.get("status"),
+                "notes": existing.get("notes"),
+            }
+            if existing is not None
+            else None
+        )
+        if existing_target == target:
+            return existing
+        now = utc_now()
+        self.conn.execute(
+            """
+            INSERT INTO labeling_users (
+                user_id, display_name, email, role, status, created_at_utc, updated_at_utc, notes
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                display_name = excluded.display_name,
+                email = excluded.email,
+                role = excluded.role,
+                status = excluded.status,
+                updated_at_utc = excluded.updated_at_utc,
+                notes = excluded.notes;
+            """,
+            (
+                normalized_user,
+                target["display_name"],
+                target["email"],
+                role_value,
+                status_value,
+                now,
+                now,
+                target["notes"],
+            ),
+        )
+        self.conn.commit()
+        row = self.get_labeling_user(normalized_user)
+        assert row is not None
+        self.record_labeling_user_event(
+            user_id=normalized_user,
+            actor_user=actor_user,
+            event_type="labeling_user_created" if existing is None else "labeling_user_changed",
+            before=existing_target,
+            after={
+                "user_id": row.get("user_id"),
+                "display_name": row.get("display_name"),
+                "email": row.get("email"),
+                "role": row.get("role"),
+                "status": row.get("status"),
+                "notes": row.get("notes"),
+            },
+        )
+        return row
+
+    def deactivate_labeling_user(
+        self,
+        user_id: str,
+        *,
+        actor_user: str | None = None,
+        notes: str | None = None,
+    ) -> dict[str, object]:
+        existing = self.get_labeling_user(user_id)
+        if existing is None:
+            raise KeyError(f"Unknown labeling user: {user_id}")
+        return self.upsert_labeling_user(
+            user_id=str(existing["user_id"]),
+            display_name=str(existing.get("display_name") or "") or None,
+            email=str(existing.get("email") or "") or None,
+            role=str(existing.get("role") or "labeler"),
+            status="inactive",
+            notes=notes if notes is not None else str(existing.get("notes") or "") or None,
+            actor_user=actor_user,
+        )
+
+    def activate_labeling_user(
+        self,
+        user_id: str,
+        *,
+        actor_user: str | None = None,
+        notes: str | None = None,
+    ) -> dict[str, object]:
+        existing = self.get_labeling_user(user_id)
+        if existing is None:
+            raise KeyError(f"Unknown labeling user: {user_id}")
+        return self.upsert_labeling_user(
+            user_id=str(existing["user_id"]),
+            display_name=str(existing.get("display_name") or "") or None,
+            email=str(existing.get("email") or "") or None,
+            role=str(existing.get("role") or "labeler"),
+            status="active",
+            notes=notes if notes is not None else str(existing.get("notes") or "") or None,
+            actor_user=actor_user,
+        )
+
+    def record_labeling_user_event(
+        self,
+        *,
+        user_id: str,
+        actor_user: str | None,
+        event_type: str,
+        before: Mapping[str, object] | None = None,
+        after: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        self.initialize()
+        event_id = str(uuid.uuid4())
+        now = utc_now()
+        self.conn.execute(
+            """
+            INSERT INTO labeling_user_events (
+                event_id, user_id, actor_user, event_type, before_json, after_json, created_at_utc
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?);
+            """,
+            (
+                event_id,
+                str(user_id),
+                _normalize_optional_text(actor_user),
+                str(event_type),
+                _json_dumps(before) if before is not None else None,
+                _json_dumps(after) if after is not None else None,
+                now,
+            ),
+        )
+        self.conn.commit()
+        return {
+            "event_id": event_id,
+            "user_id": str(user_id),
+            "actor_user": _normalize_optional_text(actor_user),
+            "event_type": str(event_type),
+            "created_at_utc": now,
+        }
+
+    def list_labeling_user_events(
+        self,
+        *,
+        user_id: str | None = None,
+        actor_user: str | None = None,
+        event_type: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
+        self.initialize()
+        sql = ["SELECT * FROM labeling_user_events WHERE 1=1"]
+        params: list[object] = []
+        if user_id:
+            sql.append("AND user_id = ?")
+            params.append(str(user_id))
+        if actor_user:
+            sql.append("AND actor_user = ?")
+            params.append(str(actor_user))
+        if event_type:
+            sql.append("AND event_type = ?")
+            params.append(str(event_type))
+        sql.append("ORDER BY created_at_utc DESC LIMIT ?")
+        params.append(max(1, int(limit)))
+        rows = self.conn.execute(" ".join(sql), params).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+    def labeling_user_status(self, user_id: str) -> dict[str, object]:
+        normalized_user = str(user_id or "").strip()
+        user_row = self.get_labeling_user(normalized_user) if normalized_user else None
+        assignments = self.list_assignments(assignee_user=normalized_user, status=None) if normalized_user else []
+        active_assignment_count = sum(1 for row in assignments if str(row.get("status") or "") == "active")
+        return {
+            "schema": "palette.web_labeling_user_status.v1",
+            "user": normalized_user,
+            "user_registry_table": "labeling_users",
+            "registry_row_present": user_row is not None,
+            "role": str((user_row or {}).get("role") or ""),
+            "status": str((user_row or {}).get("status") or ""),
+            "is_active_labeling_user": bool(user_row is not None and str(user_row.get("status") or "") == "active"),
+            "is_known_labeler": bool(user_row is not None or assignments),
+            "assignment_count": len(assignments),
+            "active_assignment_count": active_assignment_count,
+            "has_active_assignment": active_assignment_count > 0,
+            "assignment_status_counts": {
+                status: sum(1 for row in assignments if str(row.get("status") or "") == status)
+                for status in sorted({str(row.get("status") or "unknown") for row in assignments})
+            },
+        }
 
     def record_assignment_event(
         self,
@@ -1504,6 +1831,221 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                 event_type="session_closed",
                 after={"session_id": str(session_id), "closed_at_utc": now},
             )
+
+    def upsert_session_checkpoint(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        recording_id: str,
+        user: str,
+        workflow_kind: str,
+        target_run_path: str,
+        target_edit_revision: int,
+        source_rowset_path: str | None,
+        roi_idx: int,
+        component_name: str,
+        payload: Mapping[str, object],
+        metadata: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Persist the latest unapplied browser checkpoint for one task row/component."""
+
+        self.initialize()
+        session_id_value = str(session_id)
+        task_id_value = str(task_id)
+        recording_id_value = str(recording_id)
+        user_value = str(user)
+        workflow_kind_value = str(workflow_kind)
+        target_run_path_value = str(target_run_path)
+        source_rowset_path_value = _normalize_optional_text(source_rowset_path)
+        component_name_value = str(component_name)
+        roi_idx_value = int(roi_idx)
+        revision_value = int(target_edit_revision)
+        now = utc_now()
+        existing = self.get_session_checkpoint(
+            task_id=task_id_value,
+            roi_idx=roi_idx_value,
+            component_name=component_name_value,
+            state=None,
+        )
+        checkpoint_id = str(existing.get("checkpoint_id")) if existing else str(uuid.uuid4())
+        created_at_utc = str(existing.get("created_at_utc")) if existing else now
+        self.conn.execute(
+            """
+            INSERT INTO labeling_session_checkpoints (
+                checkpoint_id, session_id, task_id, recording_id, user, workflow_kind,
+                target_run_path, target_edit_revision, source_rowset_path,
+                roi_idx, component_name, payload_json, metadata_json, state,
+                created_at_utc, updated_at_utc, applied_at_utc, apply_id,
+                edit_revision_before, edit_revision_after
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL, NULL, NULL, NULL)
+            ON CONFLICT(task_id, roi_idx, component_name) DO UPDATE SET
+                session_id = excluded.session_id,
+                recording_id = excluded.recording_id,
+                user = excluded.user,
+                workflow_kind = excluded.workflow_kind,
+                target_run_path = excluded.target_run_path,
+                target_edit_revision = excluded.target_edit_revision,
+                source_rowset_path = excluded.source_rowset_path,
+                payload_json = excluded.payload_json,
+                metadata_json = excluded.metadata_json,
+                state = 'active',
+                updated_at_utc = excluded.updated_at_utc,
+                applied_at_utc = NULL,
+                apply_id = NULL,
+                edit_revision_before = NULL,
+                edit_revision_after = NULL;
+            """,
+            (
+                checkpoint_id,
+                session_id_value,
+                task_id_value,
+                recording_id_value,
+                user_value,
+                workflow_kind_value,
+                target_run_path_value,
+                revision_value,
+                source_rowset_path_value,
+                roi_idx_value,
+                component_name_value,
+                _json_dumps(dict(payload)),
+                _json_dumps(dict(metadata or {})),
+                created_at_utc,
+                now,
+            ),
+        )
+        self.conn.commit()
+        row = self.get_session_checkpoint(
+            task_id=task_id_value,
+            roi_idx=roi_idx_value,
+            component_name=component_name_value,
+            state="active",
+        )
+        if row is None:
+            raise RuntimeError("Failed to persist labeling session checkpoint.")
+        return row
+
+    def get_session_checkpoint(
+        self,
+        *,
+        task_id: str,
+        roi_idx: int,
+        component_name: str,
+        state: str | None = "active",
+    ) -> dict[str, object] | None:
+        self.initialize()
+        sql = [
+            """
+            SELECT *
+            FROM labeling_session_checkpoints
+            WHERE task_id = ?
+              AND roi_idx = ?
+              AND component_name = ?
+            """
+        ]
+        params: list[object] = [str(task_id), int(roi_idx), str(component_name)]
+        if state is not None:
+            sql.append("AND state = ?")
+            params.append(str(state))
+        sql.append("LIMIT 1;")
+        row = self.conn.execute(" ".join(sql), params).fetchone()
+        return _row_to_dict(row) if row is not None else None
+
+    def list_session_checkpoints(
+        self,
+        *,
+        task_id: str,
+        state: str | None = "active",
+        component_name: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, object]]:
+        self.initialize()
+        sql = ["SELECT * FROM labeling_session_checkpoints WHERE task_id = ?"]
+        params: list[object] = [str(task_id)]
+        if state is not None:
+            sql.append("AND state = ?")
+            params.append(str(state))
+        if component_name is not None:
+            sql.append("AND component_name = ?")
+            params.append(str(component_name))
+        sql.append("ORDER BY updated_at_utc ASC LIMIT ?")
+        params.append(max(1, int(limit)))
+        rows = self.conn.execute(" ".join(sql), params).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+    def count_unapplied_session_checkpoints(
+        self,
+        *,
+        task_id: str,
+        component_name: str | None = None,
+    ) -> int:
+        self.initialize()
+        sql = ["SELECT COUNT(*) AS n FROM labeling_session_checkpoints WHERE task_id = ? AND state = 'active'"]
+        params: list[object] = [str(task_id)]
+        if component_name is not None:
+            sql.append("AND component_name = ?")
+            params.append(str(component_name))
+        row = self.conn.execute(" ".join(sql), params).fetchone()
+        return int(row["n"] if row is not None else 0)
+
+    def get_applied_session_checkpoints_by_apply_id(
+        self,
+        *,
+        task_id: str,
+        apply_id: str,
+    ) -> list[dict[str, object]]:
+        self.initialize()
+        rows = self.conn.execute(
+            """
+            SELECT *
+            FROM labeling_session_checkpoints
+            WHERE task_id = ?
+              AND apply_id = ?
+              AND state = 'applied'
+            ORDER BY applied_at_utc ASC, roi_idx ASC, component_name ASC;
+            """,
+            (str(task_id), str(apply_id)),
+        ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+    def mark_session_checkpoints_applied(
+        self,
+        *,
+        checkpoint_ids: Sequence[str],
+        apply_id: str,
+        edit_revision_before: int,
+        edit_revision_after: int,
+    ) -> int:
+        self.initialize()
+        ids = [str(value) for value in checkpoint_ids if str(value)]
+        if not ids:
+            return 0
+        now = utc_now()
+        placeholders = ", ".join("?" for _ in ids)
+        params: list[object] = [
+            str(apply_id),
+            int(edit_revision_before),
+            int(edit_revision_after),
+            now,
+            *ids,
+        ]
+        cur = self.conn.execute(
+            f"""
+            UPDATE labeling_session_checkpoints
+            SET state = 'applied',
+                apply_id = ?,
+                edit_revision_before = ?,
+                edit_revision_after = ?,
+                applied_at_utc = ?,
+                updated_at_utc = ?
+            WHERE checkpoint_id IN ({placeholders})
+              AND state = 'active';
+            """,
+            [params[0], params[1], params[2], params[3], params[3], *ids],
+        )
+        self.conn.commit()
+        return int(cur.rowcount or 0)
 
     def list_sessions(
         self,

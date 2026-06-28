@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2092,6 +2093,7 @@ def _compute_refined_subject_component_apply_rows(
     component_name: str,
     roi_indices: Sequence[int],
     edited_masks_batch: np.ndarray,
+    compute_workers: int = 1,
 ) -> dict[str, np.ndarray]:
     if component_sources is None:
         if source is None:
@@ -2121,27 +2123,67 @@ def _compute_refined_subject_component_apply_rows(
     source_row_stale = np.zeros((row_count,), dtype=bool)
     reason_labels = np.empty((row_count,), dtype=object)
 
-    for row_offset, roi_idx in enumerate(roi_indices):
-        current_mask = component_masks[row_offset]
+    source_masks: list[np.ndarray] = []
+    for roi_idx in roi_indices:
         source_mask = _source_seed_mask_for_component(refined, component_name, int(roi_idx))
         if source_mask is None:
             source_mask = _source_mask_for_resolved_component(component_sources, component_name, int(roi_idx))
+        source_masks.append(np.asarray(source_mask, dtype=np.uint8).copy())
+
+    def _compute_single_row(row_offset: int) -> tuple[int, bool, int, float, int, float, float, float, float, float, np.uint64, str]:
+        current_mask = np.asarray(component_masks[int(row_offset)], dtype=np.uint8)
+        source_mask = source_masks[int(row_offset)]
         edited = not np.array_equal(current_mask, source_mask)
         comp_count, largest_frac, holes, hole_frac = _compute_single_mask_topology_metrics(current_mask)
+        return (
+            int(row_offset),
+            bool(edited),
+            int(comp_count),
+            float(largest_frac),
+            int(holes),
+            float(hole_frac),
+            float(_compute_single_mask_sigma_noise(current_mask)),
+            float(_compute_single_mask_curvature_var(current_mask)),
+            float(_compute_single_mask_ipr(current_mask)),
+            float(_compute_single_mask_solidity(current_mask)),
+            _mask_row_fingerprint(source_mask),
+            _default_reason_label(source_mask, current_mask, edited),
+        )
 
+    worker_count = max(1, int(compute_workers or 1))
+    if worker_count > 1 and row_count > 1:
+        with ThreadPoolExecutor(max_workers=min(worker_count, row_count)) as executor:
+            row_results = list(executor.map(_compute_single_row, range(row_count)))
+    else:
+        row_results = [_compute_single_row(row_offset) for row_offset in range(row_count)]
+
+    for (
+        row_offset,
+        edited,
+        comp_count,
+        largest_frac,
+        holes,
+        hole_frac,
+        sigma_noise_value,
+        curvature_var_value,
+        ipr_value,
+        solidity_value,
+        source_fingerprint,
+        reason_label,
+    ) in row_results:
         edit_applied[row_offset] = edited
         component_count[row_offset] = np.int32(comp_count)
         largest_component_fraction[row_offset] = np.float32(largest_frac)
         hole_count[row_offset] = np.int32(holes)
         hole_area_fraction[row_offset] = np.float32(hole_frac)
-        sigma_noise[row_offset] = np.float32(_compute_single_mask_sigma_noise(current_mask))
-        curvature_var[row_offset] = np.float32(_compute_single_mask_curvature_var(current_mask))
-        ipr[row_offset] = np.float32(_compute_single_mask_ipr(current_mask))
-        solidity[row_offset] = np.float32(_compute_single_mask_solidity(current_mask))
-        source_row_fingerprint[row_offset] = _mask_row_fingerprint(source_mask)
+        sigma_noise[row_offset] = np.float32(sigma_noise_value)
+        curvature_var[row_offset] = np.float32(curvature_var_value)
+        ipr[row_offset] = np.float32(ipr_value)
+        solidity[row_offset] = np.float32(solidity_value)
+        source_row_fingerprint[row_offset] = source_fingerprint
         manual_override[row_offset] = bool(edited)
         source_row_stale[row_offset] = False
-        reason_labels[row_offset] = _default_reason_label(source_mask, current_mask, edited)
+        reason_labels[row_offset] = reason_label
 
     return {
         "mask_present": mask_present,
@@ -2301,6 +2343,7 @@ def _apply_refined_subject_roi_rows(
     update_mode: str = "interactive",
     update_method: Optional[str] = None,
     update_reason: Optional[str] = None,
+    compute_workers: int = 1,
 ) -> tuple[int, ...]:
     if component_sources is None:
         if source is None:
@@ -2329,6 +2372,7 @@ def _apply_refined_subject_roi_rows(
             component_name=component_name,
             roi_indices=normalized_rows,
             edited_masks_batch=edited_batch,
+            compute_workers=compute_workers,
         )
         _write_refined_subject_component_apply_rows(
             refined=refined,

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import csv
 import hashlib
 import html
 import hmac
+import io
 import json
 import mimetypes
 import os
@@ -26,16 +28,26 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import numpy as np
 
-from .assignment_store import LABELER_START_TASK_STATES, LabelingStore, default_store_path
+from .assignment_store import (
+    LABELER_START_TASK_STATES,
+    LABELING_USER_ROLES,
+    LABELING_USER_STATUSES,
+    LabelingStore,
+    default_store_path,
+)
 
 
 LINK_SECRET_ENV_VAR = "PALETTE_LABELING_LINK_SECRET"
 LINK_NOT_BEFORE_ENV_VAR = "PALETTE_LABELING_LINK_NOT_BEFORE_UTC"
+REGISTRY_PATH_ENV_VAR = "PALETTE_REGISTRY_PATH"
 DATASET_QUEUE_PATH = "/datasets"
 LABELING_HOME_PATH = "/labeling"
 DASHBOARD_PATH = "/work"
 PERSONAL_DATASET_QUEUE_PATH = "/my-datasets"
 PERSONAL_WORK_PATH = "/my-work"
+SIGNED_INVITE_SCOPE_PERSONAL_QUEUE = "personal_queue"
+SIGNED_INVITE_DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60
+SIGNED_INVITE_COOKIE_NAME = "palette_labeling_invite"
 
 
 @dataclass(frozen=True)
@@ -599,9 +611,11 @@ def _identity_probe_html(payload: Mapping[str, object]) -> bytes:
     <p>{html.escape(str(identity.get('operator_action') or ''))}</p>
     <p>Browser saves run through server-side assigned task/training Zarr writers; CSV, HTML, JSON, and handoff files are metadata only. Each recording has one active assigned owner, and only that current assignee can open or save browser labeling work.</p>
 {entry_links_html}
-    <h2>What to send the operator</h2>
-    <pre id="identity-support">{html.escape(support_payload)}</pre>
-    <button type="button" onclick="copyIdentitySupport(this)">Copy identity details</button>
+    <details>
+      <summary>What to send the operator</summary>
+      <pre id="identity-support">{html.escape(support_payload)}</pre>
+      <button type="button" onclick="copyIdentitySupport(this)">Copy identity details</button>
+    </details>
   </main>
   <script>
     function copyIdentitySupport(button) {{
@@ -786,8 +800,9 @@ def _browser_error_html(payload: Mapping[str, object]) -> bytes:
     <h1>Palette labeling access problem</h1>
     <p><code>{html.escape(error)}</code> status {status}</p>
     <p>{html.escape(details)}</p>
-    <h2>What to send the operator</h2>
-    <pre id="operator-support">error={html.escape(error)}
+    <details>
+      <summary>What to send the operator</summary>
+      <pre id="operator-support">error={html.escape(error)}
 status={status}
 details={html.escape(details)}
 return_expected_user={html.escape(return_expected_user)}
@@ -795,7 +810,8 @@ return_personal_dataset_queue_url={personal_dataset_queue_url}
 return_personal_dataset_queue_expected_user_guarded={bool(return_expected_user)}
 return_personal_work_url={personal_work_url}
 return_personal_work_expected_user_guarded={bool(return_expected_user)}{closure_support_line}{authorization_support_line}{read_authorization_support_line}{signed_link_policy_support_line}{extra_support_lines}</pre>
-    <button type="button" onclick="copyOperatorSupport(this)">Copy support details</button>
+      <button type="button" onclick="copyOperatorSupport(this)">Copy support details</button>
+    </details>
     <p><a href="/">Return to your labeling landing page</a></p>
     <p><a href="{html.escape(DASHBOARD_PATH)}">Return to the work dashboard</a></p>
     <p><a href="{personal_dataset_queue_url}">Return to your personalized dataset queue</a></p>
@@ -854,6 +870,9 @@ def _is_loopback_host(host: str) -> bool:
 
 
 def _resolve_user(handler: BaseHTTPRequestHandler, config: ServerConfig) -> tuple[str | None, str]:
+    invite_user, invite_source = _resolve_invite_user(handler, config)
+    if invite_source:
+        return invite_user, invite_source
     if config.fixed_user:
         return config.fixed_user, "fixed"
     if not config.trust_auth_header:
@@ -1002,11 +1021,17 @@ def _redact_labeler_path_string(value: str) -> str:
 
 def _redact_labeler_runtime_payload(value: object) -> object:
     if isinstance(value, Mapping):
-        return {
-            str(key): _redact_labeler_runtime_payload(child)
-            for key, child in value.items()
-            if not _is_labeler_runtime_redacted_key(key)
-        }
+        is_base64_raw_payload = str(value.get("encoding") or "") == "base64_raw"
+        redacted: dict[str, object] = {}
+        for key, child in value.items():
+            key_text = str(key)
+            if _is_labeler_runtime_redacted_key(key):
+                continue
+            if is_base64_raw_payload and key_text == "pixels":
+                redacted[key_text] = child
+            else:
+                redacted[key_text] = _redact_labeler_runtime_payload(child)
+        return redacted
     if isinstance(value, list):
         return [_redact_labeler_runtime_payload(child) for child in value]
     if isinstance(value, tuple):
@@ -1636,25 +1661,52 @@ def _post_completion_queue_metadata(
 def _known_labeler_status(store: LabelingStore, user: str | None) -> dict[str, object]:
     normalized_user = str(user or "").strip()
     assignments = store.list_assignments(assignee_user=normalized_user, status=None) if normalized_user else []
-    status_counts: dict[str, int] = {}
     recording_ids: list[str] = []
     for assignment in assignments:
-        status = str(assignment.get("status") or "").strip() or "unknown"
-        status_counts[status] = status_counts.get(status, 0) + 1
         recording_id = str(assignment.get("recording_id") or "").strip()
         if recording_id:
             recording_ids.append(recording_id)
-    active_assignment_count = int(status_counts.get("active", 0))
+    status = store.labeling_user_status(normalized_user)
     return {
+        **status,
         "schema": "palette.web_labeling_known_labeler_status.v1",
         "user": normalized_user,
-        "is_known_labeler": bool(assignments),
-        "assignment_count": len(assignments),
-        "active_assignment_count": active_assignment_count,
-        "has_active_assignment": active_assignment_count > 0,
-        "assignment_status_counts": dict(sorted(status_counts.items())),
+        "is_known_labeler": bool(status.get("is_known_labeler")),
+        "is_active_labeling_user": bool(status.get("is_active_labeling_user")),
+        "registry_row_present": bool(status.get("registry_row_present")),
+        "assignment_count": int(status.get("assignment_count") or 0),
+        "active_assignment_count": int(status.get("active_assignment_count") or 0),
+        "has_active_assignment": bool(status.get("has_active_assignment")),
         "recording_ids": sorted(recording_ids),
     }
+
+
+def _active_assignee_user_issues(
+    store: LabelingStore,
+    rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    issues: list[dict[str, object]] = []
+    for row in rows:
+        assignee_user = str(row.get("assignee_user") or row.get("user") or "").strip()
+        if not assignee_user:
+            continue
+        status = _known_labeler_status(store, assignee_user)
+        if bool(status.get("is_active_labeling_user")):
+            continue
+        issues.append(
+            {
+                "code": "inactive_or_unknown_assignee_user",
+                "assignee_user": assignee_user,
+                "recording_id": str(row.get("recording_id") or ""),
+                **({"source_line": row["_source_line"]} if row.get("_source_line") is not None else {}),
+                "assignee_user_status": status,
+                "details": (
+                    "Assignments can only be created or updated for users with an active "
+                    "row in the labeling_users SQLite table. Add or activate the user first."
+                ),
+            }
+        )
+    return issues
 
 
 def _labeler_authorization_context(
@@ -1864,6 +1916,161 @@ def _signed_task_link_token(
             expected_user=expected_user,
         )["token"]
     )
+
+
+def _signed_invite_token_info(
+    *,
+    user: str,
+    secret: str,
+    ttl_seconds: int,
+    scope: str = SIGNED_INVITE_SCOPE_PERSONAL_QUEUE,
+) -> dict[str, object]:
+    normalized_user = str(user or "").strip()
+    if not normalized_user:
+        raise ValueError("Signed invite tokens require a user.")
+    issued_at_unix = int(time.time())
+    effective_ttl_seconds = _effective_signed_link_ttl_seconds(ttl_seconds)
+    expires_at_unix = issued_at_unix + effective_ttl_seconds
+    payload = {
+        "v": 1,
+        "kind": "labeler_invite",
+        "scope": str(scope or SIGNED_INVITE_SCOPE_PERSONAL_QUEUE),
+        "user": normalized_user,
+        "iat": issued_at_unix,
+        "exp": expires_at_unix,
+        "nonce": uuid.uuid4().hex,
+    }
+    payload_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    signature = hmac.new(str(secret).encode("utf-8"), payload_bytes, hashlib.sha256).digest()
+    token = f"{_b64url_encode(payload_bytes)}.{_b64url_encode(signature)}"
+    return {
+        "token": token,
+        "issued_at_unix": issued_at_unix,
+        "expires_at_unix": expires_at_unix,
+        "issued_at_utc": datetime.fromtimestamp(issued_at_unix, tz=timezone.utc).isoformat(),
+        "expires_at_utc": datetime.fromtimestamp(expires_at_unix, tz=timezone.utc).isoformat(),
+        "ttl_seconds": effective_ttl_seconds,
+        "user": normalized_user,
+        "scope": payload["scope"],
+    }
+
+
+def _signed_invite_token(
+    *,
+    user: str,
+    secret: str,
+    ttl_seconds: int,
+    scope: str = SIGNED_INVITE_SCOPE_PERSONAL_QUEUE,
+) -> str:
+    return str(
+        _signed_invite_token_info(
+            user=user,
+            secret=secret,
+            ttl_seconds=ttl_seconds,
+            scope=scope,
+        )["token"]
+    )
+
+
+def _verify_signed_invite_token(token: str, *, secret: str) -> dict[str, object]:
+    parts = str(token or "").split(".", 1)
+    if len(parts) != 2:
+        raise ValueError("Malformed signed invite token.")
+    payload_bytes = _b64url_decode(parts[0])
+    expected = hmac.new(str(secret).encode("utf-8"), payload_bytes, hashlib.sha256).digest()
+    provided = _b64url_decode(parts[1])
+    if not hmac.compare_digest(expected, provided):
+        raise ValueError("Invalid signed invite token.")
+    payload = json.loads(payload_bytes.decode("utf-8"))
+    if not isinstance(payload, dict) or int(payload.get("v") or 0) != 1:
+        raise ValueError("Unsupported signed invite token.")
+    if str(payload.get("kind") or "") != "labeler_invite":
+        raise ValueError("Signed token is not a labeler invite.")
+    if str(payload.get("scope") or "") != SIGNED_INVITE_SCOPE_PERSONAL_QUEUE:
+        raise ValueError("Signed invite token has unsupported scope.")
+    if int(payload.get("exp") or 0) < int(time.time()):
+        raise ValueError("Signed invite token has expired.")
+    user = str(payload.get("user") or "").strip()
+    if not user:
+        raise ValueError("Signed invite token is missing user.")
+    return payload
+
+
+def _signed_invite_path(token: str, *, user: str) -> str:
+    return (
+        f"{PERSONAL_DATASET_QUEUE_PATH}"
+        f"?expected_user={quote(str(user), safe='')}"
+        f"&invite={quote(str(token), safe='')}"
+    )
+
+
+def _invite_query_token_from_request(handler: BaseHTTPRequestHandler) -> str:
+    query = parse_qs(urlparse(handler.path).query, keep_blank_values=True)
+    return str((query.get("invite") or [""])[-1]).strip()
+
+
+def _cookie_value(handler: BaseHTTPRequestHandler, name: str) -> str:
+    cookie_header = str(handler.headers.get("Cookie") or "")
+    if not cookie_header:
+        return ""
+    for raw_part in cookie_header.split(";"):
+        if "=" not in raw_part:
+            continue
+        key, value = raw_part.split("=", 1)
+        if key.strip() == name:
+            return value.strip()
+    return ""
+
+
+def _invite_token_from_request(handler: BaseHTTPRequestHandler) -> str:
+    query_token = _invite_query_token_from_request(handler)
+    if query_token:
+        return query_token
+    return _cookie_value(handler, SIGNED_INVITE_COOKIE_NAME)
+
+
+def _invite_cookie_header_from_query(handler: BaseHTTPRequestHandler, config: ServerConfig) -> str | None:
+    token = _invite_query_token_from_request(handler)
+    if not token:
+        return None
+    if not config.link_secret:
+        return f"{SIGNED_INVITE_COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax"
+    try:
+        payload = _verify_signed_invite_token(token, secret=config.link_secret)
+        revocation_reason = _signed_task_link_revocation_reason(
+            payload,
+            not_before_utc=config.link_not_before_utc,
+        )
+        if revocation_reason:
+            return f"{SIGNED_INVITE_COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax"
+        max_age = max(0, int(payload.get("exp") or 0) - int(time.time()))
+    except Exception:
+        return f"{SIGNED_INVITE_COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax"
+    return f"{SIGNED_INVITE_COOKIE_NAME}={token}; Max-Age={max_age}; Path=/; HttpOnly; SameSite=Lax"
+
+
+def _resolve_invite_user(handler: BaseHTTPRequestHandler, config: ServerConfig) -> tuple[str | None, str | None]:
+    token = _invite_token_from_request(handler)
+    if not token:
+        return None, None
+    if not config.link_secret:
+        return None, "signed_invites_disabled"
+    try:
+        payload = _verify_signed_invite_token(token, secret=config.link_secret)
+        revocation_reason = _signed_task_link_revocation_reason(
+            payload,
+            not_before_utc=config.link_not_before_utc,
+        )
+        if revocation_reason:
+            return None, revocation_reason
+        invite_user = str(payload.get("user") or "").strip()
+        query = parse_qs(urlparse(handler.path).query, keep_blank_values=True)
+        expected_user = str((query.get("expected_user") or [""])[-1]).strip()
+        if expected_user and expected_user != invite_user:
+            return None, "invite_expected_user_mismatch"
+        return invite_user, f"invite:{payload.get('scope') or SIGNED_INVITE_SCOPE_PERSONAL_QUEUE}"
+    except Exception as exc:
+        return None, f"invite_error:{type(exc).__name__}"
 
 
 def _verify_signed_task_link_token(token: str, *, secret: str) -> dict[str, object]:
@@ -3485,7 +3692,105 @@ def _parse_byte_range(value: str | None, *, file_size: int) -> tuple[int, int] |
     return start, min(end, file_size - 1)
 
 
-def _subject_mask_runtime_state(runtime: SubjectMaskRuntimeSession) -> dict[str, object]:
+def _subject_mask_target_run_path(runtime: SubjectMaskRuntimeSession) -> str:
+    return f"refined_subject_masks_runs/{runtime.refined.run_name}"
+
+
+def _subject_mask_source_rowset_path(runtime: SubjectMaskRuntimeSession) -> str:
+    return f"crop_runs/{runtime.source.crop_run}"
+
+
+def _subject_mask_edit_revision(runtime: SubjectMaskRuntimeSession) -> int:
+    try:
+        return int(runtime.refined.group.attrs.get("edit_revision") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _subject_mask_row_identity(runtime: SubjectMaskRuntimeSession, roi_idx: int) -> dict[str, object]:
+    identity: dict[str, object] = {"roi_idx": int(roi_idx)}
+    for name in (
+        "source_crop_row_ids",
+        "source_refined_row_ids",
+        "source_detect_row_index",
+        "frame_indices",
+    ):
+        if name not in runtime.refined.group:
+            continue
+        try:
+            identity[name] = int(np.asarray(runtime.refined.group[name][int(roi_idx)]).item())
+        except Exception:
+            continue
+    if runtime.source.frame_indices is not None:
+        try:
+            identity["source_frame_idx"] = int(np.asarray(runtime.source.frame_indices[int(roi_idx)]).item())
+        except Exception:
+            pass
+    return identity
+
+
+def _subject_mask_checkpoint_mask(checkpoint: Mapping[str, object]) -> np.ndarray:
+    payload = checkpoint.get("payload")
+    if not isinstance(payload, Mapping):
+        raise ValueError("Subject-mask checkpoint is missing payload.")
+    mask_payload = payload.get("mask")
+    if not isinstance(mask_payload, Mapping):
+        raise ValueError("Subject-mask checkpoint is missing mask payload.")
+    mask = (_decode_uint8_payload(mask_payload) > 0).astype(np.uint8)
+    if mask.ndim == 3 and mask.shape[-1] == 1:
+        mask = mask[:, :, 0]
+    return mask
+
+
+def _subject_mask_unapplied_checkpoint_count(
+    store: LabelingStore | None,
+    runtime: SubjectMaskRuntimeSession,
+) -> int:
+    if store is None:
+        return 0
+    try:
+        return int(
+            store.count_unapplied_session_checkpoints(
+                task_id=runtime.task_id,
+                component_name=runtime.component_name,
+            )
+        )
+    except Exception:
+        return 0
+
+
+SUBJECT_MASK_COMPLETABLE_REVIEW_STATES = frozenset({"approved", "needs_review", "rejected"})
+
+
+def _subject_mask_component_review_state(runtime: SubjectMaskRuntimeSession) -> str:
+    component_reviews = runtime.refined.group.attrs.get("component_review_statuses")
+    if isinstance(component_reviews, Mapping):
+        raw_review = component_reviews.get(runtime.component_name)
+        if isinstance(raw_review, Mapping):
+            state = str(raw_review.get("state") or "").strip()
+            if state:
+                return state
+    return "pending"
+
+
+def _subject_mask_component_completion_guard(runtime: SubjectMaskRuntimeSession) -> dict[str, object]:
+    review_state = _subject_mask_component_review_state(runtime)
+    ready = review_state in SUBJECT_MASK_COMPLETABLE_REVIEW_STATES
+    return {
+        "ready": ready,
+        "component_name": runtime.component_name,
+        "component_review_state": review_state,
+        "completable_review_states": sorted(SUBJECT_MASK_COMPLETABLE_REVIEW_STATES),
+        "not_ready_reason": "" if ready else "component_review_pending",
+        "required_action": "" if ready else "set_component_review_status_before_completing_task",
+    }
+
+
+def _subject_mask_runtime_state(
+    runtime: SubjectMaskRuntimeSession,
+    *,
+    store: LabelingStore | None = None,
+) -> dict[str, object]:
     total = int(runtime.roi_indices.shape[0])
     runtime.position = 0 if total <= 0 else max(0, min(int(runtime.position), total - 1))
     current: dict[str, object] = {}
@@ -3504,6 +3809,7 @@ def _subject_mask_runtime_state(runtime: SubjectMaskRuntimeSession) -> dict[str,
         raw_review = component_reviews.get(runtime.component_name)
         component_review = dict(raw_review) if isinstance(raw_review, Mapping) else None
     run_review = runtime.refined.group.attrs.get("refined_subject_mask_review_status")
+    unapplied_checkpoint_count = _subject_mask_unapplied_checkpoint_count(store, runtime)
     return dict(_redact_labeler_runtime_payload({
         "session_id": runtime.session_id,
         "task_id": runtime.task_id,
@@ -3521,6 +3827,13 @@ def _subject_mask_runtime_state(runtime: SubjectMaskRuntimeSession) -> dict[str,
         "component_review_status": component_review,
         "run_review_status": dict(run_review) if isinstance(run_review, Mapping) else None,
         "auto_advance_on_save": bool(runtime.auto_advance_on_save),
+        "edit_revision": _subject_mask_edit_revision(runtime),
+        "target_run_path": _subject_mask_target_run_path(runtime),
+        "source_rowset_path": _subject_mask_source_rowset_path(runtime),
+        "unapplied_session_edit_count": unapplied_checkpoint_count,
+        "has_unapplied_session_edits": bool(unapplied_checkpoint_count > 0),
+        "component_review_completion_guard": _subject_mask_component_completion_guard(runtime),
+        "component_review_completion_ready": bool(_subject_mask_component_completion_guard(runtime).get("ready")),
     }))
 
 
@@ -3592,7 +3905,11 @@ def _get_subject_mask_runtime(state: ServerState, session: Mapping[str, object])
     return runtime
 
 
-def _subject_mask_current_payload(runtime: SubjectMaskRuntimeSession) -> dict[str, object]:
+def _subject_mask_current_payload(
+    runtime: SubjectMaskRuntimeSession,
+    *,
+    store: LabelingStore | None = None,
+) -> dict[str, object]:
     total = int(runtime.roi_indices.shape[0])
     if total <= 0:
         raise ValueError("Subject-mask task has no ROI rows.")
@@ -3600,6 +3917,28 @@ def _subject_mask_current_payload(runtime: SubjectMaskRuntimeSession) -> dict[st
     roi_idx = int(runtime.roi_indices[runtime.position])
     roi_image = np.asarray(runtime.roi_images[roi_idx], dtype=np.uint8)
     mask = (np.asarray(runtime.refined.group["masks_roi"][roi_idx, runtime.comp_idx], dtype=np.uint8) > 0).astype(np.uint8)
+    session_checkpoint: dict[str, object] | None = None
+    if store is not None:
+        checkpoint = store.get_session_checkpoint(
+            task_id=runtime.task_id,
+            roi_idx=roi_idx,
+            component_name=runtime.component_name,
+            state="active",
+        )
+        if checkpoint is not None:
+            checkpoint_mask = _subject_mask_checkpoint_mask(checkpoint)
+            if tuple(checkpoint_mask.shape) != tuple(mask.shape):
+                raise ValueError(
+                    f"checkpoint mask shape mismatch: expected {tuple(mask.shape)}, got {tuple(checkpoint_mask.shape)}"
+                )
+            mask = checkpoint_mask
+            session_checkpoint = {
+                "checkpoint_id": str(checkpoint.get("checkpoint_id") or ""),
+                "state": str(checkpoint.get("state") or ""),
+                "updated_at_utc": str(checkpoint.get("updated_at_utc") or ""),
+                "target_edit_revision": int(checkpoint.get("target_edit_revision") or 0),
+                "is_overlay": True,
+            }
     frame_idx: int | None = None
     frame_indices = runtime.source.frame_indices
     if frame_indices is not None:
@@ -3618,7 +3957,8 @@ def _subject_mask_current_payload(runtime: SubjectMaskRuntimeSession) -> dict[st
         "roi_image": _raw_array_payload(roi_image),
         "mask": _raw_array_payload(mask),
         "mask_area_px": int(mask.sum()),
-        "state": _subject_mask_runtime_state(runtime),
+        "session_checkpoint": session_checkpoint,
+        "state": _subject_mask_runtime_state(runtime, store=store),
     }
 
 
@@ -4984,6 +5324,1540 @@ def _refresh_registry_for_scope(
         )
 
 
+def _project_approved_keypoint_review_to_recording_step_status(
+    *,
+    store: LabelingStore,
+    task_id: str,
+    recording_id: str,
+    user: str,
+    scope: Mapping[str, object],
+    refined_attrs: Mapping[str, object],
+    review_status: Mapping[str, object],
+    review_event_id: str,
+    zarr_path: str | None = None,
+    dataset_id: str | None = None,
+    zarr_use: str | None = None,
+) -> None:
+    review_state = str(review_status.get("state") or "").strip().lower()
+    intended_use = str(review_status.get("intended_use") or "").strip().lower()
+    if review_state != "approved" or intended_use != "training":
+        return
+
+    registry_path = str(scope.get("registry_path") or "").strip()
+    resolved_dataset_id = str(dataset_id or scope.get("dataset_id") or "").strip()
+    resolved_zarr_path = str(zarr_path or scope.get("zarr_path") or "").strip()
+    resolved_zarr_use = str(zarr_use or scope.get("zarr_use") or "").strip() or None
+    refined_run = str(
+        scope.get("refined_run")
+        or refined_attrs.get("palette_run_name")
+        or refined_attrs.get("run_name")
+        or ""
+    ).strip()
+    if not registry_path or not resolved_dataset_id or not refined_run:
+        return
+
+    pose_schema = refined_attrs.get("pose_schema")
+    pose_schema_name = (
+        str(pose_schema.get("name") or "")
+        if isinstance(pose_schema, Mapping)
+        else str(scope.get("pose_schema") or refined_attrs.get("pose_schema_name") or "")
+    ).strip()
+    skeleton_id = str(
+        scope.get("skeleton_id")
+        or refined_attrs.get("skeleton_id")
+        or (
+            pose_schema.get("skeleton_id")
+            if isinstance(pose_schema, Mapping)
+            else ""
+        )
+        or ""
+    ).strip()
+    stage_group = str(scope.get("stage_group") or "refined_keypoints_runs").strip()
+    summary_statistics = refined_attrs.get("summary_statistics")
+    postprocess = (
+        summary_statistics.get("postprocess")
+        if isinstance(summary_statistics, Mapping)
+        else None
+    )
+    coverage_pct = None
+    if isinstance(postprocess, Mapping):
+        raw_coverage = postprocess.get("success_rate_percent")
+        if raw_coverage is not None:
+            try:
+                coverage_pct = float(raw_coverage)
+            except (TypeError, ValueError):
+                coverage_pct = None
+    details = {
+        "schema": "palette.web_labeling_keypoints_review_step_projection.v1",
+        "pose_schema": pose_schema_name,
+        "skeleton_id": skeleton_id,
+        "stage_group": stage_group,
+        "review_task_id": str(task_id),
+        "labeling_store_event_id": str(review_event_id),
+        "zarr_use": resolved_zarr_use,
+        "zarr_path": resolved_zarr_path,
+        "review_source": "web_labeling_keypoint_review_status",
+    }
+    zarr_mtime_ns = None
+    if resolved_zarr_path:
+        try:
+            zarr_mtime_ns = Path(resolved_zarr_path).expanduser().stat().st_mtime_ns
+        except OSError:
+            zarr_mtime_ns = None
+
+    try:
+        from fisheye.registry.db import Registry
+        from fisheye.registry.status_ledger import upsert_recording_step_status
+
+        registry = Registry(Path(registry_path).expanduser())
+        try:
+            row = upsert_recording_step_status(
+                registry,
+                dataset_id=resolved_dataset_id,
+                recording_id=str(recording_id),
+                step_name="keypoints_review",
+                status="ok",
+                run_name=refined_run,
+                method=str(review_status.get("method") or "manual"),
+                coverage_pct=coverage_pct,
+                review_status_json=dict(review_status),
+                details_json=details,
+                source="web_labeling_review_completion",
+                zarr_mtime_ns=zarr_mtime_ns,
+            )
+        finally:
+            registry.close()
+        store.record_event(
+            task_id=task_id,
+            recording_id=recording_id,
+            user=user,
+            event_type="registry_step_status_projection_success",
+            target={
+                "workflow_kind": "keypoints",
+                "dataset_id": resolved_dataset_id,
+                "registry_path": registry_path,
+                "step_name": "keypoints_review",
+                "run_name": refined_run,
+            },
+            after={"recording_step_status": row},
+        )
+    except Exception as exc:
+        store.record_event(
+            task_id=task_id,
+            recording_id=recording_id,
+            user=user,
+            event_type="registry_step_status_projection_failed",
+            target={
+                "workflow_kind": "keypoints",
+                "dataset_id": resolved_dataset_id,
+                "registry_path": registry_path,
+                "step_name": "keypoints_review",
+                "run_name": refined_run,
+            },
+            after={"error": "registry_step_status_projection_failed", "details": str(exc)},
+        )
+
+
+def _admin_task_state_counts(tasks: Sequence[Mapping[str, object]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for task in tasks:
+        state = str(task.get("state") or "unknown")
+        counts[state] = counts.get(state, 0) + 1
+    return counts
+
+
+def _admin_workflow_counts(tasks: Sequence[Mapping[str, object]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for task in tasks:
+        workflow = str(task.get("workflow_kind") or "unknown")
+        counts[workflow] = counts.get(workflow, 0) + 1
+    return counts
+
+
+def _admin_compact_task(task: Mapping[str, object]) -> dict[str, object]:
+    scope = task.get("scope")
+    scope_keys = sorted(str(key) for key in scope.keys()) if isinstance(scope, Mapping) else []
+    return {
+        "task_id": str(task.get("task_id") or ""),
+        "recording_id": str(task.get("recording_id") or ""),
+        "assignee_user": str(task.get("assignee_user") or ""),
+        "assignment_status": str(task.get("assignment_status") or ""),
+        "workflow_kind": str(task.get("workflow_kind") or ""),
+        "state": str(task.get("state") or ""),
+        "title": _task_title(task),
+        "dataset_id": str(task.get("dataset_id") or ""),
+        "zarr_use": str(task.get("zarr_use") or ""),
+        "stage_group": str(task.get("stage_group") or ""),
+        "run_name": str(task.get("run_name") or ""),
+        "component_name": str(task.get("component_name") or ""),
+        "priority": task.get("priority"),
+        "notes": str(task.get("notes") or ""),
+        "created_at_utc": str(task.get("created_at_utc") or ""),
+        "updated_at_utc": str(task.get("updated_at_utc") or ""),
+        "completed_at_utc": str(task.get("completed_at_utc") or ""),
+        "scope_keys": scope_keys,
+        "admin_task_url": f"/admin/tasks/{quote(str(task.get('task_id') or ''), safe='')}",
+    }
+
+
+def _admin_registry_path_from_env() -> Path | None:
+    value = str(os.environ.get(REGISTRY_PATH_ENV_VAR) or "").strip()
+    return Path(value).expanduser() if value else None
+
+
+def _admin_sql_identifier(value: str) -> str:
+    return '"' + str(value).replace('"', '""') + '"'
+
+
+def _admin_registry_public_row(row: Mapping[str, object], *, table_name: str) -> dict[str, object]:
+    return {
+        "table": table_name,
+        "dataset_id": str(row.get("dataset_id") or ""),
+        "recording_id": str(row.get("recording_id") or ""),
+        "artifact_kind": str(row.get("artifact_kind") or ""),
+        "zarr_origin": str(row.get("zarr_origin") or ""),
+        "zarr_use": str(row.get("zarr_use") or ""),
+        "status": str(row.get("status") or ""),
+        "zarr_path": str(row.get("zarr_path") or ""),
+        "session_uuid": str(row.get("session_uuid") or ""),
+    }
+
+
+def _admin_registry_lookup(
+    *,
+    registry_path: Path | None,
+    dataset_ids: Sequence[str],
+    recording_ids: Sequence[str],
+) -> dict[str, object]:
+    result: dict[str, object] = {
+        "enabled": bool(registry_path),
+        "path": str(registry_path) if registry_path else "",
+        "available": False,
+        "error": "",
+        "matched_row_count": 0,
+        "tables_scanned": [],
+        "rows_by_dataset_id": {},
+        "rows_by_recording_id": {},
+    }
+    if registry_path is None:
+        result["error"] = f"{REGISTRY_PATH_ENV_VAR} is not set."
+        return result
+    if not registry_path.exists():
+        result["error"] = f"Registry path does not exist: {registry_path}"
+        return result
+    dataset_filter = sorted({str(item).strip() for item in dataset_ids if str(item).strip()})
+    recording_filter = sorted({str(item).strip() for item in recording_ids if str(item).strip()})
+    if not dataset_filter and not recording_filter:
+        result["available"] = True
+        return result
+    rows_by_dataset_id: dict[str, list[dict[str, object]]] = {}
+    rows_by_recording_id: dict[str, list[dict[str, object]]] = {}
+    try:
+        connection = sqlite3.connect(str(registry_path))
+        connection.row_factory = sqlite3.Row
+        try:
+            table_names = [
+                str(row["name"])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                ).fetchall()
+            ]
+            for table_name in table_names:
+                columns = [
+                    str(row["name"])
+                    for row in connection.execute(
+                        f"PRAGMA table_info({_admin_sql_identifier(table_name)})"
+                    ).fetchall()
+                ]
+                column_set = set(columns)
+                if not {"dataset_id", "recording_id"} & column_set:
+                    continue
+                selected_columns = [
+                    column
+                    for column in (
+                        "dataset_id",
+                        "recording_id",
+                        "artifact_kind",
+                        "zarr_origin",
+                        "zarr_use",
+                        "status",
+                        "zarr_path",
+                        "session_uuid",
+                    )
+                    if column in column_set
+                ]
+                if not selected_columns:
+                    continue
+                where_parts: list[str] = []
+                params: list[object] = []
+                if dataset_filter and "dataset_id" in column_set:
+                    where_parts.append(
+                        f"{_admin_sql_identifier('dataset_id')} IN ({','.join('?' for _ in dataset_filter)})"
+                    )
+                    params.extend(dataset_filter)
+                if recording_filter and "recording_id" in column_set:
+                    where_parts.append(
+                        f"{_admin_sql_identifier('recording_id')} IN ({','.join('?' for _ in recording_filter)})"
+                    )
+                    params.extend(recording_filter)
+                if not where_parts:
+                    continue
+                query = (
+                    "SELECT "
+                    + ", ".join(_admin_sql_identifier(column) for column in selected_columns)
+                    + f" FROM {_admin_sql_identifier(table_name)} WHERE "
+                    + " OR ".join(f"({part})" for part in where_parts)
+                    + " LIMIT 5000"
+                )
+                result["tables_scanned"] = [
+                    *list(result.get("tables_scanned", [])),
+                    table_name,
+                ]
+                for sqlite_row in connection.execute(query, params).fetchall():
+                    row = {column: sqlite_row[column] if column in sqlite_row.keys() else "" for column in selected_columns}
+                    public_row = _admin_registry_public_row(row, table_name=table_name)
+                    dataset_id = str(public_row.get("dataset_id") or "")
+                    recording_id = str(public_row.get("recording_id") or "")
+                    if dataset_id:
+                        rows_by_dataset_id.setdefault(dataset_id, []).append(public_row)
+                    if recording_id:
+                        rows_by_recording_id.setdefault(recording_id, []).append(public_row)
+        finally:
+            connection.close()
+    except Exception as exc:
+        result["error"] = str(exc)
+        return result
+    result["available"] = True
+    result["matched_row_count"] = sum(len(rows) for rows in rows_by_dataset_id.values())
+    result["rows_by_dataset_id"] = rows_by_dataset_id
+    result["rows_by_recording_id"] = rows_by_recording_id
+    return result
+
+
+def _admin_registry_summary(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    return {
+        "match_count": len(rows),
+        "dataset_ids": sorted({str(row.get("dataset_id") or "") for row in rows if str(row.get("dataset_id") or "")}),
+        "recording_ids": sorted({str(row.get("recording_id") or "") for row in rows if str(row.get("recording_id") or "")}),
+        "statuses": sorted({str(row.get("status") or "") for row in rows if str(row.get("status") or "")}),
+        "zarr_uses": sorted({str(row.get("zarr_use") or "") for row in rows if str(row.get("zarr_use") or "")}),
+        "artifact_kinds": sorted({str(row.get("artifact_kind") or "") for row in rows if str(row.get("artifact_kind") or "")}),
+        "zarr_origins": sorted({str(row.get("zarr_origin") or "") for row in rows if str(row.get("zarr_origin") or "")}),
+        "zarr_paths": sorted({str(row.get("zarr_path") or "") for row in rows if str(row.get("zarr_path") or "")}),
+    }
+
+
+def _admin_registry_warning(
+    code: str,
+    *,
+    severity: str = "warning",
+    dataset_id: str = "",
+    recording_id: str = "",
+    task_id: str = "",
+    details: str = "",
+    operator_action: str = "",
+    extra: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "code": code,
+        "severity": severity,
+        "dataset_id": dataset_id,
+        "recording_id": recording_id,
+        "task_id": task_id,
+        "details": details,
+        "operator_action": operator_action,
+        **(dict(extra) if isinstance(extra, Mapping) else {}),
+    }
+
+
+def _admin_registry_warnings_for_recording(recording: Mapping[str, object]) -> list[dict[str, object]]:
+    warnings: list[dict[str, object]] = []
+    registry_rows = [
+        row
+        for row in (
+            recording.get("registry_rows")
+            if isinstance(recording.get("registry_rows"), list)
+            else []
+        )
+        if isinstance(row, Mapping)
+    ]
+    tasks = [
+        task
+        for task in (
+            recording.get("tasks")
+            if isinstance(recording.get("tasks"), list)
+            else []
+        )
+        if isinstance(task, Mapping)
+    ]
+    recording_id = str(recording.get("recording_id") or "")
+    active_training_rows = [
+        row
+        for row in registry_rows
+        if str(row.get("status") or "") == "active"
+        and str(row.get("zarr_use") or "") == "training"
+    ]
+    if not active_training_rows:
+        warnings.append(
+            _admin_registry_warning(
+                "recording_missing_active_training_registry_row",
+                recording_id=recording_id,
+                details=(
+                    "This assigned recording has no active training registry row in the configured registry."
+                ),
+                operator_action=(
+                    "Confirm the assigned recording has a registered active training Zarr, or set PALETTE_REGISTRY_PATH to the registry that contains it."
+                ),
+            )
+        )
+    seen_inactive_keys: set[tuple[str, str, str]] = set()
+    for row in registry_rows:
+        status = str(row.get("status") or "")
+        if status and status != "active":
+            key = (
+                str(row.get("table") or ""),
+                str(row.get("dataset_id") or ""),
+                status,
+            )
+            if key in seen_inactive_keys:
+                continue
+            seen_inactive_keys.add(key)
+            warnings.append(
+                _admin_registry_warning(
+                    "registry_status_not_active",
+                    dataset_id=str(row.get("dataset_id") or ""),
+                    recording_id=recording_id,
+                    details=f"Registry row is status={status}, not active.",
+                    operator_action="Inspect whether this assignment points at the current active registry dataset.",
+                    extra={
+                        "registry_table": str(row.get("table") or ""),
+                        "registry_status": status,
+                        "registry_zarr_use": str(row.get("zarr_use") or ""),
+                        "registry_zarr_path": str(row.get("zarr_path") or ""),
+                    },
+                )
+            )
+    for task in tasks:
+        task_id = str(task.get("task_id") or "")
+        task_dataset_id = str(task.get("dataset_id") or "")
+        task_zarr_use = str(task.get("zarr_use") or "")
+        if task_dataset_id:
+            dataset_rows = [
+                row
+                for row in registry_rows
+                if str(row.get("dataset_id") or "") == task_dataset_id
+            ]
+            if not dataset_rows:
+                warnings.append(
+                    _admin_registry_warning(
+                        "task_dataset_missing_registry_match",
+                        dataset_id=task_dataset_id,
+                        recording_id=recording_id,
+                        task_id=task_id,
+                        details="Task dataset_id has no matching registry row.",
+                        operator_action="Confirm the task dataset_id or point PALETTE_REGISTRY_PATH at the registry that contains this dataset.",
+                    )
+                )
+            elif task_zarr_use:
+                registry_zarr_uses = {
+                    str(row.get("zarr_use") or "")
+                    for row in dataset_rows
+                    if str(row.get("zarr_use") or "")
+                }
+                if registry_zarr_uses and task_zarr_use not in registry_zarr_uses:
+                    warnings.append(
+                        _admin_registry_warning(
+                            "task_zarr_use_registry_mismatch",
+                            dataset_id=task_dataset_id,
+                            recording_id=recording_id,
+                            task_id=task_id,
+                            details=(
+                                f"Task zarr_use={task_zarr_use} does not match registry zarr_use values "
+                                f"{', '.join(sorted(registry_zarr_uses))}."
+                            ),
+                            operator_action="Inspect task generation inputs and registry identity before sharing or continuing work.",
+                            extra={"registry_zarr_uses": sorted(registry_zarr_uses)},
+                        )
+                    )
+    return warnings
+
+
+def _admin_export_join(values: object) -> str:
+    if isinstance(values, Mapping):
+        return json.dumps(values, sort_keys=True)
+    if isinstance(values, Sequence) and not isinstance(values, (str, bytes)):
+        return ", ".join(str(value) for value in values if str(value))
+    return str(values or "")
+
+
+def _admin_dataset_export_rows(payload: Mapping[str, object]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    datasets = payload.get("datasets") if isinstance(payload.get("datasets"), list) else []
+    for dataset in datasets:
+        if not isinstance(dataset, Mapping):
+            continue
+        dataset_registry_summary = (
+            dataset.get("registry_summary")
+            if isinstance(dataset.get("registry_summary"), Mapping)
+            else {}
+        )
+        recordings = dataset.get("recordings") if isinstance(dataset.get("recordings"), list) else []
+        if not recordings:
+            dataset_warnings = (
+                dataset.get("registry_warnings")
+                if isinstance(dataset.get("registry_warnings"), list)
+                else []
+            )
+            rows.append(
+                {
+                    "dataset_id": str(dataset.get("dataset_id") or ""),
+                    "dataset_label": str(dataset.get("dataset_label") or ""),
+                    "recording_id": "",
+                    "assignee_user": "",
+                    "assignment_status": "",
+                    "task_count": int(dataset.get("task_count") or 0),
+                    "open_task_count": int(dataset.get("open_task_count") or 0),
+                    "complete_task_count": int(dataset.get("complete_task_count") or 0),
+                    "non_startable_task_count": int(dataset.get("non_startable_task_count") or 0),
+                    "progress_percent": float(dataset.get("progress_percent") or 0.0),
+                    "blocked": bool(dataset.get("blocked_recording_count")),
+                    "blocked_reason": "",
+                    "workflow_counts": _admin_export_join(dataset.get("workflow_counts", {})),
+                    "state_counts": _admin_export_join(dataset.get("state_counts", {})),
+                    "active_session_count": int(dataset.get("active_session_count") or 0),
+                    "stale_session_count": int(dataset.get("stale_session_count") or 0),
+                    "failed_promotion_count": int(dataset.get("failed_promotion_count") or 0),
+                    "latest_event_type": "",
+                    "latest_event_at_utc": "",
+                    "latest_save_event_id": "",
+                    "registry_match_count": int(dataset_registry_summary.get("match_count") or 0),
+                    "registry_statuses": _admin_export_join(dataset_registry_summary.get("statuses", [])),
+                    "registry_zarr_uses": _admin_export_join(dataset_registry_summary.get("zarr_uses", [])),
+                    "registry_artifact_kinds": _admin_export_join(dataset_registry_summary.get("artifact_kinds", [])),
+                    "registry_zarr_paths": _admin_export_join(dataset_registry_summary.get("zarr_paths", [])),
+                    "registry_warning_count": len(dataset_warnings),
+                    "registry_warning_codes": _admin_export_join(
+                        sorted(
+                            {
+                                str(warning.get("code") or "")
+                                for warning in dataset_warnings
+                                if isinstance(warning, Mapping) and str(warning.get("code") or "")
+                            }
+                        )
+                    ),
+                    "admin_recording_url": "",
+                    "labeler_queue_url": "",
+                    "labeler_work_url": "",
+                }
+            )
+            continue
+        for recording in recordings:
+            if not isinstance(recording, Mapping):
+                continue
+            latest_event = recording.get("latest_event") if isinstance(recording.get("latest_event"), Mapping) else {}
+            latest_save = (
+                recording.get("latest_save_event")
+                if isinstance(recording.get("latest_save_event"), Mapping)
+                else {}
+            )
+            registry_summary = (
+                recording.get("registry_summary")
+                if isinstance(recording.get("registry_summary"), Mapping)
+                else {}
+            )
+            registry_warnings = (
+                recording.get("registry_warnings")
+                if isinstance(recording.get("registry_warnings"), list)
+                else []
+            )
+            rows.append(
+                {
+                    "dataset_id": str(dataset.get("dataset_id") or ""),
+                    "dataset_label": str(dataset.get("dataset_label") or ""),
+                    "recording_id": str(recording.get("recording_id") or ""),
+                    "assignee_user": str(recording.get("assignee_user") or ""),
+                    "assignment_status": str(recording.get("assignment_status") or ""),
+                    "task_count": int(recording.get("task_count") or 0),
+                    "open_task_count": int(recording.get("open_task_count") or 0),
+                    "complete_task_count": int(recording.get("complete_task_count") or 0),
+                    "non_startable_task_count": int(recording.get("non_startable_task_count") or 0),
+                    "progress_percent": float(recording.get("progress_percent") or 0.0),
+                    "blocked": bool(recording.get("blocked")),
+                    "blocked_reason": str(recording.get("blocked_reason") or ""),
+                    "workflow_counts": _admin_export_join(recording.get("workflow_counts", {})),
+                    "state_counts": _admin_export_join(recording.get("state_counts", {})),
+                    "active_session_count": int(recording.get("active_session_count") or 0),
+                    "stale_session_count": int(recording.get("stale_session_count") or 0),
+                    "failed_promotion_count": int(recording.get("failed_promotion_count") or 0),
+                    "latest_event_type": str(latest_event.get("event_type") or ""),
+                    "latest_event_at_utc": str(latest_event.get("created_at_utc") or ""),
+                    "latest_save_event_id": str(latest_save.get("event_id") or ""),
+                    "registry_match_count": int(registry_summary.get("match_count") or 0),
+                    "registry_statuses": _admin_export_join(registry_summary.get("statuses", [])),
+                    "registry_zarr_uses": _admin_export_join(registry_summary.get("zarr_uses", [])),
+                    "registry_artifact_kinds": _admin_export_join(registry_summary.get("artifact_kinds", [])),
+                    "registry_zarr_paths": _admin_export_join(registry_summary.get("zarr_paths", [])),
+                    "registry_warning_count": len(registry_warnings),
+                    "registry_warning_codes": _admin_export_join(
+                        sorted(
+                            {
+                                str(warning.get("code") or "")
+                                for warning in registry_warnings
+                                if isinstance(warning, Mapping) and str(warning.get("code") or "")
+                            }
+                        )
+                    ),
+                    "admin_recording_url": str(recording.get("admin_recording_url") or ""),
+                    "labeler_queue_url": str(recording.get("expected_user_personal_dataset_queue_url") or ""),
+                    "labeler_work_url": str(recording.get("expected_user_personal_work_url") or ""),
+                }
+            )
+    return rows
+
+
+def _admin_dataset_export_csv(rows: Sequence[Mapping[str, object]]) -> str:
+    fieldnames = [
+        "dataset_id",
+        "dataset_label",
+        "recording_id",
+        "assignee_user",
+        "assignment_status",
+        "task_count",
+        "open_task_count",
+        "complete_task_count",
+        "non_startable_task_count",
+        "progress_percent",
+        "blocked",
+        "blocked_reason",
+        "workflow_counts",
+        "state_counts",
+        "active_session_count",
+        "stale_session_count",
+        "failed_promotion_count",
+        "latest_event_type",
+        "latest_event_at_utc",
+        "latest_save_event_id",
+        "registry_match_count",
+        "registry_statuses",
+        "registry_zarr_uses",
+        "registry_artifact_kinds",
+        "registry_zarr_paths",
+        "registry_warning_count",
+        "registry_warning_codes",
+        "admin_recording_url",
+        "labeler_queue_url",
+        "labeler_work_url",
+    ]
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({field: row.get(field, "") for field in fieldnames})
+    return buffer.getvalue()
+
+
+def _admin_datasets_payload(
+    store: LabelingStore,
+    *,
+    config: ServerConfig,
+    dataset_id: str | None = None,
+    recording_id: str | None = None,
+    assignee_user: str | None = None,
+    status: str | None = None,
+    warnings_only: bool = False,
+) -> dict[str, object]:
+    dataset_filter = str(dataset_id or "").strip()
+    recording_filter = str(recording_id or "").strip()
+    user_filter = str(assignee_user or "").strip()
+    status_filter = str(status or "").strip().lower()
+    assignments = store.list_assignments(status=None)
+    tasks = store.list_tasks(include_completed=True)
+    active_sessions = store.list_sessions(include_closed=False, limit=10000)
+    recent_events = store.list_events(limit=5000)
+    assignments_by_recording = {
+        str(row.get("recording_id") or ""): row
+        for row in assignments
+        if str(row.get("recording_id") or "")
+    }
+    sessions_by_recording: dict[str, list[Mapping[str, object]]] = {}
+    stale_sessions_by_recording: dict[str, int] = {}
+    for session in active_sessions:
+        recording_id = str(session.get("recording_id") or "")
+        if recording_id:
+            sessions_by_recording.setdefault(recording_id, []).append(session)
+            if _session_is_expired(session):
+                stale_sessions_by_recording[recording_id] = stale_sessions_by_recording.get(recording_id, 0) + 1
+
+    latest_event_by_recording: dict[str, Mapping[str, object]] = {}
+    latest_save_by_recording: dict[str, Mapping[str, object]] = {}
+    failed_promotion_counts: dict[str, int] = {}
+    for event in recent_events:
+        recording_id = str(event.get("recording_id") or "")
+        if not recording_id:
+            continue
+        created = str(event.get("created_at_utc") or "")
+        current_latest = latest_event_by_recording.get(recording_id)
+        if current_latest is None or created >= str(current_latest.get("created_at_utc") or ""):
+            latest_event_by_recording[recording_id] = event
+        event_type = str(event.get("event_type") or "")
+        if event_type.startswith("save_") or event_type in {"set_review_status", "complete_task"}:
+            current_save = latest_save_by_recording.get(recording_id)
+            if current_save is None or created >= str(current_save.get("created_at_utc") or ""):
+                latest_save_by_recording[recording_id] = event
+        if event_type == "promotion_failed":
+            failed_promotion_counts[recording_id] = failed_promotion_counts.get(recording_id, 0) + 1
+
+    dataset_rows: dict[str, dict[str, object]] = {}
+    recording_rows_by_dataset: dict[str, dict[str, dict[str, object]]] = {}
+
+    def dataset_row(dataset_key: str, dataset_id: str, zarr_use: str) -> dict[str, object]:
+        row = dataset_rows.get(dataset_key)
+        if row is None:
+            row = {
+                "dataset_key": dataset_key,
+                "dataset_id": dataset_id,
+                "dataset_label": dataset_id or "Assigned recordings without generated task dataset",
+                "zarr_uses": sorted({zarr_use} if zarr_use else set()),
+                "recording_count": 0,
+                "assignees": [],
+                "task_count": 0,
+                "open_task_count": 0,
+                "complete_task_count": 0,
+                "non_startable_task_count": 0,
+                "blocked_recording_count": 0,
+                "active_session_count": 0,
+                "stale_session_count": 0,
+                "failed_promotion_count": 0,
+                "workflow_counts": {},
+                "state_counts": {},
+                "recordings": [],
+            }
+            dataset_rows[dataset_key] = row
+            recording_rows_by_dataset[dataset_key] = {}
+        elif zarr_use:
+            zarr_uses = set(str(item) for item in row.get("zarr_uses", []) if str(item))
+            zarr_uses.add(zarr_use)
+            row["zarr_uses"] = sorted(zarr_uses)
+        return row
+
+    def recording_row(
+        dataset_key: str,
+        *,
+        dataset_id: str,
+        zarr_use: str,
+        recording_id: str,
+    ) -> dict[str, object]:
+        per_dataset = recording_rows_by_dataset.setdefault(dataset_key, {})
+        row = per_dataset.get(recording_id)
+        if row is None:
+            assignment = assignments_by_recording.get(recording_id, {})
+            assignee_user = str(assignment.get("assignee_user") or "")
+            assignment_status = str(assignment.get("status") or "")
+            row = {
+                "recording_id": recording_id,
+                "dataset_id": dataset_id,
+                "zarr_uses": sorted({zarr_use} if zarr_use else set()),
+                "assignee_user": assignee_user,
+                "assignment_status": assignment_status,
+                "assignment_notes": str(assignment.get("notes") or ""),
+                "assigned_by": str(assignment.get("assigned_by") or ""),
+                "assigned_at_utc": str(assignment.get("assigned_at_utc") or ""),
+                "task_count": 0,
+                "open_task_count": 0,
+                "complete_task_count": 0,
+                "non_startable_task_count": 0,
+                "workflow_counts": {},
+                "state_counts": {},
+                "active_session_count": len(sessions_by_recording.get(recording_id, [])),
+                "stale_session_count": int(stale_sessions_by_recording.get(recording_id, 0)),
+                "failed_promotion_count": int(failed_promotion_counts.get(recording_id, 0)),
+                "latest_event": dict(latest_event_by_recording.get(recording_id, {})),
+                "latest_save_event": dict(latest_save_by_recording.get(recording_id, {})),
+                "tasks": [],
+                "admin_recording_url": f"/admin/recordings/{quote(recording_id, safe='')}",
+                "expected_user_personal_dataset_queue_url": (
+                    _dashboard_url_for_expected_user(PERSONAL_DATASET_QUEUE_PATH, assignee_user)
+                    if assignee_user
+                    else ""
+                ),
+                "expected_user_personal_work_url": (
+                    _dashboard_url_for_expected_user(PERSONAL_WORK_PATH, assignee_user)
+                    if assignee_user
+                    else ""
+                ),
+            }
+            per_dataset[recording_id] = row
+            dataset = dataset_rows[dataset_key]
+            recordings = dataset["recordings"]
+            assert isinstance(recordings, list)
+            recordings.append(row)
+        elif zarr_use:
+            zarr_uses = set(str(item) for item in row.get("zarr_uses", []) if str(item))
+            zarr_uses.add(zarr_use)
+            row["zarr_uses"] = sorted(zarr_uses)
+        return row
+
+    for task in tasks:
+        recording_id = str(task.get("recording_id") or "")
+        dataset_id = str(task.get("dataset_id") or "")
+        zarr_use = str(task.get("zarr_use") or "")
+        assignment = assignments_by_recording.get(recording_id, {})
+        task_assignee_user = str(task.get("assignee_user") or assignment.get("assignee_user") or "")
+        if dataset_filter and dataset_id != dataset_filter:
+            continue
+        if recording_filter and recording_id != recording_filter:
+            continue
+        if user_filter and task_assignee_user != user_filter:
+            continue
+        dataset_key = dataset_id or f"recording:{recording_id or 'unscoped'}"
+        dataset = dataset_row(dataset_key, dataset_id, zarr_use)
+        recording = recording_row(
+            dataset_key,
+            dataset_id=dataset_id,
+            zarr_use=zarr_use,
+            recording_id=recording_id,
+        )
+        compact_task = _admin_compact_task(task)
+        task_list = recording["tasks"]
+        assert isinstance(task_list, list)
+        task_list.append(compact_task)
+        task_state = str(task.get("state") or "")
+        task_startable = task_state in LABELER_START_TASK_STATES
+        for target in (dataset, recording):
+            target["task_count"] = int(target.get("task_count") or 0) + 1
+            state_counts = target["state_counts"]
+            assert isinstance(state_counts, dict)
+            state_counts[task_state or "unknown"] = int(state_counts.get(task_state or "unknown", 0)) + 1
+            workflow_counts = target["workflow_counts"]
+            assert isinstance(workflow_counts, dict)
+            workflow = str(task.get("workflow_kind") or "unknown")
+            workflow_counts[workflow] = int(workflow_counts.get(workflow, 0)) + 1
+            if task_state == "complete":
+                target["complete_task_count"] = int(target.get("complete_task_count") or 0) + 1
+            elif task_startable:
+                target["open_task_count"] = int(target.get("open_task_count") or 0) + 1
+            else:
+                target["non_startable_task_count"] = int(target.get("non_startable_task_count") or 0) + 1
+
+    no_task_dataset_key = "__assigned_recordings_without_tasks__"
+    for assignment in assignments:
+        recording_id = str(assignment.get("recording_id") or "")
+        if not recording_id:
+            continue
+        if dataset_filter:
+            continue
+        if recording_filter and recording_id != recording_filter:
+            continue
+        if user_filter and str(assignment.get("assignee_user") or "") != user_filter:
+            continue
+        if any(
+            recording_id in per_dataset
+            for per_dataset in recording_rows_by_dataset.values()
+        ):
+            continue
+        dataset_row(no_task_dataset_key, "", "")
+        recording_row(
+            no_task_dataset_key,
+            dataset_id="",
+            zarr_use="",
+            recording_id=recording_id,
+        )
+
+    dataset_list = list(dataset_rows.values())
+    for dataset in dataset_list:
+        recordings = dataset.get("recordings") if isinstance(dataset.get("recordings"), list) else []
+        assignees = sorted(
+            {
+                str(recording.get("assignee_user") or "")
+                for recording in recordings
+                if isinstance(recording, Mapping) and str(recording.get("assignee_user") or "")
+            }
+        )
+        dataset["assignees"] = assignees
+        dataset["recording_count"] = len(recordings)
+        dataset["active_session_count"] = sum(int(recording.get("active_session_count") or 0) for recording in recordings if isinstance(recording, Mapping))
+        dataset["stale_session_count"] = sum(int(recording.get("stale_session_count") or 0) for recording in recordings if isinstance(recording, Mapping))
+        dataset["failed_promotion_count"] = sum(int(recording.get("failed_promotion_count") or 0) for recording in recordings if isinstance(recording, Mapping))
+        blocked = 0
+        for recording in recordings:
+            if not isinstance(recording, dict):
+                continue
+            total = int(recording.get("task_count") or 0)
+            complete = int(recording.get("complete_task_count") or 0)
+            open_tasks = int(recording.get("open_task_count") or 0)
+            non_startable = int(recording.get("non_startable_task_count") or 0)
+            recording["progress_fraction"] = (complete / total) if total else 0.0
+            recording["progress_percent"] = round(100.0 * float(recording["progress_fraction"]), 1)
+            recording["has_waiting_work"] = bool(open_tasks > 0)
+            recording["blocked"] = bool(total == 0 or (open_tasks == 0 and complete < total and non_startable > 0))
+            recording["blocked_reason"] = (
+                "tasks_not_generated"
+                if total == 0
+                else "no_startable_tasks"
+                if bool(recording["blocked"])
+                else ""
+            )
+            if bool(recording["blocked"]):
+                blocked += 1
+            task_rows = recording.get("tasks") if isinstance(recording.get("tasks"), list) else []
+            task_rows.sort(
+                key=lambda task: (
+                    str(task.get("workflow_kind") or "") if isinstance(task, Mapping) else "",
+                    str(task.get("state") or "") if isinstance(task, Mapping) else "",
+                    str(task.get("title") or "") if isinstance(task, Mapping) else "",
+                )
+            )
+        total_tasks = int(dataset.get("task_count") or 0)
+        complete_tasks = int(dataset.get("complete_task_count") or 0)
+        dataset["progress_fraction"] = (complete_tasks / total_tasks) if total_tasks else 0.0
+        dataset["progress_percent"] = round(100.0 * float(dataset["progress_fraction"]), 1)
+        dataset["blocked_recording_count"] = blocked
+        dataset["has_waiting_work"] = int(dataset.get("open_task_count") or 0) > 0
+
+    dataset_list.sort(
+        key=lambda row: (
+            0 if bool(row.get("has_waiting_work")) else 1,
+            str(row.get("dataset_label") or ""),
+        )
+    )
+    if status_filter:
+        def _matches_admin_dataset_status(row: Mapping[str, object]) -> bool:
+            task_count = int(row.get("task_count") or 0)
+            open_task_count = int(row.get("open_task_count") or 0)
+            complete_task_count = int(row.get("complete_task_count") or 0)
+            blocked_recording_count = int(row.get("blocked_recording_count") or 0)
+            if status_filter == "waiting":
+                return open_task_count > 0
+            if status_filter == "blocked":
+                return blocked_recording_count > 0
+            if status_filter == "complete":
+                return task_count > 0 and complete_task_count >= task_count
+            return True
+
+        dataset_list = [row for row in dataset_list if _matches_admin_dataset_status(row)]
+    registry_lookup = _admin_registry_lookup(
+        registry_path=_admin_registry_path_from_env(),
+        dataset_ids=[
+            str(row.get("dataset_id") or "")
+            for row in dataset_list
+            if str(row.get("dataset_id") or "")
+        ],
+        recording_ids=[
+            str(recording.get("recording_id") or "")
+            for dataset in dataset_list
+            for recording in (
+                dataset.get("recordings")
+                if isinstance(dataset.get("recordings"), list)
+                else []
+            )
+            if isinstance(recording, Mapping) and str(recording.get("recording_id") or "")
+        ],
+    )
+    rows_by_dataset_id = (
+        registry_lookup.get("rows_by_dataset_id")
+        if isinstance(registry_lookup.get("rows_by_dataset_id"), Mapping)
+        else {}
+    )
+    rows_by_recording_id = (
+        registry_lookup.get("rows_by_recording_id")
+        if isinstance(registry_lookup.get("rows_by_recording_id"), Mapping)
+        else {}
+    )
+    for dataset in dataset_list:
+        dataset_id = str(dataset.get("dataset_id") or "")
+        dataset_registry_rows: list[Mapping[str, object]] = []
+        if dataset_id:
+            rows = rows_by_dataset_id.get(dataset_id, []) if isinstance(rows_by_dataset_id, Mapping) else []
+            if isinstance(rows, list):
+                dataset_registry_rows.extend(row for row in rows if isinstance(row, Mapping))
+        recordings = dataset.get("recordings") if isinstance(dataset.get("recordings"), list) else []
+        for recording in recordings:
+            if not isinstance(recording, dict):
+                continue
+            recording_id = str(recording.get("recording_id") or "")
+            recording_registry_rows = []
+            rows = rows_by_recording_id.get(recording_id, []) if isinstance(rows_by_recording_id, Mapping) else []
+            if isinstance(rows, list):
+                for row in rows:
+                    if not isinstance(row, Mapping):
+                        continue
+                    row_dataset_id = str(row.get("dataset_id") or "")
+                    if dataset_id and row_dataset_id and row_dataset_id != dataset_id:
+                        continue
+                    recording_registry_rows.append(row)
+                    dataset_registry_rows.append(row)
+            deduped_recording_rows = {
+                (
+                    str(row.get("table") or ""),
+                    str(row.get("dataset_id") or ""),
+                    str(row.get("recording_id") or ""),
+                    str(row.get("zarr_path") or ""),
+                    str(row.get("zarr_use") or ""),
+                    str(row.get("status") or ""),
+                ): dict(row)
+                for row in recording_registry_rows
+            }
+            compact_recording_rows = list(deduped_recording_rows.values())
+            recording["registry_rows"] = compact_recording_rows[:25]
+            recording["registry_summary"] = _admin_registry_summary(compact_recording_rows)
+            recording["registry_warnings"] = _admin_registry_warnings_for_recording(recording)
+        deduped_dataset_rows = {
+            (
+                str(row.get("table") or ""),
+                str(row.get("dataset_id") or ""),
+                str(row.get("recording_id") or ""),
+                str(row.get("zarr_path") or ""),
+                str(row.get("zarr_use") or ""),
+                str(row.get("status") or ""),
+            ): dict(row)
+            for row in dataset_registry_rows
+        }
+        compact_dataset_rows = list(deduped_dataset_rows.values())
+        dataset["registry_rows"] = compact_dataset_rows[:50]
+        dataset["registry_summary"] = _admin_registry_summary(compact_dataset_rows)
+        dataset_warnings = []
+        for recording in recordings:
+            if not isinstance(recording, Mapping):
+                continue
+            warning_rows = (
+                recording.get("registry_warnings")
+                if isinstance(recording.get("registry_warnings"), list)
+                else []
+            )
+            dataset_warnings.extend(
+                dict(warning)
+                for warning in warning_rows
+                if isinstance(warning, Mapping)
+            )
+        dataset["registry_warnings"] = dataset_warnings
+        dataset["registry_warning_count"] = len(dataset_warnings)
+    if warnings_only:
+        dataset_list = [
+            row
+            for row in dataset_list
+            if int(row.get("registry_warning_count") or 0) > 0
+        ]
+    open_task_count = sum(int(row.get("open_task_count") or 0) for row in dataset_list)
+    complete_task_count = sum(int(row.get("complete_task_count") or 0) for row in dataset_list)
+    task_count = sum(int(row.get("task_count") or 0) for row in dataset_list)
+    blocked_recording_count = sum(int(row.get("blocked_recording_count") or 0) for row in dataset_list)
+    top_level_warnings: list[dict[str, object]] = []
+    if bool(registry_lookup.get("enabled")) and not bool(registry_lookup.get("available")):
+        top_level_warnings.append(
+            _admin_registry_warning(
+                "registry_unavailable",
+                details=str(registry_lookup.get("error") or "Registry could not be queried."),
+                operator_action=(
+                    f"Check {REGISTRY_PATH_ENV_VAR} and server filesystem access, or restart without registry enrichment."
+                ),
+                extra={"registry_path": str(registry_lookup.get("path") or "")},
+            )
+        )
+    top_level_warnings.extend(
+        dict(warning)
+        for dataset in dataset_list
+        for warning in (
+            dataset.get("registry_warnings")
+            if isinstance(dataset.get("registry_warnings"), list)
+            else []
+        )
+        if isinstance(warning, Mapping)
+    )
+    return {
+        "ok": True,
+        "schema": "palette.web_labeling_admin_datasets.v1",
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "store_path": str(config.store_path),
+        "registry": {
+            "enabled": bool(registry_lookup.get("enabled")),
+            "available": bool(registry_lookup.get("available")),
+            "path": str(registry_lookup.get("path") or ""),
+            "error": str(registry_lookup.get("error") or ""),
+            "matched_row_count": int(registry_lookup.get("matched_row_count") or 0),
+            "tables_scanned": list(registry_lookup.get("tables_scanned") or []),
+        },
+        "warnings": top_level_warnings,
+        "warning_count": len(top_level_warnings),
+        "filters": {
+            "dataset_id": dataset_filter,
+            "recording_id": recording_filter,
+            "assignee_user": user_filter,
+            "status": status_filter,
+            "warnings_only": bool(warnings_only),
+        },
+        "counts": {
+            "dataset_count": len(dataset_list),
+            "recording_count": sum(int(row.get("recording_count") or 0) for row in dataset_list),
+            "assignment_count": len(assignments),
+            "active_assignment_count": sum(1 for row in assignments if str(row.get("status") or "") == "active"),
+            "task_count": task_count,
+            "open_task_count": open_task_count,
+            "complete_task_count": complete_task_count,
+            "non_startable_task_count": sum(int(row.get("non_startable_task_count") or 0) for row in dataset_list),
+            "blocked_recording_count": blocked_recording_count,
+            "active_session_count": len(active_sessions),
+            "stale_session_count": sum(1 for session in active_sessions if _session_is_expired(session)),
+            "failed_promotion_count": sum(failed_promotion_counts.values()),
+            "progress_percent": round(100.0 * (complete_task_count / task_count), 1) if task_count else 0.0,
+        },
+        "datasets": dataset_list,
+    }
+
+
+def _admin_datasets_html() -> bytes:
+    return b"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Palette labeling datasets admin</title>
+  <style>
+    :root {
+      --ink: #17201a;
+      --muted: #5f6d62;
+      --line: #d8ded5;
+      --card: #fffdf5;
+      --accent: #0f6f5c;
+      --bad: #9a3027;
+      --warn: #a75f00;
+      --shadow: rgba(23, 32, 26, 0.12);
+    }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 88% 12%, rgba(15, 111, 92, 0.16), transparent 28rem),
+        linear-gradient(135deg, #f8f0dc, #eef6ef 62%, #fffaf0);
+      color: var(--ink);
+      font-family: "Trebuchet MS", Verdana, sans-serif;
+    }
+    main {
+      max-width: 1320px;
+      margin: 0 auto;
+      padding: 34px 18px 64px;
+    }
+    h1 {
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(2.2rem, 5vw, 4.6rem);
+      letter-spacing: -0.055em;
+      line-height: 0.92;
+      margin: 8px 0 16px;
+    }
+    a {
+      color: var(--accent);
+      font-weight: 800;
+      text-decoration: none;
+    }
+    .muted {
+      color: var(--muted);
+    }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 12px;
+      margin: 22px 0;
+    }
+    .stat, .dataset {
+      background: rgba(255, 253, 245, 0.92);
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      box-shadow: 0 14px 36px var(--shadow);
+      padding: 16px;
+    }
+    .stat b {
+      display: block;
+      font-size: 1.7rem;
+    }
+    .toolbar {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 10px;
+      align-items: end;
+      margin: 18px 0;
+    }
+    input, select {
+      box-sizing: border-box;
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 0.7rem 0.9rem;
+      background: #fffdf8;
+      color: var(--ink);
+      font: inherit;
+    }
+    button {
+      border: 0;
+      border-radius: 999px;
+      background: var(--accent);
+      color: white;
+      padding: 0.75rem 1rem;
+      cursor: pointer;
+      font-weight: 800;
+    }
+    .dataset {
+      margin: 14px 0;
+    }
+    .dataset h2 {
+      margin: 0 0 8px;
+      overflow-wrap: anywhere;
+    }
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 10px 0;
+    }
+    .chip {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fffef9;
+      padding: 5px 9px;
+      font-size: 0.88rem;
+    }
+    .progress {
+      height: 12px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #e3e8df;
+      margin: 10px 0;
+    }
+    .progress span {
+      display: block;
+      height: 100%;
+      background: linear-gradient(90deg, #0f6f5c, #8eb35e);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+      font-size: 0.9rem;
+    }
+    th, td {
+      border-top: 1px solid var(--line);
+      padding: 8px 6px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    details {
+      margin-top: 5px;
+    }
+    .bad {
+      color: var(--bad);
+      font-weight: 800;
+    }
+    .warn {
+      color: var(--warn);
+      font-weight: 800;
+    }
+    @media (max-width: 900px) {
+      .summary, .toolbar {
+        grid-template-columns: 1fr;
+      }
+      table, thead, tbody, th, td, tr {
+        display: block;
+      }
+      th {
+        display: none;
+      }
+      td {
+        border-top: 0;
+        padding: 5px 0;
+      }
+      tr {
+        border-top: 1px solid var(--line);
+        padding: 10px 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <a href="/admin" class="muted">Admin home</a> &middot; <a href="/work" class="muted">Work dashboard</a>
+    <h1>Assigned dataset progress</h1>
+    <p class="muted">Operator view over the labeling store: assignments, generated browser tasks, active sessions, latest events, and progress. The SQLite labeling store remains the source of truth for this page.</p>
+    <section class="summary">
+      <div class="stat"><b id="dataset-count">-</b><span>datasets</span></div>
+      <div class="stat"><b id="recording-count">-</b><span>recordings</span></div>
+      <div class="stat"><b id="open-task-count">-</b><span>open tasks</span></div>
+      <div class="stat"><b id="complete-task-count">-</b><span>complete tasks</span></div>
+      <div class="stat"><b id="blocked-recording-count">-</b><span>blocked recordings</span></div>
+      <div class="stat"><b id="active-session-count">-</b><span>active sessions</span></div>
+    </section>
+    <section class="toolbar">
+      <label>Search datasets, recordings, users, workflows<br><input id="search" type="search" placeholder="delahantyj RedScare keypoints"></label>
+      <label>Status<br><select id="status-filter"><option value="">All</option><option value="waiting">Waiting work</option><option value="blocked">Blocked</option><option value="complete">Complete</option></select></label>
+      <a class="chip" id="warnings-only-link" href="/admin/datasets?warnings=1">Warnings only</a>
+      <a class="chip" id="export-csv-link" href="/api/admin/datasets/export?format=csv">CSV export current server filter</a>
+      <a class="chip" id="export-json-link" href="/api/admin/datasets/export?format=json">JSON export current server filter</a>
+      <button type="button" id="refresh">Refresh</button>
+    </section>
+    <section id="registry-banner" class="dataset muted"></section>
+    <section id="scope-banner" class="dataset muted"></section>
+    <section id="content" class="muted">Loading admin dataset progress...</section>
+  </main>
+  <script>
+    let payload = null;
+    const initialAdminQuery = new URLSearchParams(window.location.search);
+    function adminApiQuery() {
+      const params = new URLSearchParams();
+      for (const key of ["dataset_id", "recording_id", "user", "assignee_user", "status", "warnings"]) {
+        const value = initialAdminQuery.get(key) || "";
+        if (value) params.set(key, value);
+      }
+      return params;
+    }
+    function focusUrl(params) {
+      const url = new URL("/admin/datasets", window.location.href);
+      for (const [key, value] of Object.entries(params || {})) {
+        if (value != null && String(value)) url.searchParams.set(key, String(value));
+      }
+      return url.pathname + url.search;
+    }
+    function adminExportUrl(format) {
+      const url = new URL("/api/admin/datasets/export", window.location.href);
+      url.searchParams.set("format", format);
+      for (const [key, value] of adminApiQuery().entries()) {
+        url.searchParams.set(key, value);
+      }
+      return url.pathname + url.search;
+    }
+    function warningsOnlyUrl() {
+      const url = new URL("/admin/datasets", window.location.href);
+      for (const [key, value] of adminApiQuery().entries()) {
+        if (key !== "warnings") url.searchParams.set(key, value);
+      }
+      url.searchParams.set("warnings", "1");
+      return url.pathname + url.search;
+    }
+    function escapeText(value) {
+      return String(value == null ? "" : value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+    function countText(counts) {
+      return Object.entries(counts || {}).map(([key, value]) => `${key}:${value}`).join(", ") || "none";
+    }
+    function rowSearchText(dataset) {
+      return [
+        dataset.dataset_id,
+        dataset.dataset_label,
+        (dataset.assignees || []).join(" "),
+        JSON.stringify(dataset.workflow_counts || {}),
+        ...(dataset.recordings || []).flatMap((recording) => [
+          recording.recording_id,
+          recording.assignee_user,
+          recording.assignment_status,
+          recording.assignment_notes,
+          JSON.stringify(recording.workflow_counts || {}),
+          ...(recording.tasks || []).map((task) => `${task.title} ${task.workflow_kind} ${task.run_name} ${task.component_name}`)
+        ])
+      ].filter(Boolean).join(" ").toLowerCase();
+    }
+    function matchesStatus(dataset, status) {
+      if (!status) return true;
+      if (status === "waiting") return Number(dataset.open_task_count || 0) > 0;
+      if (status === "blocked") return Number(dataset.blocked_recording_count || 0) > 0;
+      if (status === "complete") return Number(dataset.task_count || 0) > 0 && Number(dataset.complete_task_count || 0) >= Number(dataset.task_count || 0);
+      return true;
+    }
+    function filteredDatasets() {
+      const search = document.getElementById("search").value.trim().toLowerCase();
+      const status = "";
+      return (payload.datasets || []).filter((dataset) => {
+        if (!matchesStatus(dataset, status)) return false;
+        if (search && !rowSearchText(dataset).includes(search)) return false;
+        return true;
+      });
+    }
+    function renderScopeBanner() {
+      const banner = document.getElementById("scope-banner");
+      const scope = Array.from(adminApiQuery().entries()).map(([key, value]) => `${key}=${value}`);
+      if (!scope.length) {
+        banner.style.display = "none";
+        banner.innerHTML = "";
+        return;
+      }
+      banner.style.display = "block";
+      banner.innerHTML = `<b>Focused admin view</b>: ${escapeText(scope.join(" | "))} &middot; <a href="/admin/datasets">clear scope</a>`;
+    }
+    function renderRegistryBanner() {
+      const banner = document.getElementById("registry-banner");
+      const registry = (payload && payload.registry) || {};
+      if (!registry.enabled) {
+        banner.style.display = "block";
+        banner.innerHTML = `<b>Registry join</b>: disabled. Set <code>PALETTE_REGISTRY_PATH</code> before starting the server to enrich this page with registry rows.`;
+        return;
+      }
+      if (!registry.available) {
+        banner.style.display = "block";
+        banner.innerHTML = `<b>Registry join</b>: unavailable at <code>${escapeText(registry.path || "")}</code>. ${escapeText(registry.error || "")}`;
+        return;
+      }
+      banner.style.display = "block";
+      banner.innerHTML = `<b>Registry join</b>: ${escapeText(registry.matched_row_count || 0)} matched rows from <code>${escapeText(registry.path || "")}</code>; tables scanned ${escapeText((registry.tables_scanned || []).join(", ") || "none")}; warnings ${escapeText((payload && payload.warning_count) || 0)}.`;
+    }
+    function renderTaskDetails(tasks) {
+      if (!tasks || !tasks.length) return `<span class="muted">No generated tasks.</span>`;
+      return `<details><summary>${tasks.length} tasks</summary>` + tasks.map((task) =>
+        `<div class="chip">${escapeText(task.workflow_kind || "task")} | ${escapeText(task.state || "")} | <a href="${escapeText(task.admin_task_url || "#")}">${escapeText(task.title || task.task_id || "")}</a>${task.component_name ? " | " + escapeText(task.component_name) : ""}${task.run_name ? " | " + escapeText(task.run_name) : ""}</div>`
+      ).join("") + `</details>`;
+    }
+    function renderRegistryDetails(summary, rows) {
+      const registrySummary = summary || {};
+      const registryRows = rows || [];
+      if (!Number(registrySummary.match_count || 0)) {
+        return `<span class="muted">registry: no match</span>`;
+      }
+      const summaryText = [
+        `${registrySummary.match_count || 0} registry rows`,
+        (registrySummary.statuses || []).length ? `status ${registrySummary.statuses.join(", ")}` : "",
+        (registrySummary.zarr_uses || []).length ? `zarr_use ${registrySummary.zarr_uses.join(", ")}` : "",
+        (registrySummary.artifact_kinds || []).length ? `artifact ${registrySummary.artifact_kinds.join(", ")}` : ""
+      ].filter(Boolean).join(" | ");
+      const rowHtml = registryRows.map((row) =>
+        `<div class="chip">${escapeText(row.table || "registry")} | ${escapeText(row.status || "")} | ${escapeText(row.zarr_use || "")} | ${escapeText(row.artifact_kind || "")}<br><span class="muted">${escapeText(row.zarr_path || "")}</span></div>`
+      ).join("");
+      return `<details><summary>${escapeText(summaryText)}</summary>${rowHtml || `<span class="muted">No registry rows included.</span>`}</details>`;
+    }
+    function renderRegistryWarnings(warnings) {
+      const warningRows = warnings || [];
+      if (!warningRows.length) return "";
+      const rowHtml = warningRows.map((warning) =>
+        `<div class="chip warn">${escapeText(warning.code || "registry_warning")}${warning.task_id ? " | task " + escapeText(warning.task_id) : ""}<br><span class="muted">${escapeText(warning.details || "")}</span></div>`
+      ).join("");
+      return `<details open><summary class="warn">${warningRows.length} registry warning${warningRows.length === 1 ? "" : "s"}</summary>${rowHtml}</details>`;
+    }
+    async function copyInvite(button) {
+      const user = button && button.dataset ? String(button.dataset.user || "") : "";
+      if (!user) return;
+      const originalText = button.textContent;
+      button.disabled = true;
+      button.textContent = "Signing...";
+      try {
+        const response = await fetch("/api/admin/invites/sign", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            user,
+            base_url: window.location.origin
+          })
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.details || payload.error || "invite signing failed");
+        }
+        const inviteUrl = payload.url || new URL(payload.path || "/", window.location.href).href;
+        await navigator.clipboard.writeText(inviteUrl);
+        button.textContent = "Copied invite";
+        window.setTimeout(() => { button.textContent = originalText; }, 1800);
+      } catch (error) {
+        button.textContent = "Invite failed";
+        alert(error.message || String(error));
+        window.setTimeout(() => { button.textContent = originalText; }, 2200);
+      } finally {
+        button.disabled = false;
+      }
+    }
+    function renderRecording(recording) {
+      const latest = recording.latest_event || {};
+      const latestSave = recording.latest_save_event || {};
+      const blocked = recording.blocked ? `<span class="bad">${escapeText(recording.blocked_reason || "blocked")}</span>` : "";
+      const sessionText = Number(recording.active_session_count || 0)
+        ? `${recording.active_session_count} active${Number(recording.stale_session_count || 0) ? ", " + recording.stale_session_count + " stale" : ""}`
+        : "none";
+      return `<tr>
+        <td><a href="${escapeText(recording.admin_recording_url || "#")}">${escapeText(recording.recording_id || "")}</a><br><a class="muted" href="${escapeText(focusUrl({recording_id: recording.recording_id || ""}))}">focus recording</a><br>${blocked}</td>
+        <td>${recording.assignee_user ? `<a href="${escapeText(focusUrl({user: recording.assignee_user}))}">${escapeText(recording.assignee_user)}</a>` : ""}<br><span class="muted">${escapeText(recording.assignment_status || "")}</span></td>
+        <td>${escapeText(recording.progress_percent || 0)}%<br><span class="muted">${escapeText(recording.complete_task_count || 0)}/${escapeText(recording.task_count || 0)} complete, ${escapeText(recording.open_task_count || 0)} open</span></td>
+        <td>${escapeText(countText(recording.workflow_counts))}<br>${renderTaskDetails(recording.tasks || [])}<br>${renderRegistryDetails(recording.registry_summary, recording.registry_rows)}<br>${renderRegistryWarnings(recording.registry_warnings || [])}</td>
+        <td>${escapeText(sessionText)}${Number(recording.failed_promotion_count || 0) ? `<br><span class="warn">${escapeText(recording.failed_promotion_count)} failed promotions</span>` : ""}</td>
+        <td>${escapeText(latest.event_type || "")}<br><span class="muted">${escapeText(latest.created_at_utc || "")}</span>${latestSave.event_id ? `<br><span class="muted">latest save ${escapeText(latestSave.event_id)}</span>` : ""}</td>
+        <td>${recording.expected_user_personal_dataset_queue_url ? `<a href="${escapeText(recording.expected_user_personal_dataset_queue_url)}">queue</a> ` : ""}${recording.expected_user_personal_work_url ? `<a href="${escapeText(recording.expected_user_personal_work_url)}">work</a>` : ""}${recording.assignee_user ? `<br><button type="button" data-user="${escapeText(recording.assignee_user)}" onclick="copyInvite(this)">Copy invite</button>` : ""}</td>
+      </tr>`;
+    }
+    function render() {
+      if (!payload) return;
+      renderRegistryBanner();
+      renderScopeBanner();
+      document.getElementById("export-csv-link").href = adminExportUrl("csv");
+      document.getElementById("export-json-link").href = adminExportUrl("json");
+      document.getElementById("warnings-only-link").href = warningsOnlyUrl();
+      const counts = payload.counts || {};
+      document.getElementById("dataset-count").textContent = counts.dataset_count || 0;
+      document.getElementById("recording-count").textContent = counts.recording_count || 0;
+      document.getElementById("open-task-count").textContent = counts.open_task_count || 0;
+      document.getElementById("complete-task-count").textContent = `${counts.complete_task_count || 0}/${counts.task_count || 0}`;
+      document.getElementById("blocked-recording-count").textContent = counts.blocked_recording_count || 0;
+      document.getElementById("active-session-count").textContent = counts.active_session_count || 0;
+      const rows = filteredDatasets();
+      const content = document.getElementById("content");
+      if (!rows.length) {
+        content.className = "dataset muted";
+        content.textContent = "No datasets match the current filters.";
+        return;
+      }
+      content.className = "";
+      content.innerHTML = rows.map((dataset) => {
+        const width = Math.max(0, Math.min(100, Number(dataset.progress_percent || 0)));
+        const datasetFocus = dataset.dataset_id ? `<a class="chip" href="${escapeText(focusUrl({dataset_id: dataset.dataset_id}))}">focus dataset</a>` : "";
+        return `<article class="dataset">
+          <h2>${escapeText(dataset.dataset_label || dataset.dataset_id || "Unspecified dataset")}</h2>
+          <div class="chips">
+            ${datasetFocus}
+            <span class="chip">${escapeText(dataset.recording_count || 0)} recordings</span>
+            <span class="chip">${escapeText(dataset.open_task_count || 0)} open</span>
+            <span class="chip">${escapeText(dataset.complete_task_count || 0)}/${escapeText(dataset.task_count || 0)} complete</span>
+            <span class="chip">${escapeText(dataset.blocked_recording_count || 0)} blocked</span>
+            <span class="chip">assignees ${escapeText((dataset.assignees || []).join(", ") || "none")}</span>
+            <span class="chip">workflows ${escapeText(countText(dataset.workflow_counts))}</span>
+            <span class="chip">zarr ${escapeText((dataset.zarr_uses || []).join(", ") || "unspecified")}</span>
+          </div>
+          ${renderRegistryDetails(dataset.registry_summary, dataset.registry_rows)}
+          ${renderRegistryWarnings(dataset.registry_warnings || [])}
+          <div class="progress" aria-label="progress"><span style="width: ${width}%"></span></div>
+          <table>
+            <thead><tr><th>Recording</th><th>Assignee</th><th>Progress</th><th>Workflows/tasks</th><th>Sessions/issues</th><th>Latest activity</th><th>Labeler links</th></tr></thead>
+            <tbody>${(dataset.recordings || []).map(renderRecording).join("")}</tbody>
+          </table>
+        </article>`;
+      }).join("");
+    }
+    async function load() {
+      const query = adminApiQuery().toString();
+      const response = await fetch(`/api/admin/datasets${query ? "?" + query : ""}`);
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.details || data.error || "admin datasets load failed");
+      payload = data;
+      render();
+    }
+    document.getElementById("search").addEventListener("input", render);
+    document.getElementById("status-filter").value = initialAdminQuery.get("status") || "";
+    document.getElementById("status-filter").addEventListener("change", () => {
+      const url = new URL(window.location.href);
+      const value = document.getElementById("status-filter").value;
+      if (value) url.searchParams.set("status", value);
+      else url.searchParams.delete("status");
+      window.location.href = url.pathname + url.search;
+    });
+    document.getElementById("refresh").addEventListener("click", load);
+    load().catch((error) => {
+      const content = document.getElementById("content");
+      content.className = "dataset bad";
+      content.textContent = error.message || String(error);
+    });
+  </script>
+</body>
+</html>
+"""
+
+
 def _admin_html() -> bytes:
     return b"""<!doctype html>
 <html lang="en">
@@ -5099,7 +6973,7 @@ def _admin_html() -> bytes:
 </head>
 <body>
   <main>
-    <a href="/" class="muted">Landing page</a> &middot; <a href="/work" class="muted">Back to work list</a>
+    <a href="/" class="muted">Landing page</a> &middot; <a href="/work" class="muted">Back to work list</a> &middot; <a href="/admin/datasets" class="muted">Dataset progress</a> &middot; <a href="/admin/users" class="muted">Labeling users</a>
     <h1>Labeling admin</h1>
     <button type="button" onclick="cleanupStale()">Close stale sessions</button>
     <section class="summary">
@@ -5685,6 +7559,7 @@ def _admin_recording_html(payload: Mapping[str, object]) -> bytes:
         if owner
         else '<span class="muted">unassigned</span>'
     )
+    focused_dataset_progress_url = f"/admin/datasets?recording_id={quote(recording_id, safe='')}"
     landing_url = str(payload.get("expected_user_labeler_landing_url") or "")
     labeling_home_url = str(payload.get("expected_user_labeling_home_url") or "")
     landing_html = (
@@ -5855,6 +7730,7 @@ def _admin_recording_html(payload: Mapping[str, object]) -> bytes:
     <h1>Admin recording: {html.escape(recording_id)}</h1>
     <section class="card">
       <p><b>Owner:</b> {owner_html}</p>
+      <p><b>Focused dataset progress:</b> <a href="{html.escape(focused_dataset_progress_url)}">{html.escape(focused_dataset_progress_url)}</a></p>
       <p><b>Personalized dataset queue:</b> {personal_dataset_queue_html}</p>
       <p><b>Personalized work page:</b> {personal_work_html}</p>
       <p><b>Expected-user landing page:</b> {landing_html}</p>
@@ -6141,6 +8017,9 @@ def _admin_user_payload(store: LabelingStore, *, user: str) -> dict[str, object]
     work["queue_first_entry_contract"] = queue_first_entry_contract
     return {
         "user": user,
+        "labeling_user": store.get_labeling_user(user),
+        "labeling_user_status": _known_labeler_status(store, user),
+        "labeling_user_events": store.list_labeling_user_events(user_id=user, limit=50),
         "dashboard_path": DASHBOARD_PATH,
         "personal_work_page_path": PERSONAL_WORK_PATH,
         "labeler_landing_page_path": "/",
@@ -6173,6 +8052,327 @@ def _admin_user_payload(store: LabelingStore, *, user: str) -> dict[str, object]
         "work": work,
         "dashboard_user": dashboard_row,
     }
+
+
+def _admin_users_payload(store: LabelingStore, *, config: ServerConfig) -> dict[str, object]:
+    users = store.list_labeling_users(status=None)
+    assignments = store.list_assignments(status=None)
+    tasks = store.list_tasks(include_completed=True)
+    assignment_counts: dict[str, dict[str, int]] = {}
+    for assignment in assignments:
+        user = str(assignment.get("assignee_user") or "").strip()
+        if not user:
+            continue
+        counts = assignment_counts.setdefault(user, {"total": 0, "active": 0, "inactive": 0})
+        counts["total"] += 1
+        status = str(assignment.get("status") or "inactive")
+        counts["active" if status == "active" else "inactive"] += 1
+    task_counts: dict[str, dict[str, int]] = {}
+    for task in tasks:
+        user = str(task.get("assignee_user") or "").strip()
+        if not user:
+            continue
+        counts = task_counts.setdefault(user, {"total": 0, "open": 0, "complete": 0})
+        counts["total"] += 1
+        state = str(task.get("state") or "")
+        if state == "complete":
+            counts["complete"] += 1
+        elif state in LABELER_START_TASK_STATES:
+            counts["open"] += 1
+    rows: list[dict[str, object]] = []
+    seen_users: set[str] = set()
+    for user_row in users:
+        user_id = str(user_row.get("user_id") or "").strip()
+        if not user_id:
+            continue
+        seen_users.add(user_id)
+        rows.append(
+            {
+                **user_row,
+                "is_admin": _is_admin_user(user_id, config),
+                "assignment_counts": assignment_counts.get(user_id, {"total": 0, "active": 0, "inactive": 0}),
+                "task_counts": task_counts.get(user_id, {"total": 0, "open": 0, "complete": 0}),
+                "admin_user_url": f"/admin/users/{quote(user_id, safe='')}",
+            }
+        )
+    for user_id in sorted(set(assignment_counts) - seen_users):
+        rows.append(
+            {
+                "user_id": user_id,
+                "display_name": "",
+                "email": "",
+                "role": "",
+                "status": "missing_registry_row",
+                "created_at_utc": "",
+                "updated_at_utc": "",
+                "notes": "Assignment exists but no labeling_users row is present.",
+                "is_admin": _is_admin_user(user_id, config),
+                "assignment_counts": assignment_counts.get(user_id, {"total": 0, "active": 0, "inactive": 0}),
+                "task_counts": task_counts.get(user_id, {"total": 0, "open": 0, "complete": 0}),
+                "admin_user_url": f"/admin/users/{quote(user_id, safe='')}",
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            0 if str(row.get("status") or "") == "active" else 1,
+            str(row.get("role") or ""),
+            str(row.get("user_id") or ""),
+        )
+    )
+    return {
+        "ok": True,
+        "schema": "palette.web_labeling_admin_users.v1",
+        "store_path": str(config.store_path),
+        "user_table": "labeling_users",
+        "event_table": "labeling_user_events",
+        "roles": list(LABELING_USER_ROLES),
+        "statuses": list(LABELING_USER_STATUSES),
+        "configured_admin_users": list(config.admin_users),
+        "count": len(rows),
+        "active_count": sum(1 for row in rows if str(row.get("status") or "") == "active"),
+        "inactive_count": sum(1 for row in rows if str(row.get("status") or "") == "inactive"),
+        "missing_registry_row_count": sum(1 for row in rows if str(row.get("status") or "") == "missing_registry_row"),
+        "users": rows,
+        "recent_user_events": store.list_labeling_user_events(limit=50),
+    }
+
+
+def _admin_users_html(payload: Mapping[str, object]) -> bytes:
+    users = payload.get("users") if isinstance(payload.get("users"), list) else []
+    role_options = "".join(
+        f'<option value="{html.escape(role)}">{html.escape(role)}</option>'
+        for role in LABELING_USER_ROLES
+    )
+    status_options = "".join(
+        f'<option value="{html.escape(status)}">{html.escape(status)}</option>'
+        for status in LABELING_USER_STATUSES
+    )
+    rows_html = ""
+    for row in users:
+        if not isinstance(row, Mapping):
+            continue
+        user_id = str(row.get("user_id") or "")
+        assignment_counts = row.get("assignment_counts") if isinstance(row.get("assignment_counts"), Mapping) else {}
+        task_counts = row.get("task_counts") if isinstance(row.get("task_counts"), Mapping) else {}
+        action = (
+            f'<button type="button" data-user="{html.escape(user_id)}" data-action="deactivate" onclick="setUserStatus(this)">Deactivate</button>'
+            if str(row.get("status") or "") == "active"
+            else f'<button type="button" data-user="{html.escape(user_id)}" data-action="activate" onclick="setUserStatus(this)">Activate</button>'
+            if str(row.get("status") or "") == "inactive"
+            else ""
+        )
+        rows_html += (
+            "<tr>"
+            f'<td><a href="{html.escape(str(row.get("admin_user_url") or ""))}">{html.escape(user_id)}</a></td>'
+            f"<td>{html.escape(str(row.get('display_name') or ''))}</td>"
+            f"<td>{html.escape(str(row.get('email') or ''))}</td>"
+            f"<td>{html.escape(str(row.get('role') or ''))}</td>"
+            f"<td>{html.escape(str(row.get('status') or ''))}</td>"
+            f"<td>{html.escape(str(assignment_counts.get('active') or 0))} active / {html.escape(str(assignment_counts.get('total') or 0))} total</td>"
+            f"<td>{html.escape(str(task_counts.get('open') or 0))} open / {html.escape(str(task_counts.get('complete') or 0))} complete</td>"
+            f"<td>{action}</td>"
+            "</tr>"
+        )
+    if not rows_html:
+        rows_html = '<tr><td colspan="8" class="muted">No labeling users are registered.</td></tr>'
+    body = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin labeling users</title>
+  <style>
+    :root {{
+      --ink: #17201a;
+      --muted: #657065;
+      --line: #d8dfd6;
+      --card: #fffdf5;
+      --accent: #0f6f5c;
+    }}
+    body {{
+      margin: 0;
+      background: linear-gradient(135deg, #f8f1de, #edf6ef 62%, #fffaf0);
+      color: var(--ink);
+      font-family: "Trebuchet MS", Verdana, sans-serif;
+    }}
+    main {{
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 32px 18px 56px;
+    }}
+    h1 {{
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(2rem, 5vw, 4rem);
+      letter-spacing: -0.045em;
+      margin: 8px 0 18px;
+    }}
+    .card {{
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: var(--card);
+      padding: 18px;
+      margin: 16px 0;
+    }}
+    .summary {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }}
+    .stat {{
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: #fffef9;
+      padding: 14px;
+    }}
+    .stat b {{
+      display: block;
+      font-size: 1.7rem;
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+    }}
+    th, td {{
+      border-top: 1px solid var(--line);
+      padding: 8px 6px;
+      text-align: left;
+      vertical-align: top;
+    }}
+    th {{
+      color: var(--muted);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }}
+    input, select, textarea {{
+      box-sizing: border-box;
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 0.6rem 0.75rem;
+      background: #fffdf8;
+      font: inherit;
+    }}
+    form {{
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }}
+    button {{
+      border: 0;
+      border-radius: 999px;
+      background: var(--accent);
+      color: white;
+      padding: 0.65rem 0.9rem;
+      cursor: pointer;
+      font-weight: 800;
+    }}
+    a {{
+      color: var(--accent);
+      font-weight: 800;
+      text-decoration: none;
+    }}
+    .muted {{
+      color: var(--muted);
+    }}
+    pre {{
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }}
+    @media (max-width: 850px) {{
+      .summary, form {{
+        grid-template-columns: 1fr;
+      }}
+      table, thead, tbody, th, td, tr {{
+        display: block;
+      }}
+      th {{
+        display: none;
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <p><a href="/admin">Back to admin</a> | <a href="/admin/datasets">Dataset progress</a></p>
+    <h1>Labeling users</h1>
+    <section class="summary">
+      <div class="stat"><b>{html.escape(str(payload.get('count') or 0))}</b><span>registered/visible users</span></div>
+      <div class="stat"><b>{html.escape(str(payload.get('active_count') or 0))}</b><span>active users</span></div>
+      <div class="stat"><b>{html.escape(str(payload.get('inactive_count') or 0))}</b><span>inactive users</span></div>
+      <div class="stat"><b>{html.escape(str(payload.get('missing_registry_row_count') or 0))}</b><span>assignment-only users</span></div>
+    </section>
+    <section class="card">
+      <h2>Add or update user</h2>
+      <form id="user-form">
+        <label>User ID<br><input id="user-id" required placeholder="delahantyj"></label>
+        <label>Display name<br><input id="display-name"></label>
+        <label>Email<br><input id="email"></label>
+        <label>Role<br><select id="role">{role_options}</select></label>
+        <label>Status<br><select id="status">{status_options}</select></label>
+        <label>Notes<br><input id="notes"></label>
+        <button type="submit">Save user</button>
+      </form>
+      <pre id="user-result" class="muted"></pre>
+    </section>
+    <section class="card">
+      <h2>Users</h2>
+      <table>
+        <thead><tr><th>User</th><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Assignments</th><th>Tasks</th><th>Action</th></tr></thead>
+        <tbody>{rows_html}</tbody>
+      </table>
+    </section>
+  </main>
+  <script>
+    async function postJson(url, payload) {{
+      const response = await fetch(url, {{
+        method: "POST",
+        headers: {{"Content-Type": "application/json"}},
+        body: JSON.stringify(payload)
+      }});
+      const data = await response.json();
+      if (!response.ok || !data.ok) {{
+        throw new Error(data.details || data.error || "request failed");
+      }}
+      return data;
+    }}
+    document.getElementById("user-form").addEventListener("submit", async (event) => {{
+      event.preventDefault();
+      const result = document.getElementById("user-result");
+      result.textContent = "Saving...";
+      try {{
+        const data = await postJson("/api/admin/users", {{
+          user_id: document.getElementById("user-id").value.trim(),
+          display_name: document.getElementById("display-name").value.trim(),
+          email: document.getElementById("email").value.trim(),
+          role: document.getElementById("role").value,
+          status: document.getElementById("status").value,
+          notes: document.getElementById("notes").value.trim()
+        }});
+        result.textContent = JSON.stringify(data.user, null, 2);
+        setTimeout(() => window.location.reload(), 450);
+      }} catch (error) {{
+        result.textContent = `Error: ${{error.message || String(error)}}`;
+      }}
+    }});
+    async function setUserStatus(button) {{
+      const user = button.dataset.user || "";
+      const action = button.dataset.action || "";
+      if (!user || !action) return;
+      button.disabled = true;
+      try {{
+        await postJson(`/api/admin/users/${{encodeURIComponent(user)}}/${{action}}`, {{}});
+        window.location.reload();
+      }} catch (error) {{
+        alert(error.message || String(error));
+        button.disabled = false;
+      }}
+    }}
+  </script>
+</body>
+</html>
+"""
+    return body.encode("utf-8")
 
 
 def _admin_user_html(*, user: str, work: Mapping[str, object], dashboard_row: Mapping[str, object] | None) -> bytes:
@@ -6964,9 +9164,11 @@ def _dashboard_html() -> bytes:
       target.innerHTML = `
         <h2>${escapeText(title)}</h2>
         <p>Stop and send these support details to the operator. Do not edit zarr files directly or keep working from an old tab.</p>
-        <b>What to send the operator</b>
-        <pre>${escapeText(supportText)}</pre>
-        <button type="button" onclick="copySupportDetails(this)">Copy support details</button>
+        <details>
+          <summary>What to send the operator</summary>
+          <pre>${escapeText(supportText)}</pre>
+          <button type="button" onclick="copySupportDetails(this)">Copy support details</button>
+        </details>
       `;
     }
 
@@ -6985,6 +9187,7 @@ def _dashboard_html() -> bytes:
 
     const initialWorkQuery = new URLSearchParams(window.location.search);
     const expectedUserGuardParam = initialWorkQuery.get("expected_user") || "";
+    const inviteTokenParam = initialWorkQuery.get("invite") || "";
     let pendingInitialWorkflowFilter = initialWorkQuery.get("workflow") || "";
     let activeLinkFilters = {
       dataset_id: initialWorkQuery.get("dataset_id") || "",
@@ -6992,11 +9195,23 @@ def _dashboard_html() -> bytes:
       task_id: initialWorkQuery.get("task_id") || ""
     };
 
-    function guardedWorkPath(path) {
-      if (!expectedUserGuardParam) return path;
+    function authQueryParams() {
+      const params = new URLSearchParams();
+      if (expectedUserGuardParam) params.set("expected_user", expectedUserGuardParam);
+      if (inviteTokenParam) params.set("invite", inviteTokenParam);
+      return params;
+    }
+
+    function withAuthQuery(path) {
       const url = new URL(path, window.location.href);
-      url.searchParams.set("expected_user", expectedUserGuardParam);
+      for (const [key, value] of authQueryParams().entries()) {
+        url.searchParams.set(key, value);
+      }
       return url.pathname + url.search;
+    }
+
+    function guardedWorkPath(path) {
+      return withAuthQuery(path);
     }
 
     function setDashboardEntryLinks() {
@@ -7118,8 +9333,7 @@ def _dashboard_html() -> bytes:
       activeLinkFilters = {dataset_id: "", recording_id: "", task_id: ""};
       pendingInitialWorkflowFilter = "";
       if (window.history && window.history.replaceState) {
-        const params = new URLSearchParams();
-        if (expectedUserGuardParam) params.set("expected_user", expectedUserGuardParam);
+        const params = authQueryParams();
         const query = params.toString();
         window.history.replaceState({}, "", `${window.location.pathname}${query ? "?" + query : ""}`);
       }
@@ -7129,7 +9343,7 @@ def _dashboard_html() -> bytes:
       button.disabled = true;
       clearDashboardError();
       try {
-        const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/open`, {
+        const response = await fetch(withAuthQuery(`/api/tasks/${encodeURIComponent(taskId)}/open`), {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({client_label: navigator.userAgent, expected_user: expectedUserGuardParam || ""})
@@ -7607,9 +9821,11 @@ def _dashboard_html() -> bytes:
         content.innerHTML = `
           <h2>No assigned tasks match the current filters.</h2>
           <p>Clear filters, open the full dashboard, or send these support details to the operator if this came from a handoff link.</p>
-          <b>What to send the operator</b>
-          <pre>${escapeText(filterSupport)}</pre>
-          <button type="button" onclick="copySupportDetails(this)">Copy support details</button>
+          <details>
+            <summary>What to send the operator</summary>
+            <pre>${escapeText(filterSupport)}</pre>
+            <button type="button" onclick="copySupportDetails(this)">Copy support details</button>
+          </details>
         `;
         return;
       }
@@ -7687,9 +9903,8 @@ def _dashboard_html() -> bytes:
       content.textContent = "Refreshing assigned work...";
       try {
         const includeCompleted = document.getElementById("include-completed").checked;
-        const params = new URLSearchParams();
+        const params = authQueryParams();
         if (includeCompleted) params.set("include_completed", "1");
-        if (expectedUserGuardParam) params.set("expected_user", expectedUserGuardParam);
         const query = params.toString();
         const response = await fetch(`/api/me/tasks${query ? "?" + query : ""}`);
         const payload = await readApiPayload(response);
@@ -7980,6 +10195,7 @@ def _datasets_html() -> bytes:
   <script>
     const initialQuery = new URLSearchParams(window.location.search);
     const expectedUserGuardParam = initialQuery.get("expected_user") || "";
+    const inviteTokenParam = initialQuery.get("invite") || "";
 
     function escapeText(value) {
       return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
@@ -7992,9 +10208,9 @@ def _datasets_html() -> bytes:
     }
 
     function guardedPath(path) {
-      if (!expectedUserGuardParam) return path;
       const url = new URL(path, window.location.href);
-      url.searchParams.set("expected_user", expectedUserGuardParam);
+      if (expectedUserGuardParam) url.searchParams.set("expected_user", expectedUserGuardParam);
+      if (inviteTokenParam) url.searchParams.set("invite", inviteTokenParam);
       return url.pathname + url.search;
     }
 
@@ -8094,9 +10310,11 @@ def _datasets_html() -> bytes:
       target.className = "active";
       target.innerHTML = `<b>${escapeText(fallback)}</b>
         <p class="muted">Stop and send these support details to the operator if the identity or assignment looks wrong.</p>
-        <b>What to send the operator</b>
-        <pre>${escapeText(text)}</pre>
-        <button type="button" onclick="copyDatasetSupport(this)">Copy support details</button>`;
+        <details>
+          <summary>What to send the operator</summary>
+          <pre>${escapeText(text)}</pre>
+          <button type="button" onclick="copyDatasetSupport(this)">Copy support details</button>
+        </details>`;
     }
 
     async function copyDatasetSupport(button) {
@@ -8732,9 +10950,11 @@ def _datasets_html() -> bytes:
         <p class="muted">State code: ${escapeText(code)} - Start status: ${escapeText(startStatus)} - Labeler action: ${escapeText(labelerAction)} - Labeler start ${blocksStart ? "blocked" : "allowed"}.</p>
         ${blocksStart ? "<p><b>Do not start new labeling from this queue until the operator resolves this state.</b></p>" : ""}
         ${action ? `<p class="muted">Operator action: ${escapeText(action)}</p>` : ""}
-        <b>What to send the operator</b>
-        <pre>${escapeText(support)}</pre>
-        <button type="button" data-copy-reset="Copy queue state" onclick="copyDatasetSupport(this)">Copy queue state</button>`;
+        <details>
+          <summary>What to send the operator</summary>
+          <pre>${escapeText(support)}</pre>
+          <button type="button" data-copy-reset="Copy queue state" onclick="copyDatasetSupport(this)">Copy queue state</button>
+        </details>`;
     }
 
     function labelerQueueStatusCopy(payload, summary, progress, queueState, completion) {
@@ -8808,7 +11028,7 @@ def _datasets_html() -> bytes:
       }
       button.disabled = true;
       try {
-        const response = await fetch(openEndpoint, {
+        const response = await fetch(guardedPath(openEndpoint), {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({client_label: navigator.userAgent, expected_user: expectedUserGuardParam || ""})
@@ -8912,9 +11132,11 @@ def _datasets_html() -> bytes:
           <p>Stale previous-owner sessions are still open for one or more assigned recordings, so this queue will not start browser labeling until the operator resolves them.</p>
           ${reassignmentRecordings.length ? `<p class="muted">Affected recordings: ${escapeText(reassignmentRecordings.join(", "))}</p>` : ""}
           ${reassignmentOperatorAction ? `<p class="muted">Operator action: ${escapeText(reassignmentOperatorAction)}</p>` : ""}
-          <b>What to send the operator</b>
-          <pre>${escapeText(reassignmentSupport)}</pre>
-          <button type="button" data-copy-reset="Copy reassignment safety" onclick="copyDatasetSupport(this)">Copy reassignment safety</button>`;
+          <details>
+            <summary>What to send the operator</summary>
+            <pre>${escapeText(reassignmentSupport)}</pre>
+            <button type="button" data-copy-reset="Copy reassignment safety" onclick="copyDatasetSupport(this)">Copy reassignment safety</button>
+          </details>`;
       } else {
         reassignmentBlock.className = "notice";
         reassignmentBlock.textContent = "";
@@ -8939,9 +11161,11 @@ def _datasets_html() -> bytes:
           <p>${escapeText(blockedCount)} assigned recording${blockedCount === 1 ? "" : "s"} have no open queue task right now.${reasons ? " Reasons: " + escapeText(reasons) + "." : ""}</p>
           ${recordings ? `<p class="muted">Recordings: ${escapeText(recordings)}</p>` : ""}
           <p>Open the full work dashboard for details or send this state to the operator.</p>
-          <b>What to send the operator</b>
-          <pre>${escapeText(blockedSupport)}</pre>
-          <button type="button" data-copy-reset="Copy blocked details" onclick="copyDatasetSupport(this)">Copy blocked details</button>`;
+          <details>
+            <summary>What to send the operator</summary>
+            <pre>${escapeText(blockedSupport)}</pre>
+            <button type="button" data-copy-reset="Copy blocked details" onclick="copyDatasetSupport(this)">Copy blocked details</button>
+          </details>`;
       } else {
         blocked.className = "notice";
         blocked.textContent = "";
@@ -8962,9 +11186,11 @@ def _datasets_html() -> bytes:
       backupBlock.className = "notice active";
       backupBlock.innerHTML = `<b>Backup and rollback are operator-owned.</b>
         <p class="muted">This queue does not expose backup paths or raw Zarr paths. Operators must satisfy the ${escapeText(backupPolicy.validation_gate || "mutable_zarr_backup_confirmation")} gate before broad launch.</p>
-        <b>What to send the operator</b>
-        <pre>${escapeText(backupSupport)}</pre>
-        <button type="button" data-copy-reset="Copy backup policy" onclick="copyDatasetSupport(this)">Copy backup policy</button>`;
+        <details>
+          <summary>What to send the operator</summary>
+          <pre>${escapeText(backupSupport)}</pre>
+          <button type="button" data-copy-reset="Copy backup policy" onclick="copyDatasetSupport(this)">Copy backup policy</button>
+        </details>`;
       const auditPolicy = payload.mutation_audit_policy || {};
       const auditSupport = [
         "page_context=dataset_queue_audit_policy",
@@ -8982,9 +11208,11 @@ def _datasets_html() -> bytes:
       auditBlock.className = "notice active";
       auditBlock.innerHTML = `<b>Mutation audit trail is server-side.</b>
         <p class="muted">Browser saves are expected to append server-side audit events in ${escapeText(auditPolicy.event_store || "labeling_task_events")}.</p>
-        <b>What to send the operator</b>
-        <pre>${escapeText(auditSupport)}</pre>
-        <button type="button" data-copy-reset="Copy audit policy" onclick="copyDatasetSupport(this)">Copy audit policy</button>`;
+        <details>
+          <summary>What to send the operator</summary>
+          <pre>${escapeText(auditSupport)}</pre>
+          <button type="button" data-copy-reset="Copy audit policy" onclick="copyDatasetSupport(this)">Copy audit policy</button>
+        </details>`;
       const sessionGuardPolicy = payload.session_guard_policy || {};
       const sessionGuardSupport = [
         "page_context=dataset_queue_session_guard_policy",
@@ -9002,9 +11230,11 @@ def _datasets_html() -> bytes:
       sessionGuardBlock.className = "notice active";
       sessionGuardBlock.innerHTML = `<b>Stale browser tabs are guarded.</b>
         <p class="muted">Only the current, unexpired session can save. Reassigned, completed, closed, expired, or superseded sessions are rejected before mutation.</p>
-        <b>What to send the operator</b>
-        <pre>${escapeText(sessionGuardSupport)}</pre>
-        <button type="button" data-copy-reset="Copy session guard policy" onclick="copyDatasetSupport(this)">Copy session guard policy</button>`;
+        <details>
+          <summary>What to send the operator</summary>
+          <pre>${escapeText(sessionGuardSupport)}</pre>
+          <button type="button" data-copy-reset="Copy session guard policy" onclick="copyDatasetSupport(this)">Copy session guard policy</button>
+        </details>`;
       const queue = payload.dataset_queue || payload.datasets || [];
       const target = document.getElementById("queue");
       if (!queue.length) {
@@ -9017,9 +11247,11 @@ def _datasets_html() -> bytes:
           <p>${escapeText(emptyCopy.message)}</p>
           ${action ? `<p class="muted">Operator action: ${escapeText(action)}</p>` : ""}
           <p><a class="button secondary" href="${escapeText(dashboardUrl)}">Open full work dashboard</a></p>
-          <b>What to send the operator</b>
-          <pre>${escapeText(emptySupport)}</pre>
-          <button type="button" class="secondary" onclick="copyText(this, this.dataset.supportDetails || '', 'Copy queue state')" data-support-details="${escapeText(emptySupport)}">Copy queue state</button>`;
+          <details>
+            <summary>What to send the operator</summary>
+            <pre>${escapeText(emptySupport)}</pre>
+            <button type="button" class="secondary" onclick="copyText(this, this.dataset.supportDetails || '', 'Copy queue state')" data-support-details="${escapeText(emptySupport)}">Copy queue state</button>
+          </details>`;
         return;
       }
       target.className = "";
@@ -9096,6 +11328,7 @@ def _datasets_html() -> bytes:
       try {
         const params = new URLSearchParams();
         if (expectedUserGuardParam) params.set("expected_user", expectedUserGuardParam);
+        if (inviteTokenParam) params.set("invite", inviteTokenParam);
         const query = params.toString();
         const response = await fetch(`/api/me/datasets${query ? "?" + query : ""}`);
         const payload = await readApiPayload(response);
@@ -9132,18 +11365,32 @@ _SESSION_OPERATOR_SUPPORT_CSS = """
       margin: 12px 0;
       color: var(--ink);
       overflow-wrap: anywhere;
+      box-sizing: border-box;
+      max-width: 100%;
     }
     .operator-support.active {
       display: block;
     }
-    .operator-support b {
-      display: block;
+    .operator-support details {
+      margin: 0;
+      max-width: 100%;
+    }
+    .operator-support summary {
+      cursor: pointer;
+      font-weight: 700;
       color: var(--bad);
-      margin-bottom: 6px;
+      user-select: none;
+    }
+    .operator-support summary:focus {
+      outline: 2px solid rgba(154, 48, 39, 0.35);
+      outline-offset: 3px;
+      border-radius: 6px;
     }
     .operator-support pre {
       white-space: pre-wrap;
       overflow-wrap: anywhere;
+      word-break: break-word;
+      max-width: 100%;
       border: 1px solid rgba(154, 48, 39, 0.22);
       border-radius: 12px;
       background: #fffdf8;
@@ -9267,16 +11514,42 @@ _SESSION_OPERATOR_SUPPORT_JS = """
       const personalWorkHref = escapeSupportText(sessionReturnHref("work-dashboard", "/my-work"));
       target.className = "operator-support active";
       target.innerHTML =
-        "<b>What to send the operator</b>" +
+        "<details>" +
+        "<summary>What to send the operator</summary>" +
         "<p>Stop and send these details to the operator. Return to <a href=\\"" + personalQueueHref + "\\">your personalized dataset queue</a> or <a href=\\"" + personalWorkHref + "\\">your personalized work dashboard</a> before reopening stale or superseded work.</p>" +
         "<pre>" + escapeSupportText(supportText) + "</pre>" +
-        "<button type=\\"button\\" onclick=\\"copySessionSupport(this)\\">Copy support details</button>";
+        "<button type=\\"button\\" onclick=\\"copySessionSupport(this)\\">Copy support details</button>" +
+        "</details>";
     }
 """
 
 
 _BROWSER_MUTATION_STATUS_JS = """
     let latestMutationSupportReference = "";
+    function renderMutationSupportReference(text) {
+      if (!text) return;
+      const target = document.getElementById("operator-support");
+      if (!target) return;
+      const esc = (typeof escapeSupportText === "function") ? escapeSupportText : (value) => String(value == null ? "" : value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll("\\\"", "&quot;");
+      const personalQueueHref = esc((typeof sessionReturnHref === "function") ? sessionReturnHref("dataset-queue", "/my-datasets") : "/my-datasets");
+      const personalWorkHref = esc((typeof sessionReturnHref === "function") ? sessionReturnHref("work-dashboard", "/my-work") : "/my-work");
+      target.className = "operator-support active";
+      target.innerHTML =
+        "<details>" +
+        "<summary>Operator support reference</summary>" +
+        "<p>This is only needed if the operator asks for audit details. Return to <a href=\\"" + personalQueueHref + "\\">your personalized dataset queue</a> or <a href=\\"" + personalWorkHref + "\\">your personalized work dashboard</a> before reopening stale or superseded work.</p>" +
+        "<pre>" + esc(text) + "</pre>" +
+        "<button type=\\"button\\" onclick=\\"copySessionSupport(this)\\">Copy support details</button>" +
+        "</details>";
+    }
+    function renderMutationSupportReferenceSoon(text) {
+      if (!text) return;
+      window.setTimeout(() => renderMutationSupportReference(text), 0);
+    }
     function setMutationSupportReference(result, mutation, eventId, eventType, target) {
       const queue = (result && result.post_completion_queue) || {};
       const context = (mutation && mutation.authorization_context) || (result && result.authorization_context) || {};
@@ -9360,7 +11633,8 @@ _BROWSER_MUTATION_STATUS_JS = """
       const target = String(mutation.data_plane_write_target || "server-owned assigned task Zarr scope");
       if (!eventId) return "";
       setMutationSupportReference(result, mutation, eventId, eventType, target);
-      return " If you need operator support, give audit event " + eventId + (eventType ? " (" + eventType + ")" : "") + "; server target " + target + ".";
+      renderMutationSupportReferenceSoon(latestMutationSupportReference);
+      return " Operator support reference available below.";
     }
     function postCompletionQueueUrl(result) {
       const queue = (result && result.post_completion_queue) || {};
@@ -9387,6 +11661,171 @@ _BROWSER_MUTATION_STATUS_JS = """
       setStatus(postCompletionStatusText(result));
       const nextUrl = postCompletionQueueUrl(result);
       window.setTimeout(() => { window.location.href = nextUrl; }, 350);
+    }
+"""
+
+
+_IMAGE_CANVAS_VIEWPORT_JS = """
+    function createImageCanvasViewport(canvas, drawCallback, options={}) {
+      const ctx = canvas.getContext("2d");
+      const imageSurface = document.createElement("canvas");
+      const view = {scale: 1, offsetX: 0, offsetY: 0};
+      const minScale = Number(options.minScale || 1);
+      const maxScale = Number(options.maxScale || 16);
+      let panning = false;
+      let panLast = [0, 0];
+      let cursorBeforePan = "";
+
+      function clamp(value, minValue, maxValue) {
+        return Math.max(minValue, Math.min(maxValue, value));
+      }
+
+      function hasImage() {
+        return imageSurface.width > 0 && imageSurface.height > 0;
+      }
+
+      function constrain() {
+        if (!hasImage()) return;
+        view.scale = clamp(view.scale, minScale, maxScale);
+        const maxOffsetX = Math.max(0, imageSurface.width - canvas.width / view.scale);
+        const maxOffsetY = Math.max(0, imageSurface.height - canvas.height / view.scale);
+        view.offsetX = clamp(view.offsetX, 0, maxOffsetX);
+        view.offsetY = clamp(view.offsetY, 0, maxOffsetY);
+      }
+
+      function fit(redraw=true) {
+        view.scale = 1;
+        view.offsetX = 0;
+        view.offsetY = 0;
+        if (redraw) drawCallback();
+      }
+
+      function setImageData(imageData, config={}) {
+        const resetView = Boolean(config.resetView);
+        const sizeChanged = imageSurface.width !== imageData.width || imageSurface.height !== imageData.height;
+        canvas.width = imageData.width;
+        canvas.height = imageData.height;
+        imageSurface.width = imageData.width;
+        imageSurface.height = imageData.height;
+        imageSurface.getContext("2d").putImageData(imageData, 0, 0);
+        if (resetView || sizeChanged) fit(false);
+        else constrain();
+      }
+
+      function drawCanvas(sourceCanvas) {
+        if (!hasImage()) return;
+        constrain();
+        ctx.drawImage(
+          sourceCanvas,
+          view.offsetX,
+          view.offsetY,
+          canvas.width / view.scale,
+          canvas.height / view.scale,
+          0,
+          0,
+          canvas.width,
+          canvas.height
+        );
+      }
+
+      function drawImage() {
+        if (!hasImage()) return;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.imageSmoothingEnabled = false;
+        drawCanvas(imageSurface);
+      }
+
+      function canvasPoint(event) {
+        const rect = canvas.getBoundingClientRect();
+        return [
+          (event.clientX - rect.left) * canvas.width / rect.width,
+          (event.clientY - rect.top) * canvas.height / rect.height
+        ];
+      }
+
+      function pointerEvent(event) {
+        return event.touches && event.touches.length ? event.touches[0] : event;
+      }
+
+      function canvasToImage(x, y) {
+        return [view.offsetX + x / view.scale, view.offsetY + y / view.scale];
+      }
+
+      function imageToCanvas(x, y) {
+        return [(x - view.offsetX) * view.scale, (y - view.offsetY) * view.scale];
+      }
+
+      function shouldPan(event) {
+        return event.button === 1 || (event.buttons & 4) === 4;
+      }
+
+      function beginPan(event) {
+        if (!shouldPan(event)) return false;
+        event.preventDefault();
+        panLast = canvasPoint(pointerEvent(event));
+        panning = true;
+        cursorBeforePan = canvas.style.cursor;
+        canvas.style.cursor = "grabbing";
+        return true;
+      }
+
+      function panMove(event) {
+        if (!panning) return false;
+        event.preventDefault();
+        const point = canvasPoint(pointerEvent(event));
+        view.offsetX -= (point[0] - panLast[0]) / view.scale;
+        view.offsetY -= (point[1] - panLast[1]) / view.scale;
+        panLast = point;
+        constrain();
+        drawCallback();
+        return true;
+      }
+
+      function endPan() {
+        if (panning) {
+          canvas.style.cursor = cursorBeforePan;
+        }
+        panning = false;
+      }
+
+      function handleWheel(event) {
+        event.preventDefault();
+        if (!hasImage()) return;
+        const [canvasX, canvasY] = canvasPoint(pointerEvent(event));
+        const [beforeX, beforeY] = canvasToImage(canvasX, canvasY);
+        const factor = event.deltaY < 0 ? 1.2 : 1 / 1.2;
+        view.scale = clamp(view.scale * factor, minScale, maxScale);
+        view.offsetX = beforeX - canvasX / view.scale;
+        view.offsetY = beforeY - canvasY / view.scale;
+        constrain();
+        drawCallback();
+      }
+
+      canvas.addEventListener("auxclick", (event) => {
+        if (event.button === 1) event.preventDefault();
+      });
+
+      return {
+        ctx,
+        view,
+        imageSurface,
+        hasImage,
+        setImageData,
+        drawImage,
+        drawCanvas,
+        canvasPoint,
+        pointerEvent,
+        canvasToImage,
+        imageToCanvas,
+        fit,
+        constrain,
+        beginPan,
+        panMove,
+        endPan,
+        handleWheel,
+        get imageWidth() { return imageSurface.width; },
+        get imageHeight() { return imageSurface.height; }
+      };
     }
 """
 
@@ -9589,8 +12028,8 @@ def _keypoint_session_html(session: Mapping[str, object]) -> bytes:
       <aside class="panel">
         <div id="summary" class="meta"></div>
         <div class="buttons">
-          <button type="button" onclick="nav(-1)">Previous</button>
-          <button type="button" onclick="nav(1)">Next</button>
+          <button id="nav-prev-button" type="button" onclick="nav(-1)">Previous</button>
+          <button id="nav-next-button" type="button" onclick="nav(1)">Next</button>
           <button type="button" onclick="save(false)">Save</button>
           <button type="button" onclick="save(true)">Save + next</button>
           <button type="button" class="secondary" onclick="action('mark_no_keypoints')">No keypoints</button>
@@ -9607,6 +12046,7 @@ def _keypoint_session_html(session: Mapping[str, object]) -> bytes:
           <button type="button" onclick="setReviewStatus()">Set review</button>
           <button type="button" class="warn" onclick="completeTask()">Complete task</button>
         </div>
+        <p class="muted">Hotkeys: wheel zooms, middle-drag pans, f fits, n/p move ROI, s saves, Shift+s saves + next, t toggles text, [/ ] cycles points, 1-9 selects keypoints 1-9, 0 selects keypoint 10, r resets, x marks no-keypoints.</p>
         <div id="points"></div>
       </aside>
     </section>
@@ -9619,6 +12059,25 @@ def _keypoint_session_html(session: Mapping[str, object]) -> bytes:
     let points = [];
     let activePoint = -1;
     let dragging = false;
+    let showText = true;
+    const keypointPalette = [
+      "#e4572e",
+      "#1479ff",
+      "#00a86b",
+      "#f0b429",
+      "#b83280",
+      "#7c3aed",
+      "#00a6a6",
+      "#d97706",
+      "#ef4444",
+      "#4b5563",
+      "#84cc16",
+      "#06b6d4"
+    ];
+
+    function keypointColor(index) {{
+      return keypointPalette[Math.abs(Number(index) || 0) % keypointPalette.length];
+    }}
 
     function setStatus(text, isError=false) {{
       const node = document.getElementById("status");
@@ -9629,6 +12088,8 @@ def _keypoint_session_html(session: Mapping[str, object]) -> bytes:
 
     {_SESSION_OPERATOR_SUPPORT_JS}
     {_BROWSER_MUTATION_STATUS_JS}
+    {_IMAGE_CANVAS_VIEWPORT_JS}
+    const viewport = createImageCanvasViewport(canvas, draw);
 
     function decodeRawImage(image) {{
       const raw = atob(image.pixels);
@@ -9658,26 +12119,50 @@ def _keypoint_session_html(session: Mapping[str, object]) -> bytes:
       return out;
     }}
 
-    function draw() {{
-      if (!payload) return;
+    function fitView(redraw=true) {{
+      viewport.fit(redraw);
+    }}
+
+    function constrainView() {{
+      viewport.constrain();
+    }}
+
+    function prepareImageSurface() {{
       const image = decodeRawImage(payload.roi_image);
-      canvas.width = image.width;
-      canvas.height = image.height;
-      ctx.putImageData(image, 0, 0);
-      ctx.lineWidth = Math.max(1, image.width / 180);
-      ctx.font = `${{Math.max(11, image.width / 18)}}px Trebuchet MS`;
+      const sizeChanged = viewport.imageWidth !== image.width || viewport.imageHeight !== image.height;
+      viewport.setImageData(image, {{resetView: sizeChanged}});
+    }}
+
+    function draw() {{
+      if (!payload || !viewport.hasImage()) return;
+      viewport.drawImage();
+      const pointRadius = Math.max(2, Math.min(5, canvas.width / 120));
+      const labelFontPx = Math.max(8, Math.min(12, canvas.width / 38));
+      const labelOffset = pointRadius + 3;
+      ctx.lineWidth = Math.max(1, Math.min(2, canvas.width / 320));
+      ctx.font = `${{labelFontPx}}px Trebuchet MS`;
       points.forEach((point, index) => {{
         const x = Number(point[0]);
         const y = Number(point[1]);
         if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+        const [canvasX, canvasY] = imageToCanvas(x, y);
         ctx.beginPath();
-        ctx.arc(x, y, Math.max(3, image.width / 40), 0, Math.PI * 2);
-        ctx.fillStyle = index === activePoint ? "#1479ff" : "#e4572e";
+        ctx.arc(canvasX, canvasY, pointRadius, 0, Math.PI * 2);
+        ctx.fillStyle = keypointColor(index);
         ctx.fill();
-        ctx.strokeStyle = "white";
+        ctx.lineWidth = index === activePoint ? Math.max(2, Math.min(3, canvas.width / 180)) : Math.max(1, Math.min(2, canvas.width / 320));
+        ctx.strokeStyle = index === activePoint ? "#101410" : "white";
         ctx.stroke();
-        ctx.fillStyle = "white";
-        ctx.fillText(payload.labels[index] || String(index), x + 6, y - 6);
+        if (index === activePoint) {{
+          ctx.beginPath();
+          ctx.arc(canvasX, canvasY, pointRadius + 3, 0, Math.PI * 2);
+          ctx.strokeStyle = "white";
+          ctx.stroke();
+        }}
+        if (showText) {{
+          ctx.fillStyle = "white";
+          ctx.fillText(payload.labels[index] || String(index + 1), canvasX + labelOffset, canvasY - labelOffset);
+        }}
       }});
     }}
 
@@ -9685,8 +12170,10 @@ def _keypoint_session_html(session: Mapping[str, object]) -> bytes:
       const rows = points.map((point, index) => {{
         const x = Number(point[0]);
         const y = Number(point[1]);
-        const label = payload.labels[index] || String(index);
-        return `<div class="point-row"><b>${{label}}</b><span>${{Number.isFinite(x) ? x.toFixed(1) : "nan"}}, ${{Number.isFinite(y) ? y.toFixed(1) : "nan"}}</span></div>`;
+        const label = payload.labels[index] || String(index + 1);
+        const marker = index === activePoint ? "▶ " : "";
+        const color = keypointColor(index);
+        return `<div class="point-row"><b><span style="display:inline-block;width:0.75em;height:0.75em;border-radius:999px;background:${{color}};margin-right:0.4em;border:1px solid rgba(0,0,0,.24);"></span>${{marker}}${{label}}</b><span>${{Number.isFinite(x) ? x.toFixed(1) : "nan"}}, ${{Number.isFinite(y) ? y.toFixed(1) : "nan"}}</span></div>`;
       }}).join("");
       document.getElementById("points").innerHTML = rows;
     }}
@@ -9713,6 +12200,7 @@ def _keypoint_session_html(session: Mapping[str, object]) -> bytes:
         payload = await api("/roi/current");
         points = payload.points.map((p) => [Number(p[0]), Number(p[1])]);
         activePoint = -1;
+        prepareImageSurface();
         renderSummary();
         renderPoints();
         draw();
@@ -9790,11 +12278,15 @@ def _keypoint_session_html(session: Mapping[str, object]) -> bytes:
     }}
 
     function canvasPoint(event) {{
-      const rect = canvas.getBoundingClientRect();
-      return [
-        (event.clientX - rect.left) * canvas.width / rect.width,
-        (event.clientY - rect.top) * canvas.height / rect.height
-      ];
+      return viewport.canvasPoint(event);
+    }}
+
+    function canvasToImage(x, y) {{
+      return viewport.canvasToImage(x, y);
+    }}
+
+    function imageToCanvas(x, y) {{
+      return viewport.imageToCanvas(x, y);
     }}
 
     function nearestPoint(x, y) {{
@@ -9809,31 +12301,92 @@ def _keypoint_session_html(session: Mapping[str, object]) -> bytes:
           best = index;
         }}
       }});
-      return bestD <= Math.pow(Math.max(10, canvas.width / 18), 2) ? best : -1;
+      const hitRadius = Math.max(8, canvas.width / 28) / viewport.view.scale;
+      return bestD <= Math.pow(hitRadius, 2) ? best : -1;
+    }}
+
+    function setActivePoint(index) {{
+      if (!points.length) return;
+      activePoint = Math.max(0, Math.min(points.length - 1, index));
+      renderPoints();
+      draw();
+      const label = payload?.labels?.[activePoint] || String(activePoint + 1);
+      setStatus(`Selected ${{label}}.`);
+    }}
+
+    function cycleActivePoint(delta) {{
+      if (!points.length) return;
+      const current = activePoint >= 0 ? activePoint : 0;
+      setActivePoint((current + delta + points.length) % points.length);
+    }}
+
+    function resetPoints() {{
+      if (!payload) return;
+      points = payload.points.map((point) => [Number(point[0]), Number(point[1])]);
+      activePoint = -1;
+      renderPoints();
+      draw();
+      setStatus("Reset points from current ROI.");
     }}
 
     canvas.addEventListener("mousedown", (event) => {{
-      const [x, y] = canvasPoint(event);
-      activePoint = nearestPoint(x, y);
+      event.preventDefault();
+      if (viewport.beginPan(event)) return;
+      const [canvasX, canvasY] = canvasPoint(event);
+      const [x, y] = canvasToImage(canvasX, canvasY);
+      const nearest = nearestPoint(x, y);
+      if (nearest >= 0) {{
+        activePoint = nearest;
+      }}
       dragging = activePoint >= 0;
       if (dragging) {{
-        points[activePoint] = [x, y];
+        points[activePoint] = [Math.max(0, Math.min(canvas.width - 1, x)), Math.max(0, Math.min(canvas.height - 1, y))];
         renderPoints();
         draw();
       }}
     }});
     canvas.addEventListener("mousemove", (event) => {{
+      if (viewport.panMove(event)) return;
+      const [canvasX, canvasY] = canvasPoint(event);
       if (!dragging || activePoint < 0) return;
-      const [x, y] = canvasPoint(event);
-      points[activePoint] = [Math.max(0, Math.min(canvas.width - 1, x)), Math.max(0, Math.min(canvas.height - 1, y))];
+      const [x, y] = canvasToImage(canvasX, canvasY);
+      points[activePoint] = [Math.max(0, Math.min(viewport.imageWidth - 1, x)), Math.max(0, Math.min(viewport.imageHeight - 1, y))];
       renderPoints();
       draw();
     }});
-    window.addEventListener("mouseup", () => {{ dragging = false; }});
+    window.addEventListener("mouseup", () => {{ dragging = false; viewport.endPan(); }});
+    canvas.addEventListener("wheel", viewport.handleWheel, {{passive: false}});
     window.addEventListener("keydown", (event) => {{
-      if (event.key === "n") nav(1);
-      if (event.key === "p") nav(-1);
-      if (event.key === "s") save(false);
+      const targetTag = event.target?.tagName?.toLowerCase();
+      if (targetTag === "input" || targetTag === "textarea" || targetTag === "select") return;
+      if (event.key === "f" || event.key === "F") {{ event.preventDefault(); fitView(); return; }}
+      if (event.key === "n") {{ event.preventDefault(); nav(1); return; }}
+      if (event.key === "p") {{ event.preventDefault(); nav(-1); return; }}
+      if (event.key === "s") {{ event.preventDefault(); save(false); return; }}
+      if (event.key === "S") {{ event.preventDefault(); save(true); return; }}
+      if (event.key === "t" || event.key === "T") {{
+        event.preventDefault();
+        showText = !showText;
+        draw();
+        setStatus(showText ? "Keypoint labels shown." : "Keypoint labels hidden.");
+        return;
+      }}
+      if (event.key === "[") {{ event.preventDefault(); cycleActivePoint(-1); return; }}
+      if (event.key === "]") {{ event.preventDefault(); cycleActivePoint(1); return; }}
+      const digit = Number.parseInt(event.key, 10);
+      if (Number.isInteger(digit) && digit >= 1 && digit <= 9) {{
+        event.preventDefault();
+        const index = digit - 1;
+        if (index < points.length) setActivePoint(index);
+        return;
+      }}
+      if (event.key === "0") {{
+        event.preventDefault();
+        if (points.length >= 10) setActivePoint(9);
+        return;
+      }}
+      if (event.key === "r" || event.key === "R") {{ event.preventDefault(); resetPoints(); return; }}
+      if (event.key === "x" || event.key === "X") {{ event.preventDefault(); action("mark_no_keypoints"); return; }}
     }});
     loadCurrent();
   </script>
@@ -10034,20 +12587,31 @@ def _detect_session_html(session: Mapping[str, object]) -> bytes:
       return out;
     }}
 
+    function bboxDisplayTransform() {{
+      const t = payload?.bbox_display_transform || {{}};
+      const contentX = Number.isFinite(Number(t.content_x)) ? Number(t.content_x) : 0;
+      const contentY = Number.isFinite(Number(t.content_y)) ? Number(t.content_y) : 0;
+      const contentW = Number.isFinite(Number(t.content_width)) && Number(t.content_width) > 0 ? Number(t.content_width) : canvas.width;
+      const contentH = Number.isFinite(Number(t.content_height)) && Number(t.content_height) > 0 ? Number(t.content_height) : canvas.height;
+      return {{x: contentX, y: contentY, w: contentW, h: contentH}};
+    }}
+
     function bboxToRect(box) {{
       if (!box) return null;
-      const cx = Number(box[0]) * canvas.width;
-      const cy = Number(box[1]) * canvas.height;
-      const w = Number(box[2]) * canvas.width;
-      const h = Number(box[3]) * canvas.height;
+      const display = bboxDisplayTransform();
+      const cx = display.x + Number(box[0]) * display.w;
+      const cy = display.y + Number(box[1]) * display.h;
+      const w = Number(box[2]) * display.w;
+      const h = Number(box[3]) * display.h;
       return {{x: cx - w / 2, y: cy - h / 2, w, h}};
     }}
 
     function rectToBbox(rect) {{
-      const x0 = Math.max(0, Math.min(canvas.width, rect.x));
-      const y0 = Math.max(0, Math.min(canvas.height, rect.y));
-      const x1 = Math.max(0, Math.min(canvas.width, rect.x + rect.w));
-      const y1 = Math.max(0, Math.min(canvas.height, rect.y + rect.h));
+      const display = bboxDisplayTransform();
+      const x0 = Math.max(display.x, Math.min(display.x + display.w, rect.x));
+      const y0 = Math.max(display.y, Math.min(display.y + display.h, rect.y));
+      const x1 = Math.max(display.x, Math.min(display.x + display.w, rect.x + rect.w));
+      const y1 = Math.max(display.y, Math.min(display.y + display.h, rect.y + rect.h));
       const loX = Math.min(x0, x1);
       const hiX = Math.max(x0, x1);
       const loY = Math.min(y0, y1);
@@ -10055,7 +12619,12 @@ def _detect_session_html(session: Mapping[str, object]) -> bytes:
       const w = hiX - loX;
       const h = hiY - loY;
       if (w < 2 || h < 2) return null;
-      return [((loX + hiX) / 2) / canvas.width, ((loY + hiY) / 2) / canvas.height, w / canvas.width, h / canvas.height];
+      return [
+        (((loX + hiX) / 2) - display.x) / display.w,
+        (((loY + hiY) / 2) - display.y) / display.h,
+        w / display.w,
+        h / display.h
+      ];
     }}
 
     function draw() {{
@@ -10069,6 +12638,15 @@ def _detect_session_html(session: Mapping[str, object]) -> bytes:
         ctx.lineWidth = Math.max(2, image.width / 160);
         ctx.strokeStyle = "#f28f3b";
         ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
+      }}
+      const display = bboxDisplayTransform();
+      if (display.x > 0 || display.y > 0 || display.w < image.width || display.h < image.height) {{
+        ctx.save();
+        ctx.lineWidth = Math.max(1, image.width / 320);
+        ctx.strokeStyle = "rgba(255,255,255,0.35)";
+        ctx.setLineDash([8, 6]);
+        ctx.strokeRect(display.x, display.y, display.w, display.h);
+        ctx.restore();
       }}
     }}
 
@@ -10588,7 +13166,7 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
       image-rendering: pixelated;
       background: #101410;
       border-radius: 16px;
-      cursor: crosshair;
+      cursor: none;
       touch-action: none;
     }}
     .meta {{
@@ -10675,15 +13253,22 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
         <div class="buttons">
           <button type="button" onclick="nav(-1)">Previous</button>
           <button type="button" onclick="nav(1)">Next</button>
-          <button type="button" onclick="save(false)">Save mask</button>
-          <button type="button" onclick="save(true)">Save + next</button>
+          <button type="button" onclick="save(false)">Checkpoint mask</button>
+          <button type="button" onclick="save(true)">Checkpoint + next</button>
+          <button type="button" class="secondary" onclick="applySavedEdits()">Apply saved edits to Zarr</button>
           <button id="paint-button" type="button" class="active" onclick="setTool('paint')">Paint</button>
           <button id="erase-button" type="button" class="secondary" onclick="setTool('erase')">Erase</button>
+          <button id="lasso-button" type="button" class="secondary" onclick="toggleLassoMode()">Lasso</button>
+          <button type="button" class="secondary" onclick="fillLasso(false, null)">Fill lasso</button>
+          <button type="button" class="secondary" onclick="fillLasso(true, null)">Fill outside</button>
+          <button type="button" class="secondary" onclick="fillLasso(true, 0)">Erase outside</button>
+          <button type="button" class="secondary" onclick="undoLassoPoint()">Undo point</button>
+          <button type="button" class="secondary" onclick="clearLasso()">Clear lasso</button>
           <button type="button" class="secondary" onclick="clearMask()">Clear local</button>
           <button type="button" class="warn" onclick="completeTask()">Complete task</button>
         </div>
         <label for="brush-size">Brush size: <span id="brush-label">8</span> px</label>
-        <input id="brush-size" type="range" min="1" max="48" value="8" oninput="brushSize = Number(this.value); document.getElementById('brush-label').textContent = this.value;">
+        <input id="brush-size" type="range" min="1" max="48" value="8" oninput="setBrushSize(Number(this.value));">
         <label for="review-state">Component review state</label>
         <select id="review-state">
           <option value="approved">approved</option>
@@ -10695,7 +13280,7 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
           <button type="button" onclick="setReviewStatus()">Set review</button>
           <button type="button" class="secondary" onclick="loadCurrent()">Reload ROI</button>
         </div>
-        <p class="meta">Draw directly on the ROI. Press <b>s</b> to save, <b>n</b>/<b>p</b> to navigate, and <b>e</b>/<b>b</b> to switch erase/paint.</p>
+        <p class="meta">Draw directly on the ROI. Hotkeys: wheel zooms, middle-drag pans, <b>f</b> fits outside lasso, <b>s</b> save, <b>n</b>/<b>p</b> navigate, <b>b</b>/<b>e</b> brush paint/erase, <b>x</b> toggles brush mode, <b>[</b>/<b>]</b> brush size, <b>v</b> lasso, lasso <b>f</b> fills inside, <b>g</b> fills outside, <b>e</b> erases outside, <b>u</b> undoes point, <b>d</b> clears contour.</p>
       </aside>
     </section>
   </main>
@@ -10709,8 +13294,16 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
     let maskWidth = 0;
     let maskHeight = 0;
     let drawing = false;
+    let lassoMode = false;
+    let lassoDrawing = false;
+    let lassoPoints = [];
+    let lassoCursor = null;
+    let cursorMaskPoint = null;
+    let cursorShiftInvert = false;
     let tool = "paint";
     let brushSize = 8;
+    let busyAction = false;
+    const lassoMinPointStepPx = 2;
 
     function setStatus(text, isError=false) {{
       const node = document.getElementById("status");
@@ -10719,8 +13312,42 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
       if (!isError) clearOperatorSupport();
     }}
 
+    function clearMutationSupportReference() {{
+      const button = document.getElementById("copy-mutation-support-reference");
+      if (!button) return;
+      button.hidden = true;
+      button.textContent = "Copy support reference";
+      if (button.dataset) {{
+        Object.keys(button.dataset).forEach((key) => delete button.dataset[key]);
+      }}
+    }}
+
+    function updateNavButtons() {{
+      const prev = document.getElementById("nav-prev-button");
+      const next = document.getElementById("nav-next-button");
+      if (!prev || !next) return;
+      const state = payload?.state || {{}};
+      const total = Number(state.total || 0);
+      const position = Number(state.position || 0);
+      const noPayload = !payload || !Number.isFinite(total) || total <= 0;
+      prev.disabled = busyAction || noPayload || position <= 0;
+      next.disabled = busyAction || noPayload || position >= total - 1;
+    }}
+
+    function setBusy(isBusy, text=null) {{
+      busyAction = Boolean(isBusy);
+      document.querySelectorAll("button, select, input").forEach((node) => {{
+        node.disabled = busyAction;
+      }});
+      updateNavButtons();
+      if (text) setStatus(text);
+    }}
+
     {_SESSION_OPERATOR_SUPPORT_JS}
     {_BROWSER_MUTATION_STATUS_JS}
+    {_IMAGE_CANVAS_VIEWPORT_JS}
+    const viewport = createImageCanvasViewport(canvas, draw);
+    canvas.style.cursor = "none";
 
     function decodeBytes(rawBase64) {{
       const raw = atob(rawBase64);
@@ -10776,10 +13403,8 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
     }}
 
     function draw() {{
-      if (!imageData || !mask) return;
-      canvas.width = imageData.width;
-      canvas.height = imageData.height;
-      ctx.putImageData(imageData, 0, 0);
+      if (!imageData || !mask || !viewport.hasImage()) return;
+      viewport.drawImage();
       const overlay = new ImageData(maskWidth, maskHeight);
       for (let i = 0; i < mask.length; i++) {{
         if (!mask[i]) continue;
@@ -10793,22 +13418,100 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
       offscreen.width = maskWidth;
       offscreen.height = maskHeight;
       offscreen.getContext("2d").putImageData(overlay, 0, 0);
-      ctx.drawImage(offscreen, 0, 0, canvas.width, canvas.height);
+      viewport.drawCanvas(offscreen);
+      drawLassoOverlay();
+      drawCursorOverlay();
+    }}
+
+    function maskToCanvasPoint(mx, my) {{
+      return viewport.imageToCanvas(
+        (Number(mx) + 0.5) * viewport.imageWidth / maskWidth,
+        (Number(my) + 0.5) * viewport.imageHeight / maskHeight
+      );
+    }}
+
+    function drawLassoOverlay() {{
+      if (!lassoPoints.length || !maskWidth || !maskHeight) return;
+      ctx.save();
+      ctx.strokeStyle = "#fff176";
+      ctx.fillStyle = "#fff176";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      lassoPoints.forEach((point, index) => {{
+        const [x, y] = maskToCanvasPoint(point[0], point[1]);
+        if (index === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }});
+      if (lassoMode && lassoCursor) {{
+        const [x, y] = maskToCanvasPoint(lassoCursor[0], lassoCursor[1]);
+        ctx.lineTo(x, y);
+      }}
+      ctx.stroke();
+      ctx.setLineDash([]);
+      lassoPoints.forEach((point) => {{
+        const [x, y] = maskToCanvasPoint(point[0], point[1]);
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }});
+      ctx.restore();
+    }}
+
+    function drawCursorOverlay() {{
+      if (!cursorMaskPoint || !maskWidth || !maskHeight) return;
+      const [x, y] = maskToCanvasPoint(cursorMaskPoint[0], cursorMaskPoint[1]);
+      ctx.save();
+      ctx.lineWidth = 2;
+      if (lassoMode) {{
+        const size = 12;
+        ctx.strokeStyle = "#fff176";
+        ctx.beginPath();
+        ctx.moveTo(x - size, y);
+        ctx.lineTo(x + size, y);
+        ctx.moveTo(x, y - size);
+        ctx.lineTo(x, y + size);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2);
+        ctx.fillStyle = "#fff176";
+        ctx.fill();
+      }} else {{
+        const radiusMask = Math.max(1, Math.round(brushSize * maskWidth / viewport.imageWidth));
+        const radiusCanvas = Math.max(2, radiusMask * viewport.imageWidth * viewport.view.scale / maskWidth);
+        const baseErase = tool === "erase";
+        const erase = cursorShiftInvert ? !baseErase : baseErase;
+        ctx.strokeStyle = erase ? "#d14a32" : "#00c894";
+        ctx.fillStyle = erase ? "rgba(209, 74, 50, 0.12)" : "rgba(0, 200, 148, 0.12)";
+        ctx.beginPath();
+        ctx.arc(x, y, radiusCanvas, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }}
+      ctx.restore();
     }}
 
     function renderSummary() {{
       const state = payload.state || {{}};
       const componentReview = state.component_review_status || {{}};
+      const completionGuard = state.component_review_completion_guard || {{}};
+      const reviewState = componentReview.state || "pending";
+      const reviewWarning = completionGuard.ready ? "" :
+        "<p><b>Action needed</b> Set component review before completing this task.</p>";
       document.getElementById("summary").innerHTML =
         "<p><b>ROI</b> " + payload.roi_idx + " / <b>frame</b> " + (payload.frame_idx ?? "") + "</p>" +
         "<p><b>Position</b> " + (state.position + 1) + " of " + state.total + "</p>" +
         "<p><b>Component</b> " + payload.component_name + "</p>" +
         "<p><b>Run</b> " + payload.refined_run + "</p>" +
         "<p><b>Mask area</b> " + payload.mask_area_px + " px</p>" +
-        "<p><b>Review</b> " + (componentReview.state || "unset") + "</p>";
+        "<p><b>Review</b> " + reviewState + "</p>" +
+        "<p><b>Session edits</b> " + (state.unapplied_session_edit_count || 0) +
+        (payload.session_checkpoint ? " (current ROI is checkpoint overlay)" : "") + "</p>" +
+        reviewWarning;
     }}
 
     async function api(path, options={{}}) {{
+      clearMutationSupportReference();
       const response = await fetch("/api/sessions/" + encodeURIComponent(sessionId) + "/subject-mask" + path, options);
       const data = await readApiPayload(response);
       if (!response.ok || !data.ok) throw apiFailure(response, data, "session_request_failed");
@@ -10819,16 +13522,36 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
       try {{
         payload = await api("/roi/current");
         imageData = decodeRawImage(payload.roi_image);
+        const sizeChanged = viewport.imageWidth !== imageData.width || viewport.imageHeight !== imageData.height;
+        viewport.setImageData(imageData, {{resetView: sizeChanged}});
         decodeMask(payload.mask);
+        clearLasso(true);
         renderSummary();
         draw();
+        updateNavButtons();
         setStatus("Loaded.");
       }} catch (error) {{
+        updateNavButtons();
         showOperatorSupport(error, "session_request_failed");
       }}
     }}
 
     async function nav(delta) {{
+      if (busyAction) return;
+      const state = payload?.state || {{}};
+      const total = Number(state.total || 0);
+      const position = Number(state.position || 0);
+      if (delta < 0 && position <= 0) {{
+        setStatus("Already at the first ROI.");
+        updateNavButtons();
+        return;
+      }}
+      if (delta > 0 && total > 0 && position >= total - 1) {{
+        setStatus("Already at the last ROI.");
+        updateNavButtons();
+        return;
+      }}
+      setBusy(true, delta < 0 ? "Loading previous ROI..." : "Loading next ROI...");
       try {{
         await api("/nav", {{
           method: "POST",
@@ -10838,10 +13561,14 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
         await loadCurrent();
       }} catch (error) {{
         showOperatorSupport(error, "session_request_failed");
+      }} finally {{
+        setBusy(false);
       }}
     }}
 
     async function save(advance) {{
+      if (busyAction) return;
+      setBusy(true, advance ? "Checkpointing mask and advancing..." : "Checkpointing mask...");
       try {{
         const result = await api("/save", {{
           method: "POST",
@@ -10849,13 +13576,47 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
           body: JSON.stringify({{mask: encodeMaskPayload(), advance, target_token: payload?.state?.target_token}})
         }});
         await loadCurrent();
-        setStatus("Saved mask; area " + result.result.after_area_px + " px." + mutationStatusSuffix(result));
+        setStatus("Checkpoint saved; area " + result.result.checkpoint_area_px + " px." + mutationStatusSuffix(result));
       }} catch (error) {{
         showOperatorSupport(error, "session_request_failed");
+      }} finally {{
+        setBusy(false);
+      }}
+    }}
+
+    function newApplyId() {{
+      if (window.crypto && typeof window.crypto.randomUUID === "function") return window.crypto.randomUUID();
+      return "apply-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+    }}
+
+    async function applySavedEdits() {{
+      if (busyAction) return;
+      setBusy(true, "Applying saved edits to Zarr. This can take a while...");
+      try {{
+        const result = await api("/apply", {{
+          method: "POST",
+          headers: {{"Content-Type": "application/json"}},
+          body: JSON.stringify({{apply_id: newApplyId(), target_token: payload?.state?.target_token}})
+        }});
+        await loadCurrent();
+        const applied = result.result.applied_checkpoint_count || 0;
+        const before = result.result.edit_revision_before;
+        const after = result.result.edit_revision_after;
+        const remaining = Number(payload?.state?.unapplied_session_edit_count || 0);
+        const nextStep = remaining > 0
+          ? " " + remaining + " saved edit(s) still need applying."
+          : " Saved edits are applied to Zarr. You can now set review status or complete the task.";
+        setStatus("Applied " + applied + " saved edit(s) to Zarr; revision " + before + " -> " + after + "." + nextStep + mutationStatusSuffix(result));
+      }} catch (error) {{
+        showOperatorSupport(error, "session_request_failed");
+      }} finally {{
+        setBusy(false);
       }}
     }}
 
     async function setReviewStatus() {{
+      if (busyAction) return;
+      setBusy(true, "Setting component review status...");
       try {{
         const reviewState = document.getElementById("review-state").value;
         const result = await api("/review-status", {{
@@ -10867,17 +13628,24 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
         setStatus("Component review state set to " + reviewState + "." + mutationStatusSuffix(result));
       }} catch (error) {{
         showOperatorSupport(error, "session_request_failed");
+      }} finally {{
+        setBusy(false);
       }}
     }}
 
     async function completeTask() {{
+      if (busyAction) return;
+      setBusy(true, "Completing task...");
       try {{
+        clearMutationSupportReference();
         const response = await fetch("/api/sessions/" + encodeURIComponent(sessionId) + "/complete", {{method: "POST"}});
         const data = await readApiPayload(response);
         if (!response.ok || !data.ok) throw apiFailure(response, data, "task_complete_failed");
         handleTaskCompletionSuccess(data);
       }} catch (error) {{
         showOperatorSupport(error, "task_complete_failed");
+      }} finally {{
+        setBusy(false);
       }}
     }}
 
@@ -10885,6 +13653,48 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
       tool = nextTool;
       document.getElementById("paint-button").classList.toggle("active", tool === "paint");
       document.getElementById("erase-button").classList.toggle("active", tool === "erase");
+    }}
+
+    function toggleBrushMode() {{
+      setTool(tool === "paint" ? "erase" : "paint");
+      setStatus("Brush mode: " + tool + ".");
+    }}
+
+    function setBrushSize(nextSize) {{
+      brushSize = Math.max(1, Math.min(48, Number(nextSize) || 1));
+      document.getElementById("brush-size").value = String(brushSize);
+      document.getElementById("brush-label").textContent = String(brushSize);
+    }}
+
+    function setLassoMode(enabled) {{
+      lassoMode = Boolean(enabled);
+      lassoDrawing = false;
+      lassoCursor = null;
+      document.getElementById("lasso-button").classList.toggle("active", lassoMode);
+      if (!lassoMode) lassoPoints = [];
+      draw();
+      setStatus(lassoMode ? "Lasso mode enabled. Click or drag to add contour points." : "Lasso mode disabled.");
+    }}
+
+    function toggleLassoMode() {{
+      setLassoMode(!lassoMode);
+    }}
+
+    function clearLasso(quiet=false) {{
+      lassoPoints = [];
+      lassoCursor = null;
+      lassoDrawing = false;
+      if (!quiet) {{
+        draw();
+        setStatus("Lasso contour cleared.");
+      }}
+    }}
+
+    function undoLassoPoint() {{
+      if (!lassoPoints.length) return;
+      lassoPoints.pop();
+      draw();
+      setStatus("Removed last lasso point.");
     }}
 
     function clearMask() {{
@@ -10895,21 +13705,74 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
     }}
 
     function canvasPoint(event) {{
-      const rect = canvas.getBoundingClientRect();
+      return viewport.canvasPoint(event);
+    }}
+
+    function pointerEvent(event) {{
+      return viewport.pointerEvent(event);
+    }}
+
+    function maskPointFromEvent(event) {{
+      const point = pointerEvent(event);
+      const [canvasX, canvasY] = canvasPoint(point);
+      const [x, y] = viewport.canvasToImage(canvasX, canvasY);
       return [
-        (event.clientX - rect.left) * canvas.width / rect.width,
-        (event.clientY - rect.top) * canvas.height / rect.height
+        Math.max(0, Math.min(maskWidth - 1, Math.floor(x * maskWidth / viewport.imageWidth))),
+        Math.max(0, Math.min(maskHeight - 1, Math.floor(y * maskHeight / viewport.imageHeight)))
       ];
+    }}
+
+    function appendLassoPoint(point) {{
+      const candidate = [Number(point[0]), Number(point[1])];
+      if (!lassoPoints.length) {{
+        lassoPoints.push(candidate);
+        return true;
+      }}
+      const last = lassoPoints[lassoPoints.length - 1];
+      const dx = candidate[0] - last[0];
+      const dy = candidate[1] - last[1];
+      if ((dx * dx + dy * dy) < (lassoMinPointStepPx * lassoMinPointStepPx)) return false;
+      lassoPoints.push(candidate);
+      return true;
+    }}
+
+    function fillLasso(invert=false, forcedValue=null) {{
+      if (!mask || lassoPoints.length < 3) {{
+        setStatus("Lasso fill requires at least 3 contour points.", true);
+        return;
+      }}
+      const fillValue = forcedValue === null ? (tool === "erase" ? 0 : 1) : Number(forcedValue);
+      const lassoCanvas = document.createElement("canvas");
+      lassoCanvas.width = maskWidth;
+      lassoCanvas.height = maskHeight;
+      const lassoCtx = lassoCanvas.getContext("2d");
+      lassoCtx.fillStyle = "white";
+      lassoCtx.beginPath();
+      lassoPoints.forEach((point, index) => {{
+        if (index === 0) lassoCtx.moveTo(point[0], point[1]);
+        else lassoCtx.lineTo(point[0], point[1]);
+      }});
+      lassoCtx.closePath();
+      lassoCtx.fill();
+      const pixels = lassoCtx.getImageData(0, 0, maskWidth, maskHeight).data;
+      for (let i = 0; i < mask.length; i++) {{
+        const inside = pixels[i * 4] > 0;
+        if (invert ? !inside : inside) mask[i] = fillValue ? 1 : 0;
+      }}
+      clearLasso(true);
+      draw();
+      setStatus((invert ? "Lasso outside fill" : "Lasso fill") + " applied locally. Save to persist.");
     }}
 
     function paintAt(event) {{
       if (!mask) return;
-      const point = event.touches && event.touches.length ? event.touches[0] : event;
-      const [x, y] = canvasPoint(point);
-      const mx = Math.floor(x * maskWidth / canvas.width);
-      const my = Math.floor(y * maskHeight / canvas.height);
-      const radius = Math.max(1, Math.round(brushSize * maskWidth / canvas.width));
-      const value = tool === "erase" ? 0 : 1;
+      const [mx, my] = maskPointFromEvent(event);
+      cursorMaskPoint = [mx, my];
+      cursorShiftInvert = Boolean(event.shiftKey);
+      const radius = Math.max(1, Math.round(brushSize * maskWidth / viewport.imageWidth));
+      const baseErase = tool === "erase";
+      const erase = event.shiftKey ? !baseErase : baseErase;
+      const value = erase ? 0 : 1;
       for (let yy = Math.max(0, my - radius); yy <= Math.min(maskHeight - 1, my + radius); yy++) {{
         for (let xx = Math.max(0, mx - radius); xx <= Math.min(maskWidth - 1, mx + radius); xx++) {{
           const dx = xx - mx;
@@ -10920,18 +13783,90 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
       draw();
     }}
 
-    canvas.addEventListener("mousedown", (event) => {{ drawing = true; paintAt(event); }});
-    canvas.addEventListener("mousemove", (event) => {{ if (drawing) paintAt(event); }});
-    canvas.addEventListener("touchstart", (event) => {{ drawing = true; paintAt(event); event.preventDefault(); }}, {{passive: false}});
-    canvas.addEventListener("touchmove", (event) => {{ if (drawing) paintAt(event); event.preventDefault(); }}, {{passive: false}});
-    window.addEventListener("mouseup", () => {{ drawing = false; }});
-    window.addEventListener("touchend", () => {{ drawing = false; }});
+    function beginCanvasEdit(event) {{
+      event.preventDefault();
+      if (viewport.beginPan(event)) {{
+        cursorMaskPoint = null;
+        draw();
+        return;
+      }}
+      cursorMaskPoint = maskPointFromEvent(event);
+      cursorShiftInvert = Boolean(event.shiftKey);
+      if (lassoMode) {{
+        lassoDrawing = true;
+        const point = cursorMaskPoint;
+        lassoCursor = point;
+        appendLassoPoint(point);
+        draw();
+        return;
+      }}
+      drawing = true;
+      paintAt(event);
+    }}
+
+    function moveCanvasEdit(event) {{
+      if (viewport.panMove(event)) return;
+      cursorMaskPoint = maskPointFromEvent(event);
+      cursorShiftInvert = Boolean(event.shiftKey);
+      if (lassoMode) {{
+        event.preventDefault();
+        const point = cursorMaskPoint;
+        lassoCursor = point;
+        if (lassoDrawing) appendLassoPoint(point);
+        draw();
+        return;
+      }}
+      if (drawing) paintAt(event);
+      else draw();
+    }}
+
+    canvas.addEventListener("mousedown", beginCanvasEdit);
+    canvas.addEventListener("mousemove", moveCanvasEdit);
+    canvas.addEventListener("mouseleave", () => {{ cursorMaskPoint = null; lassoCursor = null; draw(); }});
+    canvas.addEventListener("touchstart", beginCanvasEdit, {{passive: false}});
+    canvas.addEventListener("touchmove", moveCanvasEdit, {{passive: false}});
+    window.addEventListener("mouseup", () => {{ drawing = false; lassoDrawing = false; viewport.endPan(); }});
+    window.addEventListener("touchend", () => {{ drawing = false; lassoDrawing = false; viewport.endPan(); }});
+    canvas.addEventListener("wheel", viewport.handleWheel, {{passive: false}});
     window.addEventListener("keydown", (event) => {{
-      if (event.key === "n") nav(1);
-      if (event.key === "p") nav(-1);
-      if (event.key === "s") save(false);
-      if (event.key === "e") setTool("erase");
-      if (event.key === "b") setTool("paint");
+      if (event.key === "Shift" && cursorMaskPoint) {{
+        cursorShiftInvert = true;
+        draw();
+      }}
+    }});
+    window.addEventListener("keyup", (event) => {{
+      if (event.key === "Shift" && cursorMaskPoint) {{
+        cursorShiftInvert = false;
+        draw();
+      }}
+    }});
+    window.addEventListener("keydown", (event) => {{
+      const targetTag = event.target?.tagName?.toLowerCase();
+      if (targetTag === "input" || targetTag === "textarea" || targetTag === "select") return;
+      if (event.key === "n") {{ event.preventDefault(); nav(1); return; }}
+      if (event.key === "p") {{ event.preventDefault(); nav(-1); return; }}
+      if (event.key === "s") {{ event.preventDefault(); save(false); return; }}
+      if (event.key === "S") {{ event.preventDefault(); save(true); return; }}
+      if (event.key === "b" || event.key === "B") {{ event.preventDefault(); setTool("paint"); return; }}
+      if (event.key === "x" || event.key === "X") {{ event.preventDefault(); toggleBrushMode(); return; }}
+      if (event.key === "[") {{ event.preventDefault(); setBrushSize(brushSize - 1); return; }}
+      if (event.key === "]") {{ event.preventDefault(); setBrushSize(brushSize + 1); return; }}
+      if (event.key === "v" || event.key === "V") {{ event.preventDefault(); toggleLassoMode(); return; }}
+      if (event.key === "u" || event.key === "U" || event.key === "Backspace") {{ event.preventDefault(); undoLassoPoint(); return; }}
+      if (event.key === "d" || event.key === "D") {{ event.preventDefault(); clearLasso(); return; }}
+      if (event.key === "f" || event.key === "F") {{
+        event.preventDefault();
+        if (lassoMode) fillLasso(false, null);
+        else viewport.fit();
+        return;
+      }}
+      if (event.key === "g" || event.key === "G") {{ event.preventDefault(); fillLasso(true, null); return; }}
+      if (event.key === "e" || event.key === "E") {{
+        event.preventDefault();
+        if (lassoMode) fillLasso(true, 0);
+        else setTool("erase");
+        return;
+      }}
     }});
     loadCurrent();
   </script>
@@ -11019,12 +13954,24 @@ def _make_handler(state: ServerState):
         def _write_no_store_headers(self) -> None:
             for name, value in BROWSER_RESPONSE_SECURITY_HEADERS.items():
                 self.send_header(name, value)
+            invite_cookie = _invite_cookie_header_from_query(self, state.config)
+            if invite_cookie:
+                self.send_header("Set-Cookie", invite_cookie)
 
-        def _write(self, payload: bytes, *, status: HTTPStatus = HTTPStatus.OK, content_type: str = "text/html; charset=utf-8") -> None:
+        def _write(
+            self,
+            payload: bytes,
+            *,
+            status: HTTPStatus = HTTPStatus.OK,
+            content_type: str = "text/html; charset=utf-8",
+            headers: Mapping[str, str] | None = None,
+        ) -> None:
             self.send_response(int(status))
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(payload)))
             self._write_no_store_headers()
+            for name, value in (headers or {}).items():
+                self.send_header(str(name), str(value))
             self.end_headers()
             self.wfile.write(payload)
 
@@ -11081,6 +14028,12 @@ def _make_handler(state: ServerState):
                     "Header-based authentication is disabled. Start with --user for local development "
                     "or --trust-auth-header behind a trusted proxy."
                     if source == "auth_header_not_trusted"
+                    else "This invite link cannot be used because the server was not launched with --link-secret."
+                    if source == "signed_invites_disabled"
+                    else "This invite link is for a different expected_user. Stop and ask the operator for a fresh invite."
+                    if source == "invite_expected_user_mismatch"
+                    else "This invite link is invalid, expired, or revoked. Ask the operator for a fresh invite."
+                    if source and (source.startswith("invite_error:") or source.startswith("signed_link_"))
                     else f"No user found from trusted auth header {state.config.auth_header}."
                 )
                 self._write_error(
@@ -11100,6 +14053,46 @@ def _make_handler(state: ServerState):
                 self._write_error("admin_required", status=HTTPStatus.FORBIDDEN, html_error=html_error)
                 return None
             return user
+
+        def _require_active_labeling_user(
+            self,
+            user: str,
+            *,
+            html_error: bool = False,
+            expected_user: str | None = None,
+            route_path: str = "",
+        ) -> dict[str, object] | None:
+            known_user_status = _known_labeler_status(state.store, user)
+            if bool(known_user_status.get("is_active_labeling_user")):
+                return known_user_status
+            error = (
+                "unknown_labeling_user"
+                if not bool(known_user_status.get("registry_row_present"))
+                else "inactive_labeling_user"
+            )
+            details = (
+                "This browser identity is not present in the labeling user registry. "
+                "Ask the operator to add or activate this user before labeling."
+                if error == "unknown_labeling_user"
+                else "This browser identity is present in the labeling user registry but is inactive. "
+                "Ask the operator to reactivate this user before labeling."
+            )
+            self._write_error(
+                error,
+                details=details,
+                status=HTTPStatus.FORBIDDEN,
+                html_error=html_error,
+                extra={
+                    **_labeler_read_authorization_denial_metadata(
+                        user=user,
+                        expected_user=expected_user or user,
+                        route_path=route_path,
+                        response_kind="html" if html_error else "json",
+                    ),
+                    "known_user_status": known_user_status,
+                },
+            )
+            return None
 
         def _session_for_user(
             self,
@@ -11728,6 +14721,21 @@ def _make_handler(state: ServerState):
                         dataset_id=str(session.get("dataset_id") or "") or None,
                         zarr_use=str(session.get("zarr_use") or "") or None,
                     )
+                    review_status = result.get("review_status")
+                    if isinstance(review_status, Mapping):
+                        _project_approved_keypoint_review_to_recording_step_status(
+                            store=state.store,
+                            task_id=runtime.task_id,
+                            recording_id=runtime.recording_id,
+                            user=user,
+                            scope=_session_scope(session),
+                            refined_attrs=runtime.review_session.refined.attrs,
+                            review_status=review_status,
+                            review_event_id=str(mutation_event.get("event_id") or ""),
+                            zarr_path=str(runtime.review_session.zarr_path),
+                            dataset_id=str(session.get("dataset_id") or "") or None,
+                            zarr_use=str(session.get("zarr_use") or "") or None,
+                        )
                 except Exception as exc:
                     self._write_json(_format_error("review_status_error", details=_labeler_safe_error_details(exc)), status=HTTPStatus.BAD_REQUEST)
                     return True
@@ -12134,11 +15142,11 @@ def _make_handler(state: ServerState):
 
             subject_mask_path = suffix[len("/subject-mask") :]
             if subject_mask_path == "/state":
-                self._write_json({"ok": True, "state": _subject_mask_runtime_state(runtime)})
+                self._write_json({"ok": True, "state": _subject_mask_runtime_state(runtime, store=state.store)})
                 return True
             if subject_mask_path == "/roi/current":
                 try:
-                    payload = _subject_mask_current_payload(runtime)
+                    payload = _subject_mask_current_payload(runtime, store=state.store)
                 except Exception as exc:
                     self._write_json(_format_error("roi_load_error", details=_labeler_safe_error_details(exc), status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
                     return True
@@ -12169,7 +15177,7 @@ def _make_handler(state: ServerState):
                 except (TypeError, ValueError) as exc:
                     self._write_json(_format_error("nav_error", details=_labeler_safe_error_details(exc)), status=HTTPStatus.BAD_REQUEST)
                     return True
-                self._write_json({"ok": True, "state": _subject_mask_runtime_state(runtime)})
+                self._write_json({"ok": True, "state": _subject_mask_runtime_state(runtime, store=state.store)})
                 return True
 
             if subject_mask_path == "/save":
@@ -12185,67 +15193,76 @@ def _make_handler(state: ServerState):
                         raise ValueError("Subject-mask task has no ROI rows.")
                     runtime.position = max(0, min(int(runtime.position), total - 1))
                     roi_idx = int(runtime.roi_indices[runtime.position])
-                    current_stack = np.asarray(runtime.refined.group["masks_roi"][roi_idx], dtype=np.uint8)
-                    before_mask = (np.asarray(current_stack[runtime.comp_idx], dtype=np.uint8) > 0).astype(np.uint8)
+                    canonical_mask = (np.asarray(runtime.refined.group["masks_roi"][roi_idx, runtime.comp_idx], dtype=np.uint8) > 0).astype(np.uint8)
                     edited_mask = (_decode_uint8_payload(mask_payload) > 0).astype(np.uint8)
                     if edited_mask.ndim == 3 and edited_mask.shape[-1] == 1:
                         edited_mask = edited_mask[:, :, 0]
-                    if tuple(edited_mask.shape) != tuple(before_mask.shape):
-                        raise ValueError(f"mask shape mismatch: expected {tuple(before_mask.shape)}, got {tuple(edited_mask.shape)}")
-                    edited_stack = current_stack.copy()
-                    edited_stack[runtime.comp_idx] = edited_mask
-                    review_mod.save_refined_subject_roi(
-                        source=runtime.source,
-                        refined=runtime.refined,
-                        roi_idx=roi_idx,
-                        edited_masks=edited_stack,
-                        component_names=(runtime.component_name,),
-                    )
-                    after_mask = (np.asarray(runtime.refined.group["masks_roi"][roi_idx, runtime.comp_idx], dtype=np.uint8) > 0).astype(np.uint8)
+                    if tuple(edited_mask.shape) != tuple(canonical_mask.shape):
+                        raise ValueError(f"mask shape mismatch: expected {tuple(canonical_mask.shape)}, got {tuple(edited_mask.shape)}")
                     frame_idx: int | None = None
                     if runtime.source.frame_indices is not None:
                         try:
                             frame_idx = int(np.asarray(runtime.source.frame_indices[roi_idx]).item())
                         except Exception:
                             frame_idx = None
+                    target_edit_revision = _subject_mask_edit_revision(runtime)
+                    row_identity = _subject_mask_row_identity(runtime, roi_idx)
+                    checkpoint = state.store.upsert_session_checkpoint(
+                        session_id=runtime.session_id,
+                        task_id=runtime.task_id,
+                        recording_id=runtime.recording_id,
+                        user=user,
+                        workflow_kind="subject_mask_component",
+                        target_run_path=_subject_mask_target_run_path(runtime),
+                        target_edit_revision=target_edit_revision,
+                        source_rowset_path=_subject_mask_source_rowset_path(runtime),
+                        roi_idx=roi_idx,
+                        component_name=runtime.component_name,
+                        payload={
+                            "schema": "palette.web_labeling_subject_mask_checkpoint_payload.v1",
+                            "payload_kind": "dense_roi_replacement_mask",
+                            "mask": _raw_array_payload(edited_mask),
+                        },
+                        metadata={
+                            "schema": "palette.web_labeling_subject_mask_checkpoint_metadata.v1",
+                            "row_identity": row_identity,
+                            "component_name": runtime.component_name,
+                            "target_run_path": _subject_mask_target_run_path(runtime),
+                            "source_rowset_path": _subject_mask_source_rowset_path(runtime),
+                        },
+                    )
                     result = {
                         "roi_idx": roi_idx,
                         "frame_idx": frame_idx,
                         "component_name": runtime.component_name,
                         "source_run": str(runtime.source.run_name),
                         "refined_run": str(runtime.refined.run_name),
-                        "before_area_px": int(before_mask.sum()),
-                        "after_area_px": int(after_mask.sum()),
-                        "mask_changed": bool(not np.array_equal(before_mask, after_mask)),
+                        "canonical_area_px": int(canonical_mask.sum()),
+                        "checkpoint_area_px": int(edited_mask.sum()),
+                        "mask_changed_vs_canonical": bool(not np.array_equal(canonical_mask, edited_mask)),
+                        "checkpoint_id": str(checkpoint.get("checkpoint_id") or ""),
+                        "target_edit_revision": target_edit_revision,
+                        "canonical_zarr_mutated": False,
                     }
                     mutation_event = state.store.record_event(
                         task_id=runtime.task_id,
                         recording_id=runtime.recording_id,
                         user=user,
-                        event_type="save_subject_mask_roi",
+                        event_type="checkpoint_subject_mask_roi",
                         target={
                             "roi_idx": roi_idx,
                             "frame_idx": frame_idx,
                             "component_name": runtime.component_name,
                             "source_run": str(runtime.source.run_name),
                             "refined_run": str(runtime.refined.run_name),
+                            "checkpoint_id": str(checkpoint.get("checkpoint_id") or ""),
                         },
-                        before={"area_px": int(before_mask.sum())},
+                        before={"canonical_area_px": int(canonical_mask.sum()), "edit_revision": target_edit_revision},
                         after={
-                            "area_px": int(after_mask.sum()),
-                            "mask_changed": bool(not np.array_equal(before_mask, after_mask)),
+                            "checkpoint_area_px": int(edited_mask.sum()),
+                            "mask_changed_vs_canonical": bool(not np.array_equal(canonical_mask, edited_mask)),
+                            "canonical_zarr_mutated": False,
                         },
-                    )
-                    _refresh_registry_for_scope(
-                        store=state.store,
-                        task_id=runtime.task_id,
-                        recording_id=runtime.recording_id,
-                        user=user,
-                        workflow_kind="subject_mask_component",
-                        scope=_session_scope(session),
-                        zarr_path=runtime.zarr_path,
-                        dataset_id=str(session.get("dataset_id") or "") or None,
-                        zarr_use=str(session.get("zarr_use") or "") or None,
                     )
                     if bool(body.get("advance", runtime.auto_advance_on_save)):
                         if runtime.position < total - 1:
@@ -12264,7 +15281,229 @@ def _make_handler(state: ServerState):
                                 mutation_event=mutation_event,
                                 operator_validation_mutation_gate=_runtime_operator_validation_mutation_gate(state.config),
                             ),
-                            "state": _subject_mask_runtime_state(runtime),
+                            "state": _subject_mask_runtime_state(runtime, store=state.store),
+                        }
+                    )
+                )
+                return True
+
+            if subject_mask_path == "/apply":
+                if self._reject_browser_mutation_preflight(session, body, runtime):
+                    return True
+                apply_id = str(body.get("apply_id") or "").strip() or str(uuid.uuid4())
+                try:
+                    already_applied = state.store.get_applied_session_checkpoints_by_apply_id(
+                        task_id=runtime.task_id,
+                        apply_id=apply_id,
+                    )
+                    if already_applied:
+                        before_values = [
+                            int(row.get("edit_revision_before") or 0)
+                            for row in already_applied
+                            if row.get("edit_revision_before") is not None
+                        ]
+                        after_values = [
+                            int(row.get("edit_revision_after") or 0)
+                            for row in already_applied
+                            if row.get("edit_revision_after") is not None
+                        ]
+                        result = {
+                            "apply_id": apply_id,
+                            "already_applied": True,
+                            "applied_checkpoint_count": len(already_applied),
+                            "edit_revision_before": before_values[0] if before_values else _subject_mask_edit_revision(runtime),
+                            "edit_revision_after": after_values[0] if after_values else _subject_mask_edit_revision(runtime),
+                        }
+                        mutation_event = state.store.record_event(
+                            task_id=runtime.task_id,
+                            recording_id=runtime.recording_id,
+                            user=user,
+                            event_type="apply_subject_mask_session_checkpoints_idempotent_retry",
+                            target={"apply_id": apply_id},
+                            after=result,
+                        )
+                    else:
+                        checkpoints = state.store.list_session_checkpoints(
+                            task_id=runtime.task_id,
+                            state="active",
+                            component_name=runtime.component_name,
+                        )
+                        target_path = _subject_mask_target_run_path(runtime)
+                        source_rowset_path = _subject_mask_source_rowset_path(runtime)
+                        if not checkpoints:
+                            result = {
+                                "apply_id": apply_id,
+                                "already_applied": False,
+                                "applied_checkpoint_count": 0,
+                                "edit_revision_before": _subject_mask_edit_revision(runtime),
+                                "edit_revision_after": _subject_mask_edit_revision(runtime),
+                            }
+                            mutation_event = state.store.record_event(
+                                task_id=runtime.task_id,
+                                recording_id=runtime.recording_id,
+                                user=user,
+                                event_type="apply_subject_mask_session_checkpoints_noop",
+                                target={"apply_id": apply_id, "component_name": runtime.component_name},
+                                after=result,
+                            )
+                        else:
+                            edit_revision_before = _subject_mask_edit_revision(runtime)
+                            checkpoint_ids: list[str] = []
+                            applied_rows: list[int] = []
+                            edited_stacks: list[np.ndarray] = []
+                            before_area_total = 0
+                            after_area_total = 0
+                            compute_workers_used = 1
+                            scoped_row_set = set(int(value) for value in runtime.roi_indices.tolist())
+                            for checkpoint in checkpoints:
+                                checkpoint_target_path = str(checkpoint.get("target_run_path") or "")
+                                if checkpoint_target_path != target_path:
+                                    raise ValueError(
+                                        f"checkpoint target mismatch: expected {target_path}, got {checkpoint_target_path}"
+                                    )
+                                checkpoint_source_rowset = str(checkpoint.get("source_rowset_path") or "")
+                                if checkpoint_source_rowset and checkpoint_source_rowset != source_rowset_path:
+                                    raise ValueError(
+                                        f"checkpoint source rowset mismatch: expected {source_rowset_path}, got {checkpoint_source_rowset}"
+                                    )
+                                checkpoint_revision = int(checkpoint.get("target_edit_revision") or 0)
+                                if checkpoint_revision != edit_revision_before:
+                                    raise ValueError(
+                                        f"stale checkpoint edit_revision: expected {edit_revision_before}, got {checkpoint_revision}"
+                                    )
+                                roi_idx = int(checkpoint.get("roi_idx") or 0)
+                                if roi_idx not in scoped_row_set:
+                                    raise ValueError(f"checkpoint row {roi_idx} is outside the active task row scope.")
+                                metadata = checkpoint.get("metadata")
+                                if isinstance(metadata, Mapping):
+                                    expected_identity = metadata.get("row_identity")
+                                    if isinstance(expected_identity, Mapping):
+                                        current_identity = _subject_mask_row_identity(runtime, roi_idx)
+                                        for key, expected_value in expected_identity.items():
+                                            if key not in current_identity:
+                                                continue
+                                            if str(current_identity.get(key)) != str(expected_value):
+                                                raise ValueError(
+                                                    f"checkpoint row identity mismatch for row {roi_idx}, field {key}: "
+                                                    f"expected {expected_value}, got {current_identity.get(key)}"
+                                                )
+                                edited_mask = _subject_mask_checkpoint_mask(checkpoint)
+                                current_stack = np.asarray(runtime.refined.group["masks_roi"][roi_idx], dtype=np.uint8)
+                                before_mask = (np.asarray(current_stack[runtime.comp_idx], dtype=np.uint8) > 0).astype(np.uint8)
+                                if tuple(edited_mask.shape) != tuple(before_mask.shape):
+                                    raise ValueError(
+                                        f"checkpoint mask shape mismatch for row {roi_idx}: "
+                                        f"expected {tuple(before_mask.shape)}, got {tuple(edited_mask.shape)}"
+                                    )
+                                edited_stack = current_stack.copy()
+                                edited_stack[runtime.comp_idx] = edited_mask
+                                checkpoint_ids.append(str(checkpoint.get("checkpoint_id") or ""))
+                                applied_rows.append(roi_idx)
+                                edited_stacks.append(edited_stack)
+                                before_area_total += int(before_mask.sum())
+                                after_area_total += int(edited_mask.sum())
+                            if edited_stacks:
+                                compute_worker_limit_raw = str(
+                                    os.environ.get("PALETTE_SUBJECT_MASK_APPLY_COMPUTE_WORKERS", "4")
+                                ).strip()
+                                try:
+                                    compute_worker_limit = int(compute_worker_limit_raw)
+                                except ValueError:
+                                    compute_worker_limit = 4
+                                compute_workers = max(
+                                    1,
+                                    min(
+                                        max(1, compute_worker_limit),
+                                        len(edited_stacks),
+                                        max(1, int(os.cpu_count() or 1)),
+                                    ),
+                                )
+                                compute_workers_used = int(compute_workers)
+                                review_mod._apply_refined_subject_roi_rows(  # type: ignore[attr-defined]
+                                    source=runtime.source,
+                                    refined=runtime.refined,
+                                    roi_indices=applied_rows,
+                                    edited_masks_batch=np.stack(edited_stacks, axis=0),
+                                    component_names=(runtime.component_name,),
+                                    update_mode="browser_session_apply",
+                                    update_method="palette_web_labeling_session_apply_v1",
+                                    update_reason="web_labeling_subject_mask_session_apply",
+                                    compute_workers=compute_workers,
+                                )
+                            edit_revision_after = int(edit_revision_before) + 1
+                            runtime.refined.group.attrs["edit_revision"] = int(edit_revision_after)
+                            runtime.refined.group.attrs["edit_revision_updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+                            runtime.refined.group.attrs["edit_revision_last_apply_id"] = apply_id
+                            if "mask_rle" in runtime.refined.group:
+                                runtime.refined.group.attrs["mask_rle_stale_since_edit_revision"] = int(edit_revision_after)
+                            updated_count = state.store.mark_session_checkpoints_applied(
+                                checkpoint_ids=checkpoint_ids,
+                                apply_id=apply_id,
+                                edit_revision_before=edit_revision_before,
+                                edit_revision_after=edit_revision_after,
+                            )
+                            result = {
+                                "apply_id": apply_id,
+                                "already_applied": False,
+                                "applied_checkpoint_count": int(updated_count),
+                                "requested_checkpoint_count": len(checkpoints),
+                                "component_name": runtime.component_name,
+                                "rows": applied_rows,
+                                "edit_revision_before": edit_revision_before,
+                                "edit_revision_after": edit_revision_after,
+                                "before_area_px_total": before_area_total,
+                                "after_area_px_total": after_area_total,
+                                "compute_workers": int(compute_workers_used),
+                                "canonical_zarr_mutated": True,
+                            }
+                            mutation_event = state.store.record_event(
+                                task_id=runtime.task_id,
+                                recording_id=runtime.recording_id,
+                                user=user,
+                                event_type="apply_subject_mask_session_checkpoints",
+                                target={
+                                    "apply_id": apply_id,
+                                    "component_name": runtime.component_name,
+                                    "refined_run": str(runtime.refined.run_name),
+                                    "target_run_path": target_path,
+                                },
+                                before={
+                                    "edit_revision": edit_revision_before,
+                                    "area_px_total": before_area_total,
+                                },
+                                after={
+                                    "edit_revision": edit_revision_after,
+                                    "area_px_total": after_area_total,
+                                    "applied_checkpoint_count": int(updated_count),
+                                    "compute_workers": int(compute_workers_used),
+                                },
+                            )
+                            _refresh_registry_for_scope(
+                                store=state.store,
+                                task_id=runtime.task_id,
+                                recording_id=runtime.recording_id,
+                                user=user,
+                                workflow_kind="subject_mask_component",
+                                scope=_session_scope(session),
+                                zarr_path=runtime.zarr_path,
+                                dataset_id=str(session.get("dataset_id") or "") or None,
+                                zarr_use=str(session.get("zarr_use") or "") or None,
+                            )
+                except Exception as exc:
+                    self._write_json(_format_error("apply_error", details=_labeler_safe_error_details(exc)), status=HTTPStatus.BAD_REQUEST)
+                    return True
+                self._write_json(
+                    _redact_labeler_runtime_payload(
+                        {
+                            "ok": True,
+                            "result": result,
+                            "mutation": _browser_mutation_response_metadata(
+                                workflow_kind="subject_mask_component",
+                                session=session,
+                                mutation_event=mutation_event,
+                                operator_validation_mutation_gate=_runtime_operator_validation_mutation_gate(state.config),
+                            ),
+                            "state": _subject_mask_runtime_state(runtime, store=state.store),
                         }
                     )
                 )
@@ -12272,6 +15511,26 @@ def _make_handler(state: ServerState):
 
             if subject_mask_path == "/review-status":
                 if self._reject_browser_mutation_preflight(session, body, runtime):
+                    return True
+                unapplied_count = state.store.count_unapplied_session_checkpoints(
+                    task_id=runtime.task_id,
+                    component_name=runtime.component_name,
+                )
+                if int(unapplied_count) > 0:
+                    self._write_json(
+                        _format_error(
+                            "unapplied_session_edits",
+                            details=(
+                                "Apply saved subject-mask edits to Zarr before changing component review status."
+                            ),
+                            status=HTTPStatus.CONFLICT,
+                            extra={
+                                "unapplied_session_edit_count": int(unapplied_count),
+                                "required_action": "apply_saved_edits_to_zarr",
+                            },
+                        ),
+                        status=HTTPStatus.CONFLICT,
+                    )
                     return True
                 requested_state = str(body.get("state") or "").strip()
                 if not requested_state:
@@ -12340,7 +15599,7 @@ def _make_handler(state: ServerState):
                                 mutation_event=mutation_event,
                                 operator_validation_mutation_gate=_runtime_operator_validation_mutation_gate(state.config),
                             ),
-                            "state": _subject_mask_runtime_state(runtime),
+                            "state": _subject_mask_runtime_state(runtime, store=state.store),
                         }
                     )
                 )
@@ -12384,27 +15643,13 @@ def _make_handler(state: ServerState):
                         ),
                     )
                     return
-                known_user_status = _known_labeler_status(state.store, user)
-                if not bool(known_user_status.get("is_known_labeler")):
-                    guarded_user = expected_user or str(user)
-                    self._write_error(
-                        "unknown_labeling_user",
-                        details=(
-                            "This browser identity is not present in the labeling assignment store. "
-                            "Ask the operator to assign a recording or confirm the expected login identity."
-                        ),
-                        status=HTTPStatus.FORBIDDEN,
-                        html_error=True,
-                        extra={
-                            **_labeler_read_authorization_denial_metadata(
-                                user=user,
-                                expected_user=guarded_user,
-                                route_path=path,
-                                response_kind="html",
-                            ),
-                            "known_user_status": known_user_status,
-                        },
-                    )
+                known_user_status = self._require_active_labeling_user(
+                    user,
+                    html_error=True,
+                    expected_user=expected_user or user,
+                    route_path=path,
+                )
+                if known_user_status is None:
                     return
                 self._write(
                     _dashboard_html()
@@ -12449,6 +15694,16 @@ def _make_handler(state: ServerState):
                 if self._require_admin(html_error=True) is None:
                     return
                 self._write(_admin_html())
+                return
+            if path == "/admin/datasets":
+                if self._require_admin(html_error=True) is None:
+                    return
+                self._write(_admin_datasets_html())
+                return
+            if path == "/admin/users":
+                if self._require_admin(html_error=True) is None:
+                    return
+                self._write(_admin_users_html(_admin_users_payload(state.store, config=state.config)))
                 return
             if path.startswith("/admin/recordings/"):
                 if self._require_admin(html_error=True) is None:
@@ -12510,6 +15765,110 @@ def _make_handler(state: ServerState):
                     )
                     return
                 self._write_json({"ok": True, "admin": admin})
+                return
+            if path == "/api/admin/datasets":
+                if self._require_admin() is None:
+                    return
+                try:
+                    query = parse_qs(parsed.query, keep_blank_values=True)
+                    payload = _admin_datasets_payload(
+                        state.store,
+                        config=state.config,
+                        dataset_id=str((query.get("dataset_id") or [""])[-1]).strip() or None,
+                        recording_id=str((query.get("recording_id") or [""])[-1]).strip() or None,
+                        assignee_user=(
+                            str((query.get("user") or query.get("assignee_user") or [""])[-1]).strip()
+                            or None
+                        ),
+                        status=str((query.get("status") or [""])[-1]).strip() or None,
+                        warnings_only=str((query.get("warnings") or [""])[-1]).strip().lower()
+                        in {"1", "true", "yes", "on"},
+                    )
+                except Exception as exc:
+                    self._write_json(
+                        _format_error("admin_datasets_failed", details=str(exc), status=HTTPStatus.INTERNAL_SERVER_ERROR),
+                        status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
+                    return
+                self._write_json(payload)
+                return
+            if path == "/api/admin/users":
+                if self._require_admin() is None:
+                    return
+                self._write_json(_admin_users_payload(state.store, config=state.config))
+                return
+            if path == "/api/admin/datasets/export":
+                if self._require_admin() is None:
+                    return
+                try:
+                    query = parse_qs(parsed.query, keep_blank_values=True)
+                    payload = _admin_datasets_payload(
+                        state.store,
+                        config=state.config,
+                        dataset_id=str((query.get("dataset_id") or [""])[-1]).strip() or None,
+                        recording_id=str((query.get("recording_id") or [""])[-1]).strip() or None,
+                        assignee_user=(
+                            str((query.get("user") or query.get("assignee_user") or [""])[-1]).strip()
+                            or None
+                        ),
+                        status=str((query.get("status") or [""])[-1]).strip() or None,
+                        warnings_only=str((query.get("warnings") or [""])[-1]).strip().lower()
+                        in {"1", "true", "yes", "on"},
+                    )
+                    rows = _admin_dataset_export_rows(payload)
+                    export_format = str((query.get("format") or ["csv"])[-1]).strip().lower() or "csv"
+                except Exception as exc:
+                    self._write_json(
+                        _format_error("admin_datasets_export_failed", details=str(exc), status=HTTPStatus.INTERNAL_SERVER_ERROR),
+                        status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
+                    return
+                if export_format == "json":
+                    json_payload = {
+                        "ok": True,
+                        "schema": "palette.web_labeling_admin_dataset_export.v1",
+                        "format": "json",
+                        "generated_at_utc": payload.get("generated_at_utc"),
+                        "store_path": payload.get("store_path"),
+                        "registry": payload.get("registry", {}),
+                        "filters": payload.get("filters", {}),
+                        "counts": payload.get("counts", {}),
+                        "warning_count": payload.get("warning_count", 0),
+                        "warnings": payload.get("warnings", []),
+                        "row_count": len(rows),
+                        "rows": rows,
+                    }
+                    data, response_status, content_type = _json_response(
+                        json_payload,
+                        status=HTTPStatus.OK,
+                    )
+                    self._write(
+                        data,
+                        status=response_status,
+                        content_type=content_type,
+                        headers={
+                            "Content-Disposition": 'attachment; filename="palette-admin-datasets.json"'
+                        },
+                    )
+                    return
+                if export_format != "csv":
+                    self._write_json(
+                        _format_error(
+                            "payload_validation",
+                            details="Unsupported export format. Use format=csv or format=json.",
+                            status=HTTPStatus.BAD_REQUEST,
+                        ),
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                csv_text = _admin_dataset_export_csv(rows)
+                self._write(
+                    csv_text.encode("utf-8"),
+                    content_type="text/csv; charset=utf-8",
+                    headers={
+                        "Content-Disposition": 'attachment; filename="palette-admin-datasets.csv"'
+                    },
+                )
                 return
             if path == "/api/admin/preflight":
                 if self._require_admin() is None:
@@ -12635,7 +15994,7 @@ def _make_handler(state: ServerState):
                     )
                     return
                 known_user_status = _known_labeler_status(state.store, user)
-                if not bool(known_user_status.get("is_known_labeler")):
+                if not bool(known_user_status.get("is_active_labeling_user")):
                     check_report = _store_consistency_report(state.store)
                     assignment_ownership_integrity = (
                         check_report.get("assignment_ownership_integrity")
@@ -12691,10 +16050,12 @@ def _make_handler(state: ServerState):
                         _dataset_queue_direct_start_policy()
                     )
                     unknown_user_payload = _format_error(
-                            "unknown_labeling_user",
+                            "unknown_labeling_user"
+                            if not bool(known_user_status.get("registry_row_present"))
+                            else "inactive_labeling_user",
                             details=(
-                                "This browser identity is not present in the labeling assignment store. "
-                                "Ask the operator to assign a recording or confirm the expected login identity."
+                                "This browser identity is not active in the labeling_users SQLite table. "
+                                "Ask the operator to add or activate this user before labeling."
                             ),
                             status=HTTPStatus.FORBIDDEN,
                             extra={
@@ -13545,6 +16906,14 @@ def _make_handler(state: ServerState):
                 self._write_json(_format_error("invalid_json", details=_labeler_safe_error_details(exc)), status=HTTPStatus.BAD_REQUEST)
                 return
 
+            if not path.startswith("/api/admin/"):
+                if self._require_active_labeling_user(
+                    user,
+                    expected_user=str(body.get("expected_user") or user),
+                    route_path=path,
+                ) is None:
+                    return
+
             if path == "/api/admin/sessions/cleanup-stale":
                 if not _is_admin_user(user, state.config):
                     self._write_json(_format_error("admin_required", status=HTTPStatus.FORBIDDEN), status=HTTPStatus.FORBIDDEN)
@@ -13568,6 +16937,147 @@ def _make_handler(state: ServerState):
                 )
                 return
 
+            if path == "/api/admin/invites/sign":
+                if not _is_admin_user(user, state.config):
+                    self._write_json(_format_error("admin_required", status=HTTPStatus.FORBIDDEN), status=HTTPStatus.FORBIDDEN)
+                    return
+                if not state.config.link_secret:
+                    self._write_json(
+                        _format_error(
+                            "signed_invites_disabled",
+                            details=(
+                                f"Invite signing requires --link-secret or {LINK_SECRET_ENV_VAR} "
+                                "when starting the labeling server."
+                            ),
+                            status=HTTPStatus.CONFLICT,
+                        ),
+                        status=HTTPStatus.CONFLICT,
+                    )
+                    return
+                invite_user = str(body.get("user") or body.get("assignee_user") or "").strip()
+                if not invite_user:
+                    self._write_json(_format_error("payload_validation", details="Missing user."), status=HTTPStatus.BAD_REQUEST)
+                    return
+                try:
+                    ttl_seconds = int(body.get("ttl_seconds") or SIGNED_INVITE_DEFAULT_TTL_SECONDS)
+                except (TypeError, ValueError):
+                    self._write_json(_format_error("payload_validation", details="ttl_seconds must be an integer."), status=HTTPStatus.BAD_REQUEST)
+                    return
+                base_url = str(body.get("base_url") or "").rstrip("/")
+                try:
+                    token_info = _signed_invite_token_info(
+                        user=invite_user,
+                        secret=state.config.link_secret,
+                        ttl_seconds=ttl_seconds,
+                    )
+                except Exception as exc:
+                    self._write_json(_format_error("invite_signing_failed", details=str(exc)), status=HTTPStatus.BAD_REQUEST)
+                    return
+                token = str(token_info["token"])
+                invite_path = _signed_invite_path(token, user=invite_user)
+                known_user_status = _known_labeler_status(state.store, invite_user)
+                shareability_warnings = []
+                if not base_url:
+                    shareability_warnings.append(
+                        {
+                            "code": "missing_base_url",
+                            "details": "Generated invite URL is service-relative because no base_url was supplied.",
+                        }
+                    )
+                if not bool(known_user_status.get("is_active_labeling_user")):
+                    shareability_warnings.append(
+                        {
+                            "code": "inactive_or_unknown_labeling_user",
+                            "user": invite_user,
+                            "details": "This user is not active in the labeling_users SQLite table; add or activate the user before sharing an invite.",
+                        }
+                    )
+                self._write_json(
+                    {
+                        "ok": True,
+                        "schema": "palette.web_labeling_admin_signed_invite.v1",
+                        "operator_user": user,
+                        "user": invite_user,
+                        "expected_user": invite_user,
+                        "scope": token_info["scope"],
+                        "issued_at_utc": token_info["issued_at_utc"],
+                        "expires_at_utc": token_info["expires_at_utc"],
+                        "expires_in_seconds": token_info["ttl_seconds"],
+                        "path": invite_path,
+                        "url": f"{base_url}{invite_path}" if base_url else invite_path,
+                        "url_is_absolute": bool(base_url),
+                        "known_user_status": known_user_status,
+                        "ready_to_share": bool(base_url) and not shareability_warnings,
+                        "shareability_warnings": shareability_warnings,
+                    }
+                )
+                return
+
+            if path == "/api/admin/users":
+                if not _is_admin_user(user, state.config):
+                    self._write_json(_format_error("admin_required", status=HTTPStatus.FORBIDDEN), status=HTTPStatus.FORBIDDEN)
+                    return
+                user_id = str(body.get("user_id") or body.get("user") or "").strip()
+                if not user_id:
+                    self._write_json(_format_error("payload_validation", details="Missing user_id."), status=HTTPStatus.BAD_REQUEST)
+                    return
+                try:
+                    labeling_user = state.store.upsert_labeling_user(
+                        user_id=user_id,
+                        display_name=str(body.get("display_name") or "").strip() or None,
+                        email=str(body.get("email") or "").strip() or None,
+                        role=str(body.get("role") or "labeler").strip() or "labeler",
+                        status=str(body.get("status") or "active").strip() or "active",
+                        notes=str(body.get("notes") or "").strip() or None,
+                        actor_user=user,
+                    )
+                except Exception as exc:
+                    self._write_json(_format_error("labeling_user_update_failed", details=str(exc)), status=HTTPStatus.BAD_REQUEST)
+                    return
+                self._write_json(
+                    {
+                        "ok": True,
+                        "schema": "palette.web_labeling_admin_user_update.v1",
+                        "operator_user": user,
+                        "user": labeling_user,
+                        "known_user_status": _known_labeler_status(state.store, str(labeling_user.get("user_id") or user_id)),
+                    }
+                )
+                return
+
+            if path.startswith("/api/admin/users/") and (
+                path.endswith("/activate") or path.endswith("/deactivate")
+            ):
+                if not _is_admin_user(user, state.config):
+                    self._write_json(_format_error("admin_required", status=HTTPStatus.FORBIDDEN), status=HTTPStatus.FORBIDDEN)
+                    return
+                action = "activate" if path.endswith("/activate") else "deactivate"
+                suffix = f"/{action}"
+                target_user = unquote(path[len("/api/admin/users/") : -len(suffix)].strip("/"))
+                if not target_user:
+                    self._write_json(_format_error("missing_user"), status=HTTPStatus.BAD_REQUEST)
+                    return
+                try:
+                    labeling_user = (
+                        state.store.activate_labeling_user(target_user, actor_user=user)
+                        if action == "activate"
+                        else state.store.deactivate_labeling_user(target_user, actor_user=user)
+                    )
+                except Exception as exc:
+                    self._write_json(_format_error("labeling_user_status_update_failed", details=str(exc)), status=HTTPStatus.BAD_REQUEST)
+                    return
+                self._write_json(
+                    {
+                        "ok": True,
+                        "schema": "palette.web_labeling_admin_user_status_update.v1",
+                        "operator_user": user,
+                        "action": action,
+                        "user": labeling_user,
+                        "known_user_status": _known_labeler_status(state.store, str(labeling_user.get("user_id") or target_user)),
+                    }
+                )
+                return
+
             if path == "/api/admin/assignments":
                 if not _is_admin_user(user, state.config):
                     self._write_json(_format_error("admin_required", status=HTTPStatus.FORBIDDEN), status=HTTPStatus.FORBIDDEN)
@@ -13581,6 +17091,21 @@ def _make_handler(state: ServerState):
                     return
                 if not assignee_user:
                     self._write_json(_format_error("payload_validation", details="Missing assignee_user."), status=HTTPStatus.BAD_REQUEST)
+                    return
+                assignee_status = _known_labeler_status(state.store, assignee_user)
+                if not bool(assignee_status.get("is_active_labeling_user")):
+                    self._write_json(
+                        _format_error(
+                            "inactive_or_unknown_assignee_user",
+                            details=(
+                                "Assignments can only be created or updated for users with an active "
+                                "row in the labeling_users SQLite table. Add or activate the user first."
+                            ),
+                            status=HTTPStatus.BAD_REQUEST,
+                            extra={"assignee_user_status": assignee_status},
+                        ),
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
                     return
                 try:
                     transition_result = state.store.assign_recording_with_session_closure(
@@ -14139,6 +17664,72 @@ def _make_handler(state: ServerState):
                         status=HTTPStatus.FORBIDDEN,
                     )
                     return
+                unapplied_count = state.store.count_unapplied_session_checkpoints(task_id=task_id)
+                if int(unapplied_count) > 0:
+                    self._write_json(
+                        _format_error(
+                            "unapplied_session_edits",
+                            details="Apply saved edits to Zarr before completing this task.",
+                            status=HTTPStatus.CONFLICT,
+                            extra={
+                                **_task_completion_failure_metadata(
+                                    user=user,
+                                    expected_user=expected_user or user,
+                                    task=task,
+                                    session=session,
+                                    requested_task_id=task_id,
+                                    error="unapplied_session_edits",
+                                ),
+                                "unapplied_session_edit_count": int(unapplied_count),
+                                "required_action": "apply_saved_edits_to_zarr",
+                            },
+                        ),
+                        status=HTTPStatus.CONFLICT,
+                    )
+                    return
+                if str(session.get("workflow_kind") or "") == "subject_mask_component":
+                    try:
+                        runtime = _get_subject_mask_runtime(state, session)
+                        review_completion_guard = _subject_mask_component_completion_guard(runtime)
+                    except Exception as exc:
+                        self._write_json(
+                            _format_error(
+                                "subject_mask_review_status_check_failed",
+                                details=_labeler_safe_error_details(exc),
+                                status=HTTPStatus.BAD_REQUEST,
+                                extra=_task_completion_failure_metadata(
+                                    user=user,
+                                    expected_user=expected_user or user,
+                                    task=task,
+                                    session=session,
+                                    requested_task_id=task_id,
+                                    error="subject_mask_review_status_check_failed",
+                                ),
+                            ),
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    if not bool(review_completion_guard.get("ready")):
+                        self._write_json(
+                            _format_error(
+                                "component_review_pending",
+                                details="Set component review status before completing this subject-mask task.",
+                                status=HTTPStatus.CONFLICT,
+                                extra={
+                                    **_task_completion_failure_metadata(
+                                        user=user,
+                                        expected_user=expected_user or user,
+                                        task=task,
+                                        session=session,
+                                        requested_task_id=task_id,
+                                        error="component_review_pending",
+                                    ),
+                                    "component_review_completion_guard": review_completion_guard,
+                                },
+                            ),
+                            status=HTTPStatus.CONFLICT,
+                        )
+                        return
                 closed_session_ids = _open_session_ids_for_task(state.store, task_id)
                 updated = state.store.update_task_state(task_id=task_id, state="complete", user=user)
                 if closed_session_ids:
@@ -14367,6 +17958,72 @@ def _make_handler(state: ServerState):
                         status=HTTPStatus.FORBIDDEN,
                     )
                     return
+                unapplied_count = state.store.count_unapplied_session_checkpoints(task_id=str(task["task_id"]))
+                if int(unapplied_count) > 0:
+                    self._write_json(
+                        _format_error(
+                            "unapplied_session_edits",
+                            details="Apply saved edits to Zarr before completing this task.",
+                            status=HTTPStatus.CONFLICT,
+                            extra={
+                                **_task_completion_failure_metadata(
+                                    user=user,
+                                    expected_user=user,
+                                    task=task,
+                                    session=session,
+                                    requested_task_id=str(task["task_id"]),
+                                    error="unapplied_session_edits",
+                                ),
+                                "unapplied_session_edit_count": int(unapplied_count),
+                                "required_action": "apply_saved_edits_to_zarr",
+                            },
+                        ),
+                        status=HTTPStatus.CONFLICT,
+                    )
+                    return
+                if str(session.get("workflow_kind") or "") == "subject_mask_component":
+                    try:
+                        runtime = _get_subject_mask_runtime(state, session)
+                        review_completion_guard = _subject_mask_component_completion_guard(runtime)
+                    except Exception as exc:
+                        self._write_json(
+                            _format_error(
+                                "subject_mask_review_status_check_failed",
+                                details=_labeler_safe_error_details(exc),
+                                status=HTTPStatus.BAD_REQUEST,
+                                extra=_task_completion_failure_metadata(
+                                    user=user,
+                                    expected_user=user,
+                                    task=task,
+                                    session=session,
+                                    requested_task_id=str(task["task_id"]),
+                                    error="subject_mask_review_status_check_failed",
+                                ),
+                            ),
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    if not bool(review_completion_guard.get("ready")):
+                        self._write_json(
+                            _format_error(
+                                "component_review_pending",
+                                details="Set component review status before completing this subject-mask task.",
+                                status=HTTPStatus.CONFLICT,
+                                extra={
+                                    **_task_completion_failure_metadata(
+                                        user=user,
+                                        expected_user=user,
+                                        task=task,
+                                        session=session,
+                                        requested_task_id=str(task["task_id"]),
+                                        error="component_review_pending",
+                                    ),
+                                    "component_review_completion_guard": review_completion_guard,
+                                },
+                            ),
+                            status=HTTPStatus.CONFLICT,
+                        )
+                        return
                 closed_session_ids = _open_session_ids_for_task(state.store, str(task["task_id"]))
                 updated = state.store.update_task_state(task_id=str(task["task_id"]), state="complete", user=user)
                 if closed_session_ids:
@@ -14406,6 +18063,7 @@ def _make_handler(state: ServerState):
                     "/detect/save",
                     "/detect-analysis/save",
                     "/subject-mask/save",
+                    "/subject-mask/apply",
                     "/subject-mask/review-status",
                 }
                 session = self._session_for_user(
@@ -18800,19 +22458,24 @@ BROWSER_WORKFLOW_CAPABILITIES: tuple[dict[str, object], ...] = (
         "write_contract": {
             **dict(BROWSER_WORKFLOW_SERVER_WRITE_CONTRACT),
             "primary_mutation_target_kind": "task_scoped_training_zarr",
-            "training_zarr_write_mode": "direct",
+            "training_zarr_write_mode": "session_checkpoint_then_apply",
             "save_method": "POST",
             "save_endpoint": "/api/sessions/{session_id}/subject-mask/save",
+            "save_semantics": "checkpoint_only_no_canonical_zarr_write",
+            "apply_method": "POST",
+            "apply_endpoint": "/api/sessions/{session_id}/subject-mask/apply",
+            "apply_semantics": "coalesce_saved_session_checkpoints_and_write_canonical_zarr_before_assignment_completion",
             "payload_fields": ["mask", "advance", "target_token"],
             "required_fields": ["mask", "target_token"],
             "response_fields": ["ok", "result", "state"],
-            "audit_event": "save_subject_mask_roi",
+            "audit_event": "checkpoint_subject_mask_roi",
+            "canonical_apply_audit_event": "apply_subject_mask_session_checkpoints",
             "audit_provenance": dict(BROWSER_MUTATION_AUDIT_PROVENANCE),
             "retry_policy": dict(BROWSER_MUTATION_RETRY_POLICY),
-            "registry_refresh": True,
+            "registry_refresh": "apply_only",
             "guard": "session_for_user",
         },
-        "notes": "Subject-mask edits route through the unified refined subject-mask path.",
+        "notes": "Subject-mask browser saves checkpoint to the labeling sidecar; explicit apply writes the unified refined subject-mask path while the assignment remains open.",
     },
 )
 
@@ -42222,6 +45885,29 @@ def build_parser() -> argparse.ArgumentParser:
     backup.add_argument("--output", required=True, help="Destination SQLite backup path.")
     backup.add_argument("--overwrite", action="store_true", help="Replace an existing backup destination.")
 
+    users_list = sub.add_parser("users-list", help="List SQLite-backed labeling users.")
+    users_list.add_argument("--status", choices=LABELING_USER_STATUSES, default=None)
+    users_list.add_argument("--role", choices=LABELING_USER_ROLES, default=None)
+
+    users_add = sub.add_parser("users-add", help="Add or update a SQLite-backed labeling user.")
+    users_add.add_argument("user_id")
+    users_add.add_argument("--display-name", default=None)
+    users_add.add_argument("--email", default=None)
+    users_add.add_argument("--role", choices=LABELING_USER_ROLES, default="labeler")
+    users_add.add_argument("--status", choices=LABELING_USER_STATUSES, default="active")
+    users_add.add_argument("--notes", default=None)
+    users_add.add_argument("--actor", default=None, help="Operator/user recorded on the user event.")
+
+    users_activate = sub.add_parser("users-activate", help="Mark a labeling user active.")
+    users_activate.add_argument("user_id")
+    users_activate.add_argument("--actor", default=None, help="Operator/user recorded on the user event.")
+    users_activate.add_argument("--notes", default=None)
+
+    users_deactivate = sub.add_parser("users-deactivate", help="Mark a labeling user inactive.")
+    users_deactivate.add_argument("user_id")
+    users_deactivate.add_argument("--actor", default=None, help="Operator/user recorded on the user event.")
+    users_deactivate.add_argument("--notes", default=None)
+
     zarr_backup_plan = sub.add_parser("zarr-backup-plan", help="Write a read-only operator plan for mutable Zarr backups required by assigned tasks.")
     zarr_backup_plan.add_argument("--recording-id", default=None, help="Restrict to one recording.")
     zarr_backup_plan.add_argument("--user", default=None, help="Restrict to recordings currently assigned to this user.")
@@ -42577,6 +46263,14 @@ def build_parser() -> argparse.ArgumentParser:
     sign_links.add_argument("--format", choices=("json", "jsonl"), default="json")
     sign_links.add_argument("--output", default=None, help="Optional output path for archiving the link manifest.")
     sign_links.add_argument("--overwrite", action="store_true", help="Allow replacing an existing --output file.")
+
+    sign_invite = sub.add_parser("sign-invite", help="Create a signed expiring labeler invite to the personal dataset queue.")
+    sign_invite.add_argument("--user", required=True, help="Labeler identity to bind into the invite token.")
+    sign_invite.add_argument("--ttl-seconds", type=int, default=SIGNED_INVITE_DEFAULT_TTL_SECONDS)
+    sign_invite.add_argument("--link-secret", default=None, help=f"Signing secret. Defaults to {LINK_SECRET_ENV_VAR}.")
+    sign_invite.add_argument("--base-url", default=None, help="Optional absolute service base URL, for example http://host:8795.")
+    sign_invite.add_argument("--output", default=None, help="Optional JSON output path for archiving the signed-invite report.")
+    sign_invite.add_argument("--overwrite", action="store_true", help="Allow replacing an existing --output report.")
 
     batch_readiness = sub.add_parser("batch-readiness", help="Report whether the current labeling batch is ready to announce.")
     batch_readiness.add_argument("--warnings-as-errors", action="store_true", help="Treat readiness and store-consistency warnings as launch-blocking.")
@@ -43197,6 +46891,71 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             result["ok"] = True
             _print_json(result)
             return 0
+        if args.command == "users-list":
+            users = store.list_labeling_users(status=args.status, role=args.role)
+            payload = {
+                "ok": True,
+                "schema": "palette.web_labeling_users_list.v1",
+                "store_path": str(store_path),
+                "filters": {"status": args.status, "role": args.role},
+                "roles": list(LABELING_USER_ROLES),
+                "statuses": list(LABELING_USER_STATUSES),
+                "count": len(users),
+                "users": users,
+            }
+            _print_json(payload)
+            return 0
+        if args.command == "users-add":
+            user_row = store.upsert_labeling_user(
+                user_id=args.user_id,
+                display_name=args.display_name,
+                email=args.email,
+                role=args.role,
+                status=args.status,
+                notes=args.notes,
+                actor_user=args.actor,
+            )
+            payload = {
+                "ok": True,
+                "schema": "palette.web_labeling_user_update.v1",
+                "store_path": str(store_path),
+                "user": user_row,
+                "known_user_status": _known_labeler_status(store, str(user_row.get("user_id") or args.user_id)),
+            }
+            _print_json(payload)
+            return 0
+        if args.command == "users-activate":
+            user_row = store.activate_labeling_user(
+                args.user_id,
+                actor_user=args.actor,
+                notes=args.notes,
+            )
+            payload = {
+                "ok": True,
+                "schema": "palette.web_labeling_user_status_update.v1",
+                "store_path": str(store_path),
+                "action": "activate",
+                "user": user_row,
+                "known_user_status": _known_labeler_status(store, str(user_row.get("user_id") or args.user_id)),
+            }
+            _print_json(payload)
+            return 0
+        if args.command == "users-deactivate":
+            user_row = store.deactivate_labeling_user(
+                args.user_id,
+                actor_user=args.actor,
+                notes=args.notes,
+            )
+            payload = {
+                "ok": True,
+                "schema": "palette.web_labeling_user_status_update.v1",
+                "store_path": str(store_path),
+                "action": "deactivate",
+                "user": user_row,
+                "known_user_status": _known_labeler_status(store, str(user_row.get("user_id") or args.user_id)),
+            }
+            _print_json(payload)
+            return 0
         if args.command == "zarr-backup-plan":
             payload = _zarr_backup_plan(
                 store=store,
@@ -43248,6 +47007,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "assign":
             if args.output is not None and Path(args.output).expanduser().exists() and not bool(args.overwrite):
                 raise FileExistsError(f"Output file already exists: {args.output}")
+            assignee_issues = _active_assignee_user_issues(
+                store,
+                [{"recording_id": args.recording_id, "assignee_user": args.user}],
+            )
+            if assignee_issues:
+                payload = {
+                    "ok": False,
+                    "schema": "palette.web_labeling_assignment_user_validation.v1",
+                    "store_path": str(store_path),
+                    "issue_count": len(assignee_issues),
+                    "issues": assignee_issues,
+                }
+                _write_optional_json_report(payload, args.output, overwrite=bool(args.overwrite), description="assignment report")
+                _print_json(payload)
+                return 2
             transition_result = store.assign_recording_with_session_closure(
                 recording_id=args.recording_id,
                 assignee_user=args.user,
@@ -43270,6 +47044,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
         if args.command == "import-assignments":
             rows = _parse_assignment_manifest(args.input)
+            assignee_issues = _active_assignee_user_issues(store, rows)
+            if assignee_issues:
+                payload = {
+                    "ok": False,
+                    "schema": "palette.web_labeling_assignment_import_user_validation.v1",
+                    "store_path": str(store_path),
+                    "input": str(args.input),
+                    "apply": bool(args.apply),
+                    "issue_count": len(assignee_issues),
+                    "issues": assignee_issues,
+                    "assignment_count": len(rows),
+                    **_assignment_control_plane_report_fields(store),
+                }
+                _write_optional_json_report(payload, args.output, overwrite=bool(args.overwrite), description="assignment import report")
+                _print_json(payload)
+                return 2
             results: list[dict[str, object]] = []
             warnings: list[dict[str, object]] = []
             row_warnings_by_index: dict[int, list[dict[str, object]]] = {}
@@ -45601,6 +49391,55 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             bundle_paths["manifest"].write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             _print_json(manifest)
             return 0
+        if args.command == "sign-invite":
+            secret = _link_secret_from_arg(args.link_secret)
+            user = str(args.user or "").strip()
+            token_info = _signed_invite_token_info(
+                user=user,
+                secret=secret,
+                ttl_seconds=int(args.ttl_seconds),
+            )
+            token = str(token_info["token"])
+            path = _signed_invite_path(token, user=user)
+            base_url = str(args.base_url or "").rstrip("/")
+            url_is_absolute = bool(base_url)
+            known_user_status = _known_labeler_status(store, user)
+            shareability_warnings = [] if url_is_absolute else [
+                {
+                    "code": "missing_base_url",
+                    "details": "Generated invite URL is service-relative. Provide --base-url before sharing with a labeler.",
+                }
+            ]
+            if not bool(known_user_status.get("is_active_labeling_user")):
+                shareability_warnings.append(
+                    {
+                        "code": "inactive_or_unknown_labeling_user",
+                        "user": user,
+                        "details": "This user is not active in the labeling_users SQLite table; add or activate the user before sharing an invite.",
+                    }
+                )
+            payload = {
+                "ok": True,
+                "store_path": str(args.store),
+                "user": user,
+                "expected_user": user,
+                "scope": token_info["scope"],
+                "base_url": base_url or None,
+                "issued_at_utc": token_info["issued_at_utc"],
+                "expires_at_utc": token_info["expires_at_utc"],
+                "expires_in_seconds": token_info["ttl_seconds"],
+                "path": path,
+                "url": f"{base_url}{path}" if base_url else path,
+                "url_is_absolute": url_is_absolute,
+                "preferred_labeler_entrypoint": "personal_datasets_waiting_queue",
+                "preferred_labeler_entry_url": f"{base_url}{path}" if base_url else path,
+                "known_user_status": known_user_status,
+                "ready_to_share": url_is_absolute and not shareability_warnings,
+                "shareability_warnings": shareability_warnings,
+            }
+            _write_optional_json_report(payload, args.output, overwrite=bool(args.overwrite), description="signed-invite report")
+            _print_json(payload)
+            return 0
         if args.command == "sign-link":
             task = store.get_task(args.task_id)
             if task is None:
@@ -45996,6 +49835,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             }
             issues: list[dict[str, object]] = []
             warnings: list[dict[str, object]] = []
+            issues.extend(_active_assignee_user_issues(store, assignment_rows))
             assignment_rows_by_recording: dict[str, list[dict[str, object]]] = {}
             for row in assignment_rows:
                 recording_id = str(row.get("recording_id") or "")

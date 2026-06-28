@@ -73,11 +73,19 @@ tracking_runs/tracks_auto_001/              # initial editable identity layer
 
 ### 2. Session-Staged Review Edits
 
-Preferred v1 behavior: frequent user saves should persist a lightweight review
-session, not immediately rewrite the canonical Zarr arrays.
+Preferred v1 behavior: high-frequency UI edits should pass through a durable
+review session layer, and canonical Zarr writes should happen only at explicit
+apply boundaries. Assignment completion is not an apply boundary requirement.
+A user must be able to save/apply work back to the target review run, leave,
+and continue later without marking the assignment complete or approved.
 
-The session layer may be SQLite, JSONL, or another small sidecar store owned by
-the server/UI workflow:
+For the web-labeling v1 implementation, the session layer should live in the
+existing labeling SQLite sidecar owned by the web workflow. It should not live
+in the registry SQLite, and unapplied checkpoint payloads should not be written
+into canonical Zarr groups. Large payloads may be stored as compressed blobs or
+sidecar files referenced from the labeling SQLite session rows.
+
+Conceptually, the session store should capture:
 
 ```text
 review_sessions/<session_id>/
@@ -91,11 +99,15 @@ review_sessions/<session_id>/
 During review:
 
 - the UI renders the canonical Zarr run plus the session edit overlay
-- "save" means persist the session edits/checkpoint
-- canonical arrays remain unchanged
-- work is recoverable if the UI or browser closes unexpectedly
+- checkpoint/autosave means persist session edits without mutating canonical
+  arrays
+- save/apply to Zarr means coalesce the current durable session edits and patch
+  the target canonical review run while the assignment remains open
+- ordinary browser close or crash is not an apply boundary
+- work is recoverable if the UI or browser closes unexpectedly, either from
+  applied canonical edits or from unapplied session checkpoints
 
-On session close, submit, or explicit finalize:
+On explicit save/apply to Zarr, submit, or finalize:
 
 1. validate that the target run still has the expected `edit_revision`
 2. coalesce edits by target array and physical chunk
@@ -112,6 +124,18 @@ cycles.
 Other consumers should treat unapplied session edits as invisible unless they
 explicitly opt into the session overlay. Durable analysis should consume only
 applied review runs, locked runs, or finalized snapshots.
+
+Review approval and assignment completion remain separate from canonical edit
+application:
+
+- applying edits to Zarr does not imply approval
+- approval must be an explicit review-status action
+- completing an assignment should not be required before saving/applied edits
+  become durable in the canonical review run
+- if unapplied session edits exist, approval should either be blocked with a
+  clear message or require a successful apply first
+- retrying an apply after a timeout must be idempotent, using a stable apply ID
+  or equivalent event key so the same session patch is not applied twice
 
 ### 3. Direct In-Place Row Edits
 
@@ -171,6 +195,31 @@ Minimal v1 required fields:
 | `edit_revision_after` | Edit revision after successful save. |
 | `row_indices` | Source rows touched by the edit. |
 | `operation` | `update`, `append`, `tombstone`, or `bulk_patch`. |
+
+For session-applied browser edits, `event_id` or a related `apply_id` must be
+stable across retries so that a timed-out apply can be retried without applying
+the same edit payload twice.
+
+## Browser Session Store V1
+
+The first implementation should be intentionally narrow:
+
+- store browser checkpoint/session metadata in the labeling SQLite sidecar
+- use a stable `session_id` plus `apply_id` for idempotent apply attempts
+- record `target_run_path`, `target_edit_revision`, `source_rowset_path`,
+  actor, timestamps, touched rows, and edited fields/components
+- for masks, checkpoint full dense ROI replacement masks per `(row, component)`
+  rather than replaying stroke deltas
+- keep canonical Zarr arrays invisible to checkpoint-only edits
+- apply checkpoints to Zarr only through the server-owned apply boundary
+
+Required acceptance tests:
+
+- checkpoint without canonical mutation
+- resume checkpointed session overlay
+- apply checkpoint exactly once
+- reject stale `edit_revision`
+- keep save/apply separate from approval and task completion
 
 Recommended future fields:
 
