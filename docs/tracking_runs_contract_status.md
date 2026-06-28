@@ -158,6 +158,45 @@ Current behavior:
 - registry rows do not currently verify detailed lineage between
   `tracking_runs` and `arena_assignment_runs`
 
+### Tracking Readiness Guard
+
+The registry now exposes a derived `"Tracking Ready"` status in
+`recording_step_status_wide`. This is a registry readiness guard, not a new
+tracking registry and not a replacement for `tracking_runs/<run>`.
+
+Source-of-truth artifacts remain:
+
+- `arena_assignment_runs/<run>` for assigning source detection rows to spatial
+  arenas or regions
+- `tracking_runs/<run>` for assigning those source rows to run-local temporal
+  `track_id` values
+
+The readiness guard only answers whether identity-dependent downstream work
+should treat those surfaces as available for the expected subject count.
+
+Current rule:
+
+- if `subject_count_effective` is missing or `<= 1`, `"Tracking Ready"` is
+  permissive and renders `OK`
+- if `subject_count_effective > 1`, `"Tracking Ready"` requires both
+  `arena_assignment_status == "ok"` and `tracks_status == "ok"`
+- missing multi-subject prerequisites render as `BLOCKED (arena assignment)`,
+  `BLOCKED (tracks)`, or `BLOCKED (arena assignment; tracks)`
+
+`subject_count_effective` is the expected or recorded number of subjects for
+the recording, not the apparent number of detections or tracks found by the
+pipeline. It is derived as:
+
+```text
+COALESCE(subject_count_recorded, subject_count_snapshot)
+```
+
+where `subject_count_recorded` comes from normalized recording-subject rows and
+`subject_count_snapshot` comes from imported legacy provenance. Observed counts
+such as detection totals, per-frame detection counts, `num_tracks`, and
+`track_ids_present` remain QA/diagnostic outputs; they should not be used as the
+definition of expected subject count.
+
 ## Current Gaps
 
 ### 1. A few long-tail descriptions outside the tracking docs may still lag
