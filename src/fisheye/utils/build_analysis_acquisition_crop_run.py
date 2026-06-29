@@ -17,6 +17,10 @@ import zarr
 
 from fisheye.diagnostics.compare_realtime_offline_detections import infer_recording_dir_from_zarr
 from fisheye.shared.crop_geometry import bbox_img_xyxy_to_norm_cxcywh
+from fisheye.shared.roi_pixel_contract import (
+    ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
+    orange_mono_pynvvc_luma_pixel_contract,
+)
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr.chunk_profiles import create_geometry_preload_array, stamp_geometry_preload_attrs
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_failed, mark_run_started, require_runs_parent
@@ -426,6 +430,17 @@ def _write_crop_run(
         stamp_geometry_preload_attrs(group)
 
         now = datetime.now(timezone.utc).isoformat()
+        roi_size: list[int] | None = None
+        if payload.roi_sizes_full.shape[0]:
+            unique_roi_sizes = np.unique(payload.roi_sizes_full.astype(np.int64, copy=False), axis=0)
+            if unique_roi_sizes.shape[0] != 1:
+                preview = unique_roi_sizes[:5].tolist()
+                raise ValueError(
+                    "Acquisition crop-video analysis crop runs require fixed crop-video frame size; "
+                    f"found multiple width,height values: {preview}"
+                )
+            roi_w, roi_h = int(unique_roi_sizes[0, 0]), int(unique_roi_sizes[0, 1])
+            roi_size = [roi_h, roi_w]
         summary = {
             "total_crop_meta_rows": int(payload.total_crop_meta_rows),
             "selected_rows": int(payload.frame_indices.shape[0]),
@@ -439,6 +454,10 @@ def _write_crop_run(
                 "source_pixels": "acquisition_crop_video",
                 "roi_pixel_provider": "acquisition_crop_video",
                 "source_type": "acquisition_crop_video",
+                "roi_size": roi_size,
+                "roi_pixel_contract_name": ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
+                "roi_pixel_contract": orange_mono_pynvvc_luma_pixel_contract(),
+                "decode_backend": "pynvvc_luma",
                 "detection_source_type": "external_crop_recorder_crop_meta_selected_live_detection",
                 "source_video_path": str(crop_video_path) if crop_video_path is not None else None,
                 "source_crop_video_path": str(crop_video_path) if crop_video_path is not None else None,

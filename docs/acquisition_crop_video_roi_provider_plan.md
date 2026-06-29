@@ -395,22 +395,39 @@ materialized `roi_images`.
 
 ### Phase 2: Acquisition Crop-Video Pixel Provider
 
-- [ ] Add a shared ROI pixel-provider interface if the existing crop reader
-  cannot cleanly express crop-video reads.
-- [ ] Implement provider mode `acquisition_crop_video`.
-- [ ] Decode selected crop-video frames using
+- [x] Use the existing shared `CropImageSource` as the first provider interface
+  rather than adding a parallel abstraction.
+- [x] Implement provider mode `acquisition_crop_video`.
+- [x] Decode selected crop-video frames using
   `source_crop_video_frame_indices`, not Orange local frame IDs.
-- [ ] Process acquisition crop-video rows as provider-local batches, not by
+- [x] Process acquisition crop-video rows as provider-local batches, not by
   switching decoders row-by-row inside model inference.
-- [ ] Validate decoded frame dimensions against crop-run `roi_size` and crop
+- [x] Validate decoded frame dimensions against crop-run `roi_size` and crop
   stream metadata.
-- [ ] Return the same tensor/image shape expected by current keypoint and
+- [x] Return the same tensor/image shape expected by current keypoint and
   subject-mask model paths.
-- [ ] Record `source_roi_read_mode=acquisition_crop_video` and
+- [x] Record `source_roi_read_mode=acquisition_crop_video` and
   `source_roi_pixel_contract_name` in keypoint/mask run attrs and registry
   performance tables.
 - [ ] Add parity diagnostics comparing a sampled materialized training crop run
   to the direct acquisition crop-video provider for the same recording.
+
+Implementation note, 2026-06-29:
+
+`CropImageSource` now detects geometry-only crop runs with
+`source_pixels=acquisition_crop_video` / `roi_pixel_provider=acquisition_crop_video`,
+opens `source_crop_video_path` through the sequential PyNvVideoCodec luma reader,
+and maps crop rows through `source_crop_video_frame_indices`. It returns
+`[N,H,W] uint8` luma ROI pixels directly from the acquisition crop MP4; it does
+not apply a second full-frame crop to those pixels. Temporary ROI cache promotion
+is intentionally disabled for acquisition crop-video-only runs.
+
+The provider records the `orange_mono_pynvvc_luma_uint8_v1` pixel contract through
+the existing `CropImageSource` provenance path. Unit tests cover the row mapping
+with a fake PyNvVC reader. A workstation real-video smoke reached the provider
+path but could not create an NVDEC decoder because CUDA was not visible in that
+session (`torch.cuda.is_available() == False`); the real-video smoke should be
+run on a GPU node.
 
 ### Phase 3: Offline Recovery Provider
 

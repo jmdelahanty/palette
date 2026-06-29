@@ -93,6 +93,10 @@ def test_build_analysis_acquisition_crop_run_writes_geometry_only_contract(tmp_p
     assert crop.attrs["schema_id"] == "palette.analysis_acquisition_crop_run.v1"
     assert crop.attrs["crop_storage_mode"] == "geometry_only"
     assert crop.attrs["source_pixels"] == "acquisition_crop_video"
+    assert crop.attrs["roi_size"] == [384, 384]
+    assert crop.attrs["roi_pixel_contract_name"] == "orange_mono_pynvvc_luma_uint8_v1"
+    assert crop.attrs["roi_pixel_contract"]["name"] == "orange_mono_pynvvc_luma_uint8_v1"
+    assert crop.attrs["decode_backend"] == "pynvvc_luma"
     assert crop.attrs["bbox_norm_coords_semantics"] == "bbox_xywh_normalized_to_full_frame"
     assert crop.attrs["selected_live_detection_bbox_semantics"] == "selected_postprocessed_model_detection_used_to_center_crop"
     assert "roi_images" not in crop

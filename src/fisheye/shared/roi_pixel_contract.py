@@ -144,6 +144,8 @@ def crop_image_source_live_pixel_contract(
 
     frame_source = str(frame_source_kind or "").strip()
     accel = str(roi_live_acceleration_effective or "").strip().lower()
+    if frame_source == "acquisition_crop_video":
+        return orange_mono_pynvvc_luma_pixel_contract()
     if frame_source == "source_video_path" and accel == "gpu":
         return roi_pixel_contract(
             name="decord_gpu_channel_mean_uint8",

@@ -52,6 +52,14 @@ except Exception as exc:  # pragma: no cover - environment dependent
 else:  # pragma: no cover - import itself is environment dependent
     _CV2_IMPORT_ERROR = None
 
+try:  # pragma: no cover - optional runtime dependency
+    from fisheye.shared.pynvvc_luma_rgb import PynvvcLumaRgbReader  # type: ignore
+
+    _PYNVVC_IMPORT_ERROR: Optional[Exception] = None
+except Exception as exc:  # pragma: no cover - environment dependent
+    PynvvcLumaRgbReader = None  # type: ignore
+    _PYNVVC_IMPORT_ERROR = exc
+
 _ROI_CACHE_POLICIES = {"never", "auto", "always"}
 _ROI_CACHE_AUTO_MIN_SOURCE_PIXELS = 2048 * 2048
 _ROI_CACHE_BUILD_BATCH = 64
@@ -196,6 +204,15 @@ def _resolve_storage_mode(crop_group: zarr.Group) -> str:
     return "geometry_only"
 
 
+def _is_acquisition_crop_video_source(crop_group: zarr.Group) -> bool:
+    for attr_name in ("source_pixels", "roi_pixel_provider", "source_type"):
+        if _normalize_run_name(crop_group.attrs.get(attr_name)) == "acquisition_crop_video":
+            return True
+    return "source_crop_video_frame_indices" in crop_group and bool(
+        crop_group.attrs.get("source_crop_video_path")
+    )
+
+
 def _resolve_roi_shape(crop_group: zarr.Group) -> tuple[int, int]:
     roi_size = crop_group.attrs.get("roi_size")
     if isinstance(roi_size, (list, tuple)) and len(roi_size) == 2:
@@ -205,7 +222,37 @@ def _resolve_roi_shape(crop_group: zarr.Group) -> tuple[int, int]:
         if len(roi_images.shape) < 3:
             raise ValueError("crop_runs/<run>/roi_images must be at least 3D")
         return int(roi_images.shape[1]), int(roi_images.shape[2])
+    if "roi_sizes_full" in crop_group:
+        return _resolve_fixed_roi_shape_from_wh(np.asarray(crop_group["roi_sizes_full"][:]))
+    if "source_crop_xywh" in crop_group:
+        source_crop_xywh = np.asarray(crop_group["source_crop_xywh"][:])
+        if source_crop_xywh.ndim != 2 or source_crop_xywh.shape[1] < 4:
+            raise ValueError("crop_runs/<run>/source_crop_xywh must have shape [N,4].")
+        return _resolve_fixed_roi_shape_from_wh(source_crop_xywh[:, 2:4])
     raise ValueError("Unable to determine ROI size for crop run (need roi_size or roi_images).")
+
+
+def _resolve_fixed_roi_shape_from_wh(width_height_rows: np.ndarray) -> tuple[int, int]:
+    rows = np.asarray(width_height_rows)
+    if rows.ndim != 2 or rows.shape[1] < 2:
+        raise ValueError("ROI size rows must have shape [N,2] with width,height columns.")
+    if rows.shape[0] == 0:
+        raise ValueError("Unable to determine ROI size from an empty geometry-only crop run.")
+    finite = np.isfinite(rows[:, :2]).all(axis=1)
+    positive = np.logical_and(rows[:, 0] > 0, rows[:, 1] > 0)
+    valid = np.logical_and(finite, positive)
+    if not np.any(valid):
+        raise ValueError("Unable to determine ROI size: no positive finite width/height rows.")
+    rounded = np.rint(rows[valid, :2]).astype(np.int64, copy=False)
+    unique = np.unique(rounded, axis=0)
+    if unique.shape[0] != 1:
+        preview = unique[:5].tolist()
+        raise ValueError(
+            "CropImageSource requires fixed-size ROI rows; found multiple "
+            f"width,height values: {preview}"
+        )
+    width, height = int(unique[0, 0]), int(unique[0, 1])
+    return height, width
 
 
 def _normalize_roi_cache_policy(value: object) -> str:
@@ -526,6 +573,86 @@ class _ExternalFrameReader:
         self._reader = None
 
 
+class _AcquisitionCropVideoFrameReader:
+    """Sequential PyNvVC luma reader for acquisition-time crop videos."""
+
+    def __init__(self, video_path: Path, *, gpu_id: int = 0) -> None:
+        self.video_path = video_path
+        self.gpu_id = int(gpu_id)
+        self._reader = None
+        self._frame_iter = None
+        self._next_frame_index = 0
+        self._source_height: int | None = None
+        self._source_width: int | None = None
+
+    @property
+    def source_shape(self) -> tuple[int, int] | None:
+        if self._source_height is None or self._source_width is None:
+            return None
+        return self._source_height, self._source_width
+
+    def _ensure_reader(self) -> None:
+        if self._reader is not None and self._frame_iter is not None:
+            return
+        if not self.video_path.exists():
+            raise FileNotFoundError(f"Acquisition crop video not found: {self.video_path}")
+        if PynvvcLumaRgbReader is None:
+            raise RuntimeError(
+                "PyNvVideoCodec luma reader is unavailable; cannot read acquisition crop video "
+                f"{self.video_path}: {_PYNVVC_IMPORT_ERROR}"
+            )
+        self._reader = PynvvcLumaRgbReader(self.video_path, start_frame=0, gpu_id=self.gpu_id)
+        self._frame_iter = iter(self._reader.iter_frames())
+        self._next_frame_index = 0
+        self._source_height = int(self._reader.source_height)
+        self._source_width = int(self._reader.source_width)
+
+    def _reset_reader(self) -> None:
+        self.close()
+        self._ensure_reader()
+
+    def read_frame(self, frame_idx: int) -> np.ndarray:
+        target = int(frame_idx)
+        if target < 0:
+            raise IndexError(f"Negative acquisition crop-video frame index: {target}")
+        if target < self._next_frame_index:
+            self._reset_reader()
+        else:
+            self._ensure_reader()
+
+        assert self._frame_iter is not None
+        assert self._source_height is not None
+        assert self._source_width is not None
+        while self._next_frame_index <= target:
+            try:
+                frame = next(self._frame_iter)
+            except StopIteration as exc:
+                raise RuntimeError(
+                    f"Acquisition crop video ended before frame {target} could be decoded: {self.video_path}"
+                ) from exc
+            current = self._next_frame_index
+            self._next_frame_index += 1
+            if current == target:
+                luma = frame[: self._source_height, : self._source_width]
+                if hasattr(luma, "contiguous"):
+                    luma = luma.contiguous()
+                if hasattr(luma, "to"):
+                    luma = luma.to("cpu")
+                if hasattr(luma, "numpy"):
+                    luma = luma.numpy()
+                return np.asarray(luma, dtype=np.uint8).copy()
+        raise RuntimeError(f"Failed to decode acquisition crop-video frame {target}")
+
+    def close(self) -> None:
+        if self._reader is not None and hasattr(self._reader, "close"):
+            self._reader.close()
+        self._reader = None
+        self._frame_iter = None
+        self._next_frame_index = 0
+        self._source_height = None
+        self._source_width = None
+
+
 @dataclass
 class CropImageSource:
     """Read ROI pixels from a crop run regardless of storage mode."""
@@ -557,6 +684,8 @@ class CropImageSource:
     _roi_images: object | None = None
     _images_full: object | None = None
     _external_reader: _ExternalFrameReader | None = None
+    crop_video_frame_indices: np.ndarray | None = None
+    _acquisition_crop_reader: _AcquisitionCropVideoFrameReader | None = None
 
     @classmethod
     def open(
@@ -606,6 +735,8 @@ class CropImageSource:
             )
 
         roi_images = crop_group.get("roi_images")
+        crop_video_frame_indices = None
+        acquisition_crop_reader = None
         if storage_mode == "materialized":
             if roi_images is None:
                 raise ValueError("Materialized crop run is missing 'roi_images'.")
@@ -620,58 +751,92 @@ class CropImageSource:
         else:
             raw_video = root.get("raw_video")
             images_full = raw_video.get("images_full") if raw_video is not None else None
-            frame_shape = _resolve_frame_shape(root, crop_group, images_full)
-            if images_full is not None:
-                if normalized_live_acceleration == "gpu":
+            acquisition_crop_video = _is_acquisition_crop_video_source(crop_group)
+            if acquisition_crop_video:
+                crop_video_path = (
+                    crop_group.attrs.get("source_crop_video_path")
+                    or crop_group.attrs.get("source_video_path")
+                    or crop_group.attrs.get("video_source_path")
+                )
+                if not crop_video_path:
                     raise ValueError(
-                        "roi_live_acceleration='gpu' is only supported for geometry-only external-video reads."
+                        "Acquisition crop-video crop run requires source_crop_video_path provenance."
                     )
-                frame_source_kind = "raw_video/images_full"
-                frame_source_path = None
+                crop_video_frame_indices_arr = crop_group.get("source_crop_video_frame_indices")
+                if crop_video_frame_indices_arr is None:
+                    raise ValueError(
+                        "Acquisition crop-video crop run is missing source_crop_video_frame_indices."
+                    )
+                crop_video_frame_indices = np.asarray(crop_video_frame_indices_arr[:], dtype=np.int64)
+                if crop_video_frame_indices.shape[0] != total_rois:
+                    raise ValueError(
+                        "source_crop_video_frame_indices length "
+                        f"{crop_video_frame_indices.shape[0]} does not match roi count {total_rois}"
+                    )
+                frame_source_kind = "acquisition_crop_video"
+                frame_source_path = str(crop_video_path)
+                frame_shape = roi_shape
+                images_full = None
                 external_reader = None
-                live_acceleration_effective = "cpu"
+                acquisition_crop_reader = _AcquisitionCropVideoFrameReader(Path(frame_source_path))
+                live_acceleration_effective = "pynvvc_luma"
                 live_acceleration_fallback_reason = None
             else:
-                source_video_path = (
-                    crop_group.attrs.get("source_video_path")
-                    or crop_group.attrs.get("video_source_path")
-                    or root.attrs.get("source_video_path")
-                )
-                if not source_video_path:
-                    raise ValueError(
-                        "Geometry-only crop run requires raw_video/images_full or source_video_path provenance."
-                    )
-                frame_source_kind = "source_video_path"
-                frame_source_path = str(source_video_path)
-                external_reader = _ExternalFrameReader(Path(frame_source_path))
-                if normalized_live_acceleration == "cpu":
+                frame_shape = _resolve_frame_shape(root, crop_group, images_full)
+                if images_full is not None:
+                    if normalized_live_acceleration == "gpu":
+                        raise ValueError(
+                            "roi_live_acceleration='gpu' is only supported for geometry-only external-video reads."
+                        )
+                    frame_source_kind = "raw_video/images_full"
+                    frame_source_path = None
+                    external_reader = None
                     live_acceleration_effective = "cpu"
                     live_acceleration_fallback_reason = None
                 else:
-                    gpu_available, gpu_reason = _check_external_video_live_gpu_available()
-                    if normalized_live_acceleration == "gpu":
-                        if not gpu_available:
-                            raise ValueError(
-                                "roi_live_acceleration='gpu' requested, but GPU live ROI reads are unavailable: "
-                                f"{gpu_reason}"
-                            )
-                        if frame_shape is None:
-                            raise ValueError(
-                                "roi_live_acceleration='gpu' requires known source frame dimensions "
-                                "(video_width/video_height metadata)."
-                            )
-                        live_acceleration_effective = "gpu"
-                        live_acceleration_fallback_reason = None
-                    elif gpu_available and frame_shape is not None:
-                        live_acceleration_effective = "gpu"
+                    source_video_path = (
+                        crop_group.attrs.get("source_video_path")
+                        or crop_group.attrs.get("video_source_path")
+                        or root.attrs.get("source_video_path")
+                    )
+                    if not source_video_path:
+                        raise ValueError(
+                            "Geometry-only crop run requires raw_video/images_full or source_video_path provenance."
+                        )
+                    frame_source_kind = "source_video_path"
+                    frame_source_path = str(source_video_path)
+                    external_reader = _ExternalFrameReader(Path(frame_source_path))
+                    if normalized_live_acceleration == "cpu":
+                        live_acceleration_effective = "cpu"
                         live_acceleration_fallback_reason = None
                     else:
-                        live_acceleration_effective = "cpu"
-                        if frame_shape is None:
-                            live_acceleration_fallback_reason = "unknown_frame_shape"
+                        gpu_available, gpu_reason = _check_external_video_live_gpu_available()
+                        if normalized_live_acceleration == "gpu":
+                            if not gpu_available:
+                                raise ValueError(
+                                    "roi_live_acceleration='gpu' requested, but GPU live ROI reads are unavailable: "
+                                    f"{gpu_reason}"
+                                )
+                            if frame_shape is None:
+                                raise ValueError(
+                                    "roi_live_acceleration='gpu' requires known source frame dimensions "
+                                    "(video_width/video_height metadata)."
+                                )
+                            live_acceleration_effective = "gpu"
+                            live_acceleration_fallback_reason = None
+                        elif gpu_available and frame_shape is not None:
+                            live_acceleration_effective = "gpu"
+                            live_acceleration_fallback_reason = None
                         else:
-                            live_acceleration_fallback_reason = gpu_reason
-            roi_read_mode = "geometry_only_live"
+                            live_acceleration_effective = "cpu"
+                            if frame_shape is None:
+                                live_acceleration_fallback_reason = "unknown_frame_shape"
+                            else:
+                                live_acceleration_fallback_reason = gpu_reason
+            if frame_source_kind == "acquisition_crop_video":
+                roi_read_mode = "acquisition_crop_video"
+            else:
+                roi_read_mode = "geometry_only_live"
 
         roi_pixel_contract = _resolve_crop_group_pixel_contract(
             crop_group,
@@ -709,6 +874,10 @@ class CropImageSource:
             _roi_images=roi_images,
             _images_full=images_full if storage_mode == "geometry_only" else None,
             _external_reader=external_reader if storage_mode == "geometry_only" else None,
+            crop_video_frame_indices=crop_video_frame_indices,
+            _acquisition_crop_reader=(
+                acquisition_crop_reader if storage_mode == "geometry_only" else None
+            ),
         )
         if manifest_path is not None:
             source._activate_flat_bin_cache(
@@ -786,6 +955,8 @@ class CropImageSource:
         return self._read_live_indices(roi_indices)
 
     def _read_live_indices(self, roi_indices: np.ndarray) -> np.ndarray:
+        if self.frame_source_kind == "acquisition_crop_video":
+            return self._read_acquisition_crop_video_indices(roi_indices)
         if (
             self.frame_source_kind == "source_video_path"
             and self.frame_source_path is not None
@@ -809,6 +980,28 @@ class CropImageSource:
                     f"runtime_gpu_fallback:{exc.__class__.__name__}: {exc}"
                 )
         return self._read_live_indices_cpu(roi_indices)
+
+    def _read_acquisition_crop_video_indices(self, roi_indices: np.ndarray) -> np.ndarray:
+        if self._acquisition_crop_reader is None or self.crop_video_frame_indices is None:
+            raise RuntimeError("No acquisition crop-video reader available for crop run.")
+        roi_h, roi_w = self.roi_shape
+        batch = np.zeros((roi_indices.size, roi_h, roi_w), dtype=np.uint8)
+        video_frame_indices = self.crop_video_frame_indices[roi_indices]
+        frame_cache: dict[int, np.ndarray] = {}
+        for batch_idx, video_frame_idx in enumerate(video_frame_indices):
+            video_frame_idx_int = int(video_frame_idx)
+            frame = frame_cache.get(video_frame_idx_int)
+            if frame is None:
+                frame = self._acquisition_crop_reader.read_frame(video_frame_idx_int)
+                if frame.shape[:2] != (roi_h, roi_w):
+                    raise ValueError(
+                        "Acquisition crop-video frame shape "
+                        f"{frame.shape[:2]} does not match crop run ROI shape {(roi_h, roi_w)} "
+                        f"for frame {video_frame_idx_int}."
+                    )
+                frame_cache[video_frame_idx_int] = frame
+            batch[batch_idx] = frame
+        return batch
 
     def _read_live_indices_cpu(self, roi_indices: np.ndarray) -> np.ndarray:
         roi_h, roi_w = self.roi_shape
@@ -862,6 +1055,8 @@ class CropImageSource:
 
     def _should_use_roi_cache(self) -> bool:
         if self.storage_mode != "geometry_only":
+            return False
+        if self.frame_source_kind == "acquisition_crop_video":
             return False
         if self.roi_cache_policy == "never":
             return False
@@ -1065,7 +1260,7 @@ class CropImageSource:
             "frame_shape": list(self.frame_shape) if self.frame_shape is not None else None,
         }
 
-        if self.frame_source_kind == "source_video_path" and self.frame_source_path:
+        if self.frame_source_kind in {"source_video_path", "acquisition_crop_video"} and self.frame_source_path:
             source_path = Path(self.frame_source_path)
             try:
                 stat = source_path.stat()
@@ -1099,6 +1294,8 @@ class CropImageSource:
             return _to_grayscale_uint8(np.asarray(self._images_full[frame_idx]))
         if self._external_reader is not None:
             return self._external_reader.read_frame(frame_idx)
+        if self._acquisition_crop_reader is not None:
+            return self._acquisition_crop_reader.read_frame(frame_idx)
         raise RuntimeError("No frame source available for geometry-only crop read.")
 
     def close(self) -> None:
@@ -1106,3 +1303,5 @@ class CropImageSource:
             self._roi_images.close()
         if self._external_reader is not None:
             self._external_reader.close()
+        if self._acquisition_crop_reader is not None:
+            self._acquisition_crop_reader.close()

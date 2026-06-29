@@ -155,6 +155,34 @@ def _make_external_geometry_only_root(source_video_path: str) -> _FakeGroup:
     return root
 
 
+def _make_acquisition_crop_video_root(crop_video_path: str) -> _FakeGroup:
+    root = _make_root()
+
+    crop_parent = root.create_group("crop_runs")
+    crop_parent.attrs["latest_any"] = "crop_acquisition"
+
+    crop = crop_parent.create_group("crop_acquisition")
+    crop.attrs["crop_storage_mode"] = "geometry_only"
+    crop.attrs["source_pixels"] = "acquisition_crop_video"
+    crop.attrs["roi_pixel_provider"] = "acquisition_crop_video"
+    crop.attrs["source_crop_video_path"] = crop_video_path
+    crop.create_array("frame_indices", data=np.array([10, 11], dtype=np.int64))
+    crop.create_array("source_crop_video_frame_indices", data=np.array([2, 4], dtype=np.int64))
+    crop.create_array(
+        "roi_coordinates_full",
+        data=np.array([[100, 200], [110, 210]], dtype=np.int32),
+    )
+    crop.create_array(
+        "roi_sizes_full",
+        data=np.array([[5, 3], [5, 3]], dtype=np.int32),
+    )
+    crop.create_array(
+        "source_crop_xywh",
+        data=np.array([[100, 200, 5, 3], [110, 210, 5, 3]], dtype=np.float32),
+    )
+    return root
+
+
 def test_resolve_crop_run_prefers_latest_any_for_mixed_mode_reader() -> None:
     root = _make_root()
     crop_parent = root.create_group("crop_runs")
@@ -256,6 +284,47 @@ def test_crop_image_source_reconstructs_geometry_only_rois_from_raw_video() -> N
     assert source.frame_source_kind == "raw_video/images_full"
     np.testing.assert_array_equal(batch[0], expected_first)
     np.testing.assert_array_equal(batch[1], expected_second)
+
+
+def test_crop_image_source_reads_acquisition_crop_video_with_pynvvc(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    crop_video_path = tmp_path / "crop.mp4"
+    crop_video_path.touch()
+    root = _make_acquisition_crop_video_root(str(crop_video_path))
+
+    class _FakePynvvcReader:
+        source_height = 3
+        source_width = 5
+
+        def __init__(self, video_path: Path, *, start_frame: int = 0, gpu_id: int = 0) -> None:
+            assert Path(video_path) == crop_video_path
+            assert start_frame == 0
+            assert gpu_id == 0
+
+        def iter_frames(self):
+            for frame_idx in range(6):
+                yield np.full((3, 5), frame_idx, dtype=np.uint8)
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(crop_mod, "PynvvcLumaRgbReader", _FakePynvvcReader)
+
+    source = CropImageSource.open(root, crop_run="crop_acquisition", roi_cache_policy="always")
+    batch = source.read_slice(0, 2)
+
+    assert source.frame_source_kind == "acquisition_crop_video"
+    assert source.frame_source_path == str(crop_video_path)
+    assert source.roi_read_mode == "acquisition_crop_video"
+    assert source.roi_shape == (3, 5)
+    assert source.roi_cache_used is False
+    assert source.roi_pixel_contract is not None
+    assert source.roi_pixel_contract["name"] == "orange_mono_pynvvc_luma_uint8_v1"
+    np.testing.assert_array_equal(batch[0], np.full((3, 5), 2, dtype=np.uint8))
+    np.testing.assert_array_equal(batch[1], np.full((3, 5), 4, dtype=np.uint8))
+    source.close()
 
 
 def test_crop_image_source_builds_and_reuses_temporary_roi_cache(tmp_path: Path) -> None:
