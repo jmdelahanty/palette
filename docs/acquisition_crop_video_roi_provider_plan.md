@@ -55,6 +55,33 @@ This plan complements:
   `crop_runs`, plus keypoint/refined-keypoint and subject-mask/refined-subject
   mask surfaces.
 
+### Orange Crop Metadata Clarification On 2026-06-29
+
+Orange's external crop metadata carries both crop-window geometry and selected
+live detection geometry:
+
+- `crop_x,crop_y,crop_w,crop_h` are the actual clamped full-frame source ROI
+  copied into the crop video. They are canonical crop-window geometry, not fish
+  bboxes.
+- `detection_x,detection_y,detection_w,detection_h` are the single selected
+  postprocessed live detection used to center the crop when
+  `has_detection=true`. They are useful provenance, but not the full live
+  detection stream and not proof of full-fish crop containment.
+- `has_detection=false` and `blank_frame=true` means Orange encoded an explicit
+  blank crop frame. The default zero `crop_*` fields on those rows must be
+  treated as invalid crop geometry.
+- If `Cam<serial>_yolo_events.jsonl` is present, its `detections[]` rows are
+  the preferred source for an imported Orange live-detection run. Crop-meta
+  `detection_*` is only the selected crop-controller bbox.
+
+The Palette consequence is:
+
+- build analysis `crop_runs` from `crop_*`
+- run crop-sufficiency checks against offline refined detections
+- import `yolo_events` or crop-meta `detection_*` as a separate online
+  detection run only when online-vs-offline bbox quality is explicitly needed
+- never run normal detection quality on `crop_*` crop-window geometry
+
 ### Gap
 
 There is no direct, validated cluster path that says:
@@ -240,12 +267,41 @@ contract.
   analysis `crop_runs`.
 - [x] Verify RedScare training Zarrs already have acquisition crop-video-backed
   materialized crop runs and downstream review surfaces.
-- [ ] Add a registry/report command that summarizes, per recording:
+- [x] Add a registry/report command that summarizes, per recording:
   acquisition crop stream available, analysis crop run present, training crop
   run present, crop-video-backed keypoints present, and offline detection
   coverage.
-- [ ] Identify recordings where crop video dimensions are large enough for the
+- [x] Identify recordings where crop video dimensions are large enough for the
   current keypoint/subject-mask model input policy.
+- [x] Clarify Orange crop-meta semantics for crop-window geometry versus
+  selected live detection bbox geometry.
+
+Phase 0 RedScare report command:
+
+```bash
+scripts/py -m fisheye.utils.report_acquisition_crop_video_roi_readiness \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --path-contains RedScare \
+  --output-jsonl /tmp/redscare_acquisition_crop_video_roi_readiness_20260629.jsonl \
+  --limit 40
+```
+
+Observed Phase 0 result:
+
+- 28/28 RedScare recordings have analysis and training Zarr rows.
+- 28/28 analysis Zarrs have acquisition crop-video stream inventory.
+- 28/28 crop videos and crop-meta CSVs are present.
+- 28/28 crop videos meet the current `384x384 >= 348` size policy.
+- 28/28 analysis Zarrs have offline detect and refined-detect surfaces.
+- 28/28 training Zarrs have crop/keypoint/refined-keypoint/subject-mask/refined
+  subject-mask review surfaces.
+- 0/28 analysis Zarrs have analysis `crop_runs`.
+
+Uniform next action from the report:
+
+```text
+build_analysis_acquisition_crop_run
+```
 
 ### Phase 1: Analysis Crop-Run Builder
 
@@ -254,6 +310,10 @@ contract.
 - [ ] The builder must reject or mark rows with `blank_frame=true`,
   `has_detection=false`, non-finite crop geometry, or crop-video frame-index
   gaps.
+- [ ] Use `crop_x,crop_y,crop_w,crop_h` as canonical crop-window geometry.
+  Do not treat those fields as fish bboxes.
+- [ ] Preserve `detection_x,detection_y,detection_w,detection_h` separately as
+  selected live detection provenance when present.
 - [ ] Write row arrays for crop-video frame indices, crop-meta row indices,
   source crop geometry, and full-frame placement.
 - [ ] Use canonical `bbox_norm_coords` only for full-frame-normalized boxes.

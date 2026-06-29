@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-06-25
+last_verified: 2026-06-29
 -->
 
 ## Principle
@@ -36,6 +36,64 @@ other stream facts when available.
 Future work may also mirror per-frame crop metadata arrays from the crop-meta
 CSV into the analysis zarr. Those arrays should still be treated as acquisition
 media metadata, not as proof that any model stage consumed crop-video pixels.
+
+## Orange External Crop Metadata Contract
+
+As clarified by the Orange writer/code review on 2026-06-29, the external crop
+recorder metadata has two different geometry concepts that must not be
+collapsed:
+
+```text
+crop_x, crop_y, crop_w, crop_h
+detection_x, detection_y, detection_w, detection_h
+```
+
+`crop_x`, `crop_y`, `crop_w`, and `crop_h` are the canonical crop-window
+geometry for the encoded crop video frame. They are `xywh` in full-frame camera
+pixels, top-left origin, x right, y down, zero-based, and represent the actual
+clamped source ROI copied into the crop video. These fields are not fish
+bounding boxes.
+
+`detection_x`, `detection_y`, `detection_w`, and `detection_h` are the selected
+live model detection that drove the crop controller when `has_detection=1`.
+They are also `xywh` in full-frame camera pixels, but they are only the selected
+postprocessed detection, not the full live detection history, not ground truth,
+and not proof that the full fish is inside the crop.
+
+If `Cam<serial>_yolo_events.jsonl` is available, its `detections[]` rows are
+the preferred source for canonical Orange live model detections because they
+can contain all recorded live detections and status/provenance fields. If only
+`Cam<serial>_crop_meta.csv` is available, `detection_*` may be imported as the
+selected live bbox provenance stream, but crop-video sufficiency should still be
+evaluated against offline refined detections.
+
+For no-detection crop frames, Orange writes an explicit blank/black crop video
+frame. These rows are identified by:
+
+```text
+has_detection = 0
+blank_frame = 1
+```
+
+On those rows, `crop_*` default zero values must not be treated as a meaningful
+top-left source crop. Consumers should classify them as blank no-detection crop
+frames and either skip them or recover pixels from the full-frame video using
+offline detection geometry.
+
+Frame alignment rules:
+
+- crop-video frame index is the zero-based row order in `crop_meta.csv`
+- `recording_frame_id` is one-based during active recording
+- when rows are continuous, `crop_video_frame_index = recording_frame_id - 1`
+- `local_frame_id` is Orange's acquisition-thread local frame id and is
+  provenance, not a crop-video frame index unless a source contract explicitly
+  says they are identical
+- `camera_frame_id` is source-native and its index base is not guaranteed
+
+Current Orange crop videos are luma source crops: Mono8 crop buffers are encoded
+as NV12/HEVC MP4 by filling the Y plane with crop pixels and chroma with 128.
+They are acquisition ROI pixels, not RGB visualization exports and not the raw
+YOLO tensor preprocessing surface.
 
 ## Downstream Run Source Selection
 
@@ -127,10 +185,29 @@ bbox_roi_xyxy
 bbox_norm_coords
 bbox_crop_norm_coords
 realtime_detection_bbox_roi_xyxy
+selected_live_detection_bbox_img_xyxy
+selected_live_detection_bbox_norm_coords
 offline_center_inside_crop
 offline_bbox_inside_crop
 margin_to_crop_edge
+crop_state
+crop_sufficiency_status
 ```
+
+For acquisition crop videos, `crop_state` should use explicit values such as:
+
+```text
+detected_crop
+blank_no_detection
+missing_or_dropped
+```
+
+Normal detection-quality metrics should run on canonical detection streams
+(`detect_runs`, `refined_detect_runs`, or an explicitly imported Orange live
+detection run). They should not run on `crop_*` geometry. Crop videos need a
+separate crop-sufficiency comparison against offline detections, including
+whether the offline center/bbox lies inside the crop window and how close it is
+to the crop edge.
 
 ## Allowed Mixed State
 
