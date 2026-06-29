@@ -305,23 +305,93 @@ build_analysis_acquisition_crop_run
 
 ### Phase 1: Analysis Crop-Run Builder
 
-- [ ] Add a dry-run-first tool that builds an analysis `crop_runs/<run>` rowset
+- [x] Add a dry-run-first tool that builds an analysis `crop_runs/<run>` rowset
   from acquisition crop metadata without writing `roi_images`.
-- [ ] The builder must reject or mark rows with `blank_frame=true`,
+- [x] The builder must reject or mark rows with `blank_frame=true`,
   `has_detection=false`, non-finite crop geometry, or crop-video frame-index
   gaps.
-- [ ] Use `crop_x,crop_y,crop_w,crop_h` as canonical crop-window geometry.
+- [x] Use `crop_x,crop_y,crop_w,crop_h` as canonical crop-window geometry.
   Do not treat those fields as fish bboxes.
-- [ ] Preserve `detection_x,detection_y,detection_w,detection_h` separately as
+- [x] Preserve `detection_x,detection_y,detection_w,detection_h` separately as
   selected live detection provenance when present.
-- [ ] Write row arrays for crop-video frame indices, crop-meta row indices,
+- [x] Write row arrays for crop-video frame indices, crop-meta row indices,
   source crop geometry, and full-frame placement.
-- [ ] Use canonical `bbox_norm_coords` only for full-frame-normalized boxes.
+- [x] Use canonical `bbox_norm_coords` only for full-frame-normalized boxes.
   Keep crop-frame-normalized boxes under `bbox_crop_norm_coords`.
-- [ ] Mark the run as `crop_storage_mode=geometry_only`.
-- [ ] Record source video, crop video, crop metadata, decode backend, source
-  dimensions, and crop-coordinate semantics in attrs/provenance.
+- [x] Mark the run as `crop_storage_mode=geometry_only`.
+- [x] Record source video, crop video, crop metadata, pixel-provider identity,
+  source dimensions, and crop-coordinate semantics in attrs/provenance.
 - [ ] Refresh registry crop quality/status after apply.
+
+Implemented builder:
+
+```bash
+scripts/py -m fisheye.utils.build_analysis_acquisition_crop_run
+```
+
+RedScare registry dry-run on 2026-06-29:
+
+```bash
+scripts/py -m fisheye.utils.build_analysis_acquisition_crop_run \
+  --source registry \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --path-contains RedScare \
+  --output-jsonl /tmp/redscare_build_analysis_acquisition_crop_run_dryrun_20260629.jsonl
+```
+
+Dry-run result:
+
+```text
+records: 28
+applied: False
+selected_rows_total: 3,870,334
+rejected_blank_crop_frame_total: 39,302
+rejected_crop_has_no_detection_total: 0
+rejected_nonfinite_crop_geometry_total: 0
+rejected_nonfinite_detection_geometry_total: 0
+source_shape: 4512x4512 for all 28 recordings
+```
+
+The builder writes `source_pixel_kind_codes` and `crop_state_codes` integer
+arrays with attrs maps rather than variable-length string arrays.
+
+Approved RedScare registry apply on 2026-06-29:
+
+```bash
+scripts/py -m fisheye.utils.build_analysis_acquisition_crop_run \
+  --source registry \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --path-contains RedScare \
+  --run-name crop_acquisition_crop_video_analysis_redscare_20260629_01 \
+  --output-jsonl /tmp/redscare_build_analysis_acquisition_crop_run_apply_20260629.jsonl \
+  --apply
+```
+
+Apply result:
+
+```text
+records: 28
+applied: True
+selected_rows_total: 3,870,334
+rejected_blank_crop_frame_total: 39,302
+rejected_crop_has_no_detection_total: 0
+rejected_nonfinite_crop_geometry_total: 0
+rejected_nonfinite_detection_geometry_total: 0
+run_name: crop_acquisition_crop_video_analysis_redscare_20260629_01
+```
+
+Post-apply readiness report moved all 28 RedScare recordings to:
+
+```text
+run_analysis_keypoints_from_roi_provider
+```
+
+Spot-check on `2026-06-23T16-01-09Z_arena_1_RedScare` confirmed
+`crop_runs.latest_any = crop_acquisition_crop_video_analysis_redscare_20260629_01`,
+`crop_storage_mode=geometry_only`, `source_pixels=acquisition_crop_video`, and
+`palette_run_completion_status=complete`. `latest` and `latest_materialized`
+remain unset for this analysis crop parent because the new run has no
+materialized `roi_images`.
 
 ### Phase 2: Acquisition Crop-Video Pixel Provider
 
@@ -330,6 +400,8 @@ build_analysis_acquisition_crop_run
 - [ ] Implement provider mode `acquisition_crop_video`.
 - [ ] Decode selected crop-video frames using
   `source_crop_video_frame_indices`, not Orange local frame IDs.
+- [ ] Process acquisition crop-video rows as provider-local batches, not by
+  switching decoders row-by-row inside model inference.
 - [ ] Validate decoded frame dimensions against crop-run `roi_size` and crop
   stream metadata.
 - [ ] Return the same tensor/image shape expected by current keypoint and
@@ -348,7 +420,12 @@ build_analysis_acquisition_crop_run
   inside a valid dish/ROI policy.
 - [ ] Add `offline_recovered_full_frame_crop` rows using full-frame refined
   detection geometry.
-- [ ] Materialize recovered rows into a temporary flat ROI cache by default.
+- [ ] Pre-stage recovered rows into a temporary flat ROI cache before model
+  inference by decoding the full-frame source video sequentially and cropping
+  only recovery frames.
+- [ ] Prefer node-local scratch for the recovery cache in cluster jobs; publish
+  only downstream model outputs and cache manifests unless the user explicitly
+  requests persistent recovered crop pixels.
 - [ ] Record recovery source refined-detect run, row ids, source video
   fingerprint, crop policy, and cache manifest.
 - [ ] Ensure recovered rows produce the same downstream coordinate contract as
@@ -359,11 +436,37 @@ build_analysis_acquisition_crop_run
 - [ ] Build one logical crop run that combines acquisition crop rows and
   recovered rows.
 - [ ] Add `source_pixel_kind` and per-kind row counts to run attrs and summary.
+- [ ] Classify rows before inference into provider groups:
+  `acquisition_crop_video`, `offline_recovered_full_frame_crop`, and
+  `missing_unrecoverable`.
+- [ ] Run inference by provider block:
+  acquisition crop-video rows from the crop MP4, recovered rows from the staged
+  flat cache, then merge predictions back into canonical crop-run row order.
 - [ ] Ensure keypoint and subject-mask inference can read mixed rows without
-  reordering or dropping source row identity.
+  reordering or dropping source row identity by writing explicit
+  `source_crop_row_ids` / crop-run row ids in outputs.
 - [ ] Fail clearly if a row's declared provider cannot produce pixels.
 - [ ] Add a smoke test where some rows are served from crop video and some rows
   from recovered full-frame crops.
+
+Decoder scheduling rule:
+
+Do not alternate between crop-video decoding and full-frame decoding inside the
+same tight model-inference row loop. That would force decoder seeks/context
+switching and make the stage slow. The intended execution is:
+
+1. Build the crop-run rowset and classify row provider kind.
+2. If recovered rows exist, build their temporary flat cache first from a
+   sequential full-frame decode pass.
+3. Run acquisition crop-video rows as a crop-MP4 provider block.
+4. Run recovered rows from the flat cache provider block.
+5. Merge outputs by crop-run row id so downstream contracts stay row-stable.
+
+For the initial RedScare analysis crop runs created on 2026-06-29, the crop run
+contains only usable acquisition crop-video rows. Blank rows were excluded, so
+the first implementation can be crop-video-provider-only. The recovery/hybrid
+path is the next extension when we intentionally add offline-recovered rows for
+blank/insufficient crop-video frames.
 
 ### Phase 5: Cluster Integration
 
