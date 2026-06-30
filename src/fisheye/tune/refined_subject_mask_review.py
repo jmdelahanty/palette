@@ -232,6 +232,43 @@ class _MaskStoreArray:
         return dense
 
 
+class _RefinedSubjectComponentMaskArray:
+    """Array-like single-channel source view over a refined-subject component."""
+
+    dtype = np.dtype(np.uint8)
+
+    def __init__(self, masks_roi: Any, component_index: int) -> None:
+        self._masks_roi = masks_roi
+        self._component_index = int(component_index)
+        self.shape = (
+            int(masks_roi.shape[0]),
+            1,
+            int(masks_roi.shape[2]),
+            int(masks_roi.shape[3]),
+        )
+
+    def __getitem__(self, key: object) -> np.ndarray:
+        if isinstance(key, tuple):
+            if len(key) > 4:
+                raise IndexError("too many indices for refined-subject component source")
+            normalized = key + (slice(None),) * (4 - len(key))
+        else:
+            normalized = (key, slice(None), slice(None), slice(None))
+        row_key, channel_key, y_key, x_key = normalized
+        row_scalar = isinstance(row_key, (int, np.integer))
+        channel_scalar = isinstance(channel_key, (int, np.integer))
+        if channel_scalar and int(channel_key) != 0:
+            raise IndexError("refined-subject component source has one channel")
+        dense = np.asarray(self._masks_roi[row_key, self._component_index, y_key, x_key], dtype=np.uint8)
+        if row_scalar and channel_scalar:
+            return dense
+        if row_scalar:
+            return dense.reshape((1, *dense.shape[-2:]))
+        if channel_scalar:
+            return dense
+        return dense[:, np.newaxis, ...]
+
+
 @dataclass(frozen=True)
 class RefinedSubjectMaskRun:
     run_name: str
@@ -1414,6 +1451,84 @@ def _load_refined_eye_mask_source(root: zarr.Group, refined_eye_run: Optional[st
     )
 
 
+def _load_refined_subject_component_source(
+    root: zarr.Group,
+    refined_run: str,
+    component_name: str,
+) -> SourceSubjectMaskRun:
+    refined = _open_existing_refined_subject_run(root, refined_run)
+    if component_name not in refined.component_to_index:
+        raise RuntimeError(
+            f"refined_subject_masks_runs/{refined_run} does not contain component {component_name!r}."
+        )
+    masks_roi = refined.group.get("masks_roi")
+    if masks_roi is None:
+        raise RuntimeError(f"refined_subject_masks_runs/{refined_run} missing masks_roi.")
+    crop_run = str(refined.group.attrs.get("source_crop_run") or "")
+    if not crop_run:
+        crop_parent = root.get("crop_runs")
+        crop_run = _resolve_latest_run(crop_parent, "crop_runs")
+    crop_group = root.get(f"crop_runs/{crop_run}") if crop_run else None
+    source_crop_snapshot = build_source_crop_snapshot_attrs(
+        crop_group.attrs if crop_group is not None else None,
+        source_crop_storage_mode=(
+            crop_group.attrs.get("crop_storage_mode")
+            if crop_group is not None
+            else None
+        ),
+    )
+    return SourceSubjectMaskRun(
+        run_name=str(refined_run),
+        group=refined.group,
+        crop_run=crop_run,
+        source_crop_snapshot=source_crop_snapshot,
+        masks_roi=_RefinedSubjectComponentMaskArray(masks_roi, int(refined.component_to_index[component_name])),
+        detection_source=refined.group.get("detection_source"),
+        mask_labels=(str(component_name),),
+        available_channels=np.ones((1,), dtype=bool),
+        frame_indices=_resolve_source_lineage_array(root, source_group=refined.group, source_crop_run=crop_run, array_name="frame_indices"),
+        frame_counts=_resolve_source_lineage_array(root, source_group=refined.group, source_crop_run=crop_run, array_name="frame_counts"),
+        detection_indices=_resolve_source_lineage_array(root, source_group=refined.group, source_crop_run=crop_run, array_name="detection_indices"),
+        source_method=str(refined.group.attrs.get("method")) if refined.group.attrs.get("method") is not None else None,
+        source_keypoints_run=resolve_source_keypoints_run(refined.group.attrs),
+        source_keypoint_group=(
+            str(refined.group.attrs.get("source_keypoint_group"))
+            if refined.group.attrs.get("source_keypoint_group") is not None
+            else None
+        ),
+        assignment_keypoints_run=(
+            str(resolve_assignment_keypoints_run(refined.group.attrs))
+            if resolve_assignment_keypoints_run(refined.group.attrs) is not None
+            else None
+        ),
+        assignment_keypoint_group=(
+            str(resolve_assignment_keypoint_group(refined.group.attrs))
+            if resolve_assignment_keypoint_group(refined.group.attrs) is not None
+            else None
+        ),
+        source_crop_row_ids=_resolve_source_lineage_array(
+            root,
+            source_group=refined.group,
+            source_crop_run=crop_run,
+            array_name="source_crop_row_ids",
+        ),
+        source_refined_row_ids=_resolve_source_lineage_array(
+            root,
+            source_group=refined.group,
+            source_crop_run=crop_run,
+            array_name="source_refined_row_ids",
+        ),
+        source_detect_row_index=_resolve_source_lineage_array(
+            root,
+            source_group=refined.group,
+            source_crop_run=crop_run,
+            array_name="source_detect_row_index",
+        ),
+        mask_surface_kind="refined_subject_component",
+        mask_surface_path=f"refined_subject_masks_runs/{refined_run}/masks_roi[{component_name}]",
+    )
+
+
 def _resolve_primary_source_subject_mask_run_name(refined_group: zarr.Group) -> Optional[str]:
     direct = refined_group.attrs.get("source_subject_mask_run")
     if direct is not None and str(direct).strip():
@@ -1479,6 +1594,18 @@ def _load_refined_component_source_runs(
                         resolved_source = primary_source
                     else:
                         raise
+                cache[cache_key] = resolved_source
+        elif source_run and source_stage == "refined_subject_masks_runs":
+            source_component = str(
+                provenance_group.attrs.get("source_component")
+                or provenance_group.attrs.get("source_channel")
+                or component_name
+            ) if provenance_group is not None else component_name
+            cache_key = f"refined_subject_masks_runs/{source_run}:{source_component}"
+            if cache_key in cache:
+                resolved_source = cache[cache_key]
+            else:
+                resolved_source = _load_refined_subject_component_source(root, source_run, source_component)
                 cache[cache_key] = resolved_source
         elif source_run and source_stage and source_stage != "subject_mask_runs":
             # Editing still operates against a coarse subject_mask_runs source even
