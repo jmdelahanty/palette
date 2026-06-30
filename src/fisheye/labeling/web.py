@@ -35,20 +35,83 @@ from .assignment_store import (
     LabelingStore,
     default_store_path,
 )
+from .admin_registry import (
+    REGISTRY_PATH_ENV_VAR,
+    _admin_compact_task,
+    _admin_dataset_export_csv,
+    _admin_dataset_export_rows,
+    _admin_registry_lookup,
+    _admin_registry_path_from_env,
+    _admin_registry_summary,
+    _admin_registry_warnings_for_recording,
+    _admin_task_state_counts,
+    _admin_workflow_counts,
+    _task_title,
+)
+from .web_auth import (
+    DASHBOARD_PATH,
+    DATASET_QUEUE_PATH,
+    PERSONAL_DATASET_QUEUE_PATH,
+    SIGNED_INVITE_COOKIE_NAME,
+    SIGNED_INVITE_SCOPE_PERSONAL_QUEUE,
+    _b64url_decode,
+    _cookie_value,
+    _dashboard_url_for_expected_user,
+    _dataset_queue_url_for_base,
+    _dataset_queue_url_for_dashboard,
+    _expected_user_query_value_from_url,
+    _invite_query_token_from_request,
+    _invite_token_from_request,
+    _is_admin_user,
+    _personal_dataset_queue_url_for_base,
+    _personal_dataset_queue_url_for_dashboard,
+    _resolve_invite_user,
+    _resolve_user,
+    _signed_task_link_revocation_reason,
+    _utc_timestamp,
+    _verify_signed_invite_token,
+)
+from .notification_events import (
+    _notification_config_from_values,
+    _notification_event_type,
+    _notification_exception_result,
+    _request_truthy,
+)
+from .notifications import (
+    NOTIFICATION_MODES,
+    send_assignment_available_notification,
+    send_labeler_added_notification,
+)
+from .report_io import (
+    _csv_export_value,
+    _print_json,
+    _write_optional_json_report,
+    _write_row_export,
+)
+from .task_generation import (
+    _detect_review_status_for_zarr,
+    _keypoint_review_status_for_zarr,
+    _read_zarr_attrs,
+    _registry_path_from_arg,
+    _safe_task_id,
+    _task_generation_cli_payload,
+    _zarr_child_group_exists,
+    _zarr_child_path_exists,
+    generate_detect_analysis_tasks_from_registry,
+    generate_detect_training_tasks_from_registry,
+    generate_keypoint_tasks_from_registry,
+    generate_subject_mask_component_tasks_from_registry,
+)
 
 
 LINK_SECRET_ENV_VAR = "PALETTE_LABELING_LINK_SECRET"
 LINK_NOT_BEFORE_ENV_VAR = "PALETTE_LABELING_LINK_NOT_BEFORE_UTC"
-REGISTRY_PATH_ENV_VAR = "PALETTE_REGISTRY_PATH"
 DATASET_QUEUE_PATH = "/datasets"
 LABELING_HOME_PATH = "/labeling"
 DASHBOARD_PATH = "/work"
 PERSONAL_DATASET_QUEUE_PATH = "/my-datasets"
 PERSONAL_WORK_PATH = "/my-work"
-SIGNED_INVITE_SCOPE_PERSONAL_QUEUE = "personal_queue"
 SIGNED_INVITE_DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60
-SIGNED_INVITE_COOKIE_NAME = "palette_labeling_invite"
-
 
 @dataclass(frozen=True)
 class ServerConfig:
@@ -167,6 +230,11 @@ class SubjectMaskRuntimeSession:
     auto_advance_on_save: bool = False
     target_token: str | None = None
     target_token_position: int | None = None
+    component_source_stage: str = ""
+    component_source_run: str = ""
+    component_source_component: str = ""
+    component_source_resolution: str = ""
+    component_source_seed_masks_present: bool = False
 
 
 def _json_response(payload: object, *, status: HTTPStatus = HTTPStatus.OK) -> tuple[bytes, HTTPStatus, str]:
@@ -869,26 +937,6 @@ def _is_loopback_host(host: str) -> bool:
     return str(host).strip().lower() in {"127.0.0.1", "localhost", "::1", "[::1]"}
 
 
-def _resolve_user(handler: BaseHTTPRequestHandler, config: ServerConfig) -> tuple[str | None, str]:
-    invite_user, invite_source = _resolve_invite_user(handler, config)
-    if invite_source:
-        return invite_user, invite_source
-    if config.fixed_user:
-        return config.fixed_user, "fixed"
-    if not config.trust_auth_header:
-        return None, "auth_header_not_trusted"
-    header_value = handler.headers.get(config.auth_header)
-    if header_value:
-        user = header_value.strip()
-        if user:
-            return user, f"header:{config.auth_header}"
-    return None, f"missing_header:{config.auth_header}"
-
-
-def _is_admin_user(user: str | None, config: ServerConfig) -> bool:
-    if not user:
-        return False
-    return str(user) in {str(item) for item in config.admin_users}
 
 
 def _request_has_same_origin(handler: BaseHTTPRequestHandler) -> bool:
@@ -907,19 +955,6 @@ def _request_has_same_origin(handler: BaseHTTPRequestHandler) -> bool:
             return False
     return True
 
-
-def _task_title(task: Mapping[str, object]) -> str:
-    title = str(task.get("title") or "").strip()
-    if title:
-        return title
-    bits = [str(task.get("workflow_kind") or "task")]
-    component = task.get("component_name")
-    if component:
-        bits.append(str(component))
-    run_name = task.get("run_name")
-    if run_name:
-        bits.append(str(run_name))
-    return " / ".join(bits)
 
 
 def _bool_from_scope(scope: Mapping[str, object], key: str, default: bool = False) -> bool:
@@ -1849,18 +1884,9 @@ def _labeler_read_authorization_denial_metadata(
     return payload
 
 
-def _safe_task_id(*parts: object) -> str:
-    raw = ":".join(str(part) for part in parts if part is not None)
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"palette-labeling:{raw}"))
-
-
 def _b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
-
-def _b64url_decode(data: str) -> bytes:
-    padding = "=" * (-len(data) % 4)
-    return base64.urlsafe_b64decode((data + padding).encode("ascii"))
 
 
 def _effective_signed_link_ttl_seconds(ttl_seconds: int) -> int:
@@ -1972,29 +1998,6 @@ def _signed_invite_token(
     )
 
 
-def _verify_signed_invite_token(token: str, *, secret: str) -> dict[str, object]:
-    parts = str(token or "").split(".", 1)
-    if len(parts) != 2:
-        raise ValueError("Malformed signed invite token.")
-    payload_bytes = _b64url_decode(parts[0])
-    expected = hmac.new(str(secret).encode("utf-8"), payload_bytes, hashlib.sha256).digest()
-    provided = _b64url_decode(parts[1])
-    if not hmac.compare_digest(expected, provided):
-        raise ValueError("Invalid signed invite token.")
-    payload = json.loads(payload_bytes.decode("utf-8"))
-    if not isinstance(payload, dict) or int(payload.get("v") or 0) != 1:
-        raise ValueError("Unsupported signed invite token.")
-    if str(payload.get("kind") or "") != "labeler_invite":
-        raise ValueError("Signed token is not a labeler invite.")
-    if str(payload.get("scope") or "") != SIGNED_INVITE_SCOPE_PERSONAL_QUEUE:
-        raise ValueError("Signed invite token has unsupported scope.")
-    if int(payload.get("exp") or 0) < int(time.time()):
-        raise ValueError("Signed invite token has expired.")
-    user = str(payload.get("user") or "").strip()
-    if not user:
-        raise ValueError("Signed invite token is missing user.")
-    return payload
-
 
 def _signed_invite_path(token: str, *, user: str) -> str:
     return (
@@ -2004,29 +2007,7 @@ def _signed_invite_path(token: str, *, user: str) -> str:
     )
 
 
-def _invite_query_token_from_request(handler: BaseHTTPRequestHandler) -> str:
-    query = parse_qs(urlparse(handler.path).query, keep_blank_values=True)
-    return str((query.get("invite") or [""])[-1]).strip()
 
-
-def _cookie_value(handler: BaseHTTPRequestHandler, name: str) -> str:
-    cookie_header = str(handler.headers.get("Cookie") or "")
-    if not cookie_header:
-        return ""
-    for raw_part in cookie_header.split(";"):
-        if "=" not in raw_part:
-            continue
-        key, value = raw_part.split("=", 1)
-        if key.strip() == name:
-            return value.strip()
-    return ""
-
-
-def _invite_token_from_request(handler: BaseHTTPRequestHandler) -> str:
-    query_token = _invite_query_token_from_request(handler)
-    if query_token:
-        return query_token
-    return _cookie_value(handler, SIGNED_INVITE_COOKIE_NAME)
 
 
 def _invite_cookie_header_from_query(handler: BaseHTTPRequestHandler, config: ServerConfig) -> str | None:
@@ -2049,29 +2030,6 @@ def _invite_cookie_header_from_query(handler: BaseHTTPRequestHandler, config: Se
     return f"{SIGNED_INVITE_COOKIE_NAME}={token}; Max-Age={max_age}; Path=/; HttpOnly; SameSite=Lax"
 
 
-def _resolve_invite_user(handler: BaseHTTPRequestHandler, config: ServerConfig) -> tuple[str | None, str | None]:
-    token = _invite_token_from_request(handler)
-    if not token:
-        return None, None
-    if not config.link_secret:
-        return None, "signed_invites_disabled"
-    try:
-        payload = _verify_signed_invite_token(token, secret=config.link_secret)
-        revocation_reason = _signed_task_link_revocation_reason(
-            payload,
-            not_before_utc=config.link_not_before_utc,
-        )
-        if revocation_reason:
-            return None, revocation_reason
-        invite_user = str(payload.get("user") or "").strip()
-        query = parse_qs(urlparse(handler.path).query, keep_blank_values=True)
-        expected_user = str((query.get("expected_user") or [""])[-1]).strip()
-        if expected_user and expected_user != invite_user:
-            return None, "invite_expected_user_mismatch"
-        return invite_user, f"invite:{payload.get('scope') or SIGNED_INVITE_SCOPE_PERSONAL_QUEUE}"
-    except Exception as exc:
-        return None, f"invite_error:{type(exc).__name__}"
-
 
 def _verify_signed_task_link_token(token: str, *, secret: str) -> dict[str, object]:
     parts = str(token or "").split(".", 1)
@@ -2093,37 +2051,6 @@ def _verify_signed_task_link_token(token: str, *, secret: str) -> dict[str, obje
     return payload
 
 
-def _utc_timestamp(value: str | int | float | None) -> int | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    try:
-        return int(float(text))
-    except ValueError:
-        pass
-    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
-    parsed = datetime.fromisoformat(normalized)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return int(parsed.timestamp())
-
-
-def _signed_task_link_revocation_reason(payload: Mapping[str, object], *, not_before_utc: str | None) -> str | None:
-    floor = _utc_timestamp(not_before_utc)
-    if floor is None:
-        return None
-    issued_at = payload.get("iat")
-    if issued_at is None:
-        return "Signed link was created before issuance timestamps were recorded."
-    try:
-        issued_at_unix = int(float(str(issued_at)))
-    except ValueError:
-        return "Signed link has an invalid issuance timestamp."
-    if issued_at_unix < floor:
-        return "Signed link was created before the configured not-before timestamp."
-    return None
 
 
 def _next_browser_nav_position(*, current_position: int, total: int, body: Mapping[str, object]) -> int:
@@ -2500,650 +2427,6 @@ def _admin_promotion_retry_preflight_error(
             },
         ),
         status,
-    )
-
-
-def _zarr_child_group_exists(zarr_path: object, child: str) -> bool:
-    if not zarr_path:
-        return False
-    child_path = Path(str(zarr_path)).expanduser() / child
-    if not child_path.is_dir():
-        return False
-    if (child_path / "zarr.json").exists() or (child_path / ".zgroup").exists():
-        return True
-    try:
-        next(child_path.iterdir())
-    except StopIteration:
-        return False
-    except OSError:
-        return False
-    return True
-
-
-def _zarr_child_path_exists(zarr_path: object, child: str) -> bool:
-    if not zarr_path:
-        return False
-    child_path = Path(str(zarr_path)).expanduser() / child
-    return child_path.exists()
-
-
-def _read_zarr_attrs(path: Path) -> dict[str, object]:
-    try:
-        data = json.loads((path / "zarr.json").read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    attrs = data.get("attributes")
-    return dict(attrs) if isinstance(attrs, Mapping) else {}
-
-
-def _keypoint_review_status_for_zarr(zarr_path: object) -> dict[str, object]:
-    if not zarr_path:
-        return {"approved": False, "reason": "missing_zarr_path"}
-    refined_parent = Path(str(zarr_path)).expanduser() / "refined_keypoints_runs"
-    parent_attrs = _read_zarr_attrs(refined_parent)
-    candidate_names: list[str] = []
-    for key in ("keypoint_review_status_latest", "latest"):
-        value = parent_attrs.get(key)
-        if value is not None and str(value).strip():
-            candidate_names.append(str(value).strip())
-    if not candidate_names:
-        try:
-            candidate_names = sorted(path.name for path in refined_parent.iterdir() if path.is_dir())
-        except OSError:
-            candidate_names = []
-    for run_name in dict.fromkeys(candidate_names):
-        run_attrs = _read_zarr_attrs(refined_parent / run_name)
-        status = run_attrs.get("keypoint_review_status")
-        if not isinstance(status, Mapping):
-            continue
-        state = str(status.get("state") or "").strip().lower()
-        intended_use = str(status.get("intended_use") or "").strip().lower()
-        approved = state == "approved" and (not intended_use or intended_use == "training")
-        return {
-            "approved": approved,
-            "review_state": state or None,
-            "review_intended_use": intended_use or None,
-            "review_run": run_name,
-            "review_status": dict(status),
-            "reason": "approved" if approved else "not_approved",
-        }
-    return {
-        "approved": False,
-        "review_state": None,
-        "review_intended_use": None,
-        "review_run": candidate_names[0] if candidate_names else None,
-        "review_status": None,
-        "reason": "no_keypoint_review_status",
-    }
-
-
-def _detect_review_status_for_zarr(zarr_path: object) -> dict[str, object]:
-    if not zarr_path:
-        return {"approved": False, "reason": "missing_zarr_path"}
-    refined_parent = Path(str(zarr_path)).expanduser() / "refined_detect_runs"
-    parent_attrs = _read_zarr_attrs(refined_parent)
-    candidate_names: list[str] = []
-    for key in ("detect_review_status_latest", "latest"):
-        value = parent_attrs.get(key)
-        if value is not None and str(value).strip():
-            candidate_names.append(str(value).strip())
-    if not candidate_names:
-        try:
-            candidate_names = sorted(path.name for path in refined_parent.iterdir() if path.is_dir())
-        except OSError:
-            candidate_names = []
-    for run_name in dict.fromkeys(candidate_names):
-        run_attrs = _read_zarr_attrs(refined_parent / run_name)
-        status = run_attrs.get("detect_review_status")
-        if not isinstance(status, Mapping):
-            continue
-        state = str(status.get("state") or "").strip().lower()
-        intended_use = str(status.get("intended_use") or "").strip().lower()
-        approved = state == "approved" and (not intended_use or intended_use == "training")
-        return {
-            "approved": approved,
-            "review_state": state or None,
-            "review_intended_use": intended_use or None,
-            "review_run": run_name,
-            "review_status": dict(status),
-            "reason": "approved" if approved else "not_approved",
-        }
-    return {
-        "approved": False,
-        "review_state": None,
-        "review_intended_use": None,
-        "review_run": candidate_names[0] if candidate_names else None,
-        "review_status": None,
-        "reason": "no_detect_review_status",
-    }
-
-
-def _registry_path_from_arg(raw: object | None) -> Path:
-    if raw is not None and str(raw).strip() and str(raw).strip() != "auto":
-        return Path(str(raw)).expanduser()
-    from fisheye.registry.db import RegistryPaths
-
-    return RegistryPaths.from_env(Path.cwd()).path.expanduser()
-
-
-def _query_training_datasets_for_recordings(
-    registry_path: Path,
-    recording_ids: Sequence[str],
-) -> list[dict[str, object]]:
-    recording_ids = [str(item) for item in recording_ids if str(item).strip()]
-    if not recording_ids:
-        return []
-    if not registry_path.expanduser().is_file():
-        raise FileNotFoundError(f"Registry SQLite path not found: {registry_path}")
-    conn = sqlite3.connect(str(registry_path.expanduser()))
-    conn.row_factory = sqlite3.Row
-    try:
-        placeholders = ",".join("?" for _ in recording_ids)
-        rows = conn.execute(
-            f"""
-            SELECT dataset_id, session_uuid, zarr_path, recording_id, zarr_origin,
-                   zarr_use, dataset_status AS status, source_layout, dish_design,
-                   COALESCE(subject_id, legacy_fish_id) AS fish_id,
-                   subject_id, camera_serial, fps
-            FROM dataset_context_current
-            WHERE recording_id IN ({placeholders})
-              AND zarr_use = 'training'
-              AND (dataset_status IS NULL OR dataset_status != 'missing')
-            ORDER BY recording_id, dataset_id
-            """,
-            recording_ids,
-        ).fetchall()
-    finally:
-        conn.close()
-    return [dict(row) for row in rows]
-
-
-def _query_analysis_datasets_for_recordings(
-    registry_path: Path,
-    recording_ids: Sequence[str],
-) -> list[dict[str, object]]:
-    recording_ids = [str(item) for item in recording_ids if str(item).strip()]
-    if not recording_ids:
-        return []
-    if not registry_path.expanduser().is_file():
-        raise FileNotFoundError(f"Registry SQLite path not found: {registry_path}")
-    conn = sqlite3.connect(str(registry_path.expanduser()))
-    conn.row_factory = sqlite3.Row
-    try:
-        placeholders = ",".join("?" for _ in recording_ids)
-        rows = conn.execute(
-            f"""
-            SELECT dataset_id, session_uuid, zarr_path, recording_id, zarr_origin,
-                   zarr_use, dataset_status AS status, source_layout, dish_design,
-                   COALESCE(subject_id, legacy_fish_id) AS fish_id,
-                   subject_id, camera_serial, fps
-            FROM dataset_context_current
-            WHERE recording_id IN ({placeholders})
-              AND zarr_use = 'analysis'
-              AND (dataset_status IS NULL OR dataset_status != 'missing')
-            ORDER BY recording_id, dataset_id
-            """,
-            recording_ids,
-        ).fetchall()
-    finally:
-        conn.close()
-    return [dict(row) for row in rows]
-
-
-def _query_subject_mask_components_for_recordings(
-    registry_path: Path,
-    recording_ids: Sequence[str],
-    *,
-    component_names: Sequence[str] | None = None,
-) -> list[dict[str, object]]:
-    recording_ids = [str(item) for item in recording_ids if str(item).strip()]
-    if not recording_ids:
-        return []
-    if not registry_path.expanduser().is_file():
-        raise FileNotFoundError(f"Registry SQLite path not found: {registry_path}")
-    component_names = [str(item).strip() for item in (component_names or ()) if str(item).strip()]
-    conn = sqlite3.connect(str(registry_path.expanduser()))
-    conn.row_factory = sqlite3.Row
-    try:
-        recording_placeholders = ",".join("?" for _ in recording_ids)
-        component_filter = ""
-        params: list[object] = list(recording_ids)
-        if component_names:
-            component_placeholders = ",".join("?" for _ in component_names)
-            component_filter = f" AND component_name IN ({component_placeholders})"
-            params.extend(component_names)
-        rows = conn.execute(
-            f"""
-            SELECT dataset_id, zarr_path, zarr_origin, zarr_use, dataset_status AS status,
-                   stage_group, run_name, component_name, component_family,
-                   run_created_utc, recording_id, subject_mask_method,
-                   label_schema_id, eye_component_mode, source_subject_mask_run,
-                   source_subject_mask_stale_state, source_subject_mask_stale_reason,
-                   available, review_state, review_method, review_intended_use,
-                   review_reviewer, review_timestamp_utc, total_rois,
-                   rows_with_component_mask, rows_with_component_mask_rate,
-                   lifecycle_state, lifecycle_reason, quality_updated_utc,
-                   quality_stale
-            FROM subject_mask_component_quality_latest
-            WHERE recording_id IN ({recording_placeholders})
-              AND zarr_use = 'training'
-              AND stage_group = 'refined_subject_masks_runs'
-              AND COALESCE(available, 0) = 1
-              AND (dataset_status IS NULL OR dataset_status != 'missing')
-              {component_filter}
-            ORDER BY recording_id, dataset_id, component_name, run_name
-            """,
-            params,
-        ).fetchall()
-    finally:
-        conn.close()
-    return [dict(row) for row in rows]
-
-
-def generate_keypoint_tasks_from_registry(
-    *,
-    store: LabelingStore,
-    registry_path: Path,
-    assignee_user: str | None = None,
-    recording_id: str | None = None,
-    review_filter: str = "needs_review",
-    priority: int = 0,
-    include_all: bool = False,
-    auto_advance_on_save: bool = True,
-) -> dict[str, object]:
-    assignments = store.list_assignments(assignee_user=assignee_user, status="active")
-    if recording_id:
-        assignments = [row for row in assignments if str(row.get("recording_id") or "") == str(recording_id)]
-    recording_ids = [str(row["recording_id"]) for row in assignments]
-    datasets = _query_training_datasets_for_recordings(registry_path, recording_ids)
-    generated: list[dict[str, object]] = []
-    skipped: list[dict[str, object]] = []
-    mode = str(review_filter or "needs_review").strip().lower()
-    assigned_by_recording = {str(row["recording_id"]): row for row in assignments}
-    for dataset in datasets:
-        dataset_recording_id = str(dataset.get("recording_id") or "")
-        zarr_path = dataset.get("zarr_path")
-        dataset_id = str(dataset.get("dataset_id") or "")
-        if dataset_recording_id not in assigned_by_recording:
-            skipped.append({"dataset_id": dataset_id, "reason": "recording_not_assigned"})
-            continue
-        if not _zarr_child_group_exists(zarr_path, "refined_keypoints_runs") or not _zarr_child_group_exists(zarr_path, "crop_runs"):
-            skipped.append({"dataset_id": dataset_id, "recording_id": dataset_recording_id, "reason": "not_keypoint_reviewable"})
-            continue
-        review_status = _keypoint_review_status_for_zarr(zarr_path)
-        if mode in {"needs_review", "unapproved", "not_approved"} and bool(review_status.get("approved")):
-            skipped.append({"dataset_id": dataset_id, "recording_id": dataset_recording_id, "reason": "already_approved"})
-            continue
-        if mode == "approved" and not bool(review_status.get("approved")):
-            skipped.append({"dataset_id": dataset_id, "recording_id": dataset_recording_id, "reason": "not_approved"})
-            continue
-        scope = {
-            "zarr_path": str(zarr_path),
-            "dataset_id": dataset_id,
-            "registry_path": str(registry_path),
-            "include_all": bool(include_all),
-            "filter_mode": "all" if include_all else "failed",
-            "review_method": "manual",
-            "review_intended_use": "training",
-            "auto_advance_on_save": bool(auto_advance_on_save),
-        }
-        if review_status.get("review_run"):
-            scope["refined_run"] = str(review_status["review_run"])
-        task = store.upsert_task(
-            task_id=_safe_task_id("keypoints", dataset_recording_id, dataset_id),
-            recording_id=dataset_recording_id,
-            workflow_kind="keypoints",
-            dataset_id=dataset_id,
-            zarr_use="training",
-            stage_group="refined_keypoints_runs",
-            run_name=str(review_status.get("review_run") or "") or None,
-            title=f"Review keypoints: {dataset_id}",
-            scope=scope,
-            state="pending",
-            priority=int(priority),
-            notes=f"Generated from registry {registry_path}",
-        )
-        generated.append({"task": task, "dataset": dataset, "review_status": review_status})
-    return {
-        "registry_path": str(registry_path),
-        "assignment_count": len(assignments),
-        "dataset_count": len(datasets),
-        "generated_count": len(generated),
-        "skipped_count": len(skipped),
-        "generated": generated,
-        "skipped": skipped,
-    }
-
-
-def generate_detect_training_tasks_from_registry(
-    *,
-    store: LabelingStore,
-    registry_path: Path,
-    assignee_user: str | None = None,
-    recording_id: str | None = None,
-    review_filter: str = "needs_review",
-    priority: int = 0,
-    include_all: bool = False,
-    auto_advance_on_save: bool = True,
-) -> dict[str, object]:
-    assignments = store.list_assignments(assignee_user=assignee_user, status="active")
-    if recording_id:
-        assignments = [row for row in assignments if str(row.get("recording_id") or "") == str(recording_id)]
-    recording_ids = [str(row["recording_id"]) for row in assignments]
-    datasets = _query_training_datasets_for_recordings(registry_path, recording_ids)
-    generated: list[dict[str, object]] = []
-    skipped: list[dict[str, object]] = []
-    mode = str(review_filter or "needs_review").strip().lower()
-    assigned_by_recording = {str(row["recording_id"]): row for row in assignments}
-    for dataset in datasets:
-        dataset_recording_id = str(dataset.get("recording_id") or "")
-        zarr_path = dataset.get("zarr_path")
-        dataset_id = str(dataset.get("dataset_id") or "")
-        if dataset_recording_id not in assigned_by_recording:
-            skipped.append({"dataset_id": dataset_id, "reason": "recording_not_assigned"})
-            continue
-        if not _zarr_child_group_exists(zarr_path, "refined_detect_runs") or not _zarr_child_path_exists(zarr_path, "raw_video/images_ds"):
-            skipped.append({"dataset_id": dataset_id, "recording_id": dataset_recording_id, "reason": "not_detect_training_reviewable"})
-            continue
-        review_status = _detect_review_status_for_zarr(zarr_path)
-        if mode in {"needs_review", "unapproved", "not_approved"} and bool(review_status.get("approved")):
-            skipped.append({"dataset_id": dataset_id, "recording_id": dataset_recording_id, "reason": "already_approved"})
-            continue
-        if mode == "approved" and not bool(review_status.get("approved")):
-            skipped.append({"dataset_id": dataset_id, "recording_id": dataset_recording_id, "reason": "not_approved"})
-            continue
-        scope = {
-            "zarr_path": str(zarr_path),
-            "dataset_id": dataset_id,
-            "registry_path": str(registry_path),
-            "include_all": bool(include_all),
-            "manual_score": 1.0,
-            "manual_class_id": 0,
-            "auto_advance_on_save": bool(auto_advance_on_save),
-        }
-        if review_status.get("review_run"):
-            scope["refined_run"] = str(review_status["review_run"])
-        task = store.upsert_task(
-            task_id=_safe_task_id("detect_training", dataset_recording_id, dataset_id),
-            recording_id=dataset_recording_id,
-            workflow_kind="detect_training",
-            dataset_id=dataset_id,
-            zarr_use="training",
-            stage_group="refined_detect_runs",
-            run_name=str(review_status.get("review_run") or "") or None,
-            title=f"Review detection boxes: {dataset_id}",
-            scope=scope,
-            state="pending",
-            priority=int(priority),
-            notes=f"Generated from registry {registry_path}",
-        )
-        generated.append({"task": task, "dataset": dataset, "review_status": review_status})
-    return {
-        "registry_path": str(registry_path),
-        "assignment_count": len(assignments),
-        "dataset_count": len(datasets),
-        "generated_count": len(generated),
-        "skipped_count": len(skipped),
-        "generated": generated,
-        "skipped": skipped,
-    }
-
-
-def generate_detect_analysis_tasks_from_registry(
-    *,
-    store: LabelingStore,
-    registry_path: Path,
-    assignee_user: str | None = None,
-    recording_id: str | None = None,
-    review_filter: str = "needs_review",
-    priority: int = 0,
-    editable: bool = False,
-    promote_training_zarr: str | None = None,
-    promote_target_crop_run: str | None = None,
-    promote_target_refined_run: str | None = None,
-    promote_label_origin: str = "palette_labeling_work",
-    promote_include_negative: bool = True,
-    promote_allow_unreviewed_negative: bool = False,
-    promote_target_size: tuple[int, int] | None = None,
-    auto_advance_on_save: bool = True,
-) -> dict[str, object]:
-    assignments = store.list_assignments(assignee_user=assignee_user, status="active")
-    if recording_id:
-        assignments = [row for row in assignments if str(row.get("recording_id") or "") == str(recording_id)]
-    recording_ids = [str(row["recording_id"]) for row in assignments]
-    datasets = _query_analysis_datasets_for_recordings(registry_path, recording_ids)
-    promote_mode = str(promote_training_zarr or "").strip()
-    training_dataset_by_recording: dict[str, dict[str, object]] = {}
-    if promote_mode == "auto":
-        training_datasets = _query_training_datasets_for_recordings(registry_path, recording_ids)
-        for training_dataset in training_datasets:
-            rid = str(training_dataset.get("recording_id") or "")
-            zarr_path = str(training_dataset.get("zarr_path") or "").strip()
-            if rid and zarr_path and rid not in training_dataset_by_recording:
-                training_dataset_by_recording[rid] = training_dataset
-    generated: list[dict[str, object]] = []
-    skipped: list[dict[str, object]] = []
-    mode = str(review_filter or "needs_review").strip().lower()
-    assigned_by_recording = {str(row["recording_id"]): row for row in assignments}
-    for dataset in datasets:
-        dataset_recording_id = str(dataset.get("recording_id") or "")
-        zarr_path = dataset.get("zarr_path")
-        dataset_id = str(dataset.get("dataset_id") or "")
-        if dataset_recording_id not in assigned_by_recording:
-            skipped.append({"dataset_id": dataset_id, "reason": "recording_not_assigned"})
-            continue
-        if not _zarr_child_group_exists(zarr_path, "refined_detect_runs"):
-            skipped.append({"dataset_id": dataset_id, "recording_id": dataset_recording_id, "reason": "not_detect_analysis_reviewable"})
-            continue
-        review_status = _detect_review_status_for_zarr(zarr_path)
-        if mode in {"needs_review", "unapproved", "not_approved"} and bool(review_status.get("approved")):
-            skipped.append({"dataset_id": dataset_id, "recording_id": dataset_recording_id, "reason": "already_approved"})
-            continue
-        if mode == "approved" and not bool(review_status.get("approved")):
-            skipped.append({"dataset_id": dataset_id, "recording_id": dataset_recording_id, "reason": "not_approved"})
-            continue
-        resolved_promotion_zarr: str | None = None
-        resolved_promotion_dataset_id: str | None = None
-        if promote_mode:
-            if promote_mode == "auto":
-                training_dataset = training_dataset_by_recording.get(dataset_recording_id)
-                resolved_promotion_zarr = str(training_dataset.get("zarr_path") or "").strip() if training_dataset else None
-                resolved_promotion_dataset_id = str(training_dataset.get("dataset_id") or "").strip() if training_dataset else None
-                if not resolved_promotion_zarr:
-                    skipped.append({"dataset_id": dataset_id, "recording_id": dataset_recording_id, "reason": "missing_training_zarr_for_promotion"})
-                    continue
-            else:
-                resolved_promotion_zarr = promote_mode
-        refined_parent_attrs = _read_zarr_attrs(Path(str(zarr_path)).expanduser() / "refined_detect_runs")
-        collection_id = str(refined_parent_attrs.get("latest_collection") or "").strip()
-        scope = {
-            "zarr_path": str(zarr_path),
-            "dataset_id": dataset_id,
-            "registry_path": str(registry_path),
-            "editable": bool(editable or resolved_promotion_zarr),
-            "manual_score": 1.0,
-            "manual_class_id": 0,
-            "auto_advance_on_save": bool(auto_advance_on_save),
-        }
-        if resolved_promotion_zarr:
-            scope["promote_training_zarr"] = resolved_promotion_zarr
-            if resolved_promotion_dataset_id:
-                scope["promote_training_dataset_id"] = resolved_promotion_dataset_id
-            scope["promote_label_origin"] = str(promote_label_origin or "palette_labeling_work")
-            scope["promote_include_negative"] = bool(promote_include_negative)
-            scope["promote_allow_unreviewed_negative"] = bool(promote_allow_unreviewed_negative)
-            if promote_target_crop_run:
-                scope["promote_target_crop_run"] = str(promote_target_crop_run)
-            if promote_target_refined_run:
-                scope["promote_target_refined_run"] = str(promote_target_refined_run)
-            if promote_target_size:
-                scope["promote_target_size"] = [int(promote_target_size[0]), int(promote_target_size[1])]
-        if collection_id:
-            scope["collection_id"] = collection_id
-        if review_status.get("review_run"):
-            scope["refined_run"] = str(review_status["review_run"])
-        task = store.upsert_task(
-            task_id=_safe_task_id("detect_analysis", dataset_recording_id, dataset_id),
-            recording_id=dataset_recording_id,
-            workflow_kind="detect_analysis",
-            dataset_id=dataset_id,
-            zarr_use="analysis",
-            stage_group="refined_detect_runs",
-            run_name=str(review_status.get("review_run") or collection_id or "") or None,
-            title=f"Review analysis detection video: {dataset_id}",
-            scope=scope,
-            state="pending",
-            priority=int(priority),
-            notes=f"Generated from registry {registry_path}",
-        )
-        generated.append({"task": task, "dataset": dataset, "review_status": review_status})
-    return {
-        "registry_path": str(registry_path),
-        "assignment_count": len(assignments),
-        "dataset_count": len(datasets),
-        "generated_count": len(generated),
-        "skipped_count": len(skipped),
-        "generated": generated,
-        "skipped": skipped,
-    }
-
-
-def generate_subject_mask_component_tasks_from_registry(
-    *,
-    store: LabelingStore,
-    registry_path: Path,
-    assignee_user: str | None = None,
-    recording_id: str | None = None,
-    review_filter: str = "needs_review",
-    priority: int = 0,
-    component_names: Sequence[str] | None = None,
-    auto_advance_on_save: bool = True,
-) -> dict[str, object]:
-    assignments = store.list_assignments(assignee_user=assignee_user, status="active")
-    if recording_id:
-        assignments = [row for row in assignments if str(row.get("recording_id") or "") == str(recording_id)]
-    recording_ids = [str(row["recording_id"]) for row in assignments]
-    components = _query_subject_mask_components_for_recordings(
-        registry_path,
-        recording_ids,
-        component_names=component_names,
-    )
-    generated: list[dict[str, object]] = []
-    skipped: list[dict[str, object]] = []
-    mode = str(review_filter or "needs_review").strip().lower()
-    assigned_by_recording = {str(row["recording_id"]): row for row in assignments}
-    for component in components:
-        dataset_recording_id = str(component.get("recording_id") or "")
-        zarr_path = component.get("zarr_path")
-        dataset_id = str(component.get("dataset_id") or "")
-        run_name = str(component.get("run_name") or "").strip()
-        component_name = str(component.get("component_name") or "").strip()
-        if dataset_recording_id not in assigned_by_recording:
-            skipped.append({"dataset_id": dataset_id, "component_name": component_name, "reason": "recording_not_assigned"})
-            continue
-        if not zarr_path or not run_name or not component_name:
-            skipped.append({"dataset_id": dataset_id, "recording_id": dataset_recording_id, "component_name": component_name, "reason": "missing_required_scope"})
-            continue
-        if not _zarr_child_group_exists(zarr_path, "refined_subject_masks_runs") or not _zarr_child_group_exists(zarr_path, "crop_runs"):
-            skipped.append({"dataset_id": dataset_id, "recording_id": dataset_recording_id, "component_name": component_name, "reason": "not_subject_mask_reviewable"})
-            continue
-        review_state = str(component.get("review_state") or "").strip().lower()
-        review_intended_use = str(component.get("review_intended_use") or "").strip().lower()
-        approved = review_state == "approved" and (not review_intended_use or review_intended_use == "training")
-        if mode in {"needs_review", "unapproved", "not_approved"} and approved:
-            skipped.append({"dataset_id": dataset_id, "recording_id": dataset_recording_id, "component_name": component_name, "reason": "already_approved"})
-            continue
-        if mode == "approved" and not approved:
-            skipped.append({"dataset_id": dataset_id, "recording_id": dataset_recording_id, "component_name": component_name, "reason": "not_approved"})
-            continue
-        scope = {
-            "zarr_path": str(zarr_path),
-            "dataset_id": dataset_id,
-            "registry_path": str(registry_path),
-            "refined_run": run_name,
-            "component_name": component_name,
-            "review_method": "manual",
-            "review_intended_use": "training",
-            "auto_advance_on_save": bool(auto_advance_on_save),
-        }
-        source_subject_mask_run = str(component.get("source_subject_mask_run") or "").strip()
-        if source_subject_mask_run:
-            scope["subject_run"] = source_subject_mask_run
-        task = store.upsert_task(
-            task_id=_safe_task_id("subject_mask_component", dataset_recording_id, dataset_id, run_name, component_name),
-            recording_id=dataset_recording_id,
-            workflow_kind="subject_mask_component",
-            dataset_id=dataset_id,
-            zarr_use="training",
-            stage_group="refined_subject_masks_runs",
-            run_name=run_name,
-            component_name=component_name,
-            title=f"Review {component_name} mask: {dataset_id}",
-            scope=scope,
-            state="pending",
-            priority=int(priority),
-            notes=f"Generated from registry {registry_path}",
-        )
-        generated.append({"task": task, "component": component, "approved": approved})
-    return {
-        "registry_path": str(registry_path),
-        "assignment_count": len(assignments),
-        "component_count": len(components),
-        "generated_count": len(generated),
-        "skipped_count": len(skipped),
-        "generated": generated,
-        "skipped": skipped,
-    }
-
-
-def _task_generation_cli_payload(payload: Mapping[str, object], *, warnings_as_errors: bool = False) -> dict[str, object]:
-    skipped = payload.get("skipped") if isinstance(payload.get("skipped"), list) else []
-    warnings: list[dict[str, object]] = []
-    for row in skipped:
-        if not isinstance(row, Mapping):
-            continue
-        reason = str(row.get("reason") or "skipped")
-        warning = {
-            "code": f"generation_skipped_{reason}",
-            "reason": reason,
-            "dataset_id": row.get("dataset_id"),
-            "recording_id": row.get("recording_id"),
-            "component_name": row.get("component_name"),
-            "details": "Registry row was skipped during task generation.",
-        }
-        warnings.append({key: value for key, value in warning.items() if value is not None})
-    warning_codes = sorted(
-        {
-            str(warning.get("code") or "")
-            for warning in warnings
-            if str(warning.get("code") or "")
-        }
-    )
-    failed_by_warnings = bool(warnings) and bool(warnings_as_errors)
-    return {
-        "ok": not failed_by_warnings,
-        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-        **dict(payload),
-        "warning_count": len(warnings),
-        "warning_codes": warning_codes,
-        "warnings_as_errors": bool(warnings_as_errors),
-        "failed_by_warnings": failed_by_warnings,
-        "blocking_warning_count": len(warnings) if failed_by_warnings else 0,
-        "blocking_warning_codes": warning_codes if failed_by_warnings else [],
-        "warnings": warnings,
-    }
-
-
-def _write_optional_json_report(payload: Mapping[str, object], output: str | None, *, overwrite: bool, description: str) -> None:
-    if not output:
-        return
-    output_path = Path(output)
-    if output_path.exists() and not overwrite:
-        raise FileExistsError(f"Refusing to overwrite existing {description}: {output_path}")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        json.dumps(dict(payload), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
     )
 
 
@@ -3858,15 +3141,111 @@ def _get_subject_mask_runtime(state: ServerState, session: Mapping[str, object])
         raise ValueError("Subject-mask task scope must include component_name.")
 
     root = review_mod.open_zarr_root(zarr_path, mode="a")
+    requested_subject_run = str(scope.get("subject_run") or "").strip() or None
+    requested_refined_run = str(scope.get("refined_run") or "").strip() or None
     source, refined = review_mod.prepare_refined_subject_run(
         root,
-        subject_run=str(scope.get("subject_run") or "").strip() or None,
-        refined_run=str(scope.get("refined_run") or "").strip() or None,
+        subject_run=requested_subject_run,
+        refined_run=requested_refined_run,
         components=[component_name],
     )
     normalized_component = review_mod._normalize_component_name(component_name)  # type: ignore[attr-defined]
     if normalized_component is None or normalized_component not in refined.component_to_index:
         raise ValueError(f"Component {component_name!r} is not available in refined_subject_masks_runs/{refined.run_name}.")
+
+    component_group = review_mod._get_component_group(refined.group, str(normalized_component))  # type: ignore[attr-defined]
+    provenance_group = review_mod._get_component_provenance_group(refined.group, str(normalized_component))  # type: ignore[attr-defined]
+    provenance_attrs = dict(provenance_group.attrs) if provenance_group is not None else {}
+    run_component_sources = refined.group.attrs.get("source_component_sources")
+    run_component_source = {}
+    if isinstance(run_component_sources, Mapping):
+        raw_component_source = run_component_sources.get(str(normalized_component))
+        if isinstance(raw_component_source, Mapping):
+            run_component_source = dict(raw_component_source)
+    component_source_stage = str(
+        run_component_source.get("source_stage")
+        or provenance_attrs.get("source_stage")
+        or ""
+    ).strip()
+    component_source_run = str(
+        run_component_source.get("source_run")
+        or provenance_attrs.get("source_run")
+        or ""
+    ).strip()
+    component_source_component = str(
+        run_component_source.get("source_component")
+        or run_component_source.get("source_channel")
+        or provenance_attrs.get("source_component")
+        or provenance_attrs.get("source_channel")
+        or provenance_attrs.get("component_name")
+        or normalized_component
+    ).strip()
+    component_source_seed_masks_present = bool(
+        component_group is not None and component_group.get("source_seed_masks_roi") is not None
+    )
+    component_source_resolution = "task_subject_run"
+    if component_source_stage == "subject_mask_runs" and component_source_run:
+        if requested_subject_run is not None and requested_subject_run != component_source_run:
+            raise ValueError(
+                "Subject-mask task source mismatch: "
+                f"task requested subject_mask_runs/{requested_subject_run}, but component "
+                f"{normalized_component!r} in refined_subject_masks_runs/{refined.run_name} "
+                f"declares subject_mask_runs/{component_source_run}."
+            )
+        if str(source.run_name) != component_source_run:
+            source, refined = review_mod.prepare_refined_subject_run(
+                root,
+                subject_run=component_source_run,
+                refined_run=requested_refined_run or refined.run_name,
+                components=[str(normalized_component)],
+            )
+        component_source_resolution = "component_provenance_subject_mask_run"
+    elif component_source_stage == "refined_subject_masks_runs":
+        if not component_source_run:
+            raise RuntimeError(
+                f"Component {normalized_component!r} in refined_subject_masks_runs/{refined.run_name} "
+                "declares refined-subject provenance but no source_run."
+            )
+        try:
+            _primary_source, component_sources = review_mod._load_refined_component_source_runs(  # type: ignore[attr-defined]
+                root,
+                refined,
+                default_source=source,
+            )
+            resolved_source = component_sources.get(str(normalized_component))
+        except Exception as exc:
+            raise RuntimeError(
+                f"Unable to resolve refined-subject source for component {normalized_component!r} from "
+                f"refined_subject_masks_runs/{component_source_run}."
+            ) from exc
+        if resolved_source is None:
+            raise RuntimeError(
+                f"No refined-subject source available for component {normalized_component!r} in "
+                f"refined_subject_masks_runs/{refined.run_name}."
+            )
+        source = resolved_source
+        component_source_resolution = "component_provenance_refined_subject_run"
+    elif component_source_stage:
+        try:
+            _primary_source, component_sources = review_mod._load_refined_component_source_runs(  # type: ignore[attr-defined]
+                root,
+                refined,
+                default_source=source,
+            )
+            resolved_source = component_sources.get(str(normalized_component))
+        except Exception as exc:
+            raise RuntimeError(
+                f"Unable to resolve source for component {normalized_component!r} from "
+                f"{component_source_stage}/{component_source_run or '<missing>'}."
+            ) from exc
+        if resolved_source is None:
+            raise RuntimeError(
+                f"No resolved source available for component {normalized_component!r} in "
+                f"refined_subject_masks_runs/{refined.run_name}."
+            )
+        source = resolved_source
+        component_source_resolution = "component_provenance_resolved_source_run"
+
     crop_run_name = str(scope.get("crop_run") or source.crop_run)
     crop_parent = root.get("crop_runs")
     if crop_parent is None or crop_run_name not in crop_parent:
@@ -3900,6 +3279,11 @@ def _get_subject_mask_runtime(state: ServerState, session: Mapping[str, object])
         review_intended_use=str(scope.get("review_intended_use") or "training"),
         review_notes=str(scope.get("review_notes") or "").strip() or None,
         auto_advance_on_save=_bool_from_scope(scope, "auto_advance_on_save", default=False),
+        component_source_stage=component_source_stage,
+        component_source_run=component_source_run,
+        component_source_component=component_source_component,
+        component_source_resolution=component_source_resolution,
+        component_source_seed_masks_present=component_source_seed_masks_present,
     )
     state.subject_mask_sessions[session_id] = runtime
     return runtime
@@ -3925,6 +3309,13 @@ def _subject_mask_current_payload(
             component_name=runtime.component_name,
             state="active",
         )
+        if checkpoint is None:
+            checkpoint = store.get_session_checkpoint(
+                task_id=runtime.task_id,
+                roi_idx=roi_idx,
+                component_name=runtime.component_name,
+                state="applying",
+            )
         if checkpoint is not None:
             checkpoint_mask = _subject_mask_checkpoint_mask(checkpoint)
             if tuple(checkpoint_mask.shape) != tuple(mask.shape):
@@ -3954,6 +3345,15 @@ def _subject_mask_current_payload(
         "component_name": runtime.component_name,
         "source_run": str(runtime.source.run_name),
         "refined_run": str(runtime.refined.run_name),
+        "component_source": {
+            "source_stage": runtime.component_source_stage,
+            "source_run": runtime.component_source_run,
+            "source_component": runtime.component_source_component,
+            "resolution": runtime.component_source_resolution,
+            "source_seed_masks_roi_present": bool(runtime.component_source_seed_masks_present),
+            "runtime_source_run": str(runtime.source.run_name),
+            "target_refined_run": str(runtime.refined.run_name),
+        },
         "roi_image": _raw_array_payload(roi_image),
         "mask": _raw_array_payload(mask),
         "mask_area_px": int(mask.sum()),
@@ -5458,502 +4858,17 @@ def _project_approved_keypoint_review_to_recording_step_status(
         )
 
 
-def _admin_task_state_counts(tasks: Sequence[Mapping[str, object]]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for task in tasks:
-        state = str(task.get("state") or "unknown")
-        counts[state] = counts.get(state, 0) + 1
-    return counts
 
 
-def _admin_workflow_counts(tasks: Sequence[Mapping[str, object]]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for task in tasks:
-        workflow = str(task.get("workflow_kind") or "unknown")
-        counts[workflow] = counts.get(workflow, 0) + 1
-    return counts
 
 
-def _admin_compact_task(task: Mapping[str, object]) -> dict[str, object]:
-    scope = task.get("scope")
-    scope_keys = sorted(str(key) for key in scope.keys()) if isinstance(scope, Mapping) else []
-    return {
-        "task_id": str(task.get("task_id") or ""),
-        "recording_id": str(task.get("recording_id") or ""),
-        "assignee_user": str(task.get("assignee_user") or ""),
-        "assignment_status": str(task.get("assignment_status") or ""),
-        "workflow_kind": str(task.get("workflow_kind") or ""),
-        "state": str(task.get("state") or ""),
-        "title": _task_title(task),
-        "dataset_id": str(task.get("dataset_id") or ""),
-        "zarr_use": str(task.get("zarr_use") or ""),
-        "stage_group": str(task.get("stage_group") or ""),
-        "run_name": str(task.get("run_name") or ""),
-        "component_name": str(task.get("component_name") or ""),
-        "priority": task.get("priority"),
-        "notes": str(task.get("notes") or ""),
-        "created_at_utc": str(task.get("created_at_utc") or ""),
-        "updated_at_utc": str(task.get("updated_at_utc") or ""),
-        "completed_at_utc": str(task.get("completed_at_utc") or ""),
-        "scope_keys": scope_keys,
-        "admin_task_url": f"/admin/tasks/{quote(str(task.get('task_id') or ''), safe='')}",
-    }
 
 
-def _admin_registry_path_from_env() -> Path | None:
-    value = str(os.environ.get(REGISTRY_PATH_ENV_VAR) or "").strip()
-    return Path(value).expanduser() if value else None
 
 
-def _admin_sql_identifier(value: str) -> str:
-    return '"' + str(value).replace('"', '""') + '"'
 
 
-def _admin_registry_public_row(row: Mapping[str, object], *, table_name: str) -> dict[str, object]:
-    return {
-        "table": table_name,
-        "dataset_id": str(row.get("dataset_id") or ""),
-        "recording_id": str(row.get("recording_id") or ""),
-        "artifact_kind": str(row.get("artifact_kind") or ""),
-        "zarr_origin": str(row.get("zarr_origin") or ""),
-        "zarr_use": str(row.get("zarr_use") or ""),
-        "status": str(row.get("status") or ""),
-        "zarr_path": str(row.get("zarr_path") or ""),
-        "session_uuid": str(row.get("session_uuid") or ""),
-    }
 
-
-def _admin_registry_lookup(
-    *,
-    registry_path: Path | None,
-    dataset_ids: Sequence[str],
-    recording_ids: Sequence[str],
-) -> dict[str, object]:
-    result: dict[str, object] = {
-        "enabled": bool(registry_path),
-        "path": str(registry_path) if registry_path else "",
-        "available": False,
-        "error": "",
-        "matched_row_count": 0,
-        "tables_scanned": [],
-        "rows_by_dataset_id": {},
-        "rows_by_recording_id": {},
-    }
-    if registry_path is None:
-        result["error"] = f"{REGISTRY_PATH_ENV_VAR} is not set."
-        return result
-    if not registry_path.exists():
-        result["error"] = f"Registry path does not exist: {registry_path}"
-        return result
-    dataset_filter = sorted({str(item).strip() for item in dataset_ids if str(item).strip()})
-    recording_filter = sorted({str(item).strip() for item in recording_ids if str(item).strip()})
-    if not dataset_filter and not recording_filter:
-        result["available"] = True
-        return result
-    rows_by_dataset_id: dict[str, list[dict[str, object]]] = {}
-    rows_by_recording_id: dict[str, list[dict[str, object]]] = {}
-    try:
-        connection = sqlite3.connect(str(registry_path))
-        connection.row_factory = sqlite3.Row
-        try:
-            table_names = [
-                str(row["name"])
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-                ).fetchall()
-            ]
-            for table_name in table_names:
-                columns = [
-                    str(row["name"])
-                    for row in connection.execute(
-                        f"PRAGMA table_info({_admin_sql_identifier(table_name)})"
-                    ).fetchall()
-                ]
-                column_set = set(columns)
-                if not {"dataset_id", "recording_id"} & column_set:
-                    continue
-                selected_columns = [
-                    column
-                    for column in (
-                        "dataset_id",
-                        "recording_id",
-                        "artifact_kind",
-                        "zarr_origin",
-                        "zarr_use",
-                        "status",
-                        "zarr_path",
-                        "session_uuid",
-                    )
-                    if column in column_set
-                ]
-                if not selected_columns:
-                    continue
-                where_parts: list[str] = []
-                params: list[object] = []
-                if dataset_filter and "dataset_id" in column_set:
-                    where_parts.append(
-                        f"{_admin_sql_identifier('dataset_id')} IN ({','.join('?' for _ in dataset_filter)})"
-                    )
-                    params.extend(dataset_filter)
-                if recording_filter and "recording_id" in column_set:
-                    where_parts.append(
-                        f"{_admin_sql_identifier('recording_id')} IN ({','.join('?' for _ in recording_filter)})"
-                    )
-                    params.extend(recording_filter)
-                if not where_parts:
-                    continue
-                query = (
-                    "SELECT "
-                    + ", ".join(_admin_sql_identifier(column) for column in selected_columns)
-                    + f" FROM {_admin_sql_identifier(table_name)} WHERE "
-                    + " OR ".join(f"({part})" for part in where_parts)
-                    + " LIMIT 5000"
-                )
-                result["tables_scanned"] = [
-                    *list(result.get("tables_scanned", [])),
-                    table_name,
-                ]
-                for sqlite_row in connection.execute(query, params).fetchall():
-                    row = {column: sqlite_row[column] if column in sqlite_row.keys() else "" for column in selected_columns}
-                    public_row = _admin_registry_public_row(row, table_name=table_name)
-                    dataset_id = str(public_row.get("dataset_id") or "")
-                    recording_id = str(public_row.get("recording_id") or "")
-                    if dataset_id:
-                        rows_by_dataset_id.setdefault(dataset_id, []).append(public_row)
-                    if recording_id:
-                        rows_by_recording_id.setdefault(recording_id, []).append(public_row)
-        finally:
-            connection.close()
-    except Exception as exc:
-        result["error"] = str(exc)
-        return result
-    result["available"] = True
-    result["matched_row_count"] = sum(len(rows) for rows in rows_by_dataset_id.values())
-    result["rows_by_dataset_id"] = rows_by_dataset_id
-    result["rows_by_recording_id"] = rows_by_recording_id
-    return result
-
-
-def _admin_registry_summary(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
-    return {
-        "match_count": len(rows),
-        "dataset_ids": sorted({str(row.get("dataset_id") or "") for row in rows if str(row.get("dataset_id") or "")}),
-        "recording_ids": sorted({str(row.get("recording_id") or "") for row in rows if str(row.get("recording_id") or "")}),
-        "statuses": sorted({str(row.get("status") or "") for row in rows if str(row.get("status") or "")}),
-        "zarr_uses": sorted({str(row.get("zarr_use") or "") for row in rows if str(row.get("zarr_use") or "")}),
-        "artifact_kinds": sorted({str(row.get("artifact_kind") or "") for row in rows if str(row.get("artifact_kind") or "")}),
-        "zarr_origins": sorted({str(row.get("zarr_origin") or "") for row in rows if str(row.get("zarr_origin") or "")}),
-        "zarr_paths": sorted({str(row.get("zarr_path") or "") for row in rows if str(row.get("zarr_path") or "")}),
-    }
-
-
-def _admin_registry_warning(
-    code: str,
-    *,
-    severity: str = "warning",
-    dataset_id: str = "",
-    recording_id: str = "",
-    task_id: str = "",
-    details: str = "",
-    operator_action: str = "",
-    extra: Mapping[str, object] | None = None,
-) -> dict[str, object]:
-    return {
-        "code": code,
-        "severity": severity,
-        "dataset_id": dataset_id,
-        "recording_id": recording_id,
-        "task_id": task_id,
-        "details": details,
-        "operator_action": operator_action,
-        **(dict(extra) if isinstance(extra, Mapping) else {}),
-    }
-
-
-def _admin_registry_warnings_for_recording(recording: Mapping[str, object]) -> list[dict[str, object]]:
-    warnings: list[dict[str, object]] = []
-    registry_rows = [
-        row
-        for row in (
-            recording.get("registry_rows")
-            if isinstance(recording.get("registry_rows"), list)
-            else []
-        )
-        if isinstance(row, Mapping)
-    ]
-    tasks = [
-        task
-        for task in (
-            recording.get("tasks")
-            if isinstance(recording.get("tasks"), list)
-            else []
-        )
-        if isinstance(task, Mapping)
-    ]
-    recording_id = str(recording.get("recording_id") or "")
-    active_training_rows = [
-        row
-        for row in registry_rows
-        if str(row.get("status") or "") == "active"
-        and str(row.get("zarr_use") or "") == "training"
-    ]
-    if not active_training_rows:
-        warnings.append(
-            _admin_registry_warning(
-                "recording_missing_active_training_registry_row",
-                recording_id=recording_id,
-                details=(
-                    "This assigned recording has no active training registry row in the configured registry."
-                ),
-                operator_action=(
-                    "Confirm the assigned recording has a registered active training Zarr, or set PALETTE_REGISTRY_PATH to the registry that contains it."
-                ),
-            )
-        )
-    seen_inactive_keys: set[tuple[str, str, str]] = set()
-    for row in registry_rows:
-        status = str(row.get("status") or "")
-        if status and status != "active":
-            key = (
-                str(row.get("table") or ""),
-                str(row.get("dataset_id") or ""),
-                status,
-            )
-            if key in seen_inactive_keys:
-                continue
-            seen_inactive_keys.add(key)
-            warnings.append(
-                _admin_registry_warning(
-                    "registry_status_not_active",
-                    dataset_id=str(row.get("dataset_id") or ""),
-                    recording_id=recording_id,
-                    details=f"Registry row is status={status}, not active.",
-                    operator_action="Inspect whether this assignment points at the current active registry dataset.",
-                    extra={
-                        "registry_table": str(row.get("table") or ""),
-                        "registry_status": status,
-                        "registry_zarr_use": str(row.get("zarr_use") or ""),
-                        "registry_zarr_path": str(row.get("zarr_path") or ""),
-                    },
-                )
-            )
-    for task in tasks:
-        task_id = str(task.get("task_id") or "")
-        task_dataset_id = str(task.get("dataset_id") or "")
-        task_zarr_use = str(task.get("zarr_use") or "")
-        if task_dataset_id:
-            dataset_rows = [
-                row
-                for row in registry_rows
-                if str(row.get("dataset_id") or "") == task_dataset_id
-            ]
-            if not dataset_rows:
-                warnings.append(
-                    _admin_registry_warning(
-                        "task_dataset_missing_registry_match",
-                        dataset_id=task_dataset_id,
-                        recording_id=recording_id,
-                        task_id=task_id,
-                        details="Task dataset_id has no matching registry row.",
-                        operator_action="Confirm the task dataset_id or point PALETTE_REGISTRY_PATH at the registry that contains this dataset.",
-                    )
-                )
-            elif task_zarr_use:
-                registry_zarr_uses = {
-                    str(row.get("zarr_use") or "")
-                    for row in dataset_rows
-                    if str(row.get("zarr_use") or "")
-                }
-                if registry_zarr_uses and task_zarr_use not in registry_zarr_uses:
-                    warnings.append(
-                        _admin_registry_warning(
-                            "task_zarr_use_registry_mismatch",
-                            dataset_id=task_dataset_id,
-                            recording_id=recording_id,
-                            task_id=task_id,
-                            details=(
-                                f"Task zarr_use={task_zarr_use} does not match registry zarr_use values "
-                                f"{', '.join(sorted(registry_zarr_uses))}."
-                            ),
-                            operator_action="Inspect task generation inputs and registry identity before sharing or continuing work.",
-                            extra={"registry_zarr_uses": sorted(registry_zarr_uses)},
-                        )
-                    )
-    return warnings
-
-
-def _admin_export_join(values: object) -> str:
-    if isinstance(values, Mapping):
-        return json.dumps(values, sort_keys=True)
-    if isinstance(values, Sequence) and not isinstance(values, (str, bytes)):
-        return ", ".join(str(value) for value in values if str(value))
-    return str(values or "")
-
-
-def _admin_dataset_export_rows(payload: Mapping[str, object]) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    datasets = payload.get("datasets") if isinstance(payload.get("datasets"), list) else []
-    for dataset in datasets:
-        if not isinstance(dataset, Mapping):
-            continue
-        dataset_registry_summary = (
-            dataset.get("registry_summary")
-            if isinstance(dataset.get("registry_summary"), Mapping)
-            else {}
-        )
-        recordings = dataset.get("recordings") if isinstance(dataset.get("recordings"), list) else []
-        if not recordings:
-            dataset_warnings = (
-                dataset.get("registry_warnings")
-                if isinstance(dataset.get("registry_warnings"), list)
-                else []
-            )
-            rows.append(
-                {
-                    "dataset_id": str(dataset.get("dataset_id") or ""),
-                    "dataset_label": str(dataset.get("dataset_label") or ""),
-                    "recording_id": "",
-                    "assignee_user": "",
-                    "assignment_status": "",
-                    "task_count": int(dataset.get("task_count") or 0),
-                    "open_task_count": int(dataset.get("open_task_count") or 0),
-                    "complete_task_count": int(dataset.get("complete_task_count") or 0),
-                    "non_startable_task_count": int(dataset.get("non_startable_task_count") or 0),
-                    "progress_percent": float(dataset.get("progress_percent") or 0.0),
-                    "blocked": bool(dataset.get("blocked_recording_count")),
-                    "blocked_reason": "",
-                    "workflow_counts": _admin_export_join(dataset.get("workflow_counts", {})),
-                    "state_counts": _admin_export_join(dataset.get("state_counts", {})),
-                    "active_session_count": int(dataset.get("active_session_count") or 0),
-                    "stale_session_count": int(dataset.get("stale_session_count") or 0),
-                    "failed_promotion_count": int(dataset.get("failed_promotion_count") or 0),
-                    "latest_event_type": "",
-                    "latest_event_at_utc": "",
-                    "latest_save_event_id": "",
-                    "registry_match_count": int(dataset_registry_summary.get("match_count") or 0),
-                    "registry_statuses": _admin_export_join(dataset_registry_summary.get("statuses", [])),
-                    "registry_zarr_uses": _admin_export_join(dataset_registry_summary.get("zarr_uses", [])),
-                    "registry_artifact_kinds": _admin_export_join(dataset_registry_summary.get("artifact_kinds", [])),
-                    "registry_zarr_paths": _admin_export_join(dataset_registry_summary.get("zarr_paths", [])),
-                    "registry_warning_count": len(dataset_warnings),
-                    "registry_warning_codes": _admin_export_join(
-                        sorted(
-                            {
-                                str(warning.get("code") or "")
-                                for warning in dataset_warnings
-                                if isinstance(warning, Mapping) and str(warning.get("code") or "")
-                            }
-                        )
-                    ),
-                    "admin_recording_url": "",
-                    "labeler_queue_url": "",
-                    "labeler_work_url": "",
-                }
-            )
-            continue
-        for recording in recordings:
-            if not isinstance(recording, Mapping):
-                continue
-            latest_event = recording.get("latest_event") if isinstance(recording.get("latest_event"), Mapping) else {}
-            latest_save = (
-                recording.get("latest_save_event")
-                if isinstance(recording.get("latest_save_event"), Mapping)
-                else {}
-            )
-            registry_summary = (
-                recording.get("registry_summary")
-                if isinstance(recording.get("registry_summary"), Mapping)
-                else {}
-            )
-            registry_warnings = (
-                recording.get("registry_warnings")
-                if isinstance(recording.get("registry_warnings"), list)
-                else []
-            )
-            rows.append(
-                {
-                    "dataset_id": str(dataset.get("dataset_id") or ""),
-                    "dataset_label": str(dataset.get("dataset_label") or ""),
-                    "recording_id": str(recording.get("recording_id") or ""),
-                    "assignee_user": str(recording.get("assignee_user") or ""),
-                    "assignment_status": str(recording.get("assignment_status") or ""),
-                    "task_count": int(recording.get("task_count") or 0),
-                    "open_task_count": int(recording.get("open_task_count") or 0),
-                    "complete_task_count": int(recording.get("complete_task_count") or 0),
-                    "non_startable_task_count": int(recording.get("non_startable_task_count") or 0),
-                    "progress_percent": float(recording.get("progress_percent") or 0.0),
-                    "blocked": bool(recording.get("blocked")),
-                    "blocked_reason": str(recording.get("blocked_reason") or ""),
-                    "workflow_counts": _admin_export_join(recording.get("workflow_counts", {})),
-                    "state_counts": _admin_export_join(recording.get("state_counts", {})),
-                    "active_session_count": int(recording.get("active_session_count") or 0),
-                    "stale_session_count": int(recording.get("stale_session_count") or 0),
-                    "failed_promotion_count": int(recording.get("failed_promotion_count") or 0),
-                    "latest_event_type": str(latest_event.get("event_type") or ""),
-                    "latest_event_at_utc": str(latest_event.get("created_at_utc") or ""),
-                    "latest_save_event_id": str(latest_save.get("event_id") or ""),
-                    "registry_match_count": int(registry_summary.get("match_count") or 0),
-                    "registry_statuses": _admin_export_join(registry_summary.get("statuses", [])),
-                    "registry_zarr_uses": _admin_export_join(registry_summary.get("zarr_uses", [])),
-                    "registry_artifact_kinds": _admin_export_join(registry_summary.get("artifact_kinds", [])),
-                    "registry_zarr_paths": _admin_export_join(registry_summary.get("zarr_paths", [])),
-                    "registry_warning_count": len(registry_warnings),
-                    "registry_warning_codes": _admin_export_join(
-                        sorted(
-                            {
-                                str(warning.get("code") or "")
-                                for warning in registry_warnings
-                                if isinstance(warning, Mapping) and str(warning.get("code") or "")
-                            }
-                        )
-                    ),
-                    "admin_recording_url": str(recording.get("admin_recording_url") or ""),
-                    "labeler_queue_url": str(recording.get("expected_user_personal_dataset_queue_url") or ""),
-                    "labeler_work_url": str(recording.get("expected_user_personal_work_url") or ""),
-                }
-            )
-    return rows
-
-
-def _admin_dataset_export_csv(rows: Sequence[Mapping[str, object]]) -> str:
-    fieldnames = [
-        "dataset_id",
-        "dataset_label",
-        "recording_id",
-        "assignee_user",
-        "assignment_status",
-        "task_count",
-        "open_task_count",
-        "complete_task_count",
-        "non_startable_task_count",
-        "progress_percent",
-        "blocked",
-        "blocked_reason",
-        "workflow_counts",
-        "state_counts",
-        "active_session_count",
-        "stale_session_count",
-        "failed_promotion_count",
-        "latest_event_type",
-        "latest_event_at_utc",
-        "latest_save_event_id",
-        "registry_match_count",
-        "registry_statuses",
-        "registry_zarr_uses",
-        "registry_artifact_kinds",
-        "registry_zarr_paths",
-        "registry_warning_count",
-        "registry_warning_codes",
-        "admin_recording_url",
-        "labeler_queue_url",
-        "labeler_work_url",
-    ]
-    buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
-    writer.writeheader()
-    for row in rows:
-        writer.writerow({field: row.get(field, "") for field in fieldnames})
-    return buffer.getvalue()
 
 
 def _admin_datasets_payload(
@@ -7000,6 +5915,7 @@ def _admin_html() -> bytes:
             </select>
           </label>
           <label>Notes<br><textarea id="assign-notes" name="notes" rows="3"></textarea></label>
+          <label><input id="assign-notify" type="checkbox" style="width:auto"> Send/queue notification email</label>
           <button type="submit">Save assignment</button>
           <div id="assignment-result" class="muted"></div>
         </form>
@@ -7133,7 +6049,9 @@ def _admin_html() -> bytes:
         recording_id: document.getElementById("assign-recording-id").value.trim(),
         assignee_user: document.getElementById("assign-assignee-user").value.trim(),
         status: document.getElementById("assign-status").value,
-        notes: document.getElementById("assign-notes").value.trim()
+        notes: document.getElementById("assign-notes").value.trim(),
+        notify: document.getElementById("assign-notify").checked,
+        notification_base_url: window.location.origin
       };
       resultEl.textContent = "Saving...";
       try {
@@ -7150,7 +6068,10 @@ def _admin_html() -> bytes:
         const previousText = transition.previous_assignee_user
           ? `; previous owner ${transition.previous_assignee_user} (${transition.previous_status || "unknown"})`
           : "";
-        resultEl.textContent = `Saved ${data.assignment.recording_id} -> ${data.assignment.assignee_user}; closed ${data.closed_session_count} sessions${previousText}.`;
+        const notificationText = data.notification
+          ? `; notification ${data.notification.status || "unknown"}`
+          : "";
+        resultEl.textContent = `Saved ${data.assignment.recording_id} -> ${data.assignment.assignee_user}; closed ${data.closed_session_count} sessions${previousText}${notificationText}.`;
         form.reset();
         document.getElementById("assign-status").value = "active";
         await load();
@@ -8311,6 +7232,7 @@ def _admin_users_html(payload: Mapping[str, object]) -> bytes:
         <label>Role<br><select id="role">{role_options}</select></label>
         <label>Status<br><select id="status">{status_options}</select></label>
         <label>Notes<br><input id="notes"></label>
+        <label><input id="notify-user" type="checkbox" style="width:auto"> Send/queue notification email</label>
         <button type="submit">Save user</button>
       </form>
       <pre id="user-result" class="muted"></pre>
@@ -8347,9 +7269,11 @@ def _admin_users_html(payload: Mapping[str, object]) -> bytes:
           email: document.getElementById("email").value.trim(),
           role: document.getElementById("role").value,
           status: document.getElementById("status").value,
-          notes: document.getElementById("notes").value.trim()
+          notes: document.getElementById("notes").value.trim(),
+          notify: document.getElementById("notify-user").checked,
+          notification_base_url: window.location.origin
         }});
-        result.textContent = JSON.stringify(data.user, null, 2);
+        result.textContent = JSON.stringify({{user: data.user, notification: data.notification}}, null, 2);
         setTimeout(() => window.location.reload(), 450);
       }} catch (error) {{
         result.textContent = `Error: ${{error.message || String(error)}}`;
@@ -12538,7 +11462,7 @@ def _detect_session_html(session: Mapping[str, object]) -> bytes:
           <button type="button" class="secondary" onclick="clearBox()">Clear box</button>
           <button type="button" class="warn" onclick="completeTask()">Complete task</button>
         </div>
-        <p class="meta">Drag on the image to draw or replace the bbox. Press <b>s</b> to save, <b>n</b>/<b>p</b> to navigate.</p>
+        <p class="meta">Drag on the image to draw or replace the bbox. Hotkeys: wheel zooms, middle-drag pans, <b>f</b> fits, <b>s</b> saves, <b>n</b>/<b>p</b> navigate.</p>
       </aside>
     </section>
   </main>
@@ -12560,6 +11484,8 @@ def _detect_session_html(session: Mapping[str, object]) -> bytes:
 
     {_SESSION_OPERATOR_SUPPORT_JS}
     {_BROWSER_MUTATION_STATUS_JS}
+    {_IMAGE_CANVAS_VIEWPORT_JS}
+    const viewport = createImageCanvasViewport(canvas, draw);
 
     function decodeRawImage(image) {{
       const raw = atob(image.pixels);
@@ -12591,8 +11517,8 @@ def _detect_session_html(session: Mapping[str, object]) -> bytes:
       const t = payload?.bbox_display_transform || {{}};
       const contentX = Number.isFinite(Number(t.content_x)) ? Number(t.content_x) : 0;
       const contentY = Number.isFinite(Number(t.content_y)) ? Number(t.content_y) : 0;
-      const contentW = Number.isFinite(Number(t.content_width)) && Number(t.content_width) > 0 ? Number(t.content_width) : canvas.width;
-      const contentH = Number.isFinite(Number(t.content_height)) && Number(t.content_height) > 0 ? Number(t.content_height) : canvas.height;
+      const contentW = Number.isFinite(Number(t.content_width)) && Number(t.content_width) > 0 ? Number(t.content_width) : viewport.imageWidth;
+      const contentH = Number.isFinite(Number(t.content_height)) && Number(t.content_height) > 0 ? Number(t.content_height) : viewport.imageHeight;
       return {{x: contentX, y: contentY, w: contentW, h: contentH}};
     }}
 
@@ -12629,23 +11555,24 @@ def _detect_session_html(session: Mapping[str, object]) -> bytes:
 
     function draw() {{
       if (!payload) return;
-      const image = decodeRawImage(payload.frame_image);
-      canvas.width = image.width;
-      canvas.height = image.height;
-      ctx.putImageData(image, 0, 0);
+      viewport.drawImage();
       const rect = bboxToRect(bbox);
       if (rect) {{
-        ctx.lineWidth = Math.max(2, image.width / 160);
+        const [x0, y0] = viewport.imageToCanvas(rect.x, rect.y);
+        const [x1, y1] = viewport.imageToCanvas(rect.x + rect.w, rect.y + rect.h);
+        ctx.lineWidth = Math.max(2, canvas.width / 160);
         ctx.strokeStyle = "#f28f3b";
-        ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
+        ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
       }}
       const display = bboxDisplayTransform();
-      if (display.x > 0 || display.y > 0 || display.w < image.width || display.h < image.height) {{
+      if (display.x > 0 || display.y > 0 || display.w < viewport.imageWidth || display.h < viewport.imageHeight) {{
+        const [x0, y0] = viewport.imageToCanvas(display.x, display.y);
+        const [x1, y1] = viewport.imageToCanvas(display.x + display.w, display.y + display.h);
         ctx.save();
-        ctx.lineWidth = Math.max(1, image.width / 320);
+        ctx.lineWidth = Math.max(1, canvas.width / 320);
         ctx.strokeStyle = "rgba(255,255,255,0.35)";
         ctx.setLineDash([8, 6]);
-        ctx.strokeRect(display.x, display.y, display.w, display.h);
+        ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
         ctx.restore();
       }}
     }}
@@ -12671,6 +11598,7 @@ def _detect_session_html(session: Mapping[str, object]) -> bytes:
       try {{
         payload = await api("/frame/current");
         bbox = payload.bbox_norm ? payload.bbox_norm.slice() : null;
+        viewport.setImageData(decodeRawImage(payload.frame_image), {{resetView: true}});
         renderSummary();
         draw();
         setStatus("Loaded.");
@@ -12723,29 +11651,28 @@ def _detect_session_html(session: Mapping[str, object]) -> bytes:
       }}
     }}
 
-    function canvasPoint(event) {{
-      const rect = canvas.getBoundingClientRect();
-      return [
-        (event.clientX - rect.left) * canvas.width / rect.width,
-        (event.clientY - rect.top) * canvas.height / rect.height
-      ];
-    }}
-
     canvas.addEventListener("mousedown", (event) => {{
-      dragStart = canvasPoint(event);
+      if (viewport.beginPan(event)) return;
+      if (event.button !== 0) return;
+      const [canvasX, canvasY] = viewport.canvasPoint(event);
+      dragStart = viewport.canvasToImage(canvasX, canvasY);
       drawing = true;
     }});
     canvas.addEventListener("mousemove", (event) => {{
+      if (viewport.panMove(event)) return;
       if (!drawing || !dragStart) return;
-      const p = canvasPoint(event);
+      const [canvasX, canvasY] = viewport.canvasPoint(event);
+      const p = viewport.canvasToImage(canvasX, canvasY);
       bbox = rectToBbox({{x: dragStart[0], y: dragStart[1], w: p[0] - dragStart[0], h: p[1] - dragStart[1]}});
       draw();
     }});
-    window.addEventListener("mouseup", () => {{ drawing = false; dragStart = null; }});
+    window.addEventListener("mouseup", () => {{ drawing = false; dragStart = null; viewport.endPan(); }});
+    canvas.addEventListener("wheel", viewport.handleWheel, {{passive: false}});
     window.addEventListener("keydown", (event) => {{
       if (event.key === "n") nav(1);
       if (event.key === "p") nav(-1);
       if (event.key === "s") save(false);
+      if (event.key === "f" || event.key === "F") viewport.fit();
     }});
     loadCurrent();
   </script>
@@ -13267,6 +12194,11 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
           <button type="button" class="secondary" onclick="clearMask()">Clear local</button>
           <button type="button" class="warn" onclick="completeTask()">Complete task</button>
         </div>
+        <div class="buttons">
+          <label for="roi-seek-input">Go to ROI</label>
+          <input id="roi-seek-input" type="number" min="0" step="1" placeholder="ROI #" onkeydown="if (event.key === 'Enter') seekRoi();">
+          <button type="button" class="secondary" onclick="seekRoi()">Go</button>
+        </div>
         <label for="brush-size">Brush size: <span id="brush-label">8</span> px</label>
         <input id="brush-size" type="range" min="1" max="48" value="8" oninput="setBrushSize(Number(this.value));">
         <label for="review-state">Component review state</label>
@@ -13293,6 +12225,11 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
     let mask = null;
     let maskWidth = 0;
     let maskHeight = 0;
+    let maskOverlayCanvas = document.createElement("canvas");
+    let maskOverlayCtx = maskOverlayCanvas.getContext("2d");
+    let maskOverlayDirty = true;
+    let maskOverlayDirtyRect = null;
+    let drawScheduled = false;
     let drawing = false;
     let lassoMode = false;
     let lassoDrawing = false;
@@ -13303,6 +12240,7 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
     let tool = "paint";
     let brushSize = 8;
     let busyAction = false;
+    let applyInFlight = false;
     const lassoMinPointStepPx = 2;
 
     function setStatus(text, isError=false) {{
@@ -13386,6 +12324,7 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
       maskWidth = maskPayload.shape[1];
       mask = new Uint8Array(maskWidth * maskHeight);
       for (let i = 0; i < mask.length; i++) mask[i] = bytes[i] > 0 ? 1 : 0;
+      markMaskOverlayDirty();
     }}
 
     function encodeMaskPayload() {{
@@ -13402,23 +12341,86 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
       }};
     }}
 
+    function markMaskOverlayDirty(rect=null) {{
+      const wasFullyDirty = maskOverlayDirty && maskOverlayDirtyRect === null;
+      maskOverlayDirty = true;
+      if (!rect) {{
+        maskOverlayDirtyRect = null;
+        return;
+      }}
+      if (wasFullyDirty) return;
+      const clipped = {{
+        x0: Math.max(0, Math.min(maskWidth, Math.floor(rect.x0))),
+        y0: Math.max(0, Math.min(maskHeight, Math.floor(rect.y0))),
+        x1: Math.max(0, Math.min(maskWidth, Math.ceil(rect.x1))),
+        y1: Math.max(0, Math.min(maskHeight, Math.ceil(rect.y1)))
+      }};
+      if (clipped.x1 <= clipped.x0 || clipped.y1 <= clipped.y0) return;
+      if (maskOverlayDirtyRect === null) {{
+        maskOverlayDirtyRect = clipped;
+        return;
+      }}
+      maskOverlayDirtyRect = {{
+        x0: Math.min(maskOverlayDirtyRect.x0, clipped.x0),
+        y0: Math.min(maskOverlayDirtyRect.y0, clipped.y0),
+        x1: Math.max(maskOverlayDirtyRect.x1, clipped.x1),
+        y1: Math.max(maskOverlayDirtyRect.y1, clipped.y1)
+      }};
+    }}
+
+    function rebuildMaskOverlay() {{
+      if (!mask || !maskWidth || !maskHeight) return;
+      const resized = maskOverlayCanvas.width !== maskWidth || maskOverlayCanvas.height !== maskHeight;
+      if (maskOverlayCanvas.width !== maskWidth) maskOverlayCanvas.width = maskWidth;
+      if (maskOverlayCanvas.height !== maskHeight) maskOverlayCanvas.height = maskHeight;
+      if (resized || !maskOverlayDirtyRect) {{
+        const overlay = new ImageData(maskWidth, maskHeight);
+        for (let i = 0; i < mask.length; i++) {{
+          if (!mask[i]) continue;
+          const dst = i * 4;
+          overlay.data[dst] = 0;
+          overlay.data[dst + 1] = 200;
+          overlay.data[dst + 2] = 148;
+          overlay.data[dst + 3] = 118;
+        }}
+        maskOverlayCtx.putImageData(overlay, 0, 0);
+      }} else {{
+        const x0 = maskOverlayDirtyRect.x0;
+        const y0 = maskOverlayDirtyRect.y0;
+        const w = maskOverlayDirtyRect.x1 - maskOverlayDirtyRect.x0;
+        const h = maskOverlayDirtyRect.y1 - maskOverlayDirtyRect.y0;
+        const overlay = new ImageData(w, h);
+        for (let yy = 0; yy < h; yy++) {{
+          for (let xx = 0; xx < w; xx++) {{
+            const src = (y0 + yy) * maskWidth + (x0 + xx);
+            if (!mask[src]) continue;
+            const dst = (yy * w + xx) * 4;
+            overlay.data[dst] = 0;
+            overlay.data[dst + 1] = 200;
+            overlay.data[dst + 2] = 148;
+            overlay.data[dst + 3] = 118;
+          }}
+        }}
+        maskOverlayCtx.putImageData(overlay, x0, y0);
+      }}
+      maskOverlayDirty = false;
+      maskOverlayDirtyRect = null;
+    }}
+
+    function scheduleDraw() {{
+      if (drawScheduled) return;
+      drawScheduled = true;
+      window.requestAnimationFrame(() => {{
+        drawScheduled = false;
+        draw();
+      }});
+    }}
+
     function draw() {{
       if (!imageData || !mask || !viewport.hasImage()) return;
+      if (maskOverlayDirty) rebuildMaskOverlay();
       viewport.drawImage();
-      const overlay = new ImageData(maskWidth, maskHeight);
-      for (let i = 0; i < mask.length; i++) {{
-        if (!mask[i]) continue;
-        const dst = i * 4;
-        overlay.data[dst] = 0;
-        overlay.data[dst + 1] = 200;
-        overlay.data[dst + 2] = 148;
-        overlay.data[dst + 3] = 118;
-      }}
-      const offscreen = document.createElement("canvas");
-      offscreen.width = maskWidth;
-      offscreen.height = maskHeight;
-      offscreen.getContext("2d").putImageData(overlay, 0, 0);
-      viewport.drawCanvas(offscreen);
+      viewport.drawCanvas(maskOverlayCanvas);
       drawLassoOverlay();
       drawCursorOverlay();
     }}
@@ -13508,6 +12510,8 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
         "<p><b>Session edits</b> " + (state.unapplied_session_edit_count || 0) +
         (payload.session_checkpoint ? " (current ROI is checkpoint overlay)" : "") + "</p>" +
         reviewWarning;
+      const seekInput = document.getElementById("roi-seek-input");
+      if (seekInput) seekInput.value = payload.roi_idx;
     }}
 
     async function api(path, options={{}}) {{
@@ -13527,7 +12531,7 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
         decodeMask(payload.mask);
         clearLasso(true);
         renderSummary();
-        draw();
+        scheduleDraw();
         updateNavButtons();
         setStatus("Loaded.");
       }} catch (error) {{
@@ -13566,6 +12570,30 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
       }}
     }}
 
+    async function seekRoi() {{
+      if (busyAction) return;
+      const input = document.getElementById("roi-seek-input");
+      const rawValue = input ? String(input.value || "").trim() : "";
+      const roiIdx = Number(rawValue);
+      if (!rawValue || !Number.isInteger(roiIdx) || roiIdx < 0) {{
+        setStatus("Enter a non-negative integer ROI number.", true);
+        return;
+      }}
+      setBusy(true, "Loading ROI " + roiIdx + "...");
+      try {{
+        await api("/nav", {{
+          method: "POST",
+          headers: {{"Content-Type": "application/json"}},
+          body: JSON.stringify({{roi_idx: roiIdx}})
+        }});
+        await loadCurrent();
+      }} catch (error) {{
+        showOperatorSupport(error, "session_request_failed");
+      }} finally {{
+        setBusy(false);
+      }}
+    }}
+
     async function save(advance) {{
       if (busyAction) return;
       setBusy(true, advance ? "Checkpointing mask and advancing..." : "Checkpointing mask...");
@@ -13590,8 +12618,9 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
     }}
 
     async function applySavedEdits() {{
-      if (busyAction) return;
-      setBusy(true, "Applying saved edits to Zarr. This can take a while...");
+      if (busyAction || applyInFlight) return;
+      applyInFlight = true;
+      setStatus("Applying saved edits to Zarr in the background. You can continue editing other rows while this runs.");
       try {{
         const result = await api("/apply", {{
           method: "POST",
@@ -13600,17 +12629,23 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
         }});
         await loadCurrent();
         const applied = result.result.applied_checkpoint_count || 0;
+        const stale = result.result.stale_checkpoint_count || 0;
+        const staleRows = Array.isArray(result.result.stale_rows) ? result.result.stale_rows : [];
         const before = result.result.edit_revision_before;
         const after = result.result.edit_revision_after;
         const remaining = Number(payload?.state?.unapplied_session_edit_count || 0);
         const nextStep = remaining > 0
           ? " " + remaining + " saved edit(s) still need applying."
           : " Saved edits are applied to Zarr. You can now set review status or complete the task.";
-        setStatus("Applied " + applied + " saved edit(s) to Zarr; revision " + before + " -> " + after + "." + nextStep + mutationStatusSuffix(result));
+        const stalePreview = staleRows.slice(0, 12).join(", ");
+        const staleSuffix = stale > 0
+          ? " Skipped " + stale + " stale saved edit(s)" + (stalePreview ? " at ROI " + stalePreview : "") + "; revisit and save those ROI(s) again."
+          : "";
+        setStatus("Applied " + applied + " saved edit(s) to Zarr; revision " + before + " -> " + after + "." + staleSuffix + nextStep + mutationStatusSuffix(result));
       }} catch (error) {{
         showOperatorSupport(error, "session_request_failed");
       }} finally {{
-        setBusy(false);
+        applyInFlight = false;
       }}
     }}
 
@@ -13653,6 +12688,7 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
       tool = nextTool;
       document.getElementById("paint-button").classList.toggle("active", tool === "paint");
       document.getElementById("erase-button").classList.toggle("active", tool === "erase");
+      scheduleDraw();
     }}
 
     function toggleBrushMode() {{
@@ -13664,6 +12700,7 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
       brushSize = Math.max(1, Math.min(48, Number(nextSize) || 1));
       document.getElementById("brush-size").value = String(brushSize);
       document.getElementById("brush-label").textContent = String(brushSize);
+      scheduleDraw();
     }}
 
     function setLassoMode(enabled) {{
@@ -13672,7 +12709,7 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
       lassoCursor = null;
       document.getElementById("lasso-button").classList.toggle("active", lassoMode);
       if (!lassoMode) lassoPoints = [];
-      draw();
+      scheduleDraw();
       setStatus(lassoMode ? "Lasso mode enabled. Click or drag to add contour points." : "Lasso mode disabled.");
     }}
 
@@ -13685,7 +12722,7 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
       lassoCursor = null;
       lassoDrawing = false;
       if (!quiet) {{
-        draw();
+        scheduleDraw();
         setStatus("Lasso contour cleared.");
       }}
     }}
@@ -13693,14 +12730,15 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
     function undoLassoPoint() {{
       if (!lassoPoints.length) return;
       lassoPoints.pop();
-      draw();
+      scheduleDraw();
       setStatus("Removed last lasso point.");
     }}
 
     function clearMask() {{
       if (!mask) return;
       mask.fill(0);
-      draw();
+      markMaskOverlayDirty();
+      scheduleDraw();
       setStatus("Mask cleared locally. Save to persist.");
     }}
 
@@ -13760,7 +12798,8 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
         if (invert ? !inside : inside) mask[i] = fillValue ? 1 : 0;
       }}
       clearLasso(true);
-      draw();
+      markMaskOverlayDirty();
+      scheduleDraw();
       setStatus((invert ? "Lasso outside fill" : "Lasso fill") + " applied locally. Save to persist.");
     }}
 
@@ -13773,21 +12812,33 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
       const baseErase = tool === "erase";
       const erase = event.shiftKey ? !baseErase : baseErase;
       const value = erase ? 0 : 1;
-      for (let yy = Math.max(0, my - radius); yy <= Math.min(maskHeight - 1, my + radius); yy++) {{
-        for (let xx = Math.max(0, mx - radius); xx <= Math.min(maskWidth - 1, mx + radius); xx++) {{
+      let changed = false;
+      const minX = Math.max(0, mx - radius);
+      const maxX = Math.min(maskWidth - 1, mx + radius);
+      const minY = Math.max(0, my - radius);
+      const maxY = Math.min(maskHeight - 1, my + radius);
+      for (let yy = minY; yy <= maxY; yy++) {{
+        for (let xx = minX; xx <= maxX; xx++) {{
           const dx = xx - mx;
           const dy = yy - my;
-          if (dx * dx + dy * dy <= radius * radius) mask[yy * maskWidth + xx] = value;
+          if (dx * dx + dy * dy <= radius * radius) {{
+            const idx = yy * maskWidth + xx;
+            if (mask[idx] !== value) {{
+              mask[idx] = value;
+              changed = true;
+            }}
+          }}
         }}
       }}
-      draw();
+      if (changed) markMaskOverlayDirty({{x0: minX, y0: minY, x1: maxX + 1, y1: maxY + 1}});
+      scheduleDraw();
     }}
 
     function beginCanvasEdit(event) {{
       event.preventDefault();
       if (viewport.beginPan(event)) {{
         cursorMaskPoint = null;
-        draw();
+        scheduleDraw();
         return;
       }}
       cursorMaskPoint = maskPointFromEvent(event);
@@ -13797,7 +12848,7 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
         const point = cursorMaskPoint;
         lassoCursor = point;
         appendLassoPoint(point);
-        draw();
+        scheduleDraw();
         return;
       }}
       drawing = true;
@@ -13813,16 +12864,16 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
         const point = cursorMaskPoint;
         lassoCursor = point;
         if (lassoDrawing) appendLassoPoint(point);
-        draw();
+        scheduleDraw();
         return;
       }}
       if (drawing) paintAt(event);
-      else draw();
+      else scheduleDraw();
     }}
 
     canvas.addEventListener("mousedown", beginCanvasEdit);
     canvas.addEventListener("mousemove", moveCanvasEdit);
-    canvas.addEventListener("mouseleave", () => {{ cursorMaskPoint = null; lassoCursor = null; draw(); }});
+    canvas.addEventListener("mouseleave", () => {{ cursorMaskPoint = null; lassoCursor = null; scheduleDraw(); }});
     canvas.addEventListener("touchstart", beginCanvasEdit, {{passive: false}});
     canvas.addEventListener("touchmove", moveCanvasEdit, {{passive: false}});
     window.addEventListener("mouseup", () => {{ drawing = false; lassoDrawing = false; viewport.endPan(); }});
@@ -13831,13 +12882,13 @@ def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
     window.addEventListener("keydown", (event) => {{
       if (event.key === "Shift" && cursorMaskPoint) {{
         cursorShiftInvert = true;
-        draw();
+        scheduleDraw();
       }}
     }});
     window.addEventListener("keyup", (event) => {{
       if (event.key === "Shift" && cursorMaskPoint) {{
         cursorShiftInvert = false;
-        draw();
+        scheduleDraw();
       }}
     }});
     window.addEventListener("keydown", (event) => {{
@@ -15169,11 +14220,18 @@ def _make_handler(state: ServerState):
             if subject_mask_path == "/nav":
                 try:
                     total = int(runtime.roi_indices.shape[0])
-                    runtime.position = _next_browser_nav_position(
-                        current_position=runtime.position,
-                        total=total,
-                        body=body,
-                    )
+                    if body.get("roi_idx") is not None:
+                        requested_roi_idx = int(body.get("roi_idx"))  # type: ignore[arg-type]
+                        matches = np.flatnonzero(runtime.roi_indices.astype(np.int64) == requested_roi_idx)
+                        if matches.size <= 0:
+                            raise ValueError(f"ROI {requested_roi_idx} is outside the active task row scope.")
+                        runtime.position = int(matches[0])
+                    else:
+                        runtime.position = _next_browser_nav_position(
+                            current_position=runtime.position,
+                            total=total,
+                            body=body,
+                        )
                 except (TypeError, ValueError) as exc:
                     self._write_json(_format_error("nav_error", details=_labeler_safe_error_details(exc)), status=HTTPStatus.BAD_REQUEST)
                     return True
@@ -15291,6 +14349,8 @@ def _make_handler(state: ServerState):
                 if self._reject_browser_mutation_preflight(session, body, runtime):
                     return True
                 apply_id = str(body.get("apply_id") or "").strip() or str(uuid.uuid4())
+                claimed_apply_id: str | None = None
+                canonical_write_started = False
                 try:
                     already_applied = state.store.get_applied_session_checkpoints_by_apply_id(
                         task_id=runtime.task_id,
@@ -15321,13 +14381,14 @@ def _make_handler(state: ServerState):
                             event_type="apply_subject_mask_session_checkpoints_idempotent_retry",
                             target={"apply_id": apply_id},
                             after=result,
-                        )
+                            )
                     else:
-                        checkpoints = state.store.list_session_checkpoints(
+                        checkpoints = state.store.claim_session_checkpoints_for_apply(
                             task_id=runtime.task_id,
-                            state="active",
                             component_name=runtime.component_name,
+                            apply_id=apply_id,
                         )
+                        claimed_apply_id = apply_id if checkpoints else None
                         target_path = _subject_mask_target_run_path(runtime)
                         source_rowset_path = _subject_mask_source_rowset_path(runtime)
                         if not checkpoints:
@@ -15354,6 +14415,8 @@ def _make_handler(state: ServerState):
                             before_area_total = 0
                             after_area_total = 0
                             compute_workers_used = 1
+                            stale_checkpoint_ids: list[str] = []
+                            stale_rows: list[int] = []
                             scoped_row_set = set(int(value) for value in runtime.roi_indices.tolist())
                             for checkpoint in checkpoints:
                                 checkpoint_target_path = str(checkpoint.get("target_run_path") or "")
@@ -15367,13 +14430,13 @@ def _make_handler(state: ServerState):
                                         f"checkpoint source rowset mismatch: expected {source_rowset_path}, got {checkpoint_source_rowset}"
                                     )
                                 checkpoint_revision = int(checkpoint.get("target_edit_revision") or 0)
-                                if checkpoint_revision != edit_revision_before:
-                                    raise ValueError(
-                                        f"stale checkpoint edit_revision: expected {edit_revision_before}, got {checkpoint_revision}"
-                                    )
                                 roi_idx = int(checkpoint.get("roi_idx") or 0)
                                 if roi_idx not in scoped_row_set:
                                     raise ValueError(f"checkpoint row {roi_idx} is outside the active task row scope.")
+                                if checkpoint_revision != edit_revision_before:
+                                    stale_checkpoint_ids.append(str(checkpoint.get("checkpoint_id") or ""))
+                                    stale_rows.append(roi_idx)
+                                    continue
                                 metadata = checkpoint.get("metadata")
                                 if isinstance(metadata, Mapping):
                                     expected_identity = metadata.get("row_identity")
@@ -15402,94 +14465,153 @@ def _make_handler(state: ServerState):
                                 edited_stacks.append(edited_stack)
                                 before_area_total += int(before_mask.sum())
                                 after_area_total += int(edited_mask.sum())
-                            if edited_stacks:
-                                compute_worker_limit_raw = str(
-                                    os.environ.get("PALETTE_SUBJECT_MASK_APPLY_COMPUTE_WORKERS", "4")
-                                ).strip()
-                                try:
-                                    compute_worker_limit = int(compute_worker_limit_raw)
-                                except ValueError:
-                                    compute_worker_limit = 4
-                                compute_workers = max(
-                                    1,
-                                    min(
-                                        max(1, compute_worker_limit),
-                                        len(edited_stacks),
-                                        max(1, int(os.cpu_count() or 1)),
-                                    ),
-                                )
-                                compute_workers_used = int(compute_workers)
-                                review_mod._apply_refined_subject_roi_rows(  # type: ignore[attr-defined]
-                                    source=runtime.source,
-                                    refined=runtime.refined,
-                                    roi_indices=applied_rows,
-                                    edited_masks_batch=np.stack(edited_stacks, axis=0),
-                                    component_names=(runtime.component_name,),
-                                    update_mode="browser_session_apply",
-                                    update_method="palette_web_labeling_session_apply_v1",
-                                    update_reason="web_labeling_subject_mask_session_apply",
-                                    compute_workers=compute_workers,
-                                )
-                            edit_revision_after = int(edit_revision_before) + 1
-                            runtime.refined.group.attrs["edit_revision"] = int(edit_revision_after)
-                            runtime.refined.group.attrs["edit_revision_updated_at_utc"] = datetime.now(timezone.utc).isoformat()
-                            runtime.refined.group.attrs["edit_revision_last_apply_id"] = apply_id
-                            if "mask_rle" in runtime.refined.group:
-                                runtime.refined.group.attrs["mask_rle_stale_since_edit_revision"] = int(edit_revision_after)
-                            updated_count = state.store.mark_session_checkpoints_applied(
-                                checkpoint_ids=checkpoint_ids,
-                                apply_id=apply_id,
-                                edit_revision_before=edit_revision_before,
-                                edit_revision_after=edit_revision_after,
-                            )
-                            result = {
-                                "apply_id": apply_id,
-                                "already_applied": False,
-                                "applied_checkpoint_count": int(updated_count),
-                                "requested_checkpoint_count": len(checkpoints),
-                                "component_name": runtime.component_name,
-                                "rows": applied_rows,
-                                "edit_revision_before": edit_revision_before,
-                                "edit_revision_after": edit_revision_after,
-                                "before_area_px_total": before_area_total,
-                                "after_area_px_total": after_area_total,
-                                "compute_workers": int(compute_workers_used),
-                                "canonical_zarr_mutated": True,
-                            }
-                            mutation_event = state.store.record_event(
-                                task_id=runtime.task_id,
-                                recording_id=runtime.recording_id,
-                                user=user,
-                                event_type="apply_subject_mask_session_checkpoints",
-                                target={
+                            if not edited_stacks:
+                                released_stale_checkpoint_count = 0
+                                if stale_checkpoint_ids:
+                                    released_stale_checkpoint_count = state.store.release_session_checkpoints_apply(
+                                        task_id=runtime.task_id,
+                                        apply_id=apply_id,
+                                    )
+                                edit_revision_current = _subject_mask_edit_revision(runtime)
+                                result = {
                                     "apply_id": apply_id,
+                                    "already_applied": False,
+                                    "applied_checkpoint_count": 0,
+                                    "requested_checkpoint_count": len(checkpoints),
+                                    "stale_checkpoint_count": len(stale_checkpoint_ids),
+                                    "stale_rows": stale_rows,
+                                    "released_stale_checkpoint_count": int(released_stale_checkpoint_count),
+                                    "skipped_checkpoint_count": len(stale_checkpoint_ids),
                                     "component_name": runtime.component_name,
-                                    "refined_run": str(runtime.refined.run_name),
-                                    "target_run_path": target_path,
-                                },
-                                before={
-                                    "edit_revision": edit_revision_before,
-                                    "area_px_total": before_area_total,
-                                },
-                                after={
-                                    "edit_revision": edit_revision_after,
-                                    "area_px_total": after_area_total,
+                                    "rows": [],
+                                    "edit_revision_before": edit_revision_current,
+                                    "edit_revision_after": edit_revision_current,
+                                    "before_area_px_total": 0,
+                                    "after_area_px_total": 0,
+                                    "compute_workers": 0,
+                                    "canonical_zarr_mutated": False,
+                                }
+                                mutation_event = state.store.record_event(
+                                    task_id=runtime.task_id,
+                                    recording_id=runtime.recording_id,
+                                    user=user,
+                                    event_type="apply_subject_mask_session_checkpoints_stale_skipped",
+                                    target={
+                                        "apply_id": apply_id,
+                                        "component_name": runtime.component_name,
+                                        "refined_run": str(runtime.refined.run_name),
+                                        "target_run_path": target_path,
+                                    },
+                                    after=result,
+                                )
+                            else:
+                                if edited_stacks:
+                                    compute_worker_limit_raw = str(
+                                        os.environ.get("PALETTE_SUBJECT_MASK_APPLY_COMPUTE_WORKERS", "4")
+                                    ).strip()
+                                    try:
+                                        compute_worker_limit = int(compute_worker_limit_raw)
+                                    except ValueError:
+                                        compute_worker_limit = 4
+                                    compute_workers = max(
+                                        1,
+                                        min(
+                                            max(1, compute_worker_limit),
+                                            len(edited_stacks),
+                                            max(1, int(os.cpu_count() or 1)),
+                                        ),
+                                    )
+                                    compute_workers_used = int(compute_workers)
+                                    canonical_write_started = True
+                                    review_mod._apply_refined_subject_roi_rows(  # type: ignore[attr-defined]
+                                        source=runtime.source,
+                                        refined=runtime.refined,
+                                        roi_indices=applied_rows,
+                                        edited_masks_batch=np.stack(edited_stacks, axis=0),
+                                        component_names=(runtime.component_name,),
+                                        update_mode="browser_session_apply",
+                                        update_method="palette_web_labeling_session_apply_v1",
+                                        update_reason="web_labeling_subject_mask_session_apply",
+                                        compute_workers=compute_workers,
+                                    )
+                                edit_revision_after = int(edit_revision_before) + 1
+                                runtime.refined.group.attrs["edit_revision"] = int(edit_revision_after)
+                                runtime.refined.group.attrs["edit_revision_updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+                                runtime.refined.group.attrs["edit_revision_last_apply_id"] = apply_id
+                                if "mask_rle" in runtime.refined.group:
+                                    runtime.refined.group.attrs["mask_rle_stale_since_edit_revision"] = int(edit_revision_after)
+                                updated_count = state.store.mark_session_checkpoints_applied(
+                                    checkpoint_ids=checkpoint_ids,
+                                    apply_id=apply_id,
+                                    edit_revision_before=edit_revision_before,
+                                    edit_revision_after=edit_revision_after,
+                                )
+                                released_stale_checkpoint_count = 0
+                                if stale_checkpoint_ids:
+                                    released_stale_checkpoint_count = state.store.release_session_checkpoints_apply(
+                                        task_id=runtime.task_id,
+                                        apply_id=apply_id,
+                                    )
+                                result = {
+                                    "apply_id": apply_id,
+                                    "already_applied": False,
                                     "applied_checkpoint_count": int(updated_count),
+                                    "requested_checkpoint_count": len(checkpoints),
+                                    "stale_checkpoint_count": len(stale_checkpoint_ids),
+                                    "stale_rows": stale_rows,
+                                    "released_stale_checkpoint_count": int(released_stale_checkpoint_count),
+                                    "skipped_checkpoint_count": len(stale_checkpoint_ids),
+                                    "component_name": runtime.component_name,
+                                    "rows": applied_rows,
+                                    "edit_revision_before": edit_revision_before,
+                                    "edit_revision_after": edit_revision_after,
+                                    "before_area_px_total": before_area_total,
+                                    "after_area_px_total": after_area_total,
                                     "compute_workers": int(compute_workers_used),
-                                },
-                            )
-                            _refresh_registry_for_scope(
-                                store=state.store,
-                                task_id=runtime.task_id,
-                                recording_id=runtime.recording_id,
-                                user=user,
-                                workflow_kind="subject_mask_component",
-                                scope=_session_scope(session),
-                                zarr_path=runtime.zarr_path,
-                                dataset_id=str(session.get("dataset_id") or "") or None,
-                                zarr_use=str(session.get("zarr_use") or "") or None,
-                            )
+                                    "canonical_zarr_mutated": True,
+                                }
+                                mutation_event = state.store.record_event(
+                                    task_id=runtime.task_id,
+                                    recording_id=runtime.recording_id,
+                                    user=user,
+                                    event_type="apply_subject_mask_session_checkpoints",
+                                    target={
+                                        "apply_id": apply_id,
+                                        "component_name": runtime.component_name,
+                                        "refined_run": str(runtime.refined.run_name),
+                                        "target_run_path": target_path,
+                                    },
+                                    before={
+                                        "edit_revision": edit_revision_before,
+                                        "area_px_total": before_area_total,
+                                    },
+                                    after={
+                                        "edit_revision": edit_revision_after,
+                                        "area_px_total": after_area_total,
+                                        "applied_checkpoint_count": int(updated_count),
+                                        "compute_workers": int(compute_workers_used),
+                                    },
+                                )
+                                _refresh_registry_for_scope(
+                                    store=state.store,
+                                    task_id=runtime.task_id,
+                                    recording_id=runtime.recording_id,
+                                    user=user,
+                                    workflow_kind="subject_mask_component",
+                                    scope=_session_scope(session),
+                                    zarr_path=runtime.zarr_path,
+                                    dataset_id=str(session.get("dataset_id") or "") or None,
+                                    zarr_use=str(session.get("zarr_use") or "") or None,
+                                )
                 except Exception as exc:
+                    if claimed_apply_id and not canonical_write_started:
+                        try:
+                            state.store.release_session_checkpoints_apply(
+                                task_id=runtime.task_id,
+                                apply_id=claimed_apply_id,
+                            )
+                        except Exception:
+                            pass
                     self._write_json(_format_error("apply_error", details=_labeler_safe_error_details(exc)), status=HTTPStatus.BAD_REQUEST)
                     return True
                 self._write_json(
@@ -17034,6 +16156,32 @@ def _make_handler(state: ServerState):
                 except Exception as exc:
                     self._write_json(_format_error("labeling_user_update_failed", details=str(exc)), status=HTTPStatus.BAD_REQUEST)
                     return
+                notification_result = None
+                if _request_truthy(body.get("notify") or body.get("send_notification")):
+                    try:
+                        notification_result = send_labeler_added_notification(
+                            user=labeling_user,
+                            actor_user=user,
+                            config=_notification_config_from_values(
+                                mode=str(body.get("notification_mode") or "").strip() or None,
+                                base_url=str(body.get("notification_base_url") or body.get("base_url") or "").strip() or None,
+                            ),
+                        )
+                    except Exception as exc:
+                        notification_result = _notification_exception_result(
+                            kind="labeler_added",
+                            to_user=str(labeling_user.get("user_id") or user_id),
+                            exc=exc,
+                        )
+                    state.store.record_labeling_user_event(
+                        user_id=str(labeling_user.get("user_id") or user_id),
+                        actor_user=user,
+                        event_type=_notification_event_type(
+                            notification_result,
+                            prefix="labeling_user_notification",
+                        ),
+                        after=notification_result,
+                    )
                 self._write_json(
                     {
                         "ok": True,
@@ -17041,6 +16189,7 @@ def _make_handler(state: ServerState):
                         "operator_user": user,
                         "user": labeling_user,
                         "known_user_status": _known_labeler_status(state.store, str(labeling_user.get("user_id") or user_id)),
+                        "notification": notification_result,
                     }
                 )
                 return
@@ -17123,6 +16272,33 @@ def _make_handler(state: ServerState):
                     self._write_json(_format_error("assignment_update_failed", details=str(exc)), status=HTTPStatus.BAD_REQUEST)
                     return
                 closed_session_payload = _closed_session_response_payload(state.store, closed_session_ids)
+                notification_result = None
+                if _request_truthy(body.get("notify") or body.get("send_notification")):
+                    try:
+                        notification_result = send_assignment_available_notification(
+                            user=state.store.get_labeling_user(str(assignment.get("assignee_user") or assignee_user)),
+                            assignment=assignment,
+                            actor_user=user,
+                            config=_notification_config_from_values(
+                                mode=str(body.get("notification_mode") or "").strip() or None,
+                                base_url=str(body.get("notification_base_url") or body.get("base_url") or "").strip() or None,
+                            ),
+                        )
+                    except Exception as exc:
+                        notification_result = _notification_exception_result(
+                            kind="assignment_available",
+                            to_user=str(assignment.get("assignee_user") or assignee_user),
+                            exc=exc,
+                        )
+                    state.store.record_assignment_event(
+                        recording_id=str(assignment.get("recording_id") or recording_id),
+                        actor_user=user,
+                        event_type=_notification_event_type(
+                            notification_result,
+                            prefix="assignment_notification",
+                        ),
+                        after=notification_result,
+                    )
                 self._write_json(
                     {
                         "ok": True,
@@ -17134,6 +16310,7 @@ def _make_handler(state: ServerState):
                         "closed_session_ids": transition_result.get("closed_session_ids", []),
                         "closed_sessions": closed_sessions,
                         "session_closure_events": closed_session_payload["session_closure_events"],
+                        "notification": notification_result,
                     }
                 )
                 return
@@ -18154,18 +17331,6 @@ def serve(config: ServerConfig) -> int:
     return 0
 
 
-def _print_json(payload: object) -> None:
-    print(json.dumps(payload, indent=2, sort_keys=True))
-
-
-def _csv_export_value(value: object) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, (dict, list, tuple)):
-        return json.dumps(value, sort_keys=True, separators=(",", ":"))
-    return str(value)
-
-
 def _write_csv_manifest_template(path: Path, *, fieldnames: list[str], sample: dict[str, object], overwrite: bool) -> None:
     import csv
 
@@ -18215,56 +17380,6 @@ def _write_manifest_templates_readme(
         "",
     ]
     path.write_text("\n".join(lines), encoding="utf-8")
-
-
-def _write_row_export(
-    *,
-    payload: dict[str, object],
-    rows: list[dict[str, object]],
-    output: str | None,
-    output_format: str,
-    overwrite: bool,
-) -> dict[str, object]:
-    if output_format == "json":
-        text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-    elif output_format == "jsonl":
-        text = "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows)
-    elif output_format == "csv":
-        import csv
-        import io
-
-        fieldnames: list[str] = []
-        seen: set[str] = set()
-        for row in rows:
-            for key in row:
-                if key not in seen:
-                    seen.add(key)
-                    fieldnames.append(str(key))
-        buffer = io.StringIO()
-        writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({key: _csv_export_value(row.get(key)) for key in fieldnames})
-        text = buffer.getvalue()
-    else:
-        raise ValueError(f"Unsupported export format: {output_format}")
-
-    summary = {
-        "ok": True,
-        "count": len(rows),
-        "format": output_format,
-        "output": output,
-        "filters": payload.get("filters", {}),
-    }
-    if output:
-        output_path = Path(output)
-        if output_path.exists() and not overwrite:
-            raise FileExistsError(f"Refusing to overwrite existing export: {output_path}")
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(text, encoding="utf-8")
-        return summary
-    print(text, end="")
-    return summary
 
 
 def _write_batch_plan_html_report(payload: dict[str, object], output_path: Path) -> None:
@@ -19767,19 +18882,6 @@ def _parse_header_evidence_values(values: Sequence[str]) -> dict[str, str]:
         headers[name] = header_value.strip()
     return headers
 
-
-def _expected_user_query_value_from_url(url: str) -> str:
-    from urllib.parse import unquote_plus
-
-    text = str(url or "")
-    if "?" not in text:
-        return ""
-    query_text = text.split("?", 1)[1].split("#", 1)[0]
-    for query_part in query_text.split("&"):
-        query_key, separator, query_value = query_part.partition("=")
-        if separator and unquote_plus(query_key) == "expected_user":
-            return unquote_plus(query_value)
-    return ""
 
 
 def _record_browser_response_security_evidence(
@@ -22225,10 +21327,7 @@ def _html_escape(value: object) -> str:
     )
 
 
-DATASET_QUEUE_PATH = "/datasets"
 LABELING_HOME_PATH = "/labeling"
-DASHBOARD_PATH = "/work"
-PERSONAL_DATASET_QUEUE_PATH = "/my-datasets"
 PERSONAL_WORK_PATH = "/my-work"
 IDENTITY_PROBE_PATH = "/identity"
 
@@ -25139,11 +24238,6 @@ def _labeler_landing_url_for_base(base_url: str | None) -> str:
     return str(base_url).rstrip("/")
 
 
-def _dataset_queue_url_for_base(base_url: str | None) -> str:
-    if not base_url:
-        return ""
-    return f"{str(base_url).rstrip('/')}{DATASET_QUEUE_PATH}"
-
 
 def _labeling_home_url_for_base(base_url: str | None) -> str:
     if not base_url:
@@ -25157,19 +24251,6 @@ def _personal_work_url_for_base(base_url: str | None) -> str:
     return f"{str(base_url).rstrip('/')}{PERSONAL_WORK_PATH}"
 
 
-def _personal_dataset_queue_url_for_base(base_url: str | None) -> str:
-    if not base_url:
-        return ""
-    return f"{str(base_url).rstrip('/')}{PERSONAL_DATASET_QUEUE_PATH}"
-
-
-def _dashboard_url_for_expected_user(dashboard_url: str | None, user: str | None) -> str:
-    base = str(dashboard_url or "").strip()
-    expected_user = str(user or "").strip()
-    if not base or not expected_user:
-        return base
-    separator = "&" if "?" in base else "?"
-    return f"{base}{separator}expected_user={quote(expected_user, safe='')}"
 
 
 def _identity_probe_url_for_base(base_url: str | None) -> str:
@@ -25200,16 +24281,6 @@ def _labeler_landing_url_for_dashboard(dashboard_url: str | None, user: str | No
     return _dashboard_url_for_expected_user(landing_url, user) if landing_url else ""
 
 
-def _dataset_queue_url_for_dashboard(dashboard_url: str | None, user: str | None) -> str:
-    dashboard = str(dashboard_url or "").strip()
-    if not dashboard:
-        return ""
-    if dashboard.endswith(DASHBOARD_PATH):
-        queue_url = f"{dashboard[:-len(DASHBOARD_PATH)]}{DATASET_QUEUE_PATH}"
-    else:
-        queue_url = DATASET_QUEUE_PATH if dashboard == DASHBOARD_PATH else ""
-    return _dashboard_url_for_expected_user(queue_url, user) if queue_url else ""
-
 
 def _personal_work_url_for_dashboard(dashboard_url: str | None, user: str | None) -> str:
     dashboard = str(dashboard_url or "").strip()
@@ -25221,19 +24292,6 @@ def _personal_work_url_for_dashboard(dashboard_url: str | None, user: str | None
         work_url = PERSONAL_WORK_PATH if dashboard == DASHBOARD_PATH else ""
     return _dashboard_url_for_expected_user(work_url, user) if work_url else ""
 
-
-def _personal_dataset_queue_url_for_dashboard(
-    dashboard_url: str | None,
-    user: str | None,
-) -> str:
-    dashboard = str(dashboard_url or "").strip()
-    if not dashboard:
-        return ""
-    if dashboard.endswith(DASHBOARD_PATH):
-        queue_url = f"{dashboard[:-len(DASHBOARD_PATH)]}{PERSONAL_DATASET_QUEUE_PATH}"
-    else:
-        queue_url = PERSONAL_DATASET_QUEUE_PATH if dashboard == DASHBOARD_PATH else ""
-    return _dashboard_url_for_expected_user(queue_url, user) if queue_url else ""
 
 
 def _dataset_queue_direct_start_policy() -> dict[str, object]:
@@ -45897,6 +44955,9 @@ def build_parser() -> argparse.ArgumentParser:
     users_add.add_argument("--status", choices=LABELING_USER_STATUSES, default="active")
     users_add.add_argument("--notes", default=None)
     users_add.add_argument("--actor", default=None, help="Operator/user recorded on the user event.")
+    users_add.add_argument("--notify", action="store_true", help="Send or queue a labeler-added email notification.")
+    users_add.add_argument("--notification-mode", choices=NOTIFICATION_MODES, default=None, help="Override PALETTE_LABELING_NOTIFICATION_MODE for this notification.")
+    users_add.add_argument("--notification-base-url", default=None, help="Absolute labeling service URL to include in notification links.")
 
     users_activate = sub.add_parser("users-activate", help="Mark a labeling user active.")
     users_activate.add_argument("user_id")
@@ -46067,6 +45128,9 @@ def build_parser() -> argparse.ArgumentParser:
     assign.add_argument("--notes", default=None)
     assign.add_argument("--output", default=None, help="Optional JSON output path for archiving the assignment report.")
     assign.add_argument("--overwrite", action="store_true", help="Allow replacing an existing --output report.")
+    assign.add_argument("--notify", action="store_true", help="Send or queue a dataset-available email notification for the assignee.")
+    assign.add_argument("--notification-mode", choices=NOTIFICATION_MODES, default=None, help="Override PALETTE_LABELING_NOTIFICATION_MODE for this notification.")
+    assign.add_argument("--notification-base-url", default=None, help="Absolute labeling service URL to include in notification links.")
 
     import_assignments = sub.add_parser("import-assignments", help="Dry-run or apply a JSON/JSONL recording assignment manifest.")
     import_assignments.add_argument("--input", required=True, help="JSON list, JSONL file, or JSON object with assignments list.")
@@ -46075,6 +45139,9 @@ def build_parser() -> argparse.ArgumentParser:
     import_assignments.add_argument("--warnings-as-errors", action="store_true", help="Return nonzero and do not apply when assignment import warnings are present.")
     import_assignments.add_argument("--output", default=None, help="Optional JSON output path for archiving the assignment import report.")
     import_assignments.add_argument("--overwrite", action="store_true", help="Allow replacing an existing --output report.")
+    import_assignments.add_argument("--notify", action="store_true", help="Send or queue dataset-available email notifications for applied active assignments.")
+    import_assignments.add_argument("--notification-mode", choices=NOTIFICATION_MODES, default=None, help="Override PALETTE_LABELING_NOTIFICATION_MODE for these notifications.")
+    import_assignments.add_argument("--notification-base-url", default=None, help="Absolute labeling service URL to include in notification links.")
 
     task = sub.add_parser("add-task", help="Create or update a labeling task.")
     task.add_argument("--task-id", default=None)
@@ -46915,12 +45982,39 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 notes=args.notes,
                 actor_user=args.actor,
             )
+            notification_result = None
+            if bool(args.notify):
+                try:
+                    notification_result = send_labeler_added_notification(
+                        user=user_row,
+                        actor_user=args.actor,
+                        config=_notification_config_from_values(
+                            mode=args.notification_mode,
+                            base_url=args.notification_base_url,
+                        ),
+                    )
+                except Exception as exc:
+                    notification_result = _notification_exception_result(
+                        kind="labeler_added",
+                        to_user=str(user_row.get("user_id") or args.user_id),
+                        exc=exc,
+                    )
+                store.record_labeling_user_event(
+                    user_id=str(user_row.get("user_id") or args.user_id),
+                    actor_user=args.actor,
+                    event_type=_notification_event_type(
+                        notification_result,
+                        prefix="labeling_user_notification",
+                    ),
+                    after=notification_result,
+                )
             payload = {
                 "ok": True,
                 "schema": "palette.web_labeling_user_update.v1",
                 "store_path": str(store_path),
                 "user": user_row,
                 "known_user_status": _known_labeler_status(store, str(user_row.get("user_id") or args.user_id)),
+                "notification": notification_result,
             }
             _print_json(payload)
             return 0
@@ -47029,6 +46123,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 status=args.status,
                 notes=args.notes,
             )
+            notification_result = None
+            if bool(args.notify):
+                assignment = transition_result["assignment"]
+                try:
+                    notification_result = send_assignment_available_notification(
+                        user=store.get_labeling_user(str(assignment.get("assignee_user") or args.user)),
+                        assignment=assignment,
+                        actor_user=args.assigned_by,
+                        config=_notification_config_from_values(
+                            mode=args.notification_mode,
+                            base_url=args.notification_base_url,
+                        ),
+                    )
+                except Exception as exc:
+                    notification_result = _notification_exception_result(
+                        kind="assignment_available",
+                        to_user=str(assignment.get("assignee_user") or args.user),
+                        exc=exc,
+                    )
+                store.record_assignment_event(
+                    recording_id=str(assignment.get("recording_id") or args.recording_id),
+                    actor_user=args.assigned_by,
+                    event_type=_notification_event_type(
+                        notification_result,
+                        prefix="assignment_notification",
+                    ),
+                    after=notification_result,
+                )
             payload = {
                 "ok": True,
                 "assignment": transition_result["assignment"],
@@ -47038,6 +46160,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "closed_session_count": transition_result.get("closed_session_count", 0),
                 "closed_session_ids": transition_result.get("closed_session_ids", []),
                 "closed_sessions": transition_result.get("closed_sessions", []),
+                "notification": notification_result,
             }
             _write_optional_json_report(payload, args.output, overwrite=bool(args.overwrite), description="assignment report")
             _print_json(payload)
@@ -47108,6 +46231,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             apply_rows = _assignment_rows_for_apply(rows, apply=bool(args.apply) and not blocked_by_warnings)
             apply_row_ids = {id(row) for row in apply_rows} if bool(args.apply) and not blocked_by_warnings else set()
             applied_result_count = 0
+            notification_results: list[dict[str, object]] = []
             for row_index, row in enumerate(rows):
                 recording_id = str(row["recording_id"])
                 assignee_user = str(row["assignee_user"])
@@ -47144,6 +46268,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             "details": "Duplicate assignment input row was reported but not applied; only the final row for each recording mutates ownership/status.",
                         }
                     )
+                notification_result = None
                 if should_apply_row:
                     transition_result = store.assign_recording_with_session_closure(
                         recording_id=recording_id,
@@ -47156,6 +46281,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     closed_sessions = list(transition_result.get("closed_sessions") or [])
                     assignment_transition = transition_result.get("assignment_transition")
                     applied_result_count += 1
+                    if bool(args.notify):
+                        try:
+                            notification_result = send_assignment_available_notification(
+                                user=store.get_labeling_user(str(assignment.get("assignee_user") or assignee_user)),
+                                assignment=assignment,
+                                actor_user=str(assigned_by) if assigned_by is not None else None,
+                                config=_notification_config_from_values(
+                                    mode=args.notification_mode,
+                                    base_url=args.notification_base_url,
+                                ),
+                            )
+                        except Exception as exc:
+                            notification_result = _notification_exception_result(
+                                kind="assignment_available",
+                                to_user=str(assignment.get("assignee_user") or assignee_user),
+                                exc=exc,
+                            )
+                        store.record_assignment_event(
+                            recording_id=str(assignment.get("recording_id") or recording_id),
+                            actor_user=str(assigned_by) if assigned_by is not None else None,
+                            event_type=_notification_event_type(
+                                notification_result,
+                                prefix="assignment_notification",
+                            ),
+                            after=notification_result,
+                        )
+                        notification_results.append(notification_result)
                 else:
                     assignment = target
                     closed_sessions = []
@@ -47171,6 +46323,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         "assignment_transition": assignment_transition,
                         "closed_session_count": len(closed_sessions),
                         "closed_sessions": closed_sessions,
+                        "notification": notification_result,
                         "warnings": row_warnings,
                         **({"source_line": row["_source_line"]} if row.get("_source_line") is not None else {}),
                     }
@@ -47191,6 +46344,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "applied_count": applied_result_count,
                 "input_row_count": len(rows),
                 "deduplicated_apply_count": len(apply_rows) if bool(args.apply) and not blocked_by_warnings else 0,
+                "notification_count": len(notification_results),
+                "notifications": notification_results,
                 "skipped_duplicate_apply_count": sum(
                     1
                     for result in results

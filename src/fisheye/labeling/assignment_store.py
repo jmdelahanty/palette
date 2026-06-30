@@ -1868,6 +1868,11 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
             component_name=component_name_value,
             state=None,
         )
+        if existing and str(existing.get("state") or "") == "applying":
+            raise RuntimeError(
+                "This row already has a checkpoint being applied to Zarr. "
+                "Wait for that apply to finish before saving this same row again."
+            )
         checkpoint_id = str(existing.get("checkpoint_id")) if existing else str(uuid.uuid4())
         created_at_utc = str(existing.get("created_at_utc")) if existing else now
         self.conn.execute(
@@ -1958,6 +1963,7 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         task_id: str,
         state: str | None = "active",
         component_name: str | None = None,
+        apply_id: str | None = None,
         limit: int = 1000,
     ) -> list[dict[str, object]]:
         self.initialize()
@@ -1969,6 +1975,9 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         if component_name is not None:
             sql.append("AND component_name = ?")
             params.append(str(component_name))
+        if apply_id is not None:
+            sql.append("AND apply_id = ?")
+            params.append(str(apply_id))
         sql.append("ORDER BY updated_at_utc ASC LIMIT ?")
         params.append(max(1, int(limit)))
         rows = self.conn.execute(" ".join(sql), params).fetchall()
@@ -1981,13 +1990,92 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
         component_name: str | None = None,
     ) -> int:
         self.initialize()
-        sql = ["SELECT COUNT(*) AS n FROM labeling_session_checkpoints WHERE task_id = ? AND state = 'active'"]
+        sql = [
+            "SELECT COUNT(*) AS n FROM labeling_session_checkpoints "
+            "WHERE task_id = ? AND state IN ('active', 'applying')"
+        ]
         params: list[object] = [str(task_id)]
         if component_name is not None:
             sql.append("AND component_name = ?")
             params.append(str(component_name))
         row = self.conn.execute(" ".join(sql), params).fetchone()
         return int(row["n"] if row is not None else 0)
+
+    def claim_session_checkpoints_for_apply(
+        self,
+        *,
+        task_id: str,
+        component_name: str,
+        apply_id: str,
+        limit: int = 1000,
+    ) -> list[dict[str, object]]:
+        """Atomically claim current active checkpoints for one canonical apply snapshot."""
+
+        self.initialize()
+        task_id_value = str(task_id)
+        component_name_value = str(component_name)
+        apply_id_value = str(apply_id)
+        rows = self.conn.execute(
+            """
+            SELECT checkpoint_id
+            FROM labeling_session_checkpoints
+            WHERE task_id = ?
+              AND component_name = ?
+              AND state = 'active'
+            ORDER BY updated_at_utc ASC
+            LIMIT ?;
+            """,
+            (task_id_value, component_name_value, max(1, int(limit))),
+        ).fetchall()
+        ids = [str(row["checkpoint_id"]) for row in rows]
+        if not ids:
+            return []
+        now = utc_now()
+        placeholders = ", ".join("?" for _ in ids)
+        self.conn.execute(
+            f"""
+            UPDATE labeling_session_checkpoints
+            SET state = 'applying',
+                apply_id = ?,
+                updated_at_utc = ?
+            WHERE checkpoint_id IN ({placeholders})
+              AND state = 'active';
+            """,
+            [apply_id_value, now, *ids],
+        )
+        self.conn.commit()
+        return self.list_session_checkpoints(
+            task_id=task_id_value,
+            state="applying",
+            component_name=component_name_value,
+            apply_id=apply_id_value,
+            limit=limit,
+        )
+
+    def release_session_checkpoints_apply(
+        self,
+        *,
+        task_id: str,
+        apply_id: str,
+    ) -> int:
+        """Return an unapplied claimed snapshot to active state after a pre-write failure."""
+
+        self.initialize()
+        now = utc_now()
+        cur = self.conn.execute(
+            """
+            UPDATE labeling_session_checkpoints
+            SET state = 'active',
+                apply_id = NULL,
+                updated_at_utc = ?
+            WHERE task_id = ?
+              AND apply_id = ?
+              AND state = 'applying';
+            """,
+            (now, str(task_id), str(apply_id)),
+        )
+        self.conn.commit()
+        return int(cur.rowcount or 0)
 
     def get_applied_session_checkpoints_by_apply_id(
         self,
@@ -2040,9 +2128,10 @@ class LabelingStore(AbstractContextManager["LabelingStore"]):
                 applied_at_utc = ?,
                 updated_at_utc = ?
             WHERE checkpoint_id IN ({placeholders})
-              AND state = 'active';
+              AND apply_id = ?
+              AND state = 'applying';
             """,
-            [params[0], params[1], params[2], params[3], params[3], *ids],
+            [params[0], params[1], params[2], params[3], params[3], *ids, str(apply_id)],
         )
         self.conn.commit()
         return int(cur.rowcount or 0)
