@@ -43,6 +43,13 @@ This plan complements:
   `*_training.zarr`.
 - `import_acquisition_detections_to_detect_run` can import acquisition-time crop
   recorder boxes as a normal `detect_runs/<run>`.
+- `CropImageSource` can read acquisition crop-video-backed geometry-only crop
+  runs directly from `source_crop_video_frame_indices`.
+- `CropImageSource` can also read hybrid acquisition crop runs where some rows
+  come from the crop MP4 and some rows come from a supplemental flat ROI cache.
+- `build_hybrid_acquisition_offline_crop_run` can create one logical crop
+  rowset backed by acquisition crop video plus pre-decoded offline-recovered
+  ROIs.
 
 ### Observed RedScare State On 2026-06-29
 
@@ -100,9 +107,11 @@ acquisition crop MP4
 ```
 
 For analysis Zarrs, the current cluster keypoint and subject-mask tooling expects
-a `crop_runs/<run>` rowset and an image provider. The provider can be
-materialized `roi_images` or a flat/temporary ROI cache, but not yet the
-acquisition crop video itself.
+a `crop_runs/<run>` rowset and an image provider. The provider can now be
+materialized `roi_images`, a flat/temporary ROI cache, an acquisition crop video,
+or a hybrid acquisition crop video plus supplemental flat cache. The remaining
+gap is cluster orchestration: building the hybrid crop run/cache and then
+submitting downstream model jobs as one reproducible workflow.
 
 ## Design Principle
 
@@ -184,8 +193,8 @@ frame_indices                         # zero-based parent recording frame index
 source_recording_frame_ids             # acquisition 1-based frame id when available
 roi_coordinates_full                   # x,y top-left in full-frame pixels
 source_crop_xywh                       # x,y,w,h in full-frame pixels
-source_pixel_kind                      # enum/string per row
-source_crop_row_ids                    # optional row ids into source crop run when derived
+source_pixel_kind_codes                # integer enum per row; attrs carry labels
+supplemental_cache_row_indices         # row in supplemental flat cache, or -1
 source_refined_row_ids                 # optional refined-detect row ids for recovered crops
 source_crop_meta_row_indices           # required for acquisition crop-video rows
 source_crop_video_frame_indices        # required for acquisition crop-video rows
@@ -208,24 +217,26 @@ Run attrs should include:
 
 ```text
 crop_storage_mode = "geometry_only"
-source_pixels = "hybrid_acquisition_then_recovered" | "acquisition_crop_video"
-roi_pixel_provider = "acquisition_crop_video" | "hybrid_acquisition_then_recovered"
+source_pixels = "hybrid_acquisition_crop_video_offline_supplement" | "acquisition_crop_video"
+roi_pixel_provider = "acquisition_crop_video" | "hybrid_acquisition_crop_video_offline_supplement"
 source_crop_video_path
 source_crop_meta_path or source_crop_meta_array_path
 source_video_path
 source_video_fingerprint
+supplemental_roi_cache_manifest
 source_crop_xywh_coordinate_space = "source_image_xywh"
 roi_coordinates_full_coordinate_space = "source_image_xy"
 source_crop_video_frame_indices_semantics = "zero_based_frame_index_in_acquisition_crop_video"
 source_crop_local_frame_ids_semantics = "orange_acquisition_local_frame_id_not_video_frame_index"
+supplemental_cache_row_indices_semantics = "row_index_in_supplemental_flat_roi_cache_or_-1_for_acquisition_video_rows"
 ```
 
-For hybrid runs, `source_pixel_kind` should use a small explicit vocabulary:
+For hybrid runs, `source_pixel_kind_codes` should use a small explicit
+vocabulary stored in `source_pixel_kind_code_map`:
 
 ```text
-acquisition_crop_video
-offline_recovered_full_frame_crop
-missing_unrecoverable
+acquisition_crop_video = 0
+offline_full_frame_supplemental_flat_cache = 1
 ```
 
 Rows marked `missing_unrecoverable` should either be excluded from model
@@ -431,39 +442,60 @@ run on a GPU node.
 
 ### Phase 3: Offline Recovery Provider
 
-- [ ] Compare realtime crop metadata coverage to offline refined detections.
-- [ ] Define recovery row selection:
+- [x] Compare realtime crop metadata coverage to offline refined detections.
+- [x] Define recovery row selection:
   offline detection exists, realtime crop is missing/blank, and offline bbox is
   inside a valid dish/ROI policy.
-- [ ] Add `offline_recovered_full_frame_crop` rows using full-frame refined
-  detection geometry.
-- [ ] Pre-stage recovered rows into a temporary flat ROI cache before model
-  inference by decoding the full-frame source video sequentially and cropping
-  only recovery frames.
+- [x] Add `offline_full_frame_supplemental_flat_cache` rows using full-frame
+  refined-detection geometry.
+- [x] Pre-stage recovered rows into a supplemental flat ROI cache before model
+  inference.
+- [x] Prefer PyNvVideoCodec indexed decode for sparse recovery frames, with
+  sequential full-frame decode as the safe fallback when indexed decode is
+  unavailable or inconsistent.
 - [ ] Prefer node-local scratch for the recovery cache in cluster jobs; publish
   only downstream model outputs and cache manifests unless the user explicitly
   requests persistent recovered crop pixels.
-- [ ] Record recovery source refined-detect run, row ids, source video
+- [x] Record recovery source refined-detect run, row ids, source video
   fingerprint, crop policy, and cache manifest.
 - [ ] Ensure recovered rows produce the same downstream coordinate contract as
   acquisition crop-video rows.
 
+Implemented tool:
+
+```bash
+scripts/py -m fisheye.utils.build_hybrid_acquisition_offline_crop_run \
+  <analysis.zarr> \
+  --acquisition-crop-run <crop_video_run> \
+  --refined-detect-run <refined_detect_run> \
+  --run-name <hybrid_crop_run> \
+  --decode-mode auto \
+  --apply
+```
+
+`--decode-mode auto` chooses indexed PyNvVideoCodec reads when recovery frames
+are sparse. Indexed mode requests exact frame indices through
+`SimpleDecoder.get_batch_frames_by_index(...)`; if that path fails in `auto`
+mode, the tool falls back to sequential decode. Explicit `--decode-mode indexed`
+fails fast instead of silently changing the access pattern.
+
 ### Phase 4: Hybrid Provider
 
-- [ ] Build one logical crop run that combines acquisition crop rows and
+- [x] Build one logical crop run that combines acquisition crop rows and
   recovered rows.
-- [ ] Add `source_pixel_kind` and per-kind row counts to run attrs and summary.
-- [ ] Classify rows before inference into provider groups:
-  `acquisition_crop_video`, `offline_recovered_full_frame_crop`, and
-  `missing_unrecoverable`.
-- [ ] Run inference by provider block:
-  acquisition crop-video rows from the crop MP4, recovered rows from the staged
-  flat cache, then merge predictions back into canonical crop-run row order.
+- [x] Add `source_pixel_kind_codes`, `supplemental_cache_row_indices`, and
+  per-kind row counts to run attrs and summary.
+- [x] Classify rows before inference into provider groups:
+  `acquisition_crop_video` and
+  `offline_full_frame_supplemental_flat_cache`.
+- [x] Let the shared crop reader return mixed rows in requested crop-run order:
+  acquisition crop-video rows from the crop MP4 and recovered rows from the
+  supplemental flat cache.
 - [ ] Ensure keypoint and subject-mask inference can read mixed rows without
   reordering or dropping source row identity by writing explicit
   `source_crop_row_ids` / crop-run row ids in outputs.
-- [ ] Fail clearly if a row's declared provider cannot produce pixels.
-- [ ] Add a smoke test where some rows are served from crop video and some rows
+- [x] Fail clearly if a row's declared provider cannot produce pixels.
+- [x] Add a smoke test where some rows are served from crop video and some rows
   from recovered full-frame crops.
 
 Decoder scheduling rule:
@@ -473,8 +505,10 @@ same tight model-inference row loop. That would force decoder seeks/context
 switching and make the stage slow. The intended execution is:
 
 1. Build the crop-run rowset and classify row provider kind.
-2. If recovered rows exist, build their temporary flat cache first from a
-   sequential full-frame decode pass.
+2. If recovered rows exist, build their supplemental flat cache first. Prefer
+   indexed PyNvVideoCodec reads for sparse frame recovery; fall back to
+   sequential full-frame decode only when indexed decode is unavailable or
+   unsafe.
 3. Run acquisition crop-video rows as a crop-MP4 provider block.
 4. Run recovered rows from the flat cache provider block.
 5. Merge outputs by crop-run row id so downstream contracts stay row-stable.
@@ -541,8 +575,6 @@ blank/insufficient crop-video frames.
 - Should recovered full-frame crops be stored in the same flat cache as
   acquisition crop-video decoded rows, or should cache manifests remain
   provider-specific?
-- Should `source_pixel_kind` be a string array for readability or an enum-coded
-  integer array with attrs for compactness?
 - Should a hybrid crop run keep all acquisition crop-video valid rows, or should
   it be restricted to the rowset selected by offline refined detections?
 - How much crop-video/full-frame pixel parity is required before this becomes a

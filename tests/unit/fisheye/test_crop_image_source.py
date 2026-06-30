@@ -327,6 +327,82 @@ def test_crop_image_source_reads_acquisition_crop_video_with_pynvvc(
     source.close()
 
 
+def test_crop_image_source_reads_hybrid_acquisition_video_and_supplemental_cache(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    crop_video_path = tmp_path / "crop.mp4"
+    crop_video_path.touch()
+    manifest_path = tmp_path / "supplemental.flat_roi_cache.json"
+    root = _make_acquisition_crop_video_root(str(crop_video_path))
+    crop = root["crop_runs/crop_acquisition"]
+    crop.create_array("frame_indices", data=np.array([10, 11, 12], dtype=np.int64))
+    crop.create_array(
+        "source_crop_video_frame_indices",
+        data=np.array([2, -1, 4], dtype=np.int64),
+    )
+    crop.create_array(
+        "roi_coordinates_full",
+        data=np.array([[100, 200], [105, 205], [110, 210]], dtype=np.int32),
+    )
+    crop.create_array(
+        "roi_sizes_full",
+        data=np.array([[5, 3], [5, 3], [5, 3]], dtype=np.int32),
+    )
+    crop.create_array(
+        "source_pixel_kind_codes",
+        data=np.array([0, 1, 0], dtype=np.int8),
+    )
+    crop.create_array(
+        "supplemental_cache_row_indices",
+        data=np.array([-1, 0, -1], dtype=np.int64),
+    )
+    crop.attrs["supplemental_roi_cache_manifest"] = str(manifest_path)
+
+    class _FakePynvvcReader:
+        source_height = 3
+        source_width = 5
+
+        def __init__(self, video_path: Path, *, start_frame: int = 0, gpu_id: int = 0) -> None:
+            assert Path(video_path) == crop_video_path
+            assert start_frame == 0
+            assert gpu_id == 0
+
+        def iter_frames(self):
+            for frame_idx in range(6):
+                yield np.full((3, 5), frame_idx, dtype=np.uint8)
+
+        def close(self) -> None:
+            return None
+
+    class _FakeFlatCache:
+        manifest = {"cache_key": "supplemental", "builder": {"pixel_contract": {"name": "nv12_luma_plane_uint8"}}}
+        shape = (1, 3, 5)
+        dtype = np.dtype(np.uint8)
+
+        def __init__(self) -> None:
+            self.manifest_path = manifest_path
+
+        def __getitem__(self, key):
+            return np.full(self.shape, 99, dtype=np.uint8)[key]
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(crop_mod, "PynvvcLumaRgbReader", _FakePynvvcReader)
+    monkeypatch.setattr(crop_mod, "open_flat_roi_cache", lambda *_args, **_kwargs: _FakeFlatCache())
+
+    source = CropImageSource.open(root, crop_run="crop_acquisition")
+    batch = source.read_slice(0, 3)
+
+    assert source.frame_source_kind == "acquisition_crop_video"
+    assert source.roi_read_mode == "acquisition_crop_video"
+    np.testing.assert_array_equal(batch[0], np.full((3, 5), 2, dtype=np.uint8))
+    np.testing.assert_array_equal(batch[1], np.full((3, 5), 99, dtype=np.uint8))
+    np.testing.assert_array_equal(batch[2], np.full((3, 5), 4, dtype=np.uint8))
+    source.close()
+
+
 def test_crop_image_source_builds_and_reuses_temporary_roi_cache(tmp_path: Path) -> None:
     zarr_path = _make_geometry_only_archive(tmp_path)
     cache_dir = tmp_path / "roi-cache"

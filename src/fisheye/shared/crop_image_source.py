@@ -685,7 +685,10 @@ class CropImageSource:
     _images_full: object | None = None
     _external_reader: _ExternalFrameReader | None = None
     crop_video_frame_indices: np.ndarray | None = None
+    source_pixel_kind_codes: np.ndarray | None = None
+    supplemental_cache_row_indices: np.ndarray | None = None
     _acquisition_crop_reader: _AcquisitionCropVideoFrameReader | None = None
+    _supplemental_flat_cache: object | None = None
 
     @classmethod
     def open(
@@ -736,6 +739,9 @@ class CropImageSource:
 
         roi_images = crop_group.get("roi_images")
         crop_video_frame_indices = None
+        source_pixel_kind_codes = None
+        supplemental_cache_row_indices = None
+        supplemental_flat_cache = None
         acquisition_crop_reader = None
         if storage_mode == "materialized":
             if roi_images is None:
@@ -773,6 +779,48 @@ class CropImageSource:
                         "source_crop_video_frame_indices length "
                         f"{crop_video_frame_indices.shape[0]} does not match roi count {total_rois}"
                     )
+                source_pixel_kind_codes_arr = crop_group.get("source_pixel_kind_codes")
+                if source_pixel_kind_codes_arr is not None:
+                    source_pixel_kind_codes = np.asarray(
+                        source_pixel_kind_codes_arr[:],
+                        dtype=np.int16,
+                    )
+                    if source_pixel_kind_codes.shape[0] != total_rois:
+                        raise ValueError(
+                            "source_pixel_kind_codes length "
+                            f"{source_pixel_kind_codes.shape[0]} does not match roi count {total_rois}"
+                        )
+                    if np.any(source_pixel_kind_codes != 0):
+                        supplemental_cache_rows_arr = crop_group.get(
+                            "supplemental_cache_row_indices"
+                        )
+                        if supplemental_cache_rows_arr is None:
+                            raise ValueError(
+                                "Hybrid acquisition crop run has non-video source rows but is "
+                                "missing supplemental_cache_row_indices."
+                            )
+                        supplemental_cache_row_indices = np.asarray(
+                            supplemental_cache_rows_arr[:],
+                            dtype=np.int64,
+                        )
+                        if supplemental_cache_row_indices.shape[0] != total_rois:
+                            raise ValueError(
+                                "supplemental_cache_row_indices length "
+                                f"{supplemental_cache_row_indices.shape[0]} does not match roi count {total_rois}"
+                            )
+                        supplemental_manifest = (
+                            crop_group.attrs.get("supplemental_roi_cache_manifest")
+                            or crop_group.attrs.get("supplemental_flat_roi_cache_manifest")
+                        )
+                        if not supplemental_manifest:
+                            raise ValueError(
+                                "Hybrid acquisition crop run has supplemental rows but is "
+                                "missing supplemental_roi_cache_manifest provenance."
+                            )
+                        supplemental_flat_cache = open_flat_roi_cache(
+                            Path(str(supplemental_manifest)).expanduser(),
+                            expected_crop_run=crop_run_name,
+                        )
                 frame_source_kind = "acquisition_crop_video"
                 frame_source_path = str(crop_video_path)
                 frame_shape = roi_shape
@@ -875,8 +923,13 @@ class CropImageSource:
             _images_full=images_full if storage_mode == "geometry_only" else None,
             _external_reader=external_reader if storage_mode == "geometry_only" else None,
             crop_video_frame_indices=crop_video_frame_indices,
+            source_pixel_kind_codes=source_pixel_kind_codes,
+            supplemental_cache_row_indices=supplemental_cache_row_indices,
             _acquisition_crop_reader=(
                 acquisition_crop_reader if storage_mode == "geometry_only" else None
+            ),
+            _supplemental_flat_cache=(
+                supplemental_flat_cache if storage_mode == "geometry_only" else None
             ),
         )
         if manifest_path is not None:
@@ -986,10 +1039,24 @@ class CropImageSource:
             raise RuntimeError("No acquisition crop-video reader available for crop run.")
         roi_h, roi_w = self.roi_shape
         batch = np.zeros((roi_indices.size, roi_h, roi_w), dtype=np.uint8)
-        video_frame_indices = self.crop_video_frame_indices[roi_indices]
+
+        if self.source_pixel_kind_codes is not None:
+            source_kind_codes = self.source_pixel_kind_codes[roi_indices]
+            video_positions = np.flatnonzero(source_kind_codes == 0)
+            supplemental_positions = np.flatnonzero(source_kind_codes != 0)
+        else:
+            video_positions = np.arange(roi_indices.size, dtype=np.int64)
+            supplemental_positions = np.zeros(0, dtype=np.int64)
+
         frame_cache: dict[int, np.ndarray] = {}
-        for batch_idx, video_frame_idx in enumerate(video_frame_indices):
+        for batch_idx in video_positions:
+            video_frame_idx = self.crop_video_frame_indices[int(roi_indices[int(batch_idx)])]
             video_frame_idx_int = int(video_frame_idx)
+            if video_frame_idx_int < 0:
+                raise ValueError(
+                    "Acquisition crop-video source row points at a negative "
+                    f"source_crop_video_frame_indices value for crop row {int(roi_indices[int(batch_idx)])}."
+                )
             frame = frame_cache.get(video_frame_idx_int)
             if frame is None:
                 frame = self._acquisition_crop_reader.read_frame(video_frame_idx_int)
@@ -1001,6 +1068,24 @@ class CropImageSource:
                     )
                 frame_cache[video_frame_idx_int] = frame
             batch[batch_idx] = frame
+
+        if supplemental_positions.size:
+            if self._supplemental_flat_cache is None or self.supplemental_cache_row_indices is None:
+                raise RuntimeError("Hybrid acquisition crop run has supplemental rows but no flat cache.")
+            cache_rows = self.supplemental_cache_row_indices[roi_indices[supplemental_positions]]
+            if np.any(cache_rows < 0):
+                bad_crop_row = int(roi_indices[supplemental_positions[np.flatnonzero(cache_rows < 0)[0]]])
+                raise ValueError(
+                    "Supplemental source row points at a negative supplemental_cache_row_indices "
+                    f"value for crop row {bad_crop_row}."
+                )
+            supplemental = _normalize_roi_batch(np.asarray(self._supplemental_flat_cache[cache_rows]))
+            if supplemental.shape[1:] != (roi_h, roi_w):
+                raise ValueError(
+                    "Supplemental flat-cache ROI shape "
+                    f"{supplemental.shape[1:]} does not match crop run ROI shape {(roi_h, roi_w)}."
+                )
+            batch[supplemental_positions] = supplemental
         return batch
 
     def _read_live_indices_cpu(self, roi_indices: np.ndarray) -> np.ndarray:
@@ -1301,6 +1386,11 @@ class CropImageSource:
     def close(self) -> None:
         if self._roi_images is not None and hasattr(self._roi_images, "close"):
             self._roi_images.close()
+        if self._supplemental_flat_cache is not None and hasattr(
+            self._supplemental_flat_cache,
+            "close",
+        ):
+            self._supplemental_flat_cache.close()
         if self._external_reader is not None:
             self._external_reader.close()
         if self._acquisition_crop_reader is not None:
