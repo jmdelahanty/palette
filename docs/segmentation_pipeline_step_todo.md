@@ -387,6 +387,14 @@ pipeline are:
      - `probability_semantics = "sigmoid_selected_mask_logits"`
    - Selected SAM quality scores should be treated as a separate provenance/QC
      signal, not as the semantics of `mask_probs_roi`.
+   - SAM3 creation currently does not run the U-Net smart-finalizer cleanup
+     path. It does not apply Palette-side morphology closing, hole filling,
+     keep-largest-component cleanup, or removed-mass / changed-area
+     finalization metrics after SAM candidate selection. U-Net-derived
+     `subject_mask_runs` commonly enter `smart_finalize_subject_masks_v1`
+     before becoming refined masks; SAM3 body masks should only do that if a
+     future explicit SAM3-refinement policy is added and records its
+     parameters.
 
 3. Row-level prompt and confidence provenance
    - Current SAM3 runs now persist the selected SAM quality score per row, but

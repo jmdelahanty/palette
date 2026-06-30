@@ -19,6 +19,7 @@ import numpy as np
 import zarr
 
 from fisheye.pose.schema import schema_from_metadata
+from fisheye.shared.crop_geometry import resolve_full_frame_shape
 from fisheye.shared.crop_image_source import CropImageSource
 from fisheye.shared.inference_timing import InferenceTimingProfiler
 from fisheye.shared.provenance_attrs import (
@@ -251,24 +252,32 @@ def _normalize_sam3_root(explicit: str | Path | None) -> Path | None:
 
 
 def _resolve_frame_shape(root: zarr.Group, crop_group: zarr.Group) -> tuple[int, int]:
-    width = (
-        root.attrs.get("video_width")
-        or root.attrs.get("width")
-        or root.attrs.get("source_video_width")
-        or crop_group.attrs.get("width")
+    try:
+        return resolve_full_frame_shape(root)
+    except ValueError:
+        pass
+
+    candidates = (
+        (root.attrs, "video_width", "video_height"),
+        (root.attrs, "source_video_width", "source_video_height"),
+        (root.attrs, "width", "height"),
+        (crop_group.attrs, "bbox_norm_reference_width", "bbox_norm_reference_height"),
+        (crop_group.attrs, "bbox_img_xyxy_reference_width", "bbox_img_xyxy_reference_height"),
+        (crop_group.attrs, "width", "height"),
     )
-    height = (
-        root.attrs.get("video_height")
-        or root.attrs.get("height")
-        or root.attrs.get("source_video_height")
-        or crop_group.attrs.get("height")
+    for attrs, width_key, height_key in candidates:
+        width = attrs.get(width_key)
+        height = attrs.get(height_key)
+        if width is None or height is None:
+            continue
+        width_int = int(width)
+        height_int = int(height)
+        if width_int > 0 and height_int > 0:
+            return height_int, width_int
+    raise ValueError(
+        "Could not resolve full-frame width/height from root or crop attrs; "
+        "required to project detection boxes into ROI-local SAM prompts."
     )
-    if width is None or height is None:
-        raise ValueError(
-            "Could not resolve full-frame width/height from root or crop attrs; "
-            "required to project detection boxes into ROI-local SAM prompts."
-        )
-    return int(height), int(width)
 
 
 def _inspect_sam3_runtime(explicit_root: str | Path | None) -> dict[str, Any]:

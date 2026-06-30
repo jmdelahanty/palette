@@ -14,6 +14,11 @@ The short version is:
 - and no custom SAM3 training dataloaders were required for the workflow that
   was verified.
 
+If the goal is actual SAM3 fine-tuning rather than prompt-based SAM3 inference,
+see `docs/sam3_finetuning_from_palette_data.md`. Fine-tuning should start from
+a Palette-to-COCO/SAM3 export adapter over reviewed dense subject-mask training
+data, not from the current `run_sam_subject_masks.py` runtime wrapper.
+
 ## Short Answer
 
 If a collaborator asks "where is the real work for using SAM3 on our data?",
@@ -117,6 +122,29 @@ So the simplest reuse path is:
 - convert their data into a Palette-like training Zarr,
 - or adapt `resolve_sam_subject_inputs(...)` inside
   `src/fisheye/utils/run_sam_subject_masks.py`
+
+## Output Semantics
+
+The current SAM3 wrapper is a prompt-based body-mask creator, not the same
+cleanup/refinement path used after U-Net subject-mask inference.
+
+For each eligible ROI, Palette asks SAM3 for candidate masks, selects the
+candidate with the highest SAM-predicted quality score, and writes:
+
+- `masks_roi[:, subject_body] = selected_logits > 0`
+- `mask_probs_roi[:, subject_body] = sigmoid(selected_logits)`
+- `metrics/sam_quality_score[:, subject_body] = selected_candidate_score`
+
+The wrapper does not then run Palette's U-Net smart-finalizer cleanup. In
+particular, SAM3 creation currently does not apply additional Palette-side
+morphology closing, hole filling, keep-largest-component cleanup, or
+removed-mass / changed-area finalization metrics.
+
+That contrast is intentional. U-Net `subject_mask_runs` commonly become
+`refined_subject_masks_runs` through `smart_finalize_subject_masks_v1`, where
+those cleanup policies are explicit and parameterized. SAM3 outputs should stay
+as selected SAM masks unless a later, explicit SAM3-refinement policy is added
+with its own recorded parameters.
 
 ## Recommended Reuse Path
 

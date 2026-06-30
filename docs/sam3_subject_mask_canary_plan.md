@@ -171,6 +171,37 @@ That means:
 This keeps the output compatible with the current Palette subject-mask contract
 without inventing fake supervision for other anatomy channels.
 
+### SAM3 Output Semantics Versus U-Net Finalization
+
+SAM3 body-mask creation currently writes the selected SAM candidate directly.
+For each eligible ROI, the wrapper asks SAM for one or more candidate masks,
+selects the candidate with the highest SAM-predicted quality score, then writes:
+
+- `masks_roi[:, subject_body] = selected_logits > 0`
+- `mask_probs_roi[:, subject_body] = sigmoid(selected_logits)`
+- `metrics/sam_quality_score[:, subject_body] = selected_candidate_score`
+
+Palette does not run the U-Net smart-finalizer cleanup on this SAM3 output.
+That means the SAM3 creation path does **not** apply additional Palette-side:
+
+- probability threshold sweeps beyond SAM's selected-mask zero-logit boundary
+- morphology closing
+- hole filling
+- keep-largest-component cleanup
+- removed-mass / changed-area finalization metrics
+
+This is deliberate for the first SAM3 body canary. The SAM-selected mask is the
+artifact under evaluation, and downstream refined runs should record that
+provenance rather than silently converting it into a U-Net-style finalized mask.
+
+By contrast, U-Net `subject_mask_runs` are normally refined into
+`refined_subject_masks_runs` through `smart_finalize_subject_masks_v1`, where
+component-specific thresholding and cleanup policies can fill holes, close small
+gaps, keep the largest component, and compute finalization QC metrics. If SAM3
+masks later need the same cleanup, that should be added as an explicit
+SAM3-refinement policy with recorded parameters, not hidden inside raw SAM3
+creation.
+
 ## Row Eligibility Policy
 
 Phase-1 segmentation should be fail-closed.
