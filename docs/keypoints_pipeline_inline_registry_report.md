@@ -88,6 +88,12 @@ marked `"missing"`. This already works for stages that call it.
 Returns `(dataset_id, session_uuid)` from zarr attrs. Every stage that writes
 inline uses this.
 
+2026-06-25 update: live stage completion now canonicalizes that base ID through
+`Registry.resolve_effective_dataset_id()` before writing `datasets`,
+`recording_step_status`, or cascade invalidation rows. Source-recording zarrs
+under `/recordings/` therefore use the same `<session_uuid>:z<path_hash_prefix>`
+ID during runtime completion that full `register_from_root()` scans use.
+
 ### Stage provenance helpers
 
 `src/fisheye/shared/stage_provenance.py` — `build_stage_provenance()`,
@@ -300,6 +306,9 @@ def emit_stage_completion(
 ) -> None:
     """Write step status + cascade after a pipeline stage completes."""
     dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
+    dataset_id = registry.resolve_effective_dataset_id(
+        dataset_id, session_uuid=session_uuid, zarr_path=zarr_path
+    )
     registry.upsert_dataset(
         dataset_id, session_uuid=session_uuid, zarr_path=zarr_path
     )

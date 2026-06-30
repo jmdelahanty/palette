@@ -72,6 +72,13 @@ SQLite `ATTACH` is available as an escape hatch for zebrobot-only fields if need
   - Implemented by preferring canonical source IDs (`{session_uuid}:z<path-hash>`) in
     `_resolve_effective_dataset_id()` for recording-source artifacts.
   - Verified on live DB: rescan updates did not recreate `dataset_id=session_uuid` rows.
+- [x] Prevent legacy source IDs from being recreated during live stage completion.
+  - Implemented by routing `emit_stage_completion()` through
+    `Registry.resolve_effective_dataset_id()` before dataset upsert, step-status
+    upsert, and cascade invalidation.
+  - 2026-06-25 RedScare repair verified that the training zarr has one active
+    canonical dataset row and no remaining references to the duplicate bare
+    recording/session ID.
 - [x] Keep CI wiring for the targeted registry migration/integrity test subset.
   - CI entrypoint script: `scripts/ci_registry_migration_integrity_subset.sh`
   - Supports full run and fast `--smoke` precheck mode.
