@@ -229,6 +229,10 @@ def _write_attrs(
         "zarr_use": "training",
         "created_at_utc": created_at_utc,
         "source_video_path": str(source_video_path),
+        "source_video_width": int(original_hw[1]),
+        "source_video_height": int(original_hw[0]),
+        "video_width": int(original_hw[1]),
+        "video_height": int(original_hw[0]),
     }
     root_attrs.update(_manifest_recording_attrs(recording_dir))
     root.attrs.update(root_attrs)
@@ -256,6 +260,10 @@ def _write_attrs(
         "source_video": source_video_path.name,
         "source_path": str(source_video_path.resolve()),
         "source_video_path": str(source_video_path),
+        "source_video_width": int(original_hw[1]),
+        "source_video_height": int(original_hw[0]),
+        "video_width": int(original_hw[1]),
+        "video_height": int(original_hw[0]),
         "source_frame_count": int(source_frame_count),
         "original_video_length": int(source_frame_count),
         "effective_video_length": int(source_frame_count) - int(skip_tail_frames),

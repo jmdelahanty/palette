@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import zarr
 
+from fisheye.shared.crop_geometry import resolve_full_frame_shape
 from fisheye.shared.roi_pixel_contract import ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
 from fisheye.utils.import_sampled_training_pynvvc import import_sampled_training_pynvvc
 
@@ -85,11 +86,21 @@ import:
     assert root.attrs["recording_id"] == "2026-06-23T16-01-09Z_arena_1"
     assert root.attrs["recording_name"] == "2026-06-23T16-01-09Z_arena_1_RedScare"
     assert root.attrs["protocol_name"] == "RedScare"
+    assert root.attrs["source_video_width"] == 5
+    assert root.attrs["source_video_height"] == 4
+    assert root.attrs["video_width"] == 5
+    assert root.attrs["video_height"] == 4
     assert raw.attrs["decode_backend"] == "pynvvc_luma"
     assert raw.attrs["pixel_contract_name"] == ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
     assert raw.attrs["color_range"] == "tv"
     assert raw.attrs["frame_step"] == 3
     assert raw.attrs["source_frame_count"] == 10
+    assert raw.attrs["source_video_width"] == 5
+    assert raw.attrs["source_video_height"] == 4
+    assert raw.attrs["video_width"] == 5
+    assert raw.attrs["video_height"] == 4
+    assert raw.attrs["original_resolution"] == [4, 5]
+    assert resolve_full_frame_shape(root) == (4, 5)
     assert raw["original_frame_indices"][:].tolist() == [0, 3, 6]
     assert raw["images_full"].shape == (3, 4, 5)
     assert raw["images_ds"].shape == (3, 2, 3)

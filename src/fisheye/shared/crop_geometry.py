@@ -75,6 +75,12 @@ def resolve_full_frame_shape(root: zarr.Group) -> Tuple[int, int]:
             height = as_int(raw.attrs.get(height_key))
             if width is not None and height is not None and width > 0 and height > 0:
                 return int(height), int(width)
+        original_resolution = raw.attrs.get("original_resolution")
+        if isinstance(original_resolution, Sequence) and len(original_resolution) == 2:
+            height = as_int(original_resolution[0])
+            width = as_int(original_resolution[1])
+            if width is not None and height is not None and width > 0 and height > 0:
+                return int(height), int(width)
     for width_key, height_key in (
         ("video_width", "video_height"),
         ("source_video_width", "source_video_height"),
