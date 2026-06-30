@@ -27,6 +27,9 @@ ROI_CACHE_DIR=""
 ROI_CACHE_MANIFEST=""
 STAGE_ROI_CACHE_TO_SCRATCH=0
 ROI_CACHE_STAGING_DIR=""
+PROGRESS_JSONL_DIR=""
+PROGRESS_EVERY_BATCHES=1
+NO_PROGRESS_JSONL=0
 CPU=0
 OVERWRITE=0
 LOG_DIR=""
@@ -72,6 +75,11 @@ Options:
                             Recommended for large flat caches on GPU jobs.
   --roi-cache-staging-dir PATH
                             Override staging directory (default: /scratch/$USER/$LSB_JOBID when available)
+  --progress-jsonl-dir PATH Directory for per-recording live progress JSONL logs
+                            (default: <run-dir>/progress_jsonl)
+  --progress-every-batches N
+                            Write one progress event every N inference batches (default: 1)
+  --no-progress-jsonl       Do not pass live progress JSONL paths to keypoint jobs
   --cpu                     Force CPU inference
   --overwrite               Run keypoints even if keypoints run already exists
   --log-dir PATH            Submission logs (default: <root>/logs/run_keypoints_batch/bsub_submissions)
@@ -114,6 +122,9 @@ while [[ $# -gt 0 ]]; do
     --roi-cache-manifest) ROI_CACHE_MANIFEST="$2"; shift 2;;
     --stage-roi-cache-to-scratch) STAGE_ROI_CACHE_TO_SCRATCH=1; shift;;
     --roi-cache-staging-dir) ROI_CACHE_STAGING_DIR="$2"; shift 2;;
+    --progress-jsonl-dir) PROGRESS_JSONL_DIR="$2"; shift 2;;
+    --progress-every-batches) PROGRESS_EVERY_BATCHES="$2"; shift 2;;
+    --no-progress-jsonl) NO_PROGRESS_JSONL=1; shift;;
     --cpu) CPU=1; shift;;
     --overwrite) OVERWRITE=1; shift;;
     --log-dir) LOG_DIR="$2"; shift 2;;
@@ -263,6 +274,12 @@ fi
 if [[ "$CPU" != "1" && -z "$DEVICE" && "$GPUS" != "0" ]]; then
   DEVICE="0"
 fi
+if [[ "$NO_PROGRESS_JSONL" != "1" && -z "$PROGRESS_JSONL_DIR" ]]; then
+  PROGRESS_JSONL_DIR="${RUN_DIR}/progress_jsonl"
+fi
+if [[ "$NO_PROGRESS_JSONL" != "1" ]]; then
+  mkdir -p "$PROGRESS_JSONL_DIR"
+fi
 if [[ -n "$ROI_CACHE_MANIFEST" && "$GPUS" != "0" && "$STAGE_ROI_CACHE_TO_SCRATCH" != "1" ]]; then
   {
     echo "Warning: GPU job will read --roi-cache-manifest directly from its source tier."
@@ -292,12 +309,16 @@ if [[ "$CPU" == "1" ]]; then EXTRA_ARGS+=(--cpu); fi
 EXTRA_ARGS+=(--batch-size "$BATCH_SIZE_KP")
 
 printf -v EXTRA_ARGS_SHELL '%q ' "${EXTRA_ARGS[@]}"
+printf -v PROGRESS_JSONL_DIR_SHELL '%q' "$PROGRESS_JSONL_DIR"
+printf -v PROGRESS_EVERY_BATCHES_SHELL '%q' "$PROGRESS_EVERY_BATCHES"
 
 JOB_SCRIPT="${RUN_DIR}/run_batch.sh"
 cat > "$JOB_SCRIPT" <<JOBSCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
 RUN_DIR="\$1"
+PROGRESS_JSONL_DIR=${PROGRESS_JSONL_DIR_SHELL}
+PROGRESS_EVERY_BATCHES=${PROGRESS_EVERY_BATCHES_SHELL}
 if [[ -z "\${LSB_JOBINDEX:-}" ]]; then
   echo "LSB_JOBINDEX not set; are you running under bsub array?" >&2
   exit 2
@@ -321,8 +342,14 @@ for zarr_path in "\${zarr_paths[@]}"; do
   else
     recording_dir="\$zarr_parent"
   fi
+  progress_args=()
+  if [[ -n "\$PROGRESS_JSONL_DIR" ]]; then
+    mkdir -p "\$PROGRESS_JSONL_DIR"
+    safe_recording="\$(basename "\$recording_dir" | tr -c 'A-Za-z0-9_.-' '_')"
+    progress_args=(--progress-jsonl "\${PROGRESS_JSONL_DIR}/\${safe_recording}.jsonl" --progress-every-batches "\$PROGRESS_EVERY_BATCHES")
+  fi
   echo "=== Processing: \$recording_dir ==="
-  scripts/py -m fisheye.utils.run_keypoints_with_registry_model --recording-dir "\$recording_dir" ${EXTRA_ARGS_SHELL}|| {
+  scripts/py -m fisheye.utils.run_keypoints_with_registry_model --recording-dir "\$recording_dir" ${EXTRA_ARGS_SHELL} "\${progress_args[@]}" || {
     echo "FAILED: \$recording_dir" >&2
     continue
   }
@@ -360,6 +387,7 @@ echo "Queue: ${QUEUE:-<default>}"
 echo "Resources: ncores=$NCORES mem_gb=$MEM_GB gpus=$GPUS"
 echo "Manifest file: $RUN_DIR/recordings.txt"
 echo "Batch files: $RUN_DIR/batch_*.txt"
+echo "Progress JSONL dir: ${PROGRESS_JSONL_DIR:-<disabled>}"
 echo "Per-recording command: $KP_CMD"
 echo "Submit command: $BSUB_CMD"
 

@@ -445,6 +445,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Collect per-stage timing diagnostics and store them in the output keypoint run attrs.",
     )
     parser.add_argument(
+        "--progress-jsonl",
+        type=Path,
+        default=None,
+        help="Optional JSONL file for live keypoint progress events.",
+    )
+    parser.add_argument(
+        "--progress-every-batches",
+        type=int,
+        default=1,
+        help="Write one progress JSONL event every N completed batches (default: 1).",
+    )
+    parser.add_argument(
         "--input-mode",
         choices=("numpy-list", "tensor", "auto"),
         default="numpy-list",
@@ -524,6 +536,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         roi_cache_staging_details=roi_cache_staging_details or None,
         input_mode=args.input_mode,
         profile_timings=bool(args.profile_timings),
+        progress_jsonl=args.progress_jsonl,
+        progress_every_batches=args.progress_every_batches,
         registry=registry_path,
     )
     if not run_name:

@@ -9,8 +9,9 @@ keypoints.
 
 from __future__ import annotations
 
-import sys
 import argparse
+import json
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Sequence
 from datetime import datetime, timezone
@@ -52,6 +53,42 @@ TRADITIONAL_POSE_SCHEMA, TRADITIONAL_POSE_ATTR_PAYLOAD = schema_payload_from_pac
 _KEYPOINT_STEP_NAME = "keypoints"
 _KEYPOINT_STATUS_SOURCE = "runtime_keypoints_detect"
 _KEYPOINT_INPUT_MODES = ("numpy-list", "tensor", "auto")
+_KEYPOINT_PROGRESS_SCHEMA_ID = "palette.keypoint_inference_progress.v1"
+
+
+def _progress_json_ready(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, dict):
+        return {str(key): _progress_json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_progress_json_ready(item) for item in value]
+    return str(value)
+
+
+def _write_keypoint_progress_jsonl(
+    progress_jsonl: Optional[Path],
+    event: str,
+    **payload: Any,
+) -> None:
+    if progress_jsonl is None:
+        return
+    progress_path = Path(progress_jsonl).expanduser()
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    record: Dict[str, Any] = {
+        "schema_id": _KEYPOINT_PROGRESS_SCHEMA_ID,
+        "event": str(event),
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        **payload,
+    }
+    with progress_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(_progress_json_ready(record), sort_keys=True) + "\n")
 
 
 def _infer_roi_cache_source_tier(path: Optional[str]) -> Optional[str]:
@@ -655,6 +692,8 @@ def detect_keypoints_yolo(
     input_mode: str = "numpy-list",
     model_input_transform_mode: str = "auto",
     profile_timings: bool = False,
+    progress_jsonl: Optional[Path] = None,
+    progress_every_batches: int = 1,
     registry: Optional[Path] = None,
     console: Optional[Console] = None,
 ) -> str:
@@ -817,6 +856,8 @@ def detect_keypoints_yolo(
     success_total = 0
     confidence_accum: List[float] = []
     timing_profiler = InferenceTimingProfiler(enabled=profile_timings)
+    progress_jsonl_path = Path(progress_jsonl).expanduser() if progress_jsonl is not None else None
+    progress_interval = max(1, int(progress_every_batches))
 
     progress = Progress(
         SpinnerColumn(),
@@ -827,10 +868,30 @@ def detect_keypoints_yolo(
     )
 
     start_time = time.time()
+    _write_keypoint_progress_jsonl(
+        progress_jsonl_path,
+        "start",
+        zarr_path=str(zarr_path.resolve()),
+        run_name=resolved_run_name,
+        crop_run=latest_crop,
+        total_rois=int(total_rois),
+        batch_size=int(batch_size),
+        pose_schema=pose_schema_obj.name,
+        model_path=str(model_path_resolved),
+        requested_device=device,
+        normalized_torch_device=torch_device,
+        initial_model_device=model_device,
+        roi_read_mode=crop_source.roi_read_mode,
+        roi_cache_policy=crop_source.roi_cache_policy,
+        source_roi_cache_used=bool(crop_source.roi_cache_used),
+        frame_source=crop_source.frame_source_kind,
+        source_video_path=crop_source.frame_source_path or crop_group.attrs.get("video_source_path"),
+    )
 
     with progress:
         task = progress.add_task("[cyan]Predicting keypoints...", total=total_rois)
-        for start in range(0, total_rois, batch_size):
+        for batch_index, start in enumerate(range(0, total_rois, batch_size), start=1):
+            batch_started = time.perf_counter()
             end = min(start + batch_size, total_rois)
             batch_coords = roi_coords[start:end]
             batch_count = end - start
@@ -957,6 +1018,32 @@ def detect_keypoints_yolo(
                 )
 
             progress.update(task, advance=end - start)
+            if batch_index % progress_interval == 0 or end >= total_rois:
+                batch_seconds = time.perf_counter() - batch_started
+                elapsed_seconds = time.time() - start_time
+                _write_keypoint_progress_jsonl(
+                    progress_jsonl_path,
+                    "batch_complete",
+                    zarr_path=str(zarr_path.resolve()),
+                    run_name=resolved_run_name,
+                    crop_run=latest_crop,
+                    batch_index=int(batch_index),
+                    row_start=int(start),
+                    row_stop=int(end),
+                    batch_rows=int(batch_count),
+                    rows_written=int(end),
+                    total_rois=int(total_rois),
+                    percent_complete=float((end / total_rois) * 100.0) if total_rois else 100.0,
+                    batch_successful=int(np.count_nonzero(batch_success)),
+                    successful_so_far=int(success_total),
+                    failed_so_far=int(end - success_total),
+                    batch_seconds=float(batch_seconds),
+                    elapsed_seconds=float(elapsed_seconds),
+                    batch_rois_per_second=float(batch_count / batch_seconds) if batch_seconds > 0 else None,
+                    cumulative_rois_per_second=float(end / elapsed_seconds) if elapsed_seconds > 0 else None,
+                    input_mode_requested=resolved_input_mode,
+                    input_mode_effective=effective_input_mode,
+                )
 
     total_time = time.time() - start_time
     inference_rate = success_total / total_time if total_time > 0 else 0.0
@@ -1056,6 +1143,8 @@ def detect_keypoints_yolo(
             "initial_model_device": model_device,
             "resolved_model_device": resolved_model_device,
             "profile_timings": bool(profile_timings),
+            "progress_jsonl": str(progress_jsonl_path) if progress_jsonl_path is not None else None,
+            "progress_every_batches": int(progress_interval),
             "pose_schema": pose_schema_obj.name,
             "n_keypoints": int(n_keypoints),
             "model_kpt_shape": list(model_kpt_shape) if model_kpt_shape is not None else None,
@@ -1085,6 +1174,7 @@ def detect_keypoints_yolo(
         "inference_duration_seconds": float(total_time),
         "inference_poses_per_second": float(inference_rate),
         "profile_timings_enabled": bool(profile_timings),
+        "progress_jsonl": str(progress_jsonl_path) if progress_jsonl_path is not None else None,
         "input_mode_requested": resolved_input_mode,
         "input_mode_effective": effective_input_mode,
         "model_input_transform": model_input_transform.to_attrs(),
@@ -1248,6 +1338,20 @@ def detect_keypoints_yolo(
         )
     finally:
         crop_source.close()
+    _write_keypoint_progress_jsonl(
+        progress_jsonl_path,
+        "complete",
+        zarr_path=str(zarr_path.resolve()),
+        run_name=resolved_run_name,
+        crop_run=latest_crop,
+        total_rois=int(total_rois),
+        successful_detections=int(success_total),
+        failed_detections=int(failure_total),
+        success_rate_percent=round(float(success_rate), 2),
+        elapsed_seconds=float(total_time),
+        poses_per_second=float(inference_rate),
+        resolved_model_device=resolved_model_device,
+    )
 
     summary_lines = [
         "[green]✓[/green] Pose inference complete",
@@ -1340,6 +1444,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Collect per-stage timing diagnostics and store them in the output run attrs.",
     )
     parser.add_argument(
+        "--progress-jsonl",
+        type=Path,
+        default=None,
+        help="Optional JSONL file for live progress events written after each durable output batch.",
+    )
+    parser.add_argument(
+        "--progress-every-batches",
+        type=int,
+        default=1,
+        help="Write one progress JSONL event every N completed batches (default: 1).",
+    )
+    parser.add_argument(
         "--input-mode",
         choices=_KEYPOINT_INPUT_MODES,
         default="numpy-list",
@@ -1388,6 +1504,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         input_mode=args.input_mode,
         model_input_transform_mode=args.model_input_transform,
         profile_timings=args.profile_timings,
+        progress_jsonl=args.progress_jsonl,
+        progress_every_batches=args.progress_every_batches,
         registry=args.registry,
     )
 
