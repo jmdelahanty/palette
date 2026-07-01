@@ -74,6 +74,7 @@ def _seed_lineage(group: _FakeGroup, *, detection_indices: np.ndarray | None = N
         chunks=(2,),
         overwrite=True,
     )
+    group.create_array("source_crop_row_ids", data=np.array([0, 1, 2], dtype=np.int64), chunks=(2,), overwrite=True)
     group.create_array("source_refined_row_ids", data=np.array([100, 101, 102], dtype=np.int64), chunks=(2,), overwrite=True)
     group.create_array("source_detect_row_index", data=np.array([4, 5, -1], dtype=np.int32), chunks=(2,), overwrite=True)
 
@@ -90,6 +91,7 @@ def test_copy_row_lineage_arrays_copies_canonical_identity() -> None:
     assert target["source_frame_indices"][:].tolist() == [0, 5000, 5000]
     assert target["source_clip_indices"][:].tolist() == [0, 1, 1]
     assert target["source_clip_local_frame_indices"][:].tolist() == [0, 12, 12]
+    assert target["source_crop_row_ids"][:].tolist() == [0, 1, 2]
     assert target["source_refined_row_ids"][:].tolist() == [100, 101, 102]
     assert target["source_detect_row_index"][:].tolist() == [4, 5, -1]
 
@@ -114,11 +116,13 @@ def test_copy_row_lineage_arrays_with_fallback_uses_matching_fallback() -> None:
     crop.create_array("source_clip_local_frame_indices", data=np.array([0, 12, 12], dtype=np.int64), overwrite=True)
     crop.create_array("frame_counts", data=np.array([1, 2], dtype=np.int32), overwrite=True)
     keypoints.create_array("detection_indices", data=np.array([10, 11, 12], dtype=np.int32), overwrite=True)
+    keypoints.create_array("source_crop_row_ids", data=np.array([0, 1, 2], dtype=np.int64), overwrite=True)
     keypoints.create_array("source_refined_row_ids", data=np.array([100, 101, 102], dtype=np.int64), overwrite=True)
 
     result = copy_row_lineage_arrays_with_fallback(target, crop, keypoints, total_rois=3)
 
-    assert result.fallback_copied == ("detection_indices", "source_refined_row_ids")
+    assert result.fallback_copied == ("detection_indices", "source_crop_row_ids", "source_refined_row_ids")
+    assert target["source_crop_row_ids"][:].tolist() == [0, 1, 2]
     assert target["source_refined_row_ids"][:].tolist() == [100, 101, 102]
 
 
@@ -136,6 +140,7 @@ def test_copy_row_lineage_arrays_from_sources_accepts_resolved_arrays() -> None:
             "source_clip_local_frame_indices": source["source_clip_local_frame_indices"],
             "frame_counts": source["frame_counts"],
             "detection_indices": source["detection_indices"],
+            "source_crop_row_ids": source["source_crop_row_ids"],
             "source_refined_row_ids": source["source_refined_row_ids"],
             "source_detect_row_index": source["source_detect_row_index"],
         },
@@ -193,6 +198,7 @@ def test_assert_row_lineage_sources_equal_uses_resolved_arrays() -> None:
             "source_clip_local_frame_indices": reference["source_clip_local_frame_indices"],
             "frame_counts": reference["frame_counts"],
             "detection_indices": reference["detection_indices"],
+            "source_crop_row_ids": reference["source_crop_row_ids"],
             "source_refined_row_ids": reference["source_refined_row_ids"],
             "source_detect_row_index": reference["source_detect_row_index"],
         },
@@ -203,6 +209,7 @@ def test_assert_row_lineage_sources_equal_uses_resolved_arrays() -> None:
             "source_clip_local_frame_indices": other["source_clip_local_frame_indices"],
             "frame_counts": other["frame_counts"],
             "detection_indices": other["detection_indices"],
+            "source_crop_row_ids": other["source_crop_row_ids"],
             "source_refined_row_ids": other["source_refined_row_ids"],
             "source_detect_row_index": other["source_detect_row_index"],
         },

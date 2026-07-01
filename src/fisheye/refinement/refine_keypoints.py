@@ -72,7 +72,7 @@ from ..registry.stage_complete import (
     emit_stage_completion,
     extract_dataset_metadata,
 )
-from ..shared.row_lineage import copy_row_lineage_arrays
+from ..shared.row_lineage import copy_row_lineage_arrays, resolve_source_crop_row_ids, write_direct_source_crop_row_ids
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import as_float, normalize_attr
 from ..shared.zarr_helpers import open_zarr_group_direct
@@ -1215,12 +1215,21 @@ def create_refined_keypoint_run(
     kp_refined.attrs["edge_distance_source"] = edge_source
 
     # Copy row-lineage arrays from the source keypoint run.
-    copy_row_lineage_arrays(
+    refined_lineage = copy_row_lineage_arrays(
         kp_refined,
         kp_source,
         total_rois=total_rois,
         use_geometry_preload_profile=True,
     )
+    if "source_crop_row_ids" not in refined_lineage.copied:
+        resolved_source_crop_row_ids = resolve_source_crop_row_ids(
+            kp_source,
+            source_crop_group,
+            total_rois=total_rois,
+            frame_indices=kp_source.get("frame_indices"),
+        )
+        if resolved_source_crop_row_ids is not None:
+            write_direct_source_crop_row_ids(kp_refined, total_rois=total_rois)
     if "n_rois" in kp_source:
         _copy_array(kp_source["n_rois"], kp_refined, "n_rois")
 

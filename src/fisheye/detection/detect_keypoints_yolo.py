@@ -31,7 +31,7 @@ from ..shared.inference_timing import InferenceTimingProfiler
 from ..shared.model_input_transform import MODEL_INPUT_TRANSFORM_CHOICES, ModelInputTransform, resolve_model_input_transform
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs, build_source_roi_pixel_attrs
 from ..registry.stage_complete import emit_stage_completion
-from ..shared.row_lineage import copy_row_lineage_arrays
+from ..shared.row_lineage import copy_row_lineage_arrays, write_direct_source_crop_row_ids
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
@@ -805,6 +805,8 @@ def detect_keypoints_yolo(
         total_rois=total_rois,
         use_geometry_preload_profile=True,
     )
+    if "source_crop_row_ids" not in lineage_result.copied:
+        write_direct_source_crop_row_ids(run_group, total_rois=total_rois)
     if "detection_indices" not in lineage_result.copied:
         console.print("[yellow]Crop run missing 'detection_indices'; YOLO keypoint run will omit them.[/yellow]")
 
