@@ -15,7 +15,8 @@ import numpy as np
 import zarr
 
 from ..pose.schema import resolve_required_keypoint_indices_from_attrs
-from ..refinement.refine_eye_masks import _compute_roi_metrics, _measure_mask, _write_contours_from_masks
+from ..refinement.refine_eye_masks import _compute_roi_metrics, _write_contours_from_masks
+from ..shared.mask_geometry import measure_mask_ellipse as _measure_mask
 from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from ..shared.mask_store import MaskStoreError, open_mask_store
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run

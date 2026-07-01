@@ -50,10 +50,10 @@ def _write_array(group: zarr.Group, name: str, data: np.ndarray, *, chunks: tupl
 
 
 def _measure_eye_mask(mask: np.ndarray):
-    """Import the legacy eye-mask measurement helper only when geometry is materialized."""
-    from ..refinement.refine_eye_masks import _measure_mask
+    """Import mask ellipse measurement only when geometry is materialized."""
+    from .mask_geometry import measure_mask_ellipse
 
-    return _measure_mask(mask)
+    return measure_mask_ellipse(mask)
 
 
 def _write_component_contours(*args, **kwargs):

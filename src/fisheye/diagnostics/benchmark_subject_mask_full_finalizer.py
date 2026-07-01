@@ -374,7 +374,7 @@ def _compute_subject_mask_postcompute_shard(
     write_eye_geometry: bool,
     write_component_contours: bool,
 ) -> dict[str, object]:
-    from ..refinement.refine_eye_masks import _measure_mask
+    from ..shared.mask_geometry import measure_mask_ellipse as _measure_mask
 
     started = time.perf_counter()
     root = open_zarr_root(zarr_path, mode="r")

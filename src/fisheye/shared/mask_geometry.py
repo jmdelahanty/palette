@@ -195,3 +195,70 @@ def mask_pixel_centroid(mask: np.ndarray) -> np.ndarray:
     if ys.size > 0:
         return np.array([float(xs.mean()), float(ys.mean())], dtype=np.float32)
     return np.full(2, np.nan, dtype=np.float32)
+
+
+def extract_mask_contour(mask: np.ndarray, min_points: int) -> np.ndarray | None:
+    """Return the largest external contour for a binary mask in ``(x, y)`` order."""
+
+    mask_u8 = (np.asarray(mask, dtype=np.uint8) > 0).astype(np.uint8)
+    contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return None
+    contour = max(contours, key=cv2.contourArea).reshape(-1, 2).astype(np.float32)
+    if contour.shape[0] < min_points:
+        return None
+    return contour
+
+
+def measure_mask_ellipse(
+    mask: np.ndarray,
+    min_contour_points: int = 5,
+) -> tuple[bool, np.ndarray, np.ndarray, np.ndarray | None, str | None]:
+    """Extract ellipse metrics from a binary mask using OpenCV ellipse fitting."""
+
+    if mask.sum() == 0:
+        ellipse = np.full(5, np.nan, dtype=np.float32)
+        centroid = np.full(2, np.nan, dtype=np.float32)
+        return False, ellipse, centroid, None, "empty_mask"
+
+    contour = extract_mask_contour(mask.astype(float), min_contour_points)
+    if contour is None:
+        ellipse = np.full(5, np.nan, dtype=np.float32)
+        centroid = np.full(2, np.nan, dtype=np.float32)
+        return False, ellipse, centroid, None, "contour_missing"
+
+    contour = contour.astype(np.float32)
+
+    try:
+        (xc, yc), (axis_a, axis_b), angle = cv2.fitEllipse(contour)
+    except cv2.error:
+        ellipse = np.full(5, np.nan, dtype=np.float32)
+        centroid = mask_pixel_centroid(mask)
+        return False, ellipse, centroid, contour, "ellipse_estimate_failed"
+
+    major = float(axis_a)
+    minor = float(axis_b)
+    theta = float(angle)
+    if major < minor:
+        major, minor = minor, major
+        theta += 90.0
+    theta = float((theta + 180.0) % 180.0)
+
+    if not all(np.isfinite([xc, yc, major, minor, theta])) or major <= 0.0 or minor <= 0.0:
+        ellipse = np.full(5, np.nan, dtype=np.float32)
+        centroid = mask_pixel_centroid(mask)
+        return False, ellipse, centroid, contour, "ellipse_invalid_params"
+
+    centroid = np.array([float(xc), float(yc)], dtype=np.float32)
+    ellipse = np.array(
+        [
+            float(xc),
+            float(yc),
+            major,
+            minor,
+            theta,
+        ],
+        dtype=np.float32,
+    )
+
+    return True, ellipse, centroid, contour, None

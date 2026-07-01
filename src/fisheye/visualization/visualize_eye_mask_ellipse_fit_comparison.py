@@ -20,7 +20,7 @@ from ..diagnostics.review_refined_eye_mask_failures import (
     _resolve_source_keypoint_run,
     _select_indices,
 )
-from ..refinement.refine_eye_masks import _measure_mask
+from ..shared.mask_geometry import measure_mask_ellipse
 from ..shared.crop_image_source import CropImageSource
 from ..shared.mask_source import load_mask_bundle
 from .visualize_eye_mask_patches import _fit_ellipse_from_mask
@@ -42,7 +42,7 @@ def _should_draw_fit(name: str, component: str, visibility: dict[str, bool]) -> 
 
 def _compute_fit_comparison(mask: np.ndarray) -> tuple[EllipseFitResult, EllipseFitResult]:
     cv2_params, cv2_success, cv2_contour, _centroid = _fit_ellipse_from_mask(mask)
-    sk_success, sk_params, _sk_centroid, sk_contour, sk_failure = _measure_mask(mask.astype(np.uint8))
+    sk_success, sk_params, _sk_centroid, sk_contour, sk_failure = measure_mask_ellipse(mask.astype(np.uint8))
     return (
         EllipseFitResult(
             name="cv2",

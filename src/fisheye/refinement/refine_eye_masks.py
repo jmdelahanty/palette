@@ -29,7 +29,6 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import dask
 import dask.array as da
 import numpy as np
-import cv2
 import zarr
 from zarr.core.dtype import VariableLengthUTF8
 from dask import delayed
@@ -53,7 +52,10 @@ from collections import Counter
 from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
 from ..pose.schema import resolve_required_keypoint_indices_from_attrs
 from ..shared.detect_reason_codec import write_reason_columns
-from ..shared.mask_geometry import mask_pixel_centroid as _mask_pixel_centroid
+from ..shared.mask_geometry import (
+    extract_mask_contour as _extract_contour,
+    measure_mask_ellipse as _measure_mask,
+)
 from ..shared.mask_source import load_mask_bundle
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
 from ..registry.stage_complete import emit_stage_completion, extract_dataset_metadata
@@ -473,16 +475,6 @@ def _apply_driver_global_reason_tags(
     return np.asarray(out, dtype=object)
 
 
-def _extract_contour(mask: np.ndarray, min_points: int) -> Optional[np.ndarray]:
-    mask_u8 = (np.asarray(mask, dtype=np.uint8) > 0).astype(np.uint8)
-    contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    if not contours:
-        return None
-    contour = max(contours, key=cv2.contourArea).reshape(-1, 2).astype(np.float32)
-    if contour.shape[0] < min_points:
-        return None
-    return contour
-
 def _largest_component(mask: np.ndarray) -> np.ndarray:
     """Return the largest 8-connected component of a boolean mask."""
     labeled = measure.label(mask.astype(bool), connectivity=2)
@@ -801,62 +793,6 @@ def _split_mask_by_heading(
     left_mask[ys[split_mask], xs[split_mask]] = True
     right_mask[ys[~split_mask], xs[~split_mask]] = True
     return left_mask, right_mask
-
-
-def _measure_mask(
-    mask: np.ndarray,
-    min_contour_points: int = 5,
-) -> Tuple[bool, np.ndarray, np.ndarray, Optional[np.ndarray], Optional[str]]:
-    """Extract metrics from a binary mask using OpenCV ellipse fitting."""
-
-    if mask.sum() == 0:
-        ellipse = np.full(5, np.nan, dtype=np.float32)
-        centroid = np.full(2, np.nan, dtype=np.float32)
-        return False, ellipse, centroid, None, "empty_mask"
-
-    # Extract contour first (already in x, y format)
-    contour = _extract_contour(mask.astype(float), min_contour_points)
-    if contour is None:
-        ellipse = np.full(5, np.nan, dtype=np.float32)
-        centroid = np.full(2, np.nan, dtype=np.float32)
-        return False, ellipse, centroid, None, "contour_missing"
-
-    contour = contour.astype(np.float32)
-
-    try:
-        (xc, yc), (axis_a, axis_b), angle = cv2.fitEllipse(contour)
-    except cv2.error:
-        ellipse = np.full(5, np.nan, dtype=np.float32)
-        centroid = _mask_pixel_centroid(mask)
-        return False, ellipse, centroid, contour, "ellipse_estimate_failed"
-
-    major = float(axis_a)
-    minor = float(axis_b)
-    theta = float(angle)
-    if major < minor:
-        major, minor = minor, major
-        theta += 90.0
-    theta = float((theta + 180.0) % 180.0)
-
-    if not all(np.isfinite([xc, yc, major, minor, theta])) or major <= 0.0 or minor <= 0.0:
-        ellipse = np.full(5, np.nan, dtype=np.float32)
-        centroid = _mask_pixel_centroid(mask)
-        return False, ellipse, centroid, contour, "ellipse_invalid_params"
-
-    centroid = np.array([float(xc), float(yc)], dtype=np.float32)
-
-    ellipse = np.array(
-        [
-            float(xc),
-            float(yc),
-            major,
-            minor,
-            theta,
-        ],
-        dtype=np.float32,
-    )
-
-    return True, ellipse, centroid, contour, None
 
 
 def _append_ellipse_failure_tags(

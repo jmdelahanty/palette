@@ -29,10 +29,9 @@ except ImportError:  # pragma: no cover - depends on optional dependency
     LocalCluster = None  # type: ignore
     HAVE_DISTRIBUTED = False
 
-from ..refinement.refine_eye_masks import _measure_mask
 from ..shared.detect_reason_codec import decode_reason_bytes
 from ..shared.json_safety import json_attr_safe
-from ..shared.mask_geometry import batch_mask_spatial_metrics
+from ..shared.mask_geometry import batch_mask_spatial_metrics, measure_mask_ellipse as _measure_mask
 from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance

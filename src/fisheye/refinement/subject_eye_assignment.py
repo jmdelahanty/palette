@@ -9,7 +9,7 @@ from typing import Mapping
 
 import numpy as np
 
-from .refine_eye_masks import _measure_mask
+from ..shared.mask_geometry import measure_mask_ellipse as _measure_mask
 from ..shared.mask_geometry import connected_component_labels as _connected_component_labels
 from ..shared.mask_geometry import select_component_near_point as _select_component_near_point
 
