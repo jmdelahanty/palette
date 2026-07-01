@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from fisheye.registry.db import RegistryPaths
+from fisheye.registry.db import SQLITE_BUSY_TIMEOUT_MS, RegistryPaths
 
 
 DATASET_REF_COLUMN_NAMES = {
@@ -74,6 +74,7 @@ class DatasetRef:
 def _connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};")
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 

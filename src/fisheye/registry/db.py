@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import yaml
@@ -33,6 +34,9 @@ from .extractors.quality import _extract_detect_quality_rows, _extract_keypoint_
 from .migration_bodies import RegistryMigrationMixin
 from .migrations import bind_migrations
 from .stage_catalog import recording_status_stage_ids, recording_tuning_stage_ids
+
+
+SQLITE_BUSY_TIMEOUT_MS = 30_000
 
 
 def _require_sql_identifier(value: str) -> str:
@@ -1197,12 +1201,50 @@ class Registry(RegistryMigrationMixin):
     def __init__(self, path: Path):
         self.path = path
         _ensure_parent(self.path)
+        self._managed_transaction_depth = 0
         self.conn = sqlite3.connect(str(self.path))
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};")
+        # Do not enable WAL here: production LSF jobs open /groups/.../palette_registry.sqlite
+        # directly from compute nodes. SQLite WAL's shared-memory index is only safe when
+        # all connections are on one host, so registry deployments on multi-host NFS must
+        # stay on the rollback journal and rely on timeout/retry plus a future writer funnel.
         self._init_schema()
 
     def close(self) -> None:
         self.conn.close()
+
+    def _commit_if_standalone(self) -> None:
+        if self._managed_transaction_depth <= 0:
+            self.conn.commit()
+
+    @contextmanager
+    def _maybe_transaction(self) -> Iterator[None]:
+        if self._managed_transaction_depth > 0:
+            yield
+            return
+        with self.conn:
+            yield
+
+    @contextmanager
+    def _transaction_context(self) -> Iterator[None]:
+        if self._managed_transaction_depth > 0:
+            self._managed_transaction_depth += 1
+            try:
+                yield
+            finally:
+                self._managed_transaction_depth -= 1
+            return
+        self.conn.execute("BEGIN IMMEDIATE;")
+        self._managed_transaction_depth = 1
+        try:
+            yield
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self._managed_transaction_depth = 0
 
     def _init_schema(self) -> None:
         self.conn.execute("PRAGMA foreign_keys = ON;")
@@ -2410,7 +2452,7 @@ class Registry(RegistryMigrationMixin):
             """,
             payload,
         )
-        self.conn.commit()
+        self._commit_if_standalone()
         return skeleton_id
 
     def _resolve_run_skeleton_id(self, run_id: str) -> Optional[str]:
@@ -2499,7 +2541,7 @@ class Registry(RegistryMigrationMixin):
             """,
             payload,
         )
-        self.conn.commit()
+        self._commit_if_standalone()
 
     def upsert_recording(
         self,
@@ -2601,7 +2643,7 @@ class Registry(RegistryMigrationMixin):
             """,
             payload,
         )
-        self.conn.commit()
+        self._commit_if_standalone()
 
     def upsert_analytics_collection(
         self,
@@ -2960,12 +3002,12 @@ class Registry(RegistryMigrationMixin):
             """,
             payload,
         )
-        self.conn.commit()
+        self._commit_if_standalone()
 
     def replace_detection_sources(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
         """Replace detection source lineage rows for a dataset."""
         now = _utc_now()
-        with self.conn:
+        with self._maybe_transaction():
             self.conn.execute(
                 "DELETE FROM detection_sources WHERE dataset_id = ?;",
                 (dataset_id,),
@@ -4936,7 +4978,7 @@ class Registry(RegistryMigrationMixin):
         self.conn.commit()
 
     def replace_detect_performance(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
-        with self.conn:
+        with self._maybe_transaction():
             self.conn.execute("DELETE FROM detect_performance WHERE dataset_id = ?;", (str(dataset_id),))
             for record in records:
                 payload = dict(record)
@@ -5207,7 +5249,7 @@ class Registry(RegistryMigrationMixin):
                 )
 
     def replace_keypoint_performance(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
-        with self.conn:
+        with self._maybe_transaction():
             self.conn.execute("DELETE FROM keypoint_performance WHERE dataset_id = ?;", (str(dataset_id),))
             for record in records:
                 payload = dict(record)
@@ -5303,7 +5345,7 @@ class Registry(RegistryMigrationMixin):
         return dataset_id, len(keypoint_performance_rows)
 
     def replace_eye_mask_performance(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
-        with self.conn:
+        with self._maybe_transaction():
             self.conn.execute("DELETE FROM eye_mask_performance WHERE dataset_id = ?;", (str(dataset_id),))
             for record in records:
                 payload = dict(record)
@@ -5340,7 +5382,7 @@ class Registry(RegistryMigrationMixin):
                 )
 
     def replace_eye_mask_quality(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
-        with self.conn:
+        with self._maybe_transaction():
             self.conn.execute("DELETE FROM eye_mask_quality WHERE dataset_id = ?;", (str(dataset_id),))
             for record in records:
                 payload = dict(record)
@@ -5374,7 +5416,7 @@ class Registry(RegistryMigrationMixin):
                 )
 
     def replace_subject_mask_performance(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
-        with self.conn:
+        with self._maybe_transaction():
             self.conn.execute("DELETE FROM subject_mask_performance WHERE dataset_id = ?;", (str(dataset_id),))
             for record in records:
                 payload = dict(record)
@@ -5528,7 +5570,7 @@ class Registry(RegistryMigrationMixin):
                 )
 
     def replace_subject_mask_component_quality(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
-        with self.conn:
+        with self._maybe_transaction():
             self.conn.execute("DELETE FROM subject_mask_component_quality WHERE dataset_id = ?;", (str(dataset_id),))
             for record in records:
                 payload = dict(record)
@@ -5695,7 +5737,7 @@ class Registry(RegistryMigrationMixin):
                 "review_notes": "TEXT",
             },
         )
-        with self.conn:
+        with self._maybe_transaction():
             self.conn.execute("DELETE FROM detect_quality WHERE dataset_id = ?;", (str(dataset_id),))
             for record in records:
                 payload = dict(record)
@@ -5725,7 +5767,7 @@ class Registry(RegistryMigrationMixin):
                 )
 
     def replace_crop_quality(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
-        with self.conn:
+        with self._maybe_transaction():
             self.conn.execute("DELETE FROM crop_quality WHERE dataset_id = ?;", (str(dataset_id),))
             for record in records:
                 payload = dict(record)
@@ -5762,7 +5804,7 @@ class Registry(RegistryMigrationMixin):
     def replace_acquisition_video_streams(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
         if not self._sqlite_object_exists("acquisition_video_streams", object_types=("table",)):
             self._migration_056_acquisition_video_streams_registry()
-        with self.conn:
+        with self._maybe_transaction():
             self.conn.execute(
                 "DELETE FROM acquisition_video_streams WHERE dataset_id = ?;",
                 (str(dataset_id),),
@@ -5861,7 +5903,7 @@ class Registry(RegistryMigrationMixin):
                 "review_policy_version": "INTEGER",
             },
         )
-        with self.conn:
+        with self._maybe_transaction():
             self.conn.execute("DELETE FROM keypoint_quality WHERE dataset_id = ?;", (str(dataset_id),))
             for record in records:
                 payload = dict(record)
@@ -6376,6 +6418,10 @@ class Registry(RegistryMigrationMixin):
         )
 
     def register_from_root(self, root: zarr.Group, zarr_path: Path) -> str:
+        with self._transaction_context():
+            return self._register_from_root_in_transaction(root, zarr_path)
+
+    def _register_from_root_in_transaction(self, root: zarr.Group, zarr_path: Path) -> str:
         metadata = extract_dataset_metadata(root, zarr_path)
         base_dataset_id = metadata.dataset_id
         session_uuid = metadata.session_uuid
