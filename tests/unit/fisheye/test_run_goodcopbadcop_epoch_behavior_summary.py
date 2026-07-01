@@ -33,6 +33,8 @@ def test_run_for_targets_forwards_epoch_behavior_parameters_and_writes(monkeypat
             ),
             per_epoch_chaser=np.zeros(4, dtype=[("window_id", "i4")]),
             per_epoch_bouts=np.zeros(3, dtype=[("window_id", "i4")]),
+            per_epoch_bout_histograms=np.zeros(12, dtype=[("window_id", "i4")]),
+            per_epoch_inter_bout_interval_histograms=np.zeros(6, dtype=[("window_id", "i4")]),
             center_distance_histogram=np.zeros(6, dtype=[("window_id", "i4")]),
             warnings=("track_kinematics_unavailable: test",),
         )
@@ -99,6 +101,8 @@ def test_run_for_targets_forwards_epoch_behavior_parameters_and_writes(monkeypat
                 "epoch_count": 2,
                 "chaser_epoch_count": 4,
                 "per_epoch_bout_count": 3,
+                "per_epoch_bout_histogram_count": 12,
+                "per_epoch_inter_bout_interval_histogram_count": 6,
                 "center_distance_histogram_count": 6,
                 "bout_count": [2, 1],
                 "inter_bout_interval_count": [1, 0],
@@ -127,6 +131,8 @@ def test_run_for_targets_dry_run_does_not_write(monkeypatch, tmp_path: Path) -> 
             ),
             per_epoch_chaser=np.zeros(0, dtype=[("window_id", "i4")]),
             per_epoch_bouts=np.zeros(0, dtype=[("window_id", "i4")]),
+            per_epoch_bout_histograms=np.zeros(0, dtype=[("window_id", "i4")]),
+            per_epoch_inter_bout_interval_histograms=np.zeros(0, dtype=[("window_id", "i4")]),
             center_distance_histogram=np.zeros(0, dtype=[("window_id", "i4")]),
             warnings=(),
         )

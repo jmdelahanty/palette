@@ -185,6 +185,8 @@ class GoodCopBadCopEpochBehaviorData:
     per_epoch_fish_df: pl.DataFrame
     per_epoch_chaser_df: pl.DataFrame
     per_epoch_bouts_df: pl.DataFrame
+    per_epoch_bout_histograms_df: pl.DataFrame
+    per_epoch_inter_bout_interval_histograms_df: pl.DataFrame
     center_distance_histogram_df: pl.DataFrame
 
 
@@ -1847,6 +1849,17 @@ def load_goodcopbadcop_epoch_behavior_data(
         per_epoch_bout_records, _per_epoch_bout_attrs = load_structured_dataset(component, "per_epoch_bouts")
     except Exception:
         per_epoch_bout_records = np.zeros(0, dtype=[])
+    try:
+        bout_hist_records, _bout_hist_attrs = load_structured_dataset(component, "per_epoch_bout_histograms")
+    except Exception:
+        bout_hist_records = np.zeros(0, dtype=[])
+    try:
+        ibi_hist_records, _ibi_hist_attrs = load_structured_dataset(
+            component,
+            "per_epoch_inter_bout_interval_histograms",
+        )
+    except Exception:
+        ibi_hist_records = np.zeros(0, dtype=[])
 
     source_refs = attrs.get("source_refs")
     if not isinstance(source_refs, Mapping):
@@ -1865,6 +1878,8 @@ def load_goodcopbadcop_epoch_behavior_data(
         per_epoch_fish_df=_structured_records_to_polars(fish_records),
         per_epoch_chaser_df=_structured_records_to_polars(chaser_records),
         per_epoch_bouts_df=_structured_records_to_polars(per_epoch_bout_records),
+        per_epoch_bout_histograms_df=_structured_records_to_polars(bout_hist_records),
+        per_epoch_inter_bout_interval_histograms_df=_structured_records_to_polars(ibi_hist_records),
         center_distance_histogram_df=_structured_records_to_polars(center_hist_records),
     )
 

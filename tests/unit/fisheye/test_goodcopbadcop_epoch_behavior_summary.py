@@ -36,6 +36,8 @@ def test_goodcopbadcop_epoch_behavior_summary_builds_fish_and_chaser_tables(tmp_
     assert result.per_epoch_fish.shape == (3,)
     assert result.per_epoch_chaser.shape == (6,)
     assert result.per_epoch_bouts.shape == (4,)
+    assert result.per_epoch_bout_histograms.shape[0] > 0
+    assert result.per_epoch_inter_bout_interval_histograms.shape[0] > 0
     assert result.center_distance_histogram.shape == (9,)
     assert result.arena_geometry.status == "circle"
 
@@ -65,6 +67,15 @@ def test_goodcopbadcop_epoch_behavior_summary_builds_fish_and_chaser_tables(tmp_
     assert "bout_net_heading_change_deg" in result.per_epoch_bouts.dtype.names
     np.testing.assert_allclose(pre_bouts["bout_duration_s"], [0.04, 0.06])
     np.testing.assert_allclose(pre_bouts["bout_path_length_mm"], [0.2, 0.3])
+    pre_duration_hist = result.per_epoch_bout_histograms[
+        (result.per_epoch_bout_histograms["window_label"] == b"pre_event")
+        & (result.per_epoch_bout_histograms["metric_name"] == b"bout_duration_s")
+    ]
+    assert int(np.sum(pre_duration_hist["hist_count"])) == 2
+    pre_ibi_hist = result.per_epoch_inter_bout_interval_histograms[
+        result.per_epoch_inter_bout_interval_histograms["window_label"] == b"pre_event"
+    ]
+    assert int(np.sum(pre_ibi_hist["hist_count"])) == 1
 
     pre_chaser_0 = result.per_epoch_chaser[
         (result.per_epoch_chaser["window_label"] == b"pre_event")
@@ -103,11 +114,16 @@ def test_goodcopbadcop_epoch_behavior_summary_writes_and_reads_component(tmp_pat
     stored_fish, fish_attrs = load_structured_dataset(component, "per_epoch_fish")
     stored_chaser, chaser_attrs = load_structured_dataset(component, "per_epoch_chaser")
     stored_bouts, bout_attrs = load_structured_dataset(component, "per_epoch_bouts")
+    stored_bout_hist, bout_hist_attrs = load_structured_dataset(component, "per_epoch_bout_histograms")
+    stored_ibi_hist, ibi_hist_attrs = load_structured_dataset(component, "per_epoch_inter_bout_interval_histograms")
     stored_center_hist, center_hist_attrs = load_structured_dataset(component, "center_distance_histogram")
     assert fish_attrs["row_axis"] == "stimulus_epoch_windows"
     assert chaser_attrs["row_axis"] == "stimulus_epoch_windows_x_chasers"
     assert bout_attrs["row_axis"] == "stimulus_epoch_windows_x_swim_bouts"
     assert bout_attrs["unit_of_analysis"] == "swim_bout"
+    assert bout_hist_attrs["row_axis"] == "stimulus_epoch_windows_x_bout_metrics_x_bins"
+    assert bout_hist_attrs["bin_contract"] == "analysis_owned_shared_bins_per_metric_within_component"
+    assert ibi_hist_attrs["row_axis"] == "stimulus_epoch_windows_x_inter_bout_interval_bins"
     assert center_hist_attrs["row_axis"] == "stimulus_epoch_windows_x_center_distance_bins"
     np.testing.assert_array_equal(stored_fish["bout_count"], result.per_epoch_fish["bout_count"])
     np.testing.assert_allclose(
@@ -116,6 +132,8 @@ def test_goodcopbadcop_epoch_behavior_summary_writes_and_reads_component(tmp_pat
     )
     np.testing.assert_array_equal(stored_chaser["chaser_index"], result.per_epoch_chaser["chaser_index"])
     np.testing.assert_array_equal(stored_bouts["bout_source_row"], result.per_epoch_bouts["bout_source_row"])
+    np.testing.assert_array_equal(stored_bout_hist["hist_count"], result.per_epoch_bout_histograms["hist_count"])
+    np.testing.assert_array_equal(stored_ibi_hist["hist_count"], result.per_epoch_inter_bout_interval_histograms["hist_count"])
     np.testing.assert_array_equal(stored_center_hist["hist_count"], result.center_distance_histogram["hist_count"])
 
     loaded = load_goodcopbadcop_epoch_behavior_data(
@@ -127,6 +145,8 @@ def test_goodcopbadcop_epoch_behavior_summary_writes_and_reads_component(tmp_pat
     assert loaded.per_epoch_fish_df.height == 3
     assert loaded.per_epoch_chaser_df.height == 6
     assert loaded.per_epoch_bouts_df.height == 4
+    assert loaded.per_epoch_bout_histograms_df.height == result.per_epoch_bout_histograms.shape[0]
+    assert loaded.per_epoch_inter_bout_interval_histograms_df.height == result.per_epoch_inter_bout_interval_histograms.shape[0]
     assert loaded.center_distance_histogram_df.height == 9
     pre = loaded.per_epoch_fish_df.filter(loaded.per_epoch_fish_df["window_label"] == "pre_event").row(
         0,

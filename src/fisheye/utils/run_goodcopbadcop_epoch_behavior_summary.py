@@ -69,6 +69,16 @@ def run_for_targets(
                 "epoch_count": int(result.per_epoch_fish.shape[0]),
                 "chaser_epoch_count": int(result.per_epoch_chaser.shape[0]),
                 "per_epoch_bout_count": int(result.per_epoch_bouts.shape[0]),
+                "per_epoch_bout_histogram_count": int(
+                    getattr(result, "per_epoch_bout_histograms", []).shape[0]
+                    if hasattr(getattr(result, "per_epoch_bout_histograms", None), "shape")
+                    else 0
+                ),
+                "per_epoch_inter_bout_interval_histogram_count": int(
+                    getattr(result, "per_epoch_inter_bout_interval_histograms", []).shape[0]
+                    if hasattr(getattr(result, "per_epoch_inter_bout_interval_histograms", None), "shape")
+                    else 0
+                ),
                 "center_distance_histogram_count": int(result.center_distance_histogram.shape[0]),
                 "bout_count": result.per_epoch_fish["bout_count"].astype(int).tolist(),
                 "inter_bout_interval_count": result.per_epoch_fish[

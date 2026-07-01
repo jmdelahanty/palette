@@ -16,6 +16,11 @@ from fisheye.analysis.chaser_distance_runs import (
     ChaserDistanceWindow,
 )
 from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
+from fisheye.analysis.epoch_segments import (
+    HistogramMetricSpec,
+    histogram_table,
+    segments_from_window_objects,
+)
 from fisheye.analysis.swim_bout_io import load_default_swim_bout_tables
 from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
@@ -32,6 +37,10 @@ DEFAULT_COMPONENT_NAME = "kinematics_bouts_v1"
 REQUIRED_TRACK_SCOPE = "offline"
 DEFAULT_CENTER_DISTANCE_BIN_WIDTH_MM = 2.5
 DEFAULT_WALL_BAND_MM = 5.0
+DEFAULT_BOUT_DURATION_BIN_WIDTH_S = 0.02
+DEFAULT_BOUT_DISTANCE_BIN_WIDTH_MM = 0.25
+DEFAULT_BOUT_HEADING_BIN_WIDTH_DEG = 10.0
+DEFAULT_IBI_BIN_WIDTH_S = 0.1
 
 
 @dataclass(frozen=True)
@@ -67,6 +76,8 @@ class GoodCopBadCopEpochBehaviorSummaryResult:
     per_epoch_fish: np.ndarray
     per_epoch_chaser: np.ndarray
     per_epoch_bouts: np.ndarray
+    per_epoch_bout_histograms: np.ndarray
+    per_epoch_inter_bout_interval_histograms: np.ndarray
     center_distance_histogram: np.ndarray
     arena_geometry: ArenaGeometry
     center_distance_bin_width_mm: float
@@ -977,6 +988,134 @@ def _make_per_epoch_bouts(
     return np.asarray(rows, dtype=dtype)
 
 
+def _degree_edges(start: float, stop: float, width: float) -> tuple[float, ...]:
+    return tuple(float(value) for value in np.arange(float(start), float(stop) + float(width) * 0.5, float(width)))
+
+
+def _bout_histogram_specs() -> tuple[HistogramMetricSpec, ...]:
+    heading_width = float(DEFAULT_BOUT_HEADING_BIN_WIDTH_DEG)
+    return (
+        HistogramMetricSpec(
+            metric_name="bout_duration_s",
+            units="s",
+            bin_policy="fixed_width_from_zero_to_component_max",
+            bin_width=float(DEFAULT_BOUT_DURATION_BIN_WIDTH_S),
+            range_min=0.0,
+        ),
+        HistogramMetricSpec(
+            metric_name="bout_path_length_mm",
+            units="mm",
+            bin_policy="fixed_width_from_zero_to_component_max",
+            bin_width=float(DEFAULT_BOUT_DISTANCE_BIN_WIDTH_MM),
+            range_min=0.0,
+        ),
+        HistogramMetricSpec(
+            metric_name="bout_net_heading_change_deg",
+            units="deg",
+            bin_policy="fixed_edges_-180_to_180_deg",
+            bin_edges=_degree_edges(-180.0, 180.0, heading_width),
+        ),
+        HistogramMetricSpec(
+            metric_name="abs_bout_net_heading_change_deg",
+            units="deg",
+            bin_policy="fixed_edges_0_to_180_deg",
+            bin_edges=_degree_edges(0.0, 180.0, heading_width),
+        ),
+        HistogramMetricSpec(
+            metric_name="bout_heading_path_deg",
+            units="deg",
+            bin_policy="fixed_width_from_zero_to_component_max",
+            bin_width=heading_width,
+            range_min=0.0,
+        ),
+    )
+
+
+def _make_per_epoch_bout_histograms(
+    *,
+    windows: Sequence[ChaserDistanceWindow],
+    per_epoch_bouts: np.ndarray,
+) -> np.ndarray:
+    segments = segments_from_window_objects(windows)
+    tables: list[np.ndarray] = []
+    for spec in _bout_histogram_specs():
+        if per_epoch_bouts.size == 0 or per_epoch_bouts.dtype.names is None or spec.metric_name not in per_epoch_bouts.dtype.names:
+            values_by_window = [np.asarray([], dtype=np.float64) for _ in segments]
+        else:
+            values = np.asarray(per_epoch_bouts[spec.metric_name], dtype=np.float64)
+            window_ids = np.asarray(per_epoch_bouts["window_id"], dtype=np.int32)
+            values_by_window = [values[window_ids == int(segment.segment_id)] for segment in segments]
+        tables.append(
+            histogram_table(
+                segments=segments,
+                values_by_segment=values_by_window,
+                metric_spec=spec,
+            )
+        )
+    if not tables:
+        return np.zeros(0, dtype=[])
+    return np.concatenate(tables) if any(table.size for table in tables) else tables[0]
+
+
+def _inter_bout_interval_values_by_window(
+    *,
+    windows: Sequence[ChaserDistanceWindow],
+    swim_tables: Optional[Any],
+) -> list[np.ndarray]:
+    if swim_tables is None or swim_tables.inter_bout_intervals.size == 0:
+        return [np.asarray([], dtype=np.float64) for _ in windows]
+    intervals = swim_tables.inter_bout_intervals
+    interval_s = _structured_field(intervals, "interval_s")
+    interval_prev_end_frame = _structured_field(intervals, "prev_end_frame")
+    interval_next_start_frame = _structured_field(intervals, "next_start_frame")
+    interval_prev_end_s = _structured_field(intervals, "prev_end_time_s")
+    interval_next_start_s = _structured_field(intervals, "next_start_time_s")
+    interval_valid = _structured_field(intervals, "valid")
+    if interval_s is None:
+        return [np.asarray([], dtype=np.float64) for _ in windows]
+    interval_values = np.asarray(interval_s, dtype=np.float64)
+    values_by_window: list[np.ndarray] = []
+    for window in windows:
+        if interval_prev_end_frame is not None and interval_next_start_frame is not None:
+            interval_mask = (
+                np.isfinite(interval_values)
+                & (np.asarray(interval_prev_end_frame, dtype=np.int64) >= int(window.start_frame))
+                & (np.asarray(interval_next_start_frame, dtype=np.int64) <= int(window.end_frame))
+            )
+        elif interval_prev_end_s is not None and interval_next_start_s is not None:
+            interval_mask = (
+                np.isfinite(interval_values)
+                & (np.asarray(interval_prev_end_s, dtype=np.float64) >= float(window.start_time_s))
+                & (np.asarray(interval_next_start_s, dtype=np.float64) <= float(window.end_time_s))
+            )
+        else:
+            interval_mask = np.zeros(interval_values.shape[0], dtype=bool)
+        if interval_valid is not None:
+            interval_mask &= np.asarray(interval_valid, dtype=bool)
+        values_by_window.append(interval_values[interval_mask])
+    return values_by_window
+
+
+def _make_per_epoch_inter_bout_interval_histograms(
+    *,
+    windows: Sequence[ChaserDistanceWindow],
+    swim_tables: Optional[Any],
+) -> np.ndarray:
+    segments = segments_from_window_objects(windows)
+    spec = HistogramMetricSpec(
+        metric_name="inter_bout_interval_s",
+        units="s",
+        bin_policy="fixed_width_from_zero_to_component_max",
+        bin_width=float(DEFAULT_IBI_BIN_WIDTH_S),
+        range_min=0.0,
+    )
+    return histogram_table(
+        segments=segments,
+        values_by_segment=_inter_bout_interval_values_by_window(windows=windows, swim_tables=swim_tables),
+        metric_spec=spec,
+    )
+
+
 def _array_float(values: Optional[np.ndarray], *indices: int) -> float:
     if values is None:
         return np.nan
@@ -1138,6 +1277,14 @@ def build_goodcopbadcop_epoch_behavior_summary_result(
         swim_tables=swim_tables,
         track=track,
     )
+    per_epoch_bout_histograms = _make_per_epoch_bout_histograms(
+        windows=windows,
+        per_epoch_bouts=per_epoch_bouts,
+    )
+    per_epoch_inter_bout_interval_histograms = _make_per_epoch_inter_bout_interval_histograms(
+        windows=windows,
+        swim_tables=swim_tables,
+    )
     center_distance_histogram = _make_center_distance_histogram(
         windows=windows,
         run_group=run_group,
@@ -1166,6 +1313,8 @@ def build_goodcopbadcop_epoch_behavior_summary_result(
         per_epoch_fish=per_epoch_fish,
         per_epoch_chaser=per_epoch_chaser,
         per_epoch_bouts=per_epoch_bouts,
+        per_epoch_bout_histograms=per_epoch_bout_histograms,
+        per_epoch_inter_bout_interval_histograms=per_epoch_inter_bout_interval_histograms,
         center_distance_histogram=center_distance_histogram,
         arena_geometry=geometry,
         center_distance_bin_width_mm=float(center_distance_bin_width_mm),
@@ -1217,6 +1366,29 @@ def write_goodcopbadcop_epoch_behavior_summary_component(
     )
     write_columnar_dataset(
         component,
+        "per_epoch_bout_histograms",
+        result.per_epoch_bout_histograms,
+        {
+            "row_axis": "stimulus_epoch_windows_x_bout_metrics_x_bins",
+            "unit_of_analysis": "swim_bout",
+            "source_table": "per_epoch_bouts",
+            "bin_contract": "analysis_owned_shared_bins_per_metric_within_component",
+        },
+    )
+    write_columnar_dataset(
+        component,
+        "per_epoch_inter_bout_interval_histograms",
+        result.per_epoch_inter_bout_interval_histograms,
+        {
+            "row_axis": "stimulus_epoch_windows_x_inter_bout_interval_bins",
+            "unit_of_analysis": "inter_bout_interval",
+            "source_table": "source_swim_bout_run/inter_bout_intervals",
+            "epoch_assignment_rule": "prev_end and next_start within inclusive epoch; time fallback",
+            "bin_contract": "analysis_owned_shared_bins_within_component",
+        },
+    )
+    write_columnar_dataset(
+        component,
         "center_distance_histogram",
         result.center_distance_histogram,
         {"row_axis": "stimulus_epoch_windows_x_center_distance_bins"},
@@ -1244,6 +1416,12 @@ def write_goodcopbadcop_epoch_behavior_summary_component(
         "center_distance_bin_width_mm": float(result.center_distance_bin_width_mm),
         "wall_band_mm": float(result.wall_band_mm),
         "window_boundary_rule": "inclusive start_frame/end_frame",
+        "per_epoch_bout_histogram_metrics": [spec.metric_name for spec in _bout_histogram_specs()],
+        "bout_duration_bin_width_s": float(DEFAULT_BOUT_DURATION_BIN_WIDTH_S),
+        "bout_distance_bin_width_mm": float(DEFAULT_BOUT_DISTANCE_BIN_WIDTH_MM),
+        "bout_heading_bin_width_deg": float(DEFAULT_BOUT_HEADING_BIN_WIDTH_DEG),
+        "inter_bout_interval_bin_width_s": float(DEFAULT_IBI_BIN_WIDTH_S),
+        "histogram_bin_contract": "analysis_owned_shared_bins_per_metric_within_component",
     }
     summary = {
         "epoch_labels": [
@@ -1253,6 +1431,10 @@ def write_goodcopbadcop_epoch_behavior_summary_component(
         "bout_count": result.per_epoch_fish["bout_count"].astype(int).tolist(),
         "inter_bout_interval_count": result.per_epoch_fish["inter_bout_interval_count"].astype(int).tolist(),
         "mean_inter_bout_interval_s": result.per_epoch_fish["mean_inter_bout_interval_s"].astype(float).tolist(),
+        "per_epoch_bout_histogram_rows": int(result.per_epoch_bout_histograms.shape[0]),
+        "per_epoch_inter_bout_interval_histogram_rows": int(
+            result.per_epoch_inter_bout_interval_histograms.shape[0]
+        ),
     }
     component.attrs.update(
         json_attr_safe(
