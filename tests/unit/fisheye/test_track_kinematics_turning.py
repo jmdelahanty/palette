@@ -54,6 +54,10 @@ class _FakeGroup:
         return key in self._children
 
 
+def _make_memory_group() -> zarr.Group:
+    return zarr.open_group("memory://", mode="w")
+
+
 def test_build_track_datasets_computes_turning_series_for_all_tracks() -> None:
     track_ids = np.array([0, 0, 1, 1], dtype=np.int64)
     frames = np.array([0, 1, 0, 2], dtype=np.int64)
@@ -354,7 +358,7 @@ def test_save_track_kinematics_tracks_persists_turning_arrays() -> None:
         pixel_to_mm=None,
     )
 
-    run_group = _FakeGroup()
+    run_group = _make_memory_group()
     ordered_ids = mod.save_track_kinematics_tracks(run_group, tracks, summaries)
 
     assert ordered_ids == [0]
@@ -454,7 +458,7 @@ def test_save_track_kinematics_tracks_persists_speed_derivative_hierarchy() -> N
         pixel_to_mm=2.0,
     )
 
-    run_group = _FakeGroup()
+    run_group = _make_memory_group()
     mod.save_track_kinematics_tracks(run_group, tracks, summaries)
 
     subgroup = run_group["tracks"]["id_0"]

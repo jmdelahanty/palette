@@ -2,7 +2,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
+import types
 from fisheye.utils import run_detections_batch as mod
+
+
+def _patch_detect_yolo(monkeypatch, func) -> None:
+    fake_module = types.ModuleType("fisheye.detection.detect_yolo")
+    fake_module.detect_yolo = func
+    monkeypatch.setitem(sys.modules, "fisheye.detection.detect_yolo", fake_module)
 
 
 def _write_root_metadata(zarr_path: Path, attrs: dict[str, object] | None = None) -> None:
@@ -459,7 +467,7 @@ def test_run_detect_plan_skips_registry_provenance_for_explicit_model(monkeypatc
         status=mod.STATUS_OK,
     )
 
-    monkeypatch.setattr(mod, "detect_yolo", lambda **_kwargs: "detect_explicit")
+    _patch_detect_yolo(monkeypatch, lambda **_kwargs: "detect_explicit")
 
     def _unexpected_provenance(**_kwargs):
         raise AssertionError("registry model-resolution provenance should be skipped for explicit models")

@@ -467,7 +467,13 @@ def _subject_mask_target_run_path(runtime: SubjectMaskRuntimeSession) -> str:
     return f"refined_subject_masks_runs/{runtime.refined.run_name}"
 
 def _subject_mask_source_rowset_path(runtime: SubjectMaskRuntimeSession) -> str:
-    return f"crop_runs/{runtime.source.crop_run}"
+    crop_run = getattr(runtime.source, "crop_run", None)
+    if crop_run:
+        return f"crop_runs/{crop_run}"
+    source_run = getattr(runtime.source, "run_name", None)
+    if source_run:
+        return f"subject_mask_runs/{source_run}"
+    return ""
 
 def _subject_mask_edit_revision(runtime: SubjectMaskRuntimeSession) -> int:
     try:

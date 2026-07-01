@@ -120,10 +120,10 @@
     <p><a href="/admin">Back to admin</a> | <a href="/admin/datasets">Dataset progress</a></p>
     <h1>Labeling users</h1>
     <section class="summary">
-      <div class="stat"><b>{{ slot_001 }}</b><span>registered/visible users</span></div>
-      <div class="stat"><b>{{ slot_002 }}</b><span>active users</span></div>
-      <div class="stat"><b>{{ slot_003 }}</b><span>inactive users</span></div>
-      <div class="stat"><b>{{ slot_004 }}</b><span>assignment-only users</span></div>
+      <div class="stat"><b>@@slot_001@@</b><span>registered/visible users</span></div>
+      <div class="stat"><b>@@slot_002@@</b><span>active users</span></div>
+      <div class="stat"><b>@@slot_003@@</b><span>inactive users</span></div>
+      <div class="stat"><b>@@slot_004@@</b><span>assignment-only users</span></div>
     </section>
     <section class="card">
       <h2>Add or update user</h2>
@@ -131,8 +131,8 @@
         <label>User ID<br><input id="user-id" required placeholder="delahantyj"></label>
         <label>Display name<br><input id="display-name"></label>
         <label>Email<br><input id="email"></label>
-        <label>Role<br><select id="role">{{ slot_005 }}</select></label>
-        <label>Status<br><select id="status">{{ slot_006 }}</select></label>
+        <label>Role<br><select id="role">@@slot_005@@</select></label>
+        <label>Status<br><select id="status">@@slot_006@@</select></label>
         <label>Notes<br><input id="notes"></label>
         <label><input id="notify-user" type="checkbox" style="width:auto"> Send/queue notification email</label>
         <button type="submit">Save user</button>
@@ -143,7 +143,7 @@
       <h2>Users</h2>
       <table>
         <thead><tr><th>User</th><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Assignments</th><th>Tasks</th><th>Action</th></tr></thead>
-        <tbody>{{ slot_007 }}</tbody>
+        <tbody>@@slot_007@@</tbody>
       </table>
     </section>
   </main>

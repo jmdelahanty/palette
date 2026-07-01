@@ -109,6 +109,10 @@ from .web_runtimes import (
     _video_detect_runtime_state,
 )
 from .web_policy import (
+    BROWSER_CLIENT_AUTHORITY,
+    BROWSER_MUTATION_AUDIT_PROVENANCE,
+    BROWSER_MUTATION_RETRY_POLICY,
+    BROWSER_WORKFLOW_SERVER_WRITE_CONTRACT,
     _browser_mutation_target_contract_policy,
     _browser_mutation_write_contract_policy,
     _browser_mutation_write_policy,
@@ -14144,42 +14148,6 @@ LABELING_HOME_PATH = "/labeling"
 PERSONAL_WORK_PATH = "/my-work"
 IDENTITY_PROBE_PATH = "/identity"
 
-BROWSER_CLIENT_AUTHORITY: dict[str, object] = {
-    "mutation_executor": "server",
-    "browser_can_submit_edits": True,
-    "browser_can_write_zarr": False,
-    "browser_can_write_filesystem": False,
-    "browser_receives_write_credentials": False,
-    "browser_receives_direct_zarr_handles": False,
-}
-
-BROWSER_MUTATION_AUDIT_PROVENANCE: dict[str, object] = {
-    "event_store": "labeling_task_events",
-    "required_event_fields": [
-        "event_id",
-        "task_id",
-        "recording_id",
-        "user",
-        "event_type",
-        "created_at_utc",
-        "target",
-        "before",
-        "after",
-    ],
-    "timestamp_field": "created_at_utc",
-    "identity_fields": ["task_id", "recording_id", "user"],
-    "mutation_summary_fields": ["target", "before", "after"],
-}
-
-BROWSER_MUTATION_RETRY_POLICY: dict[str, object] = {
-    "data_write_semantics": "replace_target_payload",
-    "same_payload_retry_safe": True,
-    "audit_semantics": "append_only",
-    "duplicate_audit_events_possible": True,
-    "client_idempotency_key_supported": False,
-    "retry_guidance": "If the browser loses the response after submitting, reopening the task and saving the same target payload again should leave the label data in the same state, but records another audit event.",
-}
-
 BROWSER_TASK_STATE_POLICY: dict[str, object] = {
     "startable_task_states": list(LABELER_START_TASK_STATES),
     "completed_tasks_read_only": True,
@@ -14251,28 +14219,6 @@ BROWSER_SIGNED_LINK_POLICY: dict[str, object] = {
     "session_bound_after_open": True,
     "runtime_operator_validation_start_gate_enforced": True,
     "dashboard_preferred_for_multi_task_work": True,
-}
-
-BROWSER_WORKFLOW_SERVER_WRITE_CONTRACT: dict[str, object] = {
-    "data_plane_write_target": "server_owned_assigned_task_zarr_scope",
-    "server_owned_write_target": True,
-    "payload_role": "browser_command_payload",
-    "training_zarr_mutation_target_kind": "task_scoped_training_zarr",
-    "browser_label_write_target": "training_zarr",
-    "csv_handoff_artifact_role": "metadata_only_control_plane",
-    "csv_handoff_artifacts_are_label_write_targets": False,
-    "handoff_csv_artifacts_are_label_write_targets": False,
-    "intermediate_csv_artifacts_are_label_write_targets": False,
-    "handoff_artifacts_are_metadata_only": True,
-    "browser_writes_csv_or_handoff_files": False,
-    "browser_writes_handoff_csv": False,
-    "browser_writes_intermediate_csv": False,
-    "browser_receives_zarr_write_authority": False,
-    "browser_has_direct_zarr_write_authority": False,
-    "requires_active_assignment": True,
-    "requires_open_task": True,
-    "requires_current_session": True,
-    "requires_current_target_token": True,
 }
 
 BROWSER_WORKFLOW_CAPABILITIES: tuple[dict[str, object], ...] = (

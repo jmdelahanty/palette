@@ -18,6 +18,7 @@ def _make_subject_review_zarr(path: Path) -> None:
     crop_parent.attrs["latest"] = "crop_001"
     crop = crop_parent.create_group("crop_001")
     crop.create_array("roi_images", data=np.zeros((1, 8, 8), dtype=np.uint8))
+    crop.create_array("frame_indices", data=np.asarray([10], dtype=np.int32))
 
     subject_parent = root.create_group("subject_mask_runs")
     subject_parent.attrs["latest"] = "subject_masks_001"
@@ -28,6 +29,7 @@ def _make_subject_review_zarr(path: Path) -> None:
     subject.attrs["label_schema_id"] = "subject_v1_lr"
     subject.create_array("detection_source", data=np.zeros((1,), dtype=np.int8))
     subject.create_array("frame_indices", data=np.asarray([10], dtype=np.int32))
+    subject.create_array("source_crop_row_ids", data=np.asarray([0], dtype=np.int64))
     subject.create_array("detection_indices", data=np.asarray([0], dtype=np.int32))
     subject.create_array("frame_counts", data=np.asarray([1], dtype=np.int32))
     subject.create_array("available_channels", data=np.asarray([True, True, True, False], dtype=np.bool_))

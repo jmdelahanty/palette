@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Admin task: {{ slot_001 }}</title>
+  <title>Admin task: @@slot_001@@</title>
   <style>
     :root {
       --ink: #17201a;
@@ -86,26 +86,26 @@
   <main>
     <p><a href="/admin">Back to admin</a></p>
     <article>
-      <h1>{{ slot_002 }}</h1>
+      <h1>@@slot_002@@</h1>
       <p class="muted">Admin task detail. Label mutations still require the assigned user's guarded labeling session; operators may only change task state here.</p>
-      <table>{{ slot_003 }}</table>
+      <table>@@slot_003@@</table>
       <section class="state-form">
         <h2>Operator task state</h2>
         <p class="muted">Use this only for completion corrections or explicit reopen workflows. Reopening a completed task records <code>task_reopened</code>; completing a task closes open sessions.</p>
         <form id="task-state-form">
-          <label>New state<br><select id="task-state">{{ slot_004 }}</select></label>
+          <label>New state<br><select id="task-state">@@slot_004@@</select></label>
           <button type="submit">Save task state</button>
         </form>
         <pre id="task-state-result" class="muted"></pre>
       </section>
       <h2>Task scope</h2>
-      <pre>{{ slot_005 }}</pre>
+      <pre>@@slot_005@@</pre>
       <h2>Recent audit events</h2>
-      {{ slot_006 }}
+      @@slot_006@@
     </article>
   </main>
   <script>
-    const taskId = {{ slot_007 }};
+    const taskId = @@slot_007@@;
     const resultEl = document.getElementById("task-state-result");
     document.getElementById("task-state-form").addEventListener("submit", async (event) => {
       event.preventDefault();

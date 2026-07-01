@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Admin user: {{ slot_001 }}</title>
+  <title>Admin user: @@slot_001@@</title>
   <style>
     :root {
       --ink: #17201a;
@@ -79,32 +79,32 @@
 <body>
   <main>
     <p><a href="/admin">Back to admin</a></p>
-    <h1>Admin user: {{ slot_002 }}</h1>
+    <h1>Admin user: @@slot_002@@</h1>
     <section class="card">
-      <p><b>Status:</b> {{ slot_003 }}</p>
-      <p><b>Expected-user landing page:</b> <a href="{{ slot_004 }}">{{ slot_005 }}</a></p>
-      <p><b>Expected-user dashboard:</b> <a href="{{ slot_006 }}">{{ slot_007 }}</a></p>
-      <p><b>Personalized work page:</b> <a href="{{ slot_008 }}">{{ slot_009 }}</a></p>
-      <p><b>Personalized dataset queue:</b> <a href="{{ slot_010 }}">{{ slot_011 }}</a></p>
-      <p><b>Expected-user dataset queue:</b> <a href="{{ slot_012 }}">{{ slot_013 }}</a></p>
-      <p><b>Identity probe:</b> <a href="{{ slot_014 }}">{{ slot_015 }}</a></p>
-      <p><b>Empty state:</b> {{ slot_016 }} {{ slot_017 }}</p>
-      <p><b>Dataset queue state:</b> {{ slot_018 }} {{ slot_019 }}</p>
-      {{ slot_020 }}
-      <p><b>Invite reasons:</b> {{ slot_021 }}</p>
-      <p><b>Copy intent:</b> {{ slot_022 }}</p>
-      <p><b>Operator actions:</b> {{ slot_023 }}</p>
-      <button type="button" onclick="copyUserInvitation(this)">{{ slot_024 }}</button>
-      <textarea readonly>{{ slot_025 }}</textarea>
+      <p><b>Status:</b> @@slot_003@@</p>
+      <p><b>Expected-user landing page:</b> <a href="@@slot_004@@">@@slot_005@@</a></p>
+      <p><b>Expected-user dashboard:</b> <a href="@@slot_006@@">@@slot_007@@</a></p>
+      <p><b>Personalized work page:</b> <a href="@@slot_008@@">@@slot_009@@</a></p>
+      <p><b>Personalized dataset queue:</b> <a href="@@slot_010@@">@@slot_011@@</a></p>
+      <p><b>Expected-user dataset queue:</b> <a href="@@slot_012@@">@@slot_013@@</a></p>
+      <p><b>Identity probe:</b> <a href="@@slot_014@@">@@slot_015@@</a></p>
+      <p><b>Empty state:</b> @@slot_016@@ @@slot_017@@</p>
+      <p><b>Dataset queue state:</b> @@slot_018@@ @@slot_019@@</p>
+      @@slot_020@@
+      <p><b>Invite reasons:</b> @@slot_021@@</p>
+      <p><b>Copy intent:</b> @@slot_022@@</p>
+      <p><b>Operator actions:</b> @@slot_023@@</p>
+      <button type="button" onclick="copyUserInvitation(this)">@@slot_024@@</button>
+      <textarea readonly>@@slot_025@@</textarea>
     </section>
     <section class="stats">
-      <div class="stat"><b>{{ slot_026 }}</b><span>waiting recordings</span></div>
-      <div class="stat"><b>{{ slot_027 }}</b><span>complete recordings</span></div>
-      <div class="stat"><b>{{ slot_028 }}</b><span>blocked/no-open recordings</span></div>
-      <div class="stat"><b>{{ slot_029 }}</b><span>startable tasks</span></div>
-      <div class="stat"><b>{{ slot_030 }}</b><span>complete tasks</span></div>
+      <div class="stat"><b>@@slot_026@@</b><span>waiting recordings</span></div>
+      <div class="stat"><b>@@slot_027@@</b><span>complete recordings</span></div>
+      <div class="stat"><b>@@slot_028@@</b><span>blocked/no-open recordings</span></div>
+      <div class="stat"><b>@@slot_029@@</b><span>startable tasks</span></div>
+      <div class="stat"><b>@@slot_030@@</b><span>complete tasks</span></div>
     </section>
-    {{ slot_031 }}
+    @@slot_031@@
   </main>
   <script>
     async function copyUserInvitation(button) {

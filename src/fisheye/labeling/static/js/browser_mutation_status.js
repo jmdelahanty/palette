@@ -15,7 +15,7 @@
       target.innerHTML =
         "<details>" +
         "<summary>Operator support reference</summary>" +
-        "<p>This is only needed if the operator asks for audit details. Return to <a href=\"" + personalQueueHref + "\">your personalized dataset queue</a> or <a href=\"" + personalWorkHref + "\">your personalized work dashboard</a> before reopening stale or superseded work.</p>" +
+        "<p>This operator support reference is only needed if the operator asks for audit details; give audit event id and server target from the block below. Return to <a href=\"" + personalQueueHref + "\">your personalized dataset queue</a> or <a href=\"" + personalWorkHref + "\">your personalized work dashboard</a> before reopening stale or superseded work.</p>" +
         "<pre>" + esc(text) + "</pre>" +
         "<button type=\"button\" onclick=\"copySessionSupport(this)\">Copy support details</button>" +
         "</details>";

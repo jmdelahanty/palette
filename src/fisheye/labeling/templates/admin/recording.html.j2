@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Admin recording: {{ slot_001 }}</title>
+  <title>Admin recording: @@slot_001@@</title>
   <style>
     :root {
       --ink: #17201a;
@@ -86,38 +86,38 @@
 <body>
   <main>
     <p><a href="/admin">Back to admin</a></p>
-    <h1>Admin recording: {{ slot_002 }}</h1>
+    <h1>Admin recording: @@slot_002@@</h1>
     <section class="card">
-      <p><b>Owner:</b> {{ slot_003 }}</p>
-      <p><b>Focused dataset progress:</b> <a href="{{ slot_004 }}">{{ slot_005 }}</a></p>
-      <p><b>Personalized dataset queue:</b> {{ slot_006 }}</p>
-      <p><b>Personalized work page:</b> {{ slot_007 }}</p>
-      <p><b>Expected-user landing page:</b> {{ slot_008 }}</p>
-      <p><b>Expected-user labeling home:</b> {{ slot_009 }}</p>
-      <p><b>Expected-user dashboard:</b> {{ slot_010 }}</p>
-      <p><b>Expected-user dataset queue:</b> {{ slot_011 }}</p>
+      <p><b>Owner:</b> @@slot_003@@</p>
+      <p><b>Focused dataset progress:</b> <a href="@@slot_004@@">@@slot_005@@</a></p>
+      <p><b>Personalized dataset queue:</b> @@slot_006@@</p>
+      <p><b>Personalized work page:</b> @@slot_007@@</p>
+      <p><b>Expected-user landing page:</b> @@slot_008@@</p>
+      <p><b>Expected-user labeling home:</b> @@slot_009@@</p>
+      <p><b>Expected-user dashboard:</b> @@slot_010@@</p>
+      <p><b>Expected-user dataset queue:</b> @@slot_011@@</p>
       <p class="muted">Recording ownership is exclusive: reassignment replaces the active owner and closes stale sessions for the previous owner.</p>
-      <table>{{ slot_012 }}</table>
+      <table>@@slot_012@@</table>
     </section>
-    {{ slot_013 }}
+    @@slot_013@@
     <section class="stats">
-      <div class="stat"><b>{{ slot_014 }}</b><span>startable tasks</span></div>
-      <div class="stat"><b>{{ slot_015 }}</b><span>complete tasks</span></div>
-      <div class="stat"><b>{{ slot_016 }}</b><span>total tasks</span></div>
-      <div class="stat"><b>{{ slot_017 }}</b><span>active sessions</span></div>
-      <div class="stat"><b>{{ slot_018 }}</b><span>recent audit events</span></div>
+      <div class="stat"><b>@@slot_014@@</b><span>startable tasks</span></div>
+      <div class="stat"><b>@@slot_015@@</b><span>complete tasks</span></div>
+      <div class="stat"><b>@@slot_016@@</b><span>total tasks</span></div>
+      <div class="stat"><b>@@slot_017@@</b><span>active sessions</span></div>
+      <div class="stat"><b>@@slot_018@@</b><span>recent audit events</span></div>
     </section>
     <section class="card">
       <h2>Tasks</h2>
-      <table><thead><tr><th>Task</th><th>Workflow</th><th>State</th><th>Dataset</th><th>Redacted fields</th></tr></thead><tbody>{{ slot_019 }}</tbody></table>
+      <table><thead><tr><th>Task</th><th>Workflow</th><th>State</th><th>Dataset</th><th>Redacted fields</th></tr></thead><tbody>@@slot_019@@</tbody></table>
     </section>
     <section class="card">
       <h2>Active sessions</h2>
-      <table><thead><tr><th>Session</th><th>Task</th><th>User</th><th>Workflow</th><th>Expires</th></tr></thead><tbody>{{ slot_020 }}</tbody></table>
+      <table><thead><tr><th>Session</th><th>Task</th><th>User</th><th>Workflow</th><th>Expires</th></tr></thead><tbody>@@slot_020@@</tbody></table>
     </section>
     <section class="card">
       <h2>Recent audit events</h2>
-      <table><thead><tr><th>Created</th><th>Event</th><th>User</th><th>Task</th><th>Target keys</th></tr></thead><tbody>{{ slot_021 }}</tbody></table>
+      <table><thead><tr><th>Created</th><th>Event</th><th>User</th><th>Task</th><th>Target keys</th></tr></thead><tbody>@@slot_021@@</tbody></table>
     </section>
   </main>
   <script>

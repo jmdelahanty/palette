@@ -53,6 +53,8 @@ def test_signed_link_task_still_requires_current_assignment(tmp_path):
     store = LabelingStore(tmp_path / "labeling_work.sqlite")
     try:
         store.initialize()
+        store.upsert_labeling_user(user_id="alice", status="active")
+        store.upsert_labeling_user(user_id="bob", status="active")
         store.assign_recording(recording_id="rec-a", assignee_user="alice")
         store.upsert_task(task_id="task-a", recording_id="rec-a", workflow_kind="detect_training")
 
@@ -62,7 +64,12 @@ def test_signed_link_task_still_requires_current_assignment(tmp_path):
         with pytest.raises(PermissionError):
             store.create_session(task_id="task-a", user="bob", ttl_seconds=600)
 
-        store.assign_recording(recording_id="rec-a", assignee_user="bob", status="active")
+        store.assign_recording_with_session_closure(
+            recording_id="rec-a",
+            assignee_user="bob",
+            status="active",
+            assigned_by="operator",
+        )
 
         with pytest.raises(PermissionError):
             store.create_session(task_id="task-a", user="alice", ttl_seconds=600)

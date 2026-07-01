@@ -111,6 +111,11 @@ def _fake_module(monkeypatch, name: str, **attrs):
     return module
 
 
+def _add_active_labeling_users(store: LabelingStore, *users: str) -> None:
+    for user in users:
+        store.upsert_labeling_user(user_id=user, status="active")
+
+
 def _assert_mutation_event_provenance(event, *, task_id: str, recording_id: str, user: str, event_type: str):
     assert event["event_id"]
     assert event["task_id"] == task_id
@@ -200,6 +205,7 @@ def test_dashboard_page_describes_browser_only_assigned_work(tmp_path):
     store = LabelingStore(tmp_path / "labeling_work.sqlite")
     try:
         store.initialize()
+        _add_active_labeling_users(store, "alice")
         store.assign_recording(recording_id="rec-paused", assignee_user="alice", status="paused")
         with _running_server(store, user="alice") as base_url:
             status, html = _text_request(base_url, "/")
@@ -728,6 +734,7 @@ def test_personal_work_payload_includes_no_assignment_empty_state(tmp_path):
     store = LabelingStore(tmp_path / "labeling_work.sqlite")
     try:
         store.initialize()
+        _add_active_labeling_users(store, "alice")
         store.assign_recording(recording_id="rec-paused", assignee_user="alice", status="paused")
         with _running_server(store, user="alice") as base_url:
             status, payload = _json_request(base_url, "/api/me/tasks")
@@ -2150,6 +2157,7 @@ def test_open_task_route_reports_superseded_session_closure(tmp_path):
     store = LabelingStore(tmp_path / "labeling_work.sqlite")
     try:
         store.initialize()
+        _add_active_labeling_users(store, "alice", "bob")
         store.assign_recording(recording_id="rec-a", assignee_user="alice")
         store.upsert_task(task_id="task-a", recording_id="rec-a", workflow_kind="keypoints")
 
@@ -3269,6 +3277,7 @@ def test_admin_assignment_route_updates_owner_and_closes_old_sessions(tmp_path):
     store = LabelingStore(tmp_path / "labeling_work.sqlite")
     try:
         store.initialize()
+        _add_active_labeling_users(store, "alice", "bob")
         store.assign_recording(recording_id="rec-a", assignee_user="alice")
         store.upsert_task(task_id="task-a", recording_id="rec-a", workflow_kind="detect_training")
         lease = store.create_session(task_id="task-a", user="alice", ttl_seconds=600)
@@ -3407,6 +3416,7 @@ def test_admin_summary_includes_dashboard_user_readiness(tmp_path):
     store = LabelingStore(tmp_path / "labeling_work.sqlite")
     try:
         store.initialize()
+        _add_active_labeling_users(store, "alice", "bob")
         store.assign_recording(recording_id="rec-a", assignee_user="alice")
         store.assign_recording(recording_id="rec-done", assignee_user="bob")
         store.upsert_task(
@@ -3811,7 +3821,7 @@ def test_admin_summary_includes_dashboard_user_readiness(tmp_path):
         assert browser_workflows["subject_mask_component"]["write_contract"]["save_endpoint"] == (
             "/api/sessions/{session_id}/subject-mask/save"
         )
-        assert browser_workflows["subject_mask_component"]["write_contract"]["audit_event"] == "save_subject_mask_roi"
+        assert browser_workflows["subject_mask_component"]["write_contract"]["audit_event"] == "checkpoint_subject_mask_roi"
         assert admin["preflight"]["browser_workflows"] == admin["browser_workflows"]
         assert admin["safe_share_gate"]["schema"] == "palette.web_labeling_safe_share_gate.v1"
         assert admin["safe_share_gate_id"] == "labeler_links_safe_to_share"
@@ -5260,7 +5270,7 @@ def test_subject_mask_nav_and_save_routes_record_audit_event_without_real_zarr(t
                 },
             )
 
-        events = store.list_events(event_type="save_subject_mask_roi", limit=10)
+        events = store.list_events(event_type="checkpoint_subject_mask_roi", limit=10)
 
         assert nav_status == 200
         assert nav_payload["state"]["position"] == 1
@@ -5277,7 +5287,8 @@ def test_subject_mask_nav_and_save_routes_record_audit_event_without_real_zarr(t
         assert save_status == 200
         assert save_payload["ok"] is True
         assert save_payload["result"]["frame_idx"] == 89
-        assert save_payload["result"]["after_area_px"] == 9
+        assert save_payload["result"]["checkpoint_area_px"] == 9
+        assert save_payload["result"]["canonical_zarr_mutated"] is False
         assert "/tmp/fake-subject.zarr" not in json.dumps(save_payload)
         assert len(events) == 1
         _assert_mutation_event_provenance(
@@ -5285,7 +5296,7 @@ def test_subject_mask_nav_and_save_routes_record_audit_event_without_real_zarr(t
             task_id="task-a",
             recording_id="rec-a",
             user="alice",
-            event_type="save_subject_mask_roi",
+            event_type="checkpoint_subject_mask_roi",
         )
         _assert_save_response_mutation_contract(
             save_payload,
@@ -5293,7 +5304,7 @@ def test_subject_mask_nav_and_save_routes_record_audit_event_without_real_zarr(t
             workflow_kind="subject_mask_component",
             task_id="task-a",
             recording_id="rec-a",
-            event_type="save_subject_mask_roi",
+            event_type="checkpoint_subject_mask_roi",
         )
         assert events[0]["target"]["component_name"] == "body"
     finally:

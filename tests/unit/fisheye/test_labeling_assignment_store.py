@@ -90,6 +90,11 @@ def _store(tmp_path):
     return store
 
 
+def _add_active_labeling_users(store: LabelingStore, *users: str) -> None:
+    for user in users:
+        store.upsert_labeling_user(user_id=user, status="active")
+
+
 @contextmanager
 def _running_labeling_server(
     store: LabelingStore,
@@ -234,8 +239,7 @@ def test_dashboard_roster_blocks_invitation_when_preferred_personal_queue_is_mis
             workflow_kind="keypoints",
         )
         monkeypatch.setattr(
-            labeling_web_module,
-            "_personal_dataset_queue_url_for_dashboard",
+            "fisheye.labeling.admin_dashboard._personal_dataset_queue_url_for_dashboard",
             lambda dashboard_url, user: "",
         )
 
@@ -5359,6 +5363,7 @@ def test_assign_cli_archives_assignment_report_and_refuses_unreported_overwrite(
     store = LabelingStore(store_path)
     try:
         store.initialize()
+        _add_active_labeling_users(store, "alice", "bob", "carol")
         store.assign_recording(recording_id="rec-a", assignee_user="alice")
         store.upsert_task(task_id="task-a", recording_id="rec-a", workflow_kind="keypoints")
         store.create_session(task_id="task-a", user="alice", ttl_seconds=600)
@@ -6357,6 +6362,8 @@ def test_import_assignments_cli_dry_run_and_apply(tmp_path, capsys):
         ),
         encoding="utf-8",
     )
+    with LabelingStore(store_path) as store:
+        _add_active_labeling_users(store, "alice", "bob")
 
     dry_run_rc = labeling_work.main(
         [
@@ -6447,6 +6454,8 @@ def test_import_assignments_cli_accepts_csv_manifest(tmp_path, capsys):
         "\n",
         encoding="utf-8",
     )
+    with LabelingStore(store_path) as store:
+        _add_active_labeling_users(store, "alice", "bob")
 
     dry_run_rc = labeling_work.main(
         [
@@ -6782,6 +6791,8 @@ def test_import_assignments_reapply_is_idempotent_and_reassignment_closes_sessio
         "rec-a,bob,active\n",
         encoding="utf-8",
     )
+    with LabelingStore(store_path) as store:
+        _add_active_labeling_users(store, "alice", "bob")
 
     rc = labeling_work.main(
         [
@@ -8656,6 +8667,8 @@ def test_import_batch_plan_cli_dry_run_apply_and_missing_assignment_check(tmp_pa
         'task-a2,rec-a,keypoints,Second,"{""frames"":[1,2]}"\n',
         encoding="utf-8",
     )
+    with LabelingStore(store_path) as store:
+        _add_active_labeling_users(store, "alice", "bob")
 
     rc = labeling_work.main(
         [
@@ -12266,6 +12279,7 @@ def test_export_user_handoff_cli_writes_preview_links_and_check(tmp_path, capsys
     store = LabelingStore(store_path)
     try:
         store.initialize()
+        _add_active_labeling_users(store, "alice", "bob")
         store.assign_recording(recording_id="rec-a", assignee_user="alice", notes="Alice instructions")
         store.assign_recording(recording_id="rec-empty", assignee_user="alice", notes="Waiting for task generation")
         store.assign_recording(recording_id="rec-b", assignee_user="bob")
@@ -16529,6 +16543,7 @@ def test_export_user_handoffs_cli_writes_batch_index_and_user_dirs(tmp_path, cap
     store = LabelingStore(store_path)
     try:
         store.initialize()
+        _add_active_labeling_users(store, "alice", "bob", "carol")
         store.assign_recording(recording_id="rec-a", assignee_user="alice", notes="Alice instructions")
         store.assign_recording(recording_id="rec-empty", assignee_user="alice", notes="Waiting for task generation")
         store.assign_recording(recording_id="rec-b", assignee_user="bob", notes="Bob instructions")

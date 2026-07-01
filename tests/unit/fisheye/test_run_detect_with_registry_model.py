@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
+import types
 
 import pytest
 
 from fisheye.utils import run_detect_with_registry_model as mod
+
+
+def _patch_detect_yolo(monkeypatch: pytest.MonkeyPatch, func) -> None:
+    fake_module = types.ModuleType("fisheye.detection.detect_yolo")
+    fake_module.detect_yolo = func
+    monkeypatch.setitem(sys.modules, "fisheye.detection.detect_yolo", fake_module)
 
 
 def test_pick_best_candidate_enforces_unique_when_tied() -> None:
@@ -147,9 +155,8 @@ def test_run_detect_with_registry_model_returns_dry_run_payload(
     registry_path = tmp_path / "registry.sqlite"
 
     best = _setup_resolution_mocks(monkeypatch)
-    monkeypatch.setattr(
-        mod,
-        "detect_yolo",
+    _patch_detect_yolo(
+        monkeypatch,
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("detect_yolo should not run during dry-run")),
     )
 
@@ -183,7 +190,7 @@ def test_run_detect_with_registry_model_returns_failure_payload_when_detect_fail
     (cams_dir / "cam_2010093.mp4").write_bytes(b"")
 
     best = _setup_resolution_mocks(monkeypatch)
-    monkeypatch.setattr(mod, "detect_yolo", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("gpu oom")))
+    _patch_detect_yolo(monkeypatch, lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("gpu oom")))
 
     result = mod.run_detect_with_registry_model(
         recording_dir=recording_dir,
@@ -271,7 +278,7 @@ def test_main_runs_detect_resolution_and_writes_provenance(
         calls["detect_kwargs"] = kwargs
         return "detect_001"
 
-    monkeypatch.setattr(mod, "detect_yolo", _fake_detect_yolo)
+    _patch_detect_yolo(monkeypatch, _fake_detect_yolo)
 
     def _fake_write_model_resolution_provenance(*, zarr_path: Path, run_name: str, payload: dict[str, object]) -> None:
         calls["write_zarr_path"] = zarr_path
