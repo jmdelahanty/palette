@@ -86,7 +86,7 @@ refine_detect:
   # Interpolation settings are deprecated. Sparse-first refine_detect writes
   # curated instances without gap interpolation.
 refine_eye_masks:
-  enabled: true
+  enabled: false
   source_run: null
   run_name: null
   keypoint_run: null

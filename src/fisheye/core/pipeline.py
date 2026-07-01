@@ -1,6 +1,11 @@
 """
-Core pipeline orchestrator for FishEye tracking system.
-Manages the execution of video processing stages in sequence.
+Legacy core pipeline orchestrator for FishEye tracking system.
+
+This module predates the current cluster workflow. Current processing uses
+``fisheye.utils.run_recording_analysis_pipeline`` plus the per-stage
+``scripts/submit_*_bsub.sh`` LSF submitters coordinated through Zarr completion
+markers; see ``docs/operator_guide/pipeline_workflow.md``. Keep this
+orchestrator runnable for compatibility, but do not extend it as the live path.
 """
 
 import sys
@@ -8,6 +13,7 @@ import math
 import yaml
 import time
 import argparse
+import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 from datetime import datetime, timezone
@@ -43,6 +49,12 @@ _DEPRECATED_REFINE_INTERPOLATION_OVERRIDE_MESSAGE = (
     "Interpolation overrides are deprecated and unsupported for refine_detect. "
     "The current sparse-first refine_detect workflow always runs with interpolation disabled."
 )
+LEGACY_ORCHESTRATOR_NOTICE = (
+    "Legacy orchestrator notice: fisheye.core.pipeline predates the current cluster workflow; "
+    "use fisheye.utils.run_recording_analysis_pipeline and scripts/submit_*_bsub.sh "
+    "(see docs/operator_guide/pipeline_workflow.md)."
+)
+LOGGER = logging.getLogger(__name__)
 
 
 def _reject_deprecated_refine_interpolation_overrides(
@@ -307,7 +319,7 @@ class Pipeline:
                 'memory_limit': None
             },
             'refine_eye_masks': {
-                'enabled': True,
+                'enabled': False,
                 'source_run': None,
                 'run_name': None,
                 'keypoint_run': None,
@@ -726,9 +738,14 @@ class Pipeline:
             self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
 
         params = self.pipeline_params.get('refine_eye_masks', {}) or {}
-        if not bool(params.get('enabled', True)):
+        explicitly_requested = self._is_stage_explicitly_requested('refined_eye_masks')
+        if not bool(params.get('enabled', False)) and not explicitly_requested:
             self.console.print("[yellow]Eye-mask refinement disabled via refine_eye_masks.enabled=false; skipping.[/yellow]")
             return
+        if not bool(params.get('enabled', False)) and explicitly_requested:
+            self.console.print(
+                "[cyan]Running eye-mask refinement because 'refined_eye_masks' was explicitly requested.[/cyan]"
+            )
 
         scheduler = str(params.get('scheduler') or self.config.scheduler or 'processes').lower()
         if scheduler in {'single-thread', 'single_thread'}:
@@ -1465,13 +1482,20 @@ class Pipeline:
             
             return False
             
-        except Exception:
+        except Exception as exc:
+            LOGGER.warning(
+                "Failed to inspect stage completion for stage=%s store=%s: %r",
+                stage,
+                self.config.zarr_path,
+                exc,
+            )
             return False
 
 
 def main():
     """Main entry point for the pipeline CLI."""
-    
+    print(LEGACY_ORCHESTRATOR_NOTICE)
+
     # Check for --interactive flag early
     if "--interactive" in sys.argv or "-i" in sys.argv:
         from ..cli.interactive_launcher import run_interactive_launcher
