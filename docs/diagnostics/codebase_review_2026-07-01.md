@@ -257,6 +257,62 @@ Ordered by leverage-per-effort for a solo maintainer running parallel LM agents.
 
 ---
 
+## Addendum (2026-07-01): the ROI pixel store — design rationale and the actual contract gap
+
+Discussion with the maintainer corrected the framing of the "two parallel storage systems"
+critique carried over from the 06-10 review. Recording it here so the next reviewer doesn't
+re-litigate a decision that is actually sound.
+
+**Design rationale (maintainer).** Decoding the 20MP videos tops out around ~100 FPS, so the
+analysis pipeline decodes + crops **once** into a large transient flat `.bin` ROI cache, then
+runs N models against that cache instead of re-decoding per model. This is correct
+materialized-view engineering, and the persisted timing profiles prove it won: on a warm
+cache, `roi_read` is ~1% of runtime while `model_predict` is ~85% — the dataloader problem
+is solved. The cache implementation (`shared/flat_roi_cache.py`) is also the
+best-engineered I/O code in the repo (manifest validation, byte-size cross-checks, atomic
+replaces).
+
+**Historical context for `images_full`.** The original pipeline imported *every* frame to
+zarr because inference on the very large raw frames was problematic at the time; the
+full-frame store is a residue of that era. Currently `images_full` is primarily intended
+for `_training.zarr` files (the sampled training surface), not as an analysis-time ROI
+read path.
+
+**Resolution of the "canonical ROI store" question.** The flat cache is the blessed
+transient ROI read surface for analysis; `images_full` is the training-sample surface and
+archival decode source. This should be stated explicitly in the zarr layout docs
+(`zarr_structure.md`) so the ROI-access pretense on full-frame chunked arrays is dropped
+rather than maintained.
+
+**The real gap: transient caches are only safe if re-materialization is bit-identical —
+and it currently isn't.** The cache is deleted after use, so the pixels the models
+actually saw cease to exist. Rebuilding from video must reproduce them byte-for-byte, and
+finding #6 documents two reasons it wouldn't:
+
+- three grayscale conventions (import ITU luma vs GPU-crop `(R+G+B)/3` vs CPU-crop cv2
+  luma) — rebuilding through a different path shifts every pixel intensity;
+- round-vs-truncate crop-center quantization — up to a 1px spatial shift for identical
+  detections.
+
+Neither matters while a cache lives; both matter the moment it is rebuilt, because
+"re-run model B on the same inputs" silently becomes "re-run model B on slightly
+different inputs," and nothing records which decode path built the original cache.
+
+**Recommended enforcement (ordered by leverage):**
+
+1. **One blessed decode+crop function** behind the existing `CropImageSource` seam — a
+   single code path (GPU-primary, bit-matching CPU fallback) used by the cache builder,
+   the live-read fallback, and training export.
+2. **A golden pixel-parity test**: tiny video, decode via every path, assert byte
+   equality — including cache-rebuild-equals-original. Converts the invariant from
+   convention to enforcement.
+3. **Stamp the decode contract** (decoder backend, grayscale coefficients, rounding mode,
+   crop-video vs raw-video source) into both the cache manifest and downstream run attrs —
+   the "all parameters captured" goal applied to the one input currently invisible to
+   provenance: the pixels themselves.
+
+---
+
 *Bottom line: a strong domain core inside a weak repo, and the repo is winning. The fix is
 not more engineering — it is a CI gate plus a deletion habit, so the good work stops being
 diluted.*
