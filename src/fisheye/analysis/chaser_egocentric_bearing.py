@@ -9,7 +9,7 @@ from io import BytesIO
 import json
 import re
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import matplotlib
 
@@ -42,6 +42,17 @@ PRE_POST_POLAR_PNG_ARTIFACT_NAME = "egocentric_bearing_pre_post_polar_png"
 PRE_POST_POLAR_POINT_CLOUD_PNG_ARTIFACT_NAME = "egocentric_bearing_pre_post_polar_point_cloud_png"
 DEFAULT_HEADING_LEVEL = "smoothed"
 REQUIRED_TRACK_SCOPE = "offline"
+STATIC_POLAR_DISPLAY_DISTANCE_BIN_WIDTH_MM = 5.0
+STATIC_POLAR_DISPLAY_BEARING_BIN_WIDTH_DEG = 30.0
+STATIC_POLAR_DISPLAY_COLOR_CMAX_QUANTILE = 0.98
+STATIC_CHASER_FALLBACK_COLORS = (
+    "#2563eb",
+    "#dc2626",
+    "#16a34a",
+    "#9333ea",
+    "#ea580c",
+    "#0891b2",
+)
 HEADING_LEVEL_TO_ARRAY = {
     "raw": "heading_degrees",
     "heading_raw": "heading_degrees",
@@ -72,6 +83,7 @@ class ChaserEgocentricBearingResult:
     total_frames: int
     pixels_per_mm_projector: float
     chaser_indices: np.ndarray
+    chaser_color_hex: Mapping[int, str]
     camera_frame_id: np.ndarray
     stimulus_epoch_window_id: np.ndarray
     windows: tuple[ChaserDistanceWindow, ...]
@@ -126,6 +138,88 @@ def _normalize_track_scope(value: str) -> str:
             f"under analysis/track_kinematics_runs/{REQUIRED_TRACK_SCOPE}; got scope={scope!r}."
         )
     return scope
+
+
+def _unit_color_to_hex(red: object, green: object, blue: object) -> Optional[str]:
+    try:
+        channels = [float(red), float(green), float(blue)]
+    except Exception:
+        return None
+    if not all(np.isfinite(value) for value in channels):
+        return None
+    values = [int(round(max(0.0, min(1.0, value)) * 255.0)) for value in channels]
+    return f"#{values[0]:02x}{values[1]:02x}{values[2]:02x}"
+
+
+def _chaser_colors_from_protocol_payload(payload: Mapping[str, Any]) -> dict[int, str]:
+    steps = payload.get("steps")
+    if not isinstance(steps, list):
+        return {}
+    for step in steps:
+        if not isinstance(step, Mapping):
+            continue
+        parameters = step.get("parameters")
+        if not isinstance(parameters, Mapping):
+            continue
+        chasers = parameters.get("chasers")
+        if not isinstance(chasers, list):
+            continue
+        colors: dict[int, str] = {}
+        for index, chaser in enumerate(chasers):
+            if not isinstance(chaser, Mapping):
+                continue
+            color = _unit_color_to_hex(
+                chaser.get("color_r"),
+                chaser.get("color_g"),
+                chaser.get("color_b"),
+            )
+            if color:
+                colors[int(index)] = color
+        if colors:
+            return colors
+    return {}
+
+
+def _source_stimulus_path_from_run_group(run_group: zarr.Group) -> Optional[str]:
+    raw_path = getattr(run_group, "attrs", {}).get("source_stimulus_path")
+    if raw_path:
+        return str(raw_path).strip().strip("/")
+    source_refs = getattr(run_group, "attrs", {}).get("source_refs")
+    if isinstance(source_refs, Mapping):
+        raw_path = source_refs.get("source_stimulus_path")
+        if raw_path:
+            return str(raw_path).strip().strip("/")
+    return None
+
+
+def _load_chaser_color_hex(
+    root: zarr.Group,
+    run_group: zarr.Group,
+    chaser_indices: np.ndarray,
+) -> dict[int, str]:
+    stimulus_path = _source_stimulus_path_from_run_group(run_group)
+    if not stimulus_path:
+        return {}
+    try:
+        stimulus_group = root[stimulus_path]
+    except Exception:
+        return {}
+    protocol_json = getattr(stimulus_group, "attrs", {}).get("protocol_json")
+    if not protocol_json:
+        return {}
+    try:
+        payload = json.loads(str(protocol_json))
+    except Exception:
+        return {}
+    by_protocol_index = _chaser_colors_from_protocol_payload(payload)
+    if not by_protocol_index:
+        return {}
+    out: dict[int, str] = {}
+    for chaser_index in np.asarray(chaser_indices, dtype=np.int64).reshape(-1).tolist():
+        color = by_protocol_index.get(int(chaser_index))
+        if color:
+            out[int(chaser_index)] = color
+    return out
 
 
 def compute_egocentric_chaser_bearing(
@@ -481,6 +575,7 @@ def build_chaser_egocentric_bearing_result(
     chaser_valid = np.asarray(positions["chaser_valid"][:], dtype=bool)
     distance_mm = np.asarray(distances["distance_mm"][:], dtype=np.float32)
     chaser_indices = np.asarray(run_group["chasers"]["chaser_index"][:], dtype=np.uint8)
+    chaser_color_hex = _load_chaser_color_hex(root, run_group, chaser_indices)
     total_frames = int(camera_frame_id.shape[0])
     if total_frames_attr > 0 and total_frames_attr != total_frames:
         raise ValueError(
@@ -562,6 +657,7 @@ def build_chaser_egocentric_bearing_result(
         total_frames=int(total_frames),
         pixels_per_mm_projector=float(pixels_per_mm_projector),
         chaser_indices=chaser_indices,
+        chaser_color_hex=chaser_color_hex,
         camera_frame_id=camera_frame_id,
         stimulus_epoch_window_id=stimulus_epoch_window_id,
         windows=windows,
@@ -651,12 +747,178 @@ def _bearing_probability_for_panel(
     return (counts.astype(np.float64) / float(total)), total
 
 
+def _positive_quantile(values: np.ndarray, quantile: float) -> float:
+    finite_positive = np.asarray(values, dtype=np.float64)
+    finite_positive = finite_positive[np.isfinite(finite_positive) & (finite_positive > 0.0)]
+    if finite_positive.size == 0:
+        return 1.0
+    return max(float(np.quantile(finite_positive, float(quantile))), float(np.finfo(np.float64).eps))
+
+
+def _chaser_plot_color(result: ChaserEgocentricBearingResult, chaser_index: int, fallback_index: int) -> str:
+    color = result.chaser_color_hex.get(int(chaser_index))
+    if color:
+        return str(color)
+    return STATIC_CHASER_FALLBACK_COLORS[int(fallback_index) % len(STATIC_CHASER_FALLBACK_COLORS)]
+
+
+def _bearing_distance_for_panel(
+    result: ChaserEgocentricBearingResult,
+    *,
+    window_idx: int,
+    chaser_col_idx: int,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    window = result.windows[window_idx]
+    start = max(0, int(window.start_frame))
+    end = min(int(result.valid.shape[0]) - 1, int(window.end_frame))
+    if end < start:
+        return np.asarray([], dtype=np.float64), np.asarray([], dtype=np.float64), 0
+    bearing = np.asarray(result.bearing_deg[start : end + 1, chaser_col_idx], dtype=np.float64)
+    distance = np.asarray(result.distance_mm[start : end + 1, chaser_col_idx], dtype=np.float64)
+    mask = result.valid[start : end + 1, chaser_col_idx] & np.isfinite(bearing) & np.isfinite(distance)
+    bearing = bearing[mask]
+    distance = distance[mask]
+    return bearing, distance, int(bearing.shape[0])
+
+
+def _display_bearing_edges_deg(width_deg: float = STATIC_POLAR_DISPLAY_BEARING_BIN_WIDTH_DEG) -> np.ndarray:
+    width = float(width_deg)
+    if not np.isfinite(width) or width <= 0.0:
+        width = float(STATIC_POLAR_DISPLAY_BEARING_BIN_WIDTH_DEG)
+    bin_count = max(1, int(round(360.0 / width)))
+    return np.linspace(-180.0, 180.0, bin_count + 1, dtype=np.float64)
+
+
+def _pre_post_panel_specs(
+    result: ChaserEgocentricBearingResult,
+) -> tuple[tuple[tuple[str, Optional[int]], ...], tuple[tuple[int, Optional[int]], ...]]:
+    pre_idx, post_idx = _pre_post_window_indices(result.windows)
+    return (
+        (
+            ("pre", pre_idx),
+            ("post", post_idx),
+        ),
+        (
+            (0, _chaser_column_index(result, 0)),
+            (1, _chaser_column_index(result, 1)),
+        ),
+    )
+
+
+def _pre_post_radial_limit_mm(
+    result: ChaserEgocentricBearingResult,
+    *,
+    panel_specs: Sequence[tuple[str, Optional[int]]],
+    chaser_specs: Sequence[tuple[int, Optional[int]]],
+    distance_bin_width_mm: float,
+) -> float:
+    radial_max = 0.0
+    for _phase_label, window_idx in panel_specs:
+        if window_idx is None:
+            continue
+        for _chaser_index, chaser_col_idx in chaser_specs:
+            if chaser_col_idx is None:
+                continue
+            _bearings, distances, sample_count = _bearing_distance_for_panel(
+                result,
+                window_idx=int(window_idx),
+                chaser_col_idx=int(chaser_col_idx),
+            )
+            if sample_count > 0 and distances.size:
+                radial_max = max(radial_max, float(np.nanmax(distances)))
+    width = max(float(distance_bin_width_mm), float(np.finfo(np.float64).eps))
+    if not np.isfinite(radial_max) or radial_max <= 0.0:
+        return width
+    return float(np.ceil(radial_max / width) * width)
+
+
+def _distance_bearing_density_for_panel(
+    result: ChaserEgocentricBearingResult,
+    *,
+    window_idx: int,
+    chaser_col_idx: int,
+    radial_limit_mm: float,
+    distance_bin_width_mm: float = STATIC_POLAR_DISPLAY_DISTANCE_BIN_WIDTH_MM,
+    bearing_bin_width_deg: float = STATIC_POLAR_DISPLAY_BEARING_BIN_WIDTH_DEG,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    bearings, distances, sample_count = _bearing_distance_for_panel(
+        result,
+        window_idx=window_idx,
+        chaser_col_idx=chaser_col_idx,
+    )
+    distance_edges = np.arange(
+        0.0,
+        max(float(radial_limit_mm), float(distance_bin_width_mm)) + float(distance_bin_width_mm) * 0.5,
+        float(distance_bin_width_mm),
+        dtype=np.float64,
+    )
+    if distance_edges.shape[0] < 2:
+        distance_edges = np.asarray([0.0, float(distance_bin_width_mm)], dtype=np.float64)
+    bearing_edges = _display_bearing_edges_deg(float(bearing_bin_width_deg))
+    if sample_count <= 0:
+        return (
+            np.zeros((bearing_edges.shape[0] - 1, distance_edges.shape[0] - 1), dtype=np.float64),
+            bearing_edges,
+            distance_edges,
+            0,
+        )
+    clipped_distance = np.clip(distances, distance_edges[0], np.nextafter(distance_edges[-1], distance_edges[0]))
+    counts, _bearing_edges, _distance_edges = np.histogram2d(
+        bearings,
+        clipped_distance,
+        bins=(bearing_edges, distance_edges),
+    )
+    total = float(np.sum(counts))
+    probability = counts.astype(np.float64) / total if total > 0.0 else counts.astype(np.float64)
+    return probability, bearing_edges, distance_edges, sample_count
+
+
+def _setup_egocentric_polar_axis(ax: Any, *, radial_limit_mm: float) -> None:
+    ax.set_theta_zero_location("N")
+    ax.set_theta_direction(1)
+    ax.set_thetagrids([0, 90, 180, 270], labels=["front", "left", "behind", "right"])
+    ax.set_ylim(0.0, float(radial_limit_mm))
+    ax.set_rlabel_position(135)
+    ax.grid(alpha=0.3)
+    ax.tick_params(labelsize=8)
+
+
+def _draw_polar_density(
+    ax: Any,
+    probability: np.ndarray,
+    *,
+    bearing_edges: np.ndarray,
+    distance_edges: np.ndarray,
+    cmap: Any,
+    norm: Any,
+) -> None:
+    bearing_centers_rad = np.deg2rad((bearing_edges[:-1] + bearing_edges[1:]) * 0.5)
+    bearing_widths_rad = np.deg2rad(np.diff(bearing_edges)) * 0.98
+    distance_starts = distance_edges[:-1]
+    distance_widths = np.diff(distance_edges)
+    for distance_idx, (distance_start, distance_width) in enumerate(zip(distance_starts, distance_widths)):
+        values = probability[:, distance_idx]
+        positive = np.isfinite(values) & (values > 0.0)
+        if not np.any(positive):
+            continue
+        ax.bar(
+            bearing_centers_rad[positive],
+            np.full(int(np.sum(positive)), float(distance_width), dtype=np.float64),
+            width=bearing_widths_rad[positive],
+            bottom=float(distance_start),
+            align="center",
+            color=cmap(norm(values[positive])),
+            edgecolor="none",
+            linewidth=0.0,
+        )
+
+
 def render_egocentric_bearing_pre_post_polar_png(
     result: ChaserEgocentricBearingResult,
     *,
     dpi: int = 150,
 ) -> bytes:
-    """Render pre/post egocentric chaser-bearing circular histograms.
+    """Render pre/post egocentric chaser-bearing distance-density maps.
 
     Panels are arranged as rows = pre/post and columns = chaser 0/chaser 1.
     The polar zero points upward, matching the egocentric convention that
@@ -664,41 +926,45 @@ def render_egocentric_bearing_pre_post_polar_png(
     counterclockwise and therefore anatomical left.
     """
 
-    pre_idx, post_idx = _pre_post_window_indices(result.windows)
-    panel_specs: tuple[tuple[str, Optional[int]], ...] = (
-        ("pre", pre_idx),
-        ("post", post_idx),
+    panel_specs, chaser_specs = _pre_post_panel_specs(result)
+    distance_width = float(STATIC_POLAR_DISPLAY_DISTANCE_BIN_WIDTH_MM)
+    bearing_width = float(STATIC_POLAR_DISPLAY_BEARING_BIN_WIDTH_DEG)
+    radial_limit = _pre_post_radial_limit_mm(
+        result,
+        panel_specs=panel_specs,
+        chaser_specs=chaser_specs,
+        distance_bin_width_mm=distance_width,
     )
-    chaser_specs: tuple[tuple[int, Optional[int]], ...] = (
-        (0, _chaser_column_index(result, 0)),
-        (1, _chaser_column_index(result, 1)),
-    )
-    centers_rad = np.deg2rad(np.asarray(result.bearing_bin_centers_deg, dtype=np.float64))
-    edges = np.asarray(result.bearing_bin_edges_deg, dtype=np.float64)
-    if edges.shape[0] > 1:
-        widths_rad = np.deg2rad(np.diff(edges))
-    else:
-        widths_rad = np.full(centers_rad.shape, np.deg2rad(15.0), dtype=np.float64)
-    if widths_rad.shape[0] != centers_rad.shape[0]:
-        widths_rad = np.full(centers_rad.shape, np.deg2rad(15.0), dtype=np.float64)
 
-    panel_values: dict[tuple[int, int], tuple[np.ndarray, int]] = {}
-    radial_max = 0.0
+    panel_values: dict[tuple[int, int], tuple[np.ndarray, np.ndarray, np.ndarray, int]] = {}
+    all_probabilities: list[np.ndarray] = []
     for row_idx, (_phase_label, window_idx) in enumerate(panel_specs):
         if window_idx is None:
             continue
         for col_idx, (_chaser_index, chaser_col_idx) in enumerate(chaser_specs):
             if chaser_col_idx is None:
                 continue
-            values, sample_count = _bearing_probability_for_panel(
+            probability, bearing_edges, distance_edges, sample_count = _distance_bearing_density_for_panel(
                 result,
                 window_idx=int(window_idx),
                 chaser_col_idx=int(chaser_col_idx),
+                radial_limit_mm=radial_limit,
+                distance_bin_width_mm=distance_width,
+                bearing_bin_width_deg=bearing_width,
             )
-            panel_values[(row_idx, col_idx)] = (values, sample_count)
-            if values.size:
-                radial_max = max(radial_max, float(np.nanmax(values)))
-    radial_limit = radial_max * 1.12 if radial_max > 0 else 1.0
+            panel_values[(row_idx, col_idx)] = (probability, bearing_edges, distance_edges, sample_count)
+            if sample_count > 0:
+                all_probabilities.append(probability.reshape(-1))
+
+    if all_probabilities:
+        color_cmax = _positive_quantile(
+            np.concatenate(all_probabilities),
+            STATIC_POLAR_DISPLAY_COLOR_CMAX_QUANTILE,
+        )
+    else:
+        color_cmax = 1.0
+    cmap = plt.get_cmap("viridis")
+    norm = matplotlib.colors.Normalize(vmin=0.0, vmax=float(color_cmax))
 
     fig, axes = plt.subplots(
         2,
@@ -707,41 +973,36 @@ def render_egocentric_bearing_pre_post_polar_png(
         subplot_kw={"projection": "polar"},
         constrained_layout=True,
     )
-    colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0", "C1"])
     for row_idx, (phase_label, window_idx) in enumerate(panel_specs):
         window_label = result.windows[window_idx].label if window_idx is not None else phase_label
         for col_idx, (chaser_index, chaser_col_idx) in enumerate(chaser_specs):
             ax = axes[row_idx, col_idx]
-            ax.set_theta_zero_location("N")
-            ax.set_theta_direction(1)
-            ax.set_thetagrids([0, 90, 180, 270], labels=["front", "left", "behind", "right"])
-            ax.set_ylim(0.0, radial_limit)
-            ax.set_rlabel_position(135)
-            ax.grid(alpha=0.35)
-            ax.tick_params(labelsize=8)
+            _setup_egocentric_polar_axis(ax, radial_limit_mm=radial_limit)
             title_window = _display_epoch_label(str(window_label))
-            ax.set_title(f"{title_window} - chaser {chaser_index}", fontsize=10, pad=12)
+            chaser_color = _chaser_plot_color(result, int(chaser_index), col_idx)
+            ax.set_title(f"{title_window} - chaser {chaser_index}", fontsize=10, pad=12, color=chaser_color)
             if window_idx is None or chaser_col_idx is None:
                 ax.text(0.5, 0.5, "not available", ha="center", va="center", transform=ax.transAxes)
                 continue
-            values, sample_count = panel_values.get(
+            probability, bearing_edges, distance_edges, sample_count = panel_values.get(
                 (row_idx, col_idx),
-                (np.zeros(centers_rad.shape[0], dtype=np.float64), 0),
+                (
+                    np.zeros((0, 0), dtype=np.float64),
+                    _display_bearing_edges_deg(bearing_width),
+                    np.asarray([0.0, distance_width], dtype=np.float64),
+                    0,
+                ),
             )
             if sample_count <= 0:
                 ax.text(0.5, 0.5, "no valid frames", ha="center", va="center", transform=ax.transAxes)
                 continue
-            color = colors[col_idx % len(colors)]
-            ax.bar(
-                centers_rad,
-                values,
-                width=widths_rad,
-                bottom=0.0,
-                align="center",
-                color=color,
-                alpha=0.78,
-                edgecolor="white",
-                linewidth=0.35,
+            _draw_polar_density(
+                ax,
+                probability,
+                bearing_edges=bearing_edges,
+                distance_edges=distance_edges,
+                cmap=cmap,
+                norm=norm,
             )
             ax.text(
                 0.02,
@@ -753,8 +1014,20 @@ def render_egocentric_bearing_pre_post_polar_png(
                 fontsize=8,
             )
 
+    sm = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])
+    fig.colorbar(
+        sm,
+        ax=axes.ravel().tolist(),
+        shrink=0.78,
+        pad=0.06,
+        label="fraction/bin",
+    )
     fig.suptitle(
-        f"Egocentric chaser bearing, pre/post\n{result.recording_id}",
+        (
+            "Egocentric chaser bearing density, pre/post "
+            f"({distance_width:g} mm x {bearing_width:g} deg display bins)\n{result.recording_id}"
+        ),
         fontsize=12,
     )
     buf = BytesIO()
@@ -771,17 +1044,11 @@ def _point_cloud_for_panel(
     chaser_col_idx: int,
     max_points: int,
 ) -> tuple[np.ndarray, np.ndarray, int]:
-    window = result.windows[window_idx]
-    start = max(0, int(window.start_frame))
-    end = min(int(result.valid.shape[0]) - 1, int(window.end_frame))
-    if end < start:
-        return np.asarray([], dtype=np.float64), np.asarray([], dtype=np.float64), 0
-    bearing = np.asarray(result.bearing_deg[start : end + 1, chaser_col_idx], dtype=np.float64)
-    distance = np.asarray(result.distance_mm[start : end + 1, chaser_col_idx], dtype=np.float64)
-    mask = result.valid[start : end + 1, chaser_col_idx] & np.isfinite(bearing) & np.isfinite(distance)
-    bearing = bearing[mask]
-    distance = distance[mask]
-    sample_count = int(bearing.shape[0])
+    bearing, distance, sample_count = _bearing_distance_for_panel(
+        result,
+        window_idx=window_idx,
+        chaser_col_idx=chaser_col_idx,
+    )
     if sample_count <= 0:
         return bearing, distance, 0
     max_count = max(1, int(max_points))
@@ -806,18 +1073,15 @@ def render_egocentric_bearing_pre_post_point_cloud_png(
     the fish, positive is anatomical left.
     """
 
-    pre_idx, post_idx = _pre_post_window_indices(result.windows)
-    panel_specs: tuple[tuple[str, Optional[int]], ...] = (
-        ("pre", pre_idx),
-        ("post", post_idx),
-    )
-    chaser_specs: tuple[tuple[int, Optional[int]], ...] = (
-        (0, _chaser_column_index(result, 0)),
-        (1, _chaser_column_index(result, 1)),
+    panel_specs, chaser_specs = _pre_post_panel_specs(result)
+    radial_limit = _pre_post_radial_limit_mm(
+        result,
+        panel_specs=panel_specs,
+        chaser_specs=chaser_specs,
+        distance_bin_width_mm=float(STATIC_POLAR_DISPLAY_DISTANCE_BIN_WIDTH_MM),
     )
 
     panel_values: dict[tuple[int, int], tuple[np.ndarray, np.ndarray, int]] = {}
-    radial_max = 0.0
     for row_idx, (_phase_label, window_idx) in enumerate(panel_specs):
         if window_idx is None:
             continue
@@ -831,9 +1095,6 @@ def render_egocentric_bearing_pre_post_point_cloud_png(
                 max_points=int(max_points_per_panel),
             )
             panel_values[(row_idx, col_idx)] = (bearings, distances, sample_count)
-            if distances.size:
-                radial_max = max(radial_max, float(np.nanmax(distances)))
-    radial_limit = radial_max * 1.04 if radial_max > 0 else 1.0
 
     fig, axes = plt.subplots(
         2,
@@ -842,20 +1103,14 @@ def render_egocentric_bearing_pre_post_point_cloud_png(
         subplot_kw={"projection": "polar"},
         constrained_layout=True,
     )
-    colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0", "C1"])
     for row_idx, (phase_label, window_idx) in enumerate(panel_specs):
         window_label = result.windows[window_idx].label if window_idx is not None else phase_label
         for col_idx, (chaser_index, chaser_col_idx) in enumerate(chaser_specs):
             ax = axes[row_idx, col_idx]
-            ax.set_theta_zero_location("N")
-            ax.set_theta_direction(1)
-            ax.set_thetagrids([0, 90, 180, 270], labels=["front", "left", "behind", "right"])
-            ax.set_ylim(0.0, radial_limit)
-            ax.set_rlabel_position(135)
-            ax.grid(alpha=0.3)
-            ax.tick_params(labelsize=8)
+            _setup_egocentric_polar_axis(ax, radial_limit_mm=radial_limit)
             title_window = _display_epoch_label(str(window_label))
-            ax.set_title(f"{title_window} - chaser {chaser_index}", fontsize=10, pad=12)
+            color = _chaser_plot_color(result, int(chaser_index), col_idx)
+            ax.set_title(f"{title_window} - chaser {chaser_index}", fontsize=10, pad=12, color=color)
             if window_idx is None or chaser_col_idx is None:
                 ax.text(0.5, 0.5, "not available", ha="center", va="center", transform=ax.transAxes)
                 continue
@@ -866,7 +1121,6 @@ def render_egocentric_bearing_pre_post_point_cloud_png(
             if sample_count <= 0:
                 ax.text(0.5, 0.5, "no valid frames", ha="center", va="center", transform=ax.transAxes)
                 continue
-            color = colors[col_idx % len(colors)]
             ax.scatter(
                 np.deg2rad(bearings),
                 distances,
@@ -1008,9 +1262,13 @@ def write_chaser_egocentric_bearing_component(
         "bearing_bin_width_deg": float(result.bearing_bin_edges_deg[1] - result.bearing_bin_edges_deg[0])
         if result.bearing_bin_edges_deg.shape[0] > 1
         else None,
+        "static_polar_display_distance_bin_width_mm": float(STATIC_POLAR_DISPLAY_DISTANCE_BIN_WIDTH_MM),
+        "static_polar_display_bearing_bin_width_deg": float(STATIC_POLAR_DISPLAY_BEARING_BIN_WIDTH_DEG),
+        "static_polar_display_color_cmax_quantile": float(STATIC_POLAR_DISPLAY_COLOR_CMAX_QUANTILE),
     }
     summary = {
         "chaser_indices": result.chaser_indices.astype(int).tolist(),
+        "chaser_color_hex": {str(key): value for key, value in result.chaser_color_hex.items()},
         "heading_valid_frame_count": int(np.sum(result.fish_heading_valid)),
         "egocentric_valid_frame_count": np.sum(result.valid, axis=0).astype(int).tolist(),
         "epoch_labels": [w.label for w in result.windows],
@@ -1066,11 +1324,12 @@ def write_chaser_egocentric_bearing_component(
                 PRE_POST_POLAR_PNG_ARTIFACT_NAME,
                 render_egocentric_bearing_pre_post_polar_png(result),
                 (
-                    "Pre/post static polar circular histograms of egocentric chaser bearing "
-                    "for chaser 0 and chaser 1."
+                    "Pre/post static polar density maps of egocentric chaser bearing and "
+                    "fish-to-chaser distance for chaser 0 and chaser 1."
                 ),
                 {
                     "bearing_deg": f"{component_path}/per_chaser/bearing_deg",
+                    "distance_mm": f"{component_path}/per_chaser/distance_mm",
                     "valid": f"{component_path}/per_chaser/valid",
                     "hist_probability": f"{component_path}/distance_bearing_histogram/hist_probability",
                     "hist_counts": f"{component_path}/distance_bearing_histogram/hist_counts",
@@ -1142,6 +1401,7 @@ def _result_payload(result: ChaserEgocentricBearingResult, *, applied_path: Opti
         "chaser_distance_run": result.chaser_distance_run_name,
         "source_heading_array": result.source_heading_array,
         "heading_level": result.heading_level,
+        "chaser_color_hex": {str(key): value for key, value in result.chaser_color_hex.items()},
         "heading_valid_frame_count": int(np.sum(result.fish_heading_valid)),
         "egocentric_valid_frame_count": np.sum(result.valid, axis=0).astype(int).tolist(),
         "windows": [

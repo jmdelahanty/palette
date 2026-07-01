@@ -371,6 +371,7 @@ def test_goodcopbadcop_component_prefers_persisted_epoch_behavior_summary(tmp_pa
     assert "persisted zarr component" in output[0]
     summary_plots = output[2]
     distribution_plots = output[4]
+    ibi_distribution_plots = output[6]
     assert [figure.layout.title.text for figure in summary_plots] == [
         "Bout Rate by Epoch",
         "Bout Count by Epoch",
@@ -389,6 +390,12 @@ def test_goodcopbadcop_component_prefers_persisted_epoch_behavior_summary(tmp_pa
         "Swim Bout Absolute Net Heading Change Distribution",
         "Swim Bout Heading Path Distribution",
     ]
+    assert output[5] == "## Inter-Bout Interval Distributions"
+    assert [figure.layout.title.text for figure in ibi_distribution_plots] == [
+        "Inter-Bout Interval Distribution",
+    ]
+    assert distribution_plots[0].data[0].type == "bar"
+    assert ibi_distribution_plots[0].data[0].type == "bar"
     assert summary_plots[0].layout.yaxis.title.text == "Bouts / min"
     assert summary_plots[1].layout.yaxis.title.text == "Bouts"
     assert "bout_rate_per_min" in output[-1].columns
@@ -835,6 +842,9 @@ def test_goodcopbadcop_egocentric_panels_render_from_linked_component(tmp_path) 
     assert len(density_figures) == 2
     assert [figure.data[0].type for figure in density_figures] == ["barpolar", "barpolar"]
     assert density_figures[0].layout.polar.angularaxis.rotation == 90
+    assert float(density_figures[0].data[0].r[0]) == 5.0
+    assert float(density_figures[0].data[0].width[0]) == 30.0
+    assert "5 mm x 30 deg display bins" in str(density_figures[0].layout.title.text)
     assert heading_fig.data[0].type == "scattergl"
     assert heading_fig.data[0].mode == "markers"
     assert heading_fig.layout.yaxis.title.text == "Fish heading (deg)"

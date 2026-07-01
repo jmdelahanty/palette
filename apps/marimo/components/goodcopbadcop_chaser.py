@@ -42,6 +42,9 @@ from .registry import InteractiveSpecOption
 
 EGOCENTRIC_PRE_POST_POLAR_PNG_ARTIFACT_NAME = "egocentric_bearing_pre_post_polar_png"
 EGOCENTRIC_PRE_POST_POLAR_POINT_CLOUD_PNG_ARTIFACT_NAME = "egocentric_bearing_pre_post_polar_point_cloud_png"
+EGOCENTRIC_POLAR_DISPLAY_MIN_DISTANCE_BIN_WIDTH_MM = 5.0
+EGOCENTRIC_POLAR_DISPLAY_MIN_BEARING_BIN_WIDTH_DEG = 30.0
+EGOCENTRIC_POLAR_DISPLAY_COLOR_CMAX_QUANTILE = 0.98
 CHASER_MARKER_COLORS = (
     "#2563eb",
     "#dc2626",
@@ -868,6 +871,88 @@ def _build_epoch_bout_distribution_plots(go: Any, bout_rows: pl.DataFrame) -> li
     return figures
 
 
+_BOUT_HISTOGRAM_TITLES = {
+    "bout_duration_s": ("Swim Bout Duration Distribution", "Duration (s)"),
+    "bout_path_length_mm": ("Swim Bout Distance Distribution", "Distance (mm)"),
+    "bout_net_heading_change_deg": ("Swim Bout Net Heading Change Distribution", "Signed degrees"),
+    "abs_bout_net_heading_change_deg": ("Swim Bout Absolute Net Heading Change Distribution", "Degrees"),
+    "bout_heading_path_deg": ("Swim Bout Heading Path Distribution", "Degrees"),
+}
+
+
+def _build_persisted_epoch_distribution_plots(
+    go: Any,
+    hist_rows: pl.DataFrame,
+    *,
+    metric_titles: Mapping[str, tuple[str, str]],
+) -> list[Any]:
+    required = {
+        "metric_name",
+        "window_label",
+        "bin_center",
+        "bin_width",
+        "hist_count",
+        "hist_fraction",
+        "hist_density",
+        "finite_sample_count",
+    }
+    if go is None or hist_rows.is_empty() or not required.issubset(set(hist_rows.columns)):
+        return []
+    figures: list[Any] = []
+    metrics = hist_rows.select("metric_name").unique(maintain_order=True)["metric_name"].to_list()
+    for metric in metrics:
+        metric_key = str(metric)
+        title, xaxis_title = metric_titles.get(metric_key, (metric_key, "Value"))
+        rows_for_metric = hist_rows.filter(pl.col("metric_name") == metric_key)
+        if rows_for_metric.is_empty():
+            continue
+        labels = rows_for_metric.select("window_label").unique(maintain_order=True)["window_label"].to_list()
+        fig = go.Figure()
+        for label in labels:
+            rows = rows_for_metric.filter(pl.col("window_label") == label).sort("bin_center")
+            if rows.is_empty():
+                continue
+            fig.add_trace(
+                go.Bar(
+                    x=rows["bin_center"].to_numpy(),
+                    y=rows["hist_count"].to_numpy(),
+                    width=(rows["bin_width"].to_numpy() * 0.92),
+                    name=str(label),
+                    opacity=0.62,
+                    customdata=np.column_stack(
+                        [
+                            rows["bin_left"].to_numpy() if "bin_left" in rows.columns else rows["bin_center"].to_numpy(),
+                            rows["bin_right"].to_numpy() if "bin_right" in rows.columns else rows["bin_center"].to_numpy(),
+                            rows["hist_fraction"].to_numpy(),
+                            rows["hist_density"].to_numpy(),
+                            rows["finite_sample_count"].to_numpy(),
+                        ]
+                    ),
+                    hovertemplate=(
+                        "Epoch=%{fullData.name}<br>"
+                        "Bin=%{customdata[0]:.3g} to %{customdata[1]:.3g}<br>"
+                        "Count=%{y}<br>"
+                        "Fraction=%{customdata[2]:.3g}<br>"
+                        "Density=%{customdata[3]:.3g}<br>"
+                        "Finite samples=%{customdata[4]}"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+        if not fig.data:
+            continue
+        fig.update_layout(
+            title=title,
+            xaxis_title=xaxis_title,
+            yaxis_title="Count",
+            barmode="overlay",
+            bargap=0.05,
+            margin=dict(l=50, r=20, t=50, b=50),
+        )
+        figures.append(fig)
+    return figures
+
+
 def build_epoch_summary_output(
     mo: Any,
     go: Any = None,
@@ -1310,13 +1395,27 @@ def build_epoch_summary_output(
     if plots:
         items.append(mo.vstack(plots))
     if loaded.epoch_behavior is not None:
-        distribution_plots = _build_epoch_bout_distribution_plots(
+        distribution_plots = _build_persisted_epoch_distribution_plots(
             go,
-            loaded.epoch_behavior.per_epoch_bouts_df,
+            loaded.epoch_behavior.per_epoch_bout_histograms_df,
+            metric_titles=_BOUT_HISTOGRAM_TITLES,
         )
+        if not distribution_plots:
+            distribution_plots = _build_epoch_bout_distribution_plots(
+                go,
+                loaded.epoch_behavior.per_epoch_bouts_df,
+            )
         if distribution_plots:
             items.append(mo.md("## Swim Bout Distributions"))
             items.append(mo.vstack(distribution_plots))
+        ibi_distribution_plots = _build_persisted_epoch_distribution_plots(
+            go,
+            loaded.epoch_behavior.per_epoch_inter_bout_interval_histograms_df,
+            metric_titles={"inter_bout_interval_s": ("Inter-Bout Interval Distribution", "Interval (s)")},
+        )
+        if ibi_distribution_plots:
+            items.append(mo.md("## Inter-Bout Interval Distributions"))
+            items.append(mo.vstack(ibi_distribution_plots))
     items.append(mo.ui.table(display_pd, selection=None, page_size=12))
     return mo.vstack(items)
 
@@ -1420,6 +1519,31 @@ def _egocentric_bearing_bin_width_deg(loaded: GoodCopBadCopLoadedView) -> float:
     return 15.0
 
 
+def _egocentric_display_distance_bin_width_mm(loaded: GoodCopBadCopLoadedView) -> float:
+    return max(
+        _egocentric_distance_bin_width_mm(loaded),
+        float(EGOCENTRIC_POLAR_DISPLAY_MIN_DISTANCE_BIN_WIDTH_MM),
+    )
+
+
+def _egocentric_display_bearing_bin_width_deg(loaded: GoodCopBadCopLoadedView) -> float:
+    return min(
+        180.0,
+        max(
+            _egocentric_bearing_bin_width_deg(loaded),
+            float(EGOCENTRIC_POLAR_DISPLAY_MIN_BEARING_BIN_WIDTH_DEG),
+        ),
+    )
+
+
+def _positive_quantile(values: np.ndarray, quantile: float) -> float:
+    finite_positive = np.asarray(values, dtype=np.float64)
+    finite_positive = finite_positive[np.isfinite(finite_positive) & (finite_positive > 0.0)]
+    if finite_positive.size == 0:
+        return 1.0
+    return max(float(np.quantile(finite_positive, float(quantile))), float(np.finfo(np.float64).eps))
+
+
 def _egocentric_polar_density_frame(
     visible: pl.DataFrame,
     *,
@@ -1497,8 +1621,8 @@ def build_egocentric_polar_heatmap_output(
     if visible.is_empty():
         return mo.md("No valid egocentric chaser-bearing samples in the selected window.")
 
-    distance_width = _egocentric_distance_bin_width_mm(loaded)
-    bearing_width = _egocentric_bearing_bin_width_deg(loaded)
+    distance_width = _egocentric_display_distance_bin_width_mm(loaded)
+    bearing_width = _egocentric_display_bearing_bin_width_deg(loaded)
     density = _egocentric_polar_density_frame(
         visible,
         distance_bin_width_mm=distance_width,
@@ -1507,7 +1631,10 @@ def build_egocentric_polar_heatmap_output(
     if density.is_empty():
         return mo.md("No egocentric samples could be binned for the selected window.")
 
-    max_probability = density.select(pl.col("probability").max()).item()
+    max_probability = _positive_quantile(
+        density["probability"].to_numpy(),
+        EGOCENTRIC_POLAR_DISPLAY_COLOR_CMAX_QUANTILE,
+    )
     if max_probability is None or not np.isfinite(float(max_probability)) or float(max_probability) <= 0:
         max_probability = 1.0
 
@@ -1528,7 +1655,7 @@ def build_egocentric_polar_heatmap_output(
                     colorscale="Viridis",
                     cmin=0.0,
                     cmax=float(max_probability),
-                    colorbar=dict(title="fraction"),
+                    colorbar=dict(title="fraction/bin"),
                     line=dict(width=0),
                 ),
                 opacity=0.95,
@@ -1538,12 +1665,14 @@ def build_egocentric_polar_heatmap_output(
                         rows["n"].to_numpy(),
                         rows["probability"].to_numpy(),
                         rows["distance_bin_start_mm"].to_numpy(),
+                        (rows["distance_bin_start_mm"] + distance_width).to_numpy(),
                         rows["bearing_bin_start_deg"].to_numpy(),
+                        (rows["bearing_bin_start_deg"] + bearing_width).to_numpy(),
                     ]
                 ),
                 hovertemplate=(
-                    "bearing bin=%{customdata[3]:.1f} deg<br>"
-                    "distance bin=%{customdata[2]:.2f} mm<br>"
+                    "bearing bin=%{customdata[4]:.1f} to %{customdata[5]:.1f} deg<br>"
+                    "distance bin=%{customdata[2]:.2f} to %{customdata[3]:.2f} mm<br>"
                     "samples=%{customdata[0]:,}<br>"
                     "fraction=%{customdata[1]:.4f}"
                     "<extra>%{fullData.name}</extra>"
@@ -1551,7 +1680,10 @@ def build_egocentric_polar_heatmap_output(
             )
         )
         fig.update_layout(
-            title=f"Egocentric Bearing Density ({window.selected_epoch_label}, chaser {int(chaser_index)})",
+            title=(
+                f"Egocentric Bearing Density ({window.selected_epoch_label}, chaser {int(chaser_index)}; "
+                f"{distance_width:g} mm x {bearing_width:g} deg display bins)"
+            ),
             height=520,
             margin=dict(l=40, r=72, t=58, b=48),
             showlegend=False,
