@@ -382,10 +382,51 @@ Recommended now:
 
 - implement a Palette-side SAM canary runtime
 - use the existing sibling `sam3` checkout
+- for cluster jobs, mirror that checkout to a compute-visible shared path such
+  as `/groups/johnson/johnsonlab/jeremy/gitrepos/sam3`
 - segment only `subject_body`
 - use all available refined keypoints as positive prompts
 - keep the result in `subject_mask_runs`
 - defer the submodule decision until after the canary proves useful
+
+## Cluster Smoke Workflow
+
+The current cluster path is a single-job bsub wrapper around
+`fisheye.utils.run_sam_subject_masks`:
+
+```bash
+scripts/submit_sam_subject_masks_bsub.sh \
+  --zarr /groups/.../recording_analysis.zarr \
+  --crop-run <crop_run> \
+  --keypoint-group refined_keypoints_runs \
+  --keypoint-run <refined_keypoints_run> \
+  --output-run <planned_subject_mask_run> \
+  --sam3-root /groups/johnson/johnsonlab/jeremy/gitrepos/sam3 \
+  --apply \
+  --apply-limit 16 \
+  --profile-timings \
+  --submit
+```
+
+`--apply-limit` is deliberate. The writer creates a normal
+`subject_mask_runs/<run>` surface, so a full apply can touch the whole eligible
+row surface. The bsub wrapper refuses `--apply` without `--apply-limit` unless
+`--allow-full-apply` is passed explicitly.
+
+SAM3 remains an external dependency. A compute-visible checkout can be mirrored
+from the workstation with:
+
+```bash
+rsync -a --delete \
+  --exclude outputs/ \
+  --exclude .ipynb_checkpoints/ \
+  /home/delahantyj@hhmi.org/gitrepos/sam3/ \
+  /groups/johnson/johnsonlab/jeremy/gitrepos/sam3/
+```
+
+Prefer passing a compute-visible `--checkpoint` plus `--no-hf-download` once a
+specific SAM3 checkpoint has been selected. Without that, the SAM3 runtime may
+try its own default/Hugging Face checkpoint resolution.
 
 ## Related Docs
 

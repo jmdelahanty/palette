@@ -461,6 +461,26 @@ scripts/py -m fisheye.utils.run_sam_subject_masks_batch \
   --apply
 ```
 
+For cluster SAM3 smokes, prefer the bsub wrapper and a bounded apply:
+
+```bash
+scripts/submit_sam_subject_masks_bsub.sh \
+  --zarr /groups/.../recording_analysis.zarr \
+  --crop-run <crop_run> \
+  --keypoint-group refined_keypoints_runs \
+  --keypoint-run <refined_keypoints_run> \
+  --output-run <planned_subject_mask_run> \
+  --sam3-root /groups/johnson/johnsonlab/jeremy/gitrepos/sam3 \
+  --apply \
+  --apply-limit 16 \
+  --profile-timings \
+  --submit
+```
+
+The wrapper is dry-run by default and requires `--apply-limit` unless
+`--allow-full-apply` is passed. SAM3 is currently an optional external checkout,
+not a Palette submodule.
+
 **Recommended U-Net mode:** probability-first raw output. By default the U-Net
 path writes `mask_probs_roi`, component/row metadata, and metrics; it does not
 materialize the dense thresholded `masks_roi` cache. It also uses async output

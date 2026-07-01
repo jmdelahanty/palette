@@ -198,25 +198,81 @@ Use the inspect step first to verify:
 ```bash
 scripts/py -m fisheye.utils.run_sam_subject_masks \
   /path/to/training_like.zarr \
+  --crop-run <their_crop_run> \
   --keypoint-group refined_keypoints_runs \
   --keypoint-run <their_refined_run> \
   --output-run <planned_subject_mask_run> \
   --sam3-root /path/to/sam3 \
+  --apply-limit 16 \
   --apply
 ```
+
+Omit `--apply-limit` only when intentionally running the full eligible row
+surface. For production/full runs, record that decision in the run notes or
+submission manifest.
 
 ### Apply with points only
 
 ```bash
 scripts/py -m fisheye.utils.run_sam_subject_masks \
   /path/to/training_like.zarr \
+  --crop-run <their_crop_run> \
   --keypoint-group refined_keypoints_runs \
   --keypoint-run <their_refined_run> \
   --output-run <planned_subject_mask_run> \
   --sam3-root /path/to/sam3 \
   --no-box-prompt \
+  --apply-limit 16 \
   --apply
 ```
+
+### Submit a bounded cluster smoke
+
+Use the bsub wrapper when the SAM3 checkout and optional checkpoint are visible
+from Janelia compute nodes:
+
+```bash
+scripts/submit_sam_subject_masks_bsub.sh \
+  --zarr /groups/.../recording/zarr/recording_analysis.zarr \
+  --crop-run <crop_run> \
+  --keypoint-group refined_keypoints_runs \
+  --keypoint-run <refined_keypoints_run> \
+  --output-run <planned_subject_mask_run> \
+  --sam3-root /groups/johnson/johnsonlab/jeremy/gitrepos/sam3 \
+  --apply \
+  --apply-limit 16 \
+  --profile-timings \
+  --submit
+```
+
+The wrapper is dry-run by default. It refuses `--apply` without either
+`--apply-limit N` or `--allow-full-apply`, which prevents accidental
+full-recording SAM writes while the runtime remains experimental.
+
+### Make SAM3 visible to cluster jobs
+
+Do not make SAM3 a required Palette submodule yet. For cluster use, maintain an
+external SAM3 checkout on shared storage, for example:
+
+```bash
+/groups/johnson/johnsonlab/jeremy/gitrepos/sam3
+```
+
+The local workstation checkout can be mirrored there with `rsync` once the
+intended SAM3 state is chosen. Prefer excluding ad-hoc `outputs/` directories
+and preserving the source checkout state:
+
+```bash
+rsync -a --delete \
+  --exclude outputs/ \
+  --exclude .ipynb_checkpoints/ \
+  /home/delahantyj@hhmi.org/gitrepos/sam3/ \
+  /groups/johnson/johnsonlab/jeremy/gitrepos/sam3/
+```
+
+If `--checkpoint` is not supplied, the SAM3 runtime may try its own default or
+Hugging Face checkpoint resolution. For reproducible cluster jobs, prefer a
+compute-node-visible checkpoint path and pass `--no-hf-download`.
 
 ### Batch dry run across training archives
 
