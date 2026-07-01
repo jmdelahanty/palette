@@ -1271,11 +1271,20 @@ def test_run_sam_subject_mask_inference_updates_progress(monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr(mod, "_resolve_runtime_device", lambda *_args, **_kwargs: "cpu")
-    monkeypatch.setattr(
-        mod,
-        "write_sam_subject_mask_run",
-        lambda *_args, **_kwargs: {"rows_segmented": 3, "rows_with_nonempty_masks": 3},
-    )
+    captured_writes: list[dict[str, object]] = []
+
+    def _fake_write(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        selected = kwargs["selected"]
+        captured_writes.append(kwargs)
+        row_count = int(selected.row_indices.shape[0])
+        return {
+            "rows_segmented": row_count,
+            "rows_with_nonempty_masks": row_count,
+            "rows_selected_for_apply": row_count,
+            "apply_limit": kwargs.get("apply_limit"),
+        }
+
+    monkeypatch.setattr(mod, "write_sam_subject_mask_run", _fake_write)
 
     events: list[tuple[str, object, object]] = []
 
@@ -1303,6 +1312,25 @@ def test_run_sam_subject_mask_inference_updates_progress(monkeypatch) -> None:
     assert ("add_task", "[cyan]Running SAM subject masks (batch=2)...", 3) in events
     updates = [event for event in events if event[0] == "update"]
     assert updates == [("update", 7, 2), ("update", 7, 1)]
+    assert captured_writes[-1]["apply_limit"] is None
+
+    events.clear()
+    result = mod.run_sam_subject_mask_inference(
+        "/tmp/fake_training.zarr",
+        batch_size=4,
+        apply_limit=2,
+    )
+
+    assert result["rows_segmented"] == 2
+    assert result["rows_selected_for_apply"] == 2
+    assert result["apply_limit"] == 2
+    np.testing.assert_array_equal(
+        captured_writes[-1]["selected"].row_indices,
+        np.asarray([0, 1], dtype=np.int32),
+    )
+    assert ("add_task", "[cyan]Running SAM subject masks (batch=4)...", 2) in events
+    updates = [event for event in events if event[0] == "update"]
+    assert updates == [("update", 7, 2)]
 
 
 def test_run_sam_subject_mask_inference_records_timing_profile(monkeypatch) -> None:

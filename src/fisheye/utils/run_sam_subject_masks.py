@@ -1450,12 +1450,15 @@ def _build_subject_mask_summary(
     negative_point_margin_fraction: float | None,
     device: str,
     duration_seconds: float,
+    apply_limit: int | None,
 ) -> dict[str, Any]:
     mask_present = np.any(selected.binary > 0, axis=(1, 2)) if selected.binary.size else np.zeros((0,), dtype=bool)
     area_px = selected.binary.sum(axis=(1, 2), dtype=np.int64).astype(np.float32) if selected.binary.size else np.zeros((0,), dtype=np.float32)
     summary = {
         "rows_total": int(inputs.row_count),
         "rows_eligible": int(np.sum(eligibility.eligible)),
+        "rows_selected_for_apply": int(selected.row_indices.shape[0]),
+        "apply_limit": int(apply_limit) if apply_limit is not None else None,
         "rows_segmented": int(selected.row_indices.shape[0]),
         "rows_with_nonempty_masks": int(np.sum(mask_present)),
         "rows_skipped_interpolated": int(np.sum(eligibility.skipped_interpolated)),
@@ -1622,6 +1625,7 @@ def write_sam_subject_mask_run(
     negative_point_margin_fraction: float,
     device: str,
     duration_seconds: float,
+    apply_limit: int | None = None,
     profile_timings: bool = False,
     timing_profile_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1722,6 +1726,7 @@ def write_sam_subject_mask_run(
             else None,
             "sam_checkpoint_path": checkpoint_path,
             "sam3_root": sam3_root,
+            "sam_apply_limit": int(apply_limit) if apply_limit is not None else None,
             "profile_timings_enabled": bool(profile_timings),
             "input_format": "gray" if inputs.roi_channels == 1 else "rgb",
             "probability_semantics": "sigmoid_selected_mask_logits",
@@ -1824,6 +1829,7 @@ def write_sam_subject_mask_run(
         negative_point_margin_fraction=negative_point_margin_fraction,
         device=device,
         duration_seconds=duration_seconds,
+        apply_limit=apply_limit,
     )
     run_group.attrs["duration_seconds"] = float(duration_seconds)
     run_group.attrs["summary_statistics"] = summary_statistics
@@ -1874,6 +1880,7 @@ def write_sam_subject_mask_run(
             if negative_point_policy != "none"
             else None,
             "device": device,
+            "apply_limit": int(apply_limit) if apply_limit is not None else None,
             "input_format": "gray" if inputs.roi_channels == 1 else "rgb",
             "probabilities_dtype": "float16",
             "probabilities_encoding": "unit_float",
@@ -1914,6 +1921,7 @@ def run_sam_subject_mask_inference(
     sam3_root: str | Path | None = None,
     checkpoint_path: str | Path | None = None,
     batch_size: int = DEFAULT_INFER_BATCH_SIZE,
+    apply_limit: int | None = None,
     skip_interpolated: bool = True,
     multimask_output: bool = True,
     use_box_prompt: bool = True,
@@ -1935,6 +1943,8 @@ def run_sam_subject_mask_inference(
 ) -> dict[str, Any]:
     if batch_size <= 0:
         raise ValueError("batch_size must be positive.")
+    if apply_limit is not None and int(apply_limit) < 0:
+        raise ValueError("apply_limit must be non-negative.")
     if box_prompt_source not in BOX_PROMPT_SOURCE_CHOICES:
         raise ValueError(
             f"box_prompt_source must be one of {BOX_PROMPT_SOURCE_CHOICES}, got {box_prompt_source!r}."
@@ -1987,6 +1997,8 @@ def run_sam_subject_mask_inference(
         skip_interpolated=skip_interpolated,
     )
     eligible_indices = np.flatnonzero(eligibility.eligible).astype(np.int32, copy=False)
+    if apply_limit is not None:
+        eligible_indices = eligible_indices[: int(apply_limit)]
     resolved_output_run = output_run or _default_output_run(inputs)
 
     if no_hf_download and checkpoint_path is None:
@@ -2108,10 +2120,13 @@ def run_sam_subject_mask_inference(
                 negative_point_margin_fraction=negative_point_margin_fraction,
                 device=resolved_device,
                 duration_seconds=inference_duration,
+                apply_limit=apply_limit,
                 profile_timings=bool(profile_timings),
                 timing_profile_summary=None,
             )
         total_duration = float(time.perf_counter() - start)
+        summary_statistics.setdefault("rows_selected_for_apply", int(eligible_indices.shape[0]))
+        summary_statistics.setdefault("apply_limit", int(apply_limit) if apply_limit is not None else None)
         summary_statistics["duration_seconds"] = float(total_duration)
         if timing_profiler.enabled:
             timing_profile_summary = timing_profiler.summary(
@@ -2164,6 +2179,8 @@ def run_sam_subject_mask_inference(
         "positive_keypoint_labels": list(prompt_selection.labels),
         "output_run": resolved_output_run,
         "rows_eligible": int(np.sum(eligibility.eligible)),
+        "rows_selected_for_apply": int(summary_statistics["rows_selected_for_apply"]),
+        "apply_limit": summary_statistics["apply_limit"],
         "rows_segmented": int(summary_statistics["rows_segmented"]),
         "rows_with_nonempty_masks": int(summary_statistics["rows_with_nonempty_masks"]),
         "duration_seconds": duration,
@@ -2543,6 +2560,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         help=f"Eligible ROI batch size for SAM inference when --apply is used (default: {DEFAULT_INFER_BATCH_SIZE}).",
     )
     parser.add_argument(
+        "--apply-limit",
+        type=int,
+        help=(
+            "When --apply is used, segment at most this many eligible rows. "
+            "Useful for bounded smoke tests; omit for a full eligible-row apply."
+        ),
+    )
+    parser.add_argument(
         "--single-mask",
         action="store_true",
         help="Use multimask_output=False during SAM inference.",
@@ -2642,6 +2667,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             sam3_root=args.sam3_root,
             checkpoint_path=args.checkpoint,
             batch_size=int(args.batch_size),
+            apply_limit=args.apply_limit,
             skip_interpolated=not args.include_interpolated,
             multimask_output=not args.single_mask,
             use_box_prompt=not args.no_box_prompt,
