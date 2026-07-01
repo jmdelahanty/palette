@@ -239,6 +239,7 @@ scripts/submit_sam_subject_masks_bsub.sh \
   --keypoint-run <refined_keypoints_run> \
   --output-run <planned_subject_mask_run> \
   --sam3-root /groups/johnson/johnsonlab/jeremy/gitrepos/sam3 \
+  --python-bin /groups/ahrens/home/delahantyj/miniforge3/envs/palette-sam3/bin/python \
   --apply \
   --apply-limit 16 \
   --profile-timings \
@@ -275,10 +276,13 @@ Hugging Face checkpoint resolution. For reproducible cluster jobs, prefer a
 compute-node-visible checkpoint path and pass `--no-hf-download`.
 
 The Palette cluster environment also needs SAM3's runtime Python dependencies.
-At minimum, the `scripts/py` environment used by the bsub job must import:
+Prefer an isolated SAM3-specific clone of `palette-py311`, then pass it to the
+bsub wrapper with `--python-bin`. At minimum, the Python environment used by
+the bsub job must import:
 
 ```bash
-scripts/py - <<'PY'
+PALETTE_PYTHON=/groups/ahrens/home/delahantyj/miniforge3/envs/palette-sam3/bin/python \
+  scripts/py - <<'PY'
 for name in ("huggingface_hub", "iopath", "timm", "einops", "torch", "torchvision", "PIL"):
     __import__(name)
     print(name, "ok")

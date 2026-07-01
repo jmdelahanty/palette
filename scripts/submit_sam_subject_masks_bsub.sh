@@ -11,6 +11,7 @@ CHECKPOINT=""
 RUN_ID=""
 LOG_DIR=""
 REPO_DIR=""
+PYTHON_BIN="${PALETTE_PYTHON:-}"
 QUEUE="gpu_l4"
 NCORES=4
 MEM_GB=64
@@ -53,6 +54,7 @@ Options:
   --run-id ID                 Stable submission id (default: UTC timestamp)
   --log-dir PATH              Log/run dir (default: <recording>/logs/sam_subject_masks_bsub/<run-id>)
   --repo-dir PATH             Palette repo visible to compute nodes (default: current repo)
+  --python-bin PATH           Optional Python interpreter for scripts/py via PALETTE_PYTHON
   --queue NAME                LSF queue (default: gpu_l4)
   --ncores N                  CPU slots (default: 4)
   --mem-gb N                  Memory GB (default: 64)
@@ -91,6 +93,7 @@ while [[ $# -gt 0 ]]; do
     --run-id) RUN_ID="$2"; shift 2;;
     --log-dir) LOG_DIR="$2"; shift 2;;
     --repo-dir) REPO_DIR="$2"; shift 2;;
+    --python-bin) PYTHON_BIN="$2"; shift 2;;
     --queue) QUEUE="$2"; shift 2;;
     --ncores) NCORES="$2"; shift 2;;
     --mem-gb) MEM_GB="$2"; shift 2;;
@@ -151,6 +154,9 @@ mkdir -p "$LOG_DIR"
 if [[ "$SUBMIT" == "1" ]]; then
   [[ -d "$ZARR" ]] || { echo "Zarr not found: $ZARR" >&2; exit 2; }
   [[ -d "$SAM3_ROOT" ]] || { echo "SAM3 root not found: $SAM3_ROOT" >&2; exit 2; }
+  if [[ -n "$PYTHON_BIN" ]]; then
+    [[ -x "$PYTHON_BIN" ]] || { echo "Python interpreter not executable: $PYTHON_BIN" >&2; exit 2; }
+  fi
   if [[ -n "$CHECKPOINT" ]]; then
     [[ -f "$CHECKPOINT" ]] || { echo "Checkpoint not found: $CHECKPOINT" >&2; exit 2; }
   fi
@@ -186,6 +192,7 @@ fi
 SUMMARY_JSON="${LOG_DIR}/summary.json"
 JOB_SCRIPT="${LOG_DIR}/run_sam_subject_masks.sh"
 REPO_DIR_Q="$(printf '%q' "$REPO_DIR")"
+PYTHON_BIN_Q="$(printf '%q' "$PYTHON_BIN")"
 SUMMARY_JSON_Q="$(printf '%q' "$SUMMARY_JSON")"
 printf -v CMD_SHELL '%q ' "${CMD[@]}"
 
@@ -195,7 +202,12 @@ set -euo pipefail
 
 cd ${REPO_DIR_Q}
 
+if [[ -n ${PYTHON_BIN_Q} ]]; then
+  export PALETTE_PYTHON=${PYTHON_BIN_Q}
+fi
+
 echo "repo=\$(pwd)"
+echo "palette_python=\${PALETTE_PYTHON:-<scripts/py default>}"
 echo "host=\$(hostname)"
 echo "job_id=\${LSB_JOBID:-manual}"
 echo "sam3_root=$(printf '%q' "$SAM3_ROOT")"
@@ -227,6 +239,11 @@ echo "Run dir: $LOG_DIR"
 echo "Job script: $JOB_SCRIPT"
 echo "Summary JSON: $SUMMARY_JSON"
 echo "SAM3 root: $SAM3_ROOT"
+if [[ -n "$PYTHON_BIN" ]]; then
+  echo "Python: $PYTHON_BIN"
+else
+  echo "Python: <scripts/py default>"
+fi
 if [[ -n "$CHECKPOINT" ]]; then
   echo "Checkpoint: $CHECKPOINT"
 else

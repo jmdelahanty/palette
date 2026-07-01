@@ -402,6 +402,7 @@ scripts/submit_sam_subject_masks_bsub.sh \
   --keypoint-run <refined_keypoints_run> \
   --output-run <planned_subject_mask_run> \
   --sam3-root /groups/johnson/johnsonlab/jeremy/gitrepos/sam3 \
+  --python-bin /groups/ahrens/home/delahantyj/miniforge3/envs/palette-sam3/bin/python \
   --apply \
   --apply-limit 16 \
   --profile-timings \
