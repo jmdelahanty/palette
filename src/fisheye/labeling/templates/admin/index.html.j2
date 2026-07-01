@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Palette labeling admin</title>
+  <style>
+    :root {
+      --ink: #17201a;
+      --muted: #5f6d62;
+      --line: #d8ded5;
+      --card: #fffdf5;
+      --accent: #0f6f5c;
+      --bad: #9a3027;
+      --shadow: rgba(23, 32, 26, 0.12);
+    }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 82% 8%, rgba(154, 48, 39, 0.12), transparent 28rem),
+        linear-gradient(135deg, #f6f0dc, #edf5ee 62%, #fbf8ed);
+      color: var(--ink);
+      font-family: "Trebuchet MS", Verdana, sans-serif;
+    }
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 34px 18px 64px;
+    }
+    h1 {
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(2.1rem, 5vw, 4.4rem);
+      letter-spacing: -0.055em;
+      line-height: 0.92;
+      margin: 0 0 16px;
+    }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 12px;
+      margin: 22px 0;
+    }
+    .card, .stat {
+      background: rgba(255, 253, 245, 0.9);
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      box-shadow: 0 14px 36px var(--shadow);
+      padding: 16px;
+    }
+    .stat b {
+      display: block;
+      font-size: 1.8rem;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+    .row {
+      border-top: 1px solid var(--line);
+      padding: 8px 0;
+      overflow-wrap: anywhere;
+      font-size: 0.9rem;
+    }
+    .row:first-of-type {
+      border-top: 0;
+    }
+    button {
+      border: 0;
+      border-radius: 999px;
+      background: var(--accent);
+      color: white;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-weight: 700;
+    }
+    .bad {
+      color: var(--bad);
+    }
+    .muted {
+      color: var(--muted);
+    }
+    .stack {
+      display: grid;
+      gap: 0.8rem;
+    }
+    .lookup-result pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      border: 1px solid var(--line);
+      border-radius: 0.8rem;
+      background: #fffdf8;
+      padding: 0.75rem;
+    }
+    input, select, textarea {
+      box-sizing: border-box;
+      width: 100%;
+      margin-top: 0.25rem;
+      border: 1px solid var(--line);
+      border-radius: 0.6rem;
+      padding: 0.55rem 0.65rem;
+      background: #fffdf8;
+      color: var(--ink);
+      font: inherit;
+    }
+    @media (max-width: 900px) {
+      .summary, .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <a href="/" class="muted">Landing page</a> &middot; <a href="/work" class="muted">Back to work list</a> &middot; <a href="/admin/datasets" class="muted">Dataset progress</a> &middot; <a href="/admin/users" class="muted">Labeling users</a>
+    <h1>Labeling admin</h1>
+    <button type="button" onclick="cleanupStale()">Close stale sessions</button>
+    <section class="summary">
+      <div class="stat"><b id="assignment-count">-</b><span>assignments</span></div>
+      <div class="stat"><b id="task-count">-</b><span>tasks</span></div>
+      <div class="stat"><b id="active-session-count">-</b><span>active sessions</span></div>
+      <div class="stat"><b id="stale-session-count">-</b><span>stale sessions</span></div>
+      <div class="stat"><b id="failed-promotion-count">-</b><span>failed promotions</span></div>
+      <div class="stat"><b id="warning-count">-</b><span>preflight warnings</span></div>
+    </section>
+    <section class="grid">
+      <article class="card"><h2>Deployment preflight</h2><div id="preflight"></div></article>
+      <article class="card"><h2>Supported browser workflows</h2><div id="browser-workflows"></div></article>
+      <article class="card">
+        <h2>Assign recording</h2>
+        <form id="assignment-form" class="stack">
+          <label>Recording id<br><input id="assign-recording-id" name="recording_id" autocomplete="off" required></label>
+          <label>Assignee user<br><input id="assign-assignee-user" name="assignee_user" autocomplete="off" required></label>
+          <label>Status<br>
+            <select id="assign-status" name="status">
+              <option value="active">active</option>
+              <option value="paused">paused</option>
+              <option value="inactive">inactive</option>
+            </select>
+          </label>
+          <label>Notes<br><textarea id="assign-notes" name="notes" rows="3"></textarea></label>
+          <label><input id="assign-notify" type="checkbox" style="width:auto"> Send/queue notification email</label>
+          <button type="submit">Save assignment</button>
+          <div id="assignment-result" class="muted"></div>
+        </form>
+      </article>
+      <article class="card"><h2>Active sessions</h2><div id="active-sessions"></div></article>
+      <article class="card"><h2>Failed promotions</h2><div id="failed-promotions"></div></article>
+      <article class="card"><h2>Audit summary</h2><div id="audit-summary"></div></article>
+      <article class="card">
+        <h2>Audit event lookup</h2>
+        <form id="audit-event-lookup-form" class="stack">
+          <label>Audit event ID from labeler save status<br><input id="audit-event-id" autocomplete="off" placeholder="paste event_id"></label>
+          <button type="submit">Look up event</button>
+          <div id="audit-event-lookup-result" class="lookup-result muted"></div>
+        </form>
+      </article>
+      <article class="card"><h2>Dashboard users</h2><div id="dashboard-users"></div></article>
+      <article class="card"><h2>Workflow counts</h2><div id="workflow-counts"></div></article>
+      <article class="card"><h2>Assignment work states</h2><div id="assignment-work-states"></div></article>
+      <article class="card"><h2>Task state controls</h2><div id="tasks"></div></article>
+      <article class="card"><h2>Assignments</h2><div id="assignments"></div></article>
+    </section>
+  </main>
+  <script>
+    function escapeText(value) {
+      return String(value == null ? "" : value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+    function countsHtml(counts) {
+      return Object.entries(counts || {}).map(([key, value]) =>
+        `<div class="row"><b>${escapeText(key)}</b>: ${escapeText(value)}</div>`
+      ).join("") || '<p class="muted">None.</p>';
+    }
+    function rowsHtml(rows, render) {
+      return (rows || []).map(render).join("") || '<p class="muted">None.</p>';
+    }
+    function recordingAdminLink(value) {
+      const recordingId = String(value == null ? "" : value);
+      return recordingId
+        ? `<a href="/admin/recordings/${encodeURIComponent(recordingId)}">${escapeText(recordingId)}</a>`
+        : "";
+    }
+    async function copyInvitation(button) {
+      const row = button.closest(".row");
+      const textarea = row ? row.querySelector("textarea") : null;
+      if (!textarea) return;
+      try {
+        await navigator.clipboard.writeText(textarea.value);
+        button.textContent = "Copied";
+      } catch (_error) {
+        textarea.focus();
+        textarea.select();
+        document.execCommand("copy");
+        button.textContent = "Copied";
+      }
+    }
+    async function cleanupStale() {
+      const response = await fetch("/api/admin/sessions/cleanup-stale", {method: "POST"});
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {
+        alert(payload.details || payload.error || "cleanup failed");
+        return;
+      }
+      await load();
+    }
+    async function retryAdminPromotion(eventId, button) {
+      button.disabled = true;
+      try {
+        const response = await fetch(`/api/admin/events/${encodeURIComponent(eventId)}/retry-promotion`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({})
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.details || payload.error || "promotion retry failed");
+        }
+        button.textContent = "Retried";
+        await load();
+      } catch (error) {
+        alert(error.message || String(error));
+      } finally {
+        button.disabled = false;
+      }
+    }
+    function renderAuditEventLookup(payload) {
+      const event = payload.event || {};
+      const retryButton = payload.retry_promotion_url
+        ? `<br><button type="button" onclick="retryAdminPromotion('${escapeText(event.event_id)}', this)">Retry promotion</button>`
+        : "";
+      return `
+        <div class="row"><b>${escapeText(event.event_type || "event")}</b> ${recordingAdminLink(event.recording_id)}
+        <br><span class="muted">event ${escapeText(event.event_id || "")} &middot; task ${escapeText(event.task_id || "")} &middot; user ${escapeText(event.user || "")} &middot; workflow ${escapeText(event.workflow_kind || "")}</span>
+        ${retryButton}</div>
+        <div class="row"><b>Target</b><pre>${escapeText(JSON.stringify(event.target || {}, null, 2))}</pre></div>
+        <div class="row"><b>Before</b><pre>${escapeText(JSON.stringify(event.before || {}, null, 2))}</pre></div>
+        <div class="row"><b>After</b><pre>${escapeText(JSON.stringify(event.after || {}, null, 2))}</pre></div>
+        <div class="row"><b>Operator action</b>: ${escapeText(payload.operator_action || "")}</div>
+      `;
+    }
+    async function lookupAuditEvent(event) {
+      event.preventDefault();
+      const input = document.getElementById("audit-event-id");
+      const resultEl = document.getElementById("audit-event-lookup-result");
+      const eventId = input.value.trim();
+      if (!eventId) {
+        resultEl.textContent = "Paste an audit event ID first.";
+        return;
+      }
+      resultEl.textContent = "Looking up...";
+      try {
+        const response = await fetch(`/api/admin/events/${encodeURIComponent(eventId)}`);
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.details || payload.error || "event lookup failed");
+        }
+        resultEl.className = "lookup-result";
+        resultEl.innerHTML = renderAuditEventLookup(payload);
+      } catch (error) {
+        resultEl.className = "lookup-result bad";
+        resultEl.textContent = `Error: ${error.message || String(error)}`;
+      }
+    }
+    async function saveAssignment(event) {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const resultEl = document.getElementById("assignment-result");
+      const payload = {
+        recording_id: document.getElementById("assign-recording-id").value.trim(),
+        assignee_user: document.getElementById("assign-assignee-user").value.trim(),
+        status: document.getElementById("assign-status").value,
+        notes: document.getElementById("assign-notes").value.trim(),
+        notify: document.getElementById("assign-notify").checked,
+        notification_base_url: window.location.origin
+      };
+      resultEl.textContent = "Saving...";
+      try {
+        const response = await fetch("/api/admin/assignments", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          throw new Error(data.details || data.error || "assignment update failed");
+        }
+        const transition = data.assignment_transition || {};
+        const previousText = transition.previous_assignee_user
+          ? `; previous owner ${transition.previous_assignee_user} (${transition.previous_status || "unknown"})`
+          : "";
+        const notificationText = data.notification
+          ? `; notification ${data.notification.status || "unknown"}`
+          : "";
+        resultEl.textContent = `Saved ${data.assignment.recording_id} -> ${data.assignment.assignee_user}; closed ${data.closed_session_count} sessions${previousText}${notificationText}.`;
+        form.reset();
+        document.getElementById("assign-status").value = "active";
+        await load();
+      } catch (error) {
+        resultEl.textContent = `Error: ${error.message || String(error)}`;
+      }
+    }
+    async function load() {
+      const response = await fetch("/api/admin/summary");
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) throw new Error(payload.details || payload.error || "admin load failed");
+      const data = payload.admin;
+      const operatorValidationCommands = ((data.operator_validation_command_templates || {}).commands || []);
+      document.getElementById("assignment-count").textContent = data.assignment_count;
+      document.getElementById("task-count").textContent = data.task_count;
+      document.getElementById("active-session-count").textContent = data.active_session_count;
+      document.getElementById("stale-session-count").textContent = data.stale_session_count;
+      document.getElementById("failed-promotion-count").textContent = data.failed_promotion_count;
+      document.getElementById("warning-count").textContent = data.preflight.warning_count;
+      document.getElementById("preflight").innerHTML =
+        `<div class="row"><b>Auth</b>: ${escapeText(data.preflight.auth_mode)}</div>` +
+        `<div class="row"><b>Identity source</b>: ${escapeText((data.identity_source_policy || {}).assignment_user_source || "")}</div>` +
+        `<div class="row"><b>Identity must match assignment user</b>: ${escapeText((data.identity_source_policy || {}).assignment_user_match_required)}</div>` +
+        `<div class="row"><b>Labeler entry routes</b>: preferred=${escapeText(data.personalized_labeler_entrypoint || "personal_datasets_waiting_queue")} ${escapeText(data.personalized_labeler_entry_path || "/my-datasets")}; personal work=${escapeText(data.personal_work_page_path || "/my-work")}; canonical queue fallback=${escapeText(data.dataset_queue_page_path || "/datasets")}; dashboard fallback=${escapeText(data.dashboard_path || "/work")}</div>` +
+        `<div class="row"><b>Assignment ownership</b>: scope=${escapeText((data.single_owner_policy || {}).assignment_scope || "recording")}; key=${escapeText((data.single_owner_policy || {}).recording_assignment_key || "recording_id")}; one current row per recording=${escapeText((data.single_owner_policy || {}).one_current_assignment_row_per_recording)}; one active owner per recording=${escapeText((data.single_owner_policy || {}).one_active_owner)}; multiple labelers per recording allowed=${escapeText((data.single_owner_policy || {}).multiple_labelers_per_recording_allowed)}; schema primary key=${escapeText((data.single_owner_policy || {}).schema_enforced_recording_primary_key)}; reassignment replaces owner=${escapeText((data.single_owner_policy || {}).reassignment_replaces_owner)}; stale sessions close=${escapeText((data.single_owner_policy || {}).stale_sessions_closed_on_reassignment)}; browser mutation requires current owner=${escapeText((data.single_owner_policy || {}).browser_mutation_requires_current_assignment_owner)}; raw changes block open sessions=${escapeText((data.single_owner_policy || {}).raw_assignment_change_blocks_open_sessions)}</div>` +
+        `<div class="row"><b>Assignment ownership integrity</b>: ok=${escapeText((data.assignment_ownership_integrity || {}).ok)}; active assignments=${escapeText((data.assignment_ownership_integrity || {}).active_assignment_count || 0)}; unique active recordings=${escapeText((data.assignment_ownership_integrity || {}).unique_active_recording_count || 0)}; duplicate active owners=${escapeText((data.assignment_ownership_integrity || {}).duplicate_active_owner_count || 0)}</div>` +
+        `<div class="row"><b>Identity probe</b>: <a href="${escapeText((data.identity_source_policy || {}).identity_probe_path || "/identity")}">${escapeText((data.identity_source_policy || {}).identity_probe_path || "/identity")}</a>; expected-user probe=${escapeText((data.identity_source_policy || {}).expected_user_probe_supported)}</div>` +
+        `<div class="row"><b>Operator boundary</b>: admin routes require operator=${escapeText((data.operator_authorization_policy || {}).admin_routes_require_operator)}; admins configured=${escapeText((data.operator_authorization_policy || {}).admin_users_configured)}; ready=${escapeText((data.operator_authorization_policy || {}).operator_boundary_ready)}</div>` +
+        `<div class="row"><b>Operator policy</b>: non-admin error=${escapeText((data.operator_authorization_policy || {}).admin_required_error || "admin_required")}; runtime preflight required=${escapeText((data.operator_authorization_policy || {}).runtime_preflight_required)}</div>` +
+        `<div class="row"><b>Operator recovery policy</b>: reopen operator-only=${escapeText((data.operator_recovery_policy || {}).task_reopen_operator_only)}; validate target before session closure=${escapeText((data.operator_recovery_contract || {}).reassignment_target_validated_before_session_closure)}; session closure/update atomic=${escapeText((data.operator_recovery_contract || {}).session_closure_and_assignment_update_atomic)}; reassignment closes previous owner sessions=${escapeText((data.operator_recovery_contract || {}).reassignment_closes_previous_owner_sessions)}; before owner update=${escapeText((data.operator_recovery_contract || {}).reassignment_closes_previous_owner_sessions_before_assignment_update)}; reassignment session repair=${escapeText((data.operator_recovery_policy || {}).reassignment_session_repair_route || "")}; event lookup=${escapeText((data.operator_recovery_policy || {}).audit_event_lookup_route || "")}; retry route=${escapeText((data.operator_recovery_policy || {}).failed_promotion_retry_route || "")}; rollback gate=${escapeText((data.operator_recovery_policy || {}).validation_gate || "operator_recovery_contract")}</div>` +
+        `<div class="row"><b>Trusted auth header</b>: ${escapeText(data.preflight.trusted_auth_header_enabled)}</div>` +
+        `<div class="row"><b>Signed links</b>: ${escapeText(data.preflight.signed_links_enabled)}</div>` +
+        `<div class="row"><b>Task-specific signed links</b>: ${escapeText((data.signed_link_policy || {}).task_specific_links || "")}; auth grant=${escapeText((data.signed_link_policy || {}).authorization_grant)}</div>` +
+        `<div class="row"><b>Signed link not-before</b>: ${escapeText(data.preflight.link_not_before_utc || "none")}</div>` +
+        `<div class="row"><b>Zarr backup policy</b>: gate=${escapeText((data.zarr_backup_policy || {}).validation_gate || "mutable_zarr_backup_confirmation")}; copy before labeling=${escapeText((data.zarr_backup_policy || {}).copy_before_labeling)}; labelers receive backup paths=${escapeText(!((data.zarr_backup_policy || {}).labelers_do_not_receive_backup_paths))}</div>` +
+        `<div class="row"><b>Mutation audit policy</b>: store=${escapeText((data.mutation_audit_policy || {}).event_store || "labeling_task_events")}; server records events=${escapeText((data.mutation_audit_policy || {}).server_records_events)}; append-only=${escapeText((data.mutation_audit_policy || {}).append_only)}</div>` +
+        `<div class="row"><b>Mutation write policy</b>: ready=${escapeText((data.browser_mutation_write_checklist || {}).ready)}; authoritative=${escapeText((data.browser_mutation_write_policy || {}).authoritative_label_state || "assigned_task_zarr_scope")}; mutable data plane=${escapeText((data.browser_mutation_write_checklist || data.browser_mutation_write_policy || {}).mutable_label_data_plane || "task_scoped_training_zarr")}; label target=${escapeText((data.browser_mutation_write_checklist || data.browser_mutation_write_policy || {}).label_mutation_target_kind || "")}; browser label write target=${escapeText((data.browser_mutation_write_checklist || data.browser_mutation_write_policy || {}).browser_label_write_target || "")}; CSV/handoff role=${escapeText((data.browser_mutation_write_checklist || data.browser_mutation_write_policy || {}).csv_handoff_artifact_role || "")}; CSV/handoff label targets=${escapeText((data.browser_mutation_write_checklist || data.browser_mutation_write_policy || {}).csv_handoff_artifacts_are_label_write_targets)}; handoff CSV label targets=${escapeText((data.browser_mutation_write_checklist || data.browser_mutation_write_policy || {}).handoff_csv_artifacts_are_label_write_targets)}; intermediate CSV label targets=${escapeText((data.browser_mutation_write_checklist || data.browser_mutation_write_policy || {}).intermediate_csv_artifacts_are_label_write_targets)}; training Zarr server-owned=${escapeText((data.browser_mutation_write_policy || {}).training_zarr_mutations_are_server_owned)}; handoffs metadata-only=${escapeText((data.browser_mutation_write_policy || {}).handoff_artifacts_are_metadata_only)}; browser writes CSV/handoff=${escapeText((data.browser_mutation_write_policy || {}).browser_writes_csv_or_handoff_files)}; browser writes handoff CSV=${escapeText((data.browser_mutation_write_policy || {}).browser_writes_handoff_csv)}; browser writes intermediate CSV=${escapeText((data.browser_mutation_write_policy || {}).browser_writes_intermediate_csv)}</div>` +
+        `<div class="row"><b>Runtime validation gate CLI</b>: preferred=${escapeText((data.runtime_operator_validation_gate_cli_policy || {}).preferred_require_flag || "")}; legacy=${escapeText((data.runtime_operator_validation_gate_cli_policy || {}).legacy_require_flag || "")}; checklist=${escapeText((data.runtime_operator_validation_gate_cli_policy || {}).validation_checklist_flag || "")}; protects Start/Open=${escapeText((data.runtime_operator_validation_gate_cli_policy || {}).protects_browser_start_open)}; protects mutations=${escapeText((data.runtime_operator_validation_gate_cli_policy || {}).protects_browser_mutations)}</div>` +
+        `<div class="row"><b>Operator validation start gate</b>: required=${escapeText((data.operator_validation_start_gate || {}).required_for_browser_start)}; configured=${escapeText((data.operator_validation_start_gate || {}).validation_checklist_configured)}; ready=${escapeText((data.operator_validation_start_gate || {}).ready)}; blocks task open=${escapeText((data.operator_validation_start_gate || {}).blocks_task_open)}; status=${escapeText((data.operator_validation_start_gate || {}).operator_validation_status || "")}; pending gates=${escapeText(JSON.stringify((data.operator_validation_start_gate || {}).operator_validation_pending_gate_ids || []))}; missing evidence=${escapeText(JSON.stringify((data.operator_validation_start_gate || {}).operator_validation_required_missing_evidence_gate_ids || []))}; reason=${escapeText((data.operator_validation_start_gate || {}).not_ready_reason || "")}</div>` +
+        `<div class="row"><b>Operator validation mutation gate</b>: required=${escapeText((data.operator_validation_mutation_gate || {}).required_for_browser_mutation)}; configured=${escapeText((data.operator_validation_mutation_gate || {}).validation_checklist_configured)}; ready=${escapeText((data.operator_validation_mutation_gate || {}).ready)}; blocks browser mutation=${escapeText((data.operator_validation_mutation_gate || {}).blocks_browser_mutation)}; status=${escapeText((data.operator_validation_mutation_gate || {}).operator_validation_status || "")}; pending gates=${escapeText(JSON.stringify((data.operator_validation_mutation_gate || {}).operator_validation_pending_gate_ids || []))}; missing evidence=${escapeText(JSON.stringify((data.operator_validation_mutation_gate || {}).operator_validation_required_missing_evidence_gate_ids || []))}; reason=${escapeText((data.operator_validation_mutation_gate || {}).not_ready_reason || "")}</div>` +
+        `<div class="row"><b>Dataset queue direct start</b>: enabled=${escapeText((data.dataset_queue_direct_start_policy || {}).enabled)}; method=${escapeText((data.dataset_queue_direct_start_policy || {}).method || "POST")}; exact route=${escapeText((data.dataset_queue_direct_start_policy || {}).exact_route_required)}; row task match=${escapeText((data.dataset_queue_direct_start_policy || {}).endpoint_task_segment_must_match_row_task_id)}; browser label write target=${escapeText((data.dataset_queue_direct_start_policy || {}).browser_label_write_target || "")}; handoff CSV label targets=${escapeText((data.dataset_queue_direct_start_policy || {}).handoff_csv_artifacts_are_label_write_targets)}; intermediate CSV label targets=${escapeText((data.dataset_queue_direct_start_policy || {}).intermediate_csv_artifacts_are_label_write_targets)}; browser writes CSV/handoff=${escapeText((data.dataset_queue_direct_start_policy || {}).browser_writes_csv_or_handoff_files)}; browser writes handoff CSV=${escapeText((data.dataset_queue_direct_start_policy || {}).browser_writes_handoff_csv)}; browser writes intermediate CSV=${escapeText((data.dataset_queue_direct_start_policy || {}).browser_writes_intermediate_csv)}; browser receives zarr write=${escapeText((data.dataset_queue_direct_start_policy || {}).browser_receives_zarr_write_authority)}; browser direct zarr write=${escapeText((data.dataset_queue_direct_start_policy || {}).browser_has_direct_zarr_write_authority)}</div>` +
+        `<div class="row"><b>Labeler route authorization</b>: known user=${escapeText((data.labeler_route_authorization_policy || {}).known_assignment_store_user_required)}; expected-user match=${escapeText((data.labeler_route_authorization_policy || {}).expected_user_must_match_resolved_user)}; active assignment=${escapeText((data.labeler_route_authorization_policy || {}).task_open_requires_active_assignment)}; startable task state=${escapeText((data.labeler_route_authorization_policy || {}).task_open_requires_startable_task_state)}; startable states=${escapeText(JSON.stringify((data.labeler_route_authorization_policy || {}).startable_task_states || []))}; signed links grant auth=${escapeText(!((data.labeler_route_authorization_policy || {}).signed_links_are_entry_hints_not_authorization))}; forwarded links recheck identity=${escapeText((data.labeler_route_authorization_policy || {}).forwarded_expected_user_links_recheck_identity)}; signed links recheck runtime start gate=${escapeText((data.labeler_route_authorization_policy || {}).forwarded_signed_links_recheck_runtime_operator_validation_start_gate)}</div>` +
+        `<div class="row"><b>Browser response security policy</b>: no-store=${escapeText((data.browser_response_security_policy || {}).no_store_cache)}; clickjacking=${escapeText((data.browser_response_security_policy || {}).clickjacking_protection)}; proxy preserves headers=${escapeText((data.browser_response_security_policy || {}).proxy_must_preserve_headers)}; protected routes=${escapeText(JSON.stringify((data.browser_response_security_policy || {}).protected_labeler_paths || []))}; personalized aliases=${escapeText(JSON.stringify((data.browser_response_security_policy || {}).personalized_alias_paths || []))}; alias headers match canonical=${escapeText((data.browser_response_security_policy || {}).personalized_alias_headers_must_match_canonical)}</div>` +
+        `<div class="row"><b>Operator validation commands</b>: count=${escapeText((data.operator_validation_command_templates || {}).command_count || 0)}; ids=${escapeText(JSON.stringify((data.operator_validation_command_templates || {}).command_ids || []))}; Labelers should not run operator evidence, repair, checksum, or validation commands</div>` +
+        rowsHtml(operatorValidationCommands, (command) => `<div class="row"><b>${escapeText(command.label || command.id || "operator command")}</b><br><code>${escapeText(command.command || "")}</code><br><span class="muted">gates ${escapeText(JSON.stringify(command.gate_ids || []))}; checksum refresh ${escapeText(command.requires_checksum_refresh_after_run)}</span></div>`) +
+        `<div class="row"><b>Session guard policy</b>: current session required=${escapeText((data.session_guard_policy || {}).requires_current_session)}; stale-tab saves rejected=${escapeText((data.session_guard_policy || {}).stale_tab_save_rejected)}; closure events=${escapeText((data.session_guard_policy || {}).session_closure_event_support)}</div>` +
+        `<div class="row"><b>Same-origin POST guard</b>: ${escapeText(data.preflight.same_origin_post_guard_enabled)}</div>` +
+        `<div class="row"><b>Completed tasks read-only</b>: ${escapeText((data.task_state_policy || {}).completed_tasks_read_only)}</div>` +
+        `<div class="row"><b>Service access log</b>: ${escapeText(data.preflight.access_log_enabled)}</div>` +
+        `<div class="row"><b>Allow non-loopback bind</b>: ${escapeText(data.preflight.allow_non_loopback)}</div>` +
+        `<div class="row"><b>Production mode</b>: ${escapeText(data.preflight.production_enabled)}</div>` +
+        `<div class="row"><b>Admins</b>: ${escapeText((data.preflight.admin_users || []).join(", ") || "none")}</div>` +
+        rowsHtml(data.preflight.warnings || [], (warning) => `<div class="row bad">${escapeText(warning)}</div>`);
+      document.getElementById("browser-workflows").innerHTML = rowsHtml(data.browser_workflows || [], (workflow) =>
+        {
+          const contract = workflow.write_contract || {};
+          const authority = workflow.client_authority || {};
+          const provenance = contract.audit_provenance || {};
+          const retry = contract.retry_policy || {};
+          const contractText = contract.save_endpoint
+            ? `POST ${contract.save_endpoint} -> ${contract.audit_event || "audit event unspecified"}`
+            : "No mutable save endpoint.";
+          const provenanceText = provenance.event_store
+            ? `Audit store ${provenance.event_store}; timestamp ${provenance.timestamp_field || "created_at_utc"}.`
+            : "Audit provenance contract unspecified.";
+          const retryText = retry.same_payload_retry_safe
+            ? "Same-payload retry is data-safe; audit remains append-only."
+            : "Retry policy requires operator review.";
+          const authorityText =
+            authority.browser_can_write_zarr === false && authority.browser_can_write_filesystem === false
+              ? "Browser submits edits; server performs zarr/filesystem writes."
+              : "Review browser write authority before inviting labelers.";
+          return `<div class="row"><b>${escapeText(workflow.workflow_kind)}</b>: ${escapeText(workflow.label)}
+        <br><span class="muted">${escapeText(workflow.write_scope || workflow.notes || "")}</span>
+        <br><span class="muted">${escapeText(contractText)}</span>
+        <br><span class="muted">${escapeText(provenanceText)}</span>
+        <br><span class="muted">${escapeText(retryText)}</span>
+        <br><span class="muted">${escapeText(authorityText)}</span></div>`;
+        }
+      );
+      document.getElementById("workflow-counts").innerHTML = countsHtml(data.workflow_counts);
+      const dashboardHref = new URL(data.dashboard_path || "/work", window.location.href).href;
+      const datasetQueueHref = new URL(data.dataset_queue_page_path || "/datasets", window.location.href).href;
+      const readyInvitationText = (data.dashboard_users || [])
+        .filter((row) => row.copy_intent === "ready_row_draft")
+        .map((row) => {
+          if (row.invitation_message) return row.invitation_message;
+          const rowLandingHref = row.expected_user_labeler_landing_url
+            ? new URL(row.expected_user_labeler_landing_url, window.location.href).href
+            : "";
+          const rowDashboardHref = new URL(row.expected_user_dashboard_url || data.dashboard_path || "/work", window.location.href).href;
+          const rowIdentityHref = new URL(row.expected_user_identity_probe_url || "/identity", window.location.href).href;
+          const rowDatasetHref = new URL(row.expected_user_dataset_queue_url || row.expected_user_dashboard_url || data.dashboard_path || "/work", window.location.href).href;
+          const rowLabelingHomeHref = new URL(row.expected_user_labeling_home_url || row.expected_user_labeler_landing_url || row.expected_user_dataset_queue_url || row.expected_user_dashboard_url || data.dashboard_path || "/work", window.location.href).href;
+          const rowPreferredHref = new URL(row.personalized_labeler_entry_url || row.expected_user_personal_dataset_queue_url || row.preferred_labeler_entry_url || row.expected_user_dataset_queue_url || row.expected_user_labeler_landing_url || row.expected_user_dashboard_url || data.dashboard_path || "/work", window.location.href).href;
+          const landingText = rowLandingHref ? ` Queue-first start page: ${rowLandingHref}.` : "";
+          return `Your Palette labeling work is ready. Start here: ${rowPreferredHref}.${landingText} Human-readable labeling home alias: ${rowLabelingHomeHref}. Open your personalized dataset queue: ${rowPreferredHref}. Canonical dataset queue fallback: ${rowDatasetHref}. Full dashboard fallback: ${rowDashboardHref}. First open the identity check: ${rowIdentityHref}; confirm it reports you as ${row.user} before labeling. Sign in as ${row.user}. Confirm the dashboard shows you as ${row.user} before opening work; if it shows another user, stop and contact the operator. No local Palette or Crimson installation is needed. Use the browser controls only; do not edit zarr files directly or forward this link. Browser saves are applied server-side to your assigned task/training Zarr scope; CSV, HTML, JSON, and handoff files are metadata only. Each recording has one active assigned owner, and only that current assignee can open or save browser labeling work.`;
+        })
+        .join("\n\n");
+      const readyInvitationBlock = readyInvitationText
+        ? `<div class="row"><b>Ready rows only; safe-share review required</b><br><span class="muted">Excludes not-ready diagnostic notes. Do not send until inspect-handoff --require-shareable reports labeler_links_safe_to_share=true.</span><br><button type="button" onclick="copyInvitation(this)">Copy ready-row draft text</button><br><textarea readonly>${escapeText(readyInvitationText)}</textarea></div>`
+        : `<div class="row"><b>Ready rows only; safe-share review required</b>: <span class="muted">none</span></div>`;
+      document.getElementById("dashboard-users").innerHTML =
+        `<div class="row"><b>Dashboard</b>: <a href="${escapeText(dashboardHref)}">${escapeText(dashboardHref)}</a></div>` +
+        `<div class="row"><b>Dataset queue page</b>: <a href="${escapeText(datasetQueueHref)}">${escapeText(datasetQueueHref)}</a></div>` +
+        `<div class="row"><b>Ready rows</b>: ${escapeText((data.dashboard_user_counts || {}).ready_to_invite || 0)} &middot; ` +
+        `<b>Not-ready rows</b>: ${escapeText((data.dashboard_user_counts || {}).not_ready_to_invite || 0)} &middot; ` +
+        `<span class="muted">ready rows are draft text only until safe-share inspection passes</span></div>` +
+        `<div class="row"><b>Ready-row draft users</b>: ${escapeText(((data.dashboard_user_counts || {}).ready_row_draft_users || (data.dashboard_user_counts || {}).ready_to_invite_users || []).join(", ") || "none")}</div>` +
+        `<div class="row"><b>Diagnostic-note users</b>: ${escapeText(((data.dashboard_user_counts || {}).diagnostic_note_users || (data.dashboard_user_counts || {}).not_ready_to_invite_users || []).join(", ") || "none")}</div>` +
+        `<div class="row"><b>Identity probes</b>: ${escapeText((data.dashboard_user_counts || {}).identity_probe_available || 0)}/${escapeText((data.dashboard_user_counts || {}).identity_probe_required || 0)} available &middot; ` +
+        `<b>Missing</b>: ${escapeText((data.dashboard_user_counts || {}).identity_probe_missing || 0)} &middot; ` +
+        `<span class="muted">${escapeText(((data.dashboard_user_counts || {}).identity_probe_missing_users || []).join(", ") || "none")}</span></div>` +
+        `<div class="row"><b>Dataset queue</b>: ${escapeText((data.dashboard_user_counts || {}).waiting_datasets || 0)} waiting datasets &middot; ` +
+        `${escapeText((data.dashboard_user_counts || {}).dataset_open_tasks || 0)} startable queue tasks &middot; ` +
+        `${escapeText((data.dashboard_user_counts || {}).users_with_waiting_datasets || 0)} users</div>` +
+        `<div class="row"><b>Queue start readiness</b>: ${escapeText((data.dataset_queue_start_readiness || {}).status || "unknown")} &middot; ` +
+        `blocked users ${escapeText(((data.dataset_queue_start_readiness || {}).dataset_queue_blocked_start_users || []).join(", ") || "none")}</div>` +
+        `<div class="row"><b>Queue states</b>: ${escapeText(JSON.stringify((data.dataset_queue_start_readiness || {}).dataset_queue_states || {}))}</div>` +
+        `<div class="row"><b>Personalized queue previews</b>: ` +
+        `personalized_dataset_queue_preview_users=${escapeText(((data.dashboard_user_counts || {}).personalized_dataset_queue_preview_users || []).join(", ") || "none")} &middot; ` +
+        `all_users_have_personalized_dataset_queue_preview=${escapeText((data.dashboard_user_counts || {}).all_users_have_personalized_dataset_queue_preview === true ? "true" : "false")}</div>` +
+        `<div class="row"><b>Missing personalized queue previews</b>: ` +
+        `missing_personalized_dataset_queue_preview_users=${escapeText(((data.dashboard_user_counts || {}).missing_personalized_dataset_queue_preview_users || []).join(", ") || "none")}</div>` +
+        `<div class="row"><b>Preferred personal queue matches</b>: ` +
+        `preferred_personal_queue_match_users=${escapeText(((data.dashboard_user_counts || {}).preferred_personal_queue_match_users || []).join(", ") || "none")} &middot; ` +
+        `all_users_have_preferred_personal_queue_match=${escapeText((data.dashboard_user_counts || {}).all_users_have_preferred_personal_queue_match === true ? "true" : "false")} &middot; ` +
+        `missing_preferred_personal_queue_match_users=${escapeText(((data.dashboard_user_counts || {}).missing_preferred_personal_queue_match_users || []).join(", ") || "none")}</div>` +
+        `<div class="row"><b>Personalized personal queue matches</b>: ` +
+        `personalized_personal_queue_match_users=${escapeText(((data.dashboard_user_counts || {}).personalized_personal_queue_match_users || []).join(", ") || "none")} &middot; ` +
+        `all_users_have_personalized_personal_queue_match=${escapeText((data.dashboard_user_counts || {}).all_users_have_personalized_personal_queue_match === true ? "true" : "false")} &middot; ` +
+        `missing_personalized_personal_queue_match_users=${escapeText(((data.dashboard_user_counts || {}).missing_personalized_personal_queue_match_users || []).join(", ") || "none")}</div>` +
+        `<div class="row"><b>Canonical queue previews</b>: ` +
+        `canonical_dataset_queue_preview_users=${escapeText(((data.dashboard_user_counts || {}).canonical_dataset_queue_preview_users || []).join(", ") || "none")}</div>` +
+        `<div class="row"><b>Queue entry roles</b>: ` +
+        `dataset_queue_preferred_entrypoint_counts=${escapeText(JSON.stringify((data.dashboard_user_counts || {}).dataset_queue_preferred_entrypoint_counts || {}))} &middot; ` +
+        `dataset_queue_link_role_counts=${escapeText(JSON.stringify((data.dashboard_user_counts || {}).dataset_queue_link_role_counts || {}))}</div>` +
+        `<div class="row"><b>Completion</b>: ${escapeText((data.dashboard_user_counts || {}).complete_tasks || 0)} / ${escapeText((data.dashboard_user_counts || {}).total_tasks || 0)} tasks complete (${escapeText((data.dashboard_user_counts || {}).completion_percent ?? "n/a")}%)</div>` +
+        `<div class="row"><b>Completion states</b>: ${escapeText(JSON.stringify((data.dashboard_user_counts || {}).completion_states || {}))}</div>` +
+        `<div class="row"><b>Ready states</b>: ${escapeText(JSON.stringify((data.dashboard_user_counts || {}).ready_states || {}))}</div>` +
+        `<div class="row"><b>Invite reasons</b>: ${escapeText(JSON.stringify((data.dashboard_user_counts || {}).invite_reasons || {}))}</div>` +
+        `<div class="row"><b>Copy intents</b>: ${escapeText(JSON.stringify((data.dashboard_user_counts || {}).copy_intents || {}))}</div>` +
+        `<div class="row"><b>Invite actions</b>: ${escapeText((data.dashboard_invite_actions || []).join(" "))}</div>` +
+        readyInvitationBlock +
+        rowsHtml(data.dashboard_users, (row) => {
+          const status = row.ready_to_invite
+            ? "ready row draft; safe-share review required"
+            : `not-ready diagnostic row: ${(row.invite_reasons || []).join(", ") || "operator_review_required"}`;
+          const actions = [
+            ...(row.invite_actions || []),
+            ...(row.recordings_without_open_tasks_actions || [])
+          ].filter(Boolean).join(" ");
+          const rowLandingHref = row.expected_user_labeler_landing_url
+            ? new URL(row.expected_user_labeler_landing_url, window.location.href).href
+            : "";
+          const rowDashboardHref = new URL(row.expected_user_dashboard_url || data.dashboard_path || "/work", window.location.href).href;
+          const rowIdentityHref = new URL(row.expected_user_identity_probe_url || "/identity", window.location.href).href;
+          const rowDatasetQueueHref = (row.expected_user_dataset_queue_url || row.dataset_queue_preview_url)
+            ? new URL(row.expected_user_dataset_queue_url || row.dataset_queue_preview_url, window.location.href).href
+            : "";
+          const datasetQueueLink = rowDatasetQueueHref
+            ? `<br><a href="${escapeText(rowDatasetQueueHref)}">Open dataset queue</a>`
+            : "";
+          const landingLink = rowLandingHref
+            ? `<br><a href="${escapeText(rowLandingHref)}">Open datasets-waiting page</a>`
+            : "";
+          const rowLabelingHomeHref = new URL(row.expected_user_labeling_home_url || row.expected_user_labeler_landing_url || row.expected_user_dataset_queue_url || row.expected_user_dashboard_url || data.dashboard_path || "/work", window.location.href).href;
+          const rowPreferredHref = new URL(row.personalized_labeler_entry_url || row.expected_user_personal_dataset_queue_url || row.preferred_labeler_entry_url || row.expected_user_dataset_queue_url || row.expected_user_labeler_landing_url || row.expected_user_dashboard_url || data.dashboard_path || "/work", window.location.href).href;
+          const invitation = row.ready_to_invite
+            ? (row.invitation_message || `Your Palette labeling work is ready. Start here: ${rowPreferredHref}. ${rowLandingHref ? `Queue-first start page: ${rowLandingHref}. ` : ""}Human-readable labeling home alias: ${rowLabelingHomeHref}. Open your personalized dataset queue: ${rowPreferredHref}. Canonical dataset queue fallback: ${rowDatasetQueueHref || rowDashboardHref}. Full dashboard fallback: ${rowDashboardHref}. First open the identity check: ${rowIdentityHref}; confirm it reports you as ${row.user} before labeling. Sign in as ${row.user}. Confirm the dashboard shows you as ${row.user} before opening work; if it shows another user, stop and contact the operator. No local Palette or Crimson installation is needed. Use the browser controls only; do not edit zarr files directly or forward this link. Browser saves are applied server-side to your assigned task/training Zarr scope; CSV, HTML, JSON, and handoff files are metadata only. Each recording has one active assigned owner, and only that current assignee can open or save browser labeling work.`)
+            : (row.invitation_message || "");
+          const copyLabel = row.copy_label || (row.ready_to_invite ? "Copy ready-row draft" : "Copy not-ready note");
+          return `<div class="row"><b><a href="/admin/users/${encodeURIComponent(row.user || "")}">${escapeText(row.user)}</a></b> ${escapeText(status)}
+          <br><span class="muted">${escapeText(row.open_tasks)} startable tasks &middot; ${escapeText(row.waiting_datasets || 0)} waiting datasets &middot; ${escapeText(row.complete_tasks || 0)}/${escapeText(row.total_tasks || 0)} complete &middot; ${escapeText(row.completion_state || "unknown")} &middot; ${escapeText(row.recordings)} recordings &middot; no-startable ${escapeText(row.recordings_without_open_tasks)}${actions ? " &middot; next: " + escapeText(actions) : ""}</span>
+          <br><span class="muted">entry=${escapeText(row.preferred_labeler_entrypoint || "")} &middot; personal_queue=${escapeText(row.personal_dataset_queue_link_role || "")} &middot; canonical_queue=${escapeText(row.canonical_dataset_queue_link_role || "")} &middot; preferred_matches_personal_queue=${escapeText(row.preferred_labeler_entry_url_matches_personal_dataset_queue === true ? "true" : "false")} &middot; personalized_matches_personal_queue=${escapeText(row.personalized_labeler_entry_url_matches_personal_dataset_queue === true ? "true" : "false")}</span>
+          ${landingLink}
+          ${datasetQueueLink}
+          <br><button type="button" onclick="copyInvitation(this)">${escapeText(copyLabel)}</button>
+          <br><textarea readonly>${escapeText(invitation)}</textarea></div>`;
+        });
+      document.getElementById("active-sessions").innerHTML =
+        `<div class="row"><b>Active users</b>: ${escapeText(JSON.stringify(data.active_session_user_counts || {}))}</div>` +
+        `<div class="row"><b>Active workflows</b>: ${escapeText(JSON.stringify(data.active_session_workflow_counts || {}))}</div>` +
+        `<div class="row"><b>Stale users</b>: ${escapeText(JSON.stringify(data.stale_session_user_counts || {}))}</div>` +
+        `<div class="row"><b>Stale workflows</b>: ${escapeText(JSON.stringify(data.stale_session_workflow_counts || {}))}</div>` +
+        rowsHtml(data.active_sessions, (row) =>
+        `<div class="row"><b>${escapeText(row.user)}</b> ${escapeText(row.workflow_kind)} ${recordingAdminLink(row.recording_id)}
+        <br><span class="muted">expires ${escapeText(row.expires_at_utc)} | task ${escapeText(row.task_id)}</span></div>`
+      );
+      document.getElementById("failed-promotions").innerHTML = rowsHtml(data.failed_promotions, (row) => {
+        const target = row.target || {};
+        const after = row.after || {};
+        return `<div class="row"><b class="bad">${recordingAdminLink(row.recording_id)}</b> ${escapeText(row.assignee_user)}
+        <br>${escapeText(row.created_at_utc)} | frame=${escapeText(target.source_frame_index ?? target.parent_frame_index ?? "")}
+        <br><a href="/admin/tasks/${encodeURIComponent(row.task_id || "")}">Task ${escapeText(row.task_id || "")}</a>
+        <br>${escapeText(after.details || after.error || "promotion failed")}
+        <br><button type="button" onclick="retryAdminPromotion('${escapeText(row.event_id)}', this)">Retry promotion</button></div>`;
+      });
+      document.getElementById("audit-summary").innerHTML =
+        `<div class="row"><b>Recent task events</b>: ${escapeText(data.recent_audit_event_count || 0)}</div>` +
+        `<div class="row"><b>By user</b>: ${escapeText(JSON.stringify(data.recent_audit_event_user_counts || {}))}</div>` +
+        `<div class="row"><b>By event type</b>: ${escapeText(JSON.stringify(data.recent_audit_event_type_counts || {}))}</div>` +
+        `<div class="row"><b>By workflow</b>: ${escapeText(JSON.stringify(data.recent_audit_event_workflow_counts || {}))}</div>` +
+        rowsHtml(data.recent_audit_events || [], (row) =>
+          `<div class="row"><b>${escapeText(row.user)}</b> ${escapeText(row.event_type)} ${recordingAdminLink(row.recording_id)}
+          <br><span class="muted">${escapeText(row.created_at_utc)} | ${escapeText(row.workflow_kind)} | task ${escapeText(row.task_id)}</span></div>`
+        );
+      document.getElementById("assignment-work-states").innerHTML =
+        `<div class="row"><b>Work states</b>: ${escapeText(JSON.stringify(data.assignment_work_state_counts || {}))}</div>` +
+        rowsHtml(data.assignment_operator_rows || [], (row) =>
+          `<div class="row"><b>${recordingAdminLink(row.recording_id)}</b> -> ${escapeText(row.assignee_user)}
+          <br><span class="muted">${escapeText(row.work_state)} | assignment ${escapeText(row.assignment_status)} | ${escapeText(row.open_tasks || 0)} open, ${escapeText(row.complete_tasks || 0)}/${escapeText(row.total_tasks || 0)} complete</span></div>`
+        );
+      document.getElementById("tasks").innerHTML = rowsHtml(data.tasks || [], (row) =>
+        `<div class="row"><b><a href="/admin/tasks/${encodeURIComponent(row.task_id || "")}">${escapeText(row.task_id || "")}</a></b> ${escapeText(row.workflow_kind || "")}
+        <br><span class="muted">${recordingAdminLink(row.recording_id || "")} -> ${escapeText(row.assignee_user || "")} | state ${escapeText(row.state || "")} | assignment ${escapeText(row.assignment_status || "")}</span></div>`
+      );
+      document.getElementById("assignments").innerHTML = rowsHtml(data.assignments, (row) =>
+        `<div class="row"><b>${recordingAdminLink(row.recording_id)}</b> -> ${escapeText(row.assignee_user)}
+        <br><span class="muted">${escapeText(row.status)} | ${escapeText(row.notes || "")}</span></div>`
+      );
+    }
+    document.getElementById("assignment-form").addEventListener("submit", saveAssignment);
+    document.getElementById("audit-event-lookup-form").addEventListener("submit", lookupAuditEvent);
+    load().catch((error) => alert(error.message || String(error)));
+  </script>
+</body>
+</html>

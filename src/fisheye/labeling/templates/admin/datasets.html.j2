@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Palette labeling datasets admin</title>
+  <style>
+    :root {
+      --ink: #17201a;
+      --muted: #5f6d62;
+      --line: #d8ded5;
+      --card: #fffdf5;
+      --accent: #0f6f5c;
+      --bad: #9a3027;
+      --warn: #a75f00;
+      --shadow: rgba(23, 32, 26, 0.12);
+    }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 88% 12%, rgba(15, 111, 92, 0.16), transparent 28rem),
+        linear-gradient(135deg, #f8f0dc, #eef6ef 62%, #fffaf0);
+      color: var(--ink);
+      font-family: "Trebuchet MS", Verdana, sans-serif;
+    }
+    main {
+      max-width: 1320px;
+      margin: 0 auto;
+      padding: 34px 18px 64px;
+    }
+    h1 {
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(2.2rem, 5vw, 4.6rem);
+      letter-spacing: -0.055em;
+      line-height: 0.92;
+      margin: 8px 0 16px;
+    }
+    a {
+      color: var(--accent);
+      font-weight: 800;
+      text-decoration: none;
+    }
+    .muted {
+      color: var(--muted);
+    }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 12px;
+      margin: 22px 0;
+    }
+    .stat, .dataset {
+      background: rgba(255, 253, 245, 0.92);
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      box-shadow: 0 14px 36px var(--shadow);
+      padding: 16px;
+    }
+    .stat b {
+      display: block;
+      font-size: 1.7rem;
+    }
+    .toolbar {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 10px;
+      align-items: end;
+      margin: 18px 0;
+    }
+    input, select {
+      box-sizing: border-box;
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 0.7rem 0.9rem;
+      background: #fffdf8;
+      color: var(--ink);
+      font: inherit;
+    }
+    button {
+      border: 0;
+      border-radius: 999px;
+      background: var(--accent);
+      color: white;
+      padding: 0.75rem 1rem;
+      cursor: pointer;
+      font-weight: 800;
+    }
+    .dataset {
+      margin: 14px 0;
+    }
+    .dataset h2 {
+      margin: 0 0 8px;
+      overflow-wrap: anywhere;
+    }
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 10px 0;
+    }
+    .chip {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fffef9;
+      padding: 5px 9px;
+      font-size: 0.88rem;
+    }
+    .progress {
+      height: 12px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #e3e8df;
+      margin: 10px 0;
+    }
+    .progress span {
+      display: block;
+      height: 100%;
+      background: linear-gradient(90deg, #0f6f5c, #8eb35e);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+      font-size: 0.9rem;
+    }
+    th, td {
+      border-top: 1px solid var(--line);
+      padding: 8px 6px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    details {
+      margin-top: 5px;
+    }
+    .bad {
+      color: var(--bad);
+      font-weight: 800;
+    }
+    .warn {
+      color: var(--warn);
+      font-weight: 800;
+    }
+    @media (max-width: 900px) {
+      .summary, .toolbar {
+        grid-template-columns: 1fr;
+      }
+      table, thead, tbody, th, td, tr {
+        display: block;
+      }
+      th {
+        display: none;
+      }
+      td {
+        border-top: 0;
+        padding: 5px 0;
+      }
+      tr {
+        border-top: 1px solid var(--line);
+        padding: 10px 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <a href="/admin" class="muted">Admin home</a> &middot; <a href="/work" class="muted">Work dashboard</a>
+    <h1>Assigned dataset progress</h1>
+    <p class="muted">Operator view over the labeling store: assignments, generated browser tasks, active sessions, latest events, and progress. The SQLite labeling store remains the source of truth for this page.</p>
+    <section class="summary">
+      <div class="stat"><b id="dataset-count">-</b><span>datasets</span></div>
+      <div class="stat"><b id="recording-count">-</b><span>recordings</span></div>
+      <div class="stat"><b id="open-task-count">-</b><span>open tasks</span></div>
+      <div class="stat"><b id="complete-task-count">-</b><span>complete tasks</span></div>
+      <div class="stat"><b id="blocked-recording-count">-</b><span>blocked recordings</span></div>
+      <div class="stat"><b id="active-session-count">-</b><span>active sessions</span></div>
+    </section>
+    <section class="toolbar">
+      <label>Search datasets, recordings, users, workflows<br><input id="search" type="search" placeholder="delahantyj RedScare keypoints"></label>
+      <label>Status<br><select id="status-filter"><option value="">All</option><option value="waiting">Waiting work</option><option value="blocked">Blocked</option><option value="complete">Complete</option></select></label>
+      <a class="chip" id="warnings-only-link" href="/admin/datasets?warnings=1">Warnings only</a>
+      <a class="chip" id="export-csv-link" href="/api/admin/datasets/export?format=csv">CSV export current server filter</a>
+      <a class="chip" id="export-json-link" href="/api/admin/datasets/export?format=json">JSON export current server filter</a>
+      <button type="button" id="refresh">Refresh</button>
+    </section>
+    <section id="registry-banner" class="dataset muted"></section>
+    <section id="scope-banner" class="dataset muted"></section>
+    <section id="content" class="muted">Loading admin dataset progress...</section>
+  </main>
+  <script>
+    let payload = null;
+    const initialAdminQuery = new URLSearchParams(window.location.search);
+    function adminApiQuery() {
+      const params = new URLSearchParams();
+      for (const key of ["dataset_id", "recording_id", "user", "assignee_user", "status", "warnings"]) {
+        const value = initialAdminQuery.get(key) || "";
+        if (value) params.set(key, value);
+      }
+      return params;
+    }
+    function focusUrl(params) {
+      const url = new URL("/admin/datasets", window.location.href);
+      for (const [key, value] of Object.entries(params || {})) {
+        if (value != null && String(value)) url.searchParams.set(key, String(value));
+      }
+      return url.pathname + url.search;
+    }
+    function adminExportUrl(format) {
+      const url = new URL("/api/admin/datasets/export", window.location.href);
+      url.searchParams.set("format", format);
+      for (const [key, value] of adminApiQuery().entries()) {
+        url.searchParams.set(key, value);
+      }
+      return url.pathname + url.search;
+    }
+    function warningsOnlyUrl() {
+      const url = new URL("/admin/datasets", window.location.href);
+      for (const [key, value] of adminApiQuery().entries()) {
+        if (key !== "warnings") url.searchParams.set(key, value);
+      }
+      url.searchParams.set("warnings", "1");
+      return url.pathname + url.search;
+    }
+    function escapeText(value) {
+      return String(value == null ? "" : value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+    function countText(counts) {
+      return Object.entries(counts || {}).map(([key, value]) => `${key}:${value}`).join(", ") || "none";
+    }
+    function rowSearchText(dataset) {
+      return [
+        dataset.dataset_id,
+        dataset.dataset_label,
+        (dataset.assignees || []).join(" "),
+        JSON.stringify(dataset.workflow_counts || {}),
+        ...(dataset.recordings || []).flatMap((recording) => [
+          recording.recording_id,
+          recording.assignee_user,
+          recording.assignment_status,
+          recording.assignment_notes,
+          JSON.stringify(recording.workflow_counts || {}),
+          ...(recording.tasks || []).map((task) => `${task.title} ${task.workflow_kind} ${task.run_name} ${task.component_name}`)
+        ])
+      ].filter(Boolean).join(" ").toLowerCase();
+    }
+    function matchesStatus(dataset, status) {
+      if (!status) return true;
+      if (status === "waiting") return Number(dataset.open_task_count || 0) > 0;
+      if (status === "blocked") return Number(dataset.blocked_recording_count || 0) > 0;
+      if (status === "complete") return Number(dataset.task_count || 0) > 0 && Number(dataset.complete_task_count || 0) >= Number(dataset.task_count || 0);
+      return true;
+    }
+    function filteredDatasets() {
+      const search = document.getElementById("search").value.trim().toLowerCase();
+      const status = "";
+      return (payload.datasets || []).filter((dataset) => {
+        if (!matchesStatus(dataset, status)) return false;
+        if (search && !rowSearchText(dataset).includes(search)) return false;
+        return true;
+      });
+    }
+    function renderScopeBanner() {
+      const banner = document.getElementById("scope-banner");
+      const scope = Array.from(adminApiQuery().entries()).map(([key, value]) => `${key}=${value}`);
+      if (!scope.length) {
+        banner.style.display = "none";
+        banner.innerHTML = "";
+        return;
+      }
+      banner.style.display = "block";
+      banner.innerHTML = `<b>Focused admin view</b>: ${escapeText(scope.join(" | "))} &middot; <a href="/admin/datasets">clear scope</a>`;
+    }
+    function renderRegistryBanner() {
+      const banner = document.getElementById("registry-banner");
+      const registry = (payload && payload.registry) || {};
+      if (!registry.enabled) {
+        banner.style.display = "block";
+        banner.innerHTML = `<b>Registry join</b>: disabled. Set <code>PALETTE_REGISTRY_PATH</code> before starting the server to enrich this page with registry rows.`;
+        return;
+      }
+      if (!registry.available) {
+        banner.style.display = "block";
+        banner.innerHTML = `<b>Registry join</b>: unavailable at <code>${escapeText(registry.path || "")}</code>. ${escapeText(registry.error || "")}`;
+        return;
+      }
+      banner.style.display = "block";
+      banner.innerHTML = `<b>Registry join</b>: ${escapeText(registry.matched_row_count || 0)} matched rows from <code>${escapeText(registry.path || "")}</code>; tables scanned ${escapeText((registry.tables_scanned || []).join(", ") || "none")}; warnings ${escapeText((payload && payload.warning_count) || 0)}.`;
+    }
+    function renderTaskDetails(tasks) {
+      if (!tasks || !tasks.length) return `<span class="muted">No generated tasks.</span>`;
+      return `<details><summary>${tasks.length} tasks</summary>` + tasks.map((task) =>
+        `<div class="chip">${escapeText(task.workflow_kind || "task")} | ${escapeText(task.state || "")} | <a href="${escapeText(task.admin_task_url || "#")}">${escapeText(task.title || task.task_id || "")}</a>${task.component_name ? " | " + escapeText(task.component_name) : ""}${task.run_name ? " | " + escapeText(task.run_name) : ""}</div>`
+      ).join("") + `</details>`;
+    }
+    function renderRegistryDetails(summary, rows) {
+      const registrySummary = summary || {};
+      const registryRows = rows || [];
+      if (!Number(registrySummary.match_count || 0)) {
+        return `<span class="muted">registry: no match</span>`;
+      }
+      const summaryText = [
+        `${registrySummary.match_count || 0} registry rows`,
+        (registrySummary.statuses || []).length ? `status ${registrySummary.statuses.join(", ")}` : "",
+        (registrySummary.zarr_uses || []).length ? `zarr_use ${registrySummary.zarr_uses.join(", ")}` : "",
+        (registrySummary.artifact_kinds || []).length ? `artifact ${registrySummary.artifact_kinds.join(", ")}` : ""
+      ].filter(Boolean).join(" | ");
+      const rowHtml = registryRows.map((row) =>
+        `<div class="chip">${escapeText(row.table || "registry")} | ${escapeText(row.status || "")} | ${escapeText(row.zarr_use || "")} | ${escapeText(row.artifact_kind || "")}<br><span class="muted">${escapeText(row.zarr_path || "")}</span></div>`
+      ).join("");
+      return `<details><summary>${escapeText(summaryText)}</summary>${rowHtml || `<span class="muted">No registry rows included.</span>`}</details>`;
+    }
+    function renderRegistryWarnings(warnings) {
+      const warningRows = warnings || [];
+      if (!warningRows.length) return "";
+      const rowHtml = warningRows.map((warning) =>
+        `<div class="chip warn">${escapeText(warning.code || "registry_warning")}${warning.task_id ? " | task " + escapeText(warning.task_id) : ""}<br><span class="muted">${escapeText(warning.details || "")}</span></div>`
+      ).join("");
+      return `<details open><summary class="warn">${warningRows.length} registry warning${warningRows.length === 1 ? "" : "s"}</summary>${rowHtml}</details>`;
+    }
+    async function copyInvite(button) {
+      const user = button && button.dataset ? String(button.dataset.user || "") : "";
+      if (!user) return;
+      const originalText = button.textContent;
+      button.disabled = true;
+      button.textContent = "Signing...";
+      try {
+        const response = await fetch("/api/admin/invites/sign", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            user,
+            base_url: window.location.origin
+          })
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.details || payload.error || "invite signing failed");
+        }
+        const inviteUrl = payload.url || new URL(payload.path || "/", window.location.href).href;
+        await navigator.clipboard.writeText(inviteUrl);
+        button.textContent = "Copied invite";
+        window.setTimeout(() => { button.textContent = originalText; }, 1800);
+      } catch (error) {
+        button.textContent = "Invite failed";
+        alert(error.message || String(error));
+        window.setTimeout(() => { button.textContent = originalText; }, 2200);
+      } finally {
+        button.disabled = false;
+      }
+    }
+    function renderRecording(recording) {
+      const latest = recording.latest_event || {};
+      const latestSave = recording.latest_save_event || {};
+      const blocked = recording.blocked ? `<span class="bad">${escapeText(recording.blocked_reason || "blocked")}</span>` : "";
+      const sessionText = Number(recording.active_session_count || 0)
+        ? `${recording.active_session_count} active${Number(recording.stale_session_count || 0) ? ", " + recording.stale_session_count + " stale" : ""}`
+        : "none";
+      return `<tr>
+        <td><a href="${escapeText(recording.admin_recording_url || "#")}">${escapeText(recording.recording_id || "")}</a><br><a class="muted" href="${escapeText(focusUrl({recording_id: recording.recording_id || ""}))}">focus recording</a><br>${blocked}</td>
+        <td>${recording.assignee_user ? `<a href="${escapeText(focusUrl({user: recording.assignee_user}))}">${escapeText(recording.assignee_user)}</a>` : ""}<br><span class="muted">${escapeText(recording.assignment_status || "")}</span></td>
+        <td>${escapeText(recording.progress_percent || 0)}%<br><span class="muted">${escapeText(recording.complete_task_count || 0)}/${escapeText(recording.task_count || 0)} complete, ${escapeText(recording.open_task_count || 0)} open</span></td>
+        <td>${escapeText(countText(recording.workflow_counts))}<br>${renderTaskDetails(recording.tasks || [])}<br>${renderRegistryDetails(recording.registry_summary, recording.registry_rows)}<br>${renderRegistryWarnings(recording.registry_warnings || [])}</td>
+        <td>${escapeText(sessionText)}${Number(recording.failed_promotion_count || 0) ? `<br><span class="warn">${escapeText(recording.failed_promotion_count)} failed promotions</span>` : ""}</td>
+        <td>${escapeText(latest.event_type || "")}<br><span class="muted">${escapeText(latest.created_at_utc || "")}</span>${latestSave.event_id ? `<br><span class="muted">latest save ${escapeText(latestSave.event_id)}</span>` : ""}</td>
+        <td>${recording.expected_user_personal_dataset_queue_url ? `<a href="${escapeText(recording.expected_user_personal_dataset_queue_url)}">queue</a> ` : ""}${recording.expected_user_personal_work_url ? `<a href="${escapeText(recording.expected_user_personal_work_url)}">work</a>` : ""}${recording.assignee_user ? `<br><button type="button" data-user="${escapeText(recording.assignee_user)}" onclick="copyInvite(this)">Copy invite</button>` : ""}</td>
+      </tr>`;
+    }
+    function render() {
+      if (!payload) return;
+      renderRegistryBanner();
+      renderScopeBanner();
+      document.getElementById("export-csv-link").href = adminExportUrl("csv");
+      document.getElementById("export-json-link").href = adminExportUrl("json");
+      document.getElementById("warnings-only-link").href = warningsOnlyUrl();
+      const counts = payload.counts || {};
+      document.getElementById("dataset-count").textContent = counts.dataset_count || 0;
+      document.getElementById("recording-count").textContent = counts.recording_count || 0;
+      document.getElementById("open-task-count").textContent = counts.open_task_count || 0;
+      document.getElementById("complete-task-count").textContent = `${counts.complete_task_count || 0}/${counts.task_count || 0}`;
+      document.getElementById("blocked-recording-count").textContent = counts.blocked_recording_count || 0;
+      document.getElementById("active-session-count").textContent = counts.active_session_count || 0;
+      const rows = filteredDatasets();
+      const content = document.getElementById("content");
+      if (!rows.length) {
+        content.className = "dataset muted";
+        content.textContent = "No datasets match the current filters.";
+        return;
+      }
+      content.className = "";
+      content.innerHTML = rows.map((dataset) => {
+        const width = Math.max(0, Math.min(100, Number(dataset.progress_percent || 0)));
+        const datasetFocus = dataset.dataset_id ? `<a class="chip" href="${escapeText(focusUrl({dataset_id: dataset.dataset_id}))}">focus dataset</a>` : "";
+        return `<article class="dataset">
+          <h2>${escapeText(dataset.dataset_label || dataset.dataset_id || "Unspecified dataset")}</h2>
+          <div class="chips">
+            ${datasetFocus}
+            <span class="chip">${escapeText(dataset.recording_count || 0)} recordings</span>
+            <span class="chip">${escapeText(dataset.open_task_count || 0)} open</span>
+            <span class="chip">${escapeText(dataset.complete_task_count || 0)}/${escapeText(dataset.task_count || 0)} complete</span>
+            <span class="chip">${escapeText(dataset.blocked_recording_count || 0)} blocked</span>
+            <span class="chip">assignees ${escapeText((dataset.assignees || []).join(", ") || "none")}</span>
+            <span class="chip">workflows ${escapeText(countText(dataset.workflow_counts))}</span>
+            <span class="chip">zarr ${escapeText((dataset.zarr_uses || []).join(", ") || "unspecified")}</span>
+          </div>
+          ${renderRegistryDetails(dataset.registry_summary, dataset.registry_rows)}
+          ${renderRegistryWarnings(dataset.registry_warnings || [])}
+          <div class="progress" aria-label="progress"><span style="width: ${width}%"></span></div>
+          <table>
+            <thead><tr><th>Recording</th><th>Assignee</th><th>Progress</th><th>Workflows/tasks</th><th>Sessions/issues</th><th>Latest activity</th><th>Labeler links</th></tr></thead>
+            <tbody>${(dataset.recordings || []).map(renderRecording).join("")}</tbody>
+          </table>
+        </article>`;
+      }).join("");
+    }
+    async function load() {
+      const query = adminApiQuery().toString();
+      const response = await fetch(`/api/admin/datasets${query ? "?" + query : ""}`);
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.details || data.error || "admin datasets load failed");
+      payload = data;
+      render();
+    }
+    document.getElementById("search").addEventListener("input", render);
+    document.getElementById("status-filter").value = initialAdminQuery.get("status") || "";
+    document.getElementById("status-filter").addEventListener("change", () => {
+      const url = new URL(window.location.href);
+      const value = document.getElementById("status-filter").value;
+      if (value) url.searchParams.set("status", value);
+      else url.searchParams.delete("status");
+      window.location.href = url.pathname + url.search;
+    });
+    document.getElementById("refresh").addEventListener("click", load);
+    load().catch((error) => {
+      const content = document.getElementById("content");
+      content.className = "dataset bad";
+      content.textContent = error.message || String(error);
+    });
+  </script>
+</body>
+</html>

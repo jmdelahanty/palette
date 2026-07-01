@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>@@safe_title@@</title>
+  <style>
+    :root {
+      --ink: #17201a;
+      --muted: #5f6d62;
+      --line: #d8ded5;
+      --card: #fffdf5;
+      --accent: #0f6f5c;
+      --bad: #9a3027;
+      --box: #f28f3b;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 10% 12%, rgba(242, 143, 59, 0.18), transparent 28rem),
+        linear-gradient(135deg, #f7f0dc, #ecf4ef 64%, #fbf8ed);
+      color: var(--ink);
+      font-family: "Trebuchet MS", Verdana, sans-serif;
+    }
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 28px 18px 56px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: end;
+      margin-bottom: 18px;
+    }
+    h1 {
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(2rem, 5vw, 4.2rem);
+      letter-spacing: -0.055em;
+      line-height: 0.92;
+      margin: 0;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 340px;
+      gap: 18px;
+      align-items: start;
+    }
+    .panel {
+      background: rgba(255, 253, 245, 0.88);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      box-shadow: 0 18px 44px rgba(23, 32, 26, 0.13);
+      padding: 16px;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      image-rendering: pixelated;
+      background: #111;
+      border-radius: 16px;
+      cursor: crosshair;
+    }
+    .meta {
+      color: var(--muted);
+      overflow-wrap: anywhere;
+      font-size: 0.92rem;
+    }
+    .buttons {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 9px;
+      margin: 12px 0;
+    }
+    button {
+      font: inherit;
+      border: 0;
+      border-radius: 999px;
+      background: var(--accent);
+      color: white;
+      font-weight: 700;
+      cursor: pointer;
+      padding: 10px 12px;
+    }
+    button.secondary {
+      background: #33423a;
+    }
+    button.warn {
+      background: var(--bad);
+    }
+    .status {
+      min-height: 1.4em;
+      color: var(--muted);
+    }
+    .status.error {
+      color: var(--bad);
+    }
+    @@session_operator_support_css@@
+    @media (max-width: 860px) {
+      header, .grid {
+        display: block;
+      }
+      .panel {
+        margin-bottom: 14px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>@@safe_title@@</h1>
+        <p class="meta">Scoped detection session <code>@@session_id@@</code></p>
+      </div>
+      @@return_links@@
+    </header>
+    @@status_banner@@
+    <section class="grid">
+      <div class="panel">
+        <canvas id="canvas"></canvas>
+        <p id="status" class="status">Loading frame...</p>
+        <button id="copy-mutation-support-reference" type="button" class="secondary" hidden onclick="copyMutationSupportReference(this)">Copy support reference</button>
+        @@session_operator_support_html@@
+      </div>
+      <aside class="panel">
+        <div id="summary" class="meta"></div>
+        <div class="buttons">
+          <button type="button" onclick="nav(-1)">Previous</button>
+          <button type="button" onclick="nav(1)">Next</button>
+          <button type="button" onclick="save(false)">Save box</button>
+          <button type="button" onclick="save(true)">Save + next</button>
+          <button type="button" class="secondary" onclick="clearBox()">Clear box</button>
+          <button type="button" class="secondary" onclick="placeTypicalBox()">Place typical box</button>
+          <button type="button" class="warn" onclick="completeTask()">Complete task</button>
+        </div>
+        <p class="meta">Drag on the image to draw or replace the bbox. Hotkeys: wheel zooms, middle-drag pans, <b>f</b> fits, <b>t</b> places a typical box, <b>s</b> saves, <b>n</b>/<b>p</b> navigate.</p>
+      </aside>
+    </section>
+  </main>
+  <script>
+  window.PALETTE_DETECT_SESSION_ID = @@session_id_json@@;
+</script>
+<script>
+@@operator_support_js@@
+</script>
+<script>
+@@browser_mutation_status_js@@
+</script>
+<script>
+@@image_canvas_viewport_js@@
+</script>
+<script>
+@@detect_editor_js@@
+</script>
+</body>
+</html>

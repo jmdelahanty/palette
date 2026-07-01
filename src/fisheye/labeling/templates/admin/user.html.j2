@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin user: {{ slot_001 }}</title>
+  <style>
+    :root {
+      --ink: #17201a;
+      --muted: #5e6b61;
+      --line: #d7ded5;
+      --paper: #f7f5ec;
+      --card: #fffdf5;
+      --accent: #0f6f5c;
+    }
+    body {
+      margin: 0;
+      background: linear-gradient(135deg, #f6f0dc 0%, #edf5ee 58%, #f8f6ee 100%);
+      color: var(--ink);
+      font-family: Georgia, "Times New Roman", serif;
+    }
+    main {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 32px 18px 56px;
+    }
+    .card, .recording {
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: var(--card);
+      padding: 18px 20px;
+      margin: 14px 0;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 10px;
+    }
+    .stat {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: #fffaf0;
+      padding: 12px;
+    }
+    .stat b {
+      display: block;
+      font-size: 1.6rem;
+    }
+    .muted {
+      color: var(--muted);
+    }
+    a {
+      color: var(--accent);
+      font-weight: 700;
+    }
+    textarea {
+      box-sizing: border-box;
+      width: 100%;
+      min-height: 7rem;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 10px;
+      background: #fffdf8;
+      color: var(--ink);
+      font: 0.92rem "Trebuchet MS", Verdana, sans-serif;
+    }
+    button {
+      border: 0;
+      border-radius: 999px;
+      background: var(--accent);
+      color: white;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-weight: 700;
+      margin: 8px 0;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <p><a href="/admin">Back to admin</a></p>
+    <h1>Admin user: {{ slot_002 }}</h1>
+    <section class="card">
+      <p><b>Status:</b> {{ slot_003 }}</p>
+      <p><b>Expected-user landing page:</b> <a href="{{ slot_004 }}">{{ slot_005 }}</a></p>
+      <p><b>Expected-user dashboard:</b> <a href="{{ slot_006 }}">{{ slot_007 }}</a></p>
+      <p><b>Personalized work page:</b> <a href="{{ slot_008 }}">{{ slot_009 }}</a></p>
+      <p><b>Personalized dataset queue:</b> <a href="{{ slot_010 }}">{{ slot_011 }}</a></p>
+      <p><b>Expected-user dataset queue:</b> <a href="{{ slot_012 }}">{{ slot_013 }}</a></p>
+      <p><b>Identity probe:</b> <a href="{{ slot_014 }}">{{ slot_015 }}</a></p>
+      <p><b>Empty state:</b> {{ slot_016 }} {{ slot_017 }}</p>
+      <p><b>Dataset queue state:</b> {{ slot_018 }} {{ slot_019 }}</p>
+      {{ slot_020 }}
+      <p><b>Invite reasons:</b> {{ slot_021 }}</p>
+      <p><b>Copy intent:</b> {{ slot_022 }}</p>
+      <p><b>Operator actions:</b> {{ slot_023 }}</p>
+      <button type="button" onclick="copyUserInvitation(this)">{{ slot_024 }}</button>
+      <textarea readonly>{{ slot_025 }}</textarea>
+    </section>
+    <section class="stats">
+      <div class="stat"><b>{{ slot_026 }}</b><span>waiting recordings</span></div>
+      <div class="stat"><b>{{ slot_027 }}</b><span>complete recordings</span></div>
+      <div class="stat"><b>{{ slot_028 }}</b><span>blocked/no-open recordings</span></div>
+      <div class="stat"><b>{{ slot_029 }}</b><span>startable tasks</span></div>
+      <div class="stat"><b>{{ slot_030 }}</b><span>complete tasks</span></div>
+    </section>
+    {{ slot_031 }}
+  </main>
+  <script>
+    async function copyUserInvitation(button) {
+      const textarea = button.parentElement ? button.parentElement.querySelector("textarea") : null;
+      if (!textarea) return;
+      try {
+        await navigator.clipboard.writeText(textarea.value);
+        button.textContent = "Copied";
+      } catch (_error) {
+        textarea.focus();
+        textarea.select();
+        document.execCommand("copy");
+        button.textContent = "Copied";
+      }
+    }
+    async function repairReassignmentSessions(button) {
+      const route = button.dataset.repairRoute || "";
+      const result = document.getElementById("reassignment-repair-result");
+      if (!route || !result) return;
+      button.disabled = true;
+      result.textContent = "Repairing...";
+      try {
+        const response = await fetch(route, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({})
+        });
+        const data = await response.json();
+        result.textContent = JSON.stringify(data, null, 2);
+      } catch (error) {
+        result.textContent = `Error: ${error.message || String(error)}`;
+      } finally {
+        button.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>

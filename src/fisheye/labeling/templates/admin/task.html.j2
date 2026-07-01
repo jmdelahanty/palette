@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin task: {{ slot_001 }}</title>
+  <style>
+    :root {
+      --ink: #17201a;
+      --muted: #5e6b61;
+      --line: #d7ded5;
+      --paper: #f7f5ec;
+      --card: #fffdf5;
+    }
+    body {
+      margin: 0;
+      background: linear-gradient(135deg, #f6f0dc 0%, #edf5ee 58%, #f8f6ee 100%);
+      color: var(--ink);
+      font-family: Georgia, "Times New Roman", serif;
+    }
+    main {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 32px 18px 56px;
+    }
+    article {
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: var(--card);
+      padding: 20px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+    }
+    th, td {
+      border-top: 1px solid var(--line);
+      padding: 9px 8px;
+      text-align: left;
+      vertical-align: top;
+      overflow-wrap: anywhere;
+    }
+    th {
+      width: 210px;
+      color: var(--muted);
+      font-family: "Trebuchet MS", Verdana, sans-serif;
+    }
+    pre {
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: #fffdf8;
+      padding: 14px;
+    }
+    details {
+      border-top: 1px solid var(--line);
+      padding: 10px 0;
+    }
+    summary {
+      cursor: pointer;
+      overflow-wrap: anywhere;
+    }
+    .muted {
+      color: var(--muted);
+    }
+    .state-form {
+      margin: 18px 0;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: #fffaf0;
+      padding: 14px;
+    }
+    .state-form label {
+      display: block;
+      margin: 8px 0;
+      font-family: "Trebuchet MS", Verdana, sans-serif;
+    }
+    .state-form select, .state-form button {
+      font: inherit;
+      padding: 7px 9px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <p><a href="/admin">Back to admin</a></p>
+    <article>
+      <h1>{{ slot_002 }}</h1>
+      <p class="muted">Admin task detail. Label mutations still require the assigned user's guarded labeling session; operators may only change task state here.</p>
+      <table>{{ slot_003 }}</table>
+      <section class="state-form">
+        <h2>Operator task state</h2>
+        <p class="muted">Use this only for completion corrections or explicit reopen workflows. Reopening a completed task records <code>task_reopened</code>; completing a task closes open sessions.</p>
+        <form id="task-state-form">
+          <label>New state<br><select id="task-state">{{ slot_004 }}</select></label>
+          <button type="submit">Save task state</button>
+        </form>
+        <pre id="task-state-result" class="muted"></pre>
+      </section>
+      <h2>Task scope</h2>
+      <pre>{{ slot_005 }}</pre>
+      <h2>Recent audit events</h2>
+      {{ slot_006 }}
+    </article>
+  </main>
+  <script>
+    const taskId = {{ slot_007 }};
+    const resultEl = document.getElementById("task-state-result");
+    document.getElementById("task-state-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      resultEl.textContent = "Saving...";
+      try {
+        const response = await fetch(`/api/admin/tasks/${encodeURIComponent(taskId)}/state`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({state: document.getElementById("task-state").value})
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          throw new Error(data.details || data.error || "task state update failed");
+        }
+        resultEl.textContent = JSON.stringify(data.task_state_transition, null, 2);
+      } catch (error) {
+        resultEl.textContent = `Error: ${error.message || String(error)}`;
+      }
+    });
+  </script>
+</body>
+</html>

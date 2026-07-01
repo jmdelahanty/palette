@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin recording: {{ slot_001 }}</title>
+  <style>
+    :root {
+      --ink: #17201a;
+      --muted: #5e6b61;
+      --line: #d7ded5;
+      --card: #fffdf5;
+      --accent: #0f6f5c;
+    }
+    body {
+      margin: 0;
+      background: linear-gradient(135deg, #f6f0dc 0%, #edf5ee 58%, #f8f6ee 100%);
+      color: var(--ink);
+      font-family: Georgia, "Times New Roman", serif;
+    }
+    main {
+      max-width: 1040px;
+      margin: 0 auto;
+      padding: 32px 18px 56px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: var(--card);
+      padding: 18px 20px;
+      margin: 14px 0;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 10px;
+    }
+    .stat {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: #fffaf0;
+      padding: 12px;
+    }
+    .stat b {
+      display: block;
+      font-size: 1.55rem;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+    }
+    th, td {
+      border-top: 1px solid var(--line);
+      padding: 9px 8px;
+      text-align: left;
+      vertical-align: top;
+      overflow-wrap: anywhere;
+    }
+    th {
+      color: var(--muted);
+      font-family: "Trebuchet MS", Verdana, sans-serif;
+    }
+    .muted {
+      color: var(--muted);
+    }
+    a {
+      color: var(--accent);
+      font-weight: 700;
+    }
+    button {
+      border: 0;
+      border-radius: 999px;
+      background: var(--accent);
+      color: white;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-weight: 700;
+    }
+    pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <p><a href="/admin">Back to admin</a></p>
+    <h1>Admin recording: {{ slot_002 }}</h1>
+    <section class="card">
+      <p><b>Owner:</b> {{ slot_003 }}</p>
+      <p><b>Focused dataset progress:</b> <a href="{{ slot_004 }}">{{ slot_005 }}</a></p>
+      <p><b>Personalized dataset queue:</b> {{ slot_006 }}</p>
+      <p><b>Personalized work page:</b> {{ slot_007 }}</p>
+      <p><b>Expected-user landing page:</b> {{ slot_008 }}</p>
+      <p><b>Expected-user labeling home:</b> {{ slot_009 }}</p>
+      <p><b>Expected-user dashboard:</b> {{ slot_010 }}</p>
+      <p><b>Expected-user dataset queue:</b> {{ slot_011 }}</p>
+      <p class="muted">Recording ownership is exclusive: reassignment replaces the active owner and closes stale sessions for the previous owner.</p>
+      <table>{{ slot_012 }}</table>
+    </section>
+    {{ slot_013 }}
+    <section class="stats">
+      <div class="stat"><b>{{ slot_014 }}</b><span>startable tasks</span></div>
+      <div class="stat"><b>{{ slot_015 }}</b><span>complete tasks</span></div>
+      <div class="stat"><b>{{ slot_016 }}</b><span>total tasks</span></div>
+      <div class="stat"><b>{{ slot_017 }}</b><span>active sessions</span></div>
+      <div class="stat"><b>{{ slot_018 }}</b><span>recent audit events</span></div>
+    </section>
+    <section class="card">
+      <h2>Tasks</h2>
+      <table><thead><tr><th>Task</th><th>Workflow</th><th>State</th><th>Dataset</th><th>Redacted fields</th></tr></thead><tbody>{{ slot_019 }}</tbody></table>
+    </section>
+    <section class="card">
+      <h2>Active sessions</h2>
+      <table><thead><tr><th>Session</th><th>Task</th><th>User</th><th>Workflow</th><th>Expires</th></tr></thead><tbody>{{ slot_020 }}</tbody></table>
+    </section>
+    <section class="card">
+      <h2>Recent audit events</h2>
+      <table><thead><tr><th>Created</th><th>Event</th><th>User</th><th>Task</th><th>Target keys</th></tr></thead><tbody>{{ slot_021 }}</tbody></table>
+    </section>
+  </main>
+  <script>
+    async function repairReassignmentSessions(button) {
+      const route = button.dataset.repairRoute || "";
+      const result = document.getElementById("reassignment-repair-result");
+      if (!route || !result) return;
+      button.disabled = true;
+      result.textContent = "Repairing...";
+      try {
+        const response = await fetch(route, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({})
+        });
+        const data = await response.json();
+        result.textContent = JSON.stringify(data, null, 2);
+      } catch (error) {
+        result.textContent = `Error: ${error.message || String(error)}`;
+      } finally {
+        button.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>

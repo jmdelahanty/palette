@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin labeling users</title>
+  <style>
+    :root {
+      --ink: #17201a;
+      --muted: #657065;
+      --line: #d8dfd6;
+      --card: #fffdf5;
+      --accent: #0f6f5c;
+    }
+    body {
+      margin: 0;
+      background: linear-gradient(135deg, #f8f1de, #edf6ef 62%, #fffaf0);
+      color: var(--ink);
+      font-family: "Trebuchet MS", Verdana, sans-serif;
+    }
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 32px 18px 56px;
+    }
+    h1 {
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(2rem, 5vw, 4rem);
+      letter-spacing: -0.045em;
+      margin: 8px 0 18px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: var(--card);
+      padding: 18px;
+      margin: 16px 0;
+    }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .stat {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: #fffef9;
+      padding: 14px;
+    }
+    .stat b {
+      display: block;
+      font-size: 1.7rem;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    th, td {
+      border-top: 1px solid var(--line);
+      padding: 8px 6px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    input, select, textarea {
+      box-sizing: border-box;
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 0.6rem 0.75rem;
+      background: #fffdf8;
+      font: inherit;
+    }
+    form {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+    button {
+      border: 0;
+      border-radius: 999px;
+      background: var(--accent);
+      color: white;
+      padding: 0.65rem 0.9rem;
+      cursor: pointer;
+      font-weight: 800;
+    }
+    a {
+      color: var(--accent);
+      font-weight: 800;
+      text-decoration: none;
+    }
+    .muted {
+      color: var(--muted);
+    }
+    pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    @media (max-width: 850px) {
+      .summary, form {
+        grid-template-columns: 1fr;
+      }
+      table, thead, tbody, th, td, tr {
+        display: block;
+      }
+      th {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <p><a href="/admin">Back to admin</a> | <a href="/admin/datasets">Dataset progress</a></p>
+    <h1>Labeling users</h1>
+    <section class="summary">
+      <div class="stat"><b>{{ slot_001 }}</b><span>registered/visible users</span></div>
+      <div class="stat"><b>{{ slot_002 }}</b><span>active users</span></div>
+      <div class="stat"><b>{{ slot_003 }}</b><span>inactive users</span></div>
+      <div class="stat"><b>{{ slot_004 }}</b><span>assignment-only users</span></div>
+    </section>
+    <section class="card">
+      <h2>Add or update user</h2>
+      <form id="user-form">
+        <label>User ID<br><input id="user-id" required placeholder="delahantyj"></label>
+        <label>Display name<br><input id="display-name"></label>
+        <label>Email<br><input id="email"></label>
+        <label>Role<br><select id="role">{{ slot_005 }}</select></label>
+        <label>Status<br><select id="status">{{ slot_006 }}</select></label>
+        <label>Notes<br><input id="notes"></label>
+        <label><input id="notify-user" type="checkbox" style="width:auto"> Send/queue notification email</label>
+        <button type="submit">Save user</button>
+      </form>
+      <pre id="user-result" class="muted"></pre>
+    </section>
+    <section class="card">
+      <h2>Users</h2>
+      <table>
+        <thead><tr><th>User</th><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Assignments</th><th>Tasks</th><th>Action</th></tr></thead>
+        <tbody>{{ slot_007 }}</tbody>
+      </table>
+    </section>
+  </main>
+  <script>
+    async function postJson(url, payload) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new Error(data.details || data.error || "request failed");
+      }
+      return data;
+    }
+    document.getElementById("user-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const result = document.getElementById("user-result");
+      result.textContent = "Saving...";
+      try {
+        const data = await postJson("/api/admin/users", {
+          user_id: document.getElementById("user-id").value.trim(),
+          display_name: document.getElementById("display-name").value.trim(),
+          email: document.getElementById("email").value.trim(),
+          role: document.getElementById("role").value,
+          status: document.getElementById("status").value,
+          notes: document.getElementById("notes").value.trim(),
+          notify: document.getElementById("notify-user").checked,
+          notification_base_url: window.location.origin
+        });
+        result.textContent = JSON.stringify({user: data.user, notification: data.notification}, null, 2);
+        setTimeout(() => window.location.reload(), 450);
+      } catch (error) {
+        result.textContent = `Error: ${error.message || String(error)}`;
+      }
+    });
+    async function setUserStatus(button) {
+      const user = button.dataset.user || "";
+      const action = button.dataset.action || "";
+      if (!user || !action) return;
+      button.disabled = true;
+      try {
+        await postJson(`/api/admin/users/${encodeURIComponent(user)}/${action}`, {});
+        window.location.reload();
+      } catch (error) {
+        alert(error.message || String(error));
+        button.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>

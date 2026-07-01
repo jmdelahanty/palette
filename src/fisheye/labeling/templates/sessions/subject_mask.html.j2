@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>@@safe_title@@</title>
+  <style>
+    :root {
+      --ink: #182018;
+      --muted: #62705f;
+      --line: #d6ddcf;
+      --card: #fffdf4;
+      --accent: #0d745f;
+      --bad: #9a3027;
+      --mask: #00c894;
+      --erase: #d14a32;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 78% 12%, rgba(0, 200, 148, 0.16), transparent 28rem),
+        linear-gradient(135deg, #f7efd8, #eef5eb 58%, #fbf8ed);
+      color: var(--ink);
+      font-family: "Trebuchet MS", Verdana, sans-serif;
+    }
+    main {
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 28px 18px 56px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: end;
+      margin-bottom: 18px;
+    }
+    h1 {
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(2rem, 5vw, 4.2rem);
+      letter-spacing: -0.055em;
+      line-height: 0.92;
+      margin: 0;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 360px;
+      gap: 18px;
+      align-items: start;
+    }
+    .panel {
+      background: rgba(255, 253, 244, 0.9);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      box-shadow: 0 18px 44px rgba(23, 32, 26, 0.13);
+      padding: 16px;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      image-rendering: pixelated;
+      background: #101410;
+      border-radius: 16px;
+      cursor: none;
+      touch-action: none;
+    }
+    .meta {
+      color: var(--muted);
+      overflow-wrap: anywhere;
+      font-size: 0.92rem;
+    }
+    .buttons {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 9px;
+      margin: 12px 0;
+    }
+    button, select, input {
+      font: inherit;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      background: white;
+    }
+    button {
+      border: 0;
+      background: var(--accent);
+      color: white;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: #33423a;
+    }
+    button.warn {
+      background: var(--bad);
+    }
+    button.active {
+      box-shadow: 0 0 0 3px rgba(0, 200, 148, 0.24);
+      outline: 2px solid var(--mask);
+    }
+    label {
+      display: block;
+      margin: 12px 0 5px;
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+    input[type="range"] {
+      width: calc(100% - 24px);
+    }
+    .status {
+      min-height: 1.4em;
+      color: var(--muted);
+    }
+    .status.error {
+      color: var(--bad);
+    }
+    @@session_operator_support_css@@
+    @media (max-width: 900px) {
+      header, .grid {
+        display: block;
+      }
+      .panel {
+        margin-bottom: 14px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>@@safe_title@@</h1>
+        <p class="meta">Scoped subject-mask session <code>@@session_id@@</code></p>
+      </div>
+      @@return_links@@
+    </header>
+    @@status_banner@@
+    <section class="grid">
+      <div class="panel">
+        <canvas id="canvas"></canvas>
+        <p id="status" class="status">Loading ROI...</p>
+        <button id="copy-mutation-support-reference" type="button" class="secondary" hidden onclick="copyMutationSupportReference(this)">Copy support reference</button>
+        @@session_operator_support_html@@
+      </div>
+      <aside class="panel">
+        <div id="summary" class="meta"></div>
+        <div class="buttons">
+          <button type="button" onclick="nav(-1)">Previous</button>
+          <button type="button" onclick="nav(1)">Next</button>
+          <button type="button" onclick="save(false)">Checkpoint mask</button>
+          <button type="button" onclick="save(true)">Checkpoint + next</button>
+          <button type="button" class="secondary" onclick="applySavedEdits()">Apply saved edits to Zarr</button>
+          <button id="paint-button" type="button" class="active" onclick="setTool('paint')">Paint</button>
+          <button id="erase-button" type="button" class="secondary" onclick="setTool('erase')">Erase</button>
+          <button id="lasso-button" type="button" class="secondary" onclick="toggleLassoMode()">Lasso</button>
+          <button type="button" class="secondary" onclick="fillLasso(false, null)">Fill lasso</button>
+          <button type="button" class="secondary" onclick="fillLasso(true, null)">Fill outside</button>
+          <button type="button" class="secondary" onclick="fillLasso(true, 0)">Erase outside</button>
+          <button type="button" class="secondary" onclick="undoLassoPoint()">Undo point</button>
+          <button type="button" class="secondary" onclick="clearLasso()">Clear lasso</button>
+          <button type="button" class="secondary" onclick="clearMask()">Clear local</button>
+          <button type="button" class="warn" onclick="completeTask()">Complete task</button>
+        </div>
+        <div class="buttons">
+          <label for="roi-seek-input">Go to ROI</label>
+          <input id="roi-seek-input" type="number" min="0" step="1" placeholder="ROI #" onkeydown="if (event.key === 'Enter') seekRoi();">
+          <button type="button" class="secondary" onclick="seekRoi()">Go</button>
+        </div>
+        <label for="brush-size">Brush size: <span id="brush-label">8</span> px</label>
+        <input id="brush-size" type="range" min="1" max="48" value="8" oninput="setBrushSize(Number(this.value));">
+        <label for="review-state">Component review state</label>
+        <select id="review-state">
+          <option value="approved">approved</option>
+          <option value="pending">pending</option>
+          <option value="needs_review">needs_review</option>
+          <option value="rejected">rejected</option>
+        </select>
+        <div class="buttons">
+          <button type="button" onclick="setReviewStatus()">Set review</button>
+          <button type="button" class="secondary" onclick="loadCurrent()">Reload ROI</button>
+        </div>
+        <p class="meta">Draw directly on the ROI. Hotkeys: wheel zooms, middle-drag pans, <b>f</b> fits outside lasso, <b>s</b> save, <b>n</b>/<b>p</b> navigate, <b>b</b>/<b>e</b> brush paint/erase, <b>x</b> toggles brush mode, <b>[</b>/<b>]</b> brush size, <b>v</b> lasso, lasso <b>f</b> fills inside, <b>g</b> fills outside, <b>e</b> erases outside, <b>u</b> undoes point, <b>d</b> clears contour.</p>
+      </aside>
+    </section>
+  </main>
+  <script>
+  window.PALETTE_SUBJECT_MASK_SESSION_ID = @@session_id_json@@;
+</script>
+<script>
+@@operator_support_js@@
+</script>
+<script>
+@@browser_mutation_status_js@@
+</script>
+<script>
+@@image_canvas_viewport_js@@
+</script>
+<script>
+@@subject_mask_editor_js@@
+</script>
+</body>
+</html>

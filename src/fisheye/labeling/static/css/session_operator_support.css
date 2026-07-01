@@ -1,0 +1,44 @@
+
+    .operator-support {
+      display: none;
+      border: 1px solid rgba(154, 48, 39, 0.3);
+      border-radius: 16px;
+      background: #fff8f5;
+      padding: 12px 14px;
+      margin: 12px 0;
+      color: var(--ink);
+      overflow-wrap: anywhere;
+      box-sizing: border-box;
+      max-width: 100%;
+    }
+    .operator-support.active {
+      display: block;
+    }
+    .operator-support details {
+      margin: 0;
+      max-width: 100%;
+    }
+    .operator-support summary {
+      cursor: pointer;
+      font-weight: 700;
+      color: var(--bad);
+      user-select: none;
+    }
+    .operator-support summary:focus {
+      outline: 2px solid rgba(154, 48, 39, 0.35);
+      outline-offset: 3px;
+      border-radius: 6px;
+    }
+    .operator-support pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      max-width: 100%;
+      border: 1px solid rgba(154, 48, 39, 0.22);
+      border-radius: 12px;
+      background: #fffdf8;
+      padding: 10px;
+      margin: 8px 0;
+      color: var(--ink);
+      font-size: 0.86rem;
+    }
