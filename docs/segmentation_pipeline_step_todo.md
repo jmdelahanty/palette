@@ -2,7 +2,7 @@
 
 <!-- todo-meta
 status: active
-last_updated: 2026-04-04
+last_updated: 2026-07-01
 -->
 
 For the active operator-facing source-of-truth contract, see
@@ -449,6 +449,22 @@ In other words, future parity should mean:
   stage family
 - but each component/method retains enough model and runtime metadata to make
   the artifact auditable
+
+Current operational status as of `2026-07-01`:
+
+- SAM3 remains an optional external runtime, not a baseline Palette dependency.
+- Cluster runs should use
+  `/groups/johnson/johnsonlab/jeremy/models/sam3/sam3.pt` with
+  `--no-hf-download`.
+- The SAM3-specific cluster Python environment
+  `/groups/ahrens/home/delahantyj/miniforge3/envs/palette-sam3/bin/python`
+  passed compute-node import preflight.
+- A bounded RedScare v3 training-Zarr apply succeeded as LSF job `151924691`
+  with `16/16` selected rows segmented.
+- The review-ready RedScare arena-1 canary surface is the approved composed
+  refined run
+  `refined_subject_masks_sam3_body_existing_eye_swim_red_scare_v3_canary_20260628_01`,
+  not the later 16-row infrastructure smoke.
 
 Needed deliverables:
 

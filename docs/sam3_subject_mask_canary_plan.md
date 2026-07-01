@@ -21,13 +21,16 @@ in:
 
 - `docs/paintera_palette_subject_mask_workflow.md`
 
+Current RedScare v3 evidence is captured below. The older January archive is
+kept as historical context for the first Palette -> SAM3 integration target.
+
 ## Canary Target
 
-Primary canary archive:
+Historical first canary archive:
 
 - `/nvme1/recordings/2026-01-28T22-15-03Z_arena_1_DefaultScreen/zarr/2026-01-28T22-15-03Z_arena_1_DefaultScreen_training.zarr`
 
-Relevant existing runs in that archive:
+Relevant historical runs in that archive:
 
 - crop run:
   - `crop_runs/crop_2026-02-03_23-32-21`
@@ -35,6 +38,28 @@ Relevant existing runs in that archive:
   - `refined_keypoints_runs/refined_keypoints_2026-02-04_12-43-46`
 - current subject-mask canary:
   - `subject_mask_runs/subject_masks_canary_001`
+
+Current RedScare training canary archive:
+
+- `/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-01-09Z_arena_1_RedScare/zarr/2026-06-23T16-01-09Z_arena_1_RedScare_training.zarr`
+
+Relevant current runs:
+
+- crop-video-backed crop run:
+  - `crop_runs/crop_red_scare_acquisition_crop_video_training_2026-06-23T16-01-09Z_arena_1_RedScare`
+- approved v3 refined keypoint seed/review run:
+  - `refined_keypoints_runs/refined_keypoints_training_review_red_scare_traditional_v3_seed_20260625_01`
+- reviewed SAM3 body source:
+  - `subject_mask_runs/sam3_subject_body_red_scare_traditional_v3_canary_20260628_01`
+- approved composed refined subject-mask run:
+  - `refined_subject_masks_runs/refined_subject_masks_sam3_body_existing_eye_swim_red_scare_v3_canary_20260628_01`
+
+The composed refined run is complete and approved as of `2026-06-30`. It uses
+`label_schema_id = "subject_v1_lr"` with `mask_labels = ["subject_body",
+"eye_left", "eye_right", "swim_bladder"]`, dense `masks_roi` shape
+`(200, 4, 384, 384)`, and all four channels populated for `200/200` sampled
+training rows. Its `source_crop_row_ids` are present and map the sampled rows
+back to the acquisition crop-video crop run.
 
 ## Why SAM3 Is Interesting Here
 
@@ -264,28 +289,28 @@ Required behaviors:
 
 ### Phase 1. Loader and alignment
 
-- [ ] Read `roi_images` from the selected crop run.
-- [ ] Read `keypoints_roi`, `frame_indices`, and `detection_indices` from the
+- [x] Read `roi_images` from the selected crop run.
+- [x] Read `keypoints_roi`, `frame_indices`, and `detection_indices` from the
       selected refined keypoint run.
-- [ ] Verify row alignment between crop rows and keypoint rows.
-- [ ] Define explicit failure behavior for rows with missing prompts.
+- [x] Verify row alignment between crop rows and keypoint rows.
+- [x] Define explicit failure behavior for rows with missing prompts.
 
 ### Phase 2. SAM adapter
 
-- [ ] Build a minimal SAM adapter that accepts:
+- [x] Build a minimal SAM adapter that accepts:
   - ROI image
   - positive point prompt
   - optional box prompt
-- [ ] Start with the predictor path that best matches automatic point prompts.
-- [ ] Return:
+- [x] Start with the predictor path that best matches automatic point prompts.
+- [x] Return:
   - mask logits or probabilities if available
   - final selected mask
   - confidence/score metadata
 
 ### Phase 3. Palette write-back
 
-- [ ] Create a new `subject_mask_runs/<run>`.
-- [ ] Write:
+- [x] Create a new `subject_mask_runs/<run>`.
+- [x] Write:
   - `masks_roi`
   - `mask_probs_roi`
   - `available_channels`
@@ -301,14 +326,20 @@ Required behaviors:
 
 ### Phase 4. QC and review
 
-- [ ] Add a first-pass QC summary:
+- [x] Add a first-pass QC summary:
   - how many rows had usable prompts
   - how many masks were non-empty
   - mask area distribution
   - rows touching ROI borders
-- [ ] Review the resulting body masks in a canary archive before broader export.
-- [ ] Decide whether the masks are good enough to seed
+- [x] Review the resulting body masks in a canary archive before broader export.
+- [x] Decide whether the masks are good enough to seed
       `refined_subject_masks_runs`.
+
+RedScare update: the canary SAM3 body masks were manually cleaned, then merged
+with the existing reviewed left-eye, right-eye, and swim-bladder components into
+`refined_subject_masks_sam3_body_existing_eye_swim_red_scare_v3_canary_20260628_01`.
+That refined run is approved and should be treated as the current review-ready
+training surface for the RedScare arena-1 canary.
 
 ### Phase 5. Training use
 
@@ -402,10 +433,12 @@ scripts/submit_sam_subject_masks_bsub.sh \
   --keypoint-run <refined_keypoints_run> \
   --output-run <planned_subject_mask_run> \
   --sam3-root /groups/johnson/johnsonlab/jeremy/gitrepos/sam3 \
+  --checkpoint /groups/johnson/johnsonlab/jeremy/models/sam3/sam3.pt \
   --python-bin /groups/ahrens/home/delahantyj/miniforge3/envs/palette-sam3/bin/python \
   --apply \
   --apply-limit 16 \
   --profile-timings \
+  --no-hf-download \
   --submit
 ```
 
@@ -425,9 +458,34 @@ rsync -a --delete \
   /groups/johnson/johnsonlab/jeremy/gitrepos/sam3/
 ```
 
-Prefer passing a compute-visible `--checkpoint` plus `--no-hf-download` once a
-specific SAM3 checkpoint has been selected. Without that, the SAM3 runtime may
-try its own default/Hugging Face checkpoint resolution.
+Use the compute-visible checkpoint path:
+
+```bash
+/groups/johnson/johnsonlab/jeremy/models/sam3/sam3.pt
+```
+
+This checkpoint was downloaded from the gated Hugging Face `facebook/sam3`
+repository on `2026-07-01`. Prefer passing it with `--no-hf-download` for all
+cluster jobs. Without that, the SAM3 runtime may try its own default/Hugging
+Face checkpoint resolution and can fail if compute-node auth/cache state is not
+available.
+
+Cluster validation on `2026-07-01`:
+
+- job `151924691`
+- host `e10u08`
+- target:
+  `/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-01-09Z_arena_1_RedScare/zarr/2026-06-23T16-01-09Z_arena_1_RedScare_training.zarr`
+- crop run:
+  `crop_red_scare_acquisition_crop_video_training_2026-06-23T16-01-09Z_arena_1_RedScare`
+- keypoint run:
+  `refined_keypoints_training_review_red_scare_traditional_v3_seed_20260625_01`
+- output run:
+  `sam_subject_masks_redscare_training_a1_v3_apply16_smoke_20260701_01`
+- command used:
+  `--apply --apply-limit 16 --checkpoint .../sam3.pt --no-hf-download --profile-timings`
+- result: `16/16` selected rows segmented, all non-empty, stderr empty,
+  duration about `30.7s`
 
 ## Related Docs
 

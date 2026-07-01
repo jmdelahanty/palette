@@ -471,16 +471,20 @@ scripts/submit_sam_subject_masks_bsub.sh \
   --keypoint-run <refined_keypoints_run> \
   --output-run <planned_subject_mask_run> \
   --sam3-root /groups/johnson/johnsonlab/jeremy/gitrepos/sam3 \
+  --checkpoint /groups/johnson/johnsonlab/jeremy/models/sam3/sam3.pt \
   --python-bin /groups/ahrens/home/delahantyj/miniforge3/envs/palette-sam3/bin/python \
   --apply \
   --apply-limit 16 \
   --profile-timings \
+  --no-hf-download \
   --submit
 ```
 
 The wrapper is dry-run by default and requires `--apply-limit` unless
 `--allow-full-apply` is passed. SAM3 is currently an optional external checkout,
-not a Palette submodule.
+not a Palette submodule. For cluster jobs, prefer the `/groups` checkpoint plus
+`--no-hf-download` so execution does not depend on Hugging Face auth/cache state
+on compute nodes.
 
 **Recommended U-Net mode:** probability-first raw output. By default the U-Net
 path writes `mask_probs_roi`, component/row metadata, and metrics; it does not

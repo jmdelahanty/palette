@@ -239,10 +239,12 @@ scripts/submit_sam_subject_masks_bsub.sh \
   --keypoint-run <refined_keypoints_run> \
   --output-run <planned_subject_mask_run> \
   --sam3-root /groups/johnson/johnsonlab/jeremy/gitrepos/sam3 \
+  --checkpoint /groups/johnson/johnsonlab/jeremy/models/sam3/sam3.pt \
   --python-bin /groups/ahrens/home/delahantyj/miniforge3/envs/palette-sam3/bin/python \
   --apply \
   --apply-limit 16 \
   --profile-timings \
+  --no-hf-download \
   --submit
 ```
 
@@ -272,8 +274,16 @@ rsync -a --delete \
 ```
 
 If `--checkpoint` is not supplied, the SAM3 runtime may try its own default or
-Hugging Face checkpoint resolution. For reproducible cluster jobs, prefer a
-compute-node-visible checkpoint path and pass `--no-hf-download`.
+Hugging Face checkpoint resolution. For reproducible cluster jobs, use the
+compute-node-visible checkpoint path and pass `--no-hf-download`:
+
+```bash
+/groups/johnson/johnsonlab/jeremy/models/sam3/sam3.pt
+```
+
+This file is the `sam3.pt` checkpoint from the gated Hugging Face
+`facebook/sam3` repository. It was placed on `/groups` on `2026-07-01` so LSF
+jobs do not depend on compute-node Hugging Face auth/cache state.
 
 The Palette cluster environment also needs SAM3's runtime Python dependencies.
 Prefer an isolated SAM3-specific clone of `palette-py311`, then pass it to the
@@ -289,11 +299,38 @@ for name in ("huggingface_hub", "iopath", "timm", "einops", "torch", "torchvisio
 PY
 ```
 
-On 2026-07-01, the RedScare inspect-only bsub smoke showed that the shared
-SAM3 checkout resolved correctly, but the cluster `scripts/py` environment was
-still missing `huggingface_hub`, `iopath`, `timm`, and `einops`. Do not run a
-real `--apply` job until this import preflight passes and a checkpoint policy is
-chosen.
+On 2026-07-01, the cluster SAM3 environment was verified on a compute node with
+`numpy 2.2.6`, `zarr 3.1.6`, `opencv 4.13.0`, `torch 2.5.1`, `torchvision
+0.20.1`, `huggingface_hub`, `iopath`, `timm`, `einops`, `PIL`, and
+`pycocotools` importable. The environment is intentionally a SAM3-specific
+clone of `palette-py311` with SAM3 installed as an editable external checkout.
+
+The first bounded RedScare v3 training-Zarr cluster apply also succeeded on
+`2026-07-01`:
+
+- job `151924691`
+- host `e10u08`
+- target:
+  `/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-01-09Z_arena_1_RedScare/zarr/2026-06-23T16-01-09Z_arena_1_RedScare_training.zarr`
+- crop run:
+  `crop_red_scare_acquisition_crop_video_training_2026-06-23T16-01-09Z_arena_1_RedScare`
+- keypoint run:
+  `refined_keypoints_training_review_red_scare_traditional_v3_seed_20260625_01`
+- output run:
+  `sam_subject_masks_redscare_training_a1_v3_apply16_smoke_20260701_01`
+- result: `16/16` selected rows segmented, all non-empty, stderr empty,
+  duration about `30.7s`
+
+The current reviewed RedScare arena-1 training surface is not that 16-row smoke
+run; it is the already approved composed refined run:
+
+```text
+refined_subject_masks_runs/refined_subject_masks_sam3_body_existing_eye_swim_red_scare_v3_canary_20260628_01
+```
+
+That refined run combines the cleaned SAM3 `subject_body` source with the
+existing reviewed `eye_left`, `eye_right`, and `swim_bladder` components and has
+all four channels populated for `200/200` sampled training rows.
 
 ### Batch dry run across training archives
 
