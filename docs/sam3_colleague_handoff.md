@@ -274,6 +274,23 @@ If `--checkpoint` is not supplied, the SAM3 runtime may try its own default or
 Hugging Face checkpoint resolution. For reproducible cluster jobs, prefer a
 compute-node-visible checkpoint path and pass `--no-hf-download`.
 
+The Palette cluster environment also needs SAM3's runtime Python dependencies.
+At minimum, the `scripts/py` environment used by the bsub job must import:
+
+```bash
+scripts/py - <<'PY'
+for name in ("huggingface_hub", "iopath", "timm", "einops", "torch", "torchvision", "PIL"):
+    __import__(name)
+    print(name, "ok")
+PY
+```
+
+On 2026-07-01, the RedScare inspect-only bsub smoke showed that the shared
+SAM3 checkout resolved correctly, but the cluster `scripts/py` environment was
+still missing `huggingface_hub`, `iopath`, `timm`, and `einops`. Do not run a
+real `--apply` job until this import preflight passes and a checkpoint policy is
+chosen.
+
 ### Batch dry run across training archives
 
 ```bash
