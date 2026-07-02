@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 import zarr
 
-from ..diagnostics.preview_eye_mask_background_subtraction import (
+from ..shared.roi_background import (
     _extract_background_roi_ds,
     _extract_background_roi_full,
     _resolve_background_source,

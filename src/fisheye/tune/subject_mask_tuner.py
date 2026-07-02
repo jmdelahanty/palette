@@ -16,14 +16,14 @@ import yaml
 from skimage import measure, morphology
 import zarr
 
-from ..diagnostics.preview_eye_mask_background_subtraction import (
+from ..shared.roi_background import (
     _extract_background_roi_ds,
     _extract_background_roi_full,
     _prepare_panel,
     _resolve_background_source,
     _resolve_run_name,
 )
-from . import eye_mask_tuner as eye_mask_ops
+from ..shared import mask_tuning_helpers as mask_tuning_ops
 from ..utils.zarr_io import open_zarr_root
 
 
@@ -458,7 +458,7 @@ def _resolve_eye_keypoint_source(
     root: zarr.Group,
     explicit: Optional[str],
 ) -> EyeKeypointSource:
-    group, run_name = eye_mask_ops._resolve_keypoints_group(root, explicit)
+    group, run_name = mask_tuning_ops._resolve_keypoints_group(root, explicit)
     refined_parent = root.get("refined_keypoints_runs")
     if isinstance(refined_parent, zarr.Group) and run_name in refined_parent:
         group_name = "refined_keypoints_runs"
@@ -900,7 +900,7 @@ def _compute_eye_lr_preview(
     rotation_applied: Optional[float] = None
     if bool(params.get("rotate_roi")) and heading_deg is not None:
         rotation_applied = -float(heading_deg)
-        working_roi, working_keypoints = eye_mask_ops.rotate_image_and_points(
+        working_roi, working_keypoints = mask_tuning_ops.rotate_image_and_points(
             working_roi,
             working_keypoints,
             rotation_applied,
@@ -936,15 +936,15 @@ def _compute_eye_lr_preview(
                 debug_panels.append(_text_panel(f"{eye_label}\npatch empty"))
                 continue
 
-            filtered_patch, sobel_panel = eye_mask_ops.apply_sobel_filter(
+            filtered_patch, sobel_panel = mask_tuning_ops.apply_sobel_filter(
                 patch,
                 float(params["sobel_strength"]),
             )
-            binary, threshold_value = eye_mask_ops.global_mask(filtered_patch)
+            binary, threshold_value = mask_tuning_ops.global_mask(filtered_patch)
             if params.get("pre_threshold") is not None:
                 binary = np.logical_and(binary, filtered_patch < int(params["pre_threshold"]))
 
-            region_mask = eye_mask_ops.select_region(
+            region_mask = mask_tuning_ops.select_region(
                 binary,
                 (cx - x0, cy - y0),
                 int(params["min_area"]),
@@ -954,7 +954,7 @@ def _compute_eye_lr_preview(
                 int(params["opening_radius"]),
             )
             debug_panels.append(
-                eye_mask_ops.create_debug_panel(
+                mask_tuning_ops.create_debug_panel(
                     patch,
                     filtered_patch,
                     binary,
@@ -1008,7 +1008,7 @@ def _compute_eye_lr_preview(
     else:
         info_lines.append("Keypoints failed for this ROI")
 
-    overlay = eye_mask_ops.draw_overlay(
+    overlay = mask_tuning_ops.draw_overlay(
         working_roi,
         (masks[0], masks[1]),
         (contours[0], contours[1]),
@@ -1031,8 +1031,8 @@ def _compute_eye_lr_preview(
         separation = None
 
     if rotation_applied is not None:
-        overlay = eye_mask_ops.apply_circular_window(overlay)
-        union_mask = eye_mask_ops.apply_circular_window(union_mask)
+        overlay = mask_tuning_ops.apply_circular_window(overlay)
+        union_mask = mask_tuning_ops.apply_circular_window(union_mask)
 
     while len(debug_panels) < 2:
         debug_panels.append(_text_panel("No debug panel"))
@@ -1065,7 +1065,7 @@ def _render_eye_union_panel(
         stored_title = f"Stored {subject_preview['component_name']}{derived_note} ({subject_preview['run_name']})"
         if preview.get("rotation_applied") is not None:
             stored_mask = _rotate_image_nearest(stored_mask, float(preview["rotation_applied"]))
-            stored_mask = eye_mask_ops.apply_circular_window(stored_mask)
+            stored_mask = mask_tuning_ops.apply_circular_window(stored_mask)
 
     panels = [
         _prepare_panel(np.asarray(preview["roi_image"], dtype=np.uint8), "Crop ROI", panel_size),
@@ -1392,11 +1392,11 @@ def _run_eye_union_component_tuner(
         return {
             "roi_padding": cv2.getTrackbarPos("ROI Padding", window_name),
             "pre_threshold": pre_thresh_val if pre_thresh_val > 0 else None,
-            "sobel_strength": cv2.getTrackbarPos("Sobel %", window_name) / float(eye_mask_ops.SLIDER_MAX_SOBEL),
+            "sobel_strength": cv2.getTrackbarPos("Sobel %", window_name) / float(mask_tuning_ops.SLIDER_MAX_SOBEL),
             "min_area": cv2.getTrackbarPos("Min Area", window_name),
             "max_area": max_area_slider if max_area_slider > 0 else None,
             "min_circularity": (
-                float(min_circularity_slider) / float(eye_mask_ops.SLIDER_MAX_CIRCULARITY)
+                float(min_circularity_slider) / float(mask_tuning_ops.SLIDER_MAX_CIRCULARITY)
                 if min_circularity_slider > 0
                 else None
             ),
@@ -1415,73 +1415,73 @@ def _run_eye_union_component_tuner(
     cv2.createTrackbar(
         "ROI Padding",
         window_name,
-        min(int(initial_params["roi_padding"]), eye_mask_ops.SLIDER_MAX_PADDING),
-        eye_mask_ops.SLIDER_MAX_PADDING,
+        min(int(initial_params["roi_padding"]), mask_tuning_ops.SLIDER_MAX_PADDING),
+        mask_tuning_ops.SLIDER_MAX_PADDING,
         lambda _val: None,
     )
     cv2.createTrackbar(
         "PreThresh",
         window_name,
         int(initial_params["pre_threshold"]) if initial_params["pre_threshold"] is not None else 0,
-        eye_mask_ops.SLIDER_MAX_PRETHRESH,
+        mask_tuning_ops.SLIDER_MAX_PRETHRESH,
         lambda _val: None,
     )
     cv2.createTrackbar(
         "Sobel %",
         window_name,
-        int(float(initial_params["sobel_strength"]) * eye_mask_ops.SLIDER_MAX_SOBEL),
-        eye_mask_ops.SLIDER_MAX_SOBEL,
+        int(float(initial_params["sobel_strength"]) * mask_tuning_ops.SLIDER_MAX_SOBEL),
+        mask_tuning_ops.SLIDER_MAX_SOBEL,
         lambda _val: None,
     )
     cv2.createTrackbar(
         "Min Area",
         window_name,
-        min(int(initial_params["min_area"]), eye_mask_ops.SLIDER_MAX_AREA),
-        eye_mask_ops.SLIDER_MAX_AREA,
+        min(int(initial_params["min_area"]), mask_tuning_ops.SLIDER_MAX_AREA),
+        mask_tuning_ops.SLIDER_MAX_AREA,
         lambda _val: None,
     )
     cv2.createTrackbar(
         "Max Area",
         window_name,
         int(initial_params["max_area"]) if initial_params["max_area"] is not None else 0,
-        eye_mask_ops.SLIDER_MAX_AREA,
+        mask_tuning_ops.SLIDER_MAX_AREA,
         lambda _val: None,
     )
     cv2.createTrackbar(
         "Min Circ %",
         window_name,
-        int(round(float(initial_params["min_circularity"]) * eye_mask_ops.SLIDER_MAX_CIRCULARITY))
+        int(round(float(initial_params["min_circularity"]) * mask_tuning_ops.SLIDER_MAX_CIRCULARITY))
         if initial_params["min_circularity"] is not None
         else 0,
-        eye_mask_ops.SLIDER_MAX_CIRCULARITY,
+        mask_tuning_ops.SLIDER_MAX_CIRCULARITY,
         lambda _val: None,
     )
     cv2.createTrackbar(
         "Closing r",
         window_name,
-        min(int(initial_params["closing_radius"]), eye_mask_ops.SLIDER_MAX_RADIUS),
-        eye_mask_ops.SLIDER_MAX_RADIUS,
+        min(int(initial_params["closing_radius"]), mask_tuning_ops.SLIDER_MAX_RADIUS),
+        mask_tuning_ops.SLIDER_MAX_RADIUS,
         lambda _val: None,
     )
     cv2.createTrackbar(
         "Opening r",
         window_name,
-        min(int(initial_params["opening_radius"]), eye_mask_ops.SLIDER_MAX_RADIUS),
-        eye_mask_ops.SLIDER_MAX_RADIUS,
+        min(int(initial_params["opening_radius"]), mask_tuning_ops.SLIDER_MAX_RADIUS),
+        mask_tuning_ops.SLIDER_MAX_RADIUS,
         lambda _val: None,
     )
     cv2.createTrackbar(
         "Min Gap",
         window_name,
         int(initial_params["min_eye_separation"]) if initial_params["min_eye_separation"] is not None else 0,
-        eye_mask_ops.SLIDER_MAX_EYE_GAP,
+        mask_tuning_ops.SLIDER_MAX_EYE_GAP,
         lambda _val: None,
     )
     cv2.createTrackbar(
         "Max Gap",
         window_name,
         int(initial_params["max_eye_separation"]) if initial_params["max_eye_separation"] is not None else 0,
-        eye_mask_ops.SLIDER_MAX_EYE_GAP,
+        mask_tuning_ops.SLIDER_MAX_EYE_GAP,
         lambda _val: None,
     )
     cv2.createTrackbar(
@@ -1521,7 +1521,7 @@ def _run_eye_union_component_tuner(
                 if np.isfinite(heading_val):
                     heading_deg = heading_val
             if heading_deg is None:
-                heading_deg = eye_mask_ops.compute_heading_deg(keypoints_row)
+                heading_deg = mask_tuning_ops.compute_heading_deg(keypoints_row)
 
             frame_index = int(frame_indices[roi_idx]) if frame_indices is not None else None
             detection_index = int(detection_indices[roi_idx]) if detection_indices is not None else None

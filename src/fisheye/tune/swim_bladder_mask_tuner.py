@@ -18,7 +18,7 @@ import numpy as np
 import zarr
 from skimage import measure
 
-from ..diagnostics.preview_eye_mask_background_subtraction import _prepare_panel, _resolve_run_name
+from ..shared.roi_background import _prepare_panel, _resolve_run_name
 from ..utils.zarr_io import open_zarr_root
 from ..visualization.visualize_swim_bladder_mask_patches import (
     _extract_patch_bounds,
@@ -27,7 +27,7 @@ from ..visualization.visualize_swim_bladder_mask_patches import (
     _resolve_swim_bladder_keypoint_center,
     _validate_keypoint_group_alignment,
 )
-from . import eye_mask_tuner as eye_mask_ops
+from ..shared import mask_tuning_helpers as mask_tuning_ops
 from . import subject_mask_tuner as subject_tuner
 
 try:
@@ -399,17 +399,17 @@ def _compute_threshold_patch_preview(
     params: Mapping[str, Any],
 ) -> Dict[str, Any]:
     patch_uint8 = np.asarray(patch, dtype=np.uint8)
-    filtered_patch, sobel_panel = eye_mask_ops.apply_sobel_filter(
+    filtered_patch, sobel_panel = mask_tuning_ops.apply_sobel_filter(
         patch_uint8,
         float(params["sobel_strength"]),
     )
-    _binary_seed, threshold_value = eye_mask_ops.global_mask(filtered_patch)
+    _binary_seed, threshold_value = mask_tuning_ops.global_mask(filtered_patch)
     binary = np.asarray(filtered_patch, dtype=np.uint8) <= int(round(float(threshold_value)))
     pre_threshold = params.get("pre_threshold")
     if pre_threshold is not None:
         binary = np.logical_and(binary, filtered_patch < int(pre_threshold))
 
-    region_mask = eye_mask_ops.select_region(
+    region_mask = mask_tuning_ops.select_region(
         binary,
         center_xy,
         int(params["min_area"]),

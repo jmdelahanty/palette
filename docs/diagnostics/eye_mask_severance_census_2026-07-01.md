@@ -30,6 +30,15 @@ or subject-shape eye geometry. It is `NEEDS-CONVERSION` when legacy
 
 No recordings require legacy-to-subject conversion in this census.
 
+## Out-of-Scope Disposition
+
+The `383` skipped registry rows are valid registry datasets, but they are not
+recording-level conversion targets for this census. They include merged training
+datasets and other non-recording Zarrs outside recording paths. Any eye-mask
+channels embedded in historical merged training Zarrs become inert data after
+severance: they remain readable through generic Zarr tooling, are referenced by
+no live code path, and are deliberately retained as-is.
+
 ## Full Table
 
 | classification | recording_id | legacy_refined_eye | refined_subject_eye | subject_shape_eye | zarr_count | dataset_count | zarr_paths |
