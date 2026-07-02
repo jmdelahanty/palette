@@ -543,6 +543,53 @@ def _extract_detection_rows(
     return payload["frame_indices"], payload["bbox_norm_coords"]
 
 
+def _source_label(source_path: Optional[str] = None, source_group: Optional[zarr.Group] = None) -> str:
+    if source_path:
+        return str(source_path)
+    if source_group is not None:
+        for attr in ("path", "name"):
+            value = getattr(source_group, attr, None)
+            if value:
+                return str(value)
+    return "unknown source"
+
+
+def _validate_frame_indices_in_bounds(
+    frame_indices: np.ndarray,
+    *,
+    total_frames: int,
+    source_label: str,
+) -> None:
+    frame_indices_np = _ensure_numpy_array(frame_indices, dtype=np.int64, name="frame_indices").reshape(-1)
+    total_frames_int = int(total_frames)
+    if total_frames_int < 0:
+        raise ValueError(f"Cannot validate frame_indices for {source_label}: total_frames={total_frames_int}")
+    invalid = np.flatnonzero((frame_indices_np < 0) | (frame_indices_np >= total_frames_int))
+    if invalid.size:
+        pos = int(invalid[0])
+        frame_idx = int(frame_indices_np[pos])
+        raise ValueError(
+            f"Out-of-range frame index in {source_label}: frame_indices[{pos}]={frame_idx} "
+            f"is outside valid range [0, {max(total_frames_int - 1, -1)}] for {total_frames_int} frames"
+        )
+
+
+def _validate_frame_indices_sorted(frame_indices: np.ndarray, *, source_label: str) -> None:
+    frame_indices_np = _ensure_numpy_array(frame_indices, dtype=np.int64, name="frame_indices").reshape(-1)
+    if frame_indices_np.size < 2:
+        return
+    out_of_order = np.flatnonzero(np.diff(frame_indices_np) < 0)
+    if out_of_order.size:
+        prev_pos = int(out_of_order[0])
+        pos = prev_pos + 1
+        raise ValueError(
+            f"Detection rows from {source_label} must be sorted by ascending frame_index; "
+            f"first out-of-order row at position {pos}: "
+            f"frame_indices[{prev_pos}]={int(frame_indices_np[prev_pos])}, "
+            f"frame_indices[{pos}]={int(frame_indices_np[pos])}"
+        )
+
+
 def _extract_optional_detection_row_array(
     source_group: zarr.Group,
     name: str,
@@ -901,11 +948,20 @@ def crop_batch_cpu(
     frame_indices: np.ndarray,
     bbox_coords: np.ndarray,
     roi_sz: Tuple[int, int],
-    video_shape: Tuple[int, int]
+    video_shape: Tuple[int, int],
+    *,
+    total_frames: Optional[int] = None,
+    source_label: Optional[str] = None,
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
     """
     Crop a batch of detections using CPU (OpenCV).
     """
+    source = source_label or str(video_path)
+    if total_frames is not None:
+        _validate_frame_indices_in_bounds(frame_indices, total_frames=int(total_frames), source_label=source)
+    elif np.any(_ensure_numpy_array(frame_indices, dtype=np.int64, name="frame_indices") < 0):
+        _validate_frame_indices_in_bounds(frame_indices, total_frames=0, source_label=source)
+
     cap = cv2.VideoCapture(str(video_path))
     
     # Get unique frames and decode
@@ -922,6 +978,14 @@ def crop_batch_cpu(
     decode_seconds = time.perf_counter() - decode_start
 
     cap.release()
+
+    missing_frames = [int(frame_idx) for frame_idx in unique_frames if int(frame_idx) not in frame_cache]
+    if missing_frames:
+        sample = ", ".join(str(frame_idx) for frame_idx in missing_frames[:8])
+        raise RuntimeError(
+            f"CPU crop decode failed for frame(s) {sample} from {source}; "
+            "refusing to write zero-filled crops with plausible coordinates"
+        )
     
     # Extract crops
     num_crops = len(frame_indices)
@@ -975,8 +1039,17 @@ def crop_batch_cpu_from_top_left(
     roi_coordinates_full: np.ndarray,
     roi_sz: Tuple[int, int],
     video_shape: Tuple[int, int],
+    *,
+    total_frames: Optional[int] = None,
+    source_label: Optional[str] = None,
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
     """Crop a batch of detections using stored ROI top-left coordinates on CPU."""
+    source = source_label or str(video_path)
+    if total_frames is not None:
+        _validate_frame_indices_in_bounds(frame_indices, total_frames=int(total_frames), source_label=source)
+    elif np.any(_ensure_numpy_array(frame_indices, dtype=np.int64, name="frame_indices") < 0):
+        _validate_frame_indices_in_bounds(frame_indices, total_frames=0, source_label=source)
+
     cap = cv2.VideoCapture(str(video_path))
 
     decode_start = time.perf_counter()
@@ -992,6 +1065,14 @@ def crop_batch_cpu_from_top_left(
     decode_seconds = time.perf_counter() - decode_start
 
     cap.release()
+
+    missing_frames = [int(frame_idx) for frame_idx in unique_frames if int(frame_idx) not in frame_cache]
+    if missing_frames:
+        sample = ", ".join(str(frame_idx) for frame_idx in missing_frames[:8])
+        raise RuntimeError(
+            f"CPU crop decode failed for frame(s) {sample} from {source}; "
+            "refusing to write zero-filled crops with plausible coordinates"
+        )
 
     num_crops = len(frame_indices)
     roi_h, roi_w = roi_sz
@@ -1410,6 +1491,7 @@ def materialize_external_roi_cache(
                     roi_coordinates_np[roi_ids],
                     roi_sz,
                     video_shape,
+                    source_label=str(video_path),
                 )
                 decode_seconds += float(batch_profile.get("decode_seconds", 0.0))
                 compute_seconds += float(batch_profile.get("compute_seconds", 0.0))
@@ -1709,6 +1791,11 @@ def crop_from_external_video(
         video_width = root.attrs['width']
         video_shape = (video_height, video_width)
         num_frames = root.attrs['total_frames']
+        _validate_frame_indices_in_bounds(
+            frame_indices,
+            total_frames=int(num_frames),
+            source_label=_source_label(source_path, source_group),
+        )
         
         console.print(f"Total detections: {total_detections:,}")
         console.print(f"Video dimensions: {video_width}x{video_height}")
@@ -2113,7 +2200,9 @@ def crop_from_external_video(
 
                 crops, coords, batch_profile = crop_batch_cpu(
                     video_path, batch_frames, batch_bboxes,
-                    roi_sz, video_shape
+                    roi_sz, video_shape,
+                    total_frames=int(num_frames),
+                    source_label=_source_label(source_path, source_group),
                 )
                 decode_seconds += float(batch_profile.get("decode_seconds", 0.0))
                 compute_seconds += float(batch_profile.get("compute_seconds", 0.0))
@@ -2685,6 +2774,11 @@ def save_crop_metadata(
         raise ValueError(
             f"frame_indices length {frame_indices.shape[0]} does not match total detections {total_detections}"
         )
+    _validate_frame_indices_in_bounds(
+        frame_indices,
+        total_frames=int(num_frames),
+        source_label=_source_label(source_path, source_group),
+    )
     if bbox_coords.shape[0] != total_detections:
         raise ValueError(
             f"bbox_norm_coords length {bbox_coords.shape[0]} does not match total detections {total_detections}"
@@ -2799,6 +2893,13 @@ def crop_and_store_chunk_delayed(
     # Load frame indices and bbox coordinates
     # Load only the slice of frame indices/bboxes we need
     frame_indices, bbox_coords = _extract_detection_rows(source_group)
+    source_label = _source_label(source_path, source_group)
+    _validate_frame_indices_sorted(frame_indices, source_label=source_label)
+    _validate_frame_indices_in_bounds(
+        frame_indices,
+        total_frames=int(root['raw_video/images_full'].shape[0]),
+        source_label=source_label,
+    )
     chunk_frames = np.arange(chunk_slice.start, chunk_slice.stop)
     
     # Determine which detections fall into this chunk
@@ -3192,6 +3293,14 @@ def crop_detections(
 
     # Get detection info using frame_indices (BEFORE metadata collection)
     frame_indices, bbox_coords = _extract_detection_rows(source_group)
+    source_label = _source_label(source_path, source_group)
+    if crop_storage_mode_resolved == "materialized":
+        _validate_frame_indices_sorted(frame_indices, source_label=source_label)
+    _validate_frame_indices_in_bounds(
+        frame_indices,
+        total_frames=int(num_images),
+        source_label=source_label,
+    )
     total_detections = len(frame_indices)
     
     if total_detections == 0:
