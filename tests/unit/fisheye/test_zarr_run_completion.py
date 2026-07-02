@@ -98,6 +98,14 @@ def _add_valid_detect_quality_arrays(run: FakeGroup) -> None:
     run["detection_quality_labels"] = FakeArray((2,), "int8")
 
 
+def _add_valid_crop_arrays(run: FakeGroup) -> None:
+    run["roi_coordinates_full"] = FakeArray((2, 2), "int32")
+    run["bbox_norm_coords"] = FakeArray((2, 4), "float32")
+    run["frame_indices"] = FakeArray((2,), "int32")
+    run["frame_counts"] = FakeArray((3,), "int32")
+    run["detection_indices"] = FakeArray((2,), "int32")
+
+
 def _add_valid_refined_detect_subgroups(run: FakeGroup) -> None:
     source = FakeGroup()
     instances = FakeGroup()
@@ -126,6 +134,39 @@ def _add_valid_refined_detect_subgroups(run: FakeGroup) -> None:
     instances["reason"] = FakeArray((2,), "U16")
 
 
+def _add_valid_refined_keypoints_arrays(run: FakeGroup) -> None:
+    run["frame_indices"] = FakeArray((2,), "int32")
+    run["frame_counts"] = FakeArray((3,), "int32")
+    run["detection_indices"] = FakeArray((2,), "int32")
+    run["detection_source"] = FakeArray((2,), "int8")
+    run["retune_id"] = FakeArray((2,), "int32")
+    run["keypoints_roi"] = FakeArray((2, 3, 2), "float64")
+    run["keypoints_img"] = FakeArray((2, 3, 2), "float64")
+    run["keypoints_norm"] = FakeArray((2, 3, 2), "float64")
+    run["heading"] = FakeArray((2,), "float64")
+    run["confidence"] = FakeArray((2,), "float64")
+    run["triangle_area"] = FakeArray((2,), "float64")
+    run["min_angle"] = FakeArray((2,), "float64")
+    run["triangle_angles"] = FakeArray((2, 3), "float64")
+    run["quality_labels"] = FakeArray((2,), "int8")
+    for name in (
+        "refined_success",
+        "source_success",
+        "flip_corrected",
+        "heading_finite",
+        "heading_usable",
+        "confidence_valid",
+        "geometry_valid",
+        "usable_keypoints",
+    ):
+        run[name] = FakeArray((2,), "bool")
+
+
+def _add_valid_arena_assignment_arrays(run: FakeGroup) -> None:
+    run["arena_ids"] = FakeArray((2,), "int32")
+    run["n_detections_per_arena"] = FakeArray((3, 2), "int32")
+
+
 def _add_valid_tracking_arrays(run: FakeGroup) -> None:
     run["track_ids"] = FakeArray((2,), "int32")
     run["arena_ids"] = FakeArray((2,), "int32")
@@ -151,6 +192,55 @@ def _add_valid_track_kinematics_surface(run: FakeGroup) -> None:
         "num_tracks",
     ):
         run.attrs[attr_name] = "ok"
+
+
+_PROMOTED_STAGE_COMPLETION_CASES = (
+    pytest.param(
+        "detect",
+        "detect_runs",
+        "detect_001",
+        _add_valid_detect_arrays,
+        "detect",
+        "detect: missing required array 'frame_indices'",
+        id="detect",
+    ),
+    pytest.param(
+        "crop",
+        "crop_runs",
+        "crop_001",
+        _add_valid_crop_arrays,
+        "crop",
+        "crop: missing required array 'roi_coordinates_full'",
+        id="crop",
+    ),
+    pytest.param(
+        "refined_keypoints",
+        "refined_keypoints_runs",
+        "refined_keypoints_001",
+        _add_valid_refined_keypoints_arrays,
+        "refined_keypoints",
+        "refined_keypoints: missing required array 'frame_indices'",
+        id="refined_keypoints",
+    ),
+    pytest.param(
+        "arena_assignment",
+        "arena_assignment_runs",
+        "arena_assignment_001",
+        _add_valid_arena_assignment_arrays,
+        "arena_assignment",
+        "arena_assignment: missing required array 'arena_ids'",
+        id="arena_assignment",
+    ),
+    pytest.param(
+        "tracking",
+        "tracking_runs",
+        "tracking_001",
+        _add_valid_tracking_arrays,
+        "tracking",
+        "tracking: missing required array 'track_ids'",
+        id="tracking",
+    ),
+)
 
 
 def test_require_runs_parent_stamps_new_empty_parent_strict() -> None:
@@ -1873,14 +1963,16 @@ def test_emit_stage_completion_requires_root_for_ok_run_with_prebuilt_metadata(t
     assert called is False
 
 
-def test_emit_stage_completion_records_invalid_arrays_without_blocking_by_default(tmp_path: Path) -> None:
+def test_emit_stage_completion_records_invalid_keypoint_arrays_without_blocking_by_default(
+    tmp_path: Path,
+) -> None:
     root = FakeGroup()
-    detect_parent = FakeGroup()
+    keypoints_parent = FakeGroup()
     run = FakeGroup()
-    root["detect_runs"] = detect_parent
-    detect_parent["detect_001"] = run
-    mark_run_started(run, run_name="detect_001", stage="detect")
-    mark_run_complete(run, parent_group=detect_parent, run_name="detect_001")
+    root["keypoints_runs"] = keypoints_parent
+    keypoints_parent["keypoints_001"] = run
+    mark_run_started(run, run_name="keypoints_001", stage="keypoints")
+    mark_run_complete(run, parent_group=keypoints_parent, run_name="keypoints_001")
 
     class FakeRegistry:
         def close(self) -> None:
@@ -1891,10 +1983,10 @@ def test_emit_stage_completion_records_invalid_arrays_without_blocking_by_defaul
     wrote = emit_stage_completion(
         root,  # type: ignore[arg-type]
         tmp_path / "archive.zarr",
-        step_name="detect",
+        step_name="keypoints",
         status="ok",
         source="unit_test",
-        run_name="detect_001",
+        run_name="keypoints_001",
         registry=FakeRegistry(),  # type: ignore[arg-type]
         auto_registry_from_env=False,
         upsert_dataset_row=False,
@@ -1906,32 +1998,44 @@ def test_emit_stage_completion_records_invalid_arrays_without_blocking_by_defaul
     assert wrote is True
     details = captured["details_json"]
     assert details["stage_array_validation_status"] == "invalid"  # type: ignore[index]
-    assert details["stage_array_validation_stage"] == "detect"  # type: ignore[index]
+    assert details["stage_array_validation_stage"] == "keypoints"  # type: ignore[index]
     assert details["stage_array_validation_enforced"] is False  # type: ignore[index]
-    assert "detect: missing required array 'frame_indices'" in details["stage_array_validation_errors"]  # type: ignore[index]
+    assert "keypoints: missing required array 'frame_indices'" in details[  # type: ignore[operator]
+        "stage_array_validation_errors"
+    ]
 
 
-def test_emit_stage_completion_refuses_invalid_arrays_when_stage_is_enforced(
+@pytest.mark.parametrize(
+    ("step_name", "parent_name", "run_name", "_populate_valid", "_expected_stage", "expected_error"),
+    _PROMOTED_STAGE_COMPLETION_CASES,
+)
+def test_emit_stage_completion_refuses_invalid_promoted_stage_arrays_by_default(
     tmp_path: Path,
-    monkeypatch,
+    step_name: str,
+    parent_name: str,
+    run_name: str,
+    _populate_valid,
+    _expected_stage: str,
+    expected_error: str,
 ) -> None:
     root = FakeGroup()
-    detect_parent = FakeGroup()
+    parent = FakeGroup()
     run = FakeGroup()
-    root["detect_runs"] = detect_parent
-    detect_parent["detect_001"] = run
-    mark_run_started(run, run_name="detect_001", stage="detect")
-    mark_run_complete(run, parent_group=detect_parent, run_name="detect_001")
-
-    monkeypatch.setattr(
-        stage_complete_mod,
-        "_ENFORCE_STAGE_ARRAY_VALIDATION_FOR",
-        frozenset({"detect"}),
-    )
+    root[parent_name] = parent
+    parent[run_name] = run
+    mark_run_started(run, run_name=run_name, stage=step_name)
+    mark_run_complete(run, parent_group=parent, run_name=run_name)
 
     class FakeRegistry:
         def close(self) -> None:
             pass
+
+    class FakeConsole:
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+
+        def print(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            self.messages.append(" ".join(str(arg) for arg in args))
 
     called = False
 
@@ -1939,23 +2043,26 @@ def test_emit_stage_completion_refuses_invalid_arrays_when_stage_is_enforced(
         nonlocal called
         called = True
 
+    console = FakeConsole()
     wrote = emit_stage_completion(
         root,  # type: ignore[arg-type]
         tmp_path / "archive.zarr",
-        step_name="detect",
+        step_name=step_name,
         status="ok",
         source="unit_test",
-        run_name="detect_001",
+        run_name=run_name,
         registry=FakeRegistry(),  # type: ignore[arg-type]
         auto_registry_from_env=False,
         upsert_dataset_row=False,
         metadata=type("Metadata", (), {"dataset_id": "d", "recording_id": "r"})(),
+        console=console,  # type: ignore[arg-type]
         upsert_step_status_fn=_upsert,
         invalidate_steps_fn=lambda *args, **kwargs: None,
     )
 
     assert wrote is False
     assert called is False
+    assert expected_error in "\n".join(console.messages)
 
 
 def test_emit_stage_completion_accepts_complete_opted_in_run(tmp_path: Path) -> None:
@@ -1996,10 +2103,60 @@ def test_emit_stage_completion_accepts_complete_opted_in_run(tmp_path: Path) -> 
     assert captured["details_json"]["existing"] == "kept"  # type: ignore[index]
     assert captured["details_json"]["stage_array_validation_status"] == "ok"  # type: ignore[index]
     assert captured["details_json"]["stage_array_validation_stage"] == "detect"  # type: ignore[index]
-    assert captured["details_json"]["stage_array_validation_enforced"] is False  # type: ignore[index]
+    assert captured["details_json"]["stage_array_validation_enforced"] is True  # type: ignore[index]
     assert captured["details_json"]["stage_array_validation_warnings"] == [  # type: ignore[index]
         "detect: missing optional array 'centers_px'"
     ]
+
+
+@pytest.mark.parametrize(
+    ("step_name", "parent_name", "run_name", "populate_valid", "expected_stage", "_expected_error"),
+    _PROMOTED_STAGE_COMPLETION_CASES,
+)
+def test_emit_stage_completion_accepts_valid_promoted_stage_run(
+    tmp_path: Path,
+    step_name: str,
+    parent_name: str,
+    run_name: str,
+    populate_valid,
+    expected_stage: str,
+    _expected_error: str,
+) -> None:
+    root = FakeGroup()
+    parent = FakeGroup()
+    run = FakeGroup()
+    root[parent_name] = parent
+    parent[run_name] = run
+    mark_run_started(run, run_name=run_name, stage=step_name)
+    populate_valid(run)
+    mark_run_complete(run, parent_group=parent, run_name=run_name)
+
+    captured: dict[str, object] = {}
+
+    class FakeRegistry:
+        def close(self) -> None:
+            pass
+
+    wrote = emit_stage_completion(
+        root,  # type: ignore[arg-type]
+        tmp_path / "archive.zarr",
+        step_name=step_name,
+        status="ok",
+        source="unit_test",
+        run_name=run_name,
+        registry=FakeRegistry(),  # type: ignore[arg-type]
+        auto_registry_from_env=False,
+        upsert_dataset_row=False,
+        metadata=type("Metadata", (), {"dataset_id": "d", "recording_id": "r"})(),
+        upsert_step_status_fn=lambda *args, **kwargs: captured.update(kwargs),
+        invalidate_steps_fn=lambda *args, **kwargs: None,
+    )
+
+    assert wrote is True
+    details = captured["details_json"]
+    assert details["stage_array_validation_status"] == "ok"  # type: ignore[index]
+    assert details["stage_array_validation_stage"] == expected_stage  # type: ignore[index]
+    assert details["stage_array_validation_enforced"] is True  # type: ignore[index]
 
 
 def test_emit_stage_completion_uses_effective_recording_dataset_id(tmp_path: Path) -> None:
@@ -2360,6 +2517,7 @@ def test_emit_stage_completion_resolves_tracks_alias_to_tracking_spec(tmp_path: 
     details = captured["details_json"]
     assert details["stage_array_validation_status"] == "ok"  # type: ignore[index]
     assert details["stage_array_validation_stage"] == "tracking"  # type: ignore[index]
+    assert details["stage_array_validation_enforced"] is True  # type: ignore[index]
 
 
 def test_emit_stage_completion_resolves_refine_alias_to_refined_detect_spec(tmp_path: Path) -> None:
@@ -2551,6 +2709,6 @@ def test_emit_stage_completion_real_zarr_writes_shadow_validation_details(tmp_pa
         assert row is not None
         assert row["status"] == "ok"
         assert '"stage_array_validation_status":"ok"' in row["details_json"]
-        assert '"stage_array_validation_enforced":false' in row["details_json"]
+        assert '"stage_array_validation_enforced":true' in row["details_json"]
     finally:
         registry.close()

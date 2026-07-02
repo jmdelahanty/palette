@@ -61,7 +61,16 @@ _STAGE_ARRAY_SPEC_ALIASES = {
 # the staged allowlist below. Add canonical stage names here after real-run
 # shadow telemetry confirms that the current writers always emit the required
 # arrays in ``shared.zarr.stage_arrays``.
-_ENFORCE_STAGE_ARRAY_VALIDATION_FOR = frozenset({"detect_quality"})
+_ENFORCE_STAGE_ARRAY_VALIDATION_FOR = frozenset(
+    {
+        "arena_assignment",
+        "crop",
+        "detect",
+        "detect_quality",
+        "refined_keypoints",
+        "tracking",
+    }
+)
 
 
 def safe_zarr_mtime_ns(path: Path) -> Optional[int]:
