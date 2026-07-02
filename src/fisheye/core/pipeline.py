@@ -36,7 +36,7 @@ from ..refinement.detect_quality import analyze_detect_quality, save_quality_rep
 from ..refinement.refine_keypoints import create_refined_keypoint_run
 from ..registry.stage_catalog import canonical_stage_id
 from ..shared.experiment_setup import infer_experiment_setup
-from ..shared.zarr_run_completion import resolve_latest_complete_run_name
+from ..shared.zarr_run_completion import resolve_authoritative_run_name
 from ..shared.zarr.schema import validate_zarr_structure
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
@@ -84,7 +84,7 @@ def _get_group_with_fallback(root: zarr.Group, primary: str, legacy: str) -> Opt
 def _latest_complete(parent: Optional[zarr.Group]) -> Optional[str]:
     if parent is None:
         return None
-    return resolve_latest_complete_run_name(parent)
+    return resolve_authoritative_run_name(parent)
 
 
 @dataclass

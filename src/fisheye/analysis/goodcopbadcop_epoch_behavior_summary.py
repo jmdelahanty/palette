@@ -24,7 +24,7 @@ from fisheye.analysis.epoch_segments import (
 from fisheye.analysis.swim_bout_io import load_default_swim_bout_tables
 from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
-from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
+from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
 from fisheye.utils.system import get_git_info
 
 
@@ -105,7 +105,7 @@ def _resolve_chaser_distance_run(
         raise ValueError("Archive has no analysis/chaser_distance_runs group.")
     resolved = str(run_name or "latest").strip()
     if not resolved or resolved == "latest":
-        resolved = resolve_latest_complete_run_name(parent) or str(parent.attrs.get("latest") or "").strip()
+        resolved = resolve_authoritative_run_name(parent) or str(parent.attrs.get("latest") or "").strip()
     if not resolved or resolved not in parent:
         raise ValueError("No usable chaser-distance run found; pass --chaser-distance-run.")
     return parent[resolved], resolved, f"analysis/chaser_distance_runs/{resolved}"

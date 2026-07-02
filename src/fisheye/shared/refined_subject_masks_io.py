@@ -25,7 +25,7 @@ from .zarr_helpers import (
     zarr_child_group as _child_group,
     zarr_group_keys as _group_keys,
 )
-from .zarr_run_completion import resolve_latest_complete_run_name
+from .zarr_run_completion import resolve_authoritative_run_name, resolve_latest_complete_run_name
 
 
 REFINED_SUBJECT_MASKS_RUN_PARENT = "refined_subject_masks_runs"
@@ -281,7 +281,7 @@ def resolve_refined_subject_masks_run(
         raise RefinedSubjectMasksIOError("No refined_subject_masks_runs group found.")
 
     if run_name is None or str(run_name).strip().lower() in {"", "latest"}:
-        latest = resolve_latest_complete_run_name(parent)
+        latest = resolve_authoritative_run_name(parent)
         if latest and latest in parent:
             resolved = latest
         else:

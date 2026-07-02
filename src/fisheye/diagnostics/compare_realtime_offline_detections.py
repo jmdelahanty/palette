@@ -35,7 +35,7 @@ from fisheye.shared.zarr_run_completion import (
     mark_run_pending,
     mark_run_started,
     require_runs_parent,
-    resolve_latest_complete_run_name,
+    resolve_authoritative_run_name,
 )
 from fisheye.visualization.plot_detection_epoch_heatmaps import EpochWindow
 from fisheye.visualization.plot_detection_epoch_heatmaps import resolve_stimulus_event_windows
@@ -254,7 +254,7 @@ def _resolve_raw_detect_group(root: zarr.Group, run_name: Optional[str]) -> tupl
         raise ValueError("Archive has no detect_runs group.")
     resolved = str(run_name).strip() if run_name else None
     if not resolved:
-        resolved = resolve_latest_complete_run_name(parent)
+        resolved = resolve_authoritative_run_name(parent)
     if not resolved:
         latest = parent.attrs.get("latest")
         resolved = str(latest).strip() if latest else None
@@ -269,7 +269,7 @@ def _resolve_refined_detect_group(root: zarr.Group, run_name: Optional[str]) -> 
         raise ValueError("Archive has no refined_detect_runs group.")
     resolved = str(run_name).strip() if run_name else None
     if not resolved:
-        resolved = resolve_latest_complete_run_name(parent)
+        resolved = resolve_authoritative_run_name(parent)
     if not resolved:
         latest = parent.attrs.get("latest")
         resolved = str(latest).strip() if latest else None
@@ -410,11 +410,7 @@ def resolve_stimulus_run(root: zarr.Group, stimulus_run: Optional[str]) -> tuple
     parent = analysis["stimulus_runs"]
     resolved = str(stimulus_run).strip() if stimulus_run else None
     if not resolved:
-        for attr_name in ("latest", "latest_complete"):
-            value = parent.attrs.get(attr_name)
-            if value:
-                resolved = str(value).strip()
-                break
+        resolved = resolve_authoritative_run_name(parent)
     if not resolved:
         names = sorted(str(name) for name in parent.group_keys())
         resolved = names[-1] if names else None

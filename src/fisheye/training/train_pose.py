@@ -37,7 +37,7 @@ import zarr
 from typing import Any, Callable, Dict, Mapping, Optional
 
 from ..pose.schema import resolve_keypoint_labels_from_attrs
-from ..shared.zarr_run_completion import resolve_latest_complete_run_name
+from ..shared.zarr_run_completion import resolve_authoritative_run_name
 from .config import PoseConfig
 from .export_shared import (
     collect_export_env as _shared_collect_export_env,
@@ -442,7 +442,7 @@ def get_zarr_metadata(zarr_paths, console=None):
             
             # Get crop info
             if 'crop_runs' in root:
-                latest_crop = resolve_latest_complete_run_name(root['crop_runs'])
+                latest_crop = resolve_authoritative_run_name(root['crop_runs'])
                 if latest_crop:
                     crop_group = root[f'crop_runs/{latest_crop}']
 
@@ -458,7 +458,7 @@ def get_zarr_metadata(zarr_paths, console=None):
             
             # Get keypoint detection info if available
             if 'keypoints_runs' in root:
-                latest_kp = resolve_latest_complete_run_name(root['keypoints_runs'])
+                latest_kp = resolve_authoritative_run_name(root['keypoints_runs'])
                 if latest_kp:
                     kp_group = root[f'keypoints_runs/{latest_kp}']
                     usable_keypoints = None

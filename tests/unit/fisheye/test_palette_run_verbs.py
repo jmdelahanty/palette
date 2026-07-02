@@ -10,7 +10,13 @@ import zarr
 
 from fisheye.cli import palette
 from fisheye.cli.envelope import build_run_provenance
-from fisheye.shared.zarr_run_completion import mark_run_complete
+from fisheye.shared.zarr_run_completion import (
+    AUTHORITATIVE_RUN_ATTR,
+    AUTHORITATIVE_RUN_PROVENANCE_ATTR,
+    mark_run_complete,
+    mark_run_started,
+    require_runs_parent,
+)
 from fisheye.utils.crop_batch import CropPlan
 
 
@@ -50,6 +56,98 @@ def test_run_provenance_config_hash_is_stable() -> None:
 
     assert left["config_hash"] == right["config_hash"]
     assert left["config_hash"] != changed["config_hash"]
+
+
+def test_approve_dry_run_does_not_write_pointer(tmp_path, capsys) -> None:
+    zarr_path = tmp_path / "approve_ready.zarr"
+    root = _open_tmp_store(zarr_path)
+    _create_raw(root)
+    _complete_run(root, "subject_mask_runs", "subject_full")
+
+    rc, payload = _run_json(
+        capsys,
+        "approve",
+        str(zarr_path),
+        "subject_masks",
+        "subject_full",
+        "--by",
+        "jeremy",
+    )
+
+    assert rc == palette.EXIT_OK
+    assert payload["status"] == "dry_run"
+    assert payload["reason_code"] == "DRY_RUN"
+    assert payload["run"] == "subject_full"
+    assert payload["metrics"]["stage"] == "subject_masks"
+    assert payload["metrics"]["parent_path"] == "subject_mask_runs"
+    assert payload["approval"]["approved_by"] == "jeremy"
+    assert "--apply" in payload["next_hints"][0]
+    reopened = zarr.open_group(str(zarr_path), mode="r")
+    assert AUTHORITATIVE_RUN_ATTR not in reopened["subject_mask_runs"].attrs
+
+
+def test_approve_apply_writes_authoritative_pointer_and_status_uses_it(tmp_path, capsys) -> None:
+    zarr_path = tmp_path / "approve_apply.zarr"
+    root = _open_tmp_store(zarr_path)
+    _create_raw(root)
+    _complete_run(root, "subject_mask_runs", "subject_full")
+    _complete_run(root, "subject_mask_runs", "subject_smoke")
+
+    rc, payload = _run_json(
+        capsys,
+        "approve",
+        str(zarr_path),
+        "subject_masks",
+        "subject_full",
+        "--apply",
+        "--by",
+        "jeremy",
+        "--note",
+        "reviewed full run",
+    )
+
+    assert rc == palette.EXIT_OK
+    assert payload["status"] == "ok"
+    assert payload["reason_code"] == "OK"
+    assert payload["metrics"]["previous_authoritative_run"] is None
+    reopened = zarr.open_group(str(zarr_path), mode="r")
+    parent = reopened["subject_mask_runs"]
+    assert parent.attrs[AUTHORITATIVE_RUN_ATTR] == "subject_full"
+    provenance = dict(parent.attrs[AUTHORITATIVE_RUN_PROVENANCE_ATTR])
+    assert provenance["approved_by"] == "jeremy"
+    assert provenance["note"] == "reviewed full run"
+    assert "approved_at" in provenance
+
+    rc, status_payload = _run_json(capsys, "status", str(zarr_path))
+
+    assert rc == palette.EXIT_OK
+    subject_masks = next(stage for stage in status_payload["stages"] if stage["stage"] == "subject_masks")
+    assert subject_masks["run"] == "subject_full"
+    assert subject_masks["latest_complete_run"] == "subject_smoke"
+    assert subject_masks["run_resolution"] == "authoritative"
+
+
+def test_approve_blocks_incomplete_run(tmp_path, capsys) -> None:
+    zarr_path = tmp_path / "approve_incomplete.zarr"
+    root = _open_tmp_store(zarr_path)
+    parent = require_runs_parent(root, "subject_mask_runs")
+    run = parent.require_group("subject_pending")
+    mark_run_started(run, run_name="subject_pending", stage="subject_masks")
+
+    rc, payload = _run_json(
+        capsys,
+        "approve",
+        str(zarr_path),
+        "subject_masks",
+        "subject_pending",
+        "--apply",
+    )
+
+    assert rc == palette.EXIT_BLOCKED
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == "RUN_NOT_COMPLETE"
+    reopened = zarr.open_group(str(zarr_path), mode="r")
+    assert AUTHORITATIVE_RUN_ATTR not in reopened["subject_mask_runs"].attrs
 
 
 def test_detect_default_dry_run_uses_runner_without_writing(monkeypatch, tmp_path, capsys) -> None:
