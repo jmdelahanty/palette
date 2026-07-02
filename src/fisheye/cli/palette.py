@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 from contextlib import nullcontext, redirect_stdout
+import os
 import json
 import shlex
 import sqlite3
@@ -22,14 +24,18 @@ from fisheye.cli.envelope import (
     build_envelope,
     build_run_provenance,
     exit_code_for_status,
+    git_identity,
     json_ready,
 )
 from fisheye.registry.stage_catalog import STAGE_SPECS, StageSpec
 from fisheye.registry.stage_complete import _STEP_RUN_PARENTS
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.shared.zarr_run_completion import (
+    AUTHORITATIVE_RUN_ATTR,
     RUN_COMPLETED_AT_ATTR,
     describe_run_parent,
+    is_run_complete_in_parent,
+    set_authoritative_run,
 )
 from fisheye.status_page.query import open_readonly_connection, resolve_registry_path
 
@@ -904,6 +910,17 @@ def _resolved_palette_command(verb: str, dataset: DatasetRef, args: argparse.Nam
     return _join_command(parts)
 
 
+def _resolved_approve_command(dataset: DatasetRef, args: argparse.Namespace, *, apply: bool) -> str:
+    parts: list[Any] = ["palette", "approve", dataset.zarr_path, args.stage, args.run]
+    registry = _registry_for_dataset(dataset, getattr(args, "registry", None))
+    if registry is not None:
+        parts.extend(["--registry", registry])
+    parts.append("--apply" if apply else "--dry-run")
+    _append_option(parts, "--by", getattr(args, "by", None))
+    _append_option(parts, "--note", getattr(args, "note", None))
+    return _join_command(parts)
+
+
 def _arg_params(args: argparse.Namespace, exclude: Iterable[str] = ()) -> dict[str, Any]:
     excluded = {"command", "recording", "json", "apply", "dry_run", *set(exclude)}
     return {key: value for key, value in vars(args).items() if key not in excluded}
@@ -1026,6 +1043,180 @@ def _emit_run_payload(payload: dict[str, Any], json_output: bool) -> int:
     else:
         _print_run_table(payload)
     return exit_code_for_status(str(payload.get("status") or "failed"))
+
+
+def _approval_actor(raw: str | None) -> str:
+    return (
+        _normalize_text(raw)
+        or _normalize_text(os.environ.get("PALETTE_APPROVED_BY"))
+        or _normalize_text(os.environ.get("USER"))
+        or _normalize_text(os.environ.get("LOGNAME"))
+        or getpass.getuser()
+    )
+
+
+def _approval_parent_for_stage(root: Any, stage_id: str, run_name: str) -> tuple[str | None, Any | None, list[str]]:
+    spec = _stage_spec(stage_id)
+    candidates = _stage_parent_paths(spec)
+    run_parents: list[tuple[str, Any]] = []
+    for path in candidates:
+        group = _get_group(root, path)
+        if group is None or not _is_run_parent(group):
+            continue
+        run_parents.append((path, group))
+        try:
+            if run_name in group:
+                return path, group, candidates
+        except Exception:
+            continue
+    if run_parents:
+        path, group = run_parents[0]
+        return path, group, candidates
+    return None, None, candidates
+
+
+def _validate_approval_target(parent: Any, run_name: str) -> tuple[bool, str, str]:
+    try:
+        if run_name not in parent:
+            return False, "RUN_NOT_FOUND", f"run not found: {run_name}"
+        run_group = parent[run_name]
+    except Exception as exc:
+        return False, "RUN_NOT_FOUND", f"could not open run {run_name!r}: {exc}"
+    if not is_run_complete_in_parent(parent, run_group):
+        return False, "RUN_NOT_COMPLETE", f"run is not complete: {run_name}"
+    return True, "OK", ""
+
+
+def _run_approve(args: argparse.Namespace) -> int:
+    dataset, hints = _resolve_dataset(str(args.recording), args.registry)
+    command = "palette approve"
+    if dataset is None:
+        payload = _blocked_payload(command, str(args.recording), hints)
+        return _emit_run_payload(payload, bool(args.json))
+
+    apply = bool(args.apply)
+    root = open_zarr_group_direct(dataset.zarr_path, mode="r+" if apply else "r")
+    resolved_command = _resolved_approve_command(dataset, args, apply=apply)
+    stage = str(args.stage).strip()
+    run_name = str(args.run).strip()
+    try:
+        parent_path, parent, candidate_paths = _approval_parent_for_stage(root, stage, run_name)
+    except KeyError:
+        provenance = build_run_provenance(
+            command=command,
+            params=_arg_params(args),
+            cwd=Path.cwd(),
+        )
+        payload = build_envelope(
+            command=command,
+            status="blocked",
+            reason_code="UNKNOWN_STAGE",
+            recording=dataset.recording_id,
+            dataset_id=dataset.dataset_id,
+            zarr_path=dataset.zarr_path,
+            run=run_name,
+            artifacts=[dataset.zarr_path],
+            metrics={"stage": stage},
+            next_hints=[f"unknown stage: {stage}"],
+            provenance=provenance,
+            resolved_command=resolved_command,
+        )
+        return _emit_run_payload(payload, bool(args.json))
+
+    git = git_identity(cwd=Path.cwd())
+    approved_at = _utc_now()
+    approval = {
+        "approved_by": _approval_actor(args.by),
+        "approved_at": approved_at,
+        "git_sha": git.get("git_sha"),
+        "note": _normalize_text(args.note),
+    }
+    params = {
+        **_arg_params(args),
+        "stage": stage,
+        "run": run_name,
+        "dry_run": not apply,
+    }
+    provenance = build_run_provenance(
+        command=command,
+        params=params,
+        input_run_ids={stage: run_name},
+        cwd=Path.cwd(),
+    )
+    provenance["approval"] = dict(approval)
+
+    if parent is None or parent_path is None:
+        payload = build_envelope(
+            command=command,
+            status="blocked",
+            reason_code="STAGE_HAS_NO_RUN_PARENT",
+            recording=dataset.recording_id,
+            dataset_id=dataset.dataset_id,
+            zarr_path=dataset.zarr_path,
+            run=run_name,
+            artifacts=[dataset.zarr_path],
+            metrics={"stage": stage, "candidate_parent_paths": candidate_paths},
+            next_hints=[f"stage has no run parent: {stage}"],
+            provenance=provenance,
+            resolved_command=resolved_command,
+        )
+        return _emit_run_payload(payload, bool(args.json))
+
+    valid, reason_code, reason = _validate_approval_target(parent, run_name)
+    if not valid:
+        payload = build_envelope(
+            command=command,
+            status="blocked",
+            reason_code=reason_code,
+            recording=dataset.recording_id,
+            dataset_id=dataset.dataset_id,
+            zarr_path=dataset.zarr_path,
+            run=run_name,
+            artifacts=[dataset.zarr_path, dataset.zarr_path / parent_path / run_name],
+            metrics={"stage": stage, "parent_path": parent_path},
+            next_hints=[reason],
+            provenance=provenance,
+            resolved_command=resolved_command,
+        )
+        return _emit_run_payload(payload, bool(args.json))
+
+    previous = _normalize_text(getattr(parent, "attrs", {}).get(AUTHORITATIVE_RUN_ATTR))
+    if apply:
+        set_authoritative_run(
+            parent,
+            run_name,
+            approved_by=str(approval["approved_by"]),
+            approved_at=approved_at,
+            git_sha=_normalize_text(approval.get("git_sha")),
+            note=_normalize_text(approval.get("note")),
+        )
+    status = "ok" if apply else "dry_run"
+    payload = build_envelope(
+        command=command,
+        status=status,
+        reason_code="OK" if apply else "DRY_RUN",
+        recording=dataset.recording_id,
+        dataset_id=dataset.dataset_id,
+        zarr_path=dataset.zarr_path,
+        run=run_name,
+        artifacts=[dataset.zarr_path, dataset.zarr_path / parent_path / run_name],
+        metrics={
+            "stage": stage,
+            "parent_path": parent_path,
+            "previous_authoritative_run": previous,
+            "authoritative_run": run_name if apply else previous,
+            "proposed_authoritative_run": run_name,
+        },
+        next_hints=(
+            _next_hints_from_plan(dataset)
+            if apply
+            else [_resolved_approve_command(dataset, args, apply=True)]
+        ),
+        provenance=provenance,
+        resolved_command=resolved_command,
+        approval=approval,
+    )
+    return _emit_run_payload(payload, bool(args.json))
 
 
 def _runner_stdout_context(json_output: bool):
@@ -1464,6 +1655,19 @@ def _add_keypoints_args(sub: argparse.ArgumentParser) -> None:
     sub.add_argument("--verbose", action="store_true")
 
 
+def _add_approve_args(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument("recording", help="Recording id, dataset id, zarr path, or directory containing one zarr.")
+    sub.add_argument("stage", help="Catalog stage id to approve, e.g. refined_subject_masks.")
+    sub.add_argument("run", help="Run name under the stage run parent.")
+    sub.add_argument("--registry", type=Path, help="Path to palette_registry.sqlite.")
+    sub.add_argument("--json", action="store_true", help="Print a JSON envelope.")
+    mode = sub.add_mutually_exclusive_group()
+    mode.add_argument("--apply", action="store_true", help="Write the authoritative-run pointer.")
+    mode.add_argument("--dry-run", action="store_true", help="Resolve and report without writing. This is the default.")
+    sub.add_argument("--by", type=str, default=None, help="Approval actor. Defaults to PALETTE_APPROVED_BY or USER.")
+    sub.add_argument("--note", type=str, default=None, help="Optional approval note.")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = PaletteArgumentParser(
         prog="palette",
@@ -1478,6 +1682,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_detect_args(subparsers.add_parser("detect", help="Resolve and run detection through the registry model shim."))
     _add_crop_args(subparsers.add_parser("crop", help="Plan or run crop extraction through the live crop runner."))
     _add_keypoints_args(subparsers.add_parser("keypoints", help="Resolve and run keypoints through the registry model shim."))
+    _add_approve_args(subparsers.add_parser("approve", help="Mark a complete run as the authoritative run for a stage."))
     return parser
 
 
@@ -1489,6 +1694,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return EXIT_USAGE
     try:
+        if args.command == "approve":
+            return _run_approve(args)
         if args.command in {"detect", "crop", "keypoints"}:
             return _run_mutating_verb(args)
         return _run_readonly(
