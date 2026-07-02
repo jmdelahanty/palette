@@ -1,5 +1,13 @@
 # Eye-Mask Stage Severance Plan
 
+> Archived execution note, 2026-07-01: this plan has been executed. Landed
+> commits: `6ab7843` census, `cfc0d02` helper relocation, `73ab164`
+> compatibility mirror cutoff, `4a85e5d` deprecated stage-pipeline deletion,
+> `b983b38` visualizer deletion, `edb2534` registry write-path retirement, plus
+> the docs/archive commit containing this note. See
+> `docs/diagnostics/eye_mask_severance_census_2026-07-01.md` for the final
+> coverage decision.
+
 **Date:** 2026-05-28
 **Method:** Read-only parallel dependency trace — 10 agents: crux geometry severance + registry map + 8 file-classification batches covering all ~102 eye-mask-touching files, then synthesis. No files modified.
 **Goal:** Plan removal of the legacy standalone `eye_masks` / `refined_eye_masks` pipeline stages. Eyes are now a channel within the unified subject mask (`SUBJECT_MASK_LABEL_SCHEMAS`: `eyes_union` / `eye_left` / `eye_right`).

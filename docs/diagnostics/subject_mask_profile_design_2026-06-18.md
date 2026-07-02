@@ -5,9 +5,9 @@
 **Context:** The data-profile pattern exists for detection, keypoint, eye_mask, and
 training_image but **not subject_mask** (see
 `registry_reconcile_collapse_audit_2026-06-18.md`). Eyes are now a channel within the
-unified subject mask and the eye-mask stage is being deprecated
-(`eye_mask_severance_plan_2026-05-28.md`), so subject_mask is the stage that should carry
-the profile capability going forward.
+unified subject mask and the eye-mask stage has been severed
+(`docs/archive/eye_mask_severance_plan_2026-05-28.md`), so subject_mask is the stage
+that should carry the profile capability going forward.
 
 ## What "profile" means here (the pattern to mirror)
 

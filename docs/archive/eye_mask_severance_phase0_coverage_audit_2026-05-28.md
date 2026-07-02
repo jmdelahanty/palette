@@ -1,5 +1,10 @@
 # Eye-Mask Severance Phase 0 Coverage Audit
 
+> Archived execution note, 2026-07-01: this predecessor audit has been
+> superseded by `docs/diagnostics/eye_mask_severance_census_2026-07-01.md` and
+> the severance commits `6ab7843`, `cfc0d02`, `73ab164`, `4a85e5d`, `b983b38`,
+> and `edb2534`. Retained for historical context only.
+
 **Date:** 2026-05-28
 **Amended:** 2026-05-30
 **Mode:** original audit was read-only. On 2026-05-30, the smoke-only registry row below was marked `datasets.status = 'inactive_smoke'`; no recording zarrs were modified.

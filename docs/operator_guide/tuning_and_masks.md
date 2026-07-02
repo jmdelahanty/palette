@@ -19,10 +19,10 @@ propagate settings across recordings.
                             |
               ┌─────────────┼──────────────┐
               v             v              v
-         keypoints     eye masks     subject body
-              |             |              |
-              v             v              v
-       swim bladder    (refinement)   (refinement)
+         keypoints        subject masks / components
+              |                     |
+              v                     v
+       swim bladder          body, eyes, swim bladder
 ```
 
 Tuning happens at the top of each branch. Once you tune one recording per
@@ -418,16 +418,16 @@ This opens a paint/erase GUI where you can edit masks per ROI. Hotkeys:
 
 Edits go to `refined_subject_masks_runs/`.
 
-### Eye mask review
+### Eye component review
+
+Standalone eye-mask review has been retired. Edit eyes through the refined
+subject-mask review surface:
 
 ```bash
-scripts/py -m fisheye.tune.eye_mask_review \
+scripts/py -m fisheye.tune.refined_subject_mask_review \
   /path/to/zarr/..._analysis.zarr \
-  --manual
+  --components eye_left eye_right
 ```
-
-The `--manual` flag opens the unified review surface that edits eyes through
-the subject mask system. This is the recommended path for eye review.
 
 ### Inspecting masks without editing
 

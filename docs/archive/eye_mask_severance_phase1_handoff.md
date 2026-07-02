@@ -1,5 +1,10 @@
 # Implementation Handoff: Eye-Mask Stage Severance — Phase 1 (re-point)
 
+> Archived execution note, 2026-07-01: this handoff has been superseded by the
+> completed severance sequence and is no longer an open agent task. Relevant
+> landed commits include `cfc0d02`, `73ab164`, `4a85e5d`, `b983b38`, and
+> `edb2534`.
+
 > **Prerequisite:** Phase 0 (`eye_mask_severance_phase0_coverage_audit.md`) should report GO
 > before this runs. Phase 1 is code-only and behavior-neutral, but its safety assumes the
 > coverage audit confirmed subject-mask eye geometry exists for the recordings you care about.

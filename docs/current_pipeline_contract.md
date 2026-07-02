@@ -1,9 +1,9 @@
 # Current Palette Pipeline Contract
 
 <!-- contract-meta
-version: 1
+version: 2
 status: active
-last_verified: 2026-05-01
+last_verified: 2026-07-01
 -->
 
 Purpose: define the current operator-facing source-of-truth contract for Palette
@@ -67,9 +67,9 @@ review targets. See
 | Detect quality | detect-run quality reports | refined detect review/status metadata | legacy detect-quality aliases | quality labels feed refine; review state belongs to refined detect |
 | Crop | `crop_runs/<run>` | none in normal operation | geometry-only or repaired crop variants | current crop run that still matches selected detect/refined lineage |
 | Keypoints | `keypoints_runs/<run>` | `refined_keypoints_runs/<run>` | legacy keypoint attrs such as singular `source_keypoint_run` | refined keypoints when present; metadata-driven pose and heading semantics |
-| Raw segmentation | `subject_mask_runs/<run>` probability surfaces plus model/config/provenance | none | optional thresholded compatibility caches and `eye_masks_runs/<run>` during migration | unified subject-mask component availability for current mask state |
+| Raw segmentation | `subject_mask_runs/<run>` probability surfaces plus model/config/provenance | none | optional thresholded compatibility caches; historical `eye_masks_runs/<run>` data is read-only | unified subject-mask component availability for current mask state |
 | Refined subject masks | `subject_mask_runs/<run>` sources plus component provenance | `refined_subject_masks_runs/<run>` | none; this is the canonical refined component surface | component availability, review state, and lifecycle from refined subject-mask component rows |
-| Refined eye masks | `eye_masks_runs/<run>` or projected subject-mask sources | `refined_subject_masks_runs/<run>` for current eye review | `refined_eye_masks_runs/<run>` is historical or derived compatibility layout | active eye geometry/export should prefer refined subject-mask eye components and fall back to refined-eye only for historical archives |
+| Refined eye masks | historical `eye_masks_runs/<run>` when present | `refined_subject_masks_runs/<run>` for current eye review | `refined_eye_masks_runs/<run>` is historical compatibility layout | active eye geometry/export should use refined subject-mask or subject-shape eye components; legacy refined-eye data is inspectable history |
 | Swim bladder | raw probability surfaces in `subject_mask_runs/<run>` | `refined_subject_masks_runs/<run>/components/swim_bladder` | coarse thresholded swim-bladder masks are compatibility/refinement caches | refined subject-mask swim-bladder component state |
 | Subject shape | refined subject-mask component masks and optional mask-local geometry | none; derived deterministic analysis layer | `analysis/subject_shape_runs/<run>` as the coherent body/eyes/swim shape and shared body-frame surface; specialized downstream analysis runs may consume it | shape outputs must reference exact refined-mask source and any heading/keypoint/track inputs |
 | Tail kinematics | ordered tail geometry from `analysis/subject_shape_runs` or future keypoint-derived tail posture | none; derived deterministic analysis layer | `analysis/tail_kinematics_runs/<run>` for body-frame tail angles, lateral deflections, and curvature summaries; Megabouts/ZebraZoom/Stytra views are adapters | tail traces must reference exact geometry source and record angle/sign/unit conventions |
@@ -132,16 +132,16 @@ Current rules:
 - Production assembly/export from `refined_subject_masks_runs` is
   approved-only by default; pending or missing component reviews require an
   explicit draft/QA override.
-- `eye_masks_runs` remains writable during migration because current eye
-  producers and workflows still depend on it.
-- New eye orchestration should project or companion-write eye outputs into
-  `subject_mask_runs` when possible.
-- `refined_eye_masks_runs` remains readable and may be materialized as a
-  derived compatibility artifact, but it should not become a second manual
-  review authority for new operator-facing eye state.
-- Mask-level eye geometry and export consumers should use the shared resolver
-  that prefers `refined_subject_masks_runs` and falls back to
-  `refined_eye_masks_runs` for historical archives.
+- Standalone `eye_masks_runs` / `refined_eye_masks_runs` production is retired.
+  Historical groups remain readable in old zarrs and registry/status views, but
+  no current workflow should create new standalone eye-mask runs.
+- New eye-capable mask work should write `subject_mask_runs` and finalize into
+  `refined_subject_masks_runs` components.
+- `refined_eye_masks_runs` remains a historical compatibility layout only; it
+  is not a manual review authority for new operator-facing eye state.
+- Mask-level eye geometry and export consumers should use subject-shape or
+  refined-subject eye components. Historical refined-eye groups can be inspected
+  directly, but are not part of the live resolver path.
 - Eye-angle analysis is a specialized downstream consumer. It now opts into
   `analysis/subject_shape_runs` as the preferred eye-geometry source when
   left/right eye ellipse geometry is present, records
@@ -214,12 +214,10 @@ eye-mask stale payloads are the precedent, not the final mask-wide answer.
 These gaps are allowed transition state, but they should not be treated as the
 desired design:
 
-- `src/fisheye/core/pipeline.py` still exposes `eye_masks` and
-  `refined_eye_masks` as first-class stages.
 - There is no completed top-level `segmentation` orchestration step with a
   central method-capability table. The direct U-Net subject-mask CLI writes one
-  coherent body/eyes/swim raw snapshot, but the core pipeline still exposes
-  historical stage-specific entrypoints.
+  coherent body/eyes/swim raw snapshot, but the broader component/method
+  orchestration layer remains open.
 - Some registry query and training-prep paths still expose legacy eye-mask
   filters as primary-looking options.
 - Subject/refined-subject stale repair is not yet as complete as the eye-mask

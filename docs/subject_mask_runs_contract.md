@@ -1,8 +1,8 @@
 # Subject Mask Runs Contract (Draft v1)
 <!-- contract-meta
-version: 1
+version: 2
 status: draft
-last_verified: 2026-06-20
+last_verified: 2026-07-01
 -->
 
 Purpose: define the runtime/storage contract for a generalized ROI-local
@@ -13,8 +13,9 @@ without overloading the existing eye-specific stages.
 
 - Define `subject_mask_runs/<run>` for runtime and curated source zarrs.
 - Support model-native subject-mask runs.
-- Support explicit projection/backfill from legacy `eye_masks_runs` or
-  `refined_eye_masks_runs`.
+- Document historical projection/backfill semantics from legacy
+  `eye_masks_runs` or `refined_eye_masks_runs` for interpreting old converted
+  data. New standalone eye-mask production is retired.
 - Keep refined geometry and review authority out of raw `subject_mask_runs`.
   Modern refined eye geometry belongs in `refined_subject_masks_runs` when
   `eye_left` and `eye_right` are present; `refined_eye_masks_runs` remains a
@@ -22,7 +23,8 @@ without overloading the existing eye-specific stages.
 
 ## Non-goals
 
-- Replacing `refined_eye_masks_runs`.
+- Reviving `refined_eye_masks_runs` or treating it as a current authoring
+  target.
 - Storing eye ellipses, eye separation, or eye-specific QA summaries here.
 - Storing subject centerlines, splines, or tail kinematics here.
 - Storing thresholded model masks as canonical raw model output.
@@ -38,11 +40,11 @@ crop_runs/<run>
   -> analysis/subject_shape_runs/<run> # derived analysis geometry
 ```
 
-Legacy compatibility path:
+Historical compatibility path:
 
 ```text
 eye_masks_runs/<run> or refined_eye_masks_runs/<run>
-  -> subject_mask_runs/<run>           # explicit projection/backfill
+  -> subject_mask_runs/<run>           # historical projection/backfill
   -> refined_subject_masks_runs/<run>   # canonical refined target
 ```
 
@@ -607,34 +609,23 @@ Examples:
 
 ## Legacy projection/backfill policy
 
-Legacy `eye_masks_runs` and `refined_eye_masks_runs` remain supported source
-stages.
+Legacy `eye_masks_runs` and `refined_eye_masks_runs` are retained as historical
+data only. The 2026-07-01 severance census found no active recording that still
+needed conversion from standalone eye-mask stages to native subject-mask or
+subject-shape eye geometry, so routine projection/backfill from these stages is
+closed.
 
-Recommended migration model:
+Policy after severance:
 
-1. Preserve historical `eye_masks_runs` and `refined_eye_masks_runs`.
-2. Allow explicit projection/backfill into `subject_mask_runs`.
-3. Keep `refined_eye_masks_runs` as the eye-specific derived/compatibility
-   stage.
-4. Prefer new eye refinement through `subject_mask_runs` plus declared
+1. Preserve historical `eye_masks_runs` and `refined_eye_masks_runs` in existing
+   zarrs.
+2. Do not create new standalone eye-mask runs.
+3. Do not use legacy projection/backfill as a normal authoring path.
+4. Prefer new eye-capable work through `subject_mask_runs` plus declared
    assignment keypoint lineage, finalized into `refined_subject_masks_runs`.
-5. Only then deprecate creation of new raw `eye_masks_runs`.
-
-Current implementation note:
-
-- the explicit migration utility/backfill path records
-  `run_semantics = "legacy_eye_mask_projection"`
-- `scripts/py -m fisheye.utils.backfill_subject_mask_runs --source-stage prefer_refined`
-  now provides a one-pass migration mode that prefers `refined_eye_masks_runs`
-  and falls back to `eye_masks_runs`
-- raw eye orchestration may also materialize an immediate compatibility
-  `subject_mask_runs/<run>` companion after successful `eye_masks_runs/<run>`
-  completion
-- that fresh runtime companion records
-  `run_semantics = "eye_mask_runtime_projection"`
-- current runtime eye projection defaults to `subject_v1_union`, even when the
-  eye producer may carry richer left/right semantics, so the canonical raw
-  bridge remains safe across traditional, YOLO, and U-Net eye producers
+5. Treat historical projection metadata such as
+   `run_semantics = "legacy_eye_mask_projection"` as provenance for already
+   converted data, not an instruction to run a new conversion.
 
 ## Projection rules from legacy eye-mask stages
 

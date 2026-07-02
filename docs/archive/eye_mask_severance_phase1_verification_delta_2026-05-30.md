@@ -1,5 +1,10 @@
 # Eye-Mask Severance Phase 1 Verification Delta
 
+> Archived execution note, 2026-07-01: this predecessor verification delta has
+> been superseded by the completed severance commits `6ab7843`, `cfc0d02`,
+> `73ab164`, `4a85e5d`, `b983b38`, and `edb2534`. Retained for historical
+> context only.
+
 **Date:** 2026-05-30
 **Status:** implemented and locally validated
 **Scope:** Palette Phase 1 re-point only. No legacy files, registry migrations, tables, or recording zarr data were deleted.

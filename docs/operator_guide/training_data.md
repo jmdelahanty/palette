@@ -188,14 +188,17 @@ with `s`. Use `n`/`p` for navigation, `a` to approve when complete, `x` for
 experimental low-confidence 5-point model outputs unless they have been
 visually corrected.
 
-### Eye mask review
+### Eye component mask review
+
+Standalone eye-mask review has been retired. Review current eye labels through
+the refined subject-mask review surface, targeting `eye_left` and `eye_right`
+components when the selected refined run provides them.
 
 ```bash
-scripts/py -m fisheye.tune.eye_mask_review path/to/zarr/..._analysis.zarr
+scripts/py -m fisheye.tune.refined_subject_mask_review \
+  path/to/zarr/..._analysis.zarr \
+  --components eye_left eye_right
 ```
-
-Same modes as keypoint review. Tune threshold and morphology parameters,
-then approve.
 
 ### Batch review
 

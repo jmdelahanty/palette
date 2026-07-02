@@ -1,8 +1,8 @@
 # Subject Mask Training Artifact Contract (Draft v1)
 <!-- contract-meta
-version: 1
+version: 2
 status: active
-last_verified: 2026-06-21
+last_verified: 2026-07-01
 -->
 
 Purpose: define the merged training artifact for a generalized ROI-local
@@ -21,7 +21,8 @@ separate smart finalizer described in
 - Output one merged `.zarr` artifact for subject-mask training.
 - Preserve row-aligned crop lineage and per-channel supervision provenance.
 - Support partial supervision per channel.
-- Keep existing eye-mask training artifacts first-class and unchanged.
+- Keep existing merged eye-mask training artifacts first-class and unchanged as
+  historical training datasets.
 
 ## Goals
 
@@ -40,7 +41,7 @@ separate smart finalizer described in
 
 ## Non-goals
 
-- Replacing the current `eye_masks` training workflow.
+- Rewriting historical `eye_masks` merged training datasets.
 - Requiring historical eye-mask datasets to be rewritten or backfilled.
 - Reconstructing missing full-body or swim-bladder labels from old eye-mask
   datasets.
@@ -50,9 +51,10 @@ separate smart finalizer described in
 
 ## Compatibility Policy
 
-The current eye-mask training artifact remains valid and supported:
+Historical eye-mask training artifacts remain valid and supported:
 
-- `training_task = "eye_masks"` artifacts continue to train eye-specific models.
+- `training_task = "eye_masks"` artifacts remain registry-trackable merged
+  training datasets.
 - No migration is required for existing merged eye-mask training datasets.
 
 The new subject-mask artifact is additive:
@@ -636,8 +638,8 @@ Training loaders consuming this artifact must:
 
 ## Migration Rules
 
-1. Existing `eye_masks` merged training datasets remain valid and should
-   continue to train eye-specific models unchanged.
+1. Existing `eye_masks` merged training datasets remain valid historical
+   artifacts and should not be rewritten as part of runtime eye-mask severance.
 2. New `subject_masks` exports may ingest old eye-mask source runs.
 3. Old eye-mask rows become partial-supervision rows in the new schema.
 4. Exporters must preserve the strongest row-level provenance available from

@@ -164,17 +164,17 @@ Detailed TODO:
 - `docs/native_tensorrt_inference_todo.md`
 - `docs/orange_a16_tensorrt_engine_handoff.md`
 
-### Eye-mask severance is still a policy cleanup
+### Eye-mask severance was a policy cleanup
 
-Eye masks are being deprecated, but the codebase still contains eye-mask
-writers/readers/docs. Treat this as a planned severance, not an active model
-surface.
+Eye masks were deprecated and the standalone writer surface was severed on
+2026-07-01. Historical notes remain archived for provenance; current eye-capable
+mask work routes through subject-mask components.
 
-Relevant docs:
+Archived docs:
 
-- `docs/diagnostics/eye_mask_severance_plan_2026-05-28.md`
-- `docs/diagnostics/eye_mask_severance_phase0_coverage_audit_2026-05-28.md`
-- `docs/diagnostics/eye_mask_severance_phase1_verification_delta_2026-05-30.md`
+- `docs/archive/eye_mask_severance_plan_2026-05-28.md`
+- `docs/archive/eye_mask_severance_phase0_coverage_audit_2026-05-28.md`
+- `docs/archive/eye_mask_severance_phase1_verification_delta_2026-05-30.md`
 
 ## Recommended Next Slices
 

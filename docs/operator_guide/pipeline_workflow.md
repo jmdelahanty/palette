@@ -73,16 +73,13 @@ recommended H5 diagnostics preflight
   8. refine keypoints (correct eye swaps, compute geometry)
        |
        v
-  9. eye masks (segment eyes from crops)
+  9. subject masks (body, eye, and swim-bladder segmentation)
        |
        v
-  10. subject masks (full body segmentation)
+  10. track kinematics (consolidate into per-track metrics)
        |
        v
-  11. track kinematics (consolidate into per-track metrics)
-       |
-       v
-  12. analysis (swim bouts, stimulus response, heatmaps)
+  11. analysis (swim bouts, stimulus response, heatmaps)
 ```
 
 Detection through refined keypoints can be run together via the batch pipeline
@@ -408,43 +405,18 @@ coordinates and geometry metrics.
 scripts/py -m fisheye.utils.refine_keypoints_batch /nvme1/recordings --recursive --apply
 ```
 
-### 9. Eye masks
+### 9. Subject masks
 
-Segments eye regions from each crop. Three methods are available: U-Net
-(primary), traditional (color-based), and YOLO.
+Segments subject-mask components. This is now the canonical mask path for body,
+eyes, and swim bladder. The deprecated standalone eye-mask stage
+(`eye_masks_runs` / `refined_eye_masks_runs`) is read-only historical
+compatibility data; do not run old eye-mask inference or refinement commands for
+new recordings.
 
-```bash
-# U-Net (recommended)
-scripts/py -m fisheye.segmentation.infer_unet_eye_masks \
-  path/to/zarr/..._analysis.zarr \
-  /path/to/eye_mask_checkpoint.pt \
-  --batch-size 256
-
-# Batch across recordings
-scripts/py -m fisheye.utils.run_eye_masks_batch \
-  /nvme1/recordings \
-  --recursive \
-  --method unet \
-  --model /path/to/eye_mask_checkpoint.pt \
-  --apply
-```
-
-**What it writes:** `eye_masks_runs/{run_name}/` with binary masks,
-probability maps, and per-frame metrics (area, centroid, bounding box).
-
-#### Refine eye masks
-
-```bash
-scripts/py -m fisheye.refinement.refine_eye_masks \
-  path/to/zarr/..._analysis.zarr
-```
-
-### 10. Subject masks
-
-Segments subject-mask components. The current recommended full-component path is
-the U-Net subject-mask model, which writes raw probability surfaces for body,
-eyes union, and swim bladder into `subject_mask_runs/<run>`. SAM/traditional
-paths remain useful for body-only or component-specific workflows.
+The current recommended full-component path is the U-Net subject-mask model,
+which writes raw probability surfaces for body, eyes union, and swim bladder
+into `subject_mask_runs/<run>`. SAM/traditional paths remain useful for
+body-only or component-specific workflows.
 
 ```bash
 # U-Net subject masks
@@ -589,7 +561,7 @@ scripts/py -m fisheye.utils.run_swim_bladder_segmentation_batch \
   --apply
 ```
 
-### 11. Track kinematics
+### 10. Track kinematics
 
 Consolidates detections, keypoints, and arena assignments into unified
 per-track kinematic metrics (position, heading, speed, acceleration).
@@ -604,7 +576,7 @@ scripts/py -m fisheye.analysis.track_kinematics \
 per-track arrays for position (px and mm), heading, angular velocity, speed
 (raw/filtered/smoothed), and acceleration.
 
-### 12. Analysis
+### 11. Analysis
 
 These steps produce final behavioral metrics. Each requires track kinematics
 to exist.
@@ -656,7 +628,6 @@ Most steps read defaults from `configs/fisheye/default.yaml`. Key sections:
 | `crop` | ROI size (default 512x512), scheduler, source type |
 | `keypoints` | Method (traditional/yolo), geometry filters |
 | `refine_detect` | Raw artifact filtering, sparse curated detect writes |
-| `refine_eye_masks` | Area filtering, chunk size |
 | `refine_subject_masks` | Component selection, scheduler |
 
 Override any config with `--config path/to/custom.yaml` on the relevant
@@ -688,8 +659,8 @@ Disable logging with `--no-log`.
   crop_runs/{run}/roi_images          (ROI patches)
   keypoints_runs/{run}/               (landmarks)
   refined_keypoints_runs/{run}/       (swap-corrected landmarks)
-  eye_masks_runs/{run}/               (eye segmentation)
-  subject_mask_runs/{run}/            (body segmentation)
+  subject_mask_runs/{run}/            (body/eye/swim raw probabilities)
+  refined_subject_masks_runs/{run}/   (canonical refined components)
 ```
 
 Every run group includes provenance metadata tracing back to its source runs,

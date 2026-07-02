@@ -439,100 +439,16 @@ Safety rule:
   pending, missing, or non-approved component review states; unapproved sources
   are only allowed with an explicit draft/QA override
 
-## Additive Unified Eye/Swim Migration Procedure
+## Retired Additive Unified Eye/Swim Migration Procedure
 
-Use this procedure when historical `refined_eye_masks_runs/<run>` eye masks
-and approved `refined_subject_masks_runs/<run>` swim-bladder components need a
-single canonical refined-subject surface.
+This procedure was a transitional bridge for historical
+`refined_eye_masks_runs` data. It is retired after the 2026-07-01 eye-mask
+severance census found zero active recordings requiring conversion. New
+RedScare-style composition should source eye and swim components from
+`refined_subject_masks_runs` / subject-mask component channels directly, not
+from the deleted `--refined-eye-run` bridge.
 
-Principles:
-
-- do not delete or rewrite historical refined-eye or refined-subject component
-  source runs
-- create a new additive `refined_subject_masks_runs/<run>` target
-- seed `eye_left` and `eye_right` directly from `refined_eye_masks_runs`
-- seed `swim_bladder` from the existing approved refined-subject component run
-- keep immediate component provenance pointing to the true source stage/run
-- use approved-only assembly by default
-- do not promote source approval onto the assembled target by default; add
-  `--promote-source-review` only after deciding the assembled/finalized target
-  should inherit approved source review payloads
-
-Recommended sequence:
-
-1. Discover source pairs per archive.
-
-   - choose the refined-eye source from `refined_eye_masks_runs`
-   - choose the swim-bladder source from `refined_subject_masks_runs` where
-     `component_review_statuses["swim_bladder"].state == "approved"`
-
-2. Run assembly in dry-run mode.
-
-   ```bash
-   scripts/py -m fisheye.refinement.assemble_refined_subject_masks \
-     <archive>.zarr \
-     --refined-eye-run <refined_eye_run> \
-     --swim-refined-run <refined_subject_swim_run> \
-     --run-name refined_subject_masks_unified_eye_swim_<stamp> \
-     --dry-run
-   ```
-
-3. If dry-run reports only historical refined source-view crop-signature
-   differences, verify that the mismatch is metadata-only.
-
-   The only acceptable crop-signature differences are:
-
-   - `source_crop_signature.detection_source_path`
-   - `source_crop_signature.detection_source_type`
-
-   Row lineage, row count, detection source, ROI shape, and crop identity must
-   still match. Do not use this exception for real crop-policy or source-run
-   drift.
-
-4. Apply only to approved-compatible archives.
-
-   ```bash
-   scripts/py -m fisheye.refinement.assemble_refined_subject_masks \
-     <archive>.zarr \
-     --refined-eye-run <refined_eye_run> \
-     --swim-refined-run <refined_subject_swim_run> \
-     --run-name refined_subject_masks_unified_eye_swim_<stamp>
-   ```
-
-5. Verify the new run.
-
-   Expected surface:
-
-   - `mask_labels = ["eye_left", "eye_right", "swim_bladder"]`
-   - `available_channels = [true, true, true]`
-   - component provenance:
-     - `eye_left` / `eye_right`: `source_stage = "refined_eye_masks_runs"`
-     - `swim_bladder`: `source_stage = "refined_subject_masks_runs"`
-
-6. Verify review state.
-
-   Expected default review behavior:
-
-   - source review payloads are preserved under component provenance
-   - target component review states remain `pending`
-   - the assembled run remains `pending` until the operator reviews it or reruns
-     assembly with explicit source-review promotion
-
-   To opt into source-review promotion:
-
-   ```bash
-   scripts/py -m fisheye.refinement.assemble_refined_subject_masks \
-     <archive>.zarr \
-     --refined-eye-run <refined_eye_run> \
-     --swim-refined-run <refined_subject_swim_run> \
-     --run-name refined_subject_masks_unified_eye_swim_<stamp> \
-     --promote-source-review
-   ```
-
-   Promotion only copies approved source payloads. Pending or missing source
-   review still leaves the target component pending.
-
-Example batch result from the 2026-04-25 recording migration:
+Historical batch result from the 2026-04-25 recording migration:
 
 - 52 recording training zarrs scanned
 - 51 approved-compatible unified eye/swim runs written
@@ -540,6 +456,9 @@ Example batch result from the 2026-04-25 recording migration:
   promotion
 - 1 run remained pending because the legacy refined-eye source review was
   pending
+
+Those outputs remain valid historical refined-subject runs. The command surface
+that created them is no longer the current workflow.
 
 ## Output Layout
 

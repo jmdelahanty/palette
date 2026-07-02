@@ -1,5 +1,10 @@
 # Implementation Handoff: Eye-Mask Stage Severance — Phase 0 (coverage audit)
 
+> Archived execution note, 2026-07-01: this handoff has been executed and is no
+> longer an open agent task. See
+> `docs/diagnostics/eye_mask_severance_census_2026-07-01.md` and landed commit
+> `6ab7843`.
+
 You are running the GATING audit for a planned removal of the legacy `eye_masks` /
 `refined_eye_masks` pipeline stages. **This phase is mostly investigation, not code edits.**
 Its output is a GO / NO-GO report that every later phase depends on. Removing the legacy
