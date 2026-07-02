@@ -13,6 +13,7 @@ pytest.importorskip("flask")
 from flask import Response, request
 
 from fisheye.labeling.web_app import claimed_route, create_labeling_app
+from fisheye.labeling.web_admin_pages import register_admin_page_routes
 from fisheye.labeling.web_personal_api import register_personal_api_routes
 from fisheye.labeling.web_policy import BROWSER_RESPONSE_SECURITY_HEADERS
 from fisheye.labeling.web_wsgi_adapter import handle_with_flask_if_claimed
@@ -220,6 +221,41 @@ def test_personal_api_routes_are_get_only_and_use_shared_responder() -> None:
             "/api/me/datasets",
             "/api/me/datasets?expected_user=alice",
             "alice",
+        )
+    ]
+
+    assert handle_with_flask_if_claimed(post_handler, app) is False
+    assert post_handler.response_code is None
+
+
+def test_admin_page_routes_are_get_only_and_use_shared_responder() -> None:
+    app = create_labeling_app(import_name=__name__)
+    state = SimpleNamespace(name="state")
+    calls: list[tuple[object, str, str]] = []
+
+    def response_builder(
+        received_state: object,
+        *,
+        path: str,
+        request_adapter: object,
+    ) -> tuple[bytes, HTTPStatus, str]:
+        calls.append((received_state, path, str(getattr(request_adapter, "path", ""))))
+        return b"<html>admin</html>", HTTPStatus.ACCEPTED, "text/html; charset=utf-8"
+
+    register_admin_page_routes(app, state, response_builder)
+
+    get_handler = FakeHandler("GET", "/admin/recordings/rec-1?view=summary")
+    post_handler = FakeHandler("POST", "/admin/recordings/rec-1")
+
+    assert handle_with_flask_if_claimed(get_handler, app) is True
+    assert get_handler.response_code == int(HTTPStatus.ACCEPTED)
+    assert get_handler.header_values("Content-Type") == ["text/html; charset=utf-8"]
+    assert get_handler.wfile.getvalue() == b"<html>admin</html>"
+    assert calls == [
+        (
+            state,
+            "/admin/recordings/rec-1",
+            "/admin/recordings/rec-1?view=summary",
         )
     ]
 

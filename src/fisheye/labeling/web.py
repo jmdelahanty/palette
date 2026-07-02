@@ -73,6 +73,7 @@ from .web_auth import (
 )
 from .web_app import create_labeling_app
 from .web_admin_api import register_admin_api_routes
+from .web_admin_pages import register_admin_page_routes
 from .web_personal_api import register_personal_api_routes
 from .web_wsgi_adapter import handle_with_flask_if_claimed
 from .template_assets import read_labeling_asset, render_labeling_template
@@ -955,6 +956,118 @@ def _personal_api_response_payload(
             ),
         },
         HTTPStatus.OK,
+    )
+
+
+def _admin_page_response_payload(
+    state: ServerState,
+    *,
+    path: str,
+    request_adapter: object,
+) -> tuple[bytes, HTTPStatus, str]:
+    user, auth_source = _resolve_user(request_adapter, state.config)  # type: ignore[arg-type]
+    if user is None:
+        payload = _format_error(
+            "authentication_required",
+            details=_authentication_required_error_details(auth_source, state.config),
+            status=HTTPStatus.UNAUTHORIZED,
+        )
+        return (
+            _browser_error_html(payload),
+            HTTPStatus.UNAUTHORIZED,
+            "text/html; charset=utf-8",
+        )
+    if not _is_admin_user(user, state.config):
+        payload = _format_error(
+            "admin_required",
+            status=HTTPStatus.FORBIDDEN,
+        )
+        return (
+            _browser_error_html(payload),
+            HTTPStatus.FORBIDDEN,
+            "text/html; charset=utf-8",
+        )
+
+    if path == "/admin":
+        return _admin_html(), HTTPStatus.OK, "text/html; charset=utf-8"
+    if path == "/admin/datasets":
+        return _admin_datasets_html(), HTTPStatus.OK, "text/html; charset=utf-8"
+    if path == "/admin/users":
+        return (
+            _admin_users_html(_admin_users_payload(state.store, config=state.config)),
+            HTTPStatus.OK,
+            "text/html; charset=utf-8",
+        )
+    if path.startswith("/admin/recordings/"):
+        recording_id = unquote(path[len("/admin/recordings/") :].strip("/"))
+        if not recording_id:
+            payload = _format_error(
+                "missing_recording_id",
+                status=HTTPStatus.NOT_FOUND,
+            )
+            return (
+                _browser_error_html(payload),
+                HTTPStatus.NOT_FOUND,
+                "text/html; charset=utf-8",
+            )
+        return (
+            _admin_recording_html(
+                _admin_recording_payload(state.store, recording_id=recording_id)
+            ),
+            HTTPStatus.OK,
+            "text/html; charset=utf-8",
+        )
+    if path.startswith("/admin/users/"):
+        target_user = unquote(path[len("/admin/users/") :].strip("/"))
+        if not target_user:
+            payload = _format_error("missing_user", status=HTTPStatus.NOT_FOUND)
+            return (
+                _browser_error_html(payload),
+                HTTPStatus.NOT_FOUND,
+                "text/html; charset=utf-8",
+            )
+        payload = _admin_user_payload(state.store, user=target_user)
+        return (
+            _admin_user_html(
+                user=target_user,
+                work=payload["work"] if isinstance(payload.get("work"), Mapping) else {},
+                dashboard_row=payload["dashboard_user"] if isinstance(payload.get("dashboard_user"), Mapping) else None,
+            ),
+            HTTPStatus.OK,
+            "text/html; charset=utf-8",
+        )
+    if path.startswith("/admin/tasks/"):
+        task_id = path[len("/admin/tasks/") :].strip("/")
+        if not task_id:
+            payload = _format_error(
+                "missing_task_id",
+                status=HTTPStatus.NOT_FOUND,
+            )
+            return (
+                _browser_error_html(payload),
+                HTTPStatus.NOT_FOUND,
+                "text/html; charset=utf-8",
+            )
+        task = state.store.get_task(task_id)
+        if task is None:
+            payload = _format_error("task_not_found", status=HTTPStatus.NOT_FOUND)
+            return (
+                _browser_error_html(payload),
+                HTTPStatus.NOT_FOUND,
+                "text/html; charset=utf-8",
+            )
+        events = state.store.list_events(task_id=task_id, limit=100)
+        return (
+            _admin_task_html(task, events=events),
+            HTTPStatus.OK,
+            "text/html; charset=utf-8",
+        )
+
+    payload = _format_error("not_found", status=HTTPStatus.NOT_FOUND)
+    return (
+        _browser_error_html(payload),
+        HTTPStatus.NOT_FOUND,
+        "text/html; charset=utf-8",
     )
 
 
@@ -7325,6 +7438,7 @@ def _session_html(session: Mapping[str, object]) -> bytes:
 def _make_handler(state: ServerState):
     flask_app = create_labeling_app(config={"LABELING_SERVER_STATE": state})
     register_admin_api_routes(flask_app, state)
+    register_admin_page_routes(flask_app, state, _admin_page_response_payload)
     register_personal_api_routes(flask_app, state, _personal_api_response_payload)
 
     class LabelingWorkHandler(BaseHTTPRequestHandler):
@@ -9137,60 +9251,6 @@ def _make_handler(state: ServerState):
                     status=HTTPStatus.OK if bool(payload.get("ok")) else HTTPStatus.FORBIDDEN,
                     content_type="text/html; charset=utf-8",
                 )
-                return
-            if path == "/admin":
-                if self._require_admin(html_error=True) is None:
-                    return
-                self._write(_admin_html())
-                return
-            if path == "/admin/datasets":
-                if self._require_admin(html_error=True) is None:
-                    return
-                self._write(_admin_datasets_html())
-                return
-            if path == "/admin/users":
-                if self._require_admin(html_error=True) is None:
-                    return
-                self._write(_admin_users_html(_admin_users_payload(state.store, config=state.config)))
-                return
-            if path.startswith("/admin/recordings/"):
-                if self._require_admin(html_error=True) is None:
-                    return
-                recording_id = unquote(path[len("/admin/recordings/") :].strip("/"))
-                if not recording_id:
-                    self._write_json(_format_error("missing_recording_id", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
-                    return
-                self._write(_admin_recording_html(_admin_recording_payload(state.store, recording_id=recording_id)))
-                return
-            if path.startswith("/admin/users/"):
-                if self._require_admin(html_error=True) is None:
-                    return
-                target_user = unquote(path[len("/admin/users/") :].strip("/"))
-                if not target_user:
-                    self._write_json(_format_error("missing_user", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
-                    return
-                payload = _admin_user_payload(state.store, user=target_user)
-                self._write(
-                    _admin_user_html(
-                        user=target_user,
-                        work=payload["work"],  # type: ignore[arg-type]
-                        dashboard_row=payload["dashboard_user"] if isinstance(payload.get("dashboard_user"), Mapping) else None,
-                    )
-                )
-                return
-            if path.startswith("/admin/tasks/"):
-                if self._require_admin(html_error=True) is None:
-                    return
-                task_id = path[len("/admin/tasks/") :].strip("/")
-                if not task_id:
-                    self._write_json(_format_error("missing_task_id", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
-                    return
-                task = state.store.get_task(task_id)
-                if task is None:
-                    self._write_json(_format_error("task_not_found", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
-                    return
-                events = state.store.list_events(task_id=task_id, limit=100)
-                self._write(_admin_task_html(task, events=events))
                 return
             if path == "/api/health":
                 self._write_json(
