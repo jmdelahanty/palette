@@ -351,7 +351,9 @@ Closed since the review (commits on `sun`):
   Writer-native stamping, content hashes, and `subject_mask_data_profile` remain open.
 
 Still open: finding #5 (stage graph ×3 — but the gap list now exists:
-docs/stage_catalog_reality_gaps.md), #6 (crop/loader/grayscale silent-wrong-data), #7
+docs/stage_catalog_reality_gaps.md), #6 (crop/loader/grayscale silent-wrong-data — fix
+slice in flight on `agent/silent-wrong-data`; the systemic design behind these bugs is
+analyzed in docs/identity_lineage_staleness_review.md), #7
 (web.py monolith; modularization regressions were fixed in 2f05aa3), LICENSE/README,
 docs/root sprawl, `db.py` (8,234 — still growing), single-writer funnel, orchestrator
 convergence decision.
