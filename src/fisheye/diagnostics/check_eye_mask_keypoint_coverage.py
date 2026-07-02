@@ -587,7 +587,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--append-review-list",
         type=Path,
-        help="Append failing zarr paths to this file for review_eye_masks_batch --file-list.",
+        help="Append failing zarr paths to this file for historical/manual audit.",
     )
     parser.add_argument("--show-pass", action="store_true", help="Print PASS records too.")
     parser.add_argument("--strict", action="store_true", help="Exit with status 1 on any fail/missing/error.")

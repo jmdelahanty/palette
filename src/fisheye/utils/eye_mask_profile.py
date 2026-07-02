@@ -23,11 +23,10 @@ from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.provenance_attrs import resolve_source_keypoints_run
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from fisheye.utils.detection_profile import infer_zarr_use
-from fisheye.utils.refined_eye_masks_compat import refined_eye_masks_compat_context
-
 
 SCHEMA_NAME = "eye_mask_dataset_profile"
 SCHEMA_VERSION = "v1"
+DERIVED_REFINED_EYE_MASKS_COMPAT_ROLE = "derived_from_refined_subject_masks"
 
 COMPOSITION_FIELDS = (
     "rig_id",
@@ -114,6 +113,33 @@ def _normalize_text(value: Any) -> Optional[str]:
     else:
         text = str(value).strip()
     return text or None
+
+
+def _refined_eye_masks_compat_context(
+    attrs: Mapping[str, Any],
+    *,
+    base_stage: str,
+) -> dict[str, object]:
+    compatibility_role = _normalize_text(attrs.get("compatibility_role"))
+    source_refined_subject_masks_run = _normalize_text(attrs.get("source_refined_subject_masks_run"))
+    source_subject_mask_run = _normalize_text(attrs.get("source_subject_mask_run"))
+    source_refined_eye_masks_run = _normalize_text(attrs.get("source_refined_eye_masks_run"))
+    compat_refined_eye_masks_run = _normalize_text(attrs.get("compat_refined_eye_masks_run"))
+    is_derived_compat = bool(
+        compatibility_role == DERIVED_REFINED_EYE_MASKS_COMPAT_ROLE
+        or source_refined_subject_masks_run is not None
+    )
+    return {
+        "is_derived_compat": is_derived_compat,
+        "compatibility_role": compatibility_role,
+        "source_refined_subject_masks_run": source_refined_subject_masks_run,
+        "source_subject_mask_run": source_subject_mask_run,
+        "source_refined_eye_masks_run": source_refined_eye_masks_run,
+        "compat_refined_eye_masks_run": compat_refined_eye_masks_run,
+        "authority_stage_group": "refined_subject_masks_runs" if is_derived_compat else base_stage,
+        "stage_role": "derived_compat" if is_derived_compat else "canonical",
+        "stage_label": f"{base_stage} (derived compat)" if is_derived_compat else base_stage,
+    }
 
 
 def _as_int(value: Any) -> Optional[int]:
@@ -397,7 +423,7 @@ def resolve_eye_mask_source(
         if run_group is None:
             raise EyeMaskSourceError(f"eye-mask run not found: {stage_group}/{run_name}")
         attrs = dict(run_group.attrs)
-        compat_context = refined_eye_masks_compat_context(attrs, base_stage=stage_group)
+        compat_context = _refined_eye_masks_compat_context(attrs, base_stage=stage_group)
 
         source_keypoint_run = _normalize_text(resolve_source_keypoints_run(attrs))
         source_keypoint_group = _normalize_text(attrs.get("source_keypoint_group"))

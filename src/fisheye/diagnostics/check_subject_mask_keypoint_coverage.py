@@ -1207,28 +1207,30 @@ def _repair_plan_command_payloads(
     frame_flag_file: Optional[Path],
 ) -> dict[str, object]:
     frame_flag_arg = str(frame_flag_file) if frame_flag_file is not None else "<frame_flag_file>"
+    eye_components = [
+        component
+        for component in ("eye_left", "eye_right", "eyes_union")
+        if component in report.eye_component_indices
+    ]
+    if not eye_components:
+        eye_components = ["eye_left", "eye_right"]
 
-    eye_args = [
+    subject_mask_args = [
         "scripts/py",
         "-m",
-        "fisheye.tune.eye_mask_review",
+        "fisheye.tune.refined_subject_mask_review",
         str(report.zarr_path),
-        "--manual",
+        "--components",
+        *eye_components,
+        "--component",
+        eye_components[0],
     ]
-    refined_eye_run = _preferred_refined_eye_masks_run(report)
-    if refined_eye_run:
-        eye_args.extend(["--refined-run", refined_eye_run])
-    eye_args.extend(
-        [
-            "--frame-flag-file",
-            frame_flag_arg,
-            "--review-state",
-            "approved",
-            "--review-method",
-            "manual",
-            "--review-intended-use",
-            "training",
-        ]
+    if report.subject_stage == "refined_subject_masks_runs":
+        subject_mask_args.extend(["--refined-run", report.subject_run or "<refined_subject_masks_run>"])
+    else:
+        subject_mask_args.extend(["--subject-run", report.subject_run or "<subject_mask_run>"])
+    subject_mask_args.extend(
+        ["--approve-state", "approved", "--review-method", "manual", "--review-intended-use", "training"]
     )
 
     keypoint_args = [
@@ -1257,11 +1259,13 @@ def _repair_plan_command_payloads(
         )
 
     return {
-        "eye_mask_review": {
-            "purpose": "Repair missing subject/eye component masks when keypoints are valid.",
+        "subject_mask_review": {
+            "purpose": "Repair missing subject-mask eye components when keypoints are valid.",
+            "target_list": frame_flag_arg,
+            "note": "Open the row's roi_idx in refined_subject_mask_review; frame_idx is retained for provenance.",
             "source_refined_eye_masks_run": report.source_refined_eye_masks_run,
             "latest_refined_eye_masks_run": report.latest_refined_eye_masks_run,
-            **_command_payload(eye_args),
+            **_command_payload(subject_mask_args),
         },
         "keypoint_review": {
             "purpose": "Mark fish_present_no_keypoints or other keypoint-row failures.",
@@ -1410,8 +1414,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--write-frame-flag-file",
         type=Path,
         help=(
-            "Write failing ROI/frame targets as JSON accepted by eye_mask_review "
-            "--frame-flag-file. The file is overwritten with this run's failures."
+            "Write failing ROI/frame targets as JSON for manual repair planning. "
+            "The current subject-mask reviewer opens individual ROI indices."
         ),
     )
     parser.add_argument(

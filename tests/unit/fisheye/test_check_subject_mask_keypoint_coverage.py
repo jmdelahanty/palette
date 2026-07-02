@@ -627,17 +627,19 @@ def test_write_repair_plan_file_emits_lineage_and_candidate_commands(tmp_path: P
     assert first["classification_required"] is True
     assert "fish_present_no_keypoints" in first["classification_options"]
 
-    eye_repair = first["repair_options"]["eye_mask_review"]
+    eye_repair = first["repair_options"]["subject_mask_review"]
     assert eye_repair["argv"][:4] == [
         "scripts/py",
         "-m",
-        "fisheye.tune.eye_mask_review",
+        "fisheye.tune.refined_subject_mask_review",
         str(zarr_path),
     ]
-    assert "--refined-run" in eye_repair["argv"]
-    assert "refined_eye_masks_source" in eye_repair["argv"]
-    assert "--frame-flag-file" in eye_repair["argv"]
-    assert str(frame_flag_path) in eye_repair["argv"]
+    assert "--components" in eye_repair["argv"]
+    assert "eye_left" in eye_repair["argv"]
+    assert "eye_right" in eye_repair["argv"]
+    assert "--subject-run" in eye_repair["argv"]
+    assert "subject_masks_eye_bridge" in eye_repair["argv"]
+    assert eye_repair["target_list"] == str(frame_flag_path)
 
     keypoint_repair = first["repair_options"]["keypoint_review"]
     assert keypoint_repair["argv"][:4] == [
