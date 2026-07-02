@@ -7,7 +7,7 @@ import argparse
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 import zarr
 
@@ -359,6 +359,7 @@ def run_detect_with_registry_model(
     write_raw_video_metadata: bool = False,
     overwrite_raw_video_metadata: bool = False,
     argv: Optional[list[str]] = None,
+    cli_provenance: Optional[Mapping[str, Any]] = None,
 ) -> DetectRegistryResult:
     resolved_recording_dir = recording_dir.expanduser().resolve()
     resolved_registry_path = (registry or RegistryPaths.from_env(Path.cwd()).path).expanduser().resolve()
@@ -499,6 +500,7 @@ def run_detect_with_registry_model(
             use_gpu=(False if cpu else None),
             write_raw_video_metadata=bool(write_raw_video_metadata),
             overwrite_raw_video_metadata=bool(overwrite_raw_video_metadata),
+            cli_provenance=cli_provenance,
         )
     except Exception as exc:
         _emit_detect_step_status(

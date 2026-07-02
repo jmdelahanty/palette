@@ -9,7 +9,7 @@ module still provides the core implementation and legacy CLI.
 
 import os
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, Mapping
 
 os.environ.setdefault("DECORD_EOF_RETRY_MAX", "65536")
 
@@ -557,6 +557,7 @@ def detect_yolo(
     write_raw_video_metadata: bool = False,
     overwrite_raw_video_metadata: bool = False,
     run_name: Optional[str] = None,
+    cli_provenance: Optional[Mapping[str, Any]] = None,
 ) -> str:
     """
     Run YOLO inference directly on video file, creating minimal zarr output.
@@ -583,6 +584,7 @@ def detect_yolo(
         overwrite_raw_video_metadata: Overwrite existing raw_video attrs when writing metadata
         run_name: Optional explicit detect run group name. Used by cluster planners
             when downstream jobs need deterministic paths.
+        cli_provenance: Optional Palette CLI provenance block stamped before completion.
         
     Returns:
         Name of detect_runs group
@@ -1701,6 +1703,8 @@ def detect_yolo(
         },
     )
     provenance_record["timing"] = dict(timing_summary)
+    if cli_provenance is not None:
+        detect_group.attrs["cli_provenance"] = dict(cli_provenance)
     write_stage_provenance(detect_group, provenance_record)
     
     mark_run_complete(detect_group, parent_group=parent_group, run_name=run_name)

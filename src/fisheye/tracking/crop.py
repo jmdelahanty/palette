@@ -1629,7 +1629,8 @@ def crop_from_external_video(
     external_gpu_chunk_frames: int = 96,
     external_require_kvikio: bool = False,
     crop_storage_mode: str = "materialized",
-    verbose: bool = False
+    verbose: bool = False,
+    cli_provenance: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Crop detections from external video file (GPU or CPU).
@@ -1850,6 +1851,8 @@ def crop_from_external_video(
             video_source_type="external",
             acceleration=str(crop_group.attrs.get("acceleration") or ""),
         )
+        if cli_provenance is not None:
+            crop_group.attrs["cli_provenance"] = dict(cli_provenance)
         crop_group.attrs['crop_signature'] = build_crop_signature(crop_group.attrs)
         effective_backend = 'kvikio_gds' if use_kvikio_writes else 'standard_zarr'
         crop_group.attrs['write_backend'] = effective_backend
@@ -2898,7 +2901,8 @@ def crop_detections(
     crop_storage_mode: Optional[str] = None,
     use_gpu_allowed: bool = True,
     force_cpu: bool = False,
-    verbose: bool = False
+    verbose: bool = False,
+    cli_provenance: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Main function to crop ROIs from full-resolution frames based on detections.
@@ -3087,7 +3091,8 @@ def crop_detections(
             external_gpu_chunk_frames=gpu_chunk_frames,
             external_require_kvikio=require_kvikio,
             crop_storage_mode=crop_storage_mode_resolved,
-            verbose=verbose
+            verbose=verbose,
+            cli_provenance=cli_provenance,
         )
         external_run_name = external_result.get('run_name') if isinstance(external_result, dict) else None
         external_run = (
@@ -3306,6 +3311,8 @@ def crop_detections(
         video_source_type="zarr",
         acceleration="cpu",
     )
+    if cli_provenance is not None:
+        crop_group.attrs["cli_provenance"] = dict(cli_provenance)
     provenance_record = _build_crop_stage_provenance(
         created_at_utc=str(crop_group.attrs.get("created_at_utc")),
         command=" ".join(sys.argv),

@@ -9,10 +9,10 @@ import os
 import shutil
 import socket
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 import zarr
 
@@ -381,6 +381,300 @@ def _write_model_resolution_provenance(
     keypoint_group.attrs.put(attrs)
 
 
+@dataclass(frozen=True)
+class KeypointRegistryResult:
+    ok: bool
+    status: str
+    recording_dir: str
+    output_zarr: str
+    registry_path: str
+    reason: Optional[str] = None
+    error: Optional[str] = None
+    remediation: Optional[str] = None
+    selected_model_path: Optional[str] = None
+    selected_run_id: Optional[str] = None
+    selected_set_id: Optional[str] = None
+    keypoint_run: Optional[str] = None
+    resolved_at_utc: Optional[str] = None
+    resolution_payload: Optional[dict[str, Any]] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "ok": self.ok,
+            "status": self.status,
+            "recording_dir": self.recording_dir,
+            "output_zarr": self.output_zarr,
+            "registry_path": self.registry_path,
+            "reason": self.reason,
+            "error": self.error,
+            "remediation": self.remediation,
+            "selected_model_path": self.selected_model_path,
+            "selected_run_id": self.selected_run_id,
+            "selected_set_id": self.selected_set_id,
+            "keypoint_run": self.keypoint_run,
+            "resolved_at_utc": self.resolved_at_utc,
+        }
+        if self.resolution_payload is not None:
+            payload["resolution_payload"] = self.resolution_payload
+        return payload
+
+
+def _failure_result(
+    *,
+    reason: str,
+    error: str,
+    remediation: str,
+    recording_dir: Path,
+    output_path: Path,
+    registry_path: Path,
+    selected_model_path: Optional[str] = None,
+    selected_run_id: Optional[str] = None,
+    selected_set_id: Optional[str] = None,
+    keypoint_run: Optional[str] = None,
+    resolved_at_utc: Optional[str] = None,
+    resolution_payload: Optional[dict[str, Any]] = None,
+) -> KeypointRegistryResult:
+    return KeypointRegistryResult(
+        ok=False,
+        status="failed",
+        reason=reason,
+        error=error,
+        remediation=remediation,
+        recording_dir=str(recording_dir),
+        output_zarr=str(output_path),
+        registry_path=str(registry_path),
+        selected_model_path=selected_model_path,
+        selected_run_id=selected_run_id,
+        selected_set_id=selected_set_id,
+        keypoint_run=keypoint_run,
+        resolved_at_utc=resolved_at_utc,
+        resolution_payload=resolution_payload,
+    )
+
+
+def run_keypoints_with_registry_model(
+    *,
+    recording_dir: Path,
+    output: Optional[Path] = None,
+    registry: Optional[Path] = None,
+    set_id: Optional[str] = None,
+    require_unique: bool = False,
+    top_k: int = 5,
+    include_non_success: bool = False,
+    dry_run: bool = False,
+    run_name: Optional[str] = None,
+    crop_run: Optional[str] = None,
+    pose_schema: str = DEFAULT_POSE_SCHEMA_NAME,
+    batch_size: int = 256,
+    device: Optional[str] = None,
+    imgsz: Optional[int] = None,
+    conf: float = 0.25,
+    iou: float = 0.5,
+    max_det: int = 1,
+    mask_threshold: float = 0.5,
+    roi_cache_policy: str = "auto",
+    roi_cache_dir: Optional[Path] = None,
+    roi_cache_manifest: Optional[Path] = None,
+    stage_roi_cache_to_scratch: bool = False,
+    roi_cache_staging_dir: Optional[Path] = None,
+    profile_timings: bool = False,
+    progress_jsonl: Optional[Path] = None,
+    progress_every_batches: int = 1,
+    input_mode: str = "numpy-list",
+    cpu: bool = False,
+    verbose: bool = False,
+    argv: Optional[list[str]] = None,
+    cli_provenance: Optional[Mapping[str, Any]] = None,
+) -> KeypointRegistryResult:
+    resolved_recording_dir = recording_dir.expanduser().resolve()
+    registry_path = (registry or RegistryPaths.from_env(Path.cwd()).path).expanduser().resolve()
+    output_path = _resolve_output(resolved_recording_dir, output)
+
+    payload_args = argparse.Namespace(
+        recording_dir=resolved_recording_dir,
+        output=output,
+        registry=registry_path,
+        set_id=set_id,
+        require_unique=bool(require_unique),
+        top_k=int(top_k),
+        include_non_success=bool(include_non_success),
+        dry_run=bool(dry_run),
+        run_name=run_name,
+        crop_run=crop_run,
+        pose_schema=pose_schema,
+        batch_size=int(batch_size),
+        device=device,
+        imgsz=imgsz,
+        conf=float(conf),
+        iou=float(iou),
+        max_det=int(max_det),
+        mask_threshold=float(mask_threshold),
+        roi_cache_policy=roi_cache_policy,
+        roi_cache_dir=roi_cache_dir,
+        roi_cache_manifest=roi_cache_manifest,
+        stage_roi_cache_to_scratch=bool(stage_roi_cache_to_scratch),
+        roi_cache_staging_dir=roi_cache_staging_dir,
+        profile_timings=bool(profile_timings),
+        progress_jsonl=progress_jsonl,
+        progress_every_batches=int(progress_every_batches),
+        input_mode=input_mode,
+        cpu=bool(cpu),
+        verbose=bool(verbose),
+    )
+
+    try:
+        registry_db = Registry(registry_path)
+    except Exception as exc:
+        return _failure_result(
+            reason="registry_open_failed",
+            error=str(exc),
+            remediation="Verify --registry points to a readable palette registry SQLite file.",
+            recording_dir=resolved_recording_dir,
+            output_path=output_path,
+            registry_path=registry_path,
+        )
+
+    try:
+        recording_id = _resolve_recording_id(
+            registry_db,
+            recording_id=None,
+            recording_dir=resolved_recording_dir,
+        )
+        target = _load_target_profile(registry_db, recording_id)
+        candidates = _load_candidates(
+            registry_db,
+            target=target,
+            task="pose",
+            set_id_filter=set_id,
+            include_non_success=bool(include_non_success),
+        )
+    except Exception as exc:
+        return _failure_result(
+            reason="model_resolution_failed",
+            error=str(exc),
+            remediation="Verify registry metadata for this recording and rerun with --include-non-success or --set-id as needed.",
+            recording_dir=resolved_recording_dir,
+            output_path=output_path,
+            registry_path=registry_path,
+        )
+    finally:
+        registry_db.close()
+
+    try:
+        best = _pick_best_candidate(candidates, require_unique=bool(require_unique))
+    except SystemExit as exc:
+        return _failure_result(
+            reason="candidate_selection_failed",
+            error=str(exc),
+            remediation="Pass --set-id to pin a model set or remove --require-unique.",
+            recording_dir=resolved_recording_dir,
+            output_path=output_path,
+            registry_path=registry_path,
+        )
+
+    payload = _resolution_payload(
+        args=payload_args,
+        argv=argv,
+        recording_dir=resolved_recording_dir,
+        output_path=output_path,
+        registry_path=registry_path,
+        recording_id=recording_id,
+        target=target,
+        selected=best,
+        candidates=candidates,
+        top_k=int(top_k),
+    )
+    selected_payload = payload.get("selected") if isinstance(payload.get("selected"), dict) else {}
+    selected_model_path = selected_payload.get("model_path") if isinstance(selected_payload.get("model_path"), str) else None
+    selected_run_id = selected_payload.get("run_id") if isinstance(selected_payload.get("run_id"), str) else None
+    selected_set_id = selected_payload.get("set_id") if isinstance(selected_payload.get("set_id"), str) else None
+    resolved_at_utc = payload.get("resolved_at_utc") if isinstance(payload.get("resolved_at_utc"), str) else None
+
+    if dry_run:
+        return KeypointRegistryResult(
+            ok=True,
+            status="dry_run",
+            recording_dir=str(resolved_recording_dir),
+            output_zarr=str(output_path),
+            registry_path=str(registry_path),
+            selected_model_path=selected_model_path,
+            selected_run_id=selected_run_id,
+            selected_set_id=selected_set_id,
+            resolved_at_utc=resolved_at_utc,
+            resolution_payload=payload,
+        )
+
+    try:
+        resolved_device = "cpu" if cpu else device
+        effective_roi_cache_manifest, roi_cache_staging_details = _prepare_roi_cache_manifest(
+            roi_cache_manifest,
+            stage_to_scratch=bool(stage_roi_cache_to_scratch),
+            staging_dir=roi_cache_staging_dir,
+        )
+        keypoint_run = detect_keypoints_yolo(
+            zarr_path=str(output_path),
+            model_path=best.model_path,
+            run_name=run_name,
+            crop_run=crop_run,
+            pose_schema=pose_schema,
+            batch_size=batch_size,
+            device=resolved_device,
+            imgsz=imgsz,
+            conf=conf,
+            iou=iou,
+            max_det=max_det,
+            verbose=bool(verbose),
+            mask_threshold=mask_threshold,
+            roi_cache_policy=roi_cache_policy,
+            roi_cache_dir=roi_cache_dir,
+            roi_cache_manifest=effective_roi_cache_manifest,
+            roi_cache_source_tier=roi_cache_staging_details.get("effective_source_tier"),
+            roi_cache_staged_to_node_scratch=bool(roi_cache_staging_details.get("staged", False)),
+            roi_cache_staging_details=roi_cache_staging_details or None,
+            input_mode=input_mode,
+            profile_timings=bool(profile_timings),
+            progress_jsonl=progress_jsonl,
+            progress_every_batches=progress_every_batches,
+            registry=registry_path,
+            cli_provenance=cli_provenance,
+        )
+        if not keypoint_run:
+            raise RuntimeError("Keypoint inference did not create a run; model resolution provenance cannot be written.")
+        _write_model_resolution_provenance(
+            zarr_path=output_path,
+            run_name=keypoint_run,
+            payload=payload,
+        )
+    except Exception as exc:
+        return _failure_result(
+            reason="keypoint_inference_failed",
+            error=str(exc),
+            remediation="Inspect model/config inputs and rerun with --dry-run --json to verify resolved model selection.",
+            recording_dir=resolved_recording_dir,
+            output_path=output_path,
+            registry_path=registry_path,
+            selected_model_path=selected_model_path,
+            selected_run_id=selected_run_id,
+            selected_set_id=selected_set_id,
+            resolved_at_utc=resolved_at_utc,
+            resolution_payload=payload,
+        )
+
+    return KeypointRegistryResult(
+        ok=True,
+        status="ok",
+        recording_dir=str(resolved_recording_dir),
+        output_zarr=str(output_path),
+        registry_path=str(registry_path),
+        selected_model_path=selected_model_path,
+        selected_run_id=selected_run_id,
+        selected_set_id=selected_set_id,
+        keypoint_run=keypoint_run,
+        resolved_at_utc=resolved_at_utc,
+        resolution_payload=payload,
+    )
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--recording-dir", type=Path, required=True, help="Recording directory to process.")
@@ -467,91 +761,62 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--json", action="store_true", help="Print resolved payload JSON.")
     args = parser.parse_args(argv)
 
-    recording_dir = args.recording_dir.expanduser().resolve()
-    registry_path = (args.registry or RegistryPaths.from_env(Path.cwd()).path).expanduser().resolve()
-    output_path = _resolve_output(recording_dir, args.output)
-
-    registry = Registry(registry_path)
-    try:
-        recording_id = _resolve_recording_id(
-            registry,
-            recording_id=None,
-            recording_dir=recording_dir,
-        )
-        target = _load_target_profile(registry, recording_id)
-        candidates = _load_candidates(
-            registry,
-            target=target,
-            task="pose",
-            set_id_filter=args.set_id,
-            include_non_success=bool(args.include_non_success),
-        )
-    finally:
-        registry.close()
-
-    best = _pick_best_candidate(candidates, require_unique=bool(args.require_unique))
-    payload = _resolution_payload(
-        args=args,
-        argv=argv,
-        recording_dir=recording_dir,
-        output_path=output_path,
-        registry_path=registry_path,
-        recording_id=recording_id,
-        target=target,
-        selected=best,
-        candidates=candidates,
+    result = run_keypoints_with_registry_model(
+        recording_dir=args.recording_dir,
+        output=args.output,
+        registry=args.registry,
+        set_id=args.set_id,
+        require_unique=bool(args.require_unique),
         top_k=int(args.top_k),
-    )
-
-    if args.json or args.dry_run:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    if args.dry_run:
-        return 0
-
-    resolved_device = "cpu" if args.cpu else args.device
-    effective_roi_cache_manifest, roi_cache_staging_details = _prepare_roi_cache_manifest(
-        args.roi_cache_manifest,
-        stage_to_scratch=bool(args.stage_roi_cache_to_scratch),
-        staging_dir=args.roi_cache_staging_dir,
-    )
-    run_name = detect_keypoints_yolo(
-        zarr_path=str(output_path),
-        model_path=best.model_path,
+        include_non_success=bool(args.include_non_success),
+        dry_run=bool(args.dry_run),
         run_name=args.run_name,
         crop_run=args.crop_run,
         pose_schema=args.pose_schema,
         batch_size=args.batch_size,
-        device=resolved_device,
+        device=args.device,
         imgsz=args.imgsz,
         conf=args.conf,
         iou=args.iou,
         max_det=args.max_det,
-        verbose=bool(args.verbose),
         mask_threshold=args.mask_threshold,
         roi_cache_policy=args.roi_cache_policy,
         roi_cache_dir=args.roi_cache_dir,
-        roi_cache_manifest=effective_roi_cache_manifest,
-        roi_cache_source_tier=roi_cache_staging_details.get("effective_source_tier"),
-        roi_cache_staged_to_node_scratch=bool(roi_cache_staging_details.get("staged", False)),
-        roi_cache_staging_details=roi_cache_staging_details or None,
-        input_mode=args.input_mode,
+        roi_cache_manifest=args.roi_cache_manifest,
+        stage_roi_cache_to_scratch=bool(args.stage_roi_cache_to_scratch),
+        roi_cache_staging_dir=args.roi_cache_staging_dir,
         profile_timings=bool(args.profile_timings),
         progress_jsonl=args.progress_jsonl,
         progress_every_batches=args.progress_every_batches,
-        registry=registry_path,
+        input_mode=args.input_mode,
+        cpu=bool(args.cpu),
+        verbose=bool(args.verbose),
+        argv=argv,
     )
-    if not run_name:
-        raise RuntimeError("Keypoint inference did not create a run; model resolution provenance cannot be written.")
 
-    _write_model_resolution_provenance(
-        zarr_path=output_path,
-        run_name=run_name,
-        payload=payload,
-    )
+    if args.json or args.dry_run:
+        if result.resolution_payload is not None:
+            print(json.dumps(result.resolution_payload, indent=2, sort_keys=True))
+        else:
+            print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+    if result.status == "dry_run":
+        return 0
+
+    if not result.ok:
+        print("Keypoint run failed")
+        print(f"  recording_dir: {result.recording_dir}")
+        print(f"  output_zarr: {result.output_zarr}")
+        print(f"  reason: {result.reason or 'unknown'}")
+        if result.error:
+            print(f"  error: {result.error}")
+        if result.remediation:
+            print(f"  remediation: {result.remediation}")
+        return 1
+
     print("Model resolution provenance written")
-    print(f"  output_zarr: {output_path}")
-    print(f"  keypoint_run: {run_name}")
-    print(f"  selected_model: {best.model_path}")
+    print(f"  output_zarr: {result.output_zarr}")
+    print(f"  keypoint_run: {result.keypoint_run}")
+    print(f"  selected_model: {result.selected_model_path}")
     return 0
 
 

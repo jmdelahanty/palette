@@ -13,7 +13,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Sequence
 from datetime import datetime, timezone
 import time
 
@@ -696,6 +696,7 @@ def detect_keypoints_yolo(
     progress_every_batches: int = 1,
     registry: Optional[Path] = None,
     console: Optional[Console] = None,
+    cli_provenance: Optional[Mapping[str, Any]] = None,
 ) -> str:
     """Run YOLO pose inference and record outputs in ``keypoints_runs``.
 
@@ -1203,6 +1204,8 @@ def detect_keypoints_yolo(
         run_group.attrs["source_roi_cache_staging"] = roi_cache_staging_payload
     if source_refined_run:
         run_group.attrs["source_refined_run"] = source_refined_run
+    if cli_provenance is not None:
+        run_group.attrs["cli_provenance"] = dict(cli_provenance)
     provenance_record = build_stage_provenance(
         stage="keypoints_detect",
         command=" ".join(sys.argv),
