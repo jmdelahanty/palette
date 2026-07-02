@@ -322,6 +322,9 @@ def test_crop_image_source_reads_acquisition_crop_video_with_pynvvc(
     assert source.roi_cache_used is False
     assert source.roi_pixel_contract is not None
     assert source.roi_pixel_contract["name"] == "orange_mono_pynvvc_luma_uint8_v1"
+    assert source.roi_pixel_contract["source_pixels"] == "acquisition_crop_video"
+    assert source.roi_pixel_contract["decode_backend"] == "pynvvc_luma"
+    assert source.roi_pixel_contract["applied_range_semantics"] == "orange_mono8_full_range_0_255"
     np.testing.assert_array_equal(batch[0], np.full((3, 5), 2, dtype=np.uint8))
     np.testing.assert_array_equal(batch[1], np.full((3, 5), 4, dtype=np.uint8))
     source.close()
@@ -587,6 +590,7 @@ def test_crop_image_source_uses_accelerated_external_cache_builder(
     calls: list[dict[str, object]] = []
 
     import fisheye.tracking.crop as tracking_crop
+    monkeypatch.setattr(crop_mod, "_check_external_video_live_gpu_available", lambda: (True, "available"))
 
     def _fake_materialize_external_roi_cache_for_crop_run(**kwargs):
         calls.append(kwargs)
@@ -655,6 +659,7 @@ def test_crop_image_source_external_cache_does_not_inherit_canonical_crop_layout
     calls: list[dict[str, object]] = []
 
     import fisheye.tracking.crop as tracking_crop
+    monkeypatch.setattr(crop_mod, "_check_external_video_live_gpu_available", lambda: (True, "available"))
 
     def _fake_materialize_external_roi_cache_for_crop_run(**kwargs):
         calls.append(kwargs)
@@ -761,7 +766,7 @@ def test_crop_image_source_external_geometry_live_gpu_uses_gpu_helper(
     source.close()
 
 
-def test_crop_image_source_external_geometry_live_gpu_auto_falls_back_to_cpu_when_unavailable(
+def test_crop_image_source_external_geometry_live_gpu_auto_rejects_cpu_fallback_when_unavailable(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -773,23 +778,12 @@ def test_crop_image_source_external_geometry_live_gpu_auto_falls_back_to_cpu_whe
         lambda: (False, "cuda_unavailable"),
     )
 
-    def _fake_cpu_read(self, roi_indices: np.ndarray) -> np.ndarray:  # noqa: ANN001
-        return np.full((roi_indices.shape[0], 4, 4), 23, dtype=np.uint8)
-
-    monkeypatch.setattr(CropImageSource, "_read_live_indices_cpu", _fake_cpu_read)
-
-    source = CropImageSource.open(
-        root,
-        roi_cache_policy="never",
-        roi_live_acceleration="auto",
-    )
-    batch = source.read_slice(0, 2)
-
-    assert source.roi_live_acceleration_requested == "auto"
-    assert source.roi_live_acceleration_effective == "cpu"
-    assert source.roi_live_acceleration_fallback_reason == "cuda_unavailable"
-    np.testing.assert_array_equal(batch, np.full((2, 4, 4), 23, dtype=np.uint8))
-    source.close()
+    with pytest.raises(RuntimeError, match="GPU decode unavailable; refusing CPU fallback.*cuda_unavailable"):
+        CropImageSource.open(
+            root,
+            roi_cache_policy="never",
+            roi_live_acceleration="auto",
+        )
 
 
 def test_crop_image_source_external_geometry_live_gpu_explicit_requires_available_gpu(
@@ -803,7 +797,7 @@ def test_crop_image_source_external_geometry_live_gpu_explicit_requires_availabl
         lambda: (False, "cuda_unavailable"),
     )
 
-    with pytest.raises(ValueError, match="roi_live_acceleration='gpu'"):
+    with pytest.raises(RuntimeError, match="GPU decode unavailable; refusing CPU fallback.*cuda_unavailable"):
         CropImageSource.open(
             root,
             roi_cache_policy="never",
@@ -811,7 +805,7 @@ def test_crop_image_source_external_geometry_live_gpu_explicit_requires_availabl
         )
 
 
-def test_crop_image_source_external_geometry_live_gpu_auto_runtime_falls_back_to_cpu(
+def test_crop_image_source_external_geometry_live_gpu_auto_runtime_failure_rejects_cpu_fallback(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -824,20 +818,14 @@ def test_crop_image_source_external_geometry_live_gpu_auto_runtime_falls_back_to
 
     monkeypatch.setattr(crop_mod, "_read_external_video_live_gpu_batch", _failing_gpu_batch_reader)
 
-    def _fake_cpu_read(self, roi_indices: np.ndarray) -> np.ndarray:  # noqa: ANN001
-        return np.full((roi_indices.shape[0], 4, 4), 31, dtype=np.uint8)
-
-    monkeypatch.setattr(CropImageSource, "_read_live_indices_cpu", _fake_cpu_read)
-
     source = CropImageSource.open(
         root,
         roi_cache_policy="never",
         roi_live_acceleration="auto",
     )
-    batch = source.read_slice(0, 2)
 
     assert source.roi_live_acceleration_requested == "auto"
-    assert source.roi_live_acceleration_effective == "cpu"
-    assert source.roi_live_acceleration_fallback_reason == "runtime_gpu_fallback:RuntimeError: boom"
-    np.testing.assert_array_equal(batch, np.full((2, 4, 4), 31, dtype=np.uint8))
+    assert source.roi_live_acceleration_effective == "gpu"
+    with pytest.raises(RuntimeError, match="GPU decode unavailable; refusing CPU fallback.*RuntimeError: boom"):
+        source.read_slice(0, 2)
     source.close()

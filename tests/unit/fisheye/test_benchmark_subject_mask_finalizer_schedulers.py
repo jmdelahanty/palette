@@ -25,6 +25,7 @@ def test_decode_probabilities_handles_uint8_linear_encoding() -> None:
     decoded = mod._decode_probabilities(
         np.asarray([0, 128, 255], dtype=np.uint8),
         encoding="linear_uint8_0_255",
+        source_path="subject_mask_runs/run/mask_probs_roi",
     )
 
     np.testing.assert_allclose(decoded, np.asarray([0.0, 128 / 255.0, 1.0], dtype=np.float32))
@@ -57,4 +58,3 @@ def test_aggregate_chunk_results_combines_hashes_and_review_counts() -> None:
     assert set(payload["reason_hashes"]) == {"subject_body"}
     assert payload["review_counts"] == {"subject_body": {"pending": 2, "needs_review": 1}}
     assert payload["chunk_timing_seconds_sum"]["total"] == pytest.approx(0.75)
-

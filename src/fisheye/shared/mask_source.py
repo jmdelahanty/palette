@@ -9,6 +9,8 @@ import dask.array as da
 import numpy as np
 import zarr
 
+from fisheye.shared.mask_probability_encoding import decode_probability_values_from_attrs
+
 
 @dataclass
 class MaskBundle:
@@ -21,26 +23,12 @@ class MaskBundle:
     provenance: Dict[str, object]
 
 
-def _to_float01(arr: np.ndarray) -> np.ndarray:
-    if isinstance(arr, da.Array):
-        source_dtype = arr.dtype
-        arr = arr.astype(np.float32)
-        if np.issubdtype(source_dtype, np.integer):
-            max_value = float(np.iinfo(source_dtype).max)
-            if max_value > 1.0:
-                arr = arr / max_value
-        arr = da.where(da.isnan(arr), 0.0, arr)
-        arr = da.where(da.logical_and(da.isinf(arr), arr > 0), 1.0, arr)
-        arr = da.where(da.logical_and(da.isinf(arr), arr < 0), 0.0, arr)
-        return da.clip(arr, 0.0, 1.0)
-    source_dtype = arr.dtype
-    arr = arr.astype(np.float32, copy=False)
-    if np.issubdtype(source_dtype, np.integer):
-        max_value = float(np.iinfo(source_dtype).max)
-        if max_value > 1.0:
-            arr /= max_value
-    arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
-    return np.clip(arr, 0.0, 1.0, out=arr)
+def _to_float01(arr: np.ndarray, *, run: zarr.Group, source_path: str) -> np.ndarray:
+    return decode_probability_values_from_attrs(
+        arr,
+        attrs=run.attrs,
+        source_path=source_path,
+    )
 
 
 def _to_uint01(arr: np.ndarray) -> np.ndarray:
@@ -133,6 +121,11 @@ def load_mask_bundle(
             return da.from_zarr(arr, chunks=lazy_chunks)
         return arr[:]
 
+    def _load_probabilities(probs_key: str) -> object:
+        raw_probs = _load_array(run[probs_key])
+        source_path = f"{getattr(run, 'path', '<run>')}/{probs_key}"
+        return _ensure_4d(_to_float01(raw_probs, run=run, source_path=source_path))
+
     if lazy_chunks is not None and len(lazy_chunks) != 4:
         raise ValueError("lazy_chunks must be a 4-tuple matching (N, C, H, W) layout.")
 
@@ -141,8 +134,7 @@ def load_mask_bundle(
     probs_key = _select_probability_source(run) if prefer_probs else None
 
     if probs_key is not None:
-        raw_probs = _load_array(run[probs_key])
-        probs = _ensure_4d(_to_float01(raw_probs))
+        probs = _load_probabilities(probs_key)
         probs_identity = "lr" if probs.shape[1] == 2 else "union"
         provenance["source"].append(probs_key)
 
@@ -158,8 +150,7 @@ def load_mask_bundle(
             # if masks exist but probabilities requested, fetch fallback
             fallback_probs_key = _select_probability_source(run)
             if fallback_probs_key is not None:
-                raw_probs = _load_array(run[fallback_probs_key])
-                probs = _ensure_4d(_to_float01(raw_probs))
+                probs = _load_probabilities(fallback_probs_key)
                 probs_identity = "lr" if probs.shape[1] == 2 else "union"
                 provenance["source"].append(fallback_probs_key)
     elif probs is not None:

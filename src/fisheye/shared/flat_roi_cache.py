@@ -142,12 +142,20 @@ def build_flat_roi_cache(
     # Import lazily to avoid a circular import at module load time.
     from fisheye.shared.crop_image_source import CropImageSource
 
+    source_open_live_acceleration = roi_live_acceleration
+    if decode_backend_requested in {"auto", "pynvvc_luma"}:
+        # Flat-cache construction owns backend selection below. Avoid asking
+        # CropImageSource to choose a live-read backend merely to expose crop
+        # metadata; doing so rejects injected PyNvVC readers in CI before the
+        # flat-cache backend has a chance to run.
+        source_open_live_acceleration = "cpu"
+
     source = CropImageSource.open(
         root,
         crop_run=crop_run,
         zarr_path=archive_path,
         roi_cache_policy="never",
-        roi_live_acceleration=roi_live_acceleration,
+        roi_live_acceleration=source_open_live_acceleration,
         roi_live_gpu_chunk_frames=roi_live_gpu_chunk_frames,
         console=console,
     )
@@ -353,22 +361,28 @@ def _write_flat_cache_payload(
         except Exception as exc:
             if decode_backend_requested == "pynvvc_luma":
                 raise
-            _emit_progress(
-                progress_callback,
-                "backend_fallback",
-                requested_backend=decode_backend_requested,
-                failed_backend="pynvvc_luma",
-                fallback_backend="read_slice",
-                error={"type": exc.__class__.__name__, "message": str(exc)},
-            )
             try:
                 bin_tmp.unlink()
             except FileNotFoundError:
                 pass
+            raise RuntimeError(
+                "GPU decode unavailable; refusing CPU fallback - pixels would differ from the "
+                "production path (flat ROI cache auto backend failed to open pynvvc_luma: "
+                f"{exc.__class__.__name__}: {exc})"
+            ) from exc
     elif decode_backend_requested == "pynvvc_luma":
         raise RuntimeError(
             "pynvvc_luma flat ROI cache backend requires a geometry-only crop run "
             "with source_video_path and known frame dimensions."
+        )
+    elif (
+        decode_backend_requested == "auto"
+        and str(getattr(source, "frame_source_kind", "")) == "source_video_path"
+    ):
+        raise RuntimeError(
+            "GPU decode unavailable; refusing CPU fallback - pixels would differ from the "
+            "production path (flat ROI cache auto backend could not select pynvvc_luma for "
+            "geometry-only external-video source)."
         )
 
     return _write_flat_cache_payload_read_slice(

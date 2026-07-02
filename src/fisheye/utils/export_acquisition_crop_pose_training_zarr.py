@@ -29,7 +29,14 @@ from fisheye.shared.crop_geometry import (
     resolve_full_frame_shape,
 )
 from fisheye.shared.pynvvc_luma_rgb import PynvvcLumaRgbReader
-from fisheye.shared.roi_pixel_contract import ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
+from fisheye.shared.roi_pixel_contract import (
+    APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
+    CENTER_ROUNDING_NP_ROUND,
+    DECODE_BACKEND_PYNVVC_LUMA,
+    ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
+    SOURCE_PIXELS_ACQUISITION_CROP_VIDEO,
+    orange_mono_pynvvc_luma_pixel_contract,
+)
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
@@ -778,12 +785,24 @@ def _write_output_zarr(
     if keypoints.heading is not None:
         _create_array(keypoint_group, "heading", keypoints.heading[selection.source_keypoint_rows].astype(np.float64), chunks=vector_chunks)
 
+    roi_contract = orange_mono_pynvvc_luma_pixel_contract()
     crop_attrs = {
         "schema_id": SCHEMA_ID,
         "crop_storage_mode": "materialized",
         "roi_size": [height, width],
         "roi_pixel_contract_name": ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
-        "decode_backend": "pynvvc_luma",
+        "roi_pixel_contract": roi_contract,
+        "source_pixels": SOURCE_PIXELS_ACQUISITION_CROP_VIDEO,
+        "source_pixel_contract": "orange.camera.mono8.full_frame.v1",
+        "source_pixel_range": "0_255",
+        "decode_backend": DECODE_BACKEND_PYNVVC_LUMA,
+        "decode_backend_family": "PyNvVideoCodec",
+        "decode_contract_status": "canonical_orange_mono_pynvvc_luma",
+        "source_decode_surface": "nv12_y_plane_uint8",
+        "applied_range_semantics": APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
+        "container_color_range_observed": "tv",
+        "container_color_range_handling": roi_contract.get("container_color_range_handling"),
+        "center_rounding": CENTER_ROUNDING_NP_ROUND,
         "device": f"cuda:{int(gpu_id)}",
         "source_type": "acquisition_crop_video",
         "source_video_path": str(crop_video_path),

@@ -21,7 +21,11 @@ import zarr
 
 from fisheye.shared.pynvvc_luma_rgb import PynvvcLumaRgbReader
 from fisheye.shared.roi_pixel_contract import (
+    APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
+    CENTER_ROUNDING_NP_ROUND,
+    DECODE_BACKEND_PYNVVC_LUMA,
     ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
+    SOURCE_PIXELS_RAW_CAMERA_VIDEO,
     orange_mono_pynvvc_luma_pixel_contract,
 )
 
@@ -141,7 +145,11 @@ def _raw_video_pixel_contract() -> dict[str, Any]:
         "order": "C",
         "source_frame_representation": roi_contract.get("source_frame_representation"),
         "color_conversion": roi_contract.get("color_conversion"),
-        "production_status": "canonical_sampled_training_candidate",
+        "production_status": "canonical_orange_acquisition_training_path",
+        "source_pixels": SOURCE_PIXELS_RAW_CAMERA_VIDEO,
+        "decode_backend": DECODE_BACKEND_PYNVVC_LUMA,
+        "applied_range_semantics": APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
+        "container_color_range_handling": roi_contract.get("container_color_range_handling"),
     }
 
 
@@ -244,19 +252,26 @@ def _write_attrs(
         "device": f"cuda:{int(gpu_id)}",
         "decode_backend": PYNVVC_LUMA_DECODE_BACKEND,
         "decode_backend_family": "PyNvVideoCodec",
-        "decode_contract_status": "pynvvc_luma_canonical_candidate",
+        "decode_contract_status": "canonical_orange_mono_pynvvc_luma",
         "source_decode_surface": "nv12_y_plane_uint8",
+        "source_pixels": SOURCE_PIXELS_RAW_CAMERA_VIDEO,
+        "source_pixel_contract": "orange.camera.mono8.full_frame.v1",
+        "source_pixel_range": "0_255",
+        "applied_range_semantics": APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
+        "container_color_range_observed": "tv",
+        "container_color_range_handling": roi_contract.get("container_color_range_handling"),
+        "center_rounding": CENTER_ROUNDING_NP_ROUND,
         "pixel_contract_name": ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
         "pixel_contract": _json_attr(raw_contract),
         "roi_pixel_contract_name": ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
         "roi_pixel_contract": _json_attr(roi_contract),
-        "color_range": "tv",
+        "color_range": "source_full_range_0_255_container_observed_tv",
         "color_space": "bt709_or_source_unspecified_monochrome_luma",
         "color_matrix": "source_encoded_nv12_y_plane",
         "color_transfer": "source_encoded",
         "color_primaries": "source_encoded",
         "stored_luma_transform": "raw_nv12_y_plane_no_rgb_reconstruction",
-        "stored_luma_color_range": "tv_limited_range_y_plane",
+        "stored_luma_color_range": "source_full_range_0_255_y_plane",
         "source_video": source_video_path.name,
         "source_path": str(source_video_path.resolve()),
         "source_video_path": str(source_video_path),

@@ -21,6 +21,10 @@ from fisheye.shared.provenance_attrs import (
     build_source_keypoints_attrs,
     resolve_source_keypoints_run,
 )
+from fisheye.shared.mask_probability_encoding import (
+    decode_probability_values,
+    probabilities_encoding_from_attrs,
+)
 from fisheye.shared.row_lineage import (
     ROW_LINEAGE_ARRAYS,
     SOURCE_CROP_ROW_IDS_ARRAY,
@@ -260,19 +264,6 @@ def _probability_source_usable_for_schema(
     return _resolve_eye_layout(probability_source.source_group, channel_count).kind == "lr"
 
 
-def _normalize_encoding(value: Any) -> Optional[str]:
-    text = normalize_attr(value)
-    if text in {"unit_float", "linear_uint8_0_255"}:
-        return text
-    return None
-
-
-def _default_encoding_for_dtype(dtype: np.dtype) -> str:
-    if np.issubdtype(dtype, np.integer):
-        return "linear_uint8_0_255"
-    return "unit_float"
-
-
 def _select_probability_source(root: zarr.Group, source: ResolvedSource) -> ProbabilitySource:
     direct_names = ("mask_probs_roi", "mask_probs_roi_refined")
     if source.stage_group == "refined_eye_masks_runs":
@@ -374,17 +365,6 @@ def _write_source_crop_row_ids(
     if int(data.shape[0]) != int(total_rows):
         raise ValueError(f"source_crop_row_ids length {data.shape[0]} does not match source rows {total_rows}.")
     group.create_array(SOURCE_CROP_ROW_IDS_ARRAY, data=data, overwrite=True)
-
-
-def _decode_probabilities(batch: np.ndarray, *, encoding: str) -> np.ndarray:
-    source_dtype = batch.dtype
-    decoded = batch.astype(np.float32, copy=False)
-    if np.issubdtype(source_dtype, np.integer) and encoding == "linear_uint8_0_255":
-        max_value = float(np.iinfo(source_dtype).max)
-        if max_value > 1.0:
-            decoded /= max_value
-    decoded = np.nan_to_num(decoded, nan=0.0, posinf=1.0, neginf=0.0)
-    return np.clip(decoded, 0.0, 1.0, out=decoded)
 
 
 def _project_union(batch: np.ndarray) -> np.ndarray:
@@ -504,12 +484,12 @@ def backfill_subject_mask_run(
     use_probability_source = _probability_source_usable_for_schema(target_label_schema, probability_source=prob_source)
     if use_probability_source:
         probability_dtype = _target_prob_dtype(prob_source)
-        probability_encoding = _normalize_encoding(
-            prob_source.source_group.attrs.get("probabilities_encoding") if prob_source.source_group is not None else None
-        )
-        if probability_encoding is None:
-            probability_encoding = _default_encoding_for_dtype(probability_dtype)
         prob_source_path = prob_source.source_path or f"{source.stage_group}/{source.run_name}/masks_roi"
+        probability_encoding = probabilities_encoding_from_attrs(
+            prob_source.source_group.attrs if prob_source.source_group is not None else {},
+            source_path=prob_source_path,
+            observed_dtype=probability_dtype,
+        )
     else:
         probability_dtype = np.dtype(np.float32)
         probability_encoding = "unit_float"
@@ -659,7 +639,11 @@ def backfill_subject_mask_run(
         else:
             assert prob_source.array is not None
             prob_batch = np.asarray(prob_source.array[row_slice])
-            source_mask_batch = (_decode_probabilities(prob_batch, encoding=probability_encoding) >= 0.5).astype(
+            source_mask_batch = (decode_probability_values(
+                prob_batch,
+                encoding=probability_encoding,
+                source_path=prob_source_path,
+            ) >= 0.5).astype(
                 np.uint8,
                 copy=False,
             )
@@ -674,11 +658,19 @@ def backfill_subject_mask_run(
             prob_batch_raw = np.asarray(prob_source.array[row_slice])
             if target_label_schema == "subject_v1_union":
                 projected_prob_raw = _project_union(prob_batch_raw)
-                projected_prob_semantic = _project_union(_decode_probabilities(prob_batch_raw, encoding=probability_encoding))
+                projected_prob_semantic = _project_union(decode_probability_values(
+                    prob_batch_raw,
+                    encoding=probability_encoding,
+                    source_path=prob_source_path,
+                ))
             else:
                 projected_prob_raw = _project_lr(prob_batch_raw, _resolve_eye_layout(prob_source.source_group, prob_batch_raw.shape[1]))
                 projected_prob_semantic = _project_lr(
-                    _decode_probabilities(prob_batch_raw, encoding=probability_encoding),
+                    decode_probability_values(
+                        prob_batch_raw,
+                        encoding=probability_encoding,
+                        source_path=prob_source_path,
+                    ),
                     _resolve_eye_layout(prob_source.source_group, prob_batch_raw.shape[1]),
                 )
             probs_out[row_slice, target_eye_slice, :, :] = projected_prob_raw.astype(probability_dtype, copy=False)

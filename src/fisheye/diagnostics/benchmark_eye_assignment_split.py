@@ -25,6 +25,7 @@ from ..refinement.subject_eye_assignment import (
     assign_eyes_union_to_lr,
 )
 from ..shared.json_safety import json_attr_safe
+from ..shared.mask_probability_encoding import decode_probability_values_from_attrs
 from ..utils.zarr_io import open_zarr_root
 
 
@@ -81,9 +82,6 @@ def _synthetic_inputs(
 
 
 def _decode_probability_slice(values: np.ndarray, *, threshold: float) -> np.ndarray:
-    if values.dtype == np.uint8:
-        cutoff = int(round(float(threshold) * 255.0))
-        return (values >= cutoff).astype(np.uint8, copy=False)
     return (values.astype(np.float32, copy=False) >= float(threshold)).astype(np.uint8, copy=False)
 
 
@@ -150,10 +148,13 @@ def _real_inputs(
     keypoint_success, success_dataset = _resolve_keypoint_success_array(kp_group, kp_run_name)
     eye_left_idx, eye_right_idx = _resolve_eye_keypoint_indices(kp_group, kp_run_name)
 
-    union = _decode_probability_slice(
+    source_path = f"subject_mask_runs/{subject_run}/mask_probs_roi"
+    union_probs = decode_probability_values_from_attrs(
         np.asarray(probs_arr[start:stop, comp_idx]),
-        threshold=float(threshold),
+        attrs=subject_group.attrs,
+        source_path=source_path,
     )
+    union = _decode_probability_slice(union_probs, threshold=float(threshold))
     keypoints = np.asarray(keypoints_arr[start:stop], dtype=np.float32)
     success = np.asarray(keypoint_success[start:stop], dtype=bool)
     left = np.asarray(keypoints[:, eye_left_idx, :2], dtype=np.float32)

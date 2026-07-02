@@ -35,6 +35,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
+FRAME_INDEX_OOB_DROP_RATE_LIMIT = 0.01
+
 def _latest_complete(parent: Optional[zarr.Group]) -> Optional[str]:
     if parent is None:
         return None
@@ -285,6 +287,8 @@ class GlobalIndexManager:
         self.config = config
         self.metadata_list = self._validate_and_get_metadata()
         self.selected_indices_by_path: Dict[str, np.ndarray] = {}
+        self.frame_index_oob_drops: Dict[str, Dict[str, Any]] = {}
+        self._frame_index_in_bounds_mask_by_path: Dict[str, np.ndarray] = {}
         self.global_indices = self._build_global_index()
 
     @staticmethod
@@ -711,6 +715,106 @@ class GlobalIndexManager:
         logger.info("All Zarr files are compatible!")
         return metadata_list
 
+
+    def _resolve_detection_frame_indices(
+        self,
+        root: zarr.Group,
+        metadata: DatasetMetadata,
+        row_count: int,
+    ) -> np.ndarray:
+        frame_indices = None
+        if metadata.frame_indices_path:
+            try:
+                frame_indices = np.asarray(root[metadata.frame_indices_path][:])
+            except KeyError:
+                frame_indices = None
+
+        if frame_indices is None:
+            detect_parent = root.get('detect_runs')
+            detect_latest = _latest_complete(detect_parent) if detect_parent is not None else None
+            if detect_latest:
+                frame_indices = np.asarray(root[f'detect_runs/{detect_latest}/frame_indices'][:])
+
+        if frame_indices is None:
+            return np.arange(row_count, dtype=np.int64)
+
+        frame_indices = np.asarray(frame_indices)
+        if frame_indices.ndim != 1:
+            raise ValueError(
+                f"{metadata.name}: frame_indices must be 1D for training sample mapping; "
+                f"got shape {frame_indices.shape}."
+            )
+        if frame_indices.shape[0] != row_count:
+            raise ValueError(
+                f"{metadata.name}: frame_indices length mismatch for training sample mapping "
+                f"({frame_indices.shape[0]} frame indices for {row_count} label rows)."
+            )
+        if not np.issubdtype(frame_indices.dtype, np.integer):
+            raise ValueError(
+                f"{metadata.name}: frame_indices must be integer dtype for training sample mapping; "
+                f"got {frame_indices.dtype}."
+            )
+        return frame_indices.astype(np.int64, copy=False)
+
+    def _get_frame_index_in_bounds_mask(
+        self,
+        root: zarr.Group,
+        metadata: DatasetMetadata,
+        row_count: int,
+    ) -> np.ndarray:
+        cached = self._frame_index_in_bounds_mask_by_path.get(metadata.path)
+        if cached is not None:
+            return cached
+
+        if self.config.task != 'detect':
+            mask = np.ones(row_count, dtype=bool)
+            self._frame_index_in_bounds_mask_by_path[metadata.path] = mask
+            return mask
+
+        if not metadata.frame_array_path:
+            raise KeyError(f"{metadata.name}: no frame array path recorded for detection dataset.")
+        frame_array = root[metadata.frame_array_path]
+        frame_count = int(frame_array.shape[0])
+        frame_indices = self._resolve_detection_frame_indices(root, metadata, row_count)
+        bad_mask = (frame_indices < 0) | (frame_indices >= frame_count)
+        mask = ~bad_mask
+
+        bad_count = int(np.sum(bad_mask))
+        if bad_count:
+            bad_rows = np.flatnonzero(bad_mask)
+            first_rows = [int(v) for v in bad_rows[:10]]
+            first_frames = [int(v) for v in frame_indices[bad_rows[:10]]]
+            drop_rate = bad_count / float(max(1, row_count))
+            detail = {
+                "dropped": bad_count,
+                "rows": int(row_count),
+                "drop_rate": float(drop_rate),
+                "frame_count": int(frame_count),
+                "first_bad_rows": first_rows,
+                "first_bad_frame_indices": first_frames,
+            }
+            self.frame_index_oob_drops[metadata.path] = detail
+            logger.warning(
+                "%s: dropped %d/%d training rows with frame index out of bounds "
+                "for %s frames (first rows=%s, frame_indices=%s).",
+                metadata.name,
+                bad_count,
+                row_count,
+                frame_count,
+                first_rows,
+                first_frames,
+            )
+            if drop_rate > FRAME_INDEX_OOB_DROP_RATE_LIMIT:
+                raise ValueError(
+                    f"{metadata.name}: frame-index out-of-bounds drop rate {drop_rate:.3%} "
+                    f"exceeds {FRAME_INDEX_OOB_DROP_RATE_LIMIT:.1%} "
+                    f"({bad_count}/{row_count} rows; frame_count={frame_count}; "
+                    f"first_bad_rows={first_rows}; first_bad_frame_indices={first_frames})."
+                )
+
+        self._frame_index_in_bounds_mask_by_path[metadata.path] = mask
+        return mask
+
     def _get_valid_indices(self, metadata: DatasetMetadata) -> np.ndarray:
         """Get valid frame indices, optionally filtering out interpolated data."""
         root = zarr.open(metadata.path, mode='r')
@@ -725,6 +829,9 @@ class GlobalIndexManager:
         if metadata.status_codes_path and metadata.status_codes_path in root:
             status_codes = np.asarray(root[metadata.status_codes_path][:], dtype=np.int8)
             valid_mask = valid_mask & (status_codes == REFINED_DETECT_STATUS_CODE_MAP["present"])
+        if self.config.task == 'detect':
+            frame_mask = self._get_frame_index_in_bounds_mask(root, metadata, coords.shape[0])
+            valid_mask = valid_mask & frame_mask
         
         # Filter out interpolated data if source_type is 'filtered', 'detect', or 'manual'
         if (
@@ -783,6 +890,9 @@ class GlobalIndexManager:
                     f"{metadata.name}: {path} contains out-of-bounds sample indices "
                     f"(min={min_idx}, max={max_idx}, rows={row_count})."
                 )
+        if self.config.task == 'detect' and values.size > 0:
+            frame_mask = self._get_frame_index_in_bounds_mask(root, metadata, row_count)
+            values = values[frame_mask[values]]
         return values
 
     def _load_artifact_train_val_indices(self, metadata: DatasetMetadata) -> Tuple[np.ndarray, np.ndarray]:
@@ -1055,6 +1165,19 @@ class GlobalIndexManager:
         return train_indices, val_indices
 
 
+    def frame_index_oob_drop_summary(self) -> Dict[str, Any]:
+        total_dropped = sum(int(row.get("dropped", 0)) for row in self.frame_index_oob_drops.values())
+        total_rows = sum(int(row.get("rows", 0)) for row in self.frame_index_oob_drops.values())
+        return {
+            "total_dropped": int(total_dropped),
+            "total_rows": int(total_rows),
+            "datasets": {
+                str(path): dict(row)
+                for path, row in self.frame_index_oob_drops.items()
+            },
+        }
+
+
 # Rest of the code remains the same (ZarrYOLODataset and create_zarr_dataset)
 class ZarrYOLODataset(Dataset):
     def __init__(self, config: ZarrDatasetConfig, mode: str = 'train'):
@@ -1067,6 +1190,13 @@ class ZarrYOLODataset(Dataset):
         self.indices = train_indices if mode == 'train' else val_indices
         
         self.metadata_map = {m.path: m for m in index_manager.metadata_list}
+        summary_fn = getattr(index_manager, "frame_index_oob_drop_summary", None)
+        self.frame_index_oob_drop_summary = (
+            summary_fn()
+            if callable(summary_fn)
+            else {"total_dropped": 0, "total_rows": 0, "datasets": {}}
+        )
+        self.frame_index_oob_drops = dict(getattr(index_manager, "frame_index_oob_drops", {}))
         if self.config.task == 'pose':
             label_sets = {
                 tuple(metadata.column_names)
@@ -1131,16 +1261,15 @@ class ZarrYOLODataset(Dataset):
                     if detect_latest:
                         frame_indices = root[f'detect_runs/{detect_latest}/frame_indices'][:]
 
-                if frame_indices is None or frame_indices.shape[0] != self.bbox_cache[zarr_path].shape[0]:
+                if frame_indices is None:
                     frame_count = self.bbox_cache[zarr_path].shape[0]
-                    if frame_indices is not None and frame_indices.shape[0] != frame_count:
-                        logger.warning(
-                            f"  ⚠ Frame index count mismatch for {Path(zarr_path).name}; falling back to sequential indices."
-                        )
-                    if frame_count == 0:
-                        frame_indices = np.empty(0, dtype=np.int64)
-                    else:
-                        frame_indices = np.arange(frame_count, dtype=np.int64)
+                    frame_indices = np.arange(frame_count, dtype=np.int64)
+                elif frame_indices.shape[0] != self.bbox_cache[zarr_path].shape[0]:
+                    frame_count = self.bbox_cache[zarr_path].shape[0]
+                    raise ValueError(
+                        f"{Path(zarr_path).name}: frame_indices length mismatch during dataset initialization "
+                        f"({frame_indices.shape[0]} frame indices for {frame_count} label rows)."
+                    )
 
                 self.frame_index_cache[zarr_path] = frame_indices
                 frame_array = root[metadata.frame_array_path]
@@ -1565,19 +1694,21 @@ class ZarrYOLODataset(Dataset):
                 self.detect_frame_arrays[zarr_path] = frame_array
             frame_indices = self.frame_index_cache[zarr_path]
             frame_idx = int(frame_indices[det_idx]) if det_idx < len(frame_indices) else None
-            if frame_idx is None or frame_idx >= frame_array.shape[0]:
-                # fallback: skip label/image mismatch
-                frame_idx = 0
-                image = np.zeros_like(frame_array[0])
-            else:
-                image = self._get_detect_frame(zarr_path, image_source_path, frame_idx)
+            if frame_idx is None or frame_idx < 0 or frame_idx >= frame_array.shape[0]:
+                raise IndexError(
+                    f"{Path(zarr_path).name}: selected label row {det_idx} maps to frame index "
+                    f"{frame_idx}, outside frame array '{image_source_path}' with "
+                    f"{frame_array.shape[0]} frames. Invalid rows must be dropped during index construction."
+                )
+            image = self._get_detect_frame(zarr_path, image_source_path, frame_idx)
         else:
             roi_idx = det_idx
-            if roi_idx >= root[image_source_path].shape[0]:
-                image = np.zeros_like(root[image_source_path][0])
-                roi_idx = 0
-            else:
-                image = root[image_source_path][roi_idx]
+            if roi_idx < 0 or roi_idx >= root[image_source_path].shape[0]:
+                raise IndexError(
+                    f"{Path(zarr_path).name}: selected label row {det_idx} is outside "
+                    f"'{image_source_path}' with {root[image_source_path].shape[0]} ROI images."
+                )
+            image = root[image_source_path][roi_idx]
         if profile_enabled:
             read_seconds = max(0.0, time.perf_counter() - read_start)
 

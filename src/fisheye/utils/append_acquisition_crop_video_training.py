@@ -15,7 +15,14 @@ import numpy as np
 import zarr
 
 from fisheye.shared.crop_geometry import bbox_img_xyxy_to_norm_cxcywh, resolve_full_frame_shape
-from fisheye.shared.roi_pixel_contract import ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
+from fisheye.shared.roi_pixel_contract import (
+    APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
+    CENTER_ROUNDING_NP_ROUND,
+    DECODE_BACKEND_PYNVVC_LUMA,
+    ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
+    SOURCE_PIXELS_ACQUISITION_CROP_VIDEO,
+    orange_mono_pynvvc_luma_pixel_contract,
+)
 from fisheye.shared.pynvvc_luma_rgb import PynvvcLumaRgbReader
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr_run_completion import (
@@ -265,17 +272,28 @@ def _write_crop_run(
     _create_array(crop_group, "detection_source", np.zeros(row_count, dtype=np.int8), chunks=vector_chunks)
     _create_array(crop_group, "frame_counts", frame_counts, chunks=(max(1, min(65536, max(1, frame_counts.shape[0]))),))
 
+    roi_contract = orange_mono_pynvvc_luma_pixel_contract()
     crop_group.attrs.update(
         {
             "schema_id": SCHEMA_ID,
             "crop_storage_mode": "materialized",
-            "source_pixels": "acquisition_crop_video",
+            "source_pixels": SOURCE_PIXELS_ACQUISITION_CROP_VIDEO,
+            "source_pixel_contract": "orange.camera.mono8.full_frame.v1",
+            "source_pixel_range": "0_255",
             "source_type": "acquisition_crop_video",
             "detection_source_type": "acquisition_crop_video",
             "training_surface": "acquisition_crop_video_samples",
             "roi_size": [height, width],
             "roi_pixel_contract_name": ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
-            "decode_backend": "pynvvc_luma",
+            "roi_pixel_contract": roi_contract,
+            "decode_backend": DECODE_BACKEND_PYNVVC_LUMA,
+            "decode_backend_family": "PyNvVideoCodec",
+            "decode_contract_status": "canonical_orange_mono_pynvvc_luma",
+            "source_decode_surface": "nv12_y_plane_uint8",
+            "applied_range_semantics": APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
+            "container_color_range_observed": "tv",
+            "container_color_range_handling": roi_contract.get("container_color_range_handling"),
+            "center_rounding": CENTER_ROUNDING_NP_ROUND,
             "device": f"cuda:{int(gpu_id)}",
             "source_video_path": str(crop_video_path),
             "source_crop_meta_path": str(crop_meta_path),

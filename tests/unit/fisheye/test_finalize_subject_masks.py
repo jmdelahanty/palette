@@ -178,6 +178,7 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
 
     run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_001"]
     parent = root["refined_subject_masks_runs"]
+
     assert run.attrs[RUN_COMPLETION_CONTRACT_ATTR] == RUN_COMPLETION_CONTRACT
     assert run.attrs[RUN_COMPLETION_STATUS_ATTR] == RUN_STATUS_COMPLETE
     assert parent.attrs[RUN_LATEST_COMPLETE_ATTR] == "refined_subject_masks_smart_001"
@@ -272,6 +273,20 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert run["components/subject_body"].attrs["source_seed_masks_status"] == "omitted"
     assert "source_seed_masks_roi" not in run["components/subject_body"]
     assert "relations" not in run
+
+
+def test_finalize_subject_mask_run_requires_probabilities_encoding(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root()
+    del root["subject_mask_runs"]["subject_probs_001"].attrs["probabilities_encoding"]
+
+    with pytest.raises(ValueError, match="subject_mask_runs/subject_probs_001/mask_probs_roi.*missing.*uint8"):
+        mod.finalize_subject_mask_run(
+            root,
+            subject_run="subject_probs_001",
+            refined_run="refined_subject_masks_smart_001",
+            chunk_size=1,
+        )
 
 
 def test_finalize_subject_mask_run_can_materialize_component_rle_mask_store(monkeypatch) -> None:

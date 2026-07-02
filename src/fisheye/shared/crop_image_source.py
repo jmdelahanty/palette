@@ -67,6 +67,13 @@ _ROI_LIVE_ACCELERATION_CHOICES = {"auto", "cpu", "gpu"}
 _ROI_LIVE_GPU_CHUNK_FRAMES_DEFAULT = 32
 
 
+def _gpu_decode_unavailable(reason: str) -> RuntimeError:
+    return RuntimeError(
+        "GPU decode unavailable; refusing CPU fallback - pixels would differ from the "
+        f"production path ({reason})"
+    )
+
+
 def _normalize_run_name(value: object) -> str | None:
     normalized = normalize_attr(value)
     if normalized is None:
@@ -499,6 +506,8 @@ def _read_external_video_live_gpu_batch(
 
 
 class _ExternalFrameReader:
+    """Explicit CPU-only external-video ROI reader for inspection/non-production use."""
+
     def __init__(self, video_path: Path) -> None:
         self.video_path = video_path
         self._reader = None
@@ -861,9 +870,8 @@ class CropImageSource:
                         gpu_available, gpu_reason = _check_external_video_live_gpu_available()
                         if normalized_live_acceleration == "gpu":
                             if not gpu_available:
-                                raise ValueError(
-                                    "roi_live_acceleration='gpu' requested, but GPU live ROI reads are unavailable: "
-                                    f"{gpu_reason}"
+                                raise _gpu_decode_unavailable(
+                                    f"roi_live_acceleration='gpu' requested but unavailable: {gpu_reason}"
                                 )
                             if frame_shape is None:
                                 raise ValueError(
@@ -876,11 +884,11 @@ class CropImageSource:
                             live_acceleration_effective = "gpu"
                             live_acceleration_fallback_reason = None
                         else:
-                            live_acceleration_effective = "cpu"
                             if frame_shape is None:
-                                live_acceleration_fallback_reason = "unknown_frame_shape"
+                                reason = "unknown_frame_shape"
                             else:
-                                live_acceleration_fallback_reason = gpu_reason
+                                reason = gpu_reason
+                            raise _gpu_decode_unavailable(reason)
             if frame_source_kind == "acquisition_crop_video":
                 roi_read_mode = "acquisition_crop_video"
             else:
@@ -1026,12 +1034,9 @@ class CropImageSource:
                     gpu_chunk_frames=self.roi_live_gpu_chunk_frames,
                 )
             except Exception as exc:
-                if self.roi_live_acceleration_requested == "gpu":
-                    raise
-                self.roi_live_acceleration_effective = "cpu"
-                self.roi_live_acceleration_fallback_reason = (
-                    f"runtime_gpu_fallback:{exc.__class__.__name__}: {exc}"
-                )
+                raise _gpu_decode_unavailable(
+                    f"external-video live GPU read failed: {exc.__class__.__name__}: {exc}"
+                ) from exc
         return self._read_live_indices_cpu(roi_indices)
 
     def _read_acquisition_crop_video_indices(self, roi_indices: np.ndarray) -> np.ndarray:

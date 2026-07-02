@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import numpy as np
 import pytest
 import torch
 
@@ -24,6 +27,35 @@ def test_normalize_decode_backend_defaults_to_auto() -> None:
 def test_normalize_decode_backend_rejects_unknown_backend() -> None:
     with pytest.raises(ValueError, match="Unsupported decode backend"):
         mod._normalize_decode_backend("not_a_backend")  # noqa: SLF001
+
+
+def test_decord_gpu_init_refuses_cpu_fallback_when_cuda_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(mod, "_decord_available", lambda: True)  # noqa: SLF001
+    monkeypatch.setattr(mod.torch.cuda, "is_available", lambda: False)
+
+    with pytest.raises(RuntimeError, match="GPU decode unavailable; refusing CPU fallback"):
+        mod._init_decord_reader(  # noqa: SLF001
+            Path("video.mp4"),
+            prefer_gpu=True,
+            console=mod.Console(file=None),
+        )
+
+
+def test_decord_cpu_init_refuses_opencv_fallback(monkeypatch) -> None:
+    class _FailingVideoReader:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise RuntimeError("decord unavailable")
+
+    monkeypatch.setattr(mod, "_decord_available", lambda: True)  # noqa: SLF001
+    monkeypatch.setattr(mod, "VideoReader", _FailingVideoReader)
+    monkeypatch.setattr(mod, "cpu", lambda: object())
+
+    with pytest.raises(RuntimeError, match="Requested Decord CPU decoder failed"):
+        mod._init_decord_reader(  # noqa: SLF001
+            Path("video.mp4"),
+            prefer_gpu=False,
+            console=mod.Console(file=None),
+        )
 
 
 def test_record_timing_accumulates_perf_counter_elapsed(monkeypatch) -> None:
@@ -81,6 +113,63 @@ def test_pynvvc_streamed_batch_returns_partial_owned_batch() -> None:
     assert processed is not None
     assert tuple(processed.shape) == (1, 3, 1, 1)
     assert torch.round(processed[0, :, 0, 0] * 255.0).to(torch.int64).tolist() == [7, 7, 7]
+
+
+def test_opencv_batch_iterator_flushes_partial_batch_when_frame_count_is_overreported() -> None:
+    class _FakeCapture:
+        def __init__(self, frames: list[np.ndarray], reported_frame_count: int) -> None:
+            self.frames = frames
+            self.reported_frame_count = reported_frame_count
+            self.position = 0
+
+        def read(self):
+            if self.position >= len(self.frames):
+                return False, None
+            frame = self.frames[self.position]
+            self.position += 1
+            return True, frame.copy()
+
+    class _FakeCv2:
+        COLOR_BGR2RGB = object()
+
+        @staticmethod
+        def cvtColor(frame: np.ndarray, _code) -> np.ndarray:
+            return frame[..., ::-1].copy()
+
+        @staticmethod
+        def resize(_frame: np.ndarray, _size: tuple[int, int]) -> np.ndarray:
+            raise AssertionError("resize should not be called")
+
+    frames = [
+        np.full((2, 2, 3), [index, index + 10, index + 20], dtype=np.uint8)
+        for index in range(3)
+    ]
+    cap = _FakeCapture(frames, reported_frame_count=5)
+    assert cap.reported_frame_count > len(frames)
+
+    batches = list(
+        mod._iter_opencv_rgb_batches(  # noqa: SLF001
+            cap=cap,
+            batch_size=2,
+            pre_resize_dims=None,
+            cv2_module=_FakeCv2,
+        )
+    )
+
+    assert [indices for indices, _batch, _read, _preprocess, _frame_idx in batches] == [
+        [0, 1],
+        [2],
+    ]
+
+    detection_frame_indices: list[int] = []
+    for indices, batch_frames, _read, _preprocess, _frame_idx in batches:
+        fake_results = [object() for _frame in batch_frames]
+        for batch_i, _result in enumerate(fake_results):
+            detection_frame_indices.append(indices[batch_i])
+
+    assert detection_frame_indices == [0, 1, 2]
+    assert batches[-1][4] == 3
+    np.testing.assert_array_equal(batches[-1][1][0][0, 0], np.array([22, 12, 2], dtype=np.uint8))
 
 
 def test_detect_yolo_rejects_conflicting_resize_dims_and_imgsz() -> None:

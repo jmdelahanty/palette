@@ -29,7 +29,11 @@ from fisheye.shared.crop_roi_layout import (
 )
 from fisheye.shared.flat_roi_cache import _crop_pynvvc_luma_frame
 from fisheye.shared.roi_pixel_contract import (
+    APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
+    CENTER_ROUNDING_NP_ROUND,
+    DECODE_BACKEND_PYNVVC_LUMA,
     ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
+    SOURCE_PIXELS_ACQUISITION_CROP_VIDEO,
     orange_mono_pynvvc_luma_pixel_contract,
 )
 
@@ -626,7 +630,17 @@ def regenerate_training_crops_pynvvc(
             "source_video_path": str(resolved_video_path) if resolved_video_path is not None else "multiple_clips",
             "height": int(video_shape[0]),
             "width": int(video_shape[1]),
-            "decode_backend": "pynvvc_luma",
+            "source_pixels": SOURCE_PIXELS_ACQUISITION_CROP_VIDEO,
+            "source_pixel_contract": "orange.camera.mono8.full_frame.v1",
+            "source_pixel_range": "0_255",
+            "decode_backend": DECODE_BACKEND_PYNVVC_LUMA,
+            "decode_backend_family": "PyNvVideoCodec",
+            "decode_contract_status": "canonical_orange_mono_pynvvc_luma",
+            "source_decode_surface": "nv12_y_plane_uint8",
+            "applied_range_semantics": APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
+            "container_color_range_observed": "tv",
+            "container_color_range_handling": contract.get("container_color_range_handling"),
+            "center_rounding": CENTER_ROUNDING_NP_ROUND,
             "decode_mode_requested": str(decode_mode),
             "decode_mode_effective": str(decode_mode_effective),
             "crop_pixel_migration_version": "training_orange_mono_pynvvc_luma_v1",

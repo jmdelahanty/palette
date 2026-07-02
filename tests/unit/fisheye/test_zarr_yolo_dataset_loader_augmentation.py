@@ -70,6 +70,17 @@ def _write_training_splits(path: Path, *, train: list[int], val: list[int]) -> N
     splits.create_array("val_indices", data=np.asarray(val, dtype=np.int64), chunks=(max(1, len(val)),))
 
 
+def _replace_crop_frame_indices(path: Path, frame_indices: np.ndarray) -> None:
+    root = zarr.open_group(str(path), mode="a")
+    crop = root["crop_runs"]["crop_test"]
+    del crop["frame_indices"]
+    crop.create_array(
+        "frame_indices",
+        data=np.asarray(frame_indices, dtype=np.int64),
+        chunks=(max(1, min(len(frame_indices), 32)),),
+    )
+
+
 def _write_curated_refined_detect_zarr(path: Path) -> None:
     root = zarr.open_group(str(path), mode="w")
     raw = root.create_group("raw_video")
@@ -249,6 +260,55 @@ def test_detect_loader_honors_training_artifact_splits(tmp_path: Path) -> None:
 
     assert [int(det_idx) for _path, det_idx in train_ds.indices] == [3]
     assert sorted(int(det_idx) for _path, det_idx in val_ds.indices) == [0, 2]
+
+
+def test_detect_loader_drops_oob_frame_rows_before_sampling(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "detect_oob_frame.zarr"
+    _write_detect_zarr(zarr_path, num_frames=101)
+    frame_indices = np.arange(101, dtype=np.int64)
+    frame_indices[-1] = 999
+    _replace_crop_frame_indices(zarr_path, frame_indices)
+
+    cfg = _build_config(zarr_path, split_train=1.0, split_val=0.0)
+    ds = create_zarr_dataset(cfg, mode="train")
+
+    selected_rows = {int(det_idx) for _path, det_idx in ds.indices}
+    assert len(ds) == 100
+    assert 100 not in selected_rows
+    assert ds.frame_index_oob_drop_summary["total_dropped"] == 1
+    assert ds.frame_index_oob_drops[str(zarr_path)]["first_bad_frame_indices"] == [999]
+    sample = ds[0]
+    assert sample["bboxes"].shape == (1, 4)
+    assert np.any(sample["img"] != 0)
+
+
+def test_detect_loader_oob_frame_threshold_breach_raises(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "detect_oob_frame_threshold.zarr"
+    _write_detect_zarr(zarr_path, num_frames=100)
+    frame_indices = np.arange(100, dtype=np.int64)
+    frame_indices[-2:] = [998, 999]
+    _replace_crop_frame_indices(zarr_path, frame_indices)
+
+    cfg = _build_config(zarr_path, split_train=1.0, split_val=0.0)
+    with pytest.raises(ValueError, match="frame-index out-of-bounds drop rate"):
+        create_zarr_dataset(cfg, mode="train")
+
+
+def test_detect_loader_filters_artifact_splits_with_oob_frame_rows(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "detect_training_oob_frame.zarr"
+    _write_detect_zarr(zarr_path, num_frames=101)
+    frame_indices = np.arange(101, dtype=np.int64)
+    frame_indices[-1] = 999
+    _replace_crop_frame_indices(zarr_path, frame_indices)
+    _write_training_splits(zarr_path, train=[0, 100], val=[1])
+
+    cfg = _build_config(zarr_path, split_train=0.5, split_val=0.5)
+    train_ds = create_zarr_dataset(cfg, mode="train")
+    val_ds = create_zarr_dataset(cfg, mode="val")
+
+    assert [int(det_idx) for _path, det_idx in train_ds.indices] == [0]
+    assert [int(det_idx) for _path, det_idx in val_ds.indices] == [1]
+    assert train_ds.frame_index_oob_drop_summary["total_dropped"] == 1
 
 
 def test_detect_train_erasing_changes_pixels(tmp_path: Path) -> None:

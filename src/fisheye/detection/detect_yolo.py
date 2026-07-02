@@ -190,14 +190,23 @@ def _collect_zarr_metadata(zarr_path: Path, console: Optional[Console] = None) -
     return metadata
 
 
+def _gpu_decode_unavailable(reason: str) -> RuntimeError:
+    return RuntimeError(
+        "GPU decode unavailable; refusing CPU fallback - pixels would differ from the "
+        f"production path ({reason})"
+    )
+
+
 def _init_decord_reader(video_path: Path, prefer_gpu: bool, console: Console) -> Optional[Dict[str, Any]]:
-    """Initialise a Decord VideoReader with GPU preference and graceful fallback."""
+    """Initialise an explicitly requested Decord VideoReader without backend fallback."""
     if not _decord_available():
         if _DECORD_IMPORT_ERROR:
             console.print(f"[yellow]Decord unavailable: {escape(str(_DECORD_IMPORT_ERROR))}[/yellow]")
         return None
 
-    if prefer_gpu and torch.cuda.is_available():
+    if prefer_gpu:
+        if not torch.cuda.is_available():
+            raise _gpu_decode_unavailable("Decord GPU requested but CUDA is unavailable")
         try:
             decord.bridge.set_bridge('torch')
             vr = VideoReader(str(video_path), ctx=gpu(0))
@@ -214,7 +223,7 @@ def _init_decord_reader(video_path: Path, prefer_gpu: bool, console: Console) ->
                 'fps': fps,
             }
         except Exception as exc:
-            console.print(f"[yellow]Decord GPU decoder failed ({escape(str(exc))}); retrying on CPU[/yellow]")
+            raise _gpu_decode_unavailable(f"Decord GPU decoder failed: {exc}") from exc
 
     try:
         decord.bridge.set_bridge('native')
@@ -232,8 +241,7 @@ def _init_decord_reader(video_path: Path, prefer_gpu: bool, console: Console) ->
             'fps': fps,
         }
     except Exception as exc:
-        console.print(f"[yellow]Decord CPU decoder failed ({escape(str(exc))}); falling back to OpenCV[/yellow]")
-        return None
+        raise RuntimeError(f"Requested Decord CPU decoder failed: {exc}") from exc
 
 
 def get_video_metadata(video_path: Path, cap: Optional[cv2.VideoCapture], width: int, height: int, n_frames: int, fps: float) -> Dict[str, Any]:
@@ -451,6 +459,59 @@ def _record_timing(timings: Dict[str, float], key: str, start: float) -> float:
     elapsed = time.perf_counter() - start
     timings[key] = float(timings.get(key, 0.0) + elapsed)
     return elapsed
+
+
+def _iter_opencv_rgb_batches(
+    *,
+    cap: Any,
+    batch_size: int,
+    pre_resize_dims: Optional[list[int] | tuple[int, int]],
+    cv2_module: Any = cv2,
+):
+    """Yield RGB frame batches from an explicitly requested OpenCV decoder.
+
+    OpenCV's reported CAP_PROP_FRAME_COUNT is not authoritative. Batches are
+    flushed on the decoded stream's EOF, so an over-reported frame count cannot
+    silently drop the final partial batch.
+    """
+
+    batch_size = int(batch_size)
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+
+    frame_idx = 0
+    batch_frames: list[np.ndarray] = []
+    batch_indices: list[int] = []
+    read_seconds = 0.0
+    preprocess_seconds = 0.0
+
+    while True:
+        read_start = time.perf_counter()
+        ret, frame = cap.read()
+        read_seconds += time.perf_counter() - read_start
+
+        if not ret:
+            break
+
+        preprocess_start = time.perf_counter()
+        if pre_resize_dims:
+            frame = cv2_module.resize(frame, (int(pre_resize_dims[1]), int(pre_resize_dims[0])))
+        frame_rgb = cv2_module.cvtColor(frame, cv2_module.COLOR_BGR2RGB)
+        preprocess_seconds += time.perf_counter() - preprocess_start
+
+        batch_frames.append(frame_rgb)
+        batch_indices.append(frame_idx)
+        frame_idx += 1
+
+        if len(batch_frames) == batch_size:
+            yield batch_indices, batch_frames, read_seconds, preprocess_seconds, frame_idx
+            batch_frames = []
+            batch_indices = []
+            read_seconds = 0.0
+            preprocess_seconds = 0.0
+
+    if batch_frames:
+        yield batch_indices, batch_frames, read_seconds, preprocess_seconds, frame_idx
 
 
 def _read_and_preprocess_pynvvc_batch(
@@ -791,14 +852,10 @@ def detect_yolo(
             )
         return PynvvcLumaRgbReader(video_path, start_frame=0, gpu_id=0)
 
-    auto_pynvvc_candidate = (
-        decode_backend_requested == DECODE_BACKEND_AUTO
-        and bool(use_gpu)
-        and requested_resize_dims is not None
-    )
+    auto_pynvvc_candidate = decode_backend_requested == DECODE_BACKEND_AUTO
     if decode_backend_requested in PYNVVC_BACKENDS or auto_pynvvc_candidate:
         pynvvc_backend = (
-            BACKEND_PYNVVC_NV12_RGB
+            BACKEND_PYNVVC_LUMA_RGB
             if decode_backend_requested == DECODE_BACKEND_AUTO
             else decode_backend_requested
         )
@@ -814,19 +871,20 @@ def detect_yolo(
             decode_backend_effective = pynvvc_backend
             use_pynvvc = True
             console.print(f"[green]✓[/green] Using PyNvVideoCodec {pynvvc_backend} CUDA decoder")
-        except Exception:
+        except Exception as exc:
             if pynvvc_reader is not None:
                 pynvvc_reader.close()
                 pynvvc_reader = None
             if decode_backend_requested != DECODE_BACKEND_AUTO:
                 raise
-            console.print(
-                "[yellow]Warning:[/yellow] auto could not use PyNvVideoCodec "
-                f"{pynvvc_backend}; falling back to Decord/OpenCV."
-            )
+            raise _gpu_decode_unavailable(
+                f"auto requires PyNvVideoCodec {pynvvc_backend}; initialization failed: {exc}"
+            ) from exc
 
     if not use_pynvvc and decode_backend_requested != DECODE_BACKEND_OPENCV:
-        prefer_decord_gpu = bool(use_gpu) and decode_backend_requested != DECODE_BACKEND_DECORD_CPU
+        if decode_backend_requested == DECODE_BACKEND_AUTO:
+            raise _gpu_decode_unavailable("auto did not initialize PyNvVideoCodec luma decode")
+        prefer_decord_gpu = decode_backend_requested == DECODE_BACKEND_DECORD_GPU
         decord_info = _init_decord_reader(video_path, prefer_gpu=prefer_decord_gpu, console=console)
         if (
             decode_backend_requested == DECODE_BACKEND_DECORD_GPU
@@ -1422,73 +1480,58 @@ def detect_yolo(
         
         else:
             # OpenCV frame-by-frame processing
-            while True:
-                # Time frame reading
-                read_start = time.perf_counter()
-                ret, frame = cap.read()
-                read_elapsed = _record_timing(
-                    stage_timings, 'read_decode_seconds_total', read_start
+            for (
+                batch_indices,
+                batch_frames,
+                read_elapsed,
+                preprocess_elapsed,
+                frame_idx,
+            ) in _iter_opencv_rgb_batches(
+                cap=cap,
+                batch_size=batch_size,
+                pre_resize_dims=pre_resize_dims,
+            ):
+                stage_timings['read_decode_seconds_total'] += float(read_elapsed)
+                stage_timings['preprocess_resize_seconds_total'] += float(
+                    preprocess_elapsed
                 )
                 read_times.append(read_elapsed)
-                
-                if not ret:
-                    break
-                
-                preprocess_start = time.perf_counter()
-                # Resize if specified
-                if pre_resize_dims:
-                    frame = cv2.resize(frame, (int(pre_resize_dims[1]), int(pre_resize_dims[0])))
-                
-                # Convert BGR to RGB
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                _record_timing(
-                    stage_timings, 'preprocess_resize_seconds_total', preprocess_start
+
+                # Time inference
+                inference_start = time.perf_counter()
+
+                # Run inference
+                results = model.predict(batch_frames, **predict_kwargs)
+
+                inference_time = _record_timing(
+                    stage_timings, 'predict_seconds_total', inference_start
                 )
-                batch_frames.append(frame_rgb)
-                batch_indices.append(frame_idx)
-                frame_idx += 1
-                
-                # Process batch when full or at end
-                if len(batch_frames) == batch_size or frame_idx == n_frames:
-                    # Time inference
-                    inference_start = time.perf_counter()
-                    
-                    # Run inference
-                    results = model.predict(batch_frames, **predict_kwargs)
-                    
-                    inference_time = _record_timing(
-                        stage_timings, 'predict_seconds_total', inference_start
-                    )
-                    inference_times.append(inference_time)
-                    
-                    # Calculate FPS
-                    elapsed = time.time() - processing_start
-                    current_fps = frame_idx / elapsed if elapsed > 0 else 0
-                    
-                    # Extract detections
-                    postprocess_start = time.perf_counter()
-                    for batch_i, result in enumerate(results):
-                        accumulate_results(result, batch_indices[batch_i])
-                    _record_timing(
-                        stage_timings, 'postprocess_seconds_total', postprocess_start
-                    )
-                    
-                    batch_size_actual = len(batch_frames)
-                    
-                    # Clear batch
-                    batch_frames = []
-                    batch_indices = []
-                    batch_count += 1
-                    
-                    # Update progress
-                    progress.update(task, advance=batch_size_actual, fps=current_fps)
-                    
-                    # Print diagnostics every 100 batches
-                    if batch_count % 100 == 0:
-                        avg_inference = np.mean(inference_times[-100:]) if len(inference_times) > 0 else 0
-                        avg_read = np.mean(read_times[-100:]) if len(read_times) > 0 else 0
-                        console.print(f"[dim]Batch {batch_count}: inference={avg_inference*1000:.1f}ms, "
-                                    f"read={avg_read*1000:.1f}ms, fps={current_fps:.1f}[/dim]")
+                inference_times.append(inference_time)
+
+                # Calculate FPS
+                elapsed = time.time() - processing_start
+                current_fps = frame_idx / elapsed if elapsed > 0 else 0
+
+                # Extract detections
+                postprocess_start = time.perf_counter()
+                for batch_i, result in enumerate(results):
+                    accumulate_results(result, batch_indices[batch_i])
+                _record_timing(
+                    stage_timings, 'postprocess_seconds_total', postprocess_start
+                )
+
+                batch_size_actual = len(batch_frames)
+                batch_count += 1
+
+                # Update progress
+                progress.update(task, advance=batch_size_actual, fps=current_fps)
+
+                # Print diagnostics every 100 batches
+                if batch_count % 100 == 0:
+                    avg_inference = np.mean(inference_times[-100:]) if len(inference_times) > 0 else 0
+                    avg_read = np.mean(read_times[-100:]) if len(read_times) > 0 else 0
+                    console.print(f"[dim]Batch {batch_count}: inference={avg_inference*1000:.1f}ms, "
+                                f"read={avg_read*1000:.1f}ms, fps={current_fps:.1f}[/dim]")
             
             cap.release()
 

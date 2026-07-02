@@ -91,8 +91,15 @@ import:
     assert root.attrs["video_width"] == 5
     assert root.attrs["video_height"] == 4
     assert raw.attrs["decode_backend"] == "pynvvc_luma"
+    assert raw.attrs["decode_contract_status"] == "canonical_orange_mono_pynvvc_luma"
+    assert raw.attrs["source_pixels"] == "raw_camera_video"
+    assert raw.attrs["source_pixel_contract"] == "orange.camera.mono8.full_frame.v1"
+    assert raw.attrs["source_pixel_range"] == "0_255"
+    assert raw.attrs["applied_range_semantics"] == "orange_mono8_full_range_0_255"
+    assert raw.attrs["container_color_range_observed"] == "tv"
     assert raw.attrs["pixel_contract_name"] == ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
-    assert raw.attrs["color_range"] == "tv"
+    assert raw.attrs["color_range"] == "source_full_range_0_255_container_observed_tv"
+    assert raw.attrs["stored_luma_color_range"] == "source_full_range_0_255_y_plane"
     assert raw.attrs["frame_step"] == 3
     assert raw.attrs["source_frame_count"] == 10
     assert raw.attrs["source_video_width"] == 5

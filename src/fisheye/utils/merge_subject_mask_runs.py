@@ -24,6 +24,10 @@ from fisheye.shared.provenance_attrs import (
     resolve_source_keypoints_run,
 )
 from fisheye.shared.mask_store import MaskStore, open_mask_store
+from fisheye.shared.mask_probability_encoding import (
+    decode_probability_values,
+    probabilities_encoding_from_attrs,
+)
 from fisheye.shared.row_lineage import assert_row_lineage_sources_equal, copy_row_lineage_arrays
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
@@ -72,35 +76,12 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _normalize_encoding(value: Any) -> Optional[str]:
-    text = normalize_attr(value)
-    if text in {"unit_float", "linear_uint8_0_255"}:
-        return text
-    return None
-
-
-def _default_encoding_for_dtype(dtype: np.dtype) -> str:
-    if np.issubdtype(dtype, np.integer):
-        return "linear_uint8_0_255"
-    return "unit_float"
-
-
 def _target_mask_chunks(total_rows: int, height: int, width: int) -> tuple[int, int, int, int]:
     return subject_mask_storage_chunks(total_rows, height, width)
 
 
 def _target_metric_chunks(total_rows: int) -> tuple[int, int]:
     return (subject_mask_metric_row_chunk(total_rows), 1)
-
-
-def _decode_probabilities(batch: np.ndarray, *, encoding: str) -> np.ndarray:
-    decoded = batch.astype(np.float32, copy=False)
-    if np.issubdtype(batch.dtype, np.integer) and encoding == "linear_uint8_0_255":
-        max_value = float(np.iinfo(batch.dtype).max)
-        if max_value > 1.0:
-            decoded /= max_value
-    decoded = np.nan_to_num(decoded, nan=0.0, posinf=1.0, neginf=0.0)
-    return np.clip(decoded, 0.0, 1.0, out=decoded)
 
 
 def _component_index(source: ResolvedSubjectRun, component_name: str) -> int:
@@ -154,11 +135,14 @@ def _resolve_subject_run(root: zarr.Group, run_name: str) -> ResolvedSubjectRun:
             f"subject_mask_runs/{run_name} mask_probs_roi shape {mask_probs_roi.shape} "
             f"does not match mask store {mask_store.shape}."
         )
-    probabilities_encoding = _normalize_encoding(group.attrs.get("probabilities_encoding"))
-    if probabilities_encoding is None:
-        dense = group.get("masks_roi")
-        probs_dtype = mask_probs_roi.dtype if mask_probs_roi is not None else getattr(dense, "dtype", np.dtype(np.uint8))
-        probabilities_encoding = _default_encoding_for_dtype(np.dtype(probs_dtype))
+    if mask_probs_roi is not None:
+        probabilities_encoding = probabilities_encoding_from_attrs(
+            group.attrs,
+            source_path=f"subject_mask_runs/{run_name}/mask_probs_roi",
+            observed_dtype=mask_probs_roi.dtype,
+        )
+    else:
+        probabilities_encoding = "unit_float"
     probability_source_path = (
         f"subject_mask_runs/{run_name}/mask_probs_roi"
         if mask_probs_roi is not None
@@ -211,7 +195,11 @@ def _semantic_probabilities(
     if source.mask_probs_roi is None:
         return np.asarray(source.mask_store.read_dense(rows=row_slice, channels=slice(component_idx, component_idx + 1)), dtype=np.float32)
     batch = np.asarray(source.mask_probs_roi[row_slice, component_idx : component_idx + 1])
-    return _decode_probabilities(batch, encoding=source.probabilities_encoding)
+    return decode_probability_values(
+        batch,
+        encoding=source.probabilities_encoding,
+        source_path=f"subject_mask_runs/{source.run_name}/mask_probs_roi",
+    )
 
 
 def _resolve_shared_crop_snapshot(
