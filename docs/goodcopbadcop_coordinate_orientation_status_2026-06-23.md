@@ -18,9 +18,10 @@ No active sign-flip or axis-swap bug was found in the current
 `palette_explorer` path.
 
 Some older or adjacent chaser tools do not fully follow the newer contract and
-should be treated as legacy/diagnostic until patched. In particular,
-`compute_chaser_fish_metrics.py` mixes image-space displacement with math-style
-heading without the y-flip used by the newer egocentric component.
+should be treated as legacy/diagnostic until patched. The old
+`compute_chaser_fish_metrics.py` writer was removed on 2026-07-02 because it
+mixed image-space displacement with math-style heading without the y-flip used
+by the newer egocentric component.
 
 The current workflow is internally consistent if the reader keeps one distinction
 clear:
@@ -313,33 +314,25 @@ to component renderers. The older standalone app also reverses y for arena and
 occupancy displays. However, several legacy/adjacent tools have weaker
 orientation guarantees.
 
-### `compute_chaser_fish_metrics.py`
+### Removed: `compute_chaser_fish_metrics.py`
 
-This module predates the current chaser-distance/CRA stack. It uses crop-derived
-source-image fish centroids and chaser positions rather than
+This removed module predated the current chaser-distance/CRA stack. It used
+crop-derived source-image fish centroids and chaser positions rather than
 `arena_relative_canvas_px`.
 
-It also builds the heading vector as:
+It also built the heading vector as:
 
 ```text
 [cos(heading), sin(heading)]
 ```
 
-and computes signed angle against the image-space displacement vector without
+and computed signed angle against the image-space displacement vector without
 negating `dy`.
 
-Evidence:
-
-- `src/fisheye/analysis/compute_chaser_fish_metrics.py:168` builds the heading
-  vector.
-- `src/fisheye/analysis/compute_chaser_fish_metrics.py:377` computes
-  `chaser_point - fish_point` in image coordinates.
-- `src/fisheye/analysis/compute_chaser_fish_metrics.py:391` computes the signed
-  angle from those vectors.
-
-Status: likely incompatible with the current math-y-up heading convention for
-signed angle orientation. Do not use it as the authority for GoodCopBadCop
-egocentric analyses.
+Status: removed as an active writer. Legacy archives may still contain
+`analysis/chaser_fish_metrics` groups and those remain readable as compatibility
+data, but new GoodCopBadCop/CRA analyses should use `analysis/chaser_distance_runs`
+plus `analysis/chaser_egocentric_bearing`.
 
 ### Legacy Static Visualizers
 
@@ -466,10 +459,11 @@ attrs to avoid upside-down rendering.
 
 10. Patch or retire legacy chaser metric/display tools.
 
-    `compute_chaser_fish_metrics.py`, `visualize_chaser_vs_fish.py`, and
-    `chaser_phase_analysis.py` should either be updated to the current
-    coordinate/angle contract or clearly labeled legacy so they are not confused
-    with the current GoodCopBadCop outputs.
+    `compute_chaser_fish_metrics.py` has been retired. Remaining legacy readers
+    such as `visualize_chaser_vs_fish.py` and `chaser_phase_analysis.py` should
+    either be updated to the current coordinate/angle contract or clearly
+    labeled legacy so they are not confused with the current GoodCopBadCop
+    outputs.
 
 ## Status Table
 

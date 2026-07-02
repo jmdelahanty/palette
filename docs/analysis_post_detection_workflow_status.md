@@ -2,7 +2,7 @@
 
 Date anchored: 2026-03-06
 
-Last reviewed: 2026-05-20
+Last reviewed: 2026-07-02
 
 Purpose: summarize the current state of Palette's analysis and post-detection
 workflows, identify which repository docs are current versus aspirational or
@@ -79,7 +79,8 @@ This gives the repo a real `analysis/stimulus_runs/<run>/` substrate, including:
 Implemented downstream modules include:
 
 - [track_kinematics.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/analysis/track_kinematics.py)
-- [compute_chaser_fish_metrics.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/analysis/compute_chaser_fish_metrics.py)
+- [chaser_distance_runs.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/analysis/chaser_distance_runs.py)
+- [chaser_egocentric_bearing.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/analysis/chaser_egocentric_bearing.py)
 - [swim_bout_statistics.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/analysis/swim_bout_statistics.py)
 - [detect_bouts_multi_level.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/analysis/detect_bouts_multi_level.py)
 - [stimulus_response.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/analysis/stimulus_response.py)
@@ -115,7 +116,8 @@ The codebase already follows a fairly consistent storage convention:
 
 - `analysis/stimulus_runs`
 - `analysis/track_kinematics_runs`
-- `analysis/chaser_fish_metrics`
+- `analysis/chaser_fish_metrics` *(legacy readable layout only)*
+- `analysis/chaser_distance_runs`
 - `analysis/swim_bout_runs`
 - `analysis/eye_angle_runs`
 - `analysis/*_profile_runs`
@@ -149,7 +151,7 @@ stages. Downstream analyzers are separate CLIs and scripts.
 The current analysis modules are still specialized:
 
 - `track_kinematics` focuses on track-level movement summaries
-- `compute_chaser_fish_metrics` is chaser/fish geometry specific
+- `chaser_distance_runs` and `chaser_egocentric_bearing` are chaser/fish geometry specific
 - `swim_bout_statistics` focuses on bout segmentation and per-trial summaries
 - `eye_angle_analysis` is subject-shape/refined-subject/refined-eye geometry
   plus keypoint-heading derived and not stimulus-aware

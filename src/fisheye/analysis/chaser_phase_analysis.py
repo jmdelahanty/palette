@@ -1285,7 +1285,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--metrics-run",
         type=str,
-        help="Specific analysis/chaser_fish_metrics/<run> to use for offline metrics (default: latest).",
+        help="Specific legacy analysis/chaser_fish_metrics/<run> to use for offline metrics (default: latest).",
     )
     return parser.parse_args()
 

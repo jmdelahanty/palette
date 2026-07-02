@@ -2166,7 +2166,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     )
     parser.add_argument(
         "--metrics-run",
-        help="Specific analysis/chaser_fish_metrics/<run> to use for offline track kinematics (default: latest).",
+        help="Specific legacy analysis/chaser_fish_metrics/<run> to use for offline track kinematics (default: latest).",
     )
     parser.add_argument(
         "--swim-bout-run",

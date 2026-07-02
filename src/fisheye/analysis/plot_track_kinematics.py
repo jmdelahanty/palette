@@ -532,14 +532,16 @@ def compute_offline_chaser_distance(
     has_offline_raw = offline.get("has_offline")
     if has_offline_raw is None:
         console.print(
-            "[yellow]Warning:[/yellow] Offline chaser metrics not available. Run compute_chaser_fish_metrics to enable distance plotting."
+            "[yellow]Warning:[/yellow] Legacy offline chaser metrics not available; skipping distance plot. "
+            "Use chaser_distance_runs plus chaser_egocentric_bearing for current GoodCopBadCop/CRA analyses."
         )
         return None
 
     has_offline = np.asarray(has_offline_raw, dtype=bool)
     if not has_offline.any():
         console.print(
-            "[yellow]Warning:[/yellow] Offline chaser metrics missing for this run. Run compute_chaser_fish_metrics to enable distance plotting."
+            "[yellow]Warning:[/yellow] Legacy offline chaser metrics missing for this run; skipping distance plot. "
+            "Use chaser_distance_runs plus chaser_egocentric_bearing for current GoodCopBadCop/CRA analyses."
         )
         return None
 

@@ -1480,7 +1480,7 @@ Track kinematics results organized by type:
 - `distance_to_target_smoothed_px`, `distance_to_target_smoothed_mm` (`float32`, optional): Moving-average smoothing applied to the interpolated series using the track-kinematics run's `fps` and `smoothing_seconds`.
 - `chaser_position_px`, `chaser_positions_px` (`float32`, `[N, 2]`): Chaser centroid in camera pixels (duplicate naming retained for compatibility).
 - `fish_centroid_px`, `fish_centroids_px` (`float32`, `[N, 2]`): Target centroid in camera pixels.
-- `angle_signed_deg`, `angle_unsigned_deg`, `heading_deg` (`float32`): Per-frame angular metrics from `compute_chaser_fish_metrics`.
+- `angle_signed_deg`, `angle_unsigned_deg`, `heading_deg` (`float32`): Legacy per-frame angular metrics from historical `analysis/chaser_fish_metrics` runs. New GoodCopBadCop/CRA analyses should use `analysis/chaser_distance_runs` plus egocentric-bearing outputs instead.
 
 Consumers map from track-level `frame_indices` into these arrays using `camera_frame_ids` and the `has_offline` mask.
 

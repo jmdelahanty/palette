@@ -166,10 +166,10 @@ def visualize_chaser_vs_fish(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Overlay fish vs chaser positions from chaser_fish_metrics runs.",
+        description="Overlay fish vs chaser positions from legacy chaser_fish_metrics runs.",
     )
     parser.add_argument("zarr", type=Path, help="Path to Palette Zarr archive")
-    parser.add_argument("--run", dest="metrics_run", help="analysis/chaser_fish_metrics/<run> (default: latest)")
+    parser.add_argument("--run", dest="metrics_run", help="Legacy analysis/chaser_fish_metrics/<run> (default: latest)")
     parser.add_argument("--sample-rate", type=int, default=5, help="Plot every Nth frame (default: 5)")
     parser.add_argument("--arena-radius", type=float, help="Optional arena radius in pixels for reference circle")
     parser.add_argument("--show-distance", action="store_true", help="Overlay distance over time on secondary axis")
