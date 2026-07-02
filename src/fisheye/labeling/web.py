@@ -71,6 +71,8 @@ from .web_auth import (
     _utc_timestamp,
     _verify_signed_invite_token,
 )
+from .web_app import create_labeling_app
+from .web_wsgi_adapter import handle_with_flask_if_claimed
 from .template_assets import read_labeling_asset, render_labeling_template
 from .web_responses import (
     _decode_uint8_payload,
@@ -6694,9 +6696,14 @@ def _session_html(session: Mapping[str, object]) -> bytes:
 
 
 def _make_handler(state: ServerState):
+    flask_app = create_labeling_app(config={"LABELING_SERVER_STATE": state})
+
     class LabelingWorkHandler(BaseHTTPRequestHandler):
         server_version = "PaletteLabelingWork/0.1"
         sys_version = ""
+
+        def _handle_flask_if_claimed(self) -> bool:
+            return handle_with_flask_if_claimed(self, flask_app)
 
         def _write_no_store_headers(self) -> None:
             for name, value in BROWSER_RESPONSE_SECURITY_HEADERS.items():
@@ -8430,6 +8437,8 @@ def _make_handler(state: ServerState):
             return False
 
         def do_GET(self) -> None:  # noqa: N802
+            if self._handle_flask_if_claimed():
+                return
             parsed = urlparse(self.path)
             path = parsed.path
             if path in {
@@ -9707,6 +9716,8 @@ def _make_handler(state: ServerState):
             self._write_json(_format_error("not_found", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:  # noqa: N802
+            if self._handle_flask_if_claimed():
+                return
             parsed = urlparse(self.path)
             path = parsed.path
             user, _auth_source = self._require_user()
