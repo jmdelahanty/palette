@@ -7,6 +7,7 @@ from hashlib import sha256
 import warnings
 
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.registry import stage_complete as stage_complete_mod
@@ -16,11 +17,14 @@ from fisheye.shared import zarr_run_completion as completion_mod
 from fisheye.utils import backfill_completion_epoch as backfill_mod
 from fisheye.utils import triage_completion_epoch_blockers as triage_mod
 from fisheye.shared.zarr_run_completion import (
+    AUTHORITATIVE_RUN_ATTR,
+    AUTHORITATIVE_RUN_PROVENANCE_ATTR,
     COMPLETION_EPOCH_ATTR,
     COMPLETION_EPOCH_STRICT,
     RUN_COMPLETED_AT_ATTR,
     RUN_COMPLETION_STATUS_ATTR,
     RUN_STATUS_RUNNING,
+    clear_authoritative_run,
     describe_run_parent,
     effective_legacy_default,
     iter_run_parent_summaries,
@@ -32,7 +36,9 @@ from fisheye.shared.zarr_run_completion import (
     mark_run_started,
     note_pending_latest,
     require_runs_parent,
+    resolve_authoritative_run_name,
     resolve_latest_complete_run_name,
+    set_authoritative_run,
 )
 
 
@@ -257,6 +263,108 @@ def test_latest_resolver_handles_slash_qualified_nested_run_names() -> None:
     summary = describe_run_parent(parent, parent_path="analysis/track_kinematics_runs")
     assert summary["resolved_latest_complete"] == "offline/run_001"
     assert summary["latest_exists"] is True
+
+
+def test_authoritative_resolver_falls_back_to_latest_when_unset() -> None:
+    parent = FakeGroup()
+    run = parent.require_group("run_001")
+    mark_run_complete(run, parent_group=parent, run_name="run_001")
+
+    assert resolve_authoritative_run_name(parent) == "run_001"
+
+
+def test_set_authoritative_run_writes_pointer_and_provenance() -> None:
+    parent = FakeGroup()
+    run = parent.require_group("run_001")
+    mark_run_complete(run, parent_group=parent, run_name="run_001")
+
+    provenance = set_authoritative_run(
+        parent,
+        "run_001",
+        approved_by="jeremy",
+        approved_at="2026-07-02T12:00:00+00:00",
+        git_sha="abc123",
+        note="reviewed",
+    )
+
+    assert parent.attrs[AUTHORITATIVE_RUN_ATTR] == "run_001"
+    assert parent.attrs[AUTHORITATIVE_RUN_PROVENANCE_ATTR] == provenance
+    assert provenance == {
+        "approved_by": "jeremy",
+        "approved_at": "2026-07-02T12:00:00+00:00",
+        "git_sha": "abc123",
+        "note": "reviewed",
+    }
+    assert resolve_authoritative_run_name(parent) == "run_001"
+    summary = describe_run_parent(parent, parent_path="detect_runs")
+    assert summary["authoritative_run"] == "run_001"
+    assert summary["resolved_authoritative_run"] == "run_001"
+    assert summary["authoritative_run_provenance"] == provenance
+
+
+def test_clear_authoritative_run_removes_pointer_and_provenance() -> None:
+    parent = FakeGroup()
+    run = parent.require_group("run_001")
+    mark_run_complete(run, parent_group=parent, run_name="run_001")
+    set_authoritative_run(parent, "run_001", approved_by="jeremy")
+
+    clear_authoritative_run(parent)
+
+    assert AUTHORITATIVE_RUN_ATTR not in parent.attrs
+    assert AUTHORITATIVE_RUN_PROVENANCE_ATTR not in parent.attrs
+    assert resolve_authoritative_run_name(parent) == "run_001"
+
+
+def test_authoritative_resolver_does_not_mutate_parent_attrs() -> None:
+    parent = FakeGroup()
+    run = parent.require_group("run_001")
+    mark_run_complete(run, parent_group=parent, run_name="run_001")
+    before = dict(parent.attrs)
+
+    assert resolve_authoritative_run_name(parent) == "run_001"
+
+    assert dict(parent.attrs) == before
+
+
+def test_newer_complete_run_does_not_change_authoritative_pointer() -> None:
+    parent = FakeGroup()
+    reviewed = parent.require_group("reviewed")
+    smoke = parent.require_group("zzz_smoke")
+    mark_run_complete(reviewed, parent_group=parent, run_name="reviewed")
+    set_authoritative_run(parent, "reviewed", approved_by="jeremy")
+
+    mark_run_complete(smoke, parent_group=parent, run_name="zzz_smoke")
+
+    assert resolve_latest_complete_run_name(parent) == "zzz_smoke"
+    assert resolve_authoritative_run_name(parent) == "reviewed"
+    assert parent.attrs[AUTHORITATIVE_RUN_ATTR] == "reviewed"
+
+
+def test_set_authoritative_run_rejects_missing_or_incomplete_run() -> None:
+    parent = FakeGroup()
+    pending = parent.require_group("pending")
+    mark_run_started(pending, run_name="pending", stage="detect")
+
+    with pytest.raises(ValueError, match="does not exist"):
+        set_authoritative_run(parent, "missing", approved_by="jeremy")
+    with pytest.raises(ValueError, match="not complete"):
+        set_authoritative_run(parent, "pending", approved_by="jeremy")
+
+    assert AUTHORITATIVE_RUN_ATTR not in parent.attrs
+    assert AUTHORITATIVE_RUN_PROVENANCE_ATTR not in parent.attrs
+
+
+def test_set_authoritative_run_rolls_back_provenance_if_pointer_write_fails() -> None:
+    parent = FakeGroup(attrs=FailingSetAttrs(fail_keys=set()))
+    run = parent.require_group("run_001")
+    mark_run_complete(run, parent_group=parent, run_name="run_001")
+    parent.attrs.fail_keys.add(AUTHORITATIVE_RUN_ATTR)
+
+    with pytest.raises(RuntimeError, match="refusing attr write"):
+        set_authoritative_run(parent, "run_001", approved_by="jeremy")
+
+    assert AUTHORITATIVE_RUN_ATTR not in parent.attrs
+    assert AUTHORITATIVE_RUN_PROVENANCE_ATTR not in parent.attrs
 
 
 def test_note_pending_latest_restores_previous_complete_pointer() -> None:

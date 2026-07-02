@@ -22,6 +22,8 @@ RUN_NAME_ATTR = "palette_run_name"
 RUN_STAGE_ATTR = "palette_run_stage"
 RUN_LATEST_COMPLETE_ATTR = "latest_complete"
 RUN_LATEST_PENDING_ATTR = "latest_pending"
+AUTHORITATIVE_RUN_ATTR = "authoritative_run"
+AUTHORITATIVE_RUN_PROVENANCE_ATTR = "authoritative_run_provenance"
 COMPLETION_EPOCH_ATTR = "palette_completion_epoch"
 COMPLETION_EPOCH_STRICT = 1
 
@@ -291,6 +293,144 @@ def resolve_latest_complete_run_group(
     return name, _get_child(parent_group, name)
 
 
+def _is_child_complete(
+    parent_group: Any,
+    run_name: str,
+    *,
+    legacy_default: bool | None = None,
+) -> tuple[Optional[Any], bool]:
+    child = _get_child(parent_group, run_name)
+    if child is None:
+        return None, False
+    return child, is_run_complete_in_parent(
+        parent_group,
+        child,
+        legacy_default=legacy_default,
+    )
+
+
+def resolve_authoritative_run_name(
+    parent_group: Any,
+    *,
+    latest_attr: str = "latest",
+    legacy_default: bool | None = None,
+) -> Optional[str]:
+    """Resolve the authoritative run, falling back to latest only when unset."""
+
+    authoritative = _normalize_name(parent_group.attrs.get(AUTHORITATIVE_RUN_ATTR))
+    if authoritative is not None:
+        _child, complete = _is_child_complete(
+            parent_group,
+            authoritative,
+            legacy_default=legacy_default,
+        )
+        return authoritative if complete else None
+    return resolve_latest_complete_run_name(
+        parent_group,
+        latest_attr=latest_attr,
+        legacy_default=legacy_default,
+    )
+
+
+def resolve_authoritative_run_group(
+    parent_group: Any,
+    *,
+    latest_attr: str = "latest",
+    legacy_default: bool | None = None,
+) -> tuple[Optional[str], Optional[Any]]:
+    name = resolve_authoritative_run_name(
+        parent_group,
+        latest_attr=latest_attr,
+        legacy_default=legacy_default,
+    )
+    if name is None:
+        return None, None
+    return name, _get_child(parent_group, name)
+
+
+def _restore_attr(attrs: Any, key: str, *, existed: bool, value: Any) -> None:
+    if existed:
+        if attrs.get(key) == value:
+            return
+        attrs[key] = value
+        return
+    if key not in attrs:
+        return
+    try:
+        del attrs[key]
+    except Exception:
+        attrs[key] = None
+
+
+def set_authoritative_run(
+    parent_group: Any,
+    run_name: str,
+    *,
+    approved_by: str | None = None,
+    approved_at: str | None = None,
+    git_sha: str | None = None,
+    note: str | None = None,
+    legacy_default: bool | None = None,
+) -> dict[str, Any]:
+    """Set a parent-scoped authoritative run pointer after validating completion."""
+
+    name = _normalize_name(run_name)
+    if name is None:
+        raise ValueError("authoritative run name must be non-empty")
+    child, complete = _is_child_complete(
+        parent_group,
+        name,
+        legacy_default=legacy_default,
+    )
+    if child is None:
+        raise ValueError(f"authoritative run {name!r} does not exist")
+    if not complete:
+        raise ValueError(f"authoritative run {name!r} is not complete")
+
+    provenance = {
+        "approved_by": _normalize_name(approved_by),
+        "approved_at": approved_at or utc_now_iso(),
+        "git_sha": _normalize_name(git_sha),
+        "note": "" if note is None else str(note),
+    }
+    attrs = parent_group.attrs
+    old_run_exists = AUTHORITATIVE_RUN_ATTR in attrs
+    old_run = attrs.get(AUTHORITATIVE_RUN_ATTR)
+    old_provenance_exists = AUTHORITATIVE_RUN_PROVENANCE_ATTR in attrs
+    old_provenance = attrs.get(AUTHORITATIVE_RUN_PROVENANCE_ATTR)
+    try:
+        attrs[AUTHORITATIVE_RUN_PROVENANCE_ATTR] = provenance
+        attrs[AUTHORITATIVE_RUN_ATTR] = name
+    except Exception:
+        _restore_attr(
+            attrs,
+            AUTHORITATIVE_RUN_ATTR,
+            existed=old_run_exists,
+            value=old_run,
+        )
+        _restore_attr(
+            attrs,
+            AUTHORITATIVE_RUN_PROVENANCE_ATTR,
+            existed=old_provenance_exists,
+            value=old_provenance,
+        )
+        raise
+    return provenance
+
+
+def clear_authoritative_run(parent_group: Any) -> None:
+    """Clear the parent-scoped authoritative pointer and provenance attrs."""
+
+    attrs = parent_group.attrs
+    for key in (AUTHORITATIVE_RUN_ATTR, AUTHORITATIVE_RUN_PROVENANCE_ATTR):
+        if key not in attrs:
+            continue
+        try:
+            del attrs[key]
+        except Exception:
+            attrs[key] = None
+
+
 def note_pending_latest(parent_group: Any, run_name: str) -> None:
     name = str(run_name)
     parent_group.attrs[RUN_LATEST_PENDING_ATTR] = name
@@ -323,7 +463,13 @@ def describe_run_parent(
     latest = _normalize_name(parent_group.attrs.get("latest"))
     latest_complete = _normalize_name(parent_group.attrs.get(RUN_LATEST_COMPLETE_ATTR))
     latest_pending = _normalize_name(parent_group.attrs.get(RUN_LATEST_PENDING_ATTR))
+    authoritative_run = _normalize_name(parent_group.attrs.get(AUTHORITATIVE_RUN_ATTR))
+    authoritative_provenance = parent_group.attrs.get(AUTHORITATIVE_RUN_PROVENANCE_ATTR)
     resolved_latest_complete = resolve_latest_complete_run_name(
+        parent_group,
+        legacy_default=legacy_default,
+    )
+    resolved_authoritative = resolve_authoritative_run_name(
         parent_group,
         legacy_default=legacy_default,
     )
@@ -358,7 +504,30 @@ def describe_run_parent(
     unsafe_reasons: list[str] = []
     latest_status: Optional[str] = None
     latest_complete_status: Optional[str] = None
+    authoritative_status: Optional[str] = None
+    authoritative_exists = False
+    authoritative_complete = False
     latest_exists = latest is not None and _get_child(parent_group, latest) is not None
+    if authoritative_run:
+        authoritative_child, authoritative_complete = _is_child_complete(
+            parent_group,
+            authoritative_run,
+            legacy_default=legacy_default,
+        )
+        authoritative_exists = authoritative_child is not None
+        if authoritative_child is None:
+            unsafe_reasons.append("authoritative_run_missing")
+        else:
+            authoritative_status = _normalize_name(
+                authoritative_child.attrs.get(RUN_COMPLETION_STATUS_ATTR)
+            )
+            if not authoritative_complete:
+                reason_status = authoritative_status or (
+                    "legacy_missing_contract"
+                    if not has_run_completion_contract(authoritative_child)
+                    else "unknown"
+                )
+                unsafe_reasons.append(f"authoritative_run_incomplete:{reason_status}")
     if latest:
         latest_child = _get_child(parent_group, latest)
         if latest_child is None:
@@ -409,6 +578,12 @@ def describe_run_parent(
         "latest_complete": latest_complete,
         "latest_complete_status": latest_complete_status,
         "latest_pending": latest_pending,
+        "authoritative_run": authoritative_run,
+        "authoritative_run_exists": authoritative_exists,
+        "authoritative_run_status": authoritative_status,
+        "authoritative_run_complete": authoritative_complete,
+        "authoritative_run_provenance": authoritative_provenance,
+        "resolved_authoritative_run": resolved_authoritative,
         "resolved_latest_complete": resolved_latest_complete,
         "run_count": len(runs),
         "runs": runs,
