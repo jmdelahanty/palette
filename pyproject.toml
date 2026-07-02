@@ -63,6 +63,7 @@ dev = [
 ]
 
 [project.scripts]
+palette = "fisheye.cli.palette:main"
 palette-backfill-subject-body-mask-qc = "fisheye.refinement.subject_body_mask_qc:main"
 palette-write-refined-subject-mask-edit = "fisheye.utils.write_refined_subject_mask_edit:main"
 
