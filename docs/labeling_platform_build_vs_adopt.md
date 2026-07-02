@@ -37,14 +37,26 @@ management for animal models" is that the data-management half is bespoke resear
 infrastructure — the part correctly built in-house. What can plausibly be *stopped* is
 building the annotation UI.
 
-## Decisive fact established 2026-07-02
+## Decisive facts established 2026-07-02
 
-**Palette's zarr is a custom layout, not OME-NGFF** (no `multiscales`/OME axes;
-confirmed by grep). Web bioimage tools ingest OME-Zarr/NGFF (or tool-native formats
-like webKnossos-wrap). Therefore a **Palette-zarr → OME-NGFF conversion layer exists in
-any adopt scenario**, and it re-touches the pixel/decode contract work currently in
-flight (materializing pixels for the external tool requires the range/grayscale
-contract to be correct first — see the silent-wrong-data slice).
+1. **The campus already runs webKnossos extensively** for a harder problem class, with
+   users and workflows in place. This answers spike questions 4 (SSO — almost certainly
+   already wired to campus Okta) and 5 (admin willingness to deploy/maintain — already
+   done). **The two largest non-technical adopt risks are therefore zero.** Posture
+   shifts from "evaluate build vs adopt" to **"adopt-leaning; the remaining question is
+   the technical bridge."** The entire Palette-app *productization* track (homegrown
+   auth, multi-user hardening, self-hosted deployment) can likely be retired rather than
+   built.
+2. **Palette's zarr is a custom layout, not OME-NGFF** (no `multiscales`/OME axes;
+   confirmed by grep). webKnossos ingests OME-Zarr/NGFF or its own wkw. Therefore a
+   **Palette-zarr → OME-NGFF conversion/streaming layer exists in any adopt scenario**,
+   and it re-touches the pixel/decode contract work in flight (presenting pixels to
+   webKnossos requires the range/grayscale contract to be correct first — see the
+   silent-wrong-data slice).
+
+**What is NOT solved by campus adoption:** the round-trip (annotations back into Palette
+runs with lineage/provenance) and the named-pose-keypoint mismatch. These are unchanged
+and remain the real work.
 
 ## webKnossos — fit assessment
 
@@ -84,42 +96,61 @@ extensibility constraints.
 
 ## Recommendation
 
-Take it seriously; evaluate as a **bridge**, time-boxed, before committing either way.
+Adopt-leaning. The decision is largely made toward webKnossos as the annotation
+front-end; the work is now a focused **bridge** spike, staged by annotation type
+because the three types differ sharply in difficulty.
 
-- **Do NOT stop the Flask strangler.** It improves code retained regardless (the
-  provenance-integrated review/QC surfaces webKnossos will never provide), and it is
-  cheap, reversible, and incremental.
-- **DO pause the heavier *productization* slices** — homegrown Okta auth, multi-user
-  concurrency hardening, the deployment contract — until the webKnossos question
-  resolves. These are the exact burdens an adopted tool might absorb; bolting SSO onto
-  the app right before adopting a tool with SSO built in is the avoidable mistake.
+### The bridge is three bridges, not one
 
-### Two-week evaluation spike — decisive questions
+| Type | webKnossos representation | Palette target | Difficulty |
+|---|---|---|---|
+| Segmentation masks | segmentation layer (labeled voxels) | `subject_mask_runs` | **Medium** — voxels round-trip; work is mapping segment IDs → component channels (subject_body/eye_left/…) + re-attaching lineage |
+| Bounding boxes | bbox objects | `detect_runs` | **Easy** — coordinates only |
+| Named pose keypoints | skeleton (node/edge trees) | `keypoint_runs` (named schema) | **Hard** — semantic mismatch; may stay in a light Palette tool |
 
-1. **Annotation coverage.** Can it represent all three types for 2D fish frames? How
-   badly do named pose keypoints degrade into skeletons?
-2. **Conversion cost.** Real cost of Palette-zarr → OME-NGFF for one recording; does the
-   pixel contract survive the round-trip?
-3. **Round-trip (the crux).** Build the thinnest possible export→re-import for *one*
-   mask back into a Palette run with lineage intact. What breaks?
-4. **SSO.** Does its auth integrate with campus Okta? (Cheapest question — the admins
-   answer it.)
-5. **Ownership.** Will the admins actually deploy and maintain it? (A hard input, not a
-   technicality.)
+**Start with masks.** Highest value (aligns with the active SAM3 teacher-label work),
+webKnossos's strongest suit, and it proves the hard half of the round-trip. Then bbox.
+Decide keypoints last — they may not move at all.
+
+### Integration pattern
+
+Prefer **data-in-place streaming** (webKnossos reads Palette imagery as a remote
+OME-Zarr dataset) over export/upload batches, if webKnossos's remote-dataset support
+fits. Either way an OME-NGFF view/adapter over Palette imagery is required.
+
+### Focused spike — decisive questions (4 & 5 already answered by campus adoption)
+
+1. **Existing campus export workflow (fastest, highest-value).** Ask the campus
+   webKnossos power users *how they get annotations out* — the export format they
+   already use IS the round-trip input for the bridge. This may shortcut most of the
+   design.
+2. **Mask round-trip (the crux).** Thinnest possible: one Palette recording → OME-NGFF
+   → webKnossos → annotate one subject mask → export → import as a `subject_mask_run`
+   with lineage/provenance intact. What breaks?
+3. **Conversion + pixel contract.** Cost of Palette-zarr → OME-NGFF for one recording;
+   does the range/grayscale contract survive (depends on the silent-wrong-data slice)?
+4. **Keypoint degradation.** How lossy is named-landmark pose as skeletons — decide
+   whether keypoints move to webKnossos or stay in a light Palette surface.
 
 ### Strongest plausible future
 
 webKnossos as the multi-user annotation front-end · Palette as the provenance/pipeline
-backbone · an OME-NGFF bridge between them. Sheds labeling-UI maintenance and the
-auth/deployment burden; keeps the irreplaceable part. Hinges entirely on the round-trip
-(#3) being tractable — which the spike exists to determine before the bet is placed.
+backbone · an OME-NGFF bridge (masks first, then bbox). Sheds labeling-UI maintenance
+AND the auth/deployment/hosting burden entirely (campus already operates it). Hinges on
+the mask round-trip being tractable — the spike's core.
 
 ## Impact on current web track
 
+The residual Palette web app is **not a labeler** — it is the provenance/status/review
+dashboard webKnossos does not provide (run status, dataset queues, registry-integrated
+review, QC). The strangler should port *those survivors*, not the annotation editors.
+
 | Work | Disposition |
 |---|---|
-| Flask strangler (route-by-route) | **Continue** — code kept regardless |
-| Homegrown Okta/SSO auth | **Pause** pending decision |
-| Multi-user concurrency hardening | **Pause** pending decision |
-| Deployment contract with admins | **Reframe** — now includes "which app are we deploying" |
-| Production decision record sign-off | **Hold** — may apply to a different platform |
+| Flask strangler — admin/dashboard/status/review routes | **Continue** — these survive as the data-management surface |
+| Flask strangler — session annotation editors (keypoint/mask/detect) | **Stop investing** — webKnossos replaces these; do not port them |
+| Homegrown Okta/SSO auth | **Drop** — webKnossos owns campus auth |
+| Multi-user concurrency hardening (labeling writes) | **Drop for annotation**; revisit only for any residual dashboard mutations |
+| Self-hosted deployment contract | **Drop** — campus already hosts webKnossos |
+| Production decision record sign-off | **Retire** — was gating a labeling app that won't ship as the labeler |
+| OME-NGFF bridge (masks → bbox → keypoints?) | **New primary web-track work** |
