@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -206,6 +208,64 @@ def _make_orange_full_range_contract_crop_archive(tmp_path: Path) -> tuple[Path,
         axis=0,
     )
     return zarr_path, frames, expected
+
+
+def _write_tv_flagged_full_range_yuv420_video(tmp_path: Path, frames: list[np.ndarray]) -> Path:
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg is required to synthesize the tv-flagged full-range video")
+    if not frames:
+        raise ValueError("frames must not be empty")
+    height, width = frames[0].shape
+    if height % 2 or width % 2:
+        raise ValueError("yuv420p synthesis requires even frame dimensions")
+
+    yuv_path = tmp_path / "orange_full_range_tv_flag.yuv"
+    with yuv_path.open("wb") as handle:
+        for frame in frames:
+            y = np.asarray(frame, dtype=np.uint8)
+            if y.shape != (height, width):
+                raise ValueError("all frames must share shape")
+            u = np.full((height // 2, width // 2), 128, dtype=np.uint8)
+            v = np.full((height // 2, width // 2), 128, dtype=np.uint8)
+            handle.write(y.tobytes(order="C"))
+            handle.write(u.tobytes(order="C"))
+            handle.write(v.tobytes(order="C"))
+
+    video_path = tmp_path / "orange_full_range_tv_flag.mp4"
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
+        "-s:v",
+        f"{width}x{height}",
+        "-r",
+        "1",
+        "-i",
+        str(yuv_path),
+        "-frames:v",
+        str(len(frames)),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-qp",
+        "0",
+        "-pix_fmt",
+        "yuv420p",
+        "-color_range",
+        "tv",
+        str(video_path),
+    ]
+    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    if completed.returncode != 0:
+        pytest.skip(f"ffmpeg could not synthesize lossless h264/yuv420p test video: {completed.stderr.strip()}")
+    return video_path
 
 
 def test_write_owned_roi_payload_batch_fast_path_writes_contiguous_rows(tmp_path: Path) -> None:
@@ -479,6 +539,33 @@ def test_build_flat_roi_cache_pynvvc_luma_preserves_orange_full_range_y_plane(
     assert manifest_a["array"]["sha256"] == manifest_b["array"]["sha256"]
     assert manifest_a["builder"]["decode_backend_effective"] == "pynvvc_luma"
     assert manifest_a["builder"]["pixel_contract"]["name"] == "nv12_luma_plane_uint8"
+
+
+@pytest.mark.gpu
+def test_pynvvc_luma_reader_decodes_tv_flagged_full_range_y_plane_exactly(tmp_path: Path) -> None:
+    _zarr_path, frames, _expected = _make_orange_full_range_contract_crop_archive(tmp_path)
+    video_path = _write_tv_flagged_full_range_yuv420_video(tmp_path, frames)
+    height, width = frames[0].shape
+
+    try:
+        from fisheye.shared.pynvvc_luma_rgb import PynvvcLumaRgbReader
+
+        reader = PynvvcLumaRgbReader(video_path, start_frame=0, gpu_id=0)
+    except Exception as exc:
+        pytest.skip(f"PyNvVideoCodec GPU reader is unavailable: {exc}")
+
+    decoded: list[np.ndarray] = []
+    try:
+        for frame in reader.iter_frames():
+            decoded.append(np.asarray(frame[:height, :width].cpu().numpy(), dtype=np.uint8).copy())
+            if len(decoded) == len(frames):
+                break
+    finally:
+        reader.close()
+
+    assert len(decoded) == len(frames)
+    for decoded_frame, expected_frame in zip(decoded, frames):
+        np.testing.assert_array_equal(decoded_frame, expected_frame)
 
 
 def test_build_flat_roi_cache_auto_prefers_pynvvc_luma_for_geometry_only(

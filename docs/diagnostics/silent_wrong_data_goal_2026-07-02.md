@@ -39,10 +39,11 @@ Completed commits:
 - `eb510d0 crop: convert ordering, bounds, and decode assumptions to loud failures`
 - `29e9e6a pixels: enforce gpu-primary decode with full-range contract and stamping`
 - `e2520c5 masks: require probabilities_encoding at decode time`
+- `985f658 pixels: add golden decode parity test`
 
 Next implementation item:
 
-- Item 5: golden pixel parity.
+- Item 6: OpenCV detect fallback.
 
 Item 3 validation:
 
@@ -68,14 +69,30 @@ Item 4 validation:
   utilities, and subject-mask diagnostic benchmark readers.
 - Full non-GPU gate: `3209 passed, 2 skipped, 1 deselected, 201 warnings`.
 
-## Active Item 5 Next Step
+Item 5 validation:
 
-- [ ] Review existing pixel parity/cache tests before adding the golden contract test.
-- [ ] Generate a synthetic full-range mono video with a deliberately misleading `tv`
-  container/range flag.
-- [ ] Keep the primary PyNvVC direct-Y assertion GPU-marked while keeping CI coverage for
-  retained opt-in CPU/cache paths.
-- [ ] Assert cache build/read/rebuild byte equality for the supported CPU-free test path.
+- `31 passed` for the focused pixel/cache run, covering flat ROI cache, training crop
+  PyNvVC parity, and crop image source behavior.
+- `11 passed, 1 deselected` for the flat ROI cache tests after adding the GPU-marked
+  encoded-video smoke.
+- Full non-GPU gate: `3210 passed, 2 skipped, 2 deselected, 205 warnings`.
+
+## Active Item 6 Next Step
+
+- [ ] Inspect the OpenCV fallback path in `detection/detect_yolo.py`.
+- [ ] Add a fake-capture regression for over-reported `CAP_PROP_FRAME_COUNT`.
+- [ ] Flush any final partial batch after EOF.
+- [ ] Confirm any OpenCV backend is explicit/opt-in rather than a silent production
+  fallback.
+
+## Completed Item 5 Notes
+
+- [x] Reviewed existing pixel parity/cache tests before adding the golden contract test.
+- [x] Added a synthetic full-range Orange mono stream fixture with `tv` container/range
+  metadata.
+- [x] Asserted the PyNvVC-luma flat-cache path preserves full-range Y-plane sentinel
+  values including `0`, `16`, `235`, and `255` without limited-range expansion.
+- [x] Asserted cache build/read/rebuild byte equality for two independent cache builds.
 
 ## Completed Item 4 Notes
 
@@ -123,10 +140,10 @@ PYTHONPATH=/home/delahantyj@hhmi.org/gitrepos/palette-silent-wrong-data/src \
   - [x] Missing or unknown `probabilities_encoding` raises with run path and dtype.
   - [x] Add focused tests.
   - [x] Full non-GPU gate green.
-- [ ] Item 5 - golden pixel parity:
-  - [ ] Generate a synthetic full-range mono video with a `tv` container/range flag.
-  - [ ] GPU-marked primary assertion: PyNvVC direct-Y decode equals encoded Y.
-  - [ ] CI-runnable assertions cover any retained CPU inspection path and cache
+- [x] Item 5 - golden pixel parity:
+  - [x] Generate a synthetic full-range mono video with a `tv` container/range flag.
+  - [x] GPU-marked primary assertion: PyNvVC direct-Y decode equals encoded Y.
+  - [x] CI-runnable assertions cover any retained CPU inspection path and cache
     build/read/rebuild byte equality.
 - [ ] Item 6 - OpenCV detect fallback:
   - [ ] Flush final partial batch after EOF regardless of reported frame count.
