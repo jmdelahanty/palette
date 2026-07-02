@@ -47,18 +47,19 @@ def test_plan_fresh_store_recommends_import_frontier(tmp_path, capsys) -> None:
     assert payload["status"] == "ok"
     assert payload["metrics"]["complete"] == 0
     assert any(item["stage"] == "raw" and item["palette_verb"] == "import" for item in payload["next"])
-    assert not any(item["stage"] in {"eye_masks", "refined_eye_masks"} for item in payload["next"])
+    assert not any(item["stage"] in {"eye_masks", "refined_eye_masks", "eye_mask_tuning"} for item in payload["next"])
     eye_masks = next(stage for stage in payload["stages"] if stage["stage"] == "eye_masks")
     assert eye_masks["deprecated"] is True
+    eye_mask_tuning = next(stage for stage in payload["stages"] if stage["stage"] == "eye_mask_tuning")
+    assert eye_mask_tuning["deprecated"] is True
     detect = next(stage for stage in payload["stages"] if stage["stage"] == "detect")
-    assert detect["state"] == "blocked"
+    assert detect["state"] == "missing"
 
 
 def test_plan_mid_pipeline_recommends_frontier(tmp_path, capsys) -> None:
     zarr_path = tmp_path / "mid_training.zarr"
     root = _open_tmp_store(zarr_path)
     _create_raw(root)
-    _complete_run(root, "background", "background_001")
 
     rc, payload = _run_json(capsys, "plan", str(zarr_path))
 

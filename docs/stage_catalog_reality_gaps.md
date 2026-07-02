@@ -21,26 +21,30 @@ catalog.
 
 ## Gaps
 
-1. **`detect depends_on background` is wrong for the current pipeline.**
+1. **DONE 2026-07-02: `detect depends_on background` is wrong for the current pipeline.**
    Historical artifact: detection originally ran by background subtraction over
    imported frames. Current detection (YOLO over video/crops) does not need the
    background stage — confirmed by the maintainer 2026-07-01, and demonstrated by
    recordings (e.g. RedScare arena-1) where detect completed without background.
-   Consequence today: `palette detect` reports a false `BLOCKED_BY_BACKGROUND`.
-   Fix: remove the edge; the traditional (background-subtraction) detector checks for
-   a background model at runtime per the design rule above.
+   The catalog edge was removed. The frozen legacy `core.pipeline.Pipeline`
+   still carries `detect: ["background"]`; that intentional catalog-vs-legacy
+   difference is tracked in `tests/unit/fisheye/test_stage_catalog_drift.py`.
+   Traditional background-subtraction detection continues to check for a
+   background model at runtime per the design rule above.
 
-2. **`keypoints depends_on background` (legacy DAG) is questionable for the same
-   reason.** Maintainer statement 2026-07-01: the background model is not currently
-   required. Verify whether any live keypoint path reads the background model; if not,
-   remove the edge. If nothing in the live workflow needs `background`, consider
-   marking the stage itself legacy/optional in the catalog.
+2. **RECONCILED 2026-07-02: `keypoints depends_on background` was already fixed.**
+   The live catalog now has `keypoints depends_on ("crop",)` only. The frozen
+   legacy `core.pipeline.Pipeline` still carries `keypoints: ["crop", "background"]`
+   because traditional keypoints historically required a background model. That
+   mismatch is intentional and covered by
+   `tests/unit/fisheye/test_stage_catalog_drift.py`.
 
-3. **Artifact-name mismatch: catalog `background` vs on-disk `background_runs`.**
+3. **BRIDGED 2026-07-02: artifact-name mismatch: catalog `background` vs on-disk `background_runs`.**
    Live tooling writes `background_runs`; the catalog artifact name says `background`.
-   Currently bridged inside the oracle (`cli/palette.py`); the bridge should move into
-   the catalog (or a canonical stage-id → group-name map next to it) so every consumer
-   gets it.
+   This is bridged inside the oracle (`cli/palette.py`) and works today. Moving
+   canonical artifact-family ownership into the catalog is deferred because it
+   would ripple through every `artifact_families` consumer. Track catalog-side
+   canonicalization as a later architecture cleanup, not part of this bug-fix slice.
 
 4. **No recording-type stage profiles.** The catalog DAG is recording-type-agnostic,
    so `palette plan` recommends every structurally-possible stage (e.g. `dish_mask`,
@@ -49,16 +53,21 @@ catalog.
    driver. Needs recording profiles (training / analysis / canary) that scope which
    stages apply.
 
-5. **Deprecated stages appear in `plan` recommendations.** `eye_masks` /
-   `eye_mask_tuning` were offered as next actions on RedScare. Once the severance adds
-   deprecated markers to the catalog, the oracle must exclude deprecated stages from
-   `next` (keep them visible in `status` as historical). ~Ten-line follow-up in
-   `cli/palette.py`.
+5. **DONE 2026-07-02: deprecated stages appear in `plan` recommendations.**
+   The oracle already excludes `StageSpec.deprecated` stages from `next` while
+   keeping them visible in `status`. `eye_masks` and `refined_eye_masks` were
+   already marked deprecated; `eye_mask_tuning` is now marked deprecated as the
+   remaining dead-surface tuning stage. The broader question of whether live
+   interactive tuning stages (`detection_tuning`, `keypoint_tuning`,
+   `subject_mask_tuning`) belong in `plan next` is part of recording profiles
+   (gap item 4), not this slice.
 
-6. **Run-verbs need a general `--force` escape hatch.** Even with an accurate catalog,
+6. **DONE 2026-07-02: run-verbs need a general `--force` escape hatch.** Even with an accurate catalog,
    an operator/agent must be able to override a dependency gate with a loud warning in
-   the envelope (`"forced": true`). The waist must never be *stricter than reality* with
-   no exit.
+   the envelope (`"forced": true`). The waist must never be *stricter than reality*
+   with no exit. The `palette detect`, `palette crop`, and `palette keypoints`
+   run verbs now accept `--force`; forced dependency overrides record the original
+   `blocked_by` and `provenance.forced_dependency_overrides`.
 
 7. **Crop has no registry-model runner idiom.** detect/keypoints select models via the
    registry; crop shims to `fisheye.utils.crop_batch` / `tracking.crop.crop_detections`

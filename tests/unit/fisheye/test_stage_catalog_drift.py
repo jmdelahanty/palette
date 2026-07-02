@@ -5,6 +5,10 @@ from fisheye.registry.stage_catalog import canonical_stage_id, dependency_map
 
 
 KNOWN_PIPELINE_DEPENDENCY_OVERRIDES = {
+    # INTENT: keep until the frozen legacy orchestrator is retired or split.
+    # Current YOLO detection does not universally require background; traditional
+    # background-subtraction detection owns that runtime precondition.
+    "detect": (("background",), ()),
     # INTENT: converge. The pipeline still permits crop directly from raw
     # detections; the catalog models the newer refined-detect-first path.
     "crop": (("detect",), ("refined_detect",)),

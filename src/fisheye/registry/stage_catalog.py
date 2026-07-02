@@ -71,7 +71,6 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
     ),
     StageSpec(
         id="detect",
-        depends_on=("background",),
         invalidates=("detect_quality",),
         artifact_families=("detect_runs",),
         description="Raw detection/model output. Immutable except explicit overwrite.",
@@ -254,6 +253,7 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
         aliases=("eye-mask", "eye_mask"),
         category=TUNING,
         description="Eye mask tuner metadata.",
+        deprecated=True,
     ),
     StageSpec(
         id="subdish_mask_tuning",

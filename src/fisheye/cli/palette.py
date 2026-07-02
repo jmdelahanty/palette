@@ -774,6 +774,8 @@ def _resolved_palette_command(verb: str, dataset: DatasetRef, args: argparse.Nam
         parts.append("--apply")
     else:
         parts.append("--dry-run")
+    if bool(getattr(args, "force", False)):
+        parts.append("--force")
     option_names = {
         "detect": (
             ("--video", "video", False),
@@ -871,7 +873,8 @@ def _precondition_payload(
     stage_id: str,
     dataset: DatasetRef,
     stages: Sequence[StageState],
-    provenance: Mapping[str, Any],
+    provenance: dict[str, Any],
+    force: bool = False,
 ) -> dict[str, Any] | None:
     spec = _stage_spec(stage_id)
     by_stage = _stage_map(stages)
@@ -884,6 +887,19 @@ def _precondition_payload(
         if action:
             hints.append(str(action))
     reason_code = "BLOCKED_BY_" + "_AND_".join(dep.upper() for dep in missing)
+    if force:
+        override = {
+            "stage": stage_id,
+            "blocked_by": missing,
+            "reason_code": reason_code,
+            "warning": "Catalog dependency gate explicitly overridden by --force.",
+        }
+        overrides = provenance.setdefault("forced_dependency_overrides", [])
+        if isinstance(overrides, list):
+            overrides.append(override)
+        else:
+            provenance["forced_dependency_overrides"] = [override]
+        return None
     return build_envelope(
         command=f"palette {verb}",
         status="blocked",
@@ -897,6 +913,23 @@ def _precondition_payload(
         provenance=provenance,
         blocked_by=missing,
     )
+
+
+def _forced_envelope_fields(provenance: Mapping[str, Any]) -> dict[str, Any]:
+    overrides = provenance.get("forced_dependency_overrides")
+    if not isinstance(overrides, list) or not overrides:
+        return {}
+    blocked_by: list[str] = []
+    for override in overrides:
+        if not isinstance(override, Mapping):
+            continue
+        values = override.get("blocked_by")
+        if isinstance(values, list):
+            blocked_by.extend(str(value) for value in values)
+    return {
+        "forced": True,
+        "blocked_by": sorted(set(blocked_by)),
+    }
 
 
 def _next_hints_from_plan(dataset: DatasetRef) -> list[str]:
@@ -973,6 +1006,7 @@ def _run_detect(args: argparse.Namespace, dataset: DatasetRef, stages: Sequence[
         dataset=dataset,
         stages=stages,
         provenance=provenance,
+        force=bool(args.force),
     )
     if blocked is not None:
         blocked["resolved_command"] = resolved_command
@@ -1027,6 +1061,7 @@ def _run_detect(args: argparse.Namespace, dataset: DatasetRef, stages: Sequence[
         provenance=provenance,
         resolved_command=resolved_command,
         runner_result=payload,
+        **_forced_envelope_fields(provenance),
     )
 
 
@@ -1055,6 +1090,7 @@ def _run_keypoints(args: argparse.Namespace, dataset: DatasetRef, stages: Sequen
         dataset=dataset,
         stages=stages,
         provenance=provenance,
+        force=bool(args.force),
     )
     if blocked is not None:
         blocked["resolved_command"] = resolved_command
@@ -1118,6 +1154,7 @@ def _run_keypoints(args: argparse.Namespace, dataset: DatasetRef, stages: Sequen
         provenance=provenance,
         resolved_command=resolved_command,
         runner_result=payload,
+        **_forced_envelope_fields(provenance),
     )
 
 
@@ -1151,6 +1188,7 @@ def _run_crop(args: argparse.Namespace, dataset: DatasetRef, stages: Sequence[St
         dataset=dataset,
         stages=stages,
         provenance=provenance,
+        force=bool(args.force),
     )
     if blocked is not None:
         blocked["resolved_command"] = resolved_command
@@ -1179,6 +1217,7 @@ def _run_crop(args: argparse.Namespace, dataset: DatasetRef, stages: Sequence[St
             provenance=provenance,
             resolved_command=resolved_command,
             crop_plan=json_ready(plan),
+            **_forced_envelope_fields(provenance),
         )
     if not apply:
         return build_envelope(
@@ -1201,6 +1240,7 @@ def _run_crop(args: argparse.Namespace, dataset: DatasetRef, stages: Sequence[St
             provenance=provenance,
             resolved_command=resolved_command,
             crop_plan=json_ready(plan),
+            **_forced_envelope_fields(provenance),
         )
 
     external_use_sharding = None
@@ -1256,6 +1296,7 @@ def _run_crop(args: argparse.Namespace, dataset: DatasetRef, stages: Sequence[St
         provenance=provenance,
         resolved_command=resolved_command,
         runner_result=payload,
+        **_forced_envelope_fields(provenance),
     )
 
 
@@ -1290,6 +1331,11 @@ def _add_common_run_args(sub: argparse.ArgumentParser) -> None:
     mode = sub.add_mutually_exclusive_group()
     mode.add_argument("--apply", action="store_true", help="Execute the live runner.")
     mode.add_argument("--dry-run", action="store_true", help="Resolve and report without writing. This is the default.")
+    sub.add_argument(
+        "--force",
+        action="store_true",
+        help="Override unmet catalog dependencies with loud provenance in the run envelope.",
+    )
 
 
 def _add_detect_args(sub: argparse.ArgumentParser) -> None:

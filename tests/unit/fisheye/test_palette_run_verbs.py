@@ -122,18 +122,35 @@ def test_detect_apply_passes_cli_provenance(monkeypatch, tmp_path, capsys) -> No
     assert calls["cli_provenance"]["config_hash"]
 
 
-def test_detect_blocks_with_executable_background_hint(tmp_path, capsys) -> None:
-    zarr_path = tmp_path / "detect_blocked.zarr"
+def test_detect_no_longer_blocks_on_missing_background(monkeypatch, tmp_path, capsys) -> None:
+    zarr_path = tmp_path / "detect_raw_only.zarr"
     root = _open_tmp_store(zarr_path)
     _create_raw(root)
+    calls: dict = {}
+
+    def fake_detect(**kwargs):
+        calls.update(kwargs)
+        return _runner_result(
+            ok=True,
+            status="dry_run",
+            output_zarr=str(kwargs["output"]),
+            detect_run=None,
+            selected_model_path="/models/detect.pt",
+            selected_run_id="detect_model_run",
+            selected_set_id="detect_set",
+        )
+
+    import fisheye.utils.run_detect_with_registry_model as runner
+
+    monkeypatch.setattr(runner, "run_detect_with_registry_model", fake_detect)
 
     rc, payload = _run_json(capsys, "detect", str(zarr_path))
 
-    assert rc == palette.EXIT_BLOCKED
-    assert payload["status"] == "blocked"
-    assert payload["reason_code"] == "BLOCKED_BY_BACKGROUND"
-    assert payload["next_hints"]
-    assert payload["next_hints"][0].startswith("scripts/py -m fisheye.preprocessing.background")
+    assert rc == palette.EXIT_OK
+    assert payload["status"] == "dry_run"
+    assert payload["reason_code"] == "DRY_RUN"
+    assert calls["dry_run"] is True
+    assert calls["cli_provenance"] is None
 
 
 def test_keypoints_apply_constructs_registry_runner_invocation(monkeypatch, tmp_path, capsys) -> None:
@@ -166,6 +183,85 @@ def test_keypoints_apply_constructs_registry_runner_invocation(monkeypatch, tmp_
     assert calls["output"] == zarr_path.resolve()
     assert calls["pose_schema"] == "traditional_v3"
     assert calls["cli_provenance"]["input_run_ids"] == {"crop": "crop_001"}
+
+
+def test_keypoints_force_overrides_missing_crop_with_loud_provenance(monkeypatch, tmp_path, capsys) -> None:
+    zarr_path = tmp_path / "keypoints_force.zarr"
+    _open_tmp_store(zarr_path)
+    calls: dict = {}
+
+    def fake_keypoints(**kwargs):
+        calls.update(kwargs)
+        return _runner_result(
+            ok=True,
+            status="dry_run",
+            output_zarr=str(kwargs["output"]),
+            keypoint_run=None,
+            selected_model_path="/models/keypoints.pt",
+            selected_run_id="keypoint_model_run",
+            selected_set_id="keypoint_set",
+        )
+
+    fake_module = ModuleType("fisheye.utils.run_keypoints_with_registry_model")
+    fake_module.run_keypoints_with_registry_model = fake_keypoints
+    monkeypatch.setitem(sys.modules, "fisheye.utils.run_keypoints_with_registry_model", fake_module)
+
+    rc, payload = _run_json(capsys, "keypoints", str(zarr_path), "--force")
+
+    assert rc == palette.EXIT_OK
+    assert payload["status"] == "dry_run"
+    assert payload["forced"] is True
+    assert payload["blocked_by"] == ["crop"]
+    assert "--force" in payload["resolved_command"]
+    overrides = payload["provenance"]["forced_dependency_overrides"]
+    assert overrides == [
+        {
+            "blocked_by": ["crop"],
+            "reason_code": "BLOCKED_BY_CROP",
+            "stage": "keypoints",
+            "warning": "Catalog dependency gate explicitly overridden by --force.",
+        }
+    ]
+    assert calls["dry_run"] is True
+    assert calls["cli_provenance"] is None
+
+
+def test_keypoints_force_apply_passes_override_in_cli_provenance(monkeypatch, tmp_path, capsys) -> None:
+    zarr_path = tmp_path / "keypoints_force_apply.zarr"
+    _open_tmp_store(zarr_path)
+    calls: dict = {}
+
+    def fake_keypoints(**kwargs):
+        calls.update(kwargs)
+        return _runner_result(
+            ok=True,
+            status="ok",
+            output_zarr=str(kwargs["output"]),
+            keypoint_run="keypoints_force_001",
+            selected_model_path="/models/keypoints.pt",
+            selected_run_id="keypoint_model_run",
+            selected_set_id="keypoint_set",
+        )
+
+    fake_module = ModuleType("fisheye.utils.run_keypoints_with_registry_model")
+    fake_module.run_keypoints_with_registry_model = fake_keypoints
+    monkeypatch.setitem(sys.modules, "fisheye.utils.run_keypoints_with_registry_model", fake_module)
+
+    rc, payload = _run_json(capsys, "keypoints", str(zarr_path), "--apply", "--force")
+
+    assert rc == palette.EXIT_OK
+    assert payload["status"] == "ok"
+    assert payload["forced"] is True
+    assert payload["blocked_by"] == ["crop"]
+    overrides = calls["cli_provenance"]["forced_dependency_overrides"]
+    assert overrides == [
+        {
+            "blocked_by": ["crop"],
+            "reason_code": "BLOCKED_BY_CROP",
+            "stage": "keypoints",
+            "warning": "Catalog dependency gate explicitly overridden by --force.",
+        }
+    ]
 
 
 def test_crop_apply_writes_cli_provenance_to_real_tmp_zarr(monkeypatch, tmp_path, capsys) -> None:
