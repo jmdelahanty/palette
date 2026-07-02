@@ -7,6 +7,10 @@ Purpose: provide an operator workflow for pose/keypoint training that mirrors th
 - one-command pipeline (optional merged export and train)
 - post-run registry checks
 
+For external-tool interoperability, see
+[`pose_coco_interoperability.md`](pose_coco_interoperability.md). Palette Zarr
+remains the canonical pose store; COCO/YOLO-style outputs are export views.
+
 All commands below use repository-standard `scripts/py`.
 
 ## 1) Query Registry Candidates
