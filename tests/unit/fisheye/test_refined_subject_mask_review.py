@@ -1063,24 +1063,15 @@ def test_save_refined_subject_roi_can_scope_updates_to_requested_component() -> 
     assert swim_group["provenance"].attrs["last_update_mode"] == "create"
 
 
-def test_save_refined_subject_roi_scoped_save_passes_only_active_component_to_finalize(monkeypatch) -> None:
+def test_save_refined_subject_roi_scoped_save_does_not_materialize_legacy_refined_eye_run(monkeypatch) -> None:
     root = _build_subject_review_root()
+    _patch_review_provenance(monkeypatch)
     source, refined = mod.prepare_refined_subject_run(
         root,
         subject_run="subject_masks_001",
         refined_run="refined_subject_masks_001",
         components=("subject_body", "eye_left", "eye_right"),
     )
-
-    calls: list[tuple[str, ...] | None] = []
-
-    def _capture_materialize(_refined, *, updated_components=None):  # noqa: ANN001
-        if updated_components is None:
-            calls.append(None)
-        else:
-            calls.append(tuple(str(name) for name in updated_components))
-
-    monkeypatch.setattr(mod, "_materialize_refined_eye_compat_if_needed", _capture_materialize)
 
     edited = np.asarray(refined.group["masks_roi"][0], dtype=np.uint8)
     edited[0, 1:7, 1:7] = 0
@@ -1093,7 +1084,8 @@ def test_save_refined_subject_roi_scoped_save_passes_only_active_component_to_fi
         component_names=("subject_body",),
     )
 
-    assert calls == [("subject_body",)]
+    assert "refined_eye_masks_runs" not in root
+    assert "compat_refined_eye_masks_run" not in refined.group.attrs
 
 
 def test_check_refined_subject_source_updates_auto_syncs_unedited_rows(monkeypatch) -> None:

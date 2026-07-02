@@ -2147,19 +2147,6 @@ def apply_component_review_status(
     )
     refined.attrs["refined_subject_mask_review_status"] = run_payload
     refined_parent.attrs["refined_subject_mask_review_status_latest"] = refined_run
-    if str(component_name) in {"eye_left", "eye_right"}:
-        labels_raw = refined.attrs.get("mask_labels")
-        component_names = tuple(str(item) for item in labels_raw) if isinstance(labels_raw, (list, tuple)) else ()
-        _materialize_refined_eye_compat_if_needed(
-            RefinedSubjectMaskRun(
-                run_name=refined_run,
-                parent=refined_parent,
-                group=refined,
-                component_names=component_names,
-                component_to_index={name: idx for idx, name in enumerate(component_names)},
-            ),
-            updated_components=(str(component_name),),
-        )
     return component_reviews[str(component_name)], run_payload
 
 
@@ -2405,26 +2392,6 @@ def _write_refined_subject_component_apply_rows(
     sync_source_subject_mask_stale_payload(run_group)
 
 
-def _materialize_refined_eye_compat_if_needed(
-    refined: RefinedSubjectMaskRun,
-    *,
-    updated_components: Optional[Sequence[str]] = None,
-) -> None:
-    eye_components = {"eye_left", "eye_right"}
-    if not eye_components.issubset(set(refined.component_names)):
-        return
-    if updated_components is not None and not eye_components.intersection(str(name) for name in updated_components):
-        return
-
-    from ..utils.materialize_refined_eye_masks_compat import materialize_refined_eye_masks_compat
-
-    materialize_refined_eye_masks_compat(
-        refined.group,
-        refined_subject_run=refined.run_name,
-        overwrite=True,
-    )
-
-
 def _finalize_refined_subject_apply(
     refined: RefinedSubjectMaskRun,
     *,
@@ -2439,7 +2406,6 @@ def _finalize_refined_subject_apply(
         from ..shared.refined_subject_eye_geometry import write_refined_subject_eye_geometry
 
         write_refined_subject_eye_geometry(refined.group, updated_components=updated_components)
-    _materialize_refined_eye_compat_if_needed(refined, updated_components=updated_components)
     if "mask_bitpacked" in refined.group:
         refresh_bitpacked_mask_store_from_dense(
             refined.group,
