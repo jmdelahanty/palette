@@ -127,7 +127,11 @@ def handle_with_flask_if_claimed(handler: Any, app: Flask) -> bool:
     legacy handler branch.
     """
 
-    if not is_path_claimed(app, request_path_from_handler(handler)):
+    if not is_path_claimed(
+        app,
+        request_path_from_handler(handler),
+        method=str(getattr(handler, "command", "GET") or "GET").upper(),
+    ):
         return False
 
     environ = build_wsgi_environ(handler)

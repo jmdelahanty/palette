@@ -72,6 +72,7 @@ from .web_auth import (
     _verify_signed_invite_token,
 )
 from .web_app import create_labeling_app
+from .web_admin_api import register_admin_api_routes
 from .web_wsgi_adapter import handle_with_flask_if_claimed
 from .template_assets import read_labeling_asset, render_labeling_template
 from .web_responses import (
@@ -6697,6 +6698,7 @@ def _session_html(session: Mapping[str, object]) -> bytes:
 
 def _make_handler(state: ServerState):
     flask_app = create_labeling_app(config={"LABELING_SERVER_STATE": state})
+    register_admin_api_routes(flask_app, state)
 
     class LabelingWorkHandler(BaseHTTPRequestHandler):
         server_version = "PaletteLabelingWork/0.1"
@@ -8584,50 +8586,6 @@ def _make_handler(state: ServerState):
                     }
                 )
                 return
-            if path == "/api/admin/summary":
-                if self._require_admin() is None:
-                    return
-                try:
-                    admin = _admin_summary_payload(state.store, config=state.config)
-                except Exception as exc:
-                    self._write_json(
-                        _format_error("admin_summary_failed", details=str(exc), status=HTTPStatus.INTERNAL_SERVER_ERROR),
-                        status=HTTPStatus.INTERNAL_SERVER_ERROR,
-                    )
-                    return
-                self._write_json({"ok": True, "admin": admin})
-                return
-            if path == "/api/admin/datasets":
-                if self._require_admin() is None:
-                    return
-                try:
-                    query = parse_qs(parsed.query, keep_blank_values=True)
-                    payload = _admin_datasets_payload(
-                        state.store,
-                        config=state.config,
-                        dataset_id=str((query.get("dataset_id") or [""])[-1]).strip() or None,
-                        recording_id=str((query.get("recording_id") or [""])[-1]).strip() or None,
-                        assignee_user=(
-                            str((query.get("user") or query.get("assignee_user") or [""])[-1]).strip()
-                            or None
-                        ),
-                        status=str((query.get("status") or [""])[-1]).strip() or None,
-                        warnings_only=str((query.get("warnings") or [""])[-1]).strip().lower()
-                        in {"1", "true", "yes", "on"},
-                    )
-                except Exception as exc:
-                    self._write_json(
-                        _format_error("admin_datasets_failed", details=str(exc), status=HTTPStatus.INTERNAL_SERVER_ERROR),
-                        status=HTTPStatus.INTERNAL_SERVER_ERROR,
-                    )
-                    return
-                self._write_json(payload)
-                return
-            if path == "/api/admin/users":
-                if self._require_admin() is None:
-                    return
-                self._write_json(_admin_users_payload(state.store, config=state.config))
-                return
             if path == "/api/admin/datasets/export":
                 if self._require_admin() is None:
                     return
@@ -8700,84 +8658,6 @@ def _make_handler(state: ServerState):
                         "Content-Disposition": 'attachment; filename="palette-admin-datasets.csv"'
                     },
                 )
-                return
-            if path == "/api/admin/preflight":
-                if self._require_admin() is None:
-                    return
-                self._write_json({"ok": True, "preflight": _server_safety_payload(state.config, include_admin_details=True)})
-                return
-            if path.startswith("/api/admin/events/"):
-                if self._require_admin() is None:
-                    return
-                event_id = unquote(path[len("/api/admin/events/") :].strip("/"))
-                if not event_id or "/" in event_id:
-                    self._write_json(_format_error("event_not_found", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
-                    return
-                event = state.store.get_event(event_id)
-                if event is None:
-                    self._write_json(_format_error("event_not_found", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
-                    return
-                self._write_json(
-                    {
-                        "ok": True,
-                        "event_id": event_id,
-                        "event": event,
-                        "retry_promotion_url": (
-                            f"/api/admin/events/{event_id}/retry-promotion"
-                            if str(event.get("event_type") or "") == "promotion_failed"
-                            else ""
-                        ),
-                        "operator_action": (
-                            "Use this audit event to reconcile a labeler-provided save reference with the assigned task, recording, user, target, and mutation outcome."
-                        ),
-                    }
-                )
-                return
-            if path.startswith("/api/admin/sessions/") and path.endswith("/closure"):
-                if self._require_admin() is None:
-                    return
-                session_id = unquote(path[len("/api/admin/sessions/") : -len("/closure")].strip("/"))
-                if not session_id:
-                    self._write_json(_format_error("missing_session_id", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
-                    return
-                session = state.store.get_session(session_id)
-                if session is None:
-                    self._write_json(_format_error("session_not_found", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
-                    return
-                closure_event = state.store.get_session_closure_event(session_id)
-                closure_support = _session_closure_support(closure_event)
-                self._write_json(
-                    {
-                        "ok": True,
-                        "session_id": session_id,
-                        "session": _admin_recording_session_summary(session),
-                        "has_closure_event": closure_support is not None,
-                        "session_closure_event": closure_support,
-                        "operator_action": (
-                            "Use this closure event to explain stale-tab, reassignment, completion, or cleanup failures to the labeler."
-                            if closure_support is not None
-                            else "No closure event is recorded for this session; inspect the session and task state directly."
-                        ),
-                    }
-                )
-                return
-            if path.startswith("/api/admin/recordings/"):
-                if self._require_admin() is None:
-                    return
-                recording_id = unquote(path[len("/api/admin/recordings/") :].strip("/"))
-                if not recording_id:
-                    self._write_json(_format_error("missing_recording_id", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
-                    return
-                self._write_json({"ok": True, "admin_recording": _admin_recording_payload(state.store, recording_id=recording_id)})
-                return
-            if path.startswith("/api/admin/users/"):
-                if self._require_admin() is None:
-                    return
-                target_user = unquote(path[len("/api/admin/users/") :].strip("/"))
-                if not target_user:
-                    self._write_json(_format_error("missing_user", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
-                    return
-                self._write_json({"ok": True, "admin_user": _admin_user_payload(state.store, user=target_user)})
                 return
             if path == "/api/me/identity":
                 user, auth_source = self._require_user()

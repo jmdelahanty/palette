@@ -138,6 +138,28 @@ def test_unclaimed_path_falls_through_without_touching_flask() -> None:
     assert handler.wfile.getvalue() == b""
 
 
+def test_route_claims_are_method_aware_for_prefixes() -> None:
+    app = create_labeling_app(import_name=__name__)
+
+    @claimed_route(
+        app,
+        "/admin/read/<path:tail>",
+        claim="prefix",
+        claim_prefix_value="/admin/read",
+        methods=["GET"],
+    )
+    def admin_read(tail: str) -> Response:
+        return Response(f"tail={tail}", status=200)
+
+    get_handler = FakeHandler("GET", "/admin/read/item")
+    post_handler = FakeHandler("POST", "/admin/read/item")
+
+    assert handle_with_flask_if_claimed(get_handler, app) is True
+    assert get_handler.response_code == 200
+    assert handle_with_flask_if_claimed(post_handler, app) is False
+    assert post_handler.response_code is None
+
+
 def test_claimed_flask_response_security_headers_match_existing_policy() -> None:
     app = create_labeling_app(import_name=__name__)
 

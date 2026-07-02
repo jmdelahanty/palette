@@ -13,6 +13,7 @@ route family is deliberately claimed and ported.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections.abc import Iterable
 from typing import Any, Callable, Literal, TypeVar
 
 from flask import Flask, abort, g, request
@@ -43,26 +44,75 @@ class RouteClaims:
 
     paths: set[str] = field(default_factory=set)
     prefixes: set[str] = field(default_factory=set)
+    path_methods: dict[str, set[str] | None] = field(default_factory=dict)
+    prefix_methods: dict[str, set[str] | None] = field(default_factory=dict)
 
-    def claim_path(self, path: str) -> "RouteClaims":
-        self.paths.add(normalize_claim_path(path))
+    def claim_path(self, path: str, *, methods: Iterable[str] | None = None) -> "RouteClaims":
+        normalized = normalize_claim_path(path)
+        self.paths.add(normalized)
+        incoming = _normalize_claim_methods(methods)
+        if normalized in self.path_methods:
+            self.path_methods[normalized] = _merge_claim_methods(
+                self.path_methods[normalized],
+                incoming,
+            )
+        else:
+            self.path_methods[normalized] = incoming
         return self
 
-    def claim_prefix(self, prefix: str) -> "RouteClaims":
+    def claim_prefix(self, prefix: str, *, methods: Iterable[str] | None = None) -> "RouteClaims":
         normalized = normalize_claim_path(prefix)
         if normalized != "/":
             normalized = normalized.rstrip("/")
         self.prefixes.add(normalized or "/")
+        key = normalized or "/"
+        incoming = _normalize_claim_methods(methods)
+        if key in self.prefix_methods:
+            self.prefix_methods[key] = _merge_claim_methods(
+                self.prefix_methods[key],
+                incoming,
+            )
+        else:
+            self.prefix_methods[key] = incoming
         return self
 
-    def is_claimed(self, path: str) -> bool:
+    def is_claimed(self, path: str, *, method: str | None = None) -> bool:
         normalized = normalize_claim_path(path)
-        if normalized in self.paths:
+        normalized_method = _normalize_claim_method(method) if method is not None else None
+        if normalized in self.paths and _claim_allows_method(
+            self.path_methods.get(normalized),
+            normalized_method,
+        ):
             return True
         for prefix in self.prefixes:
-            if prefix == "/" or normalized == prefix or normalized.startswith(f"{prefix}/"):
+            if (
+                prefix == "/" or normalized == prefix or normalized.startswith(f"{prefix}/")
+            ) and _claim_allows_method(self.prefix_methods.get(prefix), normalized_method):
                 return True
         return False
+
+
+def _normalize_claim_method(method: str | None) -> str:
+    return str(method or "GET").upper()
+
+
+def _normalize_claim_methods(methods: Iterable[str] | None) -> set[str] | None:
+    if methods is None:
+        return None
+    normalized = {_normalize_claim_method(method) for method in methods}
+    if "GET" in normalized:
+        normalized.add("HEAD")
+    return normalized
+
+
+def _merge_claim_methods(existing: set[str] | None, incoming: set[str] | None) -> set[str] | None:
+    if existing is None or incoming is None:
+        return None
+    return set(existing) | set(incoming)
+
+
+def _claim_allows_method(claimed_methods: set[str] | None, method: str | None) -> bool:
+    return method is None or claimed_methods is None or method in claimed_methods
 
 
 def install_route_claims(app: Flask, claims: RouteClaims | None = None) -> RouteClaims:
@@ -82,22 +132,22 @@ def get_route_claims(app: Flask) -> RouteClaims:
     return install_route_claims(app)
 
 
-def is_path_claimed(app: Flask, path: str) -> bool:
+def is_path_claimed(app: Flask, path: str, *, method: str | None = None) -> bool:
     """Return whether Flask is allowed to handle ``path``."""
 
-    return get_route_claims(app).is_claimed(path)
+    return get_route_claims(app).is_claimed(path, method=method)
 
 
-def claim_path(app: Flask, path: str) -> None:
+def claim_path(app: Flask, path: str, *, methods: Iterable[str] | None = None) -> None:
     """Claim one exact path for Flask handling."""
 
-    get_route_claims(app).claim_path(path)
+    get_route_claims(app).claim_path(path, methods=methods)
 
 
-def claim_prefix(app: Flask, prefix: str) -> None:
+def claim_prefix(app: Flask, prefix: str, *, methods: Iterable[str] | None = None) -> None:
     """Claim one route-family prefix for Flask handling."""
 
-    get_route_claims(app).claim_prefix(prefix)
+    get_route_claims(app).claim_prefix(prefix, methods=methods)
 
 
 def claimed_route(
@@ -118,11 +168,12 @@ def claimed_route(
 
     def decorator(view_func: _ViewFunc) -> _ViewFunc:
         registered = app.route(rule, **options)(view_func)
+        methods = options.get("methods") or ("GET",)
         claims = get_route_claims(app)
         if claim == "path":
-            claims.claim_path(claim_path_value or rule)
+            claims.claim_path(claim_path_value or rule, methods=methods)
         elif claim == "prefix":
-            claims.claim_prefix(claim_prefix_value or rule)
+            claims.claim_prefix(claim_prefix_value or rule, methods=methods)
         elif claim != "none":
             raise ValueError(f"Unsupported Flask route claim mode: {claim!r}")
         return registered
@@ -152,7 +203,7 @@ def install_security_hooks(app: Flask) -> Flask:
 
     @app.before_request
     def _palette_labeling_require_claimed_route() -> None:
-        if not is_path_claimed(app, request.path):
+        if not is_path_claimed(app, request.path, method=request.method):
             abort(404)
         g.palette_labeling_claimed_path = request.path
 
