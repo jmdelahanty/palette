@@ -231,17 +231,18 @@ scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings \
 ### 3. Detect
 
 Runs YOLO inference on the camera video to find fish in every frame.
+Use `palette detect` so the CLI oracle checks prerequisites, resolves the
+registry model, emits the standard envelope, and stamps CLI provenance into the
+created run.
 
 ```bash
-scripts/py -m fisheye.detection.detect_yolo \
-  path/to/cams/Cam2010093_2026-01-28T19-36-18Z_arena_1.mp4 \
-  --output path/to/zarr/2026-01-28T19-36-18Z_arena_1_Feeding_analysis.zarr \
-  --model /path/to/best.pt \
-  --conf 0.25 \
-  --iou 0.7 \
-  --batch-size 32 \
-  --write-raw-video-metadata
+palette detect path/to/zarr/2026-01-28T19-36-18Z_arena_1_Feeding_analysis.zarr \
+  --registry /nvme1/palette_registry.sqlite \
+  --json
 ```
+
+Add `--apply` to execute the resolved command. Previously this section used
+`scripts/py -m fisheye.detection.detect_yolo ...` directly.
 
 **What it writes:** `detect_runs/{run_id}/` with bounding boxes, scores, class
 labels, and coverage statistics.
@@ -302,14 +303,20 @@ scripts/py -m fisheye.utils.refine_detect_batch /nvme1/recordings --recursive --
 
 Extracts ROI image patches around each detection for downstream pose and
 segmentation models.
+Use `palette crop` for single-recording work so prerequisite checks,
+dry-run/apply behavior, and CLI provenance are consistent with the rest of the
+narrow-waist CLI.
 
 ```bash
-scripts/py -m fisheye.utils.crop_batch \
-  path/to/zarr/..._analysis.zarr \
-  --apply
+palette crop path/to/zarr/..._analysis.zarr --json
 ```
 
-Or batch across all recordings:
+Add `--apply` to execute crop extraction. Previously this section used
+`scripts/py -m fisheye.utils.crop_batch ...` directly. The palette crop verb
+still shims the existing `fisheye.utils.crop_batch`/`tracking.crop` crop path;
+there is no registry-model crop runner analogous to detect/keypoints.
+
+For batch work across recordings, the current batch command remains:
 
 ```bash
 scripts/py -m fisheye.utils.crop_batch \
@@ -367,16 +374,18 @@ selected archive and crop run before memory-mapping the payload.
 ### 7. Keypoints
 
 Detects anatomical landmarks (eyes, body points) on each crop.
+Use `palette keypoints` so the registry-backed pose model selection, standard
+envelope, and CLI provenance stamping are handled consistently.
 
 ```bash
-scripts/py -m fisheye.utils.run_keypoints_batch \
+palette keypoints \
   path/to/zarr/..._analysis.zarr \
-  --config configs/fisheye/default.yaml \
-  --apply
+  --registry /nvme1/palette_registry.sqlite \
+  --json
 ```
 
-The default config uses the `traditional` (geometry-based) method. The
-`yolo` method is also available via the config.
+Add `--apply` to execute keypoint inference. Previously this section used
+`scripts/py -m fisheye.utils.run_keypoints_batch ...` directly.
 
 **What it writes:** `keypoints_runs/{run_id}/` with landmark coordinates and
 confidence scores.
