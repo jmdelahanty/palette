@@ -40,10 +40,11 @@ Completed commits:
 - `29e9e6a pixels: enforce gpu-primary decode with full-range contract and stamping`
 - `e2520c5 masks: require probabilities_encoding at decode time`
 - `985f658 pixels: add golden decode parity test`
+- `450ea87 pixels: add encoded-video luma parity smoke`
 
 Next implementation item:
 
-- Item 6: OpenCV detect fallback.
+- Item 7: exposure census with pixel forensics.
 
 Item 3 validation:
 
@@ -77,13 +78,28 @@ Item 5 validation:
   encoded-video smoke.
 - Full non-GPU gate: `3210 passed, 2 skipped, 2 deselected, 205 warnings`.
 
-## Active Item 6 Next Step
+Item 6 validation:
 
-- [ ] Inspect the OpenCV fallback path in `detection/detect_yolo.py`.
-- [ ] Add a fake-capture regression for over-reported `CAP_PROP_FRAME_COUNT`.
-- [ ] Flush any final partial batch after EOF.
-- [ ] Confirm any OpenCV backend is explicit/opt-in rather than a silent production
-  fallback.
+- `25 passed` for the focused detect-yolo OpenCV fallback run, covering backend
+  selection, resize contracts, and detect compute smoke.
+- Full non-GPU gate: `3211 passed, 2 skipped, 2 deselected, 200 warnings`.
+
+## Active Item 7 Next Step
+
+- [ ] Inventory existing training datasets and major run-family artifacts that carry crop
+  image pixels.
+- [ ] For datasets with no pixel-contract attrs, sample images and classify them as
+  direct-Y-like, range-expanded-like, or indeterminate.
+- [ ] Write the read-only exposure census report without modifying any existing dataset.
+
+## Completed Item 6 Notes
+
+- [x] Inspected the OpenCV fallback path in `detection/detect_yolo.py`; OpenCV remains
+  explicit via `decode_backend=opencv`, while `auto` refuses CPU fallback.
+- [x] Added a fake-capture regression for an over-reported frame count.
+- [x] Flushed the final partial OpenCV batch after EOF, independent of reported frame
+  count.
+- [x] Verified the regression preserves delivered-frame detection indexing.
 
 ## Completed Item 5 Notes
 
@@ -145,10 +161,10 @@ PYTHONPATH=/home/delahantyj@hhmi.org/gitrepos/palette-silent-wrong-data/src \
   - [x] GPU-marked primary assertion: PyNvVC direct-Y decode equals encoded Y.
   - [x] CI-runnable assertions cover any retained CPU inspection path and cache
     build/read/rebuild byte equality.
-- [ ] Item 6 - OpenCV detect fallback:
-  - [ ] Flush final partial batch after EOF regardless of reported frame count.
-  - [ ] Gate OpenCV as explicit/opt-in, not silent fallback.
-  - [ ] Add fake-capture test for over-reported `CAP_PROP_FRAME_COUNT`.
+- [x] Item 6 - OpenCV detect fallback:
+  - [x] Flush final partial batch after EOF regardless of reported frame count.
+  - [x] Gate OpenCV as explicit/opt-in, not silent fallback.
+  - [x] Add fake-capture test for over-reported `CAP_PROP_FRAME_COUNT`.
 - [ ] Item 7 - exposure census:
   - [ ] Read-only census of existing training datasets and major run families.
   - [ ] Include forensic classifier for historical datasets with no pixel-contract attrs:

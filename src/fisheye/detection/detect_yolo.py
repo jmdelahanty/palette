@@ -461,6 +461,59 @@ def _record_timing(timings: Dict[str, float], key: str, start: float) -> float:
     return elapsed
 
 
+def _iter_opencv_rgb_batches(
+    *,
+    cap: Any,
+    batch_size: int,
+    pre_resize_dims: Optional[list[int] | tuple[int, int]],
+    cv2_module: Any = cv2,
+):
+    """Yield RGB frame batches from an explicitly requested OpenCV decoder.
+
+    OpenCV's reported CAP_PROP_FRAME_COUNT is not authoritative. Batches are
+    flushed on the decoded stream's EOF, so an over-reported frame count cannot
+    silently drop the final partial batch.
+    """
+
+    batch_size = int(batch_size)
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+
+    frame_idx = 0
+    batch_frames: list[np.ndarray] = []
+    batch_indices: list[int] = []
+    read_seconds = 0.0
+    preprocess_seconds = 0.0
+
+    while True:
+        read_start = time.perf_counter()
+        ret, frame = cap.read()
+        read_seconds += time.perf_counter() - read_start
+
+        if not ret:
+            break
+
+        preprocess_start = time.perf_counter()
+        if pre_resize_dims:
+            frame = cv2_module.resize(frame, (int(pre_resize_dims[1]), int(pre_resize_dims[0])))
+        frame_rgb = cv2_module.cvtColor(frame, cv2_module.COLOR_BGR2RGB)
+        preprocess_seconds += time.perf_counter() - preprocess_start
+
+        batch_frames.append(frame_rgb)
+        batch_indices.append(frame_idx)
+        frame_idx += 1
+
+        if len(batch_frames) == batch_size:
+            yield batch_indices, batch_frames, read_seconds, preprocess_seconds, frame_idx
+            batch_frames = []
+            batch_indices = []
+            read_seconds = 0.0
+            preprocess_seconds = 0.0
+
+    if batch_frames:
+        yield batch_indices, batch_frames, read_seconds, preprocess_seconds, frame_idx
+
+
 def _read_and_preprocess_pynvvc_batch(
     *,
     frame_iter: Any,
@@ -1427,73 +1480,58 @@ def detect_yolo(
         
         else:
             # OpenCV frame-by-frame processing
-            while True:
-                # Time frame reading
-                read_start = time.perf_counter()
-                ret, frame = cap.read()
-                read_elapsed = _record_timing(
-                    stage_timings, 'read_decode_seconds_total', read_start
+            for (
+                batch_indices,
+                batch_frames,
+                read_elapsed,
+                preprocess_elapsed,
+                frame_idx,
+            ) in _iter_opencv_rgb_batches(
+                cap=cap,
+                batch_size=batch_size,
+                pre_resize_dims=pre_resize_dims,
+            ):
+                stage_timings['read_decode_seconds_total'] += float(read_elapsed)
+                stage_timings['preprocess_resize_seconds_total'] += float(
+                    preprocess_elapsed
                 )
                 read_times.append(read_elapsed)
-                
-                if not ret:
-                    break
-                
-                preprocess_start = time.perf_counter()
-                # Resize if specified
-                if pre_resize_dims:
-                    frame = cv2.resize(frame, (int(pre_resize_dims[1]), int(pre_resize_dims[0])))
-                
-                # Convert BGR to RGB
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                _record_timing(
-                    stage_timings, 'preprocess_resize_seconds_total', preprocess_start
+
+                # Time inference
+                inference_start = time.perf_counter()
+
+                # Run inference
+                results = model.predict(batch_frames, **predict_kwargs)
+
+                inference_time = _record_timing(
+                    stage_timings, 'predict_seconds_total', inference_start
                 )
-                batch_frames.append(frame_rgb)
-                batch_indices.append(frame_idx)
-                frame_idx += 1
-                
-                # Process batch when full or at end
-                if len(batch_frames) == batch_size or frame_idx == n_frames:
-                    # Time inference
-                    inference_start = time.perf_counter()
-                    
-                    # Run inference
-                    results = model.predict(batch_frames, **predict_kwargs)
-                    
-                    inference_time = _record_timing(
-                        stage_timings, 'predict_seconds_total', inference_start
-                    )
-                    inference_times.append(inference_time)
-                    
-                    # Calculate FPS
-                    elapsed = time.time() - processing_start
-                    current_fps = frame_idx / elapsed if elapsed > 0 else 0
-                    
-                    # Extract detections
-                    postprocess_start = time.perf_counter()
-                    for batch_i, result in enumerate(results):
-                        accumulate_results(result, batch_indices[batch_i])
-                    _record_timing(
-                        stage_timings, 'postprocess_seconds_total', postprocess_start
-                    )
-                    
-                    batch_size_actual = len(batch_frames)
-                    
-                    # Clear batch
-                    batch_frames = []
-                    batch_indices = []
-                    batch_count += 1
-                    
-                    # Update progress
-                    progress.update(task, advance=batch_size_actual, fps=current_fps)
-                    
-                    # Print diagnostics every 100 batches
-                    if batch_count % 100 == 0:
-                        avg_inference = np.mean(inference_times[-100:]) if len(inference_times) > 0 else 0
-                        avg_read = np.mean(read_times[-100:]) if len(read_times) > 0 else 0
-                        console.print(f"[dim]Batch {batch_count}: inference={avg_inference*1000:.1f}ms, "
-                                    f"read={avg_read*1000:.1f}ms, fps={current_fps:.1f}[/dim]")
+                inference_times.append(inference_time)
+
+                # Calculate FPS
+                elapsed = time.time() - processing_start
+                current_fps = frame_idx / elapsed if elapsed > 0 else 0
+
+                # Extract detections
+                postprocess_start = time.perf_counter()
+                for batch_i, result in enumerate(results):
+                    accumulate_results(result, batch_indices[batch_i])
+                _record_timing(
+                    stage_timings, 'postprocess_seconds_total', postprocess_start
+                )
+
+                batch_size_actual = len(batch_frames)
+                batch_count += 1
+
+                # Update progress
+                progress.update(task, advance=batch_size_actual, fps=current_fps)
+
+                # Print diagnostics every 100 batches
+                if batch_count % 100 == 0:
+                    avg_inference = np.mean(inference_times[-100:]) if len(inference_times) > 0 else 0
+                    avg_read = np.mean(read_times[-100:]) if len(read_times) > 0 else 0
+                    console.print(f"[dim]Batch {batch_count}: inference={avg_inference*1000:.1f}ms, "
+                                f"read={avg_read*1000:.1f}ms, fps={current_fps:.1f}[/dim]")
             
             cap.release()
 
