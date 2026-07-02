@@ -37,6 +37,7 @@ from ..refinement.assemble_refined_subject_masks import (
 )
 from ..refinement.subject_eye_assignment import assign_eyes_union_to_lr
 from ..refinement.subject_mask_finalization import _default_policy_for_component, finalize_component_mask
+from ..shared.mask_probability_encoding import decode_probability_values
 from ..tune.refined_subject_mask_review import (
     _load_source_subject_mask_run,
     _normalize_component_name,
@@ -81,12 +82,8 @@ def _row_chunks(*, start_row: int, roi_count: int, chunk_size: int) -> list[tupl
     ]
 
 
-def _decode_probabilities(values: np.ndarray, *, encoding: Optional[str]) -> np.ndarray:
-    arr = np.asarray(values)
-    normalized_encoding = str(encoding or "").strip().lower()
-    if arr.dtype == np.uint8 and normalized_encoding in {"", "linear_uint8_0_255"}:
-        return arr.astype(np.float32) / np.float32(255.0)
-    return arr.astype(np.float32, copy=False)
+def _decode_probabilities(values: np.ndarray, *, encoding: Optional[str], source_path: str) -> np.ndarray:
+    return decode_probability_values(values, encoding=encoding, source_path=source_path)
 
 
 def _hash_array(value: np.ndarray) -> str:
@@ -151,12 +148,17 @@ def _finalize_chunk(
     component_indices = _component_indices(labels, components)
     if not component_indices:
         raise RuntimeError(f"No requested components are available in subject_mask_runs/{source_run}.")
-    encoding = _probability_encoding_for_group(group)
+    source_path = f"subject_mask_runs/{source_run}/mask_probs_roi"
+    encoding = _probability_encoding_for_group(
+        group,
+        source_path=source_path,
+        observed_dtype=probabilities_arr.dtype,
+    )
     thresholds = _probability_thresholds_for_labels(group, labels)
 
     read_start = time.perf_counter()
     raw_probs = np.asarray(probabilities_arr[int(start_row) : int(stop_row), :, :, :])
-    probabilities = _decode_probabilities(raw_probs, encoding=encoding)
+    probabilities = _decode_probabilities(raw_probs, encoding=encoding, source_path=source_path)
     timing["read_decode"] = time.perf_counter() - read_start
 
     finalize_start = time.perf_counter()

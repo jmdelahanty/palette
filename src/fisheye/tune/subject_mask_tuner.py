@@ -16,6 +16,11 @@ import yaml
 from skimage import measure, morphology
 import zarr
 
+from fisheye.shared.mask_probability_encoding import (
+    decode_probability_values,
+    probabilities_encoding_from_attrs,
+)
+
 from ..shared.roi_background import (
     _extract_background_roi_ds,
     _extract_background_roi_full,
@@ -96,6 +101,7 @@ class SubjectMaskSource:
     masks_roi: Any
     mask_probs_roi: Any | None
     probability_encoding: str
+    probability_source_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -404,6 +410,7 @@ def _load_subject_mask_source(root: zarr.Group, explicit: Optional[str]) -> Opti
     if masks_roi is None:
         raise ValueError(f"subject_mask_runs/{run_name} missing masks_roi.")
     mask_probs_roi = run_group.get("mask_probs_roi")
+    probability_source_path = None
     mask_labels_attr = run_group.attrs.get("mask_labels")
     if isinstance(mask_labels_attr, (list, tuple)) and mask_labels_attr:
         mask_labels = tuple(str(item) for item in mask_labels_attr)
@@ -423,7 +430,14 @@ def _load_subject_mask_source(root: zarr.Group, explicit: Optional[str]) -> Opti
             f"subject_mask_runs/{run_name} available_channels shape {available_channels.shape} "
             f"does not match mask_labels length {len(mask_labels)}."
         )
-    probability_encoding = str(run_group.attrs.get("probabilities_encoding") or "unit_float")
+    probability_encoding = "unit_float"
+    if mask_probs_roi is not None:
+        probability_source_path = f"subject_mask_runs/{run_name}/mask_probs_roi"
+        probability_encoding = probabilities_encoding_from_attrs(
+            run_group.attrs,
+            source_path=probability_source_path,
+            observed_dtype=mask_probs_roi.dtype,
+        )
     return SubjectMaskSource(
         run_name=str(run_name),
         group=run_group,
@@ -432,6 +446,7 @@ def _load_subject_mask_source(root: zarr.Group, explicit: Optional[str]) -> Opti
         masks_roi=masks_roi,
         mask_probs_roi=mask_probs_roi,
         probability_encoding=probability_encoding,
+        probability_source_path=probability_source_path,
     )
 
 
@@ -590,16 +605,8 @@ def _text_panel(message: str, *, shape: tuple[int, int] = (120, 180)) -> np.ndar
     return panel
 
 
-def _decode_probability_image(image: np.ndarray, *, encoding: str) -> np.ndarray:
-    arr = np.asarray(image)
-    source_dtype = arr.dtype
-    decoded = arr.astype(np.float32, copy=False)
-    if np.issubdtype(source_dtype, np.integer) and encoding == "linear_uint8_0_255":
-        max_value = float(np.iinfo(source_dtype).max)
-        if max_value > 1.0:
-            decoded /= max_value
-    decoded = np.nan_to_num(decoded, nan=0.0, posinf=1.0, neginf=0.0)
-    return np.clip(decoded, 0.0, 1.0, out=decoded)
+def _decode_probability_image(image: np.ndarray, *, encoding: str, source_path: str) -> np.ndarray:
+    return decode_probability_values(image, encoding=encoding, source_path=source_path)
 
 
 def _postprocess_subject_mask(
@@ -865,10 +872,12 @@ def _subject_component_preview(
             left_prob = _decode_probability_image(
                 np.asarray(subject_source.mask_probs_roi[roi_index, left_idx]),
                 encoding=subject_source.probability_encoding,
+                source_path=subject_source.probability_source_path or "subject_mask_runs/<loaded>/mask_probs_roi",
             )
             right_prob = _decode_probability_image(
                 np.asarray(subject_source.mask_probs_roi[roi_index, right_idx]),
                 encoding=subject_source.probability_encoding,
+                source_path=subject_source.probability_source_path or "subject_mask_runs/<loaded>/mask_probs_roi",
             )
             preview["prob"] = np.maximum(left_prob, right_prob)
         return preview
@@ -883,7 +892,11 @@ def _subject_component_preview(
     }
     if subject_source.mask_probs_roi is not None:
         prob = np.asarray(subject_source.mask_probs_roi[roi_index, component_index])
-        preview["prob"] = _decode_probability_image(prob, encoding=subject_source.probability_encoding)
+        preview["prob"] = _decode_probability_image(
+            prob,
+            encoding=subject_source.probability_encoding,
+            source_path=subject_source.probability_source_path or "subject_mask_runs/<loaded>/mask_probs_roi",
+        )
     return preview
 
 

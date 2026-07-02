@@ -224,7 +224,10 @@ def test_resolve_subject_component_defaults_to_only_available_channel() -> None:
             "mask_probs_roi": np.zeros((2, 3, 4, 4), dtype=np.uint8),
             "available_channels": np.asarray([False, True, False], dtype=bool),
         },
-        attrs={"mask_labels": ["subject_body", "eyes_union", "swim_bladder"]},
+        attrs={
+            "mask_labels": ["subject_body", "eyes_union", "swim_bladder"],
+            "probabilities_encoding": "linear_uint8_0_255",
+        },
     )
     parent = _FakeGroup({"subject_masks_canary_001": subject_run}, attrs={"latest": "subject_masks_canary_001"})
     root = _FakeGroup({"subject_mask_runs": parent})
@@ -245,7 +248,10 @@ def test_resolve_subject_component_defaults_to_derived_eye_union_for_lr_subject_
             "mask_probs_roi": np.zeros((2, 4, 4, 4), dtype=np.uint8),
             "available_channels": np.asarray([False, True, True, False], dtype=bool),
         },
-        attrs={"mask_labels": ["subject_body", "eye_left", "eye_right", "swim_bladder"]},
+        attrs={
+            "mask_labels": ["subject_body", "eye_left", "eye_right", "swim_bladder"],
+            "probabilities_encoding": "linear_uint8_0_255",
+        },
     )
     parent = _FakeGroup({"subject_masks_canary_001": subject_run}, attrs={"latest": "subject_masks_canary_001"})
     root = _FakeGroup({"subject_mask_runs": parent})
@@ -327,7 +333,10 @@ def test_resolve_subject_component_rejects_unavailable_requested_component() -> 
             "mask_probs_roi": np.zeros((2, 3, 4, 4), dtype=np.uint8),
             "available_channels": np.asarray([False, True, False], dtype=bool),
         },
-        attrs={"mask_labels": ["subject_body", "eyes_union", "swim_bladder"]},
+        attrs={
+            "mask_labels": ["subject_body", "eyes_union", "swim_bladder"],
+            "probabilities_encoding": "linear_uint8_0_255",
+        },
     )
     parent = _FakeGroup({"subject_masks_canary_001": subject_run}, attrs={"latest": "subject_masks_canary_001"})
     root = _FakeGroup({"subject_mask_runs": parent})

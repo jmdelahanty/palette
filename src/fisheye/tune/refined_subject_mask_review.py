@@ -33,6 +33,10 @@ from ..shared.mask_store import (
     refresh_bitpacked_mask_store_from_dense,
 )
 from ..shared.mask_geometry import batch_mask_spatial_metrics
+from ..shared.mask_probability_encoding import (
+    decode_probability_values,
+    probabilities_encoding_from_attrs,
+)
 from ..shared.provenance_attrs import (
     build_source_crop_snapshot_attrs,
     build_source_keypoints_attrs,
@@ -167,10 +171,12 @@ class _ThresholdedProbabilityMaskArray:
         *,
         thresholds: Sequence[float],
         encoding: Optional[str],
+        source_path: str,
     ) -> None:
         self._probabilities = probabilities
         self._thresholds = np.asarray(thresholds, dtype=np.float32)
-        self._encoding = str(encoding or "").strip().lower()
+        self._encoding = encoding
+        self._source_path = str(source_path)
         self.shape = tuple(int(dim) for dim in probabilities.shape)
 
     def __getitem__(self, key: object) -> np.ndarray:
@@ -180,10 +186,7 @@ class _ThresholdedProbabilityMaskArray:
         return (probabilities >= thresholds).astype(np.uint8, copy=False)
 
     def _decode(self, values: np.ndarray) -> np.ndarray:
-        arr = np.asarray(values)
-        if arr.dtype == np.uint8 and self._encoding in {"", "linear_uint8_0_255"}:
-            return arr.astype(np.float32) / np.float32(255.0)
-        return arr.astype(np.float32, copy=False)
+        return decode_probability_values(values, encoding=self._encoding, source_path=self._source_path)
 
     def _thresholds_for_key(self, key: object, ndim: int) -> np.ndarray | np.float32:
         if self._thresholds.size <= 0:
@@ -407,9 +410,21 @@ def _probability_thresholds_for_labels(group: zarr.Group, labels: Sequence[str])
     return tuple(float(value) for value in thresholds)
 
 
-def _probability_encoding_for_group(group: zarr.Group) -> Optional[str]:
-    value = group.attrs.get("probabilities_encoding") or group.attrs.get("probability_encoding")
-    return str(value) if value is not None else None
+def _probability_encoding_for_group(
+    group: zarr.Group,
+    *,
+    source_path: Optional[str] = None,
+    observed_dtype: object | None = None,
+) -> str:
+    if observed_dtype is None:
+        probabilities = group.get("mask_probs_roi")
+        observed_dtype = probabilities.dtype if probabilities is not None else np.dtype(np.float32)
+    resolved_source_path = source_path or f"{getattr(group, 'path', 'subject_mask_runs/<unknown>')}/mask_probs_roi"
+    return probabilities_encoding_from_attrs(
+        group.attrs,
+        source_path=str(resolved_source_path),
+        observed_dtype=observed_dtype,
+    )
 
 
 def _require_gui_display() -> None:
@@ -1234,11 +1249,17 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
                     f"got {probabilities.shape}."
                 )
             probability_thresholds = _probability_thresholds_for_labels(group, mask_labels)
-            probability_encoding = _probability_encoding_for_group(group)
+            probability_source_path = f"subject_mask_runs/{run_name}/mask_probs_roi"
+            probability_encoding = _probability_encoding_for_group(
+                group,
+                source_path=probability_source_path,
+                observed_dtype=probabilities.dtype,
+            )
             masks_roi = _ThresholdedProbabilityMaskArray(
                 probabilities,
                 thresholds=probability_thresholds,
                 encoding=probability_encoding,
+                source_path=probability_source_path,
             )
             mask_surface_kind = "thresholded_probability"
             mask_surface_path = "mask_probs_roi"

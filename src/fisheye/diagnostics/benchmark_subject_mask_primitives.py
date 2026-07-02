@@ -28,6 +28,7 @@ from skimage.measure import label as skimage_label
 
 from ..shared.json_safety import json_attr_safe
 from ..shared.mask_geometry import fill_holes
+from ..shared.mask_probability_encoding import decode_probability_values_from_attrs
 from ..utils.zarr_io import open_zarr_root
 
 
@@ -103,11 +104,11 @@ def _load_real_masks(
     if stop <= start:
         raise ValueError(f"Requested empty row range start={start} row_count={row_count} total_rows={total_rows}.")
     values = np.asarray(group["mask_probs_roi"][start:stop, comp_idx])
-    encoding = str(group.attrs.get("probability_encoding") or "").strip().lower()
-    if values.dtype == np.uint8 and encoding in {"", "linear_uint8_0_255"}:
-        probs = values.astype(np.float32) / np.float32(255.0)
-    else:
-        probs = values.astype(np.float32, copy=False)
+    probs = decode_probability_values_from_attrs(
+        values,
+        attrs=group.attrs,
+        source_path=f"subject_mask_runs/{subject_run}/mask_probs_roi",
+    )
     return (probs >= float(threshold)).astype(np.uint8, copy=False)
 
 

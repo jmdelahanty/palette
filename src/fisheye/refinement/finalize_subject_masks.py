@@ -36,6 +36,7 @@ except ImportError:  # pragma: no cover - depends on optional dependency
 from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from ..shared.json_safety import json_attr_safe
 from ..shared.mask_geometry import batch_mask_spatial_metrics
+from ..shared.mask_probability_encoding import decode_probability_values
 from ..shared.mask_bitpack import (
     MASK_BITPACKED_AXIS,
     MASK_BITPACKED_BITORDER,
@@ -438,12 +439,8 @@ class _ProgressJsonlReporter:
             )
 
 
-def _decode_probabilities(values: np.ndarray, *, encoding: Optional[str]) -> np.ndarray:
-    arr = np.asarray(values)
-    normalized_encoding = str(encoding or "").strip().lower()
-    if arr.dtype == np.uint8 and normalized_encoding in {"", "linear_uint8_0_255"}:
-        return arr.astype(np.float32) / np.float32(255.0)
-    return arr.astype(np.float32, copy=False)
+def _decode_probabilities(values: np.ndarray, *, encoding: Optional[str], source_path: str) -> np.ndarray:
+    return decode_probability_values(values, encoding=encoding, source_path=source_path)
 
 
 def _join_reason_tags(tags: Sequence[object], *, probability_source: bool) -> str:
@@ -628,8 +625,9 @@ def _component_surface_rows(
     if probabilities is not None:
         encoding = source.probability_encoding or _probability_encoding_for_group(source.group)
         raw = np.asarray(probabilities[int(start_row) : int(stop_row), component_idx])
+        source_path = f"subject_mask_runs/{source.run_name}/mask_probs_roi"
         return (
-            _decode_probabilities(raw, encoding=encoding),
+            _decode_probabilities(raw, encoding=encoding, source_path=source_path),
             True,
             "mask_probs_roi",
             encoding,
