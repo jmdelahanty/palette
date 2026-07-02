@@ -59,7 +59,10 @@ from ..shared.crop_roi_layout import (
     crop_roi_layout_attrs,
     normalize_crop_roi_storage,
 )
-from ..shared.roi_pixel_contract import crop_run_pixel_contract
+from ..shared.roi_pixel_contract import (
+    CENTER_ROUNDING_NP_ROUND,
+    crop_run_pixel_contract,
+)
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr_run_completion import (
     mark_run_complete,
@@ -117,7 +120,7 @@ except Exception:
     gpu = None  # type: ignore
     _DECORD_AVAILABLE = False
 
-import cv2  # For CPU fallback in gpu decoding
+import cv2  # For explicit CPU crop/inspection paths.
 
 from ..utils.system import get_environment_info
 
@@ -139,6 +142,13 @@ def check_gpu_crop_available() -> Tuple[bool, str]:
         return False, "CUDA not available"
     
     return True, "GPU cropping available"
+
+
+def _gpu_decode_unavailable(reason: str) -> RuntimeError:
+    return RuntimeError(
+        "GPU decode unavailable; refusing CPU fallback - pixels would differ from the "
+        f"production path ({reason})"
+    )
 
 
 _VALID_CROP_STORAGE_MODES = {"materialized", "geometry_only"}
@@ -209,7 +219,33 @@ def _set_crop_pixel_contract_attrs(
     crop_group.attrs["roi_image_representation"] = contract.get("image_representation")
     crop_group.attrs["roi_pixel_contract"] = contract
     crop_group.attrs["roi_pixel_contract_name"] = contract.get("name")
+    for attr_name in (
+        "source_pixels",
+        "decode_backend",
+        "applied_range_semantics",
+        "container_color_range_handling",
+        "center_rounding",
+    ):
+        value = contract.get(attr_name)
+        if value is not None:
+            crop_group.attrs[attr_name] = value
+    crop_group.attrs.setdefault("center_rounding", CENTER_ROUNDING_NP_ROUND)
     return contract
+
+
+def _round_crop_center_pixels(
+    cx_norm: float,
+    cy_norm: float,
+    *,
+    width: int,
+    height: int,
+) -> Tuple[int, int]:
+    """Quantize normalized crop centers with the persisted round convention."""
+
+    center = np.round(
+        np.asarray([float(cx_norm) * int(width), float(cy_norm) * int(height)], dtype=np.float64)
+    ).astype(np.int64, copy=False)
+    return int(center[0]), int(center[1])
 
 
 def _coerce_existing_crop_pointer(
@@ -908,8 +944,7 @@ def crop_batch_gpu(
         
         # Calculate crop coordinates
         cx_norm, cy_norm = bbox[:2]
-        cx_px = int(cx_norm * W)
-        cy_px = int(cy_norm * H)
+        cx_px, cy_px = _round_crop_center_pixels(cx_norm, cy_norm, width=W, height=H)
         
         x1 = cx_px - roi_w // 2
         y1 = cy_px - roi_h // 2
@@ -1002,8 +1037,7 @@ def crop_batch_cpu(
             continue
         
         cx_norm, cy_norm = bbox[:2]
-        cx_px = int(cx_norm * W)
-        cy_px = int(cy_norm * H)
+        cx_px, cy_px = _round_crop_center_pixels(cx_norm, cy_norm, width=W, height=H)
         
         x1 = cx_px - roi_w // 2
         y1 = cy_px - roi_h // 2
@@ -1145,8 +1179,7 @@ def _process_chunk_gpu(
         for det_idx in det_list:
             bbox = bbox_coords[det_idx]
             cx_norm, cy_norm = bbox[:2]
-            cx_px = int(cx_norm * W)
-            cy_px = int(cy_norm * H)
+            cx_px, cy_px = _round_crop_center_pixels(cx_norm, cy_norm, width=W, height=H)
 
             x1 = cx_px - roi_sz[1] // 2
             y1 = cy_px - roi_sz[0] // 2
@@ -1343,6 +1376,8 @@ def materialize_external_roi_cache(
     gpu_reason = "GPU disabled"
     if prefer_gpu:
         use_gpu, gpu_reason = check_gpu_crop_available()
+        if not use_gpu:
+            raise _gpu_decode_unavailable(gpu_reason)
 
     use_kvikio_writes = False
     fallback_reason: Optional[str] = None
@@ -1984,12 +2019,9 @@ def crop_from_external_video(
                 video_reader = VideoReader(str(video_path), ctx=gpu(0))
                 console.print(f"[green]✓[/green] GPU decoder ready")
             except Exception as gpu_exc:
-                console.print(f"[yellow]GPU decoder failed ({gpu_exc}); falling back to CPU[/yellow]")
-                actual_use_gpu = False
-                crop_group.attrs['acceleration'] = 'cpu'
-                crop_group.attrs['device'] = 'cpu'
                 if _DECORD_AVAILABLE:
                     decord.bridge.set_bridge('native')
+                raise _gpu_decode_unavailable(f"Decord GPU crop decoder failed: {gpu_exc}") from gpu_exc
         if crop_storage_mode != "geometry_only" and not actual_use_gpu:
             console.print("[cyan]Using CPU video decoder...[/cyan]")
 

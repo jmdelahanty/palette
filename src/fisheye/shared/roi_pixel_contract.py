@@ -9,6 +9,13 @@ from typing import Any
 ROI_PIXEL_CONTRACT_SCHEMA = "palette_roi_pixel_contract_v1"
 ROI_IMAGE_REPRESENTATION = "uint8_grayscale_roi_v1"
 ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME = "orange_mono_pynvvc_luma_uint8_v1"
+SOURCE_PIXELS_PALETTE_CROP_RUN = "palette_crop_run"
+SOURCE_PIXELS_ACQUISITION_CROP_VIDEO = "acquisition_crop_video"
+SOURCE_PIXELS_RAW_CAMERA_VIDEO = "raw_camera_video"
+SOURCE_PIXELS_ANALYSIS_RAW_VIDEO = "analysis_raw_video"
+DECODE_BACKEND_PYNVVC_LUMA = "pynvvc_luma"
+APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE = "orange_mono8_full_range_0_255"
+CENTER_ROUNDING_NP_ROUND = "np.round_half_to_even"
 
 
 def roi_pixel_contract(
@@ -17,6 +24,11 @@ def roi_pixel_contract(
     color_conversion: str,
     production_status: str,
     source_frame_representation: str | None = None,
+    source_pixels: str | None = None,
+    decode_backend: str | None = None,
+    applied_range_semantics: str | None = None,
+    container_color_range_handling: str | None = None,
+    center_rounding: str | None = None,
 ) -> dict[str, Any]:
     """Build the canonical metadata contract for model-facing ROI pixels."""
 
@@ -35,6 +47,16 @@ def roi_pixel_contract(
     }
     if source_frame_representation is not None:
         payload["source_frame_representation"] = str(source_frame_representation)
+    if source_pixels is not None:
+        payload["source_pixels"] = str(source_pixels)
+    if decode_backend is not None:
+        payload["decode_backend"] = str(decode_backend)
+    if applied_range_semantics is not None:
+        payload["applied_range_semantics"] = str(applied_range_semantics)
+    if container_color_range_handling is not None:
+        payload["container_color_range_handling"] = str(container_color_range_handling)
+    if center_rounding is not None:
+        payload["center_rounding"] = str(center_rounding)
     return payload
 
 
@@ -74,8 +96,15 @@ def orange_mono_pynvvc_luma_pixel_contract() -> dict[str, Any]:
             "For Orange monochrome recordings, the camera intensity image is encoded "
             "into NV12 Y with neutral chroma, so no RGB reconstruction is applied."
         ),
-        production_status="source_aligned_training_migration_candidate",
+        production_status="canonical_orange_acquisition_training_path",
         source_frame_representation="Orange mono NV12 Y plane decoded by PyNvVideoCodec",
+        source_pixels=SOURCE_PIXELS_ACQUISITION_CROP_VIDEO,
+        decode_backend=DECODE_BACKEND_PYNVVC_LUMA,
+        applied_range_semantics=APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
+        container_color_range_handling=(
+            "ignore_container_tv_range_for_orange_acquisition; source contract is full-range mono8"
+        ),
+        center_rounding=CENTER_ROUNDING_NP_ROUND,
     )
 
 
@@ -99,6 +128,7 @@ def crop_run_pixel_contract(
                 "the effective live or cache conversion"
             ),
             production_status="logical_contract_only",
+            center_rounding=CENTER_ROUNDING_NP_ROUND,
         )
 
     if source == "external" and accel == "gpu":
@@ -107,6 +137,11 @@ def crop_run_pixel_contract(
             color_conversion="Decord GPU frame decoded to RGB-like channels, then channel mean to uint8",
             production_status="historical_materialized_gpu_contract",
             source_frame_representation="Decord GPU frame tensor [H,W,C]",
+            source_pixels=SOURCE_PIXELS_ANALYSIS_RAW_VIDEO,
+            decode_backend="decord_gpu",
+            applied_range_semantics="decoder_default_yuv_to_rgb",
+            container_color_range_handling="decoder_default",
+            center_rounding=CENTER_ROUNDING_NP_ROUND,
         )
 
     if source == "external" and accel == "cpu":
@@ -115,6 +150,11 @@ def crop_run_pixel_contract(
             color_conversion="OpenCV VideoCapture BGR frame converted with cv2.COLOR_BGR2GRAY",
             production_status="historical_materialized_cpu_contract",
             source_frame_representation="OpenCV BGR frame",
+            source_pixels=SOURCE_PIXELS_ANALYSIS_RAW_VIDEO,
+            decode_backend="opencv",
+            applied_range_semantics="decoder_default_yuv_to_bgr",
+            container_color_range_handling="decoder_default",
+            center_rounding=CENTER_ROUNDING_NP_ROUND,
         )
 
     if source == "zarr":
@@ -126,12 +166,18 @@ def crop_run_pixel_contract(
             ),
             production_status="canonical_zarr_crop_contract",
             source_frame_representation="raw_video/images_full",
+            source_pixels=SOURCE_PIXELS_RAW_CAMERA_VIDEO,
+            decode_backend="zarr_raw_video_images_full",
+            applied_range_semantics="stored_array_values",
+            container_color_range_handling="not_applicable_zarr_source",
+            center_rounding=CENTER_ROUNDING_NP_ROUND,
         )
 
     return roi_pixel_contract(
         name="materialized_legacy_uint8_grayscale",
         color_conversion="legacy materialized ROI pixels read as stored",
         production_status="legacy_or_unknown_materialized_contract",
+        center_rounding=CENTER_ROUNDING_NP_ROUND,
     )
 
 
@@ -152,6 +198,11 @@ def crop_image_source_live_pixel_contract(
             color_conversion="Decord GPU external-video read, then channel mean to uint8",
             production_status="live_reader_contract",
             source_frame_representation="Decord GPU frame tensor [H,W,C]",
+            source_pixels=SOURCE_PIXELS_ANALYSIS_RAW_VIDEO,
+            decode_backend="decord_gpu",
+            applied_range_semantics="decoder_default_yuv_to_rgb",
+            container_color_range_handling="decoder_default",
+            center_rounding=CENTER_ROUNDING_NP_ROUND,
         )
     if frame_source == "source_video_path":
         return roi_pixel_contract(
@@ -161,6 +212,11 @@ def crop_image_source_live_pixel_contract(
                 "OpenCV fallback uses cv2.COLOR_BGR2GRAY"
             ),
             production_status="live_reader_contract_backend_resolved_at_read",
+            source_pixels=SOURCE_PIXELS_ANALYSIS_RAW_VIDEO,
+            decode_backend="decord_cpu_or_opencv_explicit_cpu",
+            applied_range_semantics="decoder_default_yuv_to_rgb_or_bgr",
+            container_color_range_handling="decoder_default",
+            center_rounding=CENTER_ROUNDING_NP_ROUND,
         )
     if frame_source == "raw_video/images_full":
         return roi_pixel_contract(
@@ -168,12 +224,22 @@ def crop_image_source_live_pixel_contract(
             color_conversion="raw_video/images_full live crop converted to uint8 grayscale when needed",
             production_status="live_reader_contract",
             source_frame_representation="raw_video/images_full",
+            source_pixels=SOURCE_PIXELS_RAW_CAMERA_VIDEO,
+            decode_backend="zarr_raw_video_images_full",
+            applied_range_semantics="stored_array_values",
+            container_color_range_handling="not_applicable_zarr_source",
+            center_rounding=CENTER_ROUNDING_NP_ROUND,
         )
     if frame_source == "roi_images":
         return roi_pixel_contract(
             name="materialized_roi_images_uint8_grayscale",
             color_conversion="materialized crop_runs/<run>/roi_images read as stored",
             production_status="materialized_reader_contract",
+            source_pixels=SOURCE_PIXELS_PALETTE_CROP_RUN,
+            decode_backend="materialized_crop_run",
+            applied_range_semantics="stored_array_values",
+            container_color_range_handling="not_applicable_materialized_source",
+            center_rounding=CENTER_ROUNDING_NP_ROUND,
         )
     return roi_pixel_contract(
         name="crop_image_source_uint8_grayscale",

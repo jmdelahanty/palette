@@ -372,3 +372,23 @@ def test_build_flat_roi_cache_auto_prefers_pynvvc_luma_for_geometry_only(
         np.testing.assert_array_equal(cache[:], expected)
     finally:
         cache.close()
+
+
+def test_build_flat_roi_cache_auto_refuses_read_slice_fallback_for_geometry_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path, _expected = _make_geometry_only_crop_archive(tmp_path)
+
+    def _raise_no_cuda(_video_path: Path) -> object:
+        raise RuntimeError("CUDA not available")
+
+    monkeypatch.setattr(flat_cache_mod, "_open_pynvvc_luma_reader", _raise_no_cuda)
+
+    with pytest.raises(RuntimeError, match="refusing CPU fallback"):
+        build_flat_roi_cache(
+            zarr_path=zarr_path,
+            output_dir=tmp_path / "cache",
+            batch_size=2,
+            roi_decode_backend="auto",
+        )

@@ -56,6 +56,23 @@ def test_crop_batch_cpu_decode_failure_raises_instead_of_black_crop(monkeypatch)
         )
 
 
+def test_crop_batch_cpu_uses_np_round_for_crop_centers(monkeypatch) -> None:
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+    monkeypatch.setattr(crop_mod.cv2, "VideoCapture", lambda _path: _FakeVideoCapture({0: frame}))
+
+    _crops, coords, _profile = crop_mod.crop_batch_cpu(
+        "video.mp4",
+        np.array([0], dtype=np.int64),
+        np.array([[0.55, 0.55, 0.1, 0.1]], dtype=np.float32),
+        (2, 2),
+        (10, 10),
+        total_frames=1,
+        source_label="detect_runs/source",
+    )
+
+    np.testing.assert_array_equal(coords, np.array([[5, 5]], dtype=np.int32))
+
+
 def test_crop_batch_cpu_from_top_left_decode_failure_raises_instead_of_black_crop(monkeypatch) -> None:
     monkeypatch.setattr(crop_mod.cv2, "VideoCapture", lambda _path: _FakeVideoCapture())
 

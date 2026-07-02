@@ -190,14 +190,23 @@ def _collect_zarr_metadata(zarr_path: Path, console: Optional[Console] = None) -
     return metadata
 
 
+def _gpu_decode_unavailable(reason: str) -> RuntimeError:
+    return RuntimeError(
+        "GPU decode unavailable; refusing CPU fallback - pixels would differ from the "
+        f"production path ({reason})"
+    )
+
+
 def _init_decord_reader(video_path: Path, prefer_gpu: bool, console: Console) -> Optional[Dict[str, Any]]:
-    """Initialise a Decord VideoReader with GPU preference and graceful fallback."""
+    """Initialise an explicitly requested Decord VideoReader without backend fallback."""
     if not _decord_available():
         if _DECORD_IMPORT_ERROR:
             console.print(f"[yellow]Decord unavailable: {escape(str(_DECORD_IMPORT_ERROR))}[/yellow]")
         return None
 
-    if prefer_gpu and torch.cuda.is_available():
+    if prefer_gpu:
+        if not torch.cuda.is_available():
+            raise _gpu_decode_unavailable("Decord GPU requested but CUDA is unavailable")
         try:
             decord.bridge.set_bridge('torch')
             vr = VideoReader(str(video_path), ctx=gpu(0))
@@ -214,7 +223,7 @@ def _init_decord_reader(video_path: Path, prefer_gpu: bool, console: Console) ->
                 'fps': fps,
             }
         except Exception as exc:
-            console.print(f"[yellow]Decord GPU decoder failed ({escape(str(exc))}); retrying on CPU[/yellow]")
+            raise _gpu_decode_unavailable(f"Decord GPU decoder failed: {exc}") from exc
 
     try:
         decord.bridge.set_bridge('native')
@@ -232,8 +241,7 @@ def _init_decord_reader(video_path: Path, prefer_gpu: bool, console: Console) ->
             'fps': fps,
         }
     except Exception as exc:
-        console.print(f"[yellow]Decord CPU decoder failed ({escape(str(exc))}); falling back to OpenCV[/yellow]")
-        return None
+        raise RuntimeError(f"Requested Decord CPU decoder failed: {exc}") from exc
 
 
 def get_video_metadata(video_path: Path, cap: Optional[cv2.VideoCapture], width: int, height: int, n_frames: int, fps: float) -> Dict[str, Any]:
@@ -791,14 +799,10 @@ def detect_yolo(
             )
         return PynvvcLumaRgbReader(video_path, start_frame=0, gpu_id=0)
 
-    auto_pynvvc_candidate = (
-        decode_backend_requested == DECODE_BACKEND_AUTO
-        and bool(use_gpu)
-        and requested_resize_dims is not None
-    )
+    auto_pynvvc_candidate = decode_backend_requested == DECODE_BACKEND_AUTO
     if decode_backend_requested in PYNVVC_BACKENDS or auto_pynvvc_candidate:
         pynvvc_backend = (
-            BACKEND_PYNVVC_NV12_RGB
+            BACKEND_PYNVVC_LUMA_RGB
             if decode_backend_requested == DECODE_BACKEND_AUTO
             else decode_backend_requested
         )
@@ -814,19 +818,20 @@ def detect_yolo(
             decode_backend_effective = pynvvc_backend
             use_pynvvc = True
             console.print(f"[green]✓[/green] Using PyNvVideoCodec {pynvvc_backend} CUDA decoder")
-        except Exception:
+        except Exception as exc:
             if pynvvc_reader is not None:
                 pynvvc_reader.close()
                 pynvvc_reader = None
             if decode_backend_requested != DECODE_BACKEND_AUTO:
                 raise
-            console.print(
-                "[yellow]Warning:[/yellow] auto could not use PyNvVideoCodec "
-                f"{pynvvc_backend}; falling back to Decord/OpenCV."
-            )
+            raise _gpu_decode_unavailable(
+                f"auto requires PyNvVideoCodec {pynvvc_backend}; initialization failed: {exc}"
+            ) from exc
 
     if not use_pynvvc and decode_backend_requested != DECODE_BACKEND_OPENCV:
-        prefer_decord_gpu = bool(use_gpu) and decode_backend_requested != DECODE_BACKEND_DECORD_CPU
+        if decode_backend_requested == DECODE_BACKEND_AUTO:
+            raise _gpu_decode_unavailable("auto did not initialize PyNvVideoCodec luma decode")
+        prefer_decord_gpu = decode_backend_requested == DECODE_BACKEND_DECORD_GPU
         decord_info = _init_decord_reader(video_path, prefer_gpu=prefer_decord_gpu, console=console)
         if (
             decode_backend_requested == DECODE_BACKEND_DECORD_GPU

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -24,6 +26,35 @@ def test_normalize_decode_backend_defaults_to_auto() -> None:
 def test_normalize_decode_backend_rejects_unknown_backend() -> None:
     with pytest.raises(ValueError, match="Unsupported decode backend"):
         mod._normalize_decode_backend("not_a_backend")  # noqa: SLF001
+
+
+def test_decord_gpu_init_refuses_cpu_fallback_when_cuda_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(mod, "_decord_available", lambda: True)  # noqa: SLF001
+    monkeypatch.setattr(mod.torch.cuda, "is_available", lambda: False)
+
+    with pytest.raises(RuntimeError, match="GPU decode unavailable; refusing CPU fallback"):
+        mod._init_decord_reader(  # noqa: SLF001
+            Path("video.mp4"),
+            prefer_gpu=True,
+            console=mod.Console(file=None),
+        )
+
+
+def test_decord_cpu_init_refuses_opencv_fallback(monkeypatch) -> None:
+    class _FailingVideoReader:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise RuntimeError("decord unavailable")
+
+    monkeypatch.setattr(mod, "_decord_available", lambda: True)  # noqa: SLF001
+    monkeypatch.setattr(mod, "VideoReader", _FailingVideoReader)
+    monkeypatch.setattr(mod, "cpu", lambda: object())
+
+    with pytest.raises(RuntimeError, match="Requested Decord CPU decoder failed"):
+        mod._init_decord_reader(  # noqa: SLF001
+            Path("video.mp4"),
+            prefer_gpu=False,
+            console=mod.Console(file=None),
+        )
 
 
 def test_record_timing_accumulates_perf_counter_elapsed(monkeypatch) -> None:

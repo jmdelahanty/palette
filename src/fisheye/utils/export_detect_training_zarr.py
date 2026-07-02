@@ -91,6 +91,14 @@ class MergeSourceSpec:
     rgb_pixel_contract_name: Optional[str] = None
     gray_decode_backend: Optional[str] = None
     rgb_decode_backend: Optional[str] = None
+    gray_source_pixels: Optional[str] = None
+    rgb_source_pixels: Optional[str] = None
+    gray_applied_range_semantics: Optional[str] = None
+    rgb_applied_range_semantics: Optional[str] = None
+    gray_source_pixel_contract: Optional[str] = None
+    rgb_source_pixel_contract: Optional[str] = None
+    gray_source_pixel_range: Optional[str] = None
+    rgb_source_pixel_range: Optional[str] = None
 
 
 @dataclass
@@ -408,6 +416,10 @@ _DECODE_BACKEND_ATTRS = (
     "decode_backend_effective",
     "source_decode_backend",
 )
+_SOURCE_PIXELS_ATTRS = ("source_pixels",)
+_APPLIED_RANGE_SEMANTICS_ATTRS = ("applied_range_semantics",)
+_SOURCE_PIXEL_CONTRACT_ATTRS = ("source_pixel_contract",)
+_SOURCE_PIXEL_RANGE_ATTRS = ("source_pixel_range",)
 
 
 def _as_text(value: Any) -> Optional[str]:
@@ -500,6 +512,46 @@ def _format_raw_metadata_summary(
             [spec.rgb_decode_backend for spec in source_specs],
             mixed_label="mixed_decode_backends",
             partial_label="partial_decode_backends",
+        ),
+        "gray_source_pixels": _collapse_metadata_values(
+            [spec.gray_source_pixels for spec in source_specs],
+            mixed_label="mixed_source_pixels",
+            partial_label="partial_source_pixels",
+        ),
+        "rgb_source_pixels": _collapse_metadata_values(
+            [spec.rgb_source_pixels for spec in source_specs],
+            mixed_label="mixed_source_pixels",
+            partial_label="partial_source_pixels",
+        ),
+        "gray_applied_range_semantics": _collapse_metadata_values(
+            [spec.gray_applied_range_semantics for spec in source_specs],
+            mixed_label="mixed_range_semantics",
+            partial_label="partial_range_semantics",
+        ),
+        "rgb_applied_range_semantics": _collapse_metadata_values(
+            [spec.rgb_applied_range_semantics for spec in source_specs],
+            mixed_label="mixed_range_semantics",
+            partial_label="partial_range_semantics",
+        ),
+        "gray_source_pixel_contract": _collapse_metadata_values(
+            [spec.gray_source_pixel_contract for spec in source_specs],
+            mixed_label="mixed_source_pixel_contracts",
+            partial_label="partial_source_pixel_contracts",
+        ),
+        "rgb_source_pixel_contract": _collapse_metadata_values(
+            [spec.rgb_source_pixel_contract for spec in source_specs],
+            mixed_label="mixed_source_pixel_contracts",
+            partial_label="partial_source_pixel_contracts",
+        ),
+        "gray_source_pixel_range": _collapse_metadata_values(
+            [spec.gray_source_pixel_range for spec in source_specs],
+            mixed_label="mixed_source_pixel_ranges",
+            partial_label="partial_source_pixel_ranges",
+        ),
+        "rgb_source_pixel_range": _collapse_metadata_values(
+            [spec.rgb_source_pixel_range for spec in source_specs],
+            mixed_label="mixed_source_pixel_ranges",
+            partial_label="partial_source_pixel_ranges",
         ),
     }
 
@@ -1291,6 +1343,46 @@ def _discover_merge_sources(
             if has_rgb
             else None
         )
+        dataset_gray_source_pixels = (
+            _raw_image_attr_text(raw, "images_ds", _SOURCE_PIXELS_ATTRS)
+            if has_gray
+            else None
+        )
+        dataset_rgb_source_pixels = (
+            _raw_image_attr_text(raw, "images_ds_rgb", _SOURCE_PIXELS_ATTRS)
+            if has_rgb
+            else None
+        )
+        dataset_gray_applied_range_semantics = (
+            _raw_image_attr_text(raw, "images_ds", _APPLIED_RANGE_SEMANTICS_ATTRS)
+            if has_gray
+            else None
+        )
+        dataset_rgb_applied_range_semantics = (
+            _raw_image_attr_text(raw, "images_ds_rgb", _APPLIED_RANGE_SEMANTICS_ATTRS)
+            if has_rgb
+            else None
+        )
+        dataset_gray_source_pixel_contract = (
+            _raw_image_attr_text(raw, "images_ds", _SOURCE_PIXEL_CONTRACT_ATTRS)
+            if has_gray
+            else None
+        )
+        dataset_rgb_source_pixel_contract = (
+            _raw_image_attr_text(raw, "images_ds_rgb", _SOURCE_PIXEL_CONTRACT_ATTRS)
+            if has_rgb
+            else None
+        )
+        dataset_gray_source_pixel_range = (
+            _raw_image_attr_text(raw, "images_ds", _SOURCE_PIXEL_RANGE_ATTRS)
+            if has_gray
+            else None
+        )
+        dataset_rgb_source_pixel_range = (
+            _raw_image_attr_text(raw, "images_ds_rgb", _SOURCE_PIXEL_RANGE_ATTRS)
+            if has_rgb
+            else None
+        )
 
         required_contract = _as_text(required_pixel_contract_name)
         if required_contract:
@@ -1363,6 +1455,14 @@ def _discover_merge_sources(
                 rgb_pixel_contract_name=dataset_rgb_pixel_contract_name,
                 gray_decode_backend=dataset_gray_decode_backend,
                 rgb_decode_backend=dataset_rgb_decode_backend,
+                gray_source_pixels=dataset_gray_source_pixels,
+                rgb_source_pixels=dataset_rgb_source_pixels,
+                gray_applied_range_semantics=dataset_gray_applied_range_semantics,
+                rgb_applied_range_semantics=dataset_rgb_applied_range_semantics,
+                gray_source_pixel_contract=dataset_gray_source_pixel_contract,
+                rgb_source_pixel_contract=dataset_rgb_source_pixel_contract,
+                gray_source_pixel_range=dataset_gray_source_pixel_range,
+                rgb_source_pixel_range=dataset_rgb_source_pixel_range,
             )
         )
 
@@ -1749,10 +1849,38 @@ def _export_merged(
         if train_input_format == "gray"
         else raw_metadata["rgb_decode_backend"]
     )
+    selected_source_pixels = (
+        raw_metadata["gray_source_pixels"]
+        if train_input_format == "gray"
+        else raw_metadata["rgb_source_pixels"]
+    )
+    selected_applied_range_semantics = (
+        raw_metadata["gray_applied_range_semantics"]
+        if train_input_format == "gray"
+        else raw_metadata["rgb_applied_range_semantics"]
+    )
+    selected_source_pixel_contract = (
+        raw_metadata["gray_source_pixel_contract"]
+        if train_input_format == "gray"
+        else raw_metadata["rgb_source_pixel_contract"]
+    )
+    selected_source_pixel_range = (
+        raw_metadata["gray_source_pixel_range"]
+        if train_input_format == "gray"
+        else raw_metadata["rgb_source_pixel_range"]
+    )
     if selected_pixel_contract_name:
         raw_attrs["pixel_contract_name"] = selected_pixel_contract_name
     if selected_decode_backend:
         raw_attrs["decode_backend"] = selected_decode_backend
+    if selected_source_pixels:
+        raw_attrs["source_pixels"] = selected_source_pixels
+    if selected_applied_range_semantics:
+        raw_attrs["applied_range_semantics"] = selected_applied_range_semantics
+    if selected_source_pixel_contract:
+        raw_attrs["source_pixel_contract"] = selected_source_pixel_contract
+    if selected_source_pixel_range:
+        raw_attrs["source_pixel_range"] = selected_source_pixel_range
     if any(raw_metadata["pixel_contract_names_by_format"].values()):
         raw_attrs["pixel_contract_names_by_format"] = raw_metadata["pixel_contract_names_by_format"]
     if any(raw_metadata["decode_backends_by_format"].values()):
