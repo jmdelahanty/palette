@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import io
+import json
 from email.message import Message
+from http import HTTPStatus
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +13,7 @@ pytest.importorskip("flask")
 from flask import Response, request
 
 from fisheye.labeling.web_app import claimed_route, create_labeling_app
+from fisheye.labeling.web_personal_api import register_personal_api_routes
 from fisheye.labeling.web_policy import BROWSER_RESPONSE_SECURITY_HEADERS
 from fisheye.labeling.web_wsgi_adapter import handle_with_flask_if_claimed
 
@@ -173,3 +176,52 @@ def test_claimed_flask_response_security_headers_match_existing_policy() -> None
     assert handler.response_code == 204
     for name, expected in BROWSER_RESPONSE_SECURITY_HEADERS.items():
         assert handler.header_values(name) == [expected]
+
+
+def test_personal_api_routes_are_get_only_and_use_shared_responder() -> None:
+    app = create_labeling_app(import_name=__name__)
+    state = SimpleNamespace(name="state")
+    calls: list[tuple[object, str, str, str]] = []
+
+    def response_builder(
+        received_state: object,
+        *,
+        path: str,
+        request_adapter: object,
+    ) -> tuple[dict[str, object], HTTPStatus]:
+        calls.append(
+            (
+                received_state,
+                path,
+                str(getattr(request_adapter, "path", "")),
+                str(getattr(request_adapter, "headers", {}).get("X-User", "")),
+            )
+        )
+        return {"ok": True, "path": path}, HTTPStatus.ACCEPTED
+
+    register_personal_api_routes(app, state, response_builder)
+
+    get_handler = FakeHandler(
+        "GET",
+        "/api/me/datasets?expected_user=alice",
+        headers={"X-User": "alice"},
+    )
+    post_handler = FakeHandler("POST", "/api/me/datasets")
+
+    assert handle_with_flask_if_claimed(get_handler, app) is True
+    assert get_handler.response_code == int(HTTPStatus.ACCEPTED)
+    assert json.loads(get_handler.wfile.getvalue().decode("utf-8")) == {
+        "ok": True,
+        "path": "/api/me/datasets",
+    }
+    assert calls == [
+        (
+            state,
+            "/api/me/datasets",
+            "/api/me/datasets?expected_user=alice",
+            "alice",
+        )
+    ]
+
+    assert handle_with_flask_if_claimed(post_handler, app) is False
+    assert post_handler.response_code is None
