@@ -316,3 +316,42 @@ different inputs," and nothing records which decode path built the original cach
 *Bottom line: a strong domain core inside a weak repo, and the repo is winning. The fix is
 not more engineering — it is a CI gate plus a deletion habit, so the good work stops being
 diluted.*
+
+---
+
+## Remediation delta (2026-07-02, ~24h after review)
+
+The review's fix-this-week tier and action-plan items 1–2 were executed by coordinated
+agents within a day of the review landing. First trajectory row where the numbers go
+down:
+
+| Metric | 06-10 | 07-01 (review) | 07-02 |
+|---|---|---|---|
+| Suite state | red | red (8 collect errs, 24 fails) | **green + CI-gated** (3,191 passed) |
+| CI | none | none | **GitHub Actions: collect gate + not-gpu suite, required-check pending** |
+| `utils/` lines | 142k | 165,379 | **148,550** |
+| `visualization/` lines | — | 24,109 | **19,839** |
+| `eye_mask` file refs in src | — | 112 | **54** (live subject-eye components + deprecated markers) |
+| pip-installable | no | no | **yes** (pyproject + extras; console scripts) |
+
+Closed since the review (commits on `sun`):
+- **Finding #1 (pipeline inversion)**: eye default off in code+YAML with test locks
+  (f72d8aa); full eye-mask severance executed — census (0 NEEDS-CONVERSION, 6ab7843),
+  helper relocations, compat-mirror stopped, producers/visualizers/write-paths deleted,
+  −48,912 lines across 150 files (cfc0d02…56d4a8f). Catalog models deprecation as a
+  first-class field. `core/pipeline.py` marked legacy (live path documented in the
+  orchestration notes).
+- **Finding #2 (registry concurrency)**: busy_timeout everywhere, WAL deliberately not
+  enabled (multi-host NFS), `register_from_root` atomic (2919603). Single-writer funnel
+  still queued.
+- **Finding #4 (testing)**: suite green (2f05aa3), CI gating pushes (972e8fa, a51b551).
+- **Finding #3 (provenance), partially**: the `palette` narrow waist
+  (docs/palette_cli_narrow_waist_design.md; a5f1621, 6bf5912, b5d733a) stamps
+  git SHA + config hash + params into runs created through it (`cli_provenance`).
+  Writer-native stamping, content hashes, and `subject_mask_data_profile` remain open.
+
+Still open: finding #5 (stage graph ×3 — but the gap list now exists:
+docs/stage_catalog_reality_gaps.md), #6 (crop/loader/grayscale silent-wrong-data), #7
+(web.py monolith; modularization regressions were fixed in 2f05aa3), LICENSE/README,
+docs/root sprawl, `db.py` (8,234 — still growing), single-writer funnel, orchestrator
+convergence decision.
