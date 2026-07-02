@@ -1,6 +1,7 @@
 """Unit tests for registry maintenance helpers."""
 
 from datetime import datetime, timezone
+import inspect
 import json
 from pathlib import Path
 import sqlite3
@@ -67,6 +68,7 @@ from fisheye.registry.maintenance import (
 )
 from fisheye.shared.stage_provenance import build_stage_provenance
 from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
+from tests.unit.fisheye._eye_mask_registry_seed import insert_eye_mask_performance
 
 
 def _create_quality_zarr(path: Path) -> None:
@@ -2215,7 +2217,8 @@ def test_recording_performance_views_prefer_dataset_context_current(tmp_path: Pa
         zarr_mtime_ns=zarr_mtime_ns,
         updated_utc="2026-03-13T00:26:00+00:00",
     )
-    registry.upsert_eye_mask_performance(
+    insert_eye_mask_performance(
+        registry,
         dataset_id="dataset_ctx",
         stage_group="refined_eye_masks_runs",
         run_name="eye_mask_ctx",
@@ -6733,66 +6736,6 @@ def test_refresh_keypoint_profiles_deletes_stale_rows_and_is_deterministic(
     registry.close()
 
 
-def test_backfill_eye_mask_profiles_dry_run_and_apply(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
-    _ensure_eye_mask_data_profile_table(registry.conn)
-
-    zarr_path = tmp_path / "recordings" / "rec_eye_profile" / "zarr" / "rec_eye_profile_analysis.zarr"
-    _create_fake_zarr_store(zarr_path)
-    fake_root = _FakeGroup(attrs={"session_uuid": "eye_profile_session"})
-    monkeypatch.setattr(
-        "fisheye.registry.maintenance._import_zarr",
-        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
-    )
-    monkeypatch.setattr(
-        "fisheye.registry.maintenance._extract_eye_mask_profile_rows_for_maintenance",
-        lambda *_args, **_kwargs: [
-            _eye_mask_profile_row_payload(profile_run="eye_mask_profile_001", usable_rate=0.8),
-        ],
-    )
-
-    dataset_id = "dataset_eye_profile_a"
-    registry.upsert_dataset(
-        dataset_id=dataset_id,
-        session_uuid="session_eye_profile_a",
-        zarr_path=zarr_path,
-        recording_id="recording_eye_profile_a",
-        artifact_kind="source_recording",
-        zarr_use="analysis",
-    )
-    registry.conn.execute("DELETE FROM eye_mask_data_profile WHERE dataset_id = ?;", (dataset_id,))
-    registry.conn.commit()
-
-    dry = _backfill_eye_mask_profiles(
-        registry,
-        dry_run=True,
-        scope_paths=None,
-        refresh=False,
-    )
-    assert dry["datasets_scanned"] == 1
-    assert dry["rows_inserted"] == 1
-    assert dry["rows_updated"] == 0
-    assert dry["rows_deleted"] == 0
-
-    applied = _backfill_eye_mask_profiles(
-        registry,
-        dry_run=False,
-        scope_paths=None,
-        refresh=False,
-    )
-    assert applied["rows_inserted"] == 1
-    row = registry.conn.execute(
-        "SELECT profile_run FROM eye_mask_data_profile WHERE dataset_id = ?;",
-        (dataset_id,),
-    ).fetchone()
-    assert row is not None
-    assert str(row["profile_run"]) == "eye_mask_profile_001"
-    registry.close()
-
-
 def test_extract_eye_mask_profile_rows_for_maintenance_prefers_profile_run_attrs_for_lineage(tmp_path: Path) -> None:
     zarr_path = tmp_path / "recordings" / "rec_eye_profile_attrs" / "zarr" / "rec_eye_profile_attrs_training.zarr"
     _create_fake_zarr_store(zarr_path)
@@ -6853,85 +6796,6 @@ def test_extract_eye_mask_profile_rows_for_maintenance_prefers_profile_run_attrs
     assert row["source_keypoints_run"] == "refined_keypoints_attrs"
     assert row["source_crop_run"] == "crop_attrs"
     assert row["profile_created_utc"] == "2026-02-25T06:00:00+00:00"
-
-
-def test_refresh_eye_mask_profiles_deletes_stale_rows_and_is_idempotent(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
-    _ensure_eye_mask_data_profile_table(registry.conn)
-
-    zarr_path = tmp_path / "recordings" / "rec_eye_profile" / "zarr" / "rec_eye_profile_refresh.zarr"
-    _create_fake_zarr_store(zarr_path)
-    fake_root = _FakeGroup(attrs={"session_uuid": "eye_profile_refresh"})
-    monkeypatch.setattr(
-        "fisheye.registry.maintenance._import_zarr",
-        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
-    )
-    monkeypatch.setattr(
-        "fisheye.registry.maintenance._extract_eye_mask_profile_rows_for_maintenance",
-        lambda *_args, **_kwargs: [
-            _eye_mask_profile_row_payload(profile_run="eye_mask_profile_keep", usable_rate=0.85),
-        ],
-    )
-
-    dataset_id = "dataset_eye_profile_refresh"
-    registry.upsert_dataset(
-        dataset_id=dataset_id,
-        session_uuid="session_eye_profile_refresh",
-        zarr_path=zarr_path,
-        recording_id="recording_eye_profile_refresh",
-        artifact_kind="source_recording",
-        zarr_use="analysis",
-    )
-    registry.conn.execute(
-        """
-        INSERT INTO eye_mask_data_profile (dataset_id, profile_run, usable_rate, updated_utc)
-        VALUES
-            (?, 'eye_mask_profile_keep', 0.25, datetime('now')),
-            (?, 'eye_mask_profile_stale', 0.75, datetime('now'));
-        """,
-        (dataset_id, dataset_id),
-    )
-    registry.conn.commit()
-
-    dry = _backfill_eye_mask_profiles(
-        registry,
-        dry_run=True,
-        scope_paths=None,
-        refresh=True,
-    )
-    applied = _backfill_eye_mask_profiles(
-        registry,
-        dry_run=False,
-        scope_paths=None,
-        refresh=True,
-    )
-    for key in ("rows_inserted", "rows_updated", "rows_deleted", "rows_skipped"):
-        assert dry[key] == applied[key]
-    assert dry["rows_inserted"] == 0
-    assert dry["rows_updated"] == 1
-    assert dry["rows_deleted"] == 1
-    assert dry["rows_skipped"] == 0
-
-    rows = registry.conn.execute(
-        "SELECT profile_run FROM eye_mask_data_profile WHERE dataset_id = ? ORDER BY profile_run;",
-        (dataset_id,),
-    ).fetchall()
-    assert [str(row["profile_run"]) for row in rows] == ["eye_mask_profile_keep"]
-
-    repeat = _backfill_eye_mask_profiles(
-        registry,
-        dry_run=False,
-        scope_paths=None,
-        refresh=True,
-    )
-    assert repeat["rows_inserted"] == 0
-    assert repeat["rows_updated"] == 0
-    assert repeat["rows_deleted"] == 0
-    assert repeat["rows_skipped"] == 1
-    registry.close()
 
 
 def test_backfill_keypoint_performance_dry_run_and_apply(tmp_path: Path) -> None:
@@ -7050,8 +6914,83 @@ def test_main_no_action_message_includes_profile_flags() -> None:
     message = str(exc.value)
     assert "--backfill-keypoint-profiles" in message
     assert "--refresh-keypoint-profiles" in message
-    assert "--backfill-eye-mask-profiles" in message
-    assert "--refresh-eye-mask-profiles" in message
+
+
+def test_retired_eye_mask_registry_backfills_fail_closed(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    try:
+        for helper, kwargs in (
+            (
+                _backfill_eye_mask_profiles,
+                {"dry_run": True, "scope_paths": None, "refresh": False},
+            ),
+            (
+                _backfill_eye_mask_quality,
+                {"dry_run": True, "scope_paths": None, "refresh": False},
+            ),
+            (
+                _backfill_eye_mask_performance,
+                {
+                    "dry_run": True,
+                    "scope_paths": None,
+                    "refresh": False,
+                    "include_all_datasets": False,
+                },
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="retired"):
+                helper(registry, **kwargs)
+    finally:
+        registry.close()
+
+
+def test_register_from_root_does_not_write_retired_eye_mask_registry_rows(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_eye_retired" / "zarr" / "rec_eye_retired_analysis.zarr"
+    _create_eye_mask_performance_zarr(zarr_path)
+
+    dataset_id = registry.register_from_root(zarr.open_group(str(zarr_path), mode="r"), zarr_path)
+
+    for table_name in ("eye_mask_performance", "eye_mask_quality"):
+        row = registry.conn.execute(
+            f"SELECT COUNT(*) AS n FROM {table_name} WHERE dataset_id = ?;",
+            (dataset_id,),
+        ).fetchone()
+        assert row is not None
+        assert int(row["n"]) == 0
+    registry.close()
+
+
+def test_retired_eye_mask_registry_writer_methods_fail_closed(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    try:
+        for method_name in (
+            "upsert_eye_mask_performance",
+            "upsert_eye_mask_data_profile",
+            "upsert_eye_mask_quality",
+            "replace_eye_mask_data_profile",
+            "replace_eye_mask_performance",
+            "replace_eye_mask_quality",
+            "refresh_eye_mask_performance_for_dataset",
+            "refresh_eye_mask_quality_for_dataset",
+        ):
+            method = getattr(registry, method_name)
+            args = []
+            kwargs = {}
+            for name, parameter in inspect.signature(method).parameters.items():
+                if parameter.default is not inspect.Parameter.empty:
+                    continue
+                if parameter.kind is inspect.Parameter.KEYWORD_ONLY:
+                    kwargs[name] = None
+                elif parameter.kind in {
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                }:
+                    args.append(None)
+            with pytest.raises(RuntimeError, match="retired"):
+                method(*args, **kwargs)
+    finally:
+        registry.close()
 
 
 def test_main_backfill_keypoint_profiles_wiring_and_summary(
@@ -7106,60 +7045,6 @@ def test_main_backfill_keypoint_profiles_wiring_and_summary(
     output = capsys.readouterr().out
     assert "Keypoint profiles backfill: scope=source-recording-all-uses" in output
     assert "Dry run: would apply inserted=2 updated=1 deleted=0 unchanged=3 row(s)." in output
-
-
-def test_main_backfill_eye_mask_profiles_wiring_and_summary(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    registry_path = tmp_path / "registry.sqlite"
-    Registry(registry_path).close()
-    calls: list[Dict[str, object]] = []
-
-    def _fake_backfill(
-        _registry: Registry,
-        *,
-        dry_run: bool,
-        scope_paths: Optional[list[Path]],
-        refresh: bool,
-    ) -> Dict[str, int]:
-        calls.append(
-            {
-                "dry_run": dry_run,
-                "scope_paths": scope_paths,
-                "refresh": refresh,
-            }
-        )
-        return {
-            "datasets_scanned": 7,
-            "datasets_skipped_existing": 2,
-            "datasets_missing": 1,
-            "datasets_errors": 0,
-            "datasets_no_profile": 3,
-            "rows_inserted": 2,
-            "rows_updated": 1,
-            "rows_skipped": 3,
-            "rows_deleted": 4,
-        }
-
-    monkeypatch.setattr(
-        "fisheye.registry.maintenance._backfill_eye_mask_profiles",
-        _fake_backfill,
-    )
-
-    maintenance_main(
-        [
-            "--registry",
-            str(registry_path),
-            "--backfill-eye-mask-profiles",
-            "--dry-run",
-        ]
-    )
-    assert calls == [{"dry_run": True, "scope_paths": None, "refresh": False}]
-    output = capsys.readouterr().out
-    assert "Eye-mask profiles backfill: scope=source-recording-all-uses" in output
-    assert "Dry run: would apply inserted=2 updated=1 deleted=4 unchanged=3 row(s)." in output
 
 
 def test_backfill_detect_quality_refresh_apply_is_idempotent(
@@ -7747,132 +7632,6 @@ def test_backfill_detect_performance_refresh_dry_run_is_deterministic(tmp_path: 
     registry.close()
 
 
-def test_backfill_eye_mask_quality_dry_run_and_apply(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
-    zarr_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
-    _create_eye_mask_performance_zarr(zarr_path)
-    dataset_id = registry.register_from_root(zarr.open_group(str(zarr_path), mode="r"), zarr_path)
-    registry.conn.execute(
-        "UPDATE datasets SET zarr_use = 'analysis' WHERE dataset_id = ?;",
-        (dataset_id,),
-    )
-    registry.conn.execute("DELETE FROM eye_mask_quality WHERE dataset_id = ?;", (dataset_id,))
-    registry.conn.commit()
-
-    dry = _backfill_eye_mask_quality(
-        registry,
-        dry_run=True,
-        scope_paths=None,
-        refresh=False,
-    )
-    assert dry["datasets_scanned"] == 1
-    assert dry["rows_inserted"] == 1
-    assert dry["rows_updated"] == 0
-    assert dry["rows_deleted"] == 0
-
-    applied = _backfill_eye_mask_quality(
-        registry,
-        dry_run=False,
-        scope_paths=None,
-        refresh=False,
-    )
-    assert applied["rows_inserted"] == 1
-    rows = registry.conn.execute(
-        """
-        SELECT
-            stage_group,
-            run_name,
-            eye_mask_method,
-            successful_roi_pair_rate,
-            review_state,
-            review_intended_use,
-            source_keypoint_stale_state,
-            lifecycle_state
-        FROM eye_mask_quality_current
-        WHERE dataset_id = ?;
-        """,
-        (dataset_id,),
-    ).fetchall()
-    assert len(rows) == 1
-    quality = rows[0]
-    assert str(quality["stage_group"]) == "refined_eye_masks_runs"
-    assert str(quality["run_name"]) == "refined_eye_masks_001"
-    assert str(quality["eye_mask_method"]) == "refine_eye_masks"
-    assert float(quality["successful_roi_pair_rate"]) == pytest.approx(1.0)
-    assert str(quality["review_state"]) == "approved"
-    assert str(quality["review_intended_use"]) == "training"
-    assert str(quality["source_keypoint_stale_state"]) == "stale"
-    assert str(quality["lifecycle_state"]) == "stale"
-    registry.close()
-
-
-def test_backfill_eye_mask_performance_dry_run_and_apply(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
-    zarr_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
-    _create_eye_mask_performance_zarr(zarr_path)
-    dataset_id = registry.register_from_root(zarr.open_group(str(zarr_path), mode="r"), zarr_path)
-    registry.conn.execute(
-        "UPDATE datasets SET zarr_use = 'analysis' WHERE dataset_id = ?;",
-        (dataset_id,),
-    )
-    registry.conn.execute("DELETE FROM eye_mask_performance WHERE dataset_id = ?;", (dataset_id,))
-    registry.conn.commit()
-
-    dry = _backfill_eye_mask_performance(
-        registry,
-        dry_run=True,
-        scope_paths=None,
-        refresh=False,
-    )
-    assert dry["datasets_scanned"] == 1
-    assert dry["rows_inserted"] == 2
-    assert dry["rows_updated"] == 0
-    assert dry["rows_deleted"] == 0
-
-    applied = _backfill_eye_mask_performance(
-        registry,
-        dry_run=False,
-        scope_paths=None,
-        refresh=False,
-    )
-    assert applied["rows_inserted"] == 2
-    rows = registry.conn.execute(
-        """
-        SELECT
-            stage_group,
-            run_name,
-            method,
-            total_rois,
-            rois_per_second,
-            review_state,
-            review_intended_use,
-            source_keypoint_stale_state,
-            lifecycle_state
-        FROM eye_mask_performance_latest
-        WHERE dataset_id = ?
-        ORDER BY stage_group;
-        """,
-        (dataset_id,),
-    ).fetchall()
-    assert len(rows) == 2
-    by_stage = {str(row["stage_group"]): row for row in rows}
-    assert str(by_stage["eye_masks_runs"]["run_name"]) == "eye_masks_001"
-    assert str(by_stage["eye_masks_runs"]["method"]) == "traditional_eye_segmentation"
-    assert int(by_stage["eye_masks_runs"]["total_rois"]) == 4
-    assert float(by_stage["eye_masks_runs"]["rois_per_second"]) == pytest.approx(2.0)
-    assert by_stage["eye_masks_runs"]["review_state"] is None
-    assert by_stage["eye_masks_runs"]["source_keypoint_stale_state"] is None
-    assert str(by_stage["refined_eye_masks_runs"]["run_name"]) == "refined_eye_masks_001"
-    assert str(by_stage["refined_eye_masks_runs"]["method"]) == "refine_eye_masks"
-    assert int(by_stage["refined_eye_masks_runs"]["total_rois"]) == 4
-    assert float(by_stage["refined_eye_masks_runs"]["rois_per_second"]) == pytest.approx(4.0)
-    assert str(by_stage["refined_eye_masks_runs"]["review_state"]) == "approved"
-    assert str(by_stage["refined_eye_masks_runs"]["review_intended_use"]) == "training"
-    assert str(by_stage["refined_eye_masks_runs"]["source_keypoint_stale_state"]) == "stale"
-    assert str(by_stage["refined_eye_masks_runs"]["lifecycle_state"]) == "stale"
-    registry.close()
-
-
 def test_extract_eye_mask_performance_rows_prefers_created_at_utc(tmp_path: Path) -> None:
     zarr_path = tmp_path / "eye_mask_created_at_analysis.zarr"
     _create_eye_mask_performance_zarr(zarr_path)
@@ -7890,34 +7649,6 @@ def test_extract_eye_mask_performance_rows_prefers_created_at_utc(tmp_path: Path
     by_stage = {str(row["stage_group"]): row for row in rows}
     assert by_stage["eye_masks_runs"]["run_created_utc"] == "2026-02-11T00:11:00+00:00"
     assert by_stage["refined_eye_masks_runs"]["run_created_utc"] == "2026-02-11T00:12:00+00:00"
-
-
-def test_backfill_eye_mask_performance_summary_includes_stale_counters_when_zero(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
-    zarr_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
-    _create_eye_mask_performance_zarr(zarr_path)
-    root = zarr.open_group(str(zarr_path), mode="a")
-    root["refined_eye_masks_runs"]["refined_eye_masks_001"].attrs.pop("source_keypoint_stale", None)
-
-    dataset_id = registry.register_from_root(zarr.open_group(str(zarr_path), mode="r"), zarr_path)
-    registry.conn.execute(
-        "UPDATE datasets SET zarr_use = 'analysis' WHERE dataset_id = ?;",
-        (dataset_id,),
-    )
-    registry.conn.execute("DELETE FROM eye_mask_performance WHERE dataset_id = ?;", (dataset_id,))
-    registry.conn.commit()
-
-    dry = _backfill_eye_mask_performance(
-        registry,
-        dry_run=True,
-        scope_paths=None,
-        refresh=True,
-    )
-    assert dry["datasets_scanned"] == 1
-    assert dry["rows_inserted"] == 2
-    assert dry["rows_stale"] == 0
-    assert dry["rows_in_progress"] == 0
-    registry.close()
 
 
 def test_extract_subject_mask_performance_rows_falls_back_to_provenance_payload(tmp_path: Path) -> None:
@@ -8855,7 +8586,8 @@ def test_subject_mask_component_latest_views_project_eye_stage_compat_and_preser
         zarr_use="analysis",
     )
 
-    registry.upsert_eye_mask_performance(
+    insert_eye_mask_performance(
+        registry,
         dataset_id="dataset_eye_only",
         stage_group="eye_masks_runs",
         run_name="eye_masks_eye_only",
@@ -8880,7 +8612,8 @@ def test_subject_mask_component_latest_views_project_eye_stage_compat_and_preser
         summary_statistics_json=None,
         zarr_mtime_ns=111,
     )
-    registry.upsert_eye_mask_performance(
+    insert_eye_mask_performance(
+        registry,
         dataset_id="dataset_eye_only",
         stage_group="refined_eye_masks_runs",
         run_name="refined_eye_masks_eye_only",
@@ -9065,7 +8798,8 @@ def test_subject_mask_component_latest_views_project_eye_stage_compat_and_preser
             zarr_mtime_ns=222,
         )
 
-    registry.upsert_eye_mask_performance(
+    insert_eye_mask_performance(
+        registry,
         dataset_id="dataset_native",
         stage_group="refined_eye_masks_runs",
         run_name="refined_eye_masks_native",
@@ -9149,70 +8883,6 @@ def test_subject_mask_component_latest_views_project_eye_stage_compat_and_preser
     assert str(recording_by_key[("recording_eye_only", "eye_right")]["stage_group"]) == "refined_eye_masks_runs"
     assert str(recording_by_key[("recording_native", "eye_right")]["stage_group"]) == "refined_subject_masks_runs"
 
-    registry.close()
-
-
-def test_backfill_eye_mask_performance_scope_defaults_to_source_analysis(tmp_path: Path) -> None:
-    registry = Registry(tmp_path / "registry.sqlite")
-    analysis_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
-    training_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_training.zarr"
-    _create_eye_mask_performance_zarr(analysis_path)
-    _create_eye_mask_performance_zarr(training_path)
-
-    analysis_id = registry.register_from_root(zarr.open_group(str(analysis_path), mode="r"), analysis_path)
-    training_id = registry.register_from_root(zarr.open_group(str(training_path), mode="r"), training_path)
-    registry.conn.execute(
-        "UPDATE datasets SET zarr_use = 'analysis' WHERE dataset_id = ?;",
-        (analysis_id,),
-    )
-    registry.conn.execute(
-        "UPDATE datasets SET zarr_use = 'training' WHERE dataset_id = ?;",
-        (training_id,),
-    )
-    registry.conn.execute(
-        "DELETE FROM eye_mask_performance WHERE dataset_id IN (?, ?);",
-        (analysis_id, training_id),
-    )
-    registry.conn.commit()
-
-    dry_default = _backfill_eye_mask_performance(
-        registry,
-        dry_run=True,
-        scope_paths=None,
-        refresh=False,
-    )
-    assert dry_default["datasets_scanned"] == 1
-    assert dry_default["rows_inserted"] == 2
-
-    applied_default = _backfill_eye_mask_performance(
-        registry,
-        dry_run=False,
-        scope_paths=None,
-        refresh=False,
-    )
-    assert applied_default["rows_inserted"] == 2
-    analysis_rows = registry.conn.execute(
-        "SELECT COUNT(*) AS n FROM eye_mask_performance WHERE dataset_id = ?;",
-        (analysis_id,),
-    ).fetchone()
-    training_rows = registry.conn.execute(
-        "SELECT COUNT(*) AS n FROM eye_mask_performance WHERE dataset_id = ?;",
-        (training_id,),
-    ).fetchone()
-    assert analysis_rows is not None and int(analysis_rows["n"]) == 2
-    assert training_rows is not None and int(training_rows["n"]) == 0
-
-    registry.conn.execute("DELETE FROM eye_mask_performance;")
-    registry.conn.commit()
-    dry_all = _backfill_eye_mask_performance(
-        registry,
-        dry_run=True,
-        scope_paths=None,
-        refresh=False,
-        include_all_datasets=True,
-    )
-    assert dry_all["datasets_scanned"] == 2
-    assert dry_all["rows_inserted"] == 4
     registry.close()
 
 

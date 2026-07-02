@@ -6,6 +6,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry
+from tests.unit.fisheye._eye_mask_registry_seed import insert_eye_mask_performance
 from fisheye.utils.check_training_registry import (
     DETECT_GATE_MAX_INTERPOLATED_RATE,
     KEYPOINT_GATE_MIN_RATE,
@@ -924,7 +925,8 @@ def test_eye_mask_performance_view_outputs_summary_and_details(tmp_path: Path, c
         artifact_kind="source_recording",
         zarr_use="training",
     )
-    registry.upsert_eye_mask_performance(
+    insert_eye_mask_performance(
+        registry,
         dataset_id="dataset_pass",
         stage_group="refined_eye_masks_runs",
         run_name="refined_eye_masks_pass",
@@ -960,7 +962,8 @@ def test_eye_mask_performance_view_outputs_summary_and_details(tmp_path: Path, c
         lifecycle_reason="approved",
         zarr_mtime_ns=pass_mtime,
     )
-    registry.upsert_eye_mask_performance(
+    insert_eye_mask_performance(
+        registry,
         dataset_id="dataset_stale",
         stage_group="refined_eye_masks_runs",
         run_name="refined_eye_masks_stale",
@@ -1045,7 +1048,8 @@ def test_subject_mask_component_view_projects_eye_compat_rows(tmp_path: Path, ca
         zarr_use="training",
     )
 
-    registry.upsert_eye_mask_performance(
+    insert_eye_mask_performance(
+        registry,
         dataset_id="dataset_eye_only",
         stage_group="eye_masks_runs",
         run_name="eye_masks_eye_only",
@@ -1070,7 +1074,8 @@ def test_subject_mask_component_view_projects_eye_compat_rows(tmp_path: Path, ca
         summary_statistics_json=None,
         zarr_mtime_ns=eye_mtime,
     )
-    registry.upsert_eye_mask_performance(
+    insert_eye_mask_performance(
+        registry,
         dataset_id="dataset_eye_only",
         stage_group="refined_eye_masks_runs",
         run_name="refined_eye_masks_eye_only",
@@ -1173,7 +1178,8 @@ def test_subject_mask_component_view_projects_eye_compat_rows(tmp_path: Path, ca
             quality_updated_utc="2026-03-02T01:06:00+00:00",
             zarr_mtime_ns=native_mtime,
         )
-    registry.upsert_eye_mask_performance(
+    insert_eye_mask_performance(
+        registry,
         dataset_id="dataset_native",
         stage_group="refined_eye_masks_runs",
         run_name="refined_eye_masks_native",
@@ -1334,8 +1340,7 @@ def test_eye_mask_profile_view_outputs_summary_and_remediation(tmp_path: Path, c
     assert "stale rows (mtime mismatch/missing): 1" in out
     assert "top exclusion reasons: stale row: mtime mismatch=1" in out
     assert "review rollups: pending/training=1" in out
-    assert "scripts/py -m fisheye.registry.maintenance --refresh-eye-mask-profiles" in out
-    assert "scripts/py -m fisheye.utils.sync_eye_mask_profile_registry" in out
+    assert "standalone eye-mask profile registry writes are retired" in out
 
 
 def test_run_id_style_contract_and_legacy() -> None:

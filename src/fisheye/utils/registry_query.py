@@ -1230,13 +1230,12 @@ def _eye_mask_profile_stale_count(rows: list[dict[str, Any]]) -> int:
 
 
 def _eye_mask_profile_remediation_lines(*, has_rows: bool, stale_rows: int) -> list[str]:
-    sync_cmd = "scripts/py -m fisheye.utils.sync_eye_mask_profile_registry --registry <REGISTRY.sqlite> --apply"
-    refresh_cmd = "scripts/py -m fisheye.registry.maintenance --refresh-eye-mask-profiles --registry <REGISTRY.sqlite> --apply"
+    retired_note = "standalone eye-mask profile registry writes are retired; historical rows are read-only"
     lines: list[str] = []
     if not has_rows:
-        lines.append(f"Remediation: no eye-mask profile rows found; run `{sync_cmd}`.")
+        lines.append(f"Note: no eye-mask profile rows found; {retired_note}.")
     if stale_rows > 0:
-        lines.append(f"Remediation: stale eye-mask profile rows detected; run `{refresh_cmd}` then `{sync_cmd}`.")
+        lines.append(f"Note: stale eye-mask profile rows detected; {retired_note}.")
     return lines
 
 

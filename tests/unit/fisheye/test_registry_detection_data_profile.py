@@ -6,6 +6,10 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry
+from tests.unit.fisheye._eye_mask_registry_seed import (
+    insert_eye_mask_data_profile,
+    replace_eye_mask_data_profile,
+)
 
 
 _PROFILE_DUPLICATE_RECORDING_CONTEXT_FIELDS = (
@@ -334,7 +338,8 @@ def _upsert_eye_mask_profile(
     genotype: str = "Tg(elavl3:gcamp7f)",
     dpf_at_acquisition: int = 7,
 ) -> None:
-    registry.upsert_eye_mask_data_profile(
+    insert_eye_mask_data_profile(
+        registry,
         dataset_id=dataset_id,
         profile_run=profile_run,
         recording_id=recording_id,
@@ -1363,7 +1368,6 @@ def test_profile_upserts_do_not_write_duplicate_context_when_canonical_owners_ex
     for table_name, profile_run in (
         ("detection_data_profile", "detect_ctx_raw"),
         ("keypoint_data_profile", "keypoint_ctx_raw"),
-        ("eye_mask_data_profile", "eye_ctx_raw"),
     ):
         row = _fetch_profile_row(
             registry,
@@ -1525,24 +1529,6 @@ def test_profile_upserts_freeze_existing_legacy_duplicate_context_after_canonica
     )
     assert float(keypoint_row["usable_rate"]) == 0.93
 
-    eye_row = _fetch_profile_row(
-        registry,
-        table_name="eye_mask_data_profile",
-        dataset_id="dataset_freeze",
-        profile_run="eye_freeze",
-    )
-    _assert_profile_duplicate_context_values(
-        eye_row,
-        rig_id="rig_legacy",
-        camera_id="camera_legacy",
-        arena_id="arena_legacy",
-        dish_design="dish_design_legacy",
-        canvas_name="canvas_legacy",
-        protocol_name="protocol_legacy",
-        genotype="genotype_legacy",
-        dpf_at_acquisition=11,
-    )
-    assert float(eye_row["usable_rate"]) == 0.94
     registry.close()
 
 
@@ -1649,7 +1635,8 @@ def test_profile_replace_stops_writing_duplicate_context_when_canonical_owners_e
             }
         ],
     )
-    registry.replace_eye_mask_data_profile(
+    replace_eye_mask_data_profile(
+        registry,
         "dataset_replace_ctx",
         [
             {
@@ -1725,7 +1712,6 @@ def test_profile_replace_stops_writing_duplicate_context_when_canonical_owners_e
     for table_name, profile_run in (
         ("detection_data_profile", "detect_replace"),
         ("keypoint_data_profile", "keypoint_replace"),
-        ("eye_mask_data_profile", "eye_replace"),
     ):
         row = _fetch_profile_row(
             registry,

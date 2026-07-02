@@ -323,8 +323,9 @@ EYE_MASK_PROFILE_STALE_STATE_KEYS = (
     "profile_stale_state",
     "stale_state",
 )
-EYE_MASK_SYNC_COMMAND = "scripts/py -m fisheye.utils.sync_eye_mask_profile_registry"
-EYE_MASK_REFRESH_COMMAND = "scripts/py -m fisheye.registry.maintenance --refresh-eye-mask-profiles"
+EYE_MASK_PROFILE_RETIRED_NOTE = (
+    "standalone eye-mask profile registry writes are retired; historical rows are read-only"
+)
 DETECT_PERFORMANCE_BACKFILL_COMMAND = "scripts/py -m fisheye.registry.maintenance --backfill-detect-performance"
 DETECT_PERFORMANCE_REFRESH_COMMAND = "scripts/py -m fisheye.registry.maintenance --refresh-detect-performance"
 BEHAVIOR_V1_REQUIRED_ARTIFACT_TYPES = {
@@ -2690,14 +2691,11 @@ def _eye_mask_profile_remediation_lines(
     *,
     registry_path: Path,
 ) -> List[str]:
-    sync_cmd = f"{EYE_MASK_SYNC_COMMAND} --registry {registry_path} --apply"
-    refresh_cmd = f"{EYE_MASK_REFRESH_COMMAND} --registry {registry_path} --apply"
     lines: List[str] = []
     if summary.total_rows <= 0:
-        lines.append(f"remediation: no eye-mask profile rows found; run `{sync_cmd}`")
+        lines.append(f"note: no eye-mask profile rows found; {EYE_MASK_PROFILE_RETIRED_NOTE}")
     if summary.stale_rows > 0:
-        lines.append(f"remediation: stale eye-mask profile rows detected; run `{refresh_cmd}`")
-        lines.append(f"remediation: re-sync latest profile rows with `{sync_cmd}`")
+        lines.append(f"note: stale eye-mask profile rows detected; {EYE_MASK_PROFILE_RETIRED_NOTE}")
     return lines
 
 

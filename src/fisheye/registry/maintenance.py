@@ -12,7 +12,7 @@ from pathlib import PurePosixPath
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, NoReturn, Optional, Sequence, Set, Tuple
 
 from .db import (
     Registry,
@@ -54,6 +54,14 @@ ALLOWED_BEHAVIOR_MODES = {"free", "embedded", "none"}
 RECORDING_TUNING_STEP_NAMES: tuple[str, ...] = recording_tuning_stage_ids()
 RECORDING_STEP_NAMES: tuple[str, ...] = recording_status_stage_ids()
 RECORDING_STEP_STATUS_VALUES: tuple[str, ...] = ("ok", "missing", "absent", "na", "error")
+EYE_MASK_REGISTRY_WRITES_RETIRED_MESSAGE = (
+    "Standalone eye-mask registry write/backfill paths are retired. Historical "
+    "eye_mask_* rows remain readable through registry query/status surfaces."
+)
+
+
+def _raise_eye_mask_registry_writes_retired() -> NoReturn:
+    raise RuntimeError(EYE_MASK_REGISTRY_WRITES_RETIRED_MESSAGE)
 
 
 def _open_zarr_group_non_consolidated(zarr_path: Path, *, mode: str = "r"):
@@ -304,24 +312,10 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--backfill-eye-mask-profiles",
-        action="store_true",
-        help=(
-            "Backfill eye_mask_data_profile rows for source recording datasets that currently have no profile rows."
-        ),
-    )
-    parser.add_argument(
         "--backfill-keypoint-quality",
         action="store_true",
         help=(
             "Backfill keypoint_quality rows for datasets that currently have no quality rows."
-        ),
-    )
-    parser.add_argument(
-        "--backfill-eye-mask-quality",
-        action="store_true",
-        help=(
-            "Backfill eye_mask_quality rows for datasets that currently have no quality rows."
         ),
     )
     parser.add_argument(
@@ -350,13 +344,6 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "Backfill crop_quality rows for datasets that currently have no crop quality rows."
-        ),
-    )
-    parser.add_argument(
-        "--backfill-eye-mask-performance",
-        action="store_true",
-        help=(
-            "Backfill eye_mask_performance rows for datasets that currently have no eye-mask performance rows."
         ),
     )
     parser.add_argument(
@@ -406,24 +393,10 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--refresh-eye-mask-profiles",
-        action="store_true",
-        help=(
-            "Refresh eye_mask_data_profile rows for all source recording datasets in scope and remove stale rows."
-        ),
-    )
-    parser.add_argument(
         "--refresh-keypoint-quality",
         action="store_true",
         help=(
             "Refresh keypoint_quality rows for all datasets in scope and remove stale rows."
-        ),
-    )
-    parser.add_argument(
-        "--refresh-eye-mask-quality",
-        action="store_true",
-        help=(
-            "Refresh eye_mask_quality rows for all datasets in scope and remove stale rows."
         ),
     )
     parser.add_argument(
@@ -452,13 +425,6 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "Refresh crop_quality rows for all datasets in scope and remove stale rows."
-        ),
-    )
-    parser.add_argument(
-        "--refresh-eye-mask-performance",
-        action="store_true",
-        help=(
-            "Refresh eye_mask_performance rows for all datasets in scope and remove stale rows."
         ),
     )
     parser.add_argument(
@@ -496,14 +462,6 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "When backfilling/refreshing crop_quality, include all datasets. "
-            "Default scope is source_recording + analysis datasets only."
-        ),
-    )
-    parser.add_argument(
-        "--eye-mask-performance-all-datasets",
-        action="store_true",
-        help=(
-            "When backfilling/refreshing eye_mask_performance, include all datasets. "
             "Default scope is source_recording + analysis datasets only."
         ),
     )
@@ -3103,6 +3061,7 @@ def _backfill_eye_mask_profiles(
     scope_paths: Optional[Sequence[Path]],
     refresh: bool,
 ) -> Dict[str, int]:
+    _raise_eye_mask_registry_writes_retired()
     table_columns = _eye_mask_profile_table_columns(registry)
     if "dataset_id" not in table_columns or "profile_run" not in table_columns:
         raise RuntimeError(
@@ -3554,6 +3513,7 @@ def _backfill_eye_mask_quality(
     scope_paths: Optional[Sequence[Path]],
     refresh: bool,
 ) -> Dict[str, int]:
+    _raise_eye_mask_registry_writes_retired()
     rows = registry.conn.execute(
         """
         SELECT dataset_id, zarr_path, recording_id, zarr_use
@@ -4423,6 +4383,7 @@ def _backfill_eye_mask_performance(
     refresh: bool,
     include_all_datasets: bool = False,
 ) -> Dict[str, int]:
+    _raise_eye_mask_registry_writes_retired()
     if include_all_datasets:
         rows = registry.conn.execute(
             """
@@ -8790,26 +8751,20 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         and not args.remap_training_set_dataset_ids
         and not args.backfill_dataset_lineage
         and not args.backfill_keypoint_profiles
-        and not args.backfill_eye_mask_profiles
         and not args.backfill_keypoint_quality
-        and not args.backfill_eye_mask_quality
         and not args.backfill_detect_quality
         and not args.backfill_detect_performance
         and not args.backfill_keypoint_performance
         and not args.backfill_crop_quality
-        and not args.backfill_eye_mask_performance
         and not args.backfill_subject_mask_performance
         and not args.backfill_subject_mask_component_quality
         and not args.backfill_recording_step_status
         and not args.refresh_keypoint_profiles
-        and not args.refresh_eye_mask_profiles
         and not args.refresh_keypoint_quality
-        and not args.refresh_eye_mask_quality
         and not args.refresh_detect_quality
         and not args.refresh_detect_performance
         and not args.refresh_keypoint_performance
         and not args.refresh_crop_quality
-        and not args.refresh_eye_mask_performance
         and not args.refresh_subject_mask_performance
         and not args.refresh_subject_mask_component_quality
         and not args.check_integrity
@@ -8821,20 +8776,16 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             "--prune-empty-sets, --backfill-recording-entities, --backfill-subject-dish-cross, "
             "--backfill-subjects, "
             "--backfill-model-tables, --backfill-keypoint-profiles, --backfill-keypoint-quality, "
-            "--backfill-eye-mask-quality, "
-            "--backfill-eye-mask-profiles, "
             "--remap-training-set-dataset-ids, "
             "--backfill-dataset-lineage, "
             "--backfill-detect-quality, --backfill-detect-performance, --backfill-keypoint-performance, "
-            "--backfill-crop-quality, --backfill-eye-mask-performance, "
+            "--backfill-crop-quality, "
             "--backfill-subject-mask-performance, --backfill-subject-mask-component-quality, "
             "--backfill-recording-step-status, "
             "--refresh-keypoint-profiles, --refresh-keypoint-quality, "
-            "--refresh-eye-mask-quality, "
-            "--refresh-eye-mask-profiles, "
             "--refresh-detect-quality, --refresh-detect-performance, "
             "--refresh-keypoint-performance, "
-            "--refresh-crop-quality, --refresh-eye-mask-performance, "
+            "--refresh-crop-quality, "
             "--refresh-subject-mask-performance, --refresh-subject-mask-component-quality, "
             "--check-integrity, and/or --vacuum."
         )
@@ -9283,40 +9234,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                     f"unchanged={summary['rows_skipped']} row(s)."
                 )
 
-        if args.backfill_eye_mask_profiles or args.refresh_eye_mask_profiles:
-            summary = _backfill_eye_mask_profiles(
-                registry,
-                dry_run=bool(args.dry_run),
-                scope_paths=scope_paths or None,
-                refresh=bool(args.refresh_eye_mask_profiles),
-            )
-            mode = "refresh" if args.refresh_eye_mask_profiles else "backfill"
-            print(
-                f"Eye-mask profiles {mode}: "
-                "scope=source-recording-all-uses "
-                f"scanned={summary['datasets_scanned']} "
-                f"missing={summary['datasets_missing']} "
-                f"errors={summary['datasets_errors']} "
-                f"no_profile={summary['datasets_no_profile']} "
-                f"skipped_existing={summary['datasets_skipped_existing']}"
-            )
-            if args.dry_run:
-                print(
-                    "Dry run: would apply "
-                    f"inserted={summary['rows_inserted']} "
-                    f"updated={summary['rows_updated']} "
-                    f"deleted={summary['rows_deleted']} "
-                    f"unchanged={summary['rows_skipped']} row(s)."
-                )
-            else:
-                print(
-                    "Applied "
-                    f"inserted={summary['rows_inserted']} "
-                    f"updated={summary['rows_updated']} "
-                    f"deleted={summary['rows_deleted']} "
-                    f"unchanged={summary['rows_skipped']} row(s)."
-                )
-
         if args.backfill_keypoint_quality or args.refresh_keypoint_quality:
             summary = _backfill_keypoint_quality(
                 registry,
@@ -9327,39 +9244,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             mode = "refresh" if args.refresh_keypoint_quality else "backfill"
             print(
                 f"Keypoint quality {mode}: "
-                f"scanned={summary['datasets_scanned']} "
-                f"missing={summary['datasets_missing']} "
-                f"errors={summary['datasets_errors']} "
-                f"no_quality={summary['datasets_no_quality']} "
-                f"skipped_existing={summary['datasets_skipped_existing']}"
-            )
-            if args.dry_run:
-                print(
-                    "Dry run: would apply "
-                    f"inserted={summary['rows_inserted']} "
-                    f"updated={summary['rows_updated']} "
-                    f"deleted={summary['rows_deleted']} "
-                    f"unchanged={summary['rows_skipped']} row(s)."
-                )
-            else:
-                print(
-                    "Applied "
-                    f"inserted={summary['rows_inserted']} "
-                    f"updated={summary['rows_updated']} "
-                    f"deleted={summary['rows_deleted']} "
-                    f"unchanged={summary['rows_skipped']} row(s)."
-                )
-
-        if args.backfill_eye_mask_quality or args.refresh_eye_mask_quality:
-            summary = _backfill_eye_mask_quality(
-                registry,
-                dry_run=bool(args.dry_run),
-                scope_paths=scope_paths or None,
-                refresh=bool(args.refresh_eye_mask_quality),
-            )
-            mode = "refresh" if args.refresh_eye_mask_quality else "backfill"
-            print(
-                f"Eye-mask quality {mode}: "
                 f"scanned={summary['datasets_scanned']} "
                 f"missing={summary['datasets_missing']} "
                 f"errors={summary['datasets_errors']} "
@@ -9505,44 +9389,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 f"missing={summary['datasets_missing']} "
                 f"errors={summary['datasets_errors']} "
                 f"no_quality={summary['datasets_no_quality']} "
-                f"skipped_existing={summary['datasets_skipped_existing']}"
-            )
-            if args.dry_run:
-                print(
-                    "Dry run: would apply "
-                    f"inserted={summary['rows_inserted']} "
-                    f"updated={summary['rows_updated']} "
-                    f"deleted={summary['rows_deleted']} "
-                    f"unchanged={summary['rows_skipped']} row(s)."
-                )
-            else:
-                print(
-                    "Applied "
-                    f"inserted={summary['rows_inserted']} "
-                    f"updated={summary['rows_updated']} "
-                    f"deleted={summary['rows_deleted']} "
-                    f"unchanged={summary['rows_skipped']} row(s)."
-                )
-
-        if args.backfill_eye_mask_performance or args.refresh_eye_mask_performance:
-            summary = _backfill_eye_mask_performance(
-                registry,
-                dry_run=bool(args.dry_run),
-                scope_paths=scope_paths or None,
-                refresh=bool(args.refresh_eye_mask_performance),
-                include_all_datasets=bool(args.eye_mask_performance_all_datasets),
-            )
-            mode = "refresh" if args.refresh_eye_mask_performance else "backfill"
-            scope_label = "all-datasets" if args.eye_mask_performance_all_datasets else "source-analysis-only"
-            print(
-                f"Eye-mask performance {mode}: "
-                f"scope={scope_label} "
-                f"scanned={summary['datasets_scanned']} "
-                f"missing={summary['datasets_missing']} "
-                f"errors={summary['datasets_errors']} "
-                f"no_performance={summary['datasets_no_performance']} "
-                f"stale={summary['rows_stale']} "
-                f"in_progress={summary['rows_in_progress']} "
                 f"skipped_existing={summary['datasets_skipped_existing']}"
             )
             if args.dry_run:

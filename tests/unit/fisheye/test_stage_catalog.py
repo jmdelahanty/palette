@@ -12,6 +12,7 @@ from fisheye.registry.stage_catalog import (
     STAGE_SPECS,
     artifact_family_map,
     canonical_stage_id,
+    deprecated_stage_ids,
     dependency_map,
     invalidation_map,
     recording_status_stage_ids,
@@ -126,6 +127,13 @@ def test_stage_catalog_dependency_and_invalidation_maps_are_canonical() -> None:
         for downstream in spec.invalidates:
             assert downstream in STAGE_BY_ID
             assert downstream not in ALIAS_TO_STAGE_ID
+
+
+def test_eye_mask_stage_ids_remain_resolvable_but_deprecated() -> None:
+    assert deprecated_stage_ids() == ("eye_masks", "refined_eye_masks")
+    assert STAGE_BY_ID["eye_masks"].deprecated is True
+    assert STAGE_BY_ID["refined_eye_masks"].deprecated is True
+    assert "eye_masks" not in invalidation_map()["refined_keypoints"]
 
 
 def test_stage_catalog_declared_artifact_families_are_unique() -> None:

@@ -17,6 +17,8 @@ from fisheye.registry.step_cascade import (
     invalidate_downstream_steps,
 )
 
+DEPRECATED_EYE_STAGES = frozenset({"eye_masks", "refined_eye_masks"})
+
 
 def _create_registry(tmp_path: Path) -> Registry:
     registry = Registry(tmp_path / "registry.sqlite")
@@ -75,8 +77,6 @@ def test_get_transitive_dependents_detect() -> None:
         "crop",
         "keypoints",
         "refined_keypoints",
-        "eye_masks",
-        "refined_eye_masks",
         "subject_masks",
         "refined_subject_masks",
         "subject_shape",
@@ -97,8 +97,6 @@ def test_get_transitive_dependents_detect() -> None:
 def test_get_transitive_dependents_refined_keypoints() -> None:
     result = get_transitive_dependents("refined_keypoints")
     expected = frozenset({
-        "eye_masks",
-        "refined_eye_masks",
         "arena_assignment",
         "tracks",
         "track_kinematics",
@@ -115,8 +113,6 @@ def test_get_transitive_dependents_keypoints() -> None:
     result = get_transitive_dependents("keypoints")
     expected = frozenset({
         "refined_keypoints",
-        "eye_masks",
-        "refined_eye_masks",
         "arena_assignment",
         "tracks",
         "track_kinematics",
@@ -161,8 +157,6 @@ def test_get_transitive_dependents_detect_quality_uses_catalog_flow() -> None:
         "crop",
         "keypoints",
         "refined_keypoints",
-        "eye_masks",
-        "refined_eye_masks",
         "subject_masks",
         "refined_subject_masks",
         "subject_shape",
@@ -182,6 +176,11 @@ def test_get_transitive_dependents_detect_quality_uses_catalog_flow() -> None:
 
 def test_get_transitive_dependents_resolves_aliases() -> None:
     assert get_transitive_dependents("refine") == get_transitive_dependents("refined_detect")
+
+
+def test_get_transitive_dependents_excludes_deprecated_eye_stages_from_live_cascade() -> None:
+    for upstream in ("detect", "crop", "keypoints", "refined_keypoints"):
+        assert get_transitive_dependents(upstream).isdisjoint(DEPRECATED_EYE_STAGES)
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +207,7 @@ def test_invalidate_downstream_marks_missing(tmp_path: Path) -> None:
 
     assert "detect" not in result["steps_invalidated"]
     for step in ["refined_detect", "crop", "keypoints", "refined_keypoints",
-                  "eye_masks", "refined_eye_masks", "subject_masks", "refined_subject_masks",
+                  "subject_masks", "refined_subject_masks",
                   "subject_shape", "tail_kinematics", "tail_posture_view",
                   "arena_assignment", "tracks",
                   "track_kinematics", "swim_bouts", "bout_kinematics",
@@ -216,6 +215,9 @@ def test_invalidate_downstream_marks_missing(tmp_path: Path) -> None:
                   "detect_quality"]:
         assert step in result["steps_invalidated"], f"{step} should be invalidated"
         assert _get_step_status(registry, step) == "missing"
+    for step in DEPRECATED_EYE_STAGES:
+        assert step not in result["steps_invalidated"]
+        assert _get_step_status(registry, step) == "ok"
 
     # The triggering step itself should remain "ok"
     assert _get_step_status(registry, "detect") == "ok"
@@ -245,8 +247,6 @@ def test_get_transitive_dependents_crop_includes_subject_masks() -> None:
     expected = frozenset({
         "keypoints",
         "refined_keypoints",
-        "eye_masks",
-        "refined_eye_masks",
         "subject_masks",
         "refined_subject_masks",
         "subject_shape",
@@ -320,10 +320,11 @@ def test_invalidate_downstream_skips_absent_and_na(tmp_path: Path) -> None:
 def test_invalidate_downstream_creates_history_rows(tmp_path: Path) -> None:
     registry = _create_registry(tmp_path)
     _seed_step(registry, "refined_keypoints", "ok")
-    _seed_step(registry, "eye_masks", "ok")
-    _seed_step(registry, "refined_eye_masks", "ok")
+    _seed_step(registry, "track_kinematics", "ok")
+    _seed_step(registry, "eye_angles", "ok")
 
-    initial_em_count = _count_history_rows(registry, "eye_masks")
+    initial_track_count = _count_history_rows(registry, "track_kinematics")
+    initial_eye_angles_count = _count_history_rows(registry, "eye_angles")
 
     invalidate_downstream_steps(
         registry,
@@ -334,8 +335,8 @@ def test_invalidate_downstream_creates_history_rows(tmp_path: Path) -> None:
     )
 
     # Each invalidated step should have gotten a new history row
-    assert _count_history_rows(registry, "eye_masks") == initial_em_count + 1
-    assert _count_history_rows(registry, "refined_eye_masks") > 0
+    assert _count_history_rows(registry, "track_kinematics") == initial_track_count + 1
+    assert _count_history_rows(registry, "eye_angles") == initial_eye_angles_count + 1
     registry.close()
 
 

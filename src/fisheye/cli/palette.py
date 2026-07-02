@@ -54,6 +54,7 @@ class DatasetRef:
 class StageState:
     stage: str
     state: str
+    deprecated: bool = False
     run: str | None = None
     artifact: str | None = None
     blocked_by: list[str] | None = None
@@ -71,6 +72,7 @@ class StageState:
         return {
             "stage": self.stage,
             "state": self.state,
+            "deprecated": self.deprecated,
             "run": self.run,
             "artifact": self.artifact,
             "blocked_by": self.blocked_by or [],
@@ -429,6 +431,7 @@ def inspect_stages(root: Any) -> list[StageState]:
     out: list[StageState] = []
     for spec in STAGE_SPECS:
         state = _stage_base_completion(root, spec)
+        state.deprecated = bool(spec.deprecated)
         if not state.complete:
             blocked_by = [dep for dep in spec.depends_on if not by_stage.get(dep, StageState(dep, "missing")).complete]
             if blocked_by:
@@ -605,6 +608,8 @@ def build_status_payload(dataset: DatasetRef, stages: Sequence[StageState]) -> d
 def build_plan_payload(dataset: DatasetRef, stages: Sequence[StageState]) -> dict[str, Any]:
     next_items: list[dict[str, Any]] = []
     for stage in stages:
+        if stage.deprecated:
+            continue
         if stage.state != "missing":
             continue
         action = _action_for_stage(stage.stage, dataset)

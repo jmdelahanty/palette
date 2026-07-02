@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, NoReturn, Optional, Sequence, Tuple
 
 import numpy as np
 import yaml
@@ -37,6 +37,14 @@ from .stage_catalog import recording_status_stage_ids, recording_tuning_stage_id
 
 
 SQLITE_BUSY_TIMEOUT_MS = 30_000
+EYE_MASK_REGISTRY_WRITES_RETIRED_MESSAGE = (
+    "Standalone eye-mask registry write paths are retired. Historical "
+    "eye_mask_* rows remain readable, but new rows must not be created."
+)
+
+
+def _raise_eye_mask_registry_writes_retired() -> NoReturn:
+    raise RuntimeError(EYE_MASK_REGISTRY_WRITES_RETIRED_MESSAGE)
 
 
 def _require_sql_identifier(value: str) -> str:
@@ -3461,6 +3469,7 @@ class Registry(RegistryMigrationMixin):
         zarr_mtime_ns: Optional[int] = None,
         updated_utc: Optional[str] = None,
     ) -> None:
+        _raise_eye_mask_registry_writes_retired()
         payload = {
             "dataset_id": str(dataset_id),
             "stage_group": str(stage_group),
@@ -4575,6 +4584,7 @@ class Registry(RegistryMigrationMixin):
         zarr_mtime_ns: Optional[int] = None,
         updated_utc: Optional[str] = None,
     ) -> None:
+        _raise_eye_mask_registry_writes_retired()
         write_legacy_recording_context_snapshot, write_legacy_biology_snapshot = (
             self._profile_duplicate_context_write_policy(str(dataset_id))
         )
@@ -4805,6 +4815,7 @@ class Registry(RegistryMigrationMixin):
         quality_updated_utc: Optional[str] = None,
         zarr_mtime_ns: Optional[int] = None,
     ) -> None:
+        _raise_eye_mask_registry_writes_retired()
         payload = {
             "dataset_id": str(dataset_id),
             "stage_group": str(stage_group),
@@ -5151,6 +5162,7 @@ class Registry(RegistryMigrationMixin):
                 )
 
     def replace_eye_mask_data_profile(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        _raise_eye_mask_registry_writes_retired()
         write_legacy_recording_context_snapshot, write_legacy_biology_snapshot = (
             self._profile_duplicate_context_write_policy(str(dataset_id))
         )
@@ -5345,6 +5357,7 @@ class Registry(RegistryMigrationMixin):
         return dataset_id, len(keypoint_performance_rows)
 
     def replace_eye_mask_performance(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        _raise_eye_mask_registry_writes_retired()
         with self._maybe_transaction():
             self.conn.execute("DELETE FROM eye_mask_performance WHERE dataset_id = ?;", (str(dataset_id),))
             for record in records:
@@ -5382,6 +5395,7 @@ class Registry(RegistryMigrationMixin):
                 )
 
     def replace_eye_mask_quality(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        _raise_eye_mask_registry_writes_retired()
         with self._maybe_transaction():
             self.conn.execute("DELETE FROM eye_mask_quality WHERE dataset_id = ?;", (str(dataset_id),))
             for record in records:
@@ -5665,6 +5679,7 @@ class Registry(RegistryMigrationMixin):
         recording_id: Optional[str],
         zarr_use: Optional[str],
     ) -> int:
+        _raise_eye_mask_registry_writes_retired()
         root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
         rows = _extract_eye_mask_performance_rows(
             root,
@@ -5683,6 +5698,7 @@ class Registry(RegistryMigrationMixin):
         recording_id: Optional[str],
         zarr_use: Optional[str],
     ) -> int:
+        _raise_eye_mask_registry_writes_retired()
         root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
         rows = _extract_eye_mask_quality_rows(
             root,
@@ -6508,20 +6524,6 @@ class Registry(RegistryMigrationMixin):
             zarr_use=zarr_use,
         )
         self.replace_keypoint_performance(dataset_id, keypoint_performance_rows)
-        eye_mask_performance_rows = _extract_eye_mask_performance_rows(
-            root,
-            zarr_path=zarr_path,
-            recording_id=recording_id,
-            zarr_use=zarr_use,
-        )
-        self.replace_eye_mask_performance(dataset_id, eye_mask_performance_rows)
-        eye_mask_quality_rows = _extract_eye_mask_quality_rows(
-            root,
-            zarr_path=zarr_path,
-            recording_id=recording_id,
-            zarr_use=zarr_use,
-        )
-        self.replace_eye_mask_quality(dataset_id, eye_mask_quality_rows)
         subject_mask_performance_rows = _extract_subject_mask_performance_rows(
             root,
             zarr_path=zarr_path,

@@ -10,6 +10,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry
 from fisheye.utils.registry_query import main as registry_query_main
+from tests.unit.fisheye._eye_mask_registry_seed import (
+    insert_eye_mask_data_profile,
+    insert_eye_mask_performance,
+)
 
 
 def _seed_registry_for_subject_filters(registry_path: Path) -> None:
@@ -484,7 +488,8 @@ def _seed_registry_for_detect_filters(registry_path: Path) -> None:
 def _seed_eye_mask_performance_rows(registry_path: Path) -> None:
     registry = Registry(registry_path)
 
-    registry.upsert_eye_mask_performance(
+    insert_eye_mask_performance(
+        registry,
         dataset_id="dataset_a",
         stage_group="eye_masks_runs",
         run_name="eye_masks_a",
@@ -509,7 +514,8 @@ def _seed_eye_mask_performance_rows(registry_path: Path) -> None:
         summary_statistics_json=None,
         lifecycle_state=None,
     )
-    registry.upsert_eye_mask_performance(
+    insert_eye_mask_performance(
+        registry,
         dataset_id="dataset_a",
         stage_group="refined_eye_masks_runs",
         run_name="refined_eye_masks_a",
@@ -540,7 +546,8 @@ def _seed_eye_mask_performance_rows(registry_path: Path) -> None:
         lifecycle_state="approved",
     )
 
-    registry.upsert_eye_mask_performance(
+    insert_eye_mask_performance(
+        registry,
         dataset_id="dataset_b",
         stage_group="refined_eye_masks_runs",
         run_name="refined_eye_masks_b",
@@ -576,7 +583,8 @@ def _seed_eye_mask_performance_rows(registry_path: Path) -> None:
         lifecycle_reason="keypoint_manual_correction",
     )
 
-    registry.upsert_eye_mask_performance(
+    insert_eye_mask_performance(
+        registry,
         dataset_id="dataset_c",
         stage_group="eye_masks_runs",
         run_name="eye_masks_c",
@@ -601,7 +609,8 @@ def _seed_eye_mask_performance_rows(registry_path: Path) -> None:
         summary_statistics_json=None,
         lifecycle_state=None,
     )
-    registry.upsert_eye_mask_performance(
+    insert_eye_mask_performance(
+        registry,
         dataset_id="dataset_c",
         stage_group="refined_eye_masks_runs",
         run_name="refined_eye_masks_c",
@@ -713,7 +722,8 @@ def _seed_subject_mask_component_rows(registry_path: Path) -> None:
         quality_updated_utc="2026-02-12T00:06:00+00:00",
         zarr_mtime_ns=123456789,
     )
-    registry.upsert_eye_mask_performance(
+    insert_eye_mask_performance(
+        registry,
         dataset_id="dataset_a",
         stage_group="refined_eye_masks_runs",
         run_name="refined_eye_masks_a",
@@ -746,7 +756,8 @@ def _seed_subject_mask_component_rows(registry_path: Path) -> None:
         zarr_mtime_ns=123456789,
     )
 
-    registry.upsert_eye_mask_performance(
+    insert_eye_mask_performance(
+        registry,
         dataset_id="dataset_b",
         stage_group="refined_eye_masks_runs",
         run_name="refined_eye_masks_b",
@@ -1588,7 +1599,8 @@ def _seed_keypoint_data_profile_rows(registry_path: Path) -> None:
 
 def _seed_eye_mask_data_profile_rows(registry_path: Path) -> None:
     registry = Registry(registry_path)
-    registry.upsert_eye_mask_data_profile(
+    insert_eye_mask_data_profile(
+        registry,
         dataset_id="dataset_a",
         profile_run="eye_profile_a_v1",
         recording_id="recording_a",
@@ -1644,7 +1656,8 @@ def _seed_eye_mask_data_profile_rows(registry_path: Path) -> None:
         profile_json=json.dumps({"run": "eye_profile_a_v1"}),
         zarr_mtime_ns=2000,
     )
-    registry.upsert_eye_mask_data_profile(
+    insert_eye_mask_data_profile(
+        registry,
         dataset_id="dataset_b",
         profile_run="eye_profile_b_v1",
         recording_id="recording_b",
@@ -2652,7 +2665,8 @@ def test_registry_query_eye_mask_profile_plain_output_includes_remediation_for_s
     assert "dataset=dataset_b" in out
     assert "run=eye_profile_b_v1" in out
     assert "stale=stale" in out
-    assert "Remediation: stale eye-mask profile rows detected;" in out
+    assert "Note: stale eye-mask profile rows detected;" in out
+    assert "historical rows are read-only" in out
 
 
 def test_registry_query_filters_by_crop_review_state(tmp_path: Path, capsys) -> None:

@@ -32,6 +32,7 @@ class StageSpec:
     artifact_families: tuple[str, ...] = ()
     category: str = CORE_PIPELINE
     description: str = ""
+    deprecated: bool = False
 
 
 STAGE_SPECS: tuple[StageSpec, ...] = (
@@ -108,7 +109,7 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
         id="refined_keypoints",
         aliases=("keypoints_refine",),
         depends_on=("keypoints",),
-        invalidates=("eye_masks", "arena_assignment", "track_kinematics", "eye_angles"),
+        invalidates=("arena_assignment", "track_kinematics", "eye_angles"),
         artifact_families=("refined_keypoints_runs",),
         description="Curated keypoint instances used downstream.",
     ),
@@ -118,12 +119,14 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
         invalidates=("refined_eye_masks",),
         artifact_families=("eye_masks_runs",),
         description="Raw eye mask predictions.",
+        deprecated=True,
     ),
     StageSpec(
         id="refined_eye_masks",
         depends_on=("eye_masks",),
         artifact_families=("refined_eye_masks_runs",),
         description="Curated eye mask instances.",
+        deprecated=True,
     ),
     StageSpec(
         id="subject_masks",
@@ -296,6 +299,9 @@ RECORDING_STATUS_STAGE_IDS: tuple[str, ...] = (
     "calibration",
     *RECORDING_TUNING_STAGE_IDS,
 )
+DEPRECATED_STAGE_IDS: tuple[str, ...] = tuple(
+    spec.id for spec in STAGE_SPECS if spec.deprecated
+)
 
 
 def canonical_stage_id(stage_id_or_alias: str) -> str:
@@ -333,6 +339,12 @@ def artifact_family_map() -> dict[str, tuple[str, ...]]:
     return {spec.id: spec.artifact_families for spec in STAGE_SPECS}
 
 
+def deprecated_stage_ids() -> tuple[str, ...]:
+    """Return canonical stage ids retained only for historical registry rows."""
+
+    return DEPRECATED_STAGE_IDS
+
+
 def recording_status_stage_ids() -> tuple[str, ...]:
     """Return canonical recording-status stage ids in display/backfill order."""
 
@@ -352,6 +364,7 @@ __all__ = [
     "RECORDING_METADATA",
     "RECORDING_STATUS_STAGE_IDS",
     "RECORDING_TUNING_STAGE_IDS",
+    "DEPRECATED_STAGE_IDS",
     "STAGE_BY_ID",
     "STAGE_IDS",
     "STAGE_SPECS",
@@ -359,6 +372,7 @@ __all__ = [
     "StageSpec",
     "artifact_family_map",
     "canonical_stage_id",
+    "deprecated_stage_ids",
     "dependency_map",
     "get_stage_spec",
     "invalidation_map",
