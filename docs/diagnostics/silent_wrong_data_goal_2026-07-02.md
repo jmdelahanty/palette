@@ -38,10 +38,11 @@ Completed commits:
 - `2e663f6 training: drop mismatched loader rows at index construction`
 - `eb510d0 crop: convert ordering, bounds, and decode assumptions to loud failures`
 - `29e9e6a pixels: enforce gpu-primary decode with full-range contract and stamping`
+- `e2520c5 masks: require probabilities_encoding at decode time`
 
 Next implementation item:
 
-- Item 4: require `probabilities_encoding` at mask probability decode time.
+- Item 5: golden pixel parity.
 
 Item 3 validation:
 
@@ -60,18 +61,34 @@ Item 3 guard-placement ruling:
   selected or injected, row streaming remains backend-agnostic and accepts non-CUDA fake
   tensors.
 
-## Active Item 4 Next Step
+Item 4 validation:
 
-- [ ] Locate all readers of `mask_probs_roi` / mask probability stores that decode based
+- `110 passed` for the focused Item 4 run, covering mask probability encoding,
+  mask-source loading, subject-mask finalization, review and tuner paths, merge/backfill
+  utilities, and subject-mask diagnostic benchmark readers.
+- Full non-GPU gate: `3209 passed, 2 skipped, 1 deselected, 201 warnings`.
+
+## Active Item 5 Next Step
+
+- [ ] Review existing pixel parity/cache tests before adding the golden contract test.
+- [ ] Generate a synthetic full-range mono video with a deliberately misleading `tv`
+  container/range flag.
+- [ ] Keep the primary PyNvVC direct-Y assertion GPU-marked while keeping CI coverage for
+  retained opt-in CPU/cache paths.
+- [ ] Assert cache build/read/rebuild byte equality for the supported CPU-free test path.
+
+## Completed Item 4 Notes
+
+- [x] Located readers of `mask_probs_roi` / mask probability stores that decode based
   on `probabilities_encoding` or guess when the attr is missing.
-- [ ] Implement one shared required-encoding decoder in a neutral shared home.
-- [ ] Route these readers through it: `finalize_subject_masks.py`,
+- [x] Implemented one shared required-encoding decoder in a neutral shared home.
+- [x] Routed these readers through it: `finalize_subject_masks.py`,
   `refined_subject_mask_review.py`, `subject_mask_tuner.py`, `shared/mask_source.py`,
   `backfill_subject_mask_runs.py`, `merge_subject_mask_runs.py`, and subject-mask
   diagnostic benchmarks.
-- [ ] Missing or unrecognized `probabilities_encoding` raises with run path and observed
+- [x] Missing or unrecognized `probabilities_encoding` raises with run path and observed
   dtype.
-- [ ] Add focused tests, then rerun the full non-GPU gate before committing Item 4.
+- [x] Added focused tests and reran the full non-GPU gate before committing Item 4.
 
 Useful Item 3 focused command that is known green:
 
@@ -100,11 +117,12 @@ PYTHONPATH=/home/delahantyj@hhmi.org/gitrepos/palette-silent-wrong-data/src \
   - [x] Use `np.round` for crop-center quantization in forward paths.
   - [x] Fix the remaining flat ROI cache test/gate failure.
   - [x] Full non-GPU gate green.
-- [ ] Item 4 - probabilities encoding:
-  - [ ] Implement one shared required-encoding decoder for mask probability stores.
-  - [ ] Route all current readers through it.
-  - [ ] Missing or unknown `probabilities_encoding` raises with run path and dtype.
-  - [ ] Add focused tests.
+- [x] Item 4 - probabilities encoding:
+  - [x] Implement one shared required-encoding decoder for mask probability stores.
+  - [x] Route all current readers through it.
+  - [x] Missing or unknown `probabilities_encoding` raises with run path and dtype.
+  - [x] Add focused tests.
+  - [x] Full non-GPU gate green.
 - [ ] Item 5 - golden pixel parity:
   - [ ] Generate a synthetic full-range mono video with a `tv` container/range flag.
   - [ ] GPU-marked primary assertion: PyNvVC direct-Y decode equals encoded Y.
