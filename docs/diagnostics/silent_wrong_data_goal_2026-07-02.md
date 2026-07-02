@@ -1,7 +1,7 @@
 # Silent-Wrong-Data Goal Checklist
 
 <!-- contract-meta
-status: active
+status: complete
 created: 2026-07-02
 owner: jeremy
 branch: agent/silent-wrong-data
@@ -41,10 +41,12 @@ Completed commits:
 - `e2520c5 masks: require probabilities_encoding at decode time`
 - `985f658 pixels: add golden decode parity test`
 - `450ea87 pixels: add encoded-video luma parity smoke`
+- `60e7d62 detect: flush final partial batch and gate opencv fallback`
 
 Next implementation item:
 
-- Item 7: exposure census with pixel forensics.
+- Silent-wrong-data items 1-7 are implemented and validated. The next queued slice is
+  the authoritative-run pointer work after this branch and census have been reviewed.
 
 Item 3 validation:
 
@@ -84,13 +86,35 @@ Item 6 validation:
   selection, resize contracts, and detect compute smoke.
 - Full non-GPU gate: `3211 passed, 2 skipped, 2 deselected, 200 warnings`.
 
+Item 7 validation:
+
+- `3 passed` for the focused pixel decode exposure census classifier tests.
+- Read-only registry/zarr census completed against
+  `/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite`.
+- Census result: `112` datasets / `265` image surfaces sampled:
+  `195` `direct_y_like`, `68` `indeterminate`, `1` `missing_zarr`,
+  `1` `unreadable_zarr`, and `0` `range_expanded_like`.
+- Full non-GPU gate: `3214 passed, 2 skipped, 2 deselected, 205 warnings`.
+
 ## Active Item 7 Next Step
 
-- [ ] Inventory existing training datasets and major run-family artifacts that carry crop
+- [x] Inventory existing training datasets and major run-family artifacts that carry crop
   image pixels.
-- [ ] For datasets with no pixel-contract attrs, sample images and classify them as
+- [x] For datasets with no pixel-contract attrs, sample images and classify them as
   direct-Y-like, range-expanded-like, or indeterminate.
-- [ ] Write the read-only exposure census report without modifying any existing dataset.
+- [x] Write the read-only exposure census report without modifying any existing dataset.
+
+## Completed Item 7 Notes
+
+- [x] Added `fisheye.utils.pixel_decode_exposure_census`, a read-only census utility for
+  registry training datasets and model-facing zarr image surfaces.
+- [x] Classified historical surfaces using the limited-range expansion value lattice:
+  `(Y - 16) * 255 / 219`.
+- [x] Sampled up to four frames and 262,144 pixels per surface, using strided zarr
+  selection so large image arrays are not fully materialized.
+- [x] Wrote `docs/diagnostics/pixel_decode_exposure_census_2026-07-02.md`.
+- [x] Headline finding: no sampled model-facing training surface showed the
+  limited-range expansion lattice.
 
 ## Completed Item 6 Notes
 
@@ -165,13 +189,13 @@ PYTHONPATH=/home/delahantyj@hhmi.org/gitrepos/palette-silent-wrong-data/src \
   - [x] Flush final partial batch after EOF regardless of reported frame count.
   - [x] Gate OpenCV as explicit/opt-in, not silent fallback.
   - [x] Add fake-capture test for over-reported `CAP_PROP_FRAME_COUNT`.
-- [ ] Item 7 - exposure census:
-  - [ ] Read-only census of existing training datasets and major run families.
-  - [ ] Include forensic classifier for historical datasets with no pixel-contract attrs:
+- [x] Item 7 - exposure census:
+  - [x] Read-only census of existing training datasets and major run families.
+  - [x] Include forensic classifier for historical datasets with no pixel-contract attrs:
     direct-Y-like, range-expanded-like, or indeterminate.
-  - [ ] Use limited-range expansion signature: unreachable intensity comb from
+  - [x] Use limited-range expansion signature: unreachable intensity comb from
     `(Y - 16) * 255 / 219` plus clamped lows.
-  - [ ] Commit report as `docs/diagnostics/pixel_decode_exposure_census_2026-07-02.md`.
+  - [x] Commit report as `docs/diagnostics/pixel_decode_exposure_census_2026-07-02.md`.
 
 ## Reporting Requirements
 
