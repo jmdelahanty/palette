@@ -130,9 +130,10 @@ def test_stage_catalog_dependency_and_invalidation_maps_are_canonical() -> None:
 
 
 def test_eye_mask_stage_ids_remain_resolvable_but_deprecated() -> None:
-    assert deprecated_stage_ids() == ("eye_masks", "refined_eye_masks")
+    assert deprecated_stage_ids() == ("eye_masks", "refined_eye_masks", "eye_mask_tuning")
     assert STAGE_BY_ID["eye_masks"].deprecated is True
     assert STAGE_BY_ID["refined_eye_masks"].deprecated is True
+    assert STAGE_BY_ID["eye_mask_tuning"].deprecated is True
     assert "eye_masks" not in invalidation_map()["refined_keypoints"]
 
 
