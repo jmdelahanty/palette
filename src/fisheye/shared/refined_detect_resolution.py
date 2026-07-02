@@ -12,7 +12,7 @@ from .refined_detect_curation import (
 )
 from .refined_detect_review import DEFAULT_DETECT_GROUP_PREFERENCE, resolve_refined_detect_group
 from .type_conversions import normalize_attr
-from .zarr_run_completion import resolve_latest_complete_run_name
+from .zarr_run_completion import resolve_authoritative_run_name
 
 
 REVIEW_STATUS_DETECT_GROUP_PREFERENCE = ("refined", "manual", "interpolated", "filtered", "raw")
@@ -70,7 +70,7 @@ def resolve_active_curated_refined_run_name(
             raise ValueError(f"Refined detect run not found: {requested}")
         return requested if has_curated_refined_detect_surface(refined_parent[requested]) else None
 
-    latest = normalize_attr(resolve_latest_complete_run_name(refined_parent))
+    latest = normalize_attr(resolve_authoritative_run_name(refined_parent))
     if latest and latest in refined_parent and has_curated_refined_detect_surface(refined_parent[latest]):
         return latest
 
@@ -112,7 +112,7 @@ def resolve_detection_read_source(
     if refined_parent is not None:
         resolved_refined_run = normalize_attr(refined_run)
         if resolved_refined_run is None:
-            resolved_refined_run = normalize_attr(resolve_latest_complete_run_name(refined_parent))
+            resolved_refined_run = normalize_attr(resolve_authoritative_run_name(refined_parent))
             if resolved_refined_run is None:
                 names = _sorted_group_names(refined_parent)
                 resolved_refined_run = names[-1] if names else None
@@ -154,7 +154,7 @@ def resolve_detection_read_source(
 
     detect_parent = root.get("detect_runs")
     if detect_parent is not None:
-        detect_run_name = normalize_attr(resolve_latest_complete_run_name(detect_parent))
+        detect_run_name = normalize_attr(resolve_authoritative_run_name(detect_parent))
         if detect_run_name is None:
             names = _sorted_group_names(detect_parent)
             detect_run_name = names[-1] if names else None

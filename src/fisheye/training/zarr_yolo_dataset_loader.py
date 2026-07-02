@@ -27,7 +27,7 @@ from ..shared.refined_detect_curation import (
     has_curated_refined_detect_surface,
     has_sparse_curated_refined_detect_instances_arrays,
 )
-from ..shared.zarr_run_completion import resolve_latest_complete_run_name
+from ..shared.zarr_run_completion import resolve_authoritative_run_name
 from ..utils.zarr_metadata import get_downsample_array_path, get_downsample_formats
 
 # Setup logging
@@ -40,7 +40,7 @@ FRAME_INDEX_OOB_DROP_RATE_LIMIT = 0.01
 def _latest_complete(parent: Optional[zarr.Group]) -> Optional[str]:
     if parent is None:
         return None
-    return resolve_latest_complete_run_name(parent)
+    return resolve_authoritative_run_name(parent)
 
 
 # Configuration

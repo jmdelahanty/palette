@@ -23,7 +23,7 @@ from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.plot_artifacts import write_png_visualization_artifact
 from fisheye.shared.run_lineage_fingerprint import build_run_lineage_payload, write_run_lineage_attrs
-from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
+from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
 from fisheye.utils.system import get_git_info
 
 
@@ -102,7 +102,7 @@ def _resolve_chaser_distance_run(root: zarr.Group, run_name: str | None) -> tupl
         raise ValueError("Archive has no analysis/chaser_distance_runs group.")
     resolved = str(run_name or "latest").strip()
     if not resolved or resolved == "latest":
-        resolved = resolve_latest_complete_run_name(parent) or str(parent.attrs.get("latest") or "").strip()
+        resolved = resolve_authoritative_run_name(parent) or str(parent.attrs.get("latest") or "").strip()
     if not resolved or resolved not in parent:
         raise ValueError("No usable chaser-distance run found; pass --chaser-distance-run.")
     return parent[resolved], resolved, f"analysis/chaser_distance_runs/{resolved}"

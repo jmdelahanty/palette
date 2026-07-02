@@ -20,7 +20,7 @@ from scipy.ndimage import gaussian_filter  # noqa: E402
 from fisheye.shared.citrus_enums import load_event_types
 from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.shared.refined_detect_resolution import resolve_detection_read_source
-from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
+from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
 
 
 @dataclass(frozen=True)
@@ -216,11 +216,7 @@ def resolve_stimulus_event_windows(
     runs = analysis["stimulus_runs"]
     resolved = str(stimulus_run).strip() if stimulus_run else None
     if not resolved:
-        for attr_name in ("latest", "latest_complete"):
-            value = runs.attrs.get(attr_name)
-            if value:
-                resolved = str(value).strip()
-                break
+        resolved = resolve_authoritative_run_name(runs)
     if not resolved:
         run_names = sorted(str(name) for name in runs.group_keys())
         resolved = run_names[-1] if run_names else None
@@ -297,7 +293,7 @@ def _resolve_raw_detect_group(root: zarr.Group, run_name: Optional[str]) -> tupl
         raise ValueError("Archive has no detect_runs group.")
     resolved = str(run_name).strip() if run_name else None
     if not resolved:
-        resolved = resolve_latest_complete_run_name(parent)
+        resolved = resolve_authoritative_run_name(parent)
     if not resolved:
         latest = parent.attrs.get("latest")
         resolved = str(latest).strip() if latest else None

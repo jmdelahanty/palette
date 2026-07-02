@@ -35,7 +35,7 @@ from ..shared.refined_detect_curation import (
     has_curated_refined_detect_surface,
 )
 from ..shared.zarr_helpers import open_zarr_group_direct
-from ..shared.zarr_run_completion import resolve_latest_complete_run_name
+from ..shared.zarr_run_completion import resolve_authoritative_run_name
 from ..utils.system import build_invocation_record
 
 
@@ -324,7 +324,7 @@ def _resolve_refined_group(root: zarr.Group, crop_group: Optional[zarr.Group]) -
     refined_parent = root.get("refined_detect_runs") or root.get("refined_runs")
     if refined_parent is None:
         return None
-    latest = resolve_latest_complete_run_name(refined_parent)
+    latest = resolve_authoritative_run_name(refined_parent)
     if isinstance(latest, (bytes, bytearray)):
         latest = latest.decode("utf-8", "ignore")
     if isinstance(latest, str) and latest in refined_parent:
@@ -986,12 +986,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         refined_group: Optional[zarr.Group] = None
 
         crop_run = (
-            resolve_latest_complete_run_name(root["crop_runs"])
+            resolve_authoritative_run_name(root["crop_runs"])
             if "crop_runs" in root
             else None
         )
         detect_run = (
-            resolve_latest_complete_run_name(root["detect_runs"])
+            resolve_authoritative_run_name(root["detect_runs"])
             if "detect_runs" in root
             else None
         )

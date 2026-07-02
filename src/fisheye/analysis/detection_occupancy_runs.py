@@ -29,7 +29,7 @@ from fisheye.shared.zarr_run_completion import (
     mark_run_pending,
     mark_run_started,
     require_runs_parent,
-    resolve_latest_complete_run_name,
+    resolve_authoritative_run_name,
 )
 from fisheye.utils.system import get_git_info
 from fisheye.visualization.plot_detection_epoch_heatmaps import (
@@ -146,7 +146,7 @@ def _resolve_epoch_run(root: zarr.Group, epoch_run: Optional[str]) -> tuple[zarr
     parent = analysis["stimulus_epoch_runs"]
     resolved = str(epoch_run).strip() if epoch_run else None
     if not resolved:
-        resolved = resolve_latest_complete_run_name(parent)
+        resolved = resolve_authoritative_run_name(parent)
     if not resolved:
         latest = parent.attrs.get("latest")
         resolved = str(latest).strip() if latest else None

@@ -20,6 +20,7 @@ from fisheye.shared.zarr_helpers import (
     zarr_child_group,
     zarr_group_keys,
 )
+from fisheye.shared.zarr_run_completion import set_authoritative_run
 
 
 class _FakeArray:
@@ -170,6 +171,23 @@ def test_resolve_zarr_run_uses_latest_attr_and_latest_alias() -> None:
 
     assert run_name == "stimulus_003"
     assert run_group.path == "analysis/stimulus_runs/stimulus_003"
+
+
+def test_resolve_zarr_run_prefers_authoritative_run_over_later_latest() -> None:
+    root = _build_root()
+    parent = root["analysis/stimulus_runs"]
+    parent.attrs["latest"] = "stimulus_003"
+    set_authoritative_run(parent, "stimulus_002", approved_by="jeremy")
+
+    run_group, run_name = resolve_zarr_run(
+        root,
+        ("analysis", "stimulus_runs"),
+        None,
+        run_label="Stimulus run",
+    )
+
+    assert run_name == "stimulus_002"
+    assert run_group.path == "analysis/stimulus_runs/stimulus_002"
 
 
 def test_resolve_zarr_run_falls_back_to_sorted_last() -> None:

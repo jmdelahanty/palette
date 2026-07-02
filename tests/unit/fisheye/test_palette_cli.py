@@ -7,7 +7,11 @@ from pathlib import Path
 import zarr
 
 from fisheye.cli import palette
-from fisheye.shared.zarr_run_completion import RUN_COMPLETED_AT_ATTR, mark_run_complete
+from fisheye.shared.zarr_run_completion import (
+    RUN_COMPLETED_AT_ATTR,
+    mark_run_complete,
+    set_authoritative_run,
+)
 
 
 def _run_json(capsys, *args: str) -> tuple[int, dict]:
@@ -88,6 +92,34 @@ def test_status_surfaces_legacy_assumed_completion(tmp_path, capsys) -> None:
     assert detect["completion"] == "legacy_assumed"
 
 
+def test_status_surfaces_authoritative_run_distinct_from_latest(tmp_path, capsys) -> None:
+    zarr_path = tmp_path / "authority_training.zarr"
+    root = _open_tmp_store(zarr_path)
+    _create_raw(root)
+    approved = _complete_run(root, "subject_mask_runs", "subject_approved")
+    _complete_run(root, "subject_mask_runs", "subject_smoke")
+    set_authoritative_run(
+        root["subject_mask_runs"],
+        "subject_approved",
+        approved_by="jeremy",
+        approved_at="2026-07-02T12:00:00+00:00",
+        git_sha="abc123",
+        note="reviewed",
+    )
+    approved.attrs[RUN_COMPLETED_AT_ATTR] = "2026-07-02T12:00:00+00:00"
+
+    rc, payload = _run_json(capsys, "status", str(zarr_path))
+
+    assert rc == palette.EXIT_OK
+    subject_masks = next(stage for stage in payload["stages"] if stage["stage"] == "subject_masks")
+    assert subject_masks["state"] == "complete"
+    assert subject_masks["run"] == "subject_approved"
+    assert subject_masks["run_resolution"] == "authoritative"
+    assert subject_masks["authoritative_run"] == "subject_approved"
+    assert subject_masks["latest_complete_run"] == "subject_smoke"
+    assert subject_masks["authoritative_run_provenance"]["approved_by"] == "jeremy"
+
+
 def test_plan_reports_stale_downstream_stage(tmp_path, capsys) -> None:
     zarr_path = tmp_path / "stale_training.zarr"
     root = _open_tmp_store(zarr_path)
@@ -106,6 +138,50 @@ def test_plan_reports_stale_downstream_stage(tmp_path, capsys) -> None:
     assert rc == palette.EXIT_OK
     assert any(
         item["stage"] == "detect_quality" and item["invalidated_by"] == "detect"
+        for item in payload["stale"]
+    )
+
+
+def test_plan_uses_authoritative_input_run_for_staleness(tmp_path, capsys) -> None:
+    zarr_path = tmp_path / "authority_stale_training.zarr"
+    root = _open_tmp_store(zarr_path)
+    _create_raw(root)
+    _complete_run(
+        root,
+        "subject_mask_runs",
+        "subject_approved",
+        "2026-01-01T00:00:00+00:00",
+    )
+    _complete_run(
+        root,
+        "refined_subject_masks_runs",
+        "refined_approved",
+        "2026-01-02T00:00:00+00:00",
+    )
+    _complete_run(
+        root,
+        "subject_mask_runs",
+        "subject_smoke",
+        "2026-01-03T00:00:00+00:00",
+    )
+    set_authoritative_run(
+        root["subject_mask_runs"],
+        "subject_approved",
+        approved_by="jeremy",
+        approved_at="2026-01-04T00:00:00+00:00",
+        git_sha="abc123",
+        note="reviewed full run",
+    )
+
+    rc, payload = _run_json(capsys, "plan", str(zarr_path))
+
+    assert rc == palette.EXIT_OK
+    subject_masks = next(stage for stage in payload["stages"] if stage["stage"] == "subject_masks")
+    assert subject_masks["run"] == "subject_approved"
+    assert subject_masks["latest_complete_run"] == "subject_smoke"
+    assert subject_masks["run_resolution"] == "authoritative"
+    assert not any(
+        item["stage"] == "refined_subject_masks" and item["invalidated_by"] == "subject_masks"
         for item in payload["stale"]
     )
 

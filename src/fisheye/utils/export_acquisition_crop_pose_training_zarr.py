@@ -42,7 +42,7 @@ from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
     mark_run_started,
     require_runs_parent,
-    resolve_latest_complete_run_name,
+    resolve_authoritative_run_name,
 )
 from fisheye.utils.system import get_environment_info, get_git_info
 
@@ -329,7 +329,7 @@ def _resolve_keypoint_table(
         raise ValueError(f"Archive has no {keypoint_parent}.")
     resolved_run = str(keypoint_run).strip() if keypoint_run else None
     if not resolved_run:
-        resolved_run = resolve_latest_complete_run_name(parent)
+        resolved_run = resolve_authoritative_run_name(parent)
     if not resolved_run:
         latest = parent.attrs.get("latest")
         resolved_run = str(latest).strip() if latest else None

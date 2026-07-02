@@ -72,7 +72,7 @@ from ..shared.refined_detect_curation import (
 from ..shared.refined_detect_resolution import (
     resolve_detection_read_source,
 )
-from ..shared.zarr_run_completion import resolve_latest_complete_run_name
+from ..shared.zarr_run_completion import resolve_authoritative_run_name
 from ..utils.system import get_git_info, build_invocation_record
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
@@ -561,7 +561,7 @@ def get_zarr_metadata(zarr_paths, console=None):
             
             # Get detection info
             if 'detect_runs' in root:
-                latest_detect = resolve_latest_complete_run_name(root['detect_runs'])
+                latest_detect = resolve_authoritative_run_name(root['detect_runs'])
                 if latest_detect:
                     detect_group = root[f'detect_runs/{latest_detect}']
                     zarr_meta['detect_source_options']['detect'] = f"detect_runs/{latest_detect}"
@@ -576,7 +576,7 @@ def get_zarr_metadata(zarr_paths, console=None):
             
             # Get crop info with source tracking
             if 'crop_runs' in root:
-                latest_crop = resolve_latest_complete_run_name(root['crop_runs'])
+                latest_crop = resolve_authoritative_run_name(root['crop_runs'])
                 if latest_crop and latest_crop in root['crop_runs']:
                     crop_group = root[f'crop_runs/{latest_crop}']
                     
@@ -625,7 +625,7 @@ def get_zarr_metadata(zarr_paths, console=None):
             elif LEGACY_REFINED_DETECT_GROUP in root:
                 refined_root = root[LEGACY_REFINED_DETECT_GROUP]
             if refined_root is not None:
-                latest_refined = resolve_latest_complete_run_name(refined_root)
+                latest_refined = resolve_authoritative_run_name(refined_root)
                 if latest_refined and latest_refined in refined_root:
                     refined_group = refined_root[latest_refined]
                     parent_name = REFINED_DETECT_GROUP if REFINED_DETECT_GROUP in root else LEGACY_REFINED_DETECT_GROUP

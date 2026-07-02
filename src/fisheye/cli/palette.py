@@ -56,6 +56,10 @@ class StageState:
     state: str
     deprecated: bool = False
     run: str | None = None
+    run_resolution: str | None = None
+    authoritative_run: str | None = None
+    authoritative_run_provenance: dict[str, Any] | None = None
+    latest_complete_run: str | None = None
     artifact: str | None = None
     blocked_by: list[str] | None = None
     completion: str | None = None
@@ -74,6 +78,10 @@ class StageState:
             "state": self.state,
             "deprecated": self.deprecated,
             "run": self.run,
+            "run_resolution": self.run_resolution,
+            "authoritative_run": self.authoritative_run,
+            "authoritative_run_provenance": self.authoritative_run_provenance or {},
+            "latest_complete_run": self.latest_complete_run,
             "artifact": self.artifact,
             "blocked_by": self.blocked_by or [],
             "completion": self.completion,
@@ -82,6 +90,19 @@ class StageState:
             "resolved_artifacts": self.resolved_artifacts or [],
             "mismatches": self.mismatches or [],
         }
+
+
+@dataclass(frozen=True)
+class CompletionInfo:
+    complete: bool
+    run: str | None = None
+    kind: str | None = None
+    completed_at_utc: str | None = None
+    artifact: str | None = None
+    authoritative_run: str | None = None
+    authoritative_run_provenance: dict[str, Any] | None = None
+    latest_complete_run: str | None = None
+    run_resolution: str | None = None
 
 
 class PaletteArgumentParser(argparse.ArgumentParser):
@@ -291,60 +312,89 @@ def _kind_from_run_summary(run_summary: dict[str, Any] | None) -> str:
     return status or "unknown"
 
 
-def _completion_from_parent(parent: Any, parent_path: str) -> tuple[str | None, str | None, str | None]:
+def _completion_from_parent(parent: Any, parent_path: str) -> CompletionInfo:
     summary = describe_run_parent(parent, parent_path=parent_path)
-    run_name = _normalize_text(summary.get("resolved_latest_complete"))
+    run_name = _normalize_text(summary.get("resolved_authoritative_run"))
     if run_name is None:
-        return None, None, None
+        return CompletionInfo(
+            complete=False,
+            artifact=parent_path,
+            authoritative_run=_normalize_text(summary.get("authoritative_run")),
+            authoritative_run_provenance=dict(summary.get("authoritative_run_provenance") or {}),
+            latest_complete_run=_normalize_text(summary.get("resolved_latest_complete")),
+            run_resolution="authoritative_invalid" if summary.get("authoritative_run") else None,
+        )
     runs = summary.get("runs") or []
     run_summary = None
     for candidate in runs:
         if str(candidate.get("name") or "") == run_name:
             run_summary = dict(candidate)
             break
-    return run_name, _kind_from_run_summary(run_summary), _completed_at_for_run(parent, run_name)
+    authoritative_run = _normalize_text(summary.get("authoritative_run"))
+    run_resolution = (
+        "authoritative"
+        if authoritative_run is not None and run_name == authoritative_run
+        else "latest_complete"
+    )
+    return CompletionInfo(
+        complete=True,
+        run=run_name,
+        kind=_kind_from_run_summary(run_summary),
+        completed_at_utc=_completed_at_for_run(parent, run_name),
+        artifact=parent_path,
+        authoritative_run=authoritative_run,
+        authoritative_run_provenance=dict(summary.get("authoritative_run_provenance") or {}),
+        latest_complete_run=_normalize_text(summary.get("resolved_latest_complete")),
+        run_resolution=run_resolution,
+    )
 
 
-def _completion_from_quality_reports(root: Any) -> tuple[str | None, str | None, str | None, str | None]:
+def _completion_from_quality_reports(root: Any) -> CompletionInfo:
     detect_parent = _get_group(root, "detect_runs")
     if detect_parent is None:
-        return None, None, None, None
-    candidates: list[tuple[str, str, str | None, str | None]] = []
+        return CompletionInfo(complete=False)
+    candidates: list[CompletionInfo] = []
     for detect_run in _group_keys(detect_parent):
         quality_parent = _get_group(detect_parent, f"{detect_run}/quality_reports")
         if quality_parent is None:
             continue
-        run_name, kind, completed_at = _completion_from_parent(
+        info = _completion_from_parent(
             quality_parent,
             f"detect_runs/{detect_run}/quality_reports",
         )
-        if run_name is not None:
-            candidates.append((detect_run, run_name, kind, completed_at))
+        if info.run is not None:
+            candidates.append(info)
     if not candidates:
-        return None, None, None, None
-    candidates.sort(key=lambda item: item[3] or "")
-    detect_run, run_name, kind, completed_at = candidates[-1]
-    return run_name, kind, completed_at, f"detect_runs/{detect_run}/quality_reports"
+        return CompletionInfo(complete=False)
+    candidates.sort(key=lambda item: item.completed_at_utc or "")
+    return candidates[-1]
 
 
-def _completion_for_artifact(root: Any, spec: StageSpec, path: str) -> tuple[bool, str | None, str | None, str | None]:
+def _completion_for_artifact(root: Any, spec: StageSpec, path: str) -> CompletionInfo:
     if spec.id == "detect_quality":
-        run_name, kind, completed_at, quality_path = _completion_from_quality_reports(root)
-        if run_name is not None:
-            return True, run_name, quality_path, kind or "instrumented"
-        return False, None, None, None
+        info = _completion_from_quality_reports(root)
+        if info.run is not None:
+            return info
+        return CompletionInfo(complete=False)
     group = _get_group(root, path)
     if group is None:
         if _path_exists(root, path):
-            return True, None, path, "artifact_present"
-        return False, None, None, None
+            return CompletionInfo(complete=True, artifact=path, kind="artifact_present")
+        return CompletionInfo(complete=False)
     if _is_run_parent(group):
-        run_name, kind, completed_at = _completion_from_parent(group, path)
-        if run_name is not None:
-            return True, run_name, path, kind or "instrumented"
+        info = _completion_from_parent(group, path)
+        if info.run is not None:
+            return info
         if _group_keys(group):
-            return False, None, path, None
-    return True, None, path, "artifact_present"
+            return CompletionInfo(
+                complete=False,
+                artifact=path,
+                authoritative_run=info.authoritative_run,
+                authoritative_run_provenance=info.authoritative_run_provenance,
+                latest_complete_run=info.latest_complete_run,
+                run_resolution=info.run_resolution,
+            )
+    return CompletionInfo(complete=True, artifact=path, kind="artifact_present")
 
 
 def _raw_complete(root: Any) -> bool:
@@ -398,21 +448,19 @@ def _stage_base_completion(root: Any, spec: StageSpec) -> StageState:
             mismatches=mismatches,
         )
     for artifact in resolved_artifacts:
-        complete, run_name, resolved_artifact, completion_kind = _completion_for_artifact(root, spec, artifact)
-        if complete:
-            completed_at = None
-            group = _get_group(root, resolved_artifact or artifact)
-            if group is not None and run_name is not None:
-                completed_at = _completed_at_for_run(group, run_name)
-            if spec.id == "detect_quality" and completed_at is None:
-                _, _, completed_at, _ = _completion_from_quality_reports(root)
+        info = _completion_for_artifact(root, spec, artifact)
+        if info.complete:
             return StageState(
                 stage=spec.id,
                 state="complete",
-                run=run_name,
-                artifact=resolved_artifact or artifact,
-                completion=completion_kind,
-                completed_at_utc=completed_at,
+                run=info.run,
+                run_resolution=info.run_resolution,
+                authoritative_run=info.authoritative_run,
+                authoritative_run_provenance=info.authoritative_run_provenance,
+                latest_complete_run=info.latest_complete_run,
+                artifact=info.artifact or artifact,
+                completion=info.kind,
+                completed_at_utc=info.completed_at_utc,
                 catalog_artifacts=catalog_artifacts,
                 resolved_artifacts=resolved_artifacts,
                 mismatches=mismatches,
@@ -479,7 +527,7 @@ def _find_stale(stages: Sequence[StageState]) -> list[dict[str, Any]]:
                         "invalidated_by": upstream.stage,
                         "upstream_completed_at_utc": upstream.completed_at_utc,
                         "downstream_completed_at_utc": downstream.completed_at_utc,
-                        "basis": "catalog_invalidates_timestamp_comparison",
+                        "basis": "catalog_invalidates_authoritative_first_timestamp_comparison",
                     }
                 )
     return stale
@@ -629,7 +677,7 @@ def build_plan_payload(dataset: DatasetRef, stages: Sequence[StageState]) -> dic
     }
     payload["stages"] = [stage.to_dict() for stage in stages]
     payload["mismatches"] = _mismatch_report(stages, next_items)
-    payload["provenance"]["stale_basis"] = "catalog_invalidates_timestamp_comparison"
+    payload["provenance"]["stale_basis"] = "catalog_invalidates_authoritative_first_timestamp_comparison"
     return payload
 
 
@@ -638,15 +686,18 @@ def _print_status_table(dataset: DatasetRef, stages: Sequence[StageState]) -> No
     print(f"dataset_id: {dataset.dataset_id or '(explicit zarr path)'}")
     print(f"zarr_path: {dataset.zarr_path}")
     print("")
-    print(f"{'stage':28} {'state':30} {'run':40} artifact")
-    print("-" * 112)
+    print(f"{'stage':28} {'state':30} {'run':40} {'resolution':18} artifact")
+    print("-" * 132)
     for stage in stages:
         label = stage.state
         if stage.state == "blocked":
             label = "blocked_by: " + ",".join(stage.blocked_by or [])
         elif stage.state == "complete" and stage.completion == "legacy_assumed":
             label = "complete (legacy-assumed)"
-        print(f"{stage.stage:28} {label:30} {(stage.run or ''):40} {stage.artifact or ''}")
+        print(
+            f"{stage.stage:28} {label:30} {(stage.run or ''):40} "
+            f"{(stage.run_resolution or ''):18} {stage.artifact or ''}"
+        )
 
 
 def _print_plan_table(dataset: DatasetRef, payload: dict[str, Any]) -> None:
