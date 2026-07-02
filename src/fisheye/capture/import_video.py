@@ -4,6 +4,8 @@ Supports CPU or GPU-accelerated decoding, with optional GPUDirect Storage writes
 Uses process isolation to avoid segmentation faults during cleanup.
 """
 
+from __future__ import annotations
+
 import os
 import argparse
 import shutil
@@ -17,10 +19,8 @@ import json
 import copy
 import zarr
 import torch
-import decord
 import imageio.v3 as iio
 import time
-import cupy as cp
 import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,10 +35,22 @@ from ..utils.encoder_tags import parse_encoder_comment
 
 # Optional deps
 try:
+    import decord
+    _HAVE_DECORD = True
+    _DECORD_IMPORT_ERROR: Exception | None = None
+except Exception as exc:  # pragma: no cover - depends on native decoder stack
+    decord = None  # type: ignore[assignment]
+    _HAVE_DECORD = False
+    _DECORD_IMPORT_ERROR = exc
+
+try:
     import cupy as cp
     _HAVE_CUPY = True
-except Exception:
+    _CUPY_IMPORT_ERROR: Exception | None = None
+except Exception as exc:  # pragma: no cover - depends on CUDA stack
+    cp = None  # type: ignore[assignment]
     _HAVE_CUPY = False
+    _CUPY_IMPORT_ERROR = exc
 
 try:
     import kvikio
@@ -180,6 +192,28 @@ def _load_import_config(config_path: Optional[Path], console: Console) -> Dict[s
     return config
 
 
+def _require_decord() -> Any:
+    """Return decord or fail with an actionable runtime error."""
+    if _HAVE_DECORD and decord is not None:
+        return decord
+    raise RuntimeError(
+        "Video import requires the optional native dependency 'decord'. "
+        "Install the Palette conda environment from environment.yml; the "
+        "pip package intentionally does not install the custom decord stack."
+    ) from _DECORD_IMPORT_ERROR
+
+
+def _require_cupy() -> Any:
+    """Return cupy or fail with an actionable runtime error."""
+    if _HAVE_CUPY and cp is not None:
+        return cp
+    raise RuntimeError(
+        "GPU/GDS video import requires the optional CUDA dependency 'cupy'. "
+        "Install the Palette conda environment from environment.yml; the "
+        "pip package intentionally does not install CUDA-native dependencies."
+    ) from _CUPY_IMPORT_ERROR
+
+
 def _probe_gds(console: Console) -> Tuple[bool, Optional[str]]:
     """Check if GDS is available"""
     if not _HAVE_KVIKIO:
@@ -209,6 +243,7 @@ def _process_video_gpu_kvikio(
     console: Console,
     frame_indices: Optional[list[int]] = None
 ):
+    _cupy = _require_cupy()
     import torch.nn.functional as F
 
     def _compute_letterbox_dims(
@@ -279,9 +314,8 @@ def _process_video_gpu_kvikio(
 
     # Clear cache before allocating
     torch.cuda.empty_cache()
-    if _HAVE_CUPY:
-        mempool = cp.get_default_memory_pool()
-        mempool.free_all_blocks()
+    mempool = _cupy.get_default_memory_pool()
+    mempool.free_all_blocks()
 
     # Get shapes and configs for each resolution
     shapes: Dict[str, Tuple[int, ...]] = {}
@@ -420,7 +454,7 @@ def _process_video_gpu_kvikio(
                 total_bytes_written = 0
                 for key, buffer in buffers.items():
                     # Convert PyTorch to CuPy (zero-copy)
-                    cupy_data = cp.from_dlpack(
+                    cupy_data = _cupy.from_dlpack(
                         buffer[:actual_write_size].contiguous()
                     )
 
@@ -433,7 +467,7 @@ def _process_video_gpu_kvikio(
                     elem_per_frame = int(np.prod(shapes[key]))
                     total_bytes_written += actual_write_size * elem_per_frame
                 
-                cp.cuda.Stream.null.synchronize()
+                _cupy.cuda.Stream.null.synchronize()
                 dt = time.perf_counter() - t0
                 write_times.append(dt)
                 
@@ -539,21 +573,22 @@ def _finalize_kvikio_zarr_metadata(
     )
 
 def _setup_video_reader(video_path: Path, use_gpu: bool, force_cpu: bool, console: Console) -> Tuple[str, decord.VideoReader]:
+    _decord = _require_decord()
     if force_cpu:
-        decord.bridge.set_bridge("numpy")
-        vr = decord.VideoReader(str(video_path), ctx=decord.cpu())
+        _decord.bridge.set_bridge("numpy")
+        vr = _decord.VideoReader(str(video_path), ctx=_decord.cpu())
         console.print("[yellow]Using CPU (forced)[/yellow]")
         return "cpu", vr
     if use_gpu and torch.cuda.is_available():
         try:
-            decord.bridge.set_bridge("torch")
-            vr = decord.VideoReader(str(video_path), ctx=decord.gpu(0))
+            _decord.bridge.set_bridge("torch")
+            vr = _decord.VideoReader(str(video_path), ctx=_decord.gpu(0))
             console.print("[green]Using GPU acceleration[/green]")
             return "cuda:0", vr
         except Exception as e:
             console.print(f"[yellow]GPU failed: {e}, falling back to CPU[/yellow]")
-    decord.bridge.set_bridge("numpy")
-    vr = decord.VideoReader(str(video_path), ctx=decord.cpu())
+    _decord.bridge.set_bridge("numpy")
+    vr = _decord.VideoReader(str(video_path), ctx=_decord.cpu())
     console.print("Using CPU")
     return "cpu", vr
 
