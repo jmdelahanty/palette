@@ -83,7 +83,7 @@ def test_scenario_specs_share_geometry_cache_dir_between_build_and_reuse(tmp_pat
     assert specs[2].roi_cache_policy == "always"
 
 
-def test_build_keypoint_and_eye_commands_include_cache_settings(tmp_path: Path) -> None:
+def test_build_keypoint_command_includes_cache_settings(tmp_path: Path) -> None:
     zarr_path = tmp_path / "recording_analysis.zarr"
     cache_dir = tmp_path / "cache"
 
@@ -101,23 +101,6 @@ def test_build_keypoint_and_eye_commands_include_cache_settings(tmp_path: Path) 
         imgsz=512,
         profile_timings=True,
     )
-    eye_cmd = mod._build_eye_mask_command(
-        zarr_path=zarr_path,
-        checkpoint_path=Path("/tmp/eye.pt"),
-        crop_run="crop_geometry",
-        keypoints_run="kp_run",
-        run_name="eye_run",
-        roi_cache_policy="always",
-        roi_cache_dir=cache_dir,
-        roi_live_acceleration="gpu",
-        roi_live_gpu_chunk_frames=17,
-        batch_size=64,
-        device="cuda:0",
-        write_binary_masks=True,
-        mask_probs_chunk_rois=96,
-        mask_probs_dtype="uint8",
-        profile_timings=True,
-    )
 
     assert "--roi-cache-policy" in key_cmd
     assert "--roi-cache-dir" in key_cmd
@@ -129,18 +112,6 @@ def test_build_keypoint_and_eye_commands_include_cache_settings(tmp_path: Path) 
     assert "kp_run" in key_cmd
     assert "gpu" in key_cmd
     assert "17" in key_cmd
-
-    assert "--roi-cache-policy" in eye_cmd
-    assert "--roi-cache-dir" in eye_cmd
-    assert "--roi-live-acceleration" in eye_cmd
-    assert "--roi-live-gpu-chunk-frames" in eye_cmd
-    assert "--device" in eye_cmd
-    assert "--write-binary-masks" in eye_cmd
-    assert "--mask-probs-chunk-rois" in eye_cmd
-    assert "--mask-probs-dtype" in eye_cmd
-    assert "--profile-timings" in eye_cmd
-    assert "uint8" in eye_cmd
-    assert "kp_run" in eye_cmd
 
 
 def test_stage_metrics_reports_cache_usage_fields() -> None:

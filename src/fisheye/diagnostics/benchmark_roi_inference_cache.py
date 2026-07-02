@@ -275,61 +275,6 @@ def _build_keypoint_command(
     return cmd
 
 
-def _build_eye_mask_command(
-    *,
-    zarr_path: Path,
-    checkpoint_path: Path,
-    crop_run: str,
-    keypoints_run: str,
-    run_name: str,
-    roi_cache_policy: str,
-    roi_cache_dir: Optional[Path],
-    roi_live_acceleration: str,
-    roi_live_gpu_chunk_frames: int,
-    batch_size: int,
-    device: Optional[str],
-    write_binary_masks: bool,
-    mask_probs_chunk_rois: Optional[int],
-    mask_probs_dtype: str,
-    profile_timings: bool,
-) -> list[str]:
-    cmd = [
-        sys.executable,
-        "-m",
-        "fisheye.segmentation.infer_unet_eye_masks",
-        str(zarr_path),
-        "--checkpoint",
-        str(checkpoint_path),
-        "--crop-run",
-        crop_run,
-        "--keypoints-run",
-        keypoints_run,
-        "--run-name",
-        run_name,
-        "--batch-size",
-        str(batch_size),
-        "--roi-cache-policy",
-        roi_cache_policy,
-        "--roi-live-acceleration",
-        roi_live_acceleration,
-        "--roi-live-gpu-chunk-frames",
-        str(roi_live_gpu_chunk_frames),
-    ]
-    if roi_cache_dir is not None:
-        cmd.extend(["--roi-cache-dir", str(roi_cache_dir)])
-    if device:
-        cmd.extend(["--device", device])
-    if write_binary_masks:
-        cmd.append("--write-binary-masks")
-    if mask_probs_chunk_rois is not None:
-        cmd.extend(["--mask-probs-chunk-rois", str(mask_probs_chunk_rois)])
-    if mask_probs_dtype:
-        cmd.extend(["--mask-probs-dtype", str(mask_probs_dtype)])
-    if profile_timings:
-        cmd.append("--profile-timings")
-    return cmd
-
-
 def _stage_attrs(zarr_path: Path, parent_name: str, run_name: str) -> dict[str, Any]:
     root = zarr.open_group(str(zarr_path), mode="r")
     parent = root.get(parent_name)
@@ -466,9 +411,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--registry", type=Path, default=None, help="Optional registry sqlite path.")
     parser.add_argument("--pose-model", type=Path, default=None, help="Explicit pose model path (.pt/.onnx/.engine).")
-    parser.add_argument("--eye-model", type=Path, default=None, help="Explicit U-Net checkpoint path.")
     parser.add_argument("--pose-set-id", type=str, default=None, help="Optional pose model set filter.")
-    parser.add_argument("--eye-set-id", type=str, default=None, help="Optional eye-mask model set filter.")
     parser.add_argument("--include-non-success", action="store_true", help="Include non-success training runs in registry resolution.")
     parser.add_argument("--require-unique", action="store_true", help="Fail if top registry candidate scores tie.")
     parser.add_argument("--materialized-crop-run", type=str, default=None, help="Explicit materialized crop run name.")
@@ -480,21 +423,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=list(SCENARIO_CHOICES),
         help="Scenario order to benchmark.",
     )
-    parser.add_argument("--skip-eye-masks", action="store_true", help="Benchmark keypoints only.")
     parser.add_argument("--keypoint-batch-size", type=int, default=256, help="Batch size for pose inference.")
-    parser.add_argument("--eye-batch-size", type=int, default=256, help="Batch size for U-Net eye masks.")
-    parser.add_argument(
-        "--eye-mask-chunk-rois",
-        type=int,
-        default=None,
-        help="Optional ROI chunk length override for U-Net mask_probs_roi outputs.",
-    )
-    parser.add_argument(
-        "--eye-mask-probs-dtype",
-        choices=("float16", "uint8"),
-        default="uint8",
-        help="Storage dtype for U-Net mask_probs_roi outputs during benchmarking (default: uint8).",
-    )
     parser.add_argument("--device", type=str, default=None, help="Optional shared device override.")
     parser.add_argument("--imgsz", type=int, default=None, help="Optional pose imgsz override.")
     parser.add_argument(
@@ -509,7 +438,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=32,
         help="Frame batch size for GPU-accelerated live ROI reads (default: 32).",
     )
-    parser.add_argument("--write-binary-masks", action="store_true", help="Write binary eye masks during U-Net benchmark.")
     parser.add_argument(
         "--profile-timings",
         action="store_true",
@@ -528,12 +456,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         raise FileNotFoundError(f"Zarr path not found: {zarr_path}")
 
     recording_dir = _resolve_recording_dir(args.recording_dir, zarr_path)
-    registry_path = _resolve_registry_path(args.registry) if (args.registry or args.pose_model is None or args.eye_model is None) else None
+    registry_path = _resolve_registry_path(args.registry) if (args.registry or args.pose_model is None) else None
 
     pose_candidate = None
-    eye_candidate = None
     pose_model_path = args.pose_model.expanduser().resolve() if args.pose_model is not None else None
-    eye_model_path = args.eye_model.expanduser().resolve() if args.eye_model is not None else None
 
     if pose_model_path is None:
         if registry_path is None:
@@ -547,19 +473,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             require_unique=bool(args.require_unique),
         )
         pose_model_path = Path(pose_candidate.model_path).expanduser().resolve()
-
-    if not args.skip_eye_masks and eye_model_path is None:
-        if registry_path is None:
-            raise RuntimeError("Eye-mask model resolution requires --registry or --eye-model.")
-        eye_candidate = _resolve_model_from_registry(
-            task="eye_masks",
-            recording_dir=recording_dir,
-            registry_path=registry_path,
-            set_id_filter=args.eye_set_id,
-            include_non_success=bool(args.include_non_success),
-            require_unique=bool(args.require_unique),
-        )
-        eye_model_path = Path(eye_candidate.model_path).expanduser().resolve()
 
     crop_runs = _resolve_crop_runs(
         zarr_path=zarr_path,
@@ -583,8 +496,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     print(f"- materialized_crop_run={crop_runs.materialized_run or 'none'}")
     print(f"- geometry_crop_run={crop_runs.geometry_run or 'none'}")
     print(f"- pose_model={pose_model_path}")
-    if not args.skip_eye_masks:
-        print(f"- eye_model={eye_model_path}")
     print(f"- scenarios={', '.join(spec.name for spec in specs)}")
 
     results: list[dict[str, Any]] = []
@@ -656,52 +567,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             results.append(scenario_result)
             continue
 
-        if args.skip_eye_masks:
-            results.append(scenario_result)
-            continue
-
-        eye_run_name = f"bench_{benchmark_id}_{spec.name}_eye_masks"
-        eye_cmd = _build_eye_mask_command(
-            zarr_path=zarr_path,
-            checkpoint_path=eye_model_path,
-            crop_run=spec.crop_run,
-            keypoints_run=key_run_name,
-            run_name=eye_run_name,
-            roi_cache_policy=spec.roi_cache_policy,
-            roi_cache_dir=spec.roi_cache_dir,
-            roi_live_acceleration=args.roi_live_acceleration,
-            roi_live_gpu_chunk_frames=int(args.roi_live_gpu_chunk_frames),
-            batch_size=int(args.eye_batch_size),
-            device=args.device,
-            write_binary_masks=bool(args.write_binary_masks),
-            mask_probs_chunk_rois=args.eye_mask_chunk_rois,
-            mask_probs_dtype=args.eye_mask_probs_dtype,
-            profile_timings=bool(args.profile_timings),
-        )
-        eye_exec = _run_command(eye_cmd)
-        scenario_result["eye_masks"] = eye_exec
-        if eye_exec["status"] == "ok":
-            eye_attrs = _stage_attrs(zarr_path, "eye_masks_runs", eye_run_name)
-            scenario_result["eye_masks"]["run_name"] = eye_run_name
-            scenario_result["eye_masks"]["metrics"] = _stage_metrics(
-                stage="eye_masks",
-                attrs=eye_attrs,
-                wall_seconds=float(eye_exec["wall_seconds"]),
-            )
-            print(
-                f"  eye_masks: wall={eye_exec['wall_seconds']:.1f}s "
-                f"read_mode={scenario_result['eye_masks']['metrics']['source_roi_read_mode']} "
-                f"cache_used={scenario_result['eye_masks']['metrics']['source_roi_cache_used']}"
-            )
-            live_accel = scenario_result["eye_masks"]["metrics"].get("source_roi_live_acceleration_effective")
-            if live_accel:
-                print(f"    live_acceleration: {live_accel}")
-            top_stage = _top_timing_stage(scenario_result["eye_masks"]["metrics"])
-            if top_stage:
-                print(f"    timing_top: {top_stage}")
-        else:
-            print(f"  eye_masks: failed (returncode={eye_exec['returncode']})")
-
         results.append(scenario_result)
 
     payload = {
@@ -713,18 +578,13 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             "recording_dir": str(recording_dir),
             "registry_path": str(registry_path) if registry_path is not None else None,
             "pose_model_path": str(pose_model_path),
-            "eye_model_path": str(eye_model_path) if eye_model_path is not None else None,
             "materialized_crop_run": crop_runs.materialized_run,
             "geometry_crop_run": crop_runs.geometry_run,
             "keypoint_batch_size": int(args.keypoint_batch_size),
-            "eye_batch_size": int(args.eye_batch_size),
-            "eye_mask_chunk_rois": int(args.eye_mask_chunk_rois) if args.eye_mask_chunk_rois else None,
             "device": args.device,
             "imgsz": args.imgsz,
             "roi_live_acceleration": str(args.roi_live_acceleration),
             "roi_live_gpu_chunk_frames": int(args.roi_live_gpu_chunk_frames),
-            "skip_eye_masks": bool(args.skip_eye_masks),
-            "write_binary_masks": bool(args.write_binary_masks),
             "profile_timings": bool(args.profile_timings),
         },
         "resolved_models": {
@@ -733,12 +593,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 "set_id": pose_candidate.set_id,
                 "model_path": pose_candidate.model_path,
                 "score": pose_candidate.weighted_score,
-            },
-            "eye_masks": None if eye_candidate is None else {
-                "run_id": eye_candidate.run_id,
-                "set_id": eye_candidate.set_id,
-                "model_path": eye_candidate.model_path,
-                "score": eye_candidate.weighted_score,
             },
         },
         "scenarios": results,

@@ -85,18 +85,6 @@ refine_detect:
     remove_blips: false  # Usually keep blips, they're just after gaps
   # Interpolation settings are deprecated. Sparse-first refine_detect writes
   # curated instances without gap interpolation.
-refine_eye_masks:
-  enabled: false
-  source_run: null
-  run_name: null
-  keypoint_run: null
-  chunk_size: 512
-  scheduler: processes
-  num_workers: null
-  area_filter_z: 2.0
-  area_filter_mode: either
-  force_refine_traditional: false
-  allow_latest_keypoint_fallback: false
 refine_subject_masks:
   enabled: false              # Explicit --stages refined_subject_masks overrides this gate
   subject_run: null

@@ -86,14 +86,6 @@ def get_latest_run(root: zarr.Group, group_name: str, explicit: Optional[str]) -
             "latest_yolo": "yolo_pose",
             "yolo": "yolo_pose",
         },
-        "eye_masks": {
-            "latest_traditional": "traditional_eye_segmentation",
-            "traditional": "traditional_eye_segmentation",
-            "latest_yolo": "yolo_eye_segmentation",
-            "yolo": "yolo_eye_segmentation",
-            "latest_refine": "refine_eye_masks",
-            "refine": "refine_eye_masks",
-        },
     }
 
     if explicit:

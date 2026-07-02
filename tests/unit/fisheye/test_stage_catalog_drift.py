@@ -11,9 +11,6 @@ KNOWN_PIPELINE_DEPENDENCY_OVERRIDES = {
     # INTENT: keep until the traditional keypoint path is retired or split.
     # Traditional keypoints historically required background as an extra input.
     "keypoints": (("crop", "background"), ("crop",)),
-    # INTENT: converge. The runtime stage invokes raw eye-mask inference before
-    # keypoint review, while the catalog models the desired refined dependency.
-    "eye_masks": (("keypoints",), ("refined_keypoints",)),
     # INTENT: converge. Subject-mask refinement is exposed without its raw
     # subject-mask stage in the legacy pipeline launcher.
     "refined_subject_masks": ((), ("subject_masks",)),

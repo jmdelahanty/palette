@@ -16,18 +16,18 @@ from fisheye.registry.db import Registry
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.frame_flags import resolve_row_identity_arrays
 from fisheye.shared.mask_store import MaskStore, open_mask_store
+from fisheye.shared.training_zarr_helpers import (
+    json_dict as _json_dict,
+    json_list as _json_list,
+    make_split_indices as _make_split_indices,
+    resolve_source_dataset_id as _resolve_source_dataset_id,
+    write_string_array as _write_string_array,
+)
 from fisheye.shared.type_conversions import normalize_attr as _as_text
 from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
     mark_run_started,
     require_runs_parent,
-)
-from fisheye.utils.export_eye_mask_training_zarr import (
-    _json_dict,
-    _json_list,
-    _make_split_indices,
-    _resolve_source_dataset_id,
-    _write_string_array,
 )
 
 TARGET_SCHEMAS: Dict[str, Tuple[str, ...]] = {

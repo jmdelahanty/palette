@@ -14,8 +14,7 @@ It scans for:
 Dataset classification:
   - detect_*   -> fisheye.utils.validate_detect_training_zarr
   - pose_*     -> fisheye.utils.validate_keypoint_training_zarr
-  - eye_mask_* -> fisheye.utils.validate_eye_mask_training_zarr
-  - otherwise  -> tries detect, keypoint, then eye-mask validator
+  - otherwise  -> tries detect, then keypoint validator
 
 Options:
   --datasets-root DIR     Root containing dataset bundles
@@ -277,23 +276,10 @@ for zarr_path in "${MERGED_ZARRS[@]}"; do
       summary="$LAST_SUMMARY"
       [[ "$LAST_RC" -eq 124 ]] && timeouts=$((timeouts + 1))
     fi
-  elif [[ "$base" == eye_mask_* ]]; then
-    kind="eye_mask"
-    validator_label="fisheye.utils.validate_eye_mask_training_zarr"
-    run_validator_capture "$validator_label" "$zarr_path" "$LOG_DIR/${stub}.eye_mask.log"
-    if [[ "$LAST_RC" -eq 0 ]]; then
-      status="ok"
-      summary=""
-    else
-      status="fail"
-      summary="$LAST_SUMMARY"
-      [[ "$LAST_RC" -eq 124 ]] && timeouts=$((timeouts + 1))
-    fi
   else
     kind="unknown"
     local_detect_validator="fisheye.utils.validate_detect_training_zarr"
     local_kp_validator="fisheye.utils.validate_keypoint_training_zarr"
-    local_eye_validator="fisheye.utils.validate_eye_mask_training_zarr"
 
     run_validator_capture "$local_detect_validator" "$zarr_path" "$LOG_DIR/${stub}.unknown.detect.log"
     rc_detect="$LAST_RC"
@@ -312,21 +298,11 @@ for zarr_path in "${MERGED_ZARRS[@]}"; do
         status="ok"
         summary="fallback_after_detect_fail: ${summary_detect}"
       else
-        echo "    -> keypoint validator failed, trying eye-mask validator"
-        run_validator_capture "$local_eye_validator" "$zarr_path" "$LOG_DIR/${stub}.unknown.eye_mask.log"
-        rc_eye="$LAST_RC"
-        summary_eye="$LAST_SUMMARY"
-        if [[ "$rc_eye" -eq 0 ]]; then
-          validator_label="$local_eye_validator"
-          status="ok"
-          summary="fallback_after_detect_keypoint_fail: detect=${summary_detect}; keypoint=${summary_kp}"
-        else
-          validator_label="${local_detect_validator};${local_kp_validator};${local_eye_validator}"
-          status="fail"
-          summary="detect: ${summary_detect} | keypoint: ${summary_kp} | eye_mask: ${summary_eye}"
-          if [[ "$rc_detect" -eq 124 || "$rc_kp" -eq 124 || "$rc_eye" -eq 124 ]]; then
-            timeouts=$((timeouts + 1))
-          fi
+        validator_label="${local_detect_validator};${local_kp_validator}"
+        status="fail"
+        summary="detect: ${summary_detect} | keypoint: ${summary_kp}"
+        if [[ "$rc_detect" -eq 124 || "$rc_kp" -eq 124 ]]; then
+          timeouts=$((timeouts + 1))
         fi
       fi
     fi

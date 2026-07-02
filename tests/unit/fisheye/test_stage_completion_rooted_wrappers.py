@@ -206,43 +206,6 @@ def test_keypoints_batch_auto_review_sync_opens_root_for_ok_run(monkeypatch, tmp
     assert captured["step_name"] == "refined_keypoints"
 
 
-def test_eye_masks_batch_sync_opens_root_for_each_ok_run(monkeypatch, tmp_path: Path) -> None:
-    from fisheye.utils import run_eye_masks_batch
-
-    sentinel_root = object()
-    roots: list[object] = []
-
-    monkeypatch.setattr(run_eye_masks_batch, "open_zarr_group_direct", lambda path, mode: sentinel_root)
-    monkeypatch.setattr(run_eye_masks_batch, "Registry", _FakeRegistry)
-    monkeypatch.setattr(
-        run_eye_masks_batch,
-        "_resolve_step_status_context",
-        lambda zarr_path, registry_path=None: {
-            "registry_path": tmp_path / "registry.sqlite",
-            "dataset_id": "dataset",
-            "recording_id": "rec",
-        },
-    )
-
-    def _emit(root, zarr_path, **kwargs):  # type: ignore[no-untyped-def]
-        roots.append(root)
-        return True
-
-    monkeypatch.setattr(run_eye_masks_batch, "emit_stage_completion", _emit)
-
-    result = run_eye_masks_batch._sync_eye_mask_registry_rows_after_run(
-        zarr_path=tmp_path / "archive.zarr",
-        stage_payloads={
-            "eye_masks": {"run_name": "eye_masks_001", "method": "unet"},
-            "refined_eye_masks": {"run_name": "refined_eye_masks_001", "method": "refine_eye_masks"},
-        },
-    )
-
-    assert result["synced"] is True
-    assert result["step_status_written"] == ["eye_masks", "refined_eye_masks"]
-    assert roots == [sentinel_root, sentinel_root]
-
-
 def test_detect_quality_status_opens_root_directly_for_fresh_run(monkeypatch, tmp_path: Path) -> None:
     from fisheye.refinement import detect_quality
 

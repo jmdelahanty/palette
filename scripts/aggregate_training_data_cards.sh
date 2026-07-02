@@ -11,7 +11,7 @@ all manifests under the datasets root.
 
 By default this script:
 1) refreshes profile/quality rows in the registry
-2) aggregates detect/pose/eye-mask data cards + plots
+2) aggregates detect/pose data cards + plots
 3) writes per-manifest logs and a status CSV
 
 Options:
@@ -25,7 +25,7 @@ Options:
                           detection_data_profile_latest rows are unavailable)
   --skip-refresh          Skip registry refresh phase
   --relaxed               Add relaxed aggregate flags for stale/missing-profile scenarios
-  --no-force-plots        Do not pass --force for pose/eye-mask plot regeneration
+  --no-force-plots        Do not pass --force for pose plot regeneration
   --log-dir DIR           Directory for phase + per-manifest logs
                           (default: /tmp/aggregate_training_data_cards_logs_<timestamp>)
   --output-csv PATH       Output CSV path for per-manifest status
@@ -180,28 +180,19 @@ echo "  output_csv:    $OUTPUT_CSV"
 
 if [[ "$SKIP_REFRESH" -eq 0 ]]; then
   echo
-  echo "[refresh 1/3] sync detection profile rows"
+  echo "[refresh 1/2] sync detection profile rows"
   scripts/py -m fisheye.utils.sync_detection_profile_registry \
     --registry "$REGISTRY" \
     --zarr-use any \
     --apply | tee "$LOG_DIR/01_sync_detection_profile.log"
 
   echo
-  echo "[refresh 2/3] sync eye-mask profile rows"
-  scripts/py -m fisheye.utils.sync_eye_mask_profile_registry \
-    --registry "$REGISTRY" \
-    --zarr-use any \
-    --apply | tee "$LOG_DIR/02_sync_eye_mask_profile.log"
-
-  echo
-  echo "[refresh 3/3] refresh maintenance profile/quality rows"
+  echo "[refresh 2/2] refresh maintenance profile/quality rows"
   scripts/py -m fisheye.registry.maintenance \
     --registry "$REGISTRY" \
     --refresh-keypoint-profiles \
-    --refresh-eye-mask-profiles \
     --refresh-keypoint-quality \
-    --refresh-eye-mask-quality \
-    --refresh-detect-quality | tee "$LOG_DIR/03_refresh_registry_rows.log"
+    --refresh-detect-quality | tee "$LOG_DIR/02_refresh_registry_rows.log"
 fi
 
 mapfile -t MANIFESTS < <(find "$DATASETS_ROOT" -maxdepth 2 -type f -name '*.manifest.json' | sort)
@@ -245,15 +236,6 @@ for manifest in "${MANIFESTS[@]}"; do
   elif [[ "$base" == pose_*.manifest.json ]]; then
     kind="pose"
     module="fisheye.utils.aggregate_keypoint_training_data_card"
-    if [[ "$FORCE_PLOTS" -eq 1 ]]; then
-      extra+=(--force)
-    fi
-    if [[ "$RELAXED" -eq 1 ]]; then
-      extra+=(--allow-profile-mtime-mismatch --allow-profile-fallback-scan)
-    fi
-  elif [[ "$base" == eye_mask_*.manifest.json ]]; then
-    kind="eye_mask"
-    module="fisheye.utils.aggregate_eye_mask_training_data_card"
     if [[ "$FORCE_PLOTS" -eq 1 ]]; then
       extra+=(--force)
     fi

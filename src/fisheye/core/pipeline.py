@@ -9,7 +9,6 @@ orchestrator runnable for compatibility, but do not extend it as the live path.
 """
 
 import sys
-import math
 import yaml
 import time
 import argparse
@@ -39,7 +38,6 @@ from ..registry.stage_catalog import canonical_stage_id
 from ..shared.experiment_setup import infer_experiment_setup
 from ..shared.zarr_run_completion import resolve_latest_complete_run_name
 from ..shared.zarr.schema import validate_zarr_structure
-from ..utils import run_eye_masks_batch as eye_mask_batch
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
@@ -114,16 +112,6 @@ class PipelineConfig:
     frame_step: Optional[int] = None
     no_dask_progress: bool = False
     registry_path: Optional[str] = None
-    eye_mask_merged_out_zarr: Optional[str] = None
-    eye_mask_merge_overwrite: bool = False
-    eye_mask_training_set_id: Optional[str] = None
-    eye_mask_training_set_name: Optional[str] = None
-    aggregate_training_data_card: bool = False
-    no_aggregate_training_data_card: bool = False
-    data_card_output: Optional[str] = None
-    data_card_no_plots: bool = False
-    data_card_plot_dir: Optional[str] = None
-    data_card_plot_prefix: Optional[str] = None
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "PipelineConfig":
@@ -151,16 +139,6 @@ class PipelineConfig:
             frame_step=getattr(args, 'frame_step', None),
             no_dask_progress=getattr(args, 'no_dask_progress', False),
             registry_path=getattr(args, 'registry', None),
-            eye_mask_merged_out_zarr=getattr(args, 'eye_mask_merged_out_zarr', None),
-            eye_mask_merge_overwrite=getattr(args, 'eye_mask_merge_overwrite', False),
-            eye_mask_training_set_id=getattr(args, 'eye_mask_training_set_id', None),
-            eye_mask_training_set_name=getattr(args, 'eye_mask_training_set_name', None),
-            aggregate_training_data_card=getattr(args, 'aggregate_training_data_card', False),
-            no_aggregate_training_data_card=getattr(args, 'no_aggregate_training_data_card', False),
-            data_card_output=getattr(args, 'data_card_output', None),
-            data_card_no_plots=getattr(args, 'data_card_no_plots', False),
-            data_card_plot_dir=getattr(args, 'data_card_plot_dir', None),
-            data_card_plot_prefix=getattr(args, 'data_card_plot_prefix', None),
         )
 
 
@@ -181,8 +159,6 @@ class Pipeline:
         'refine',
         'crop',
         'keypoints',
-        'eye_masks',
-        'refined_eye_masks',
         'refined_subject_masks',
         'keypoints_refine',
         'assign_ids',
@@ -199,8 +175,6 @@ class Pipeline:
         'crop': ['detect'],
         'keypoints': ['crop', 'background'],
         'keypoints_refine': ['keypoints'],
-        'eye_masks': ['keypoints'],
-        'refined_eye_masks': ['eye_masks'],
         'refined_subject_masks': [],
         'assign_ids': ['detect'],
         'track': ['keypoints'],
@@ -218,7 +192,6 @@ class Pipeline:
         'track',
         'refine',
         'keypoints_refine',
-        'refined_eye_masks',
         'refined_subject_masks',
     }
     DATA_STAGES = {'import', 'downsample'}
@@ -294,16 +267,6 @@ class Pipeline:
                 'scheduler': 'processes',
                 'num_workers': None
             },
-            'eye_masks': {
-                'method': 'traditional',
-                'roi_padding': 12,
-                'pre_threshold': None,
-                'min_area': 15,
-                'max_area': None,
-                'closing_radius': 3,
-                'opening_radius': 1,
-                'contour_min_points': 5
-            },
             'track': {
                 'roi_thresh': 25,
                 'se1_radius': 3,
@@ -317,32 +280,6 @@ class Pipeline:
                 'scheduler': 'processes',
                 'num_workers': None,
                 'memory_limit': None
-            },
-            'refine_eye_masks': {
-                'enabled': False,
-                'source_run': None,
-                'run_name': None,
-                'keypoint_run': None,
-                'merged_out_zarr': None,
-                'merged_run_name': None,
-                'merged_overwrite': False,
-                'chunk_size': 512,
-                'scheduler': 'processes',
-                'num_workers': None,
-                'area_filter_z': 2.0,
-                'area_filter_mode': 'either',
-                'success_min_eye_area_px': 50.0,
-                'force_refine_traditional': False,
-                'allow_latest_keypoint_fallback': False,
-                'registry_path': None,
-                'training_set_id': None,
-                'training_set_name': None,
-                'aggregate_training_data_card': False,
-                'no_aggregate_training_data_card': False,
-                'data_card_output': None,
-                'data_card_no_plots': False,
-                'data_card_plot_dir': None,
-                'data_card_plot_prefix': None,
             },
             'refine_subject_masks': {
                 'enabled': False,
@@ -464,8 +401,6 @@ class Pipeline:
             'refine',
             'crop',
             'keypoints',
-            'eye_masks',
-            'refined_eye_masks',
             'refined_subject_masks',
             'keypoints_refine',
             'assign_ids'] and self._is_stage_complete(stage):
@@ -487,10 +422,6 @@ class Pipeline:
                 self._run_crop()
             elif stage == 'keypoints':
                 self._run_keypoints()
-            elif stage == 'eye_masks':
-                self._run_eye_masks()
-            elif stage == 'refined_eye_masks':
-                self._run_refined_eye_masks()
             elif stage == 'refined_subject_masks':
                 self._run_refined_subject_masks()
             elif stage == 'keypoints_refine':
@@ -672,51 +603,6 @@ class Pipeline:
         else:
             raise ValueError(f"Unknown keypoint method '{method}'. Expected 'traditional' or 'yolo'.")
 
-    def _run_eye_masks(self) -> None:
-        """Run raw eye-mask inference through the shared eye orchestration path."""
-        if self.zarr_root is None:
-            self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
-
-        params = self.pipeline_params.get('eye_masks', {}) or {}
-        method = eye_mask_batch._canonical_method(str(params.get('method', 'traditional')).lower())
-        eye_mask_batch._validate_method_requirements(self.pipeline_params, method, refine_only=False)
-
-        zarr_path = Path(self.config.zarr_path).expanduser().resolve()
-        plan = eye_mask_batch.EyeMaskPlan(
-            recording_dir=eye_mask_batch._infer_recording_dir(zarr_path),
-            h5_path=None,
-            zarr_path=zarr_path,
-            camera_id=None,
-            status='ok',
-        )
-        registry_path = Path(str(self.config.registry_path)).expanduser().resolve() if self.config.registry_path else None
-        result = eye_mask_batch._run_plan(
-            plan,
-            config=self.pipeline_params,
-            method=method,
-            scheduler=self.config.scheduler,
-            num_workers=self.config.num_workers,
-            quiet=not bool(self.config.verbose),
-            refine=False,
-            refine_only=False,
-            registry_path_for_sync=registry_path,
-        )
-        self.stage_results['eye_masks'] = result
-        self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
-
-        eye_payload = result.get('eye_masks') if isinstance(result, dict) else None
-        eye_run = eye_payload.get('run_name') if isinstance(eye_payload, dict) else None
-        if eye_run:
-            self.console.print(f"[green]✓[/green] Eye masks saved as [cyan]eye_masks_runs/{eye_run}[/cyan]")
-
-        subject_payload = result.get('subject_masks') if isinstance(result, dict) else None
-        subject_run = subject_payload.get('run_name') if isinstance(subject_payload, dict) else None
-        if subject_run:
-            self.console.print(
-                "[green]✓[/green] Unified subject-mask eye companion saved as "
-                f"[cyan]subject_mask_runs/{subject_run}[/cyan]"
-            )
-
     def _run_keypoints_refine(self) -> None:
         """Run keypoint refinement stage."""
         if self.zarr_root is None:
@@ -731,121 +617,6 @@ class Pipeline:
         )
 
         self.console.print(f"[green]✓[/green] Keypoint refinement saved as [cyan]{run_name}[/cyan]")
-
-    def _run_refined_eye_masks(self) -> None:
-        """Run eye-mask refinement stage."""
-        if self.zarr_root is None:
-            self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
-
-        params = self.pipeline_params.get('refine_eye_masks', {}) or {}
-        explicitly_requested = self._is_stage_explicitly_requested('refined_eye_masks')
-        if not bool(params.get('enabled', False)) and not explicitly_requested:
-            self.console.print("[yellow]Eye-mask refinement disabled via refine_eye_masks.enabled=false; skipping.[/yellow]")
-            return
-        if not bool(params.get('enabled', False)) and explicitly_requested:
-            self.console.print(
-                "[cyan]Running eye-mask refinement because 'refined_eye_masks' was explicitly requested.[/cyan]"
-            )
-
-        scheduler = str(params.get('scheduler') or self.config.scheduler or 'processes').lower()
-        if scheduler in {'single-thread', 'single_thread'}:
-            scheduler = 'single-threaded'
-        if scheduler not in {'threads', 'processes', 'distributed', 'single-threaded'}:
-            self.console.print(
-                f"[yellow]Unsupported refine_eye_masks scheduler '{scheduler}', using 'processes'[/yellow]"
-            )
-            scheduler = 'processes'
-        chunk_size = params.get('chunk_size', 512)
-        if chunk_size is None:
-            chunk_size = 512
-
-        from ..refinement.refine_eye_masks import refine_eye_masks
-
-        run_name = refine_eye_masks(
-            zarr_path=self.config.zarr_path,
-            source_run=params.get('source_run'),
-            run_name=params.get('run_name'),
-            keypoint_run=params.get('keypoint_run'),
-            chunk_size=chunk_size,
-            scheduler=scheduler,
-            num_workers=params.get('num_workers', self.config.num_workers),
-            console=self.console,
-            command="pipeline:refined_eye_masks",
-            created_at_utc=datetime.now(timezone.utc).isoformat(),
-            area_filter_z=params.get('area_filter_z', 2.0),
-            area_filter_mode=params.get('area_filter_mode', 'either'),
-            success_min_eye_area_px=params.get('success_min_eye_area_px', 50.0),
-            force_refine_traditional=bool(params.get('force_refine_traditional', False)),
-            allow_latest_keypoint_fallback=bool(params.get('allow_latest_keypoint_fallback', False)),
-            probability_threshold=params.get('probability_threshold'),
-            write_refined_probabilities=bool(params.get('write_refined_probabilities', False)),
-        )
-
-        self.console.print(f"[green]✓[/green] Eye-mask refinement saved as [cyan]{run_name}[/cyan]")
-
-        merged_out_zarr = params.get('merged_out_zarr') or self.config.eye_mask_merged_out_zarr
-        explicit_aggregate_requested = (
-            bool(params.get('aggregate_training_data_card'))
-            if 'aggregate_training_data_card' in params
-            else bool(self.config.aggregate_training_data_card)
-        )
-        no_aggregate_requested = (
-            bool(params.get('no_aggregate_training_data_card'))
-            if 'no_aggregate_training_data_card' in params
-            else bool(self.config.no_aggregate_training_data_card)
-        )
-        if explicit_aggregate_requested and no_aggregate_requested:
-            raise ValueError(
-                "refine_eye_masks aggregate_training_data_card cannot be combined with "
-                "no_aggregate_training_data_card."
-            )
-
-        auto_aggregate_requested = bool(merged_out_zarr) and not no_aggregate_requested
-        should_aggregate = bool(explicit_aggregate_requested or auto_aggregate_requested)
-        if should_aggregate and not merged_out_zarr:
-            raise ValueError(
-                "Eye-mask data-card aggregation requires merged export output. "
-                "Provide --eye-mask-merged-out-zarr or refine_eye_masks.merged_out_zarr."
-            )
-        if auto_aggregate_requested and not explicit_aggregate_requested:
-            self.console.print(
-                "[cyan]Auto enabling eye-mask training data-card aggregation for merged export. "
-                "Use --no-aggregate-training-data-card to disable.[/cyan]"
-            )
-
-        if merged_out_zarr:
-            from ..utils.export_eye_mask_training_zarr import export_merged_eye_mask_training_zarr
-
-            merged_run_name = params.get('merged_run_name') or run_name
-            merged_overwrite = bool(params.get('merged_overwrite', self.config.eye_mask_merge_overwrite))
-            registry_path = params.get('registry_path') or self.config.registry_path
-            training_set_id = params.get('training_set_id') or self.config.eye_mask_training_set_id
-            training_set_name = params.get('training_set_name') or self.config.eye_mask_training_set_name
-            data_card_output = params.get('data_card_output') or self.config.data_card_output
-            data_card_plot_dir = params.get('data_card_plot_dir') or self.config.data_card_plot_dir
-            data_card_plot_prefix = params.get('data_card_plot_prefix') or self.config.data_card_plot_prefix
-            data_card_no_plots = bool(params.get('data_card_no_plots', self.config.data_card_no_plots))
-
-            export_summary = export_merged_eye_mask_training_zarr(
-                source_zarr=Path(self.config.zarr_path),
-                out_zarr=Path(str(merged_out_zarr)),
-                eye_stage='refined_eye_masks_runs',
-                eye_run=str(run_name),
-                run_name=str(merged_run_name),
-                overwrite=merged_overwrite,
-                registry=Path(str(registry_path)) if registry_path else None,
-                training_set_id=training_set_id,
-                training_set_name=training_set_name,
-                aggregate_training_data_card=should_aggregate,
-                data_card_output=Path(str(data_card_output)) if data_card_output else None,
-                data_card_plot_dir=Path(str(data_card_plot_dir)) if data_card_plot_dir else None,
-                data_card_plot_prefix=data_card_plot_prefix,
-                data_card_no_plots=data_card_no_plots,
-            )
-            self.stage_results['eye_mask_merged_export'] = export_summary
-            self.console.print(
-                f"[green]✓[/green] Eye-mask merged export saved as [cyan]{merged_out_zarr}[/cyan]"
-            )
 
     def _run_refined_subject_masks(self) -> None:
         """Run refined subject-mask batch apply stage."""
@@ -1296,60 +1067,6 @@ class Pipeline:
                         
                         results_lines.append(f"[bold]Keypoints:[/bold] {successful:,}/{total_rois:,} ({success_rate:.1f}%)")
                 
-                # Eye mask results
-                latest_eye = _latest_complete(root['eye_masks_runs']) if 'eye_masks_runs' in root else None
-                if latest_eye:
-                    eye_group = root[f'eye_masks_runs/{latest_eye}']
-                    total_rois_attr = eye_group.attrs.get('total_rois')
-                    total_rois_eye = int(total_rois_attr) if total_rois_attr is not None else 0
-                    successful_pairs_attr = eye_group.attrs.get('successful_roi_pairs')
-                    successful_pairs = int(successful_pairs_attr) if successful_pairs_attr is not None else 0
-                    pair_rate = eye_group.attrs.get('successful_roi_pair_rate')
-                    pair_rate_pct: Optional[float]
-                    if pair_rate is None or (isinstance(pair_rate, float) and math.isnan(pair_rate)):
-                        pair_rate_pct = None
-                    else:
-                        pair_rate_pct = float(pair_rate) * 100.0
-                    successful_eyes_attr = eye_group.attrs.get('successful_eyes')
-                    successful_eyes = int(successful_eyes_attr) if successful_eyes_attr is not None else 0
-                    pair_rate_str = f" ({pair_rate_pct:.1f}%)" if pair_rate_pct is not None else ""
-                    results_lines.append(
-                        f"[bold]Eye masks:[/bold] {successful_pairs:,}/{total_rois_eye:,} ROI pairs{pair_rate_str}"
-                    )
-                    results_lines.append(
-                        f"  [dim]└─ Successful eyes: {successful_eyes:,}[/dim]"
-                    )
-                    overlap_attr = eye_group.attrs.get('rejected_overlap')
-                    proximity_attr = eye_group.attrs.get('rejected_too_close')
-                    distance_attr = eye_group.attrs.get('rejected_too_far')
-                    overlap_rejects = int(overlap_attr) if overlap_attr is not None else 0
-                    proximity_rejects = int(proximity_attr) if proximity_attr is not None else 0
-                    distance_rejects = int(distance_attr) if distance_attr is not None else 0
-                    total_rejects = overlap_rejects + proximity_rejects + distance_rejects
-                    if total_rejects > 0:
-                        results_lines.append(
-                            "  [dim]└─ Rejects – overlap: "
-                            f"{overlap_rejects:,}, too-close: {proximity_rejects:,}, too-far: {distance_rejects:,}[/dim]"
-                        )
-
-                latest_refined_eye = _latest_complete(root['refined_eye_masks_runs']) if 'refined_eye_masks_runs' in root else None
-                if latest_refined_eye:
-                    refined_eye_group = root[f'refined_eye_masks_runs/{latest_refined_eye}']
-                    total_rois_attr = refined_eye_group.attrs.get('total_rois')
-                    total_rois_refined = int(total_rois_attr) if total_rois_attr is not None else 0
-                    successful_pairs_attr = refined_eye_group.attrs.get('successful_roi_pairs')
-                    successful_pairs = int(successful_pairs_attr) if successful_pairs_attr is not None else 0
-                    pair_rate = refined_eye_group.attrs.get('successful_roi_pair_rate')
-                    pair_rate_pct: Optional[float]
-                    if pair_rate is None or (isinstance(pair_rate, float) and math.isnan(pair_rate)):
-                        pair_rate_pct = None
-                    else:
-                        pair_rate_pct = float(pair_rate) * 100.0
-                    pair_rate_str = f" ({pair_rate_pct:.1f}%)" if pair_rate_pct is not None else ""
-                    results_lines.append(
-                        f"[bold]Refined eye masks:[/bold] {successful_pairs:,}/{total_rois_refined:,} ROI pairs{pair_rate_str}"
-                    )
-                
                 # Display results panel
                 if results_lines:
                     results_text = "\n".join(results_lines)
@@ -1397,7 +1114,7 @@ class Pipeline:
             return False
 
         # Refinement stages are designed to be repeatable; always allow rerun.
-        if stage in {'refine', 'keypoints_refine', 'eye_masks', 'refined_eye_masks', 'refined_subject_masks'}:
+        if stage in {'refine', 'keypoints_refine', 'refined_subject_masks'}:
             return False
         
         try:
@@ -1439,16 +1156,6 @@ class Pipeline:
                 if 'keypoints_runs' not in root:
                     return False
                 return _latest_complete(root['keypoints_runs']) is not None
-            elif stage == 'eye_masks':
-                if 'eye_masks_runs' not in root:
-                    return False
-                return _latest_complete(root['eye_masks_runs']) is not None
-
-            elif stage == 'refined_eye_masks':
-                if 'refined_eye_masks_runs' not in root:
-                    return False
-                return _latest_complete(root['refined_eye_masks_runs']) is not None
-
             elif stage == 'refined_subject_masks':
                 if 'refined_subject_masks_runs' not in root:
                     return False
@@ -1593,57 +1300,7 @@ Examples:
     parser.add_argument(
         "--registry",
         type=str,
-        help="Optional registry SQLite path used for eye-mask merged export registration and data-card workflows.",
-    )
-    parser.add_argument(
-        "--eye-mask-merged-out-zarr",
-        type=str,
-        help="Optional merged eye-mask training Zarr output path written after refined_eye_masks stage.",
-    )
-    parser.add_argument(
-        "--eye-mask-merge-overwrite",
-        action="store_true",
-        help="Overwrite existing merged eye-mask training Zarr output path when exporting.",
-    )
-    parser.add_argument(
-        "--eye-mask-training-set-id",
-        type=str,
-        help="Optional training set id for eye-mask merged export registry linkage and data-card aggregation.",
-    )
-    parser.add_argument(
-        "--eye-mask-training-set-name",
-        type=str,
-        help="Optional training set name for eye-mask merged export registry linkage.",
-    )
-    parser.add_argument(
-        "--aggregate-training-data-card",
-        action="store_true",
-        help="Aggregate eye-mask training data card after merged export.",
-    )
-    parser.add_argument(
-        "--no-aggregate-training-data-card",
-        action="store_true",
-        help="Disable automatic eye-mask data-card aggregation when merged export is enabled.",
-    )
-    parser.add_argument(
-        "--data-card-output",
-        type=str,
-        help="Optional deterministic output JSON path for eye-mask data-card aggregation.",
-    )
-    parser.add_argument(
-        "--data-card-no-plots",
-        action="store_true",
-        help="Skip eye-mask data-card plot generation during aggregation.",
-    )
-    parser.add_argument(
-        "--data-card-plot-dir",
-        type=str,
-        help="Optional deterministic output directory for eye-mask data-card plots.",
-    )
-    parser.add_argument(
-        "--data-card-plot-prefix",
-        type=str,
-        help="Optional deterministic filename prefix for eye-mask data-card plots.",
+        help="Optional registry SQLite path used by stages that emit registry status.",
     )
 
     parser.add_argument(
@@ -1699,8 +1356,6 @@ Examples:
             'detect_quality',
             'crop',
             'keypoints',
-            'eye_masks',
-            'refined_eye_masks',
             'refined_subject_masks',
             'keypoints_refine',
             'track',
@@ -1818,11 +1473,6 @@ Examples:
             frame_idx=args.frame,
             use_full_res=args.full,
             console=console
-        )
-
-    if args.aggregate_training_data_card and args.no_aggregate_training_data_card:
-        parser.error(
-            "--aggregate-training-data-card cannot be combined with --no-aggregate-training-data-card."
         )
 
     try:
