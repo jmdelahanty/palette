@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "palette"
+version = "0.1.0"
+description = "Conversion, metadata, and analysis workflows for Palette fish behavior recordings."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "Jeremy Delahanty" },
+]
+dependencies = [
+  # Curated from environment.yml. Keep load-bearing pins aligned there.
+  "numpy>=2,<2.3",
+  "scipy",
+  "scikit-image",
+  "scikit-learn",
+  "pyarrow",
+  "polars",
+  "pandas",
+  "h5py",
+  "zarr>=3,<4",
+  "dask[distributed]",
+  "matplotlib",
+  "pillow",
+  "imageio",
+  "imageio-ffmpeg",
+  "PyYAML",
+  "rich",
+  "tqdm",
+  "click",
+  "pydantic",
+  "hsluv",
+  "networkx",
+  "bokeh",
+  "joblib",
+  "opencv-python-headless",
+  "pybaselines",
+  "textual",
+  "textual-plotext",
+  "plotext",
+  "zstandard",
+]
+
+[project.optional-dependencies]
+gpu = [
+  # PyTorch/model-stack dependencies used by detection, keypoint, training, and
+  # segmentation modules. CUDA runtime selection remains environment-specific;
+  # environment.yml is the authoritative conda workflow for GPU workstations.
+  "torch>=2.5,<2.6",
+  "torchvision>=0.20,<0.21",
+  "torchaudio>=2.5,<2.6",
+  "ultralytics==8.3.169",
+  "onnx",
+  "onnxruntime",
+  "onnxsim",
+]
+dev = [
+  "pytest>=8.4,<9",
+  "plotly",
+]
+
+[project.scripts]
+palette-backfill-subject-body-mask-qc = "fisheye.refinement.subject_body_mask_qc:main"
+palette-write-refined-subject-mask-edit = "fisheye.utils.write_refined_subject_mask_edit:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+fisheye = ["**/*.json", "**/*.yaml", "**/*.yml", "**/*.html", "**/*.css", "**/*.js"]
