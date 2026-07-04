@@ -1439,8 +1439,9 @@ def test_format_component_summary_lines_exposes_common_geometry_and_qc() -> None
     assert any("reason=copied_from_source" in line for line in lines)
 
 
-def test_apply_component_review_status_aggregates_run_review_state() -> None:
-    root = _build_subject_review_root()
+def test_apply_component_review_status_aggregates_run_review_state(tmp_path) -> None:
+    zarr_path = tmp_path / "subject_mask_review_aggregate.zarr"
+    root = _build_subject_review_root(zarr_path=zarr_path)
     _source, refined = mod.prepare_refined_subject_run(
         root,
         subject_run="subject_masks_001",
@@ -1486,10 +1487,12 @@ def test_apply_component_review_status_aggregates_run_review_state() -> None:
         intended_use="training",
         reviewer="tester",
         notes="done",
+        zarr_path=zarr_path,
     )
     assert run_payload["state"] == "approved"
     assert refined.parent.attrs["refined_subject_mask_review_status_latest"] == refined.run_name
-    assert run_payload["authoritative_approval"]["attempted"] is False
+    assert run_payload["authoritative_approval"]["attempted"] is True
+    assert run_payload["authoritative_approval"]["status"] == "ok"
 
 
 def test_apply_component_review_status_sets_authoritative_when_run_approved(tmp_path) -> None:
@@ -1533,5 +1536,64 @@ def test_apply_component_review_status_sets_authoritative_when_run_approved(tmp_
     assert run_payload["state"] == "approved"
     assert run_payload["authoritative_approval"]["attempted"] is True
     assert run_payload["authoritative_approval"]["status"] == "ok"
-    reopened = zarr.open_group(str(zarr_path), mode="r")
+    reopened = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
     assert reopened["refined_subject_masks_runs"].attrs[AUTHORITATIVE_RUN_ATTR] == refined.run_name
+
+
+def test_apply_component_review_status_final_approval_is_fail_closed_when_authoritative_approval_fails(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    zarr_path = tmp_path / "subject_mask_review_approval_blocked.zarr"
+    root = _build_subject_review_root(zarr_path=zarr_path)
+    _source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+
+    _body_payload, run_payload = mod.apply_component_review_status(
+        refined.parent,
+        refined.run_name,
+        refined.group,
+        component_name="subject_body",
+        state="approved",
+        method="manual",
+        intended_use="training",
+        reviewer="tester",
+        notes="body approved",
+        zarr_path=zarr_path,
+    )
+    assert run_payload["state"] == "pending"
+
+    monkeypatch.setattr(
+        mod,
+        "_approve_authoritative_refined_subject_masks",
+        lambda *_args, **_kwargs: {
+            "attempted": True,
+            "status": "blocked",
+            "reason_code": "RUN_INCOMPLETE",
+        },
+    )
+
+    _swim_payload, run_payload = mod.apply_component_review_status(
+        refined.parent,
+        refined.run_name,
+        refined.group,
+        component_name="swim_bladder",
+        state="approved",
+        method="manual",
+        intended_use="training",
+        reviewer="tester",
+        notes="all components approved",
+        zarr_path=zarr_path,
+    )
+
+    component_statuses = dict(refined.group.attrs["component_review_statuses"])
+    assert component_statuses["subject_body"]["state"] == "approved"
+    assert component_statuses["swim_bladder"]["state"] == "pending"
+    assert refined.group.attrs["refined_subject_mask_review_status"]["state"] == "pending"
+    assert run_payload["state"] == "pending"
+    assert run_payload["authoritative_approval"]["status"] == "blocked"
+    assert AUTHORITATIVE_RUN_ATTR not in refined.parent.attrs

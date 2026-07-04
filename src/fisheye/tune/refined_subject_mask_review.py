@@ -53,7 +53,13 @@ from ..shared.subject_mask_chunks import (
 )
 from ..shared.subject_mask_stale import sync_source_subject_mask_stale_payload
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
-from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest, require_runs_parent
+from ..shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_started,
+    note_pending_latest,
+    require_runs_parent,
+    set_authoritative_run,
+)
 from ..utils.system import get_environment_info, get_git_info
 from ..utils.zarr_io import open_zarr_root
 
@@ -2173,6 +2179,25 @@ def _approve_authoritative_refined_subject_masks(
     }
 
 
+def _authoritative_approval_ok(payload: Mapping[str, object]) -> bool:
+    return bool(payload.get("attempted")) and str(payload.get("status") or "").strip().lower() == "ok"
+
+
+def _mirror_authoritative_approval(parent: zarr.Group, run_name: str, payload: Mapping[str, object]) -> None:
+    envelope = payload.get("envelope")
+    approval = envelope.get("approval") if isinstance(envelope, Mapping) else None
+    if not isinstance(approval, Mapping):
+        approval = {}
+    set_authoritative_run(
+        parent,
+        run_name,
+        approved_by=str(approval.get("approved_by") or "unknown"),
+        approved_at=str(approval.get("approved_at") or ""),
+        git_sha=str(approval.get("git_sha") or ""),
+        note=str(approval.get("note") or ""),
+    )
+
+
 def apply_component_review_status(
     refined_parent: zarr.Group,
     refined_run: str,
@@ -2186,15 +2211,16 @@ def apply_component_review_status(
     notes: Optional[str],
     zarr_path: str | Path | None = None,
 ) -> tuple[Dict[str, object], Dict[str, object]]:
-    component_reviews = dict(refined.attrs.get("component_review_statuses") or {})
-    component_reviews[str(component_name)] = _review_payload(
+    existing_component_reviews = dict(refined.attrs.get("component_review_statuses") or {})
+    component_reviews = dict(existing_component_reviews)
+    component_payload = _review_payload(
         state=state,
         method=method,
         intended_use=intended_use,
         reviewer=reviewer,
         notes=notes,
     )
-    refined.attrs["component_review_statuses"] = component_reviews
+    component_reviews[str(component_name)] = component_payload
 
     run_state = _aggregate_run_state(component_reviews)
     run_payload = _review_payload(
@@ -2204,8 +2230,6 @@ def apply_component_review_status(
         reviewer=reviewer,
         notes="auto_aggregated_from_component_review_statuses",
     )
-    refined.attrs["refined_subject_mask_review_status"] = run_payload
-    refined_parent.attrs["refined_subject_mask_review_status_latest"] = refined_run
     authoritative_approval = _approve_authoritative_refined_subject_masks(
         zarr_path,
         refined_run=refined_run,
@@ -2213,9 +2237,20 @@ def apply_component_review_status(
         reviewer=reviewer,
         notes=notes,
     )
+    if run_state == "approved" and not _authoritative_approval_ok(authoritative_approval):
+        existing_run_payload = dict(refined.attrs.get("refined_subject_mask_review_status") or {})
+        existing_run_payload["authoritative_approval"] = authoritative_approval
+        existing_component_payload = dict(existing_component_reviews.get(str(component_name)) or {})
+        return existing_component_payload, existing_run_payload
+
+    if _authoritative_approval_ok(authoritative_approval):
+        _mirror_authoritative_approval(refined_parent, refined_run, authoritative_approval)
+    refined.attrs["component_review_statuses"] = component_reviews
+    refined.attrs["refined_subject_mask_review_status"] = run_payload
+    refined_parent.attrs["refined_subject_mask_review_status_latest"] = refined_run
     returned_run_payload = dict(run_payload)
     returned_run_payload["authoritative_approval"] = authoritative_approval
-    return component_reviews[str(component_name)], returned_run_payload
+    return component_payload, returned_run_payload
 
 
 def _normalize_refined_component_names(
