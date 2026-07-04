@@ -781,6 +781,9 @@ def _write_report_jsonl_rows(rows: Sequence[Mapping[str, Any]], output_jsonl: st
     write_jsonl_atomic(path, rows)
 
 
+_write_jsonl_rows = _write_report_jsonl_rows
+
+
 def backfill_completion_epoch(
     zarr_paths: Sequence[str | Path],
     *,
