@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.json_safety import write_json_atomic as _write_json
 from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import hashlib
@@ -37,16 +38,6 @@ def _read_json(path: Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid JSON {path}: {exc}") from exc
-
-
-def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(
-        json.dumps(payload, indent=2, sort_keys=True, default=_json_default) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(tmp, path)
 
 
 def _sha256_file(path: Path) -> str:

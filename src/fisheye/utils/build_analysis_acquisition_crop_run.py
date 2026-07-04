@@ -21,6 +21,7 @@ from fisheye.shared.roi_pixel_contract import (
     ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
     orange_mono_pynvvc_luma_pixel_contract,
 )
+from fisheye.shared.json_safety import write_jsonl_atomic
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr.chunk_profiles import create_geometry_preload_array, stamp_geometry_preload_attrs
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_failed, mark_run_started, require_runs_parent
@@ -686,9 +687,7 @@ def _batch_from_registry(
 
 
 def _write_jsonl(path: Path, rows: Sequence[BuildAnalysisAcquisitionCropRunResult]) -> None:
-    with Path(path).open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(asdict(row), sort_keys=True) + "\n")
+    write_jsonl_atomic(Path(path), [asdict(row) for row in rows])
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:

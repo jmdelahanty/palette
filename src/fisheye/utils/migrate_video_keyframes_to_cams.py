@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.json_safety import write_json_atomic as _write_json
 import argparse
 import json
 import shutil
@@ -18,10 +19,6 @@ def _load_json(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"JSON root is not an object: {path}")
     return payload
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _discover_recording_dirs(paths: list[Path], *, name_prefix: Optional[str]) -> list[Path]:

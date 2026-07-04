@@ -8,6 +8,7 @@ refined runs via raw detect rows plus detect_quality labels.
 from __future__ import annotations
 
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
+from fisheye.shared.json_safety import write_json_atomic
 import argparse
 import json
 import os
@@ -228,9 +229,8 @@ def _write_json_report(
     summary: dict[str, Any],
     mode: str,
 ) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"mode": mode, "summary": summary, "rows": rows}
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    write_json_atomic(path, payload, sort_keys=False, trailing_newline=False)
 
 
 def _row_payload(plan: PlannedMigration, *, applied: bool = False) -> dict[str, Any]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.json_safety import write_jsonl_atomic as _write_jsonl
 import argparse
 from collections import Counter
 import csv
@@ -564,13 +565,6 @@ def build_acquisition_crop_video_roi_readiness_report(
         "crop_meta_status_counts": dict(sorted(Counter(str(row.get("crop_meta_status")) for row in records).items())),
         "records": records,
     }
-
-
-def _write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, sort_keys=True) + "\n")
 
 
 def _format_counts(counts: Mapping[str, Any]) -> str:

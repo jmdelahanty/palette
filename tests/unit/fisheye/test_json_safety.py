@@ -86,6 +86,20 @@ def test_write_json_atomic_failed_replace_leaves_prior_file(
     assert out.read_text(encoding="utf-8") == '{"old": true}\n'
 
 
+def test_write_json_atomic_can_refuse_overwrite(tmp_path: Path) -> None:
+    out = tmp_path / "payload.json"
+    out.write_text('{"old": true}\n', encoding="utf-8")
+
+    try:
+        write_json_atomic(out, {"old": False}, overwrite=False)
+    except FileExistsError:
+        pass
+    else:  # pragma: no cover - defensive guard
+        raise AssertionError("write_json_atomic did not raise")
+
+    assert out.read_text(encoding="utf-8") == '{"old": true}\n'
+
+
 def test_write_jsonl_atomic_writes_one_strict_json_object_per_line(tmp_path: Path) -> None:
     out = tmp_path / "rows.jsonl"
 

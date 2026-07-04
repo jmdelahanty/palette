@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.json_safety import write_json_atomic as _write_json
 from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import contextlib
@@ -138,11 +139,6 @@ def tree_hash(root: Path) -> str:
                 digest.update(chunk)
         digest.update(b"\0")
     return digest.hexdigest()
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=_json_default) + "\n", encoding="utf-8")
 
 
 def _copy_run_group(source_run_group: Path, artifact_dir: Path) -> Path:

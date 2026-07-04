@@ -10,6 +10,7 @@ import sqlite3
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from fisheye.registry.db import RegistryPaths
+from fisheye.shared.json_safety import write_jsonl_atomic
 
 MISSING = "<missing>"
 
@@ -433,12 +434,10 @@ def print_text_report(report: Mapping[str, Any], *, limit: int = 40) -> None:
 
 
 def _write_jsonl(path: Path, report: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as fh:
-        for group in report.get("groups", []):
-            fh.write(json.dumps(group, sort_keys=True) + "\n")
-        for row in report.get("rows", []):
-            fh.write(json.dumps(row, sort_keys=True) + "\n")
+    write_jsonl_atomic(
+        path,
+        [*report.get("groups", []), *report.get("rows", [])],
+    )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

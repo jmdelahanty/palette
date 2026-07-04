@@ -130,6 +130,7 @@ def write_json_atomic(
     path: Path,
     payload: Any,
     *,
+    overwrite: bool = True,
     sort_keys: bool = True,
     indent: int | None = 2,
     ensure_ascii: bool = True,
@@ -138,6 +139,8 @@ def write_json_atomic(
 ) -> None:
     """Atomically write one strict-JSON document."""
 
+    if path.expanduser().exists() and not overwrite:
+        raise FileExistsError(f"Refusing to overwrite existing file: {path}")
     text = json.dumps(
         json_attr_safe(payload),
         allow_nan=False,

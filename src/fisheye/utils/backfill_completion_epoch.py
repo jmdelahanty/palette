@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fisheye.shared.batch_logging import utc_now as _utc_now
+from fisheye.shared.json_safety import write_jsonl_atomic
 import argparse
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -777,8 +778,7 @@ def _write_jsonl_rows(rows: Sequence[Mapping[str, Any]], output_jsonl: str | Pat
     if not output_jsonl:
         return
     path = Path(output_jsonl).expanduser()
-    text = "".join(json.dumps(row, sort_keys=True, default=str) + "\n" for row in rows)
-    path.write_text(text, encoding="utf-8")
+    write_jsonl_atomic(path, rows)
 
 
 def backfill_completion_epoch(

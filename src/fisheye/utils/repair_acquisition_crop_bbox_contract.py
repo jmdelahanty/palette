@@ -7,6 +7,7 @@ Dry-run by default. The repair preserves existing crop-frame-normalized
 
 from __future__ import annotations
 
+from fisheye.shared.json_safety import write_json_atomic as _write_json
 import argparse
 import json
 import os
@@ -43,13 +44,6 @@ def _json_default(value: object) -> object:
     if isinstance(value, np.ndarray):
         return value.tolist()
     return str(value)
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True, default=_json_default) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
 
 
 def _child_group_names(group: zarr.Group) -> list[str]:

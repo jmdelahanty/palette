@@ -6,6 +6,7 @@ Default behavior is dry-run. Use --apply to write visualization artifacts.
 
 from __future__ import annotations
 
+from fisheye.shared.json_safety import write_json_atomic as _write_json_report
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import hashlib
@@ -508,11 +509,6 @@ def _finalize_row(row: FinalizeRow, *, visuals_dpi: int, force: bool) -> str:
         }
     refined_group.attrs["visualizations"] = manifest
     return "rendered"
-
-
-def _write_json_report(path: Path, payload: Dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def main(argv: Optional[List[str]] = None) -> int:

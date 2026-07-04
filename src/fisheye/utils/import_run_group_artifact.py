@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.json_safety import write_json_atomic as _write_json
 from fisheye.shared.batch_logging import utc_now_compact as _utc_now_label
 import argparse
 import hashlib
@@ -45,11 +46,6 @@ def _read_json_strict(path: Path) -> Any:
         raise ValueError(f"non-finite JSON constant {value!r}")
 
     return json.loads(path.read_text(encoding="utf-8"), parse_constant=_reject_constant)
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=_json_default) + "\n", encoding="utf-8")
 
 
 def _write_zarr_group_metadata(path: Path) -> None:

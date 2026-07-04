@@ -12,6 +12,7 @@ The utility is intentionally conservative:
 from __future__ import annotations
 
 from fisheye.shared.batch_logging import utc_now_date as _utc_now_compact
+from fisheye.shared.json_safety import write_json_atomic
 import argparse
 import hashlib
 import json
@@ -922,13 +923,12 @@ def validate_outputs(
 
 
 def _write_json_report(path: Path, *, plans: Sequence[ArchivePlan], results: Sequence[ArchiveResult]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "plans": [asdict(plan) for plan in plans],
         "results": [asdict(result) for result in results],
     }
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    write_json_atomic(path, payload, trailing_newline=False)
 
 
 def _write_markdown_report(path: Path, *, plans: Sequence[ArchivePlan], results: Sequence[ArchiveResult]) -> None:

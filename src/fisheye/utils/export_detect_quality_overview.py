@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.json_safety import write_json_atomic as _write_json_report
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import json
@@ -168,11 +169,6 @@ def _collect_rows(
 
     rows.sort(key=lambda row: row.zarr_path)
     return rows
-
-
-def _write_json_report(path: Path, payload: Dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _load_artifact_bytes(row: ExportRow) -> bytes:

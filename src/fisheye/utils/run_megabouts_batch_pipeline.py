@@ -25,6 +25,8 @@ from typing import Any, Optional, Sequence
 
 import zarr
 
+from fisheye.shared.json_safety import write_json_atomic
+
 
 DEFAULT_SUBJECT_SHAPE_RUN = "subject_shape_v3_snout_medialjoin_batch_20260505"
 DEFAULT_TAIL_POSTURE_RUN = "tail_posture_megabouts_k11_batch_20260505"
@@ -409,13 +411,12 @@ def _run_archive_plan(
 
 
 def _write_json_report(path: Path, *, plans: Sequence[ArchivePlan], results: Sequence[ArchiveResult]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "plans": [asdict(plan) for plan in plans],
         "results": [asdict(result) for result in results],
     }
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    write_json_atomic(path, payload, trailing_newline=False)
 
 
 def _write_markdown_report(path: Path, *, plans: Sequence[ArchivePlan], results: Sequence[ArchiveResult]) -> None:

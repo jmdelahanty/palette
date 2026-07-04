@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.json_safety import write_json_atomic as _write_json
 from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import json
@@ -91,18 +92,6 @@ def _json_default(value: object) -> object:
     if isinstance(value, np.generic):
         return value.item()
     return str(value)
-
-
-def _write_json(path: Path, payload: Mapping[str, Any], *, overwrite: bool) -> None:
-    if path.exists() and not overwrite:
-        raise FileExistsError(f"Refusing to overwrite existing file: {path}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(
-        json.dumps(payload, indent=2, sort_keys=True, default=_json_default) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(tmp, path)
 
 
 def _default_output_zarr(recording_dir: Path, camera_serial: str | None) -> Path:

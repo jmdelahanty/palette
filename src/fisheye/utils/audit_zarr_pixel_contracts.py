@@ -8,6 +8,8 @@ sync-zarr hangs in sandboxed environments.
 from __future__ import annotations
 
 from fisheye.shared.batch_logging import utc_now as _utc_now
+from fisheye.shared.json_safety import write_json_atomic as _write_json
+from fisheye.shared.json_safety import write_jsonl_atomic
 import argparse
 import hashlib
 import json
@@ -1154,16 +1156,7 @@ def _write_jsonl(path: Path | None, rows: Sequence[Mapping[str, Any]]) -> None:
         for row in rows:
             print(json.dumps(_json_safe(row), sort_keys=True))
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(_json_safe(row), sort_keys=True) + "\n")
-
-
-def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
-    tmp_path = path.with_name(f".{path.name}.tmp")
-    tmp_path.write_text(json.dumps(_json_safe(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp_path.replace(path)
+    write_jsonl_atomic(path, [_json_safe(row) for row in rows])
 
 
 def _set_node_attr(path: Path, *, metadata_format: str | None, name: str, value: Any) -> tuple[bool, str]:
