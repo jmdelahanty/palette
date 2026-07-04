@@ -6,6 +6,9 @@ Default mode is dry-run. Use --apply to write changes.
 
 from __future__ import annotations
 
+from fisheye.shared.zarr_helpers import infer_zarr_use
+from functools import partial
+_infer_zarr_use = partial(infer_zarr_use, default="unknown")
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import json
@@ -167,21 +170,6 @@ def _as_mapping(value: Any) -> dict[str, Any]:
         if isinstance(payload, Mapping):
             return {str(key): _to_json_compatible(item) for key, item in payload.items()}
     return {}
-
-
-def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> str:
-    for key in ("zarr_use", "zarr_purpose"):
-        purpose = root.attrs.get(key)
-        if purpose is not None:
-            value = str(purpose).strip().lower()
-            if value in {"analysis", "training"}:
-                return value
-    name = zarr_path.name.lower()
-    if name.endswith("_analysis.zarr"):
-        return "analysis"
-    if name.endswith("_training.zarr"):
-        return "training"
-    return "unknown"
 
 
 def _normalize_storage_mode(value: Any) -> Optional[str]:

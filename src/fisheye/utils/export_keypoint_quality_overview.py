@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.zarr_helpers import infer_zarr_use
 from fisheye.shared.json_safety import write_json_atomic as _write_json_report
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
@@ -72,19 +73,6 @@ def _decode_text(value: object) -> Optional[str]:
     return text or None
 
 
-def _infer_zarr_use(zarr_path: Path, root_attrs: Dict[str, object]) -> str:
-    for key in ("zarr_use", "zarr_purpose"):
-        value = _decode_text(root_attrs.get(key))
-        if value and value.lower() in {"analysis", "training"}:
-            return value.lower()
-    name = zarr_path.name.lower()
-    if name.endswith("_analysis.zarr"):
-        return "analysis"
-    if name.endswith("_training.zarr"):
-        return "training"
-    return "unknown"
-
-
 def _resolve_refined_parent(root: zarr.Group) -> tuple[Optional[str], Optional[zarr.Group]]:
     for parent_name in REFINED_PARENT_NAMES:
         if parent_name in root:
@@ -142,7 +130,7 @@ def _collect_rows(
     rows: List[ExportRow] = []
     for zarr_path in _iter_zarr(roots, recursive=recursive):
         root_attrs = _read_zarr_attrs(zarr_path / "zarr.json")
-        zarr_use = _infer_zarr_use(zarr_path, root_attrs)
+        zarr_use = infer_zarr_use(root_attrs, zarr_path, default="unknown")
         if zarr_use_filter != "any" and zarr_use_filter != zarr_use:
             continue
 

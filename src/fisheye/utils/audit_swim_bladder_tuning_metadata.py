@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import json
 import os
@@ -11,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
+from fisheye.shared.zarr_helpers import infer_zarr_use
 from fisheye.utils.apply_tuning_by_camera import (
     SOURCE_SPECIFIC_SUBJECT_TUNING_CONTEXT_KEYS,
     _normalize_subject_mask_tuning_payload,
@@ -59,15 +60,6 @@ def _resolve_roots(paths: list[Path]) -> list[Path]:
     if env_root:
         return [Path(env_root)]
     return [DEFAULT_RECORDINGS_ROOT]
-
-
-def _infer_zarr_use(zarr_path: Path) -> Optional[str]:
-    name = zarr_path.name.lower()
-    if name.endswith("_analysis.zarr"):
-        return "analysis"
-    if name.endswith("_training.zarr"):
-        return "training"
-    return None
 
 
 def _read_json(path: Path) -> Mapping[str, Any]:
@@ -138,19 +130,10 @@ def _scan_zarr_path(
     zarr_use_filter: str,
     camera_ids: set[str],
 ) -> AuditRow:
-    zarr_use = _infer_zarr_use(zarr_path)
-    if zarr_use_filter != "any" and zarr_use != zarr_use_filter:
-        return AuditRow(
-            zarr_path=zarr_path,
-            camera_id=None,
-            zarr_use=zarr_use,
-            status="filtered_zarr_use",
-            reason=f"wanted={zarr_use_filter} found={zarr_use or 'unknown'}",
-        )
-
     try:
         attrs = _analysis_attrs(zarr_path)
     except FileNotFoundError:
+        zarr_use = infer_zarr_use(None, zarr_path)
         return AuditRow(
             zarr_path=zarr_path,
             camera_id=None,
@@ -158,12 +141,23 @@ def _scan_zarr_path(
             status="missing_analysis_metadata",
         )
     except Exception as exc:
+        zarr_use = infer_zarr_use(None, zarr_path)
         return AuditRow(
             zarr_path=zarr_path,
             camera_id=None,
             zarr_use=zarr_use,
             status="error",
             reason=str(exc),
+        )
+
+    zarr_use = infer_zarr_use(attrs, zarr_path)
+    if zarr_use_filter != "any" and zarr_use != zarr_use_filter:
+        return AuditRow(
+            zarr_path=zarr_path,
+            camera_id=None,
+            zarr_use=zarr_use,
+            status="filtered_zarr_use",
+            reason=f"wanted={zarr_use_filter} found={zarr_use or 'unknown'}",
         )
 
     camera_id = _camera_id_from_analysis_attrs(attrs)

@@ -6,7 +6,6 @@ Default mode is dry-run. Use --apply to write arrays and metadata.
 
 from __future__ import annotations
 
-from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import json
 import os
@@ -19,6 +18,8 @@ import numpy as np
 import zarr
 
 from fisheye.shared.row_lineage import normalize_chunks_for_data
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
+from fisheye.shared.zarr_helpers import infer_zarr_use
 
 
 IDENTITY_ARRAY_NAMES = ("source_refined_row_ids", "source_detect_row_index")
@@ -128,20 +129,6 @@ def _select_crop_runs(
         return sorted(path.name for path in crop_parent.iterdir() if path.is_dir())
     latest = _latest_crop_name(crop_parent)
     return [latest] if latest else []
-
-
-def _infer_zarr_use(zarr_path: Path) -> str:
-    attrs = _attrs(zarr_path)
-    for key in ("zarr_use", "zarr_purpose"):
-        raw = attrs.get(key)
-        if isinstance(raw, str) and raw.lower() in {"analysis", "training"}:
-            return raw.lower()
-    name = zarr_path.name.lower()
-    if name.endswith("_analysis.zarr"):
-        return "analysis"
-    if name.endswith("_training.zarr"):
-        return "training"
-    return "unknown"
 
 
 def build_crop_identity_payload(
@@ -415,7 +402,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     errors = 0
 
     for zarr_path in _iter_zarr(roots, recursive=bool(args.recursive)):
-        if args.zarr_use != "any" and _infer_zarr_use(zarr_path) != args.zarr_use:
+        zarr_use = infer_zarr_use(_attrs(zarr_path), zarr_path, default="unknown")
+        if args.zarr_use != "any" and zarr_use != args.zarr_use:
             continue
         scanned_zarrs += 1
         for crop_run in _select_crop_runs(zarr_path, requested=args.crop_run, limit=args.limit):

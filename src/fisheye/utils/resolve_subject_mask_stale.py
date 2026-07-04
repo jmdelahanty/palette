@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+from fisheye.shared.zarr_helpers import infer_zarr_use
+from functools import partial
+_infer_zarr_use = partial(infer_zarr_use, default="unknown")
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import os
@@ -23,22 +26,6 @@ def _load_paths_file(path: Path) -> List[Path]:
             continue
         items.append(Path(value))
     return items
-
-
-def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> str:
-    for key in ("zarr_use", "zarr_purpose"):
-        raw = root.attrs.get(key)
-        if raw is None:
-            continue
-        value = str(raw).strip().lower()
-        if value in {"analysis", "training"}:
-            return value
-    name = zarr_path.name.lower()
-    if name.endswith("_analysis.zarr"):
-        return "analysis"
-    if name.endswith("_training.zarr"):
-        return "training"
-    return "unknown"
 
 
 def main(argv: Optional[List[str]] = None) -> int:

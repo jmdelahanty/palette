@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+from fisheye.shared.zarr_helpers import infer_zarr_use
+from functools import partial
+_infer_zarr_use = partial(infer_zarr_use, default="unknown")
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import json
@@ -35,20 +38,6 @@ def _resolve_roots(paths: Optional[List[Path]]) -> List[Path]:
     if env_root:
         return [Path(env_root)]
     return [Path("/nvme1/recordings")]
-
-
-def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> str:
-    purpose = root.attrs.get("zarr_purpose")
-    if purpose is not None:
-        norm = str(purpose).strip().lower()
-        if norm in {"analysis", "training"}:
-            return norm
-    name = zarr_path.name.lower()
-    if name.endswith("_analysis.zarr"):
-        return "analysis"
-    if name.endswith("_training.zarr"):
-        return "training"
-    return "unknown"
 
 
 def _collect_rows(

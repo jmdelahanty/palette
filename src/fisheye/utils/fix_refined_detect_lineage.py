@@ -6,6 +6,9 @@ Default mode is dry-run. Use --apply to write changes.
 
 from __future__ import annotations
 
+from fisheye.shared.zarr_helpers import infer_zarr_use
+from functools import partial
+_infer_zarr_use = partial(infer_zarr_use, default="unknown")
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import json
@@ -66,22 +69,6 @@ def _normalize_str(value: Any) -> Optional[str]:
         return None
     text = str(value).strip()
     return text or None
-
-
-def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> str:
-    for key in ("zarr_use", "zarr_purpose"):
-        purpose = root.attrs.get(key)
-        if purpose is None:
-            continue
-        value = str(purpose).strip().lower()
-        if value in {"analysis", "training"}:
-            return value
-    name = zarr_path.name.lower()
-    if name.endswith("_analysis.zarr"):
-        return "analysis"
-    if name.endswith("_training.zarr"):
-        return "training"
-    return "unknown"
 
 
 def _group_keys(group: zarr.Group) -> list[str]:

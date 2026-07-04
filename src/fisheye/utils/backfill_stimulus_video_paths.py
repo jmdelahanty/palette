@@ -8,6 +8,7 @@ carry stimulus-run provenance attrs.
 
 from __future__ import annotations
 
+from fisheye.shared.zarr_helpers import infer_zarr_use as _infer_zarr_use
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 from dataclasses import dataclass
@@ -21,20 +22,6 @@ import zarr
 class BackfillResult:
     status: str
     reason: Optional[str] = None
-
-
-def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> Optional[str]:
-    purpose = root.attrs.get("zarr_purpose")
-    if purpose is not None:
-        value = str(purpose).strip().lower()
-        if value in {"analysis", "training"}:
-            return value
-    name = zarr_path.name.lower()
-    if name.endswith("_analysis.zarr"):
-        return "analysis"
-    if name.endswith("_training.zarr"):
-        return "training"
-    return None
 
 
 def _resolve_rendered_video_from_source_h5(source_h5: object) -> Optional[Path]:

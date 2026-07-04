@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.zarr_helpers import infer_zarr_use
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import json
@@ -38,20 +39,6 @@ def _resolve_roots(paths: Optional[List[Path]]) -> List[Path]:
     if env_root:
         return [Path(env_root)]
     return [Path("/nvme1/recordings")]
-
-
-def _infer_zarr_use(zarr_path: Path, root: zarr.Group) -> str:
-    purpose = root.attrs.get("zarr_purpose")
-    if purpose is not None:
-        norm = str(purpose).strip().lower()
-        if norm in {"analysis", "training"}:
-            return norm
-    name = zarr_path.name.lower()
-    if name.endswith("_analysis.zarr"):
-        return "analysis"
-    if name.endswith("_training.zarr"):
-        return "training"
-    return "unknown"
 
 
 def _subgroups_to_validate(refined_run: zarr.Group) -> List[str]:
@@ -173,7 +160,7 @@ def _collect_issues(
             )
             continue
 
-        zarr_use = _infer_zarr_use(zarr_path, root)
+        zarr_use = infer_zarr_use(root, zarr_path, default="unknown")
         if zarr_use_filter != "any" and zarr_use != zarr_use_filter:
             continue
         if "refined_detect_runs" not in root:

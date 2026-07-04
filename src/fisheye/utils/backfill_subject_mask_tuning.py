@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.zarr_helpers import infer_zarr_use as _infer_zarr_use
 from fisheye.shared.batch_logging import utc_now as _utc_now
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
@@ -42,19 +43,6 @@ def _normalize_component_name(value: object) -> Optional[str]:
         "swim-bladder": "swim_bladder",
     }
     return aliases.get(text, text if text in SUPPORTED_COMPONENTS else None)
-
-
-def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> Optional[str]:
-    for key in ("zarr_use", "zarr_purpose"):
-        value = normalize_attr(root.attrs.get(key))
-        if value in {"analysis", "training"}:
-            return value
-    name = zarr_path.name.lower()
-    if name.endswith("_analysis.zarr"):
-        return "analysis"
-    if name.endswith("_training.zarr"):
-        return "training"
-    return None
 
 
 def _normalize_subject_tuning_payload(raw: object) -> dict[str, Any]:

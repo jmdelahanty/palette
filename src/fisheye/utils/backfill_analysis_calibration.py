@@ -9,6 +9,7 @@ available, then by the affiliated ``raw/*.h5`` file under the recording folder.
 
 from __future__ import annotations
 
+from fisheye.shared.zarr_helpers import infer_zarr_use as _infer_zarr_use
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 from dataclasses import dataclass
@@ -60,20 +61,6 @@ def _group_keys(group: zarr.Group) -> list[str]:
         except Exception:
             pass
     return sorted(str(key) for key in group.keys() if isinstance(group.get(key), zarr.Group))
-
-
-def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> Optional[str]:
-    purpose = root.attrs.get("zarr_purpose")
-    if purpose is not None:
-        value = str(purpose).strip().lower()
-        if value in {"analysis", "training"}:
-            return value
-    name = zarr_path.name.lower()
-    if name.endswith("_analysis.zarr"):
-        return "analysis"
-    if name.endswith("_training.zarr"):
-        return "training"
-    return None
 
 
 def _get_analysis_calibration(root: zarr.Group) -> Optional[zarr.Group]:

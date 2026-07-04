@@ -6,6 +6,7 @@ Default behavior is dry-run. Use --apply to write visualization artifacts.
 
 from __future__ import annotations
 
+from fisheye.shared.zarr_helpers import infer_zarr_use
 from fisheye.shared.json_safety import write_json_atomic as _write_json_report
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
@@ -123,20 +124,6 @@ def _read_zarr_attrs(zarr_json_path: Path) -> Dict[str, object]:
     return attrs if isinstance(attrs, dict) else {}
 
 
-def _infer_zarr_use(zarr_path: Path, root_attrs: Dict[str, object]) -> str:
-    for key in ("zarr_use", "zarr_purpose"):
-        purpose = root_attrs.get(key)
-        value = _decode_text_lower(purpose)
-        if value in {"analysis", "training"}:
-            return value
-    name = zarr_path.name.lower()
-    if name.endswith("_analysis.zarr"):
-        return "analysis"
-    if name.endswith("_training.zarr"):
-        return "training"
-    return "unknown"
-
-
 def _resolve_refined_parent(zarr_path: Path) -> tuple[Optional[Path], Optional[str]]:
     for parent_name in REFINED_PARENT_NAMES:
         parent_path = zarr_path / parent_name
@@ -248,7 +235,7 @@ def _build_rows(
 
     for zarr_path in _iter_zarr(roots, recursive=recursive):
         root_attrs = _read_zarr_attrs(zarr_path / "zarr.json")
-        zarr_use = _infer_zarr_use(zarr_path, root_attrs)
+        zarr_use = infer_zarr_use(root_attrs, zarr_path, default="unknown")
         if zarr_use_filter != "any" and zarr_use != zarr_use_filter:
             continue
 

@@ -7,6 +7,7 @@ projection for each selected archive.
 
 from __future__ import annotations
 
+from fisheye.shared.zarr_helpers import infer_zarr_use as _infer_zarr_use
 from fisheye.shared.batch_logging import utc_now_z as _utc_now
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
@@ -81,19 +82,6 @@ class EyeLayout:
     kind: str
     left_idx: Optional[int] = None
     right_idx: Optional[int] = None
-
-
-def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> Optional[str]:
-    for key in ("zarr_use", "zarr_purpose"):
-        value = normalize_attr(root.attrs.get(key))
-        if value in {"analysis", "training"}:
-            return value
-    name = zarr_path.name.lower()
-    if name.endswith("_analysis.zarr"):
-        return "analysis"
-    if name.endswith("_training.zarr"):
-        return "training"
-    return None
 
 
 def _resolve_source(

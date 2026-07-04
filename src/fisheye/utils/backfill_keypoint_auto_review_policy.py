@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from fisheye.shared.zarr_helpers import infer_zarr_use as _infer_zarr_use
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import json
@@ -54,25 +55,6 @@ def _as_int(value: object) -> Optional[int]:
 def _coerce_mapping(value: object) -> Optional[Mapping[str, object]]:
     if isinstance(value, Mapping):
         return value
-    return None
-
-
-def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> Optional[str]:
-    purpose = _decode_text(root.attrs.get("zarr_purpose"))
-    if purpose is not None:
-        value = purpose.lower()
-        if value in {"analysis", "training"}:
-            return value
-    use_attr = _decode_text(root.attrs.get("zarr_use"))
-    if use_attr is not None:
-        value = use_attr.lower()
-        if value in {"analysis", "training"}:
-            return value
-    name = zarr_path.name.lower()
-    if name.endswith("_analysis.zarr"):
-        return "analysis"
-    if name.endswith("_training.zarr"):
-        return "training"
     return None
 
 

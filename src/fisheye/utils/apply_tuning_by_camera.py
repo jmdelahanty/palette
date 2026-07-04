@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from fisheye.shared.zarr_helpers import infer_zarr_use as _infer_zarr_use
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 from copy import deepcopy
@@ -95,19 +96,6 @@ def _open_group(path: Path, mode: str) -> zarr.Group:
         return zarr.open_group(str(path), mode=mode, use_consolidated=False)
     except TypeError:
         return zarr.open_group(str(path), mode=mode)
-
-
-def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> Optional[str]:
-    for key in ("zarr_use", "zarr_purpose"):
-        raw = _normalize_attr(root.attrs.get(key))
-        if raw in {"analysis", "training"}:
-            return raw
-    name = zarr_path.name.lower()
-    if name.endswith("_analysis.zarr"):
-        return "analysis"
-    if name.endswith("_training.zarr"):
-        return "training"
-    return None
 
 
 def _parse_keys(keys: Optional[str]) -> List[str]:
