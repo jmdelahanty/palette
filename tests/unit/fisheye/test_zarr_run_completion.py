@@ -91,6 +91,7 @@ def _add_valid_detect_arrays(run: FakeGroup) -> None:
     run["class_ids"] = FakeArray((2,), "int32")
     run["frame_counts"] = FakeArray((3,), "int32")
     run["n_detections"] = FakeArray((3,), "int32")
+    run["instance_key"] = FakeArray((2,), "uint64")
 
 
 def _add_valid_detect_quality_arrays(run: FakeGroup) -> None:
