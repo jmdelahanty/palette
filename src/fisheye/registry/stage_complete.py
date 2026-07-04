@@ -19,7 +19,12 @@ from .step_cascade import invalidate_downstream_steps
 from ..shared.zarr.stage_arrays import STAGES, StageSpec, validate_run
 from ..shared.stage_run_groups import STAGE_RUN_PARENTS
 from ..shared.zarr_helpers import open_zarr_group_direct
+from ..shared.run_provenance import CLI_RUN_PROVENANCE_ATTR
+from ..shared.run_provenance import RUN_PROVENANCE_ATTR
+from ..shared.run_provenance import validate_run_provenance
+from ..shared.zarr_run_completion import RUN_PROVENANCE_BYPASS_ATTR
 from ..shared.zarr_run_completion import is_run_complete_in_parent
+from ..shared.zarr_run_completion import requires_completion_provenance
 
 RegistryInput = Optional[Union[Registry, Path, str]]
 ResolveDatasetIdFn = Callable[[zarr.Group, Path], Tuple[str, Optional[str]]]
@@ -207,9 +212,46 @@ def _validate_completion_run_group(
             "the Zarr run-completion marker is not complete"
         )
 
+    provenance_details: dict[str, Any] = {
+        "run_provenance_validation_enforced": requires_completion_provenance(parent_group),
+    }
+    if requires_completion_provenance(parent_group):
+        attrs = getattr(run_group, "attrs", {})
+        bypass = attrs.get(RUN_PROVENANCE_BYPASS_ATTR)
+        if isinstance(bypass, Mapping):
+            provenance_details.update(
+                {
+                    "run_provenance_validation_status": "bypassed",
+                    "run_provenance_bypass": dict(bypass),
+                }
+            )
+        else:
+            payload = attrs.get(RUN_PROVENANCE_ATTR)
+            source = RUN_PROVENANCE_ATTR
+            if not isinstance(payload, Mapping):
+                payload = attrs.get(CLI_RUN_PROVENANCE_ATTR)
+                source = CLI_RUN_PROVENANCE_ATTR
+            result = validate_run_provenance(payload if isinstance(payload, Mapping) else None)
+            provenance_details.update(
+                {
+                    "run_provenance_validation_status": "ok" if result.valid else "invalid",
+                    "run_provenance_validation_source": source if isinstance(payload, Mapping) else None,
+                }
+            )
+            if result.errors:
+                provenance_details["run_provenance_validation_errors"] = list(result.errors)
+            if not result.valid:
+                raise RuntimeError(
+                    f"Refusing to mark {step_name} run {run_name!r} ok because "
+                    f"required run provenance failed validation: {'; '.join(result.errors)}"
+                )
+    else:
+        provenance_details["run_provenance_validation_status"] = "not_required"
+
     spec = _stage_array_spec_for_completion(step_name)
     if spec is None:
         return {
+            **provenance_details,
             "stage_array_validation_status": "no_spec",
             "stage_array_validation_enforced": False,
             "stage_array_validation_warnings": [
@@ -220,6 +262,7 @@ def _validate_completion_run_group(
     enforced = spec.stage_name in _ENFORCE_STAGE_ARRAY_VALIDATION_FOR
     result = validate_run(run_group, spec)
     details: dict[str, Any] = {
+        **provenance_details,
         "stage_array_validation_status": "ok" if result.valid else "invalid",
         "stage_array_validation_stage": spec.stage_name,
         "stage_array_validation_enforced": enforced,

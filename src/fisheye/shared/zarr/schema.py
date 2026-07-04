@@ -17,8 +17,7 @@ from pathlib import Path
 import platform
 from rich.console import Console
 
-# Import our existing system utilities
-from fisheye.utils.system import (
+from fisheye.shared.system_metadata import (
     get_git_info,
     get_platform_info,
     get_gpu_info,
@@ -344,7 +343,8 @@ def get_run_group(
     root: zarr.Group, 
     stage_name: str, 
     console: Optional[Console] = None,
-    create_new: bool = True
+    create_new: bool = True,
+    completion_epoch: Optional[int] = None,
 ) -> Tuple[zarr.Group, str]:
     """
     Get or create a run group for a pipeline stage with timestamp.
@@ -363,7 +363,11 @@ def get_run_group(
     parent_group_name = f'{stage_name}_runs'
     
     if create_new:
-        parent_group = require_runs_parent(root, parent_group_name)
+        parent_group = require_runs_parent(
+            root,
+            parent_group_name,
+            completion_epoch=completion_epoch,
+        )
     else:
         if parent_group_name not in root:
             raise ValueError(f"No runs found for {stage}")

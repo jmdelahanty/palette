@@ -10,8 +10,12 @@ for read compatibility until the backfill tool verifies and stamps them.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator, Mapping, Optional
 import warnings
+
+from fisheye.shared.run_provenance import CLI_RUN_PROVENANCE_ATTR
+from fisheye.shared.run_provenance import RUN_PROVENANCE_ATTR
+from fisheye.shared.run_provenance import validate_run_provenance
 
 RUN_COMPLETION_CONTRACT = "palette.zarr_run_completion.v1"
 RUN_COMPLETION_CONTRACT_ATTR = "palette_run_completion_contract"
@@ -26,6 +30,8 @@ AUTHORITATIVE_RUN_ATTR = "authoritative_run"
 AUTHORITATIVE_RUN_PROVENANCE_ATTR = "authoritative_run_provenance"
 COMPLETION_EPOCH_ATTR = "palette_completion_epoch"
 COMPLETION_EPOCH_STRICT = 1
+COMPLETION_EPOCH_REQUIRE_PROVENANCE = 2
+RUN_PROVENANCE_BYPASS_ATTR = "run_provenance_enforcement_bypass"
 
 RUN_STATUS_RUNNING = "running"
 RUN_STATUS_COMPLETE = "complete"
@@ -54,6 +60,13 @@ def effective_legacy_default(parent_group: Any) -> bool:
     return not (epoch is not None and epoch >= COMPLETION_EPOCH_STRICT)
 
 
+def requires_completion_provenance(parent_group: Any) -> bool:
+    """Return whether a runs-parent requires run provenance to finalize."""
+
+    epoch = _coerce_int(getattr(parent_group, "attrs", {}).get(COMPLETION_EPOCH_ATTR))
+    return bool(epoch is not None and epoch >= COMPLETION_EPOCH_REQUIRE_PROVENANCE)
+
+
 def _has_children(parent_group: Any) -> bool:
     """Conservatively report whether a runs-parent already has child groups."""
 
@@ -63,8 +76,18 @@ def _has_children(parent_group: Any) -> bool:
         return True
 
 
-def require_runs_parent(root: Any, name: str) -> Any:
-    """Return a runs-parent group, stamping new empty parents as strict."""
+def require_runs_parent(
+    root: Any,
+    name: str,
+    *,
+    completion_epoch: Optional[int] = None,
+) -> Any:
+    """Return a runs-parent group, stamping new empty parents as strict.
+
+    ``completion_epoch`` is an opt-in for families whose writers are ready for
+    newer completion policies. The default remains epoch 1 so under-instrumented
+    writers do not start failing merely because they create a new parent.
+    """
 
     if hasattr(root, "require_group"):
         parent = root.require_group(name)
@@ -76,8 +99,73 @@ def require_runs_parent(root: Any, name: str) -> Any:
         raise AttributeError(f"Root object does not support require_group/create_group for {name!r}.")
     attrs = parent.attrs
     if attrs.get(COMPLETION_EPOCH_ATTR) is None and not _has_children(parent):
-        attrs[COMPLETION_EPOCH_ATTR] = COMPLETION_EPOCH_STRICT
+        attrs[COMPLETION_EPOCH_ATTR] = (
+            int(completion_epoch)
+            if completion_epoch is not None
+            else COMPLETION_EPOCH_STRICT
+        )
     return parent
+
+
+def _candidate_run_provenance(run_group: Any, explicit: Optional[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    if isinstance(explicit, Mapping):
+        return explicit
+    attrs = getattr(run_group, "attrs", {})
+    for attr_name in (RUN_PROVENANCE_ATTR, CLI_RUN_PROVENANCE_ATTR):
+        value = attrs.get(attr_name)
+        if isinstance(value, Mapping):
+            return value
+    return None
+
+
+def _record_run_provenance_bypass(
+    run_group: Any,
+    *,
+    reason: str,
+    errors: tuple[str, ...],
+) -> None:
+    run_group.attrs[RUN_PROVENANCE_BYPASS_ATTR] = {
+        "bypassed_at_utc": utc_now_iso(),
+        "reason": str(reason),
+        "errors": list(errors),
+    }
+
+
+def _validate_or_record_run_provenance(
+    run_group: Any,
+    *,
+    parent_group: Optional[Any],
+    run_name: Optional[str],
+    run_provenance: Optional[Mapping[str, Any]],
+    allow_missing_run_provenance: bool,
+    missing_run_provenance_reason: Optional[str],
+) -> None:
+    if parent_group is None or not requires_completion_provenance(parent_group):
+        if isinstance(run_provenance, Mapping):
+            run_group.attrs[RUN_PROVENANCE_ATTR] = validate_run_provenance(run_provenance).normalized or dict(run_provenance)
+        return
+
+    candidate = _candidate_run_provenance(run_group, run_provenance)
+    result = validate_run_provenance(candidate)
+    if result.valid:
+        run_group.attrs[RUN_PROVENANCE_ATTR] = result.normalized or dict(candidate or {})
+        return
+
+    if allow_missing_run_provenance:
+        reason = str(missing_run_provenance_reason or "").strip()
+        if not reason:
+            raise RuntimeError(
+                "Refusing run-provenance enforcement bypass without "
+                "missing_run_provenance_reason"
+            )
+        _record_run_provenance_bypass(run_group, reason=reason, errors=result.errors)
+        return
+
+    label = f" run {run_name!r}" if run_name is not None else ""
+    raise RuntimeError(
+        f"Refusing to mark{label} complete because parent epoch requires "
+        f"valid run provenance: {'; '.join(result.errors)}"
+    )
 
 
 def mark_run_started(
@@ -110,9 +198,20 @@ def mark_run_complete(
     parent_group: Optional[Any] = None,
     run_name: Optional[str] = None,
     completed_at_utc: Optional[str] = None,
+    run_provenance: Optional[Mapping[str, Any]] = None,
+    allow_missing_run_provenance: bool = False,
+    missing_run_provenance_reason: Optional[str] = None,
 ) -> None:
     """Mark a run as complete and then publish it as latest when requested."""
 
+    _validate_or_record_run_provenance(
+        run_group,
+        parent_group=parent_group,
+        run_name=run_name,
+        run_provenance=run_provenance,
+        allow_missing_run_provenance=allow_missing_run_provenance,
+        missing_run_provenance_reason=missing_run_provenance_reason,
+    )
     attrs = run_group.attrs
     attrs[RUN_COMPLETION_CONTRACT_ATTR] = RUN_COMPLETION_CONTRACT
     attrs[RUN_COMPLETION_STATUS_ATTR] = RUN_STATUS_COMPLETE
