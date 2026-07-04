@@ -13,6 +13,39 @@ import zarr
 from fisheye.shared.refined_detect_resolution import resolve_detect_review_target
 
 
+def _normalize_state(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def _approve_refined_detect_authority(
+    *,
+    zarr_path: Path,
+    refined_run_name: str,
+    reviewer: str | None,
+    notes: str | None,
+) -> dict[str, object]:
+    from fisheye.cli.palette import ApproveRequest, approve
+
+    envelope = approve(
+        ApproveRequest(
+            recording=zarr_path,
+            stage="refined_detect",
+            run=refined_run_name,
+            approved_by=reviewer,
+            note=notes or "detect review status backfill",
+            apply=True,
+        )
+    )
+    if str(envelope.get("status") or "").strip().lower() != "ok":
+        reason = envelope.get("reason_code") or "UNKNOWN"
+        hints = envelope.get("next_hints") or []
+        raise RuntimeError(
+            "could not set authoritative refined detect run "
+            f"{refined_run_name!r} for {zarr_path}: {reason}; hints={hints}"
+        )
+    return envelope
+
+
 def _pick_refined_parent(root: zarr.Group) -> Optional[zarr.Group]:
     if "refined_detect_runs" in root:
         return root["refined_detect_runs"]
@@ -140,8 +173,25 @@ def main(argv: Optional[list[str]] = None) -> int:
             payload.setdefault("notes", args.notes)
 
         if args.apply:
-            refined_run.attrs["detect_review_status"] = payload
-            refined_parent.attrs["detect_review_status_latest"] = refined_run_name
+            try:
+                approval: dict[str, object] | None = None
+                if _normalize_state(payload.get("state")) == "approved":
+                    approval = _approve_refined_detect_authority(
+                        zarr_path=zarr_path,
+                        refined_run_name=refined_run_name,
+                        reviewer=args.reviewer,
+                        notes=args.notes,
+                    )
+                    payload["authoritative_approval"] = {
+                        "status": approval.get("status"),
+                        "reason_code": approval.get("reason_code"),
+                        "run": approval.get("run"),
+                    }
+                refined_run.attrs["detect_review_status"] = payload
+            except Exception as exc:
+                print(f"ERROR updating {zarr_path} ({refined_run_name}): {exc}")
+                failed += 1
+                continue
             print(f"UPDATED {zarr_path} ({refined_run_name})")
             print(f"  review_status: {payload}")
         else:
