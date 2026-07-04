@@ -33,6 +33,12 @@ Branch from current `sun` (re-verify lines; `sun` moves between turns):
 2. **`tune/detect_review.py:1430`** (TUI review) — pure legacy writer, no authoritative
    call in the file. Convert to the same `approve`/`set_authoritative_run` path the
    backend uses, then drop the pointer write.
+   **Added scope (2026-07-04, curation instance-key slice):** this file also calls
+   `write_curated_refined_detect_surfaces` WITHOUT instance-key arguments, so its
+   curated writes are stamped `instance_key_status="missing"` with a warning. While
+   you are converting this file, wire the instance-key inputs through (mirror how
+   `update_curated_refined_detect_rows` → `write_curated_refined_detect_root` does
+   it) so TUI-curated rowsets carry keys. One agent, one pass over the file.
 3. **`utils/accept_detect_review.py:329`** and **`utils/set_detect_review_status.py:130`**
    — `--no-latest`-guarded CLIs, pure legacy writers. Route approval through `approve`;
    stop writing the pointer. Update `--no-latest` help/flag semantics accordingly (a
@@ -70,7 +76,7 @@ Branch from current `sun` (re-verify lines; `sun` moves between turns):
 - Focused tests for every touched file, plus the review-approval fail-closed tests.
 - Full non-GPU suite green on branch tip rebased on current `sun`
   (`~/miniconda3/envs/palette-py311/bin/python -m pytest tests -m "not gpu"`;
-  baseline 3320 passed / 2 skipped / 2 deselected — recount, it grows).
+  baseline 3346 passed / 2 skipped / 2 deselected as of 182d1be — recount, it grows).
 - Grep proof in report: remaining `detect_review_status_latest` assignment sites are
   exactly the two annotated migrations + nothing else in `src/`.
 
