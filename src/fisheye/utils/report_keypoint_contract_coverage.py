@@ -433,7 +433,7 @@ def print_text_report(report: Mapping[str, Any], *, limit: int = 40) -> None:
             )
 
 
-def _write_jsonl(path: Path, report: Mapping[str, Any]) -> None:
+def _write_contract_report_jsonl(path: Path, report: Mapping[str, Any]) -> None:
     write_jsonl_atomic(
         path,
         [*report.get("groups", []), *report.get("rows", [])],
@@ -512,7 +512,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             encoding="utf-8",
         )
     if args.output_jsonl:
-        _write_jsonl(args.output_jsonl.expanduser().resolve(), report)
+        _write_contract_report_jsonl(args.output_jsonl.expanduser().resolve(), report)
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:

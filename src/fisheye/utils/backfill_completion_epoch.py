@@ -774,7 +774,7 @@ def _write_failed_parent_rows(report: Mapping[str, Any]) -> list[dict[str, Any]]
     return rows
 
 
-def _write_jsonl_rows(rows: Sequence[Mapping[str, Any]], output_jsonl: str | Path | None) -> None:
+def _write_report_jsonl_rows(rows: Sequence[Mapping[str, Any]], output_jsonl: str | Path | None) -> None:
     if not output_jsonl:
         return
     path = Path(output_jsonl).expanduser()
@@ -1194,8 +1194,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 expectation_errors=expectation_errors,
             )
             payload = _summary_payload(preflight) if bool(args.summary_only) else preflight
-            _write_jsonl_rows(_blocked_parent_rows(preflight), args.blocked_jsonl)
-            _write_jsonl_rows(_write_failed_parent_rows(preflight), args.write_failed_jsonl)
+            _write_report_jsonl_rows(_blocked_parent_rows(preflight), args.blocked_jsonl)
+            _write_report_jsonl_rows(_write_failed_parent_rows(preflight), args.write_failed_jsonl)
             _write_report(payload, args.output_json, emit_stdout=not bool(args.no_stdout))
             raise SystemExit(str(preflight["apply_abort_message"]))
 
@@ -1210,8 +1210,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 expected_counts=expected_counts,
             )
             payload = _summary_payload(preflight) if bool(args.summary_only) else preflight
-            _write_jsonl_rows(_blocked_parent_rows(preflight), args.blocked_jsonl)
-            _write_jsonl_rows(_write_failed_parent_rows(preflight), args.write_failed_jsonl)
+            _write_report_jsonl_rows(_blocked_parent_rows(preflight), args.blocked_jsonl)
+            _write_report_jsonl_rows(_write_failed_parent_rows(preflight), args.write_failed_jsonl)
             _write_report(payload, args.output_json, emit_stdout=not bool(args.no_stdout))
             raise SystemExit(str(preflight["apply_abort_message"]))
 
@@ -1227,8 +1227,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 expected_counts=expected_counts,
             )
             payload: Mapping[str, Any] = _summary_payload(preflight) if bool(args.summary_only) else preflight
-            _write_jsonl_rows(_blocked_parent_rows(preflight), args.blocked_jsonl)
-            _write_jsonl_rows(_write_failed_parent_rows(preflight), args.write_failed_jsonl)
+            _write_report_jsonl_rows(_blocked_parent_rows(preflight), args.blocked_jsonl)
+            _write_report_jsonl_rows(_write_failed_parent_rows(preflight), args.write_failed_jsonl)
             _write_report(payload, args.output_json, emit_stdout=not bool(args.no_stdout))
             raise SystemExit(str(preflight["apply_abort_message"]))
 
@@ -1254,8 +1254,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             expectation_errors=expectation_errors,
         )
         payload = _summary_payload(report) if bool(args.summary_only) else report
-        _write_jsonl_rows(_blocked_parent_rows(report), args.blocked_jsonl)
-        _write_jsonl_rows(_write_failed_parent_rows(report), args.write_failed_jsonl)
+        _write_report_jsonl_rows(_blocked_parent_rows(report), args.blocked_jsonl)
+        _write_report_jsonl_rows(_write_failed_parent_rows(report), args.write_failed_jsonl)
         _write_report(payload, args.output_json, emit_stdout=not bool(args.no_stdout))
         raise SystemExit(str(report["apply_abort_message"]))
 
@@ -1268,8 +1268,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "is expected to be idempotent after fixing the write failure."
         )
         payload = _summary_payload(report) if bool(args.summary_only) else report
-        _write_jsonl_rows(_blocked_parent_rows(report), args.blocked_jsonl)
-        _write_jsonl_rows(_write_failed_parent_rows(report), args.write_failed_jsonl)
+        _write_report_jsonl_rows(_blocked_parent_rows(report), args.blocked_jsonl)
+        _write_report_jsonl_rows(_write_failed_parent_rows(report), args.write_failed_jsonl)
         _write_report(payload, args.output_json, emit_stdout=not bool(args.no_stdout))
         raise SystemExit(str(report["apply_failure_message"]))
 
@@ -1287,14 +1287,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         report["post_apply_expectation_errors"] = post_apply_expectation_errors
         payload = _summary_payload(report) if bool(args.summary_only) else report
-        _write_jsonl_rows(_blocked_parent_rows(report), args.blocked_jsonl)
-        _write_jsonl_rows(_write_failed_parent_rows(report), args.write_failed_jsonl)
+        _write_report_jsonl_rows(_blocked_parent_rows(report), args.blocked_jsonl)
+        _write_report_jsonl_rows(_write_failed_parent_rows(report), args.write_failed_jsonl)
         _write_report(payload, args.output_json, emit_stdout=not bool(args.no_stdout))
         raise SystemExit(str(report["apply_failure_message"]))
 
     payload: Mapping[str, Any] = _summary_payload(report) if bool(args.summary_only) else report
-    _write_jsonl_rows(_blocked_parent_rows(report), args.blocked_jsonl)
-    _write_jsonl_rows(_write_failed_parent_rows(report), args.write_failed_jsonl)
+    _write_report_jsonl_rows(_blocked_parent_rows(report), args.blocked_jsonl)
+    _write_report_jsonl_rows(_write_failed_parent_rows(report), args.write_failed_jsonl)
     _write_report(payload, args.output_json, emit_stdout=not bool(args.no_stdout))
     return 0
 

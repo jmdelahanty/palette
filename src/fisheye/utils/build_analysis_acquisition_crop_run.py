@@ -686,7 +686,7 @@ def _batch_from_registry(
     return results
 
 
-def _write_jsonl(path: Path, rows: Sequence[BuildAnalysisAcquisitionCropRunResult]) -> None:
+def _write_acquisition_crop_results_jsonl(path: Path, rows: Sequence[BuildAnalysisAcquisitionCropRunResult]) -> None:
     write_jsonl_atomic(Path(path), [asdict(row) for row in rows])
 
 
@@ -730,7 +730,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         payload: Any = [asdict(result) for result in results]
         if args.output_jsonl:
-            _write_jsonl(args.output_jsonl, results)
+            _write_acquisition_crop_results_jsonl(args.output_jsonl, results)
         if args.output_json:
             args.output_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         if args.json:

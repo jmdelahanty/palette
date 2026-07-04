@@ -209,7 +209,7 @@ def _plan_one(
     )
 
 
-def _write_json_report(
+def _write_sparse_migration_json_report(
     path: Path,
     *,
     rows: list[dict[str, Any]],
@@ -377,7 +377,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"  {key}: {summary[key]}")
         print("\nUse --apply to run migration.")
         if args.json_report:
-            _write_json_report(args.json_report, rows=rows, summary=summary, mode=mode)
+            _write_sparse_migration_json_report(args.json_report, rows=rows, summary=summary, mode=mode)
         return 0
 
     print("Applying refined-detect sparse migration:")
@@ -451,7 +451,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     for key in ("scanned", "ok", "skipped", "missing", "conflict", "error", "applied", "failed_apply"):
         print(f"  {key}: {summary[key]}")
     if args.json_report:
-        _write_json_report(args.json_report, rows=rows, summary=summary, mode=mode)
+        _write_sparse_migration_json_report(args.json_report, rows=rows, summary=summary, mode=mode)
     return 0 if failed_apply == 0 else 1
 
 

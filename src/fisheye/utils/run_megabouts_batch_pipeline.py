@@ -410,7 +410,7 @@ def _run_archive_plan(
     return result
 
 
-def _write_json_report(path: Path, *, plans: Sequence[ArchivePlan], results: Sequence[ArchiveResult]) -> None:
+def _write_batch_json_report(path: Path, *, plans: Sequence[ArchivePlan], results: Sequence[ArchiveResult]) -> None:
     payload = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "plans": [asdict(plan) for plan in plans],
@@ -612,7 +612,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         results = [ordered_results[idx] for idx in sorted(ordered_results)]
 
     if args.json_report:
-        _write_json_report(args.json_report, plans=plans, results=results)
+        _write_batch_json_report(args.json_report, plans=plans, results=results)
     if args.markdown_report:
         _write_markdown_report(args.markdown_report, plans=plans, results=results)
 

@@ -1151,7 +1151,7 @@ def _crop_contract_report(rows: Sequence[Mapping[str, Any]], *, candidates: Sequ
     }
 
 
-def _write_jsonl(path: Path | None, rows: Sequence[Mapping[str, Any]]) -> None:
+def _write_audit_jsonl(path: Path | None, rows: Sequence[Mapping[str, Any]]) -> None:
     if path is None:
         for row in rows:
             print(json.dumps(_json_safe(row), sort_keys=True))
@@ -1700,7 +1700,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.apply_source_video_ffprobe_colorimetry:
         rows.extend(apply_source_video_ffprobe_colorimetry(rows, ffprobe_bin=str(args.ffprobe_bin)))
     if args.source_video_backfill_plan_jsonl is not None:
-        _write_jsonl(args.source_video_backfill_plan_jsonl, source_video_backfill_plan_rows(rows))
+        _write_audit_jsonl(args.source_video_backfill_plan_jsonl, source_video_backfill_plan_rows(rows))
     summary = _summary(rows, candidates=candidates)
     if args.crop_contract_report_json is not None:
         args.crop_contract_report_json.parent.mkdir(parents=True, exist_ok=True)
@@ -1708,7 +1708,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             json.dumps(_json_safe(_crop_contract_report(rows, candidates=candidates)), indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-    _write_jsonl(args.output_jsonl, rows)
+    _write_audit_jsonl(args.output_jsonl, rows)
     if args.summary_json is not None:
         args.summary_json.parent.mkdir(parents=True, exist_ok=True)
         args.summary_json.write_text(json.dumps(_json_safe(summary), indent=2, sort_keys=True) + "\n", encoding="utf-8")
