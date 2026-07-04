@@ -55,6 +55,90 @@ def test_reconcile_keypoint_mask_row_identity_skips_when_legacy_ids_missing() ->
     assert summary["mask_has_source_crop_row_ids"] is True
 
 
+def test_reconcile_keypoint_mask_row_identity_rejects_keypoint_row_count_mismatch() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"keypoints_runs/kp_001: keypoint source_crop_row_ids has 2 rows, expected 3",
+    ):
+        reconcile_keypoint_mask_row_identity(
+            keypoint_source_crop_row_ids=np.asarray([4, 8], dtype=np.int64),
+            mask_source_crop_row_ids=np.asarray([4, 8, 9], dtype=np.int64),
+            expected_rows=3,
+            keypoint_run_name="kp_001",
+            mask_run_name="subject_001",
+        )
+
+
+def test_reconcile_keypoint_mask_row_identity_rejects_mask_row_count_mismatch() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"mask source_crop_row_ids has 4 rows, expected 3",
+    ):
+        reconcile_keypoint_mask_row_identity(
+            keypoint_source_crop_row_ids=np.asarray([4, 8, 9], dtype=np.int64),
+            mask_source_crop_row_ids=np.asarray([4, 8, 9, 11], dtype=np.int64),
+            expected_rows=3,
+            keypoint_run_name="kp_001",
+            mask_run_name="subject_001",
+        )
+
+
+def test_reconcile_keypoint_mask_row_identity_skips_when_mask_ids_missing() -> None:
+    summary = reconcile_keypoint_mask_row_identity(
+        keypoint_source_crop_row_ids=np.asarray([0, 1], dtype=np.int64),
+        mask_source_crop_row_ids=None,
+        expected_rows=2,
+        keypoint_run_name="kp_001",
+        mask_run_name="legacy_subject",
+    )
+
+    assert summary["row_identity_check"] == "skipped_missing_source_crop_row_ids"
+    assert summary["keypoint_has_source_crop_row_ids"] is True
+    assert summary["mask_has_source_crop_row_ids"] is False
+    assert summary["expected_rows"] == 2
+
+
+def test_reconcile_keypoint_mask_row_identity_skips_when_both_sides_missing() -> None:
+    summary = reconcile_keypoint_mask_row_identity(
+        keypoint_source_crop_row_ids=None,
+        mask_source_crop_row_ids=None,
+        expected_rows=5,
+        keypoint_run_name="legacy_kp",
+        mask_run_name="legacy_subject",
+    )
+
+    assert summary["row_identity_check"] == "skipped_missing_source_crop_row_ids"
+    assert summary["keypoint_has_source_crop_row_ids"] is False
+    assert summary["mask_has_source_crop_row_ids"] is False
+
+
+def test_reconcile_keypoint_mask_row_identity_rejects_reordered_ids_without_reordering() -> None:
+    # Same id set, different order: the check is strict positional equality.
+    # The reconciler never reorders rows to make the sides match.
+    with pytest.raises(ValueError, match=r"row identity mismatch.*row 0.*keypoint=4.*mask=9"):
+        reconcile_keypoint_mask_row_identity(
+            keypoint_source_crop_row_ids=np.asarray([4, 8, 9], dtype=np.int64),
+            mask_source_crop_row_ids=np.asarray([9, 8, 4], dtype=np.int64),
+            expected_rows=3,
+            keypoint_run_name="kp_001",
+            mask_run_name="subject_001",
+        )
+
+
+def test_reconcile_keypoint_mask_row_identity_accepts_sliceable_zarr_like_sources() -> None:
+    # Call sites pass zarr arrays; the reader consumes them via value[:].
+    summary = reconcile_keypoint_mask_row_identity(
+        keypoint_source_crop_row_ids=[4, 8, 9],
+        mask_source_crop_row_ids=[4, 8, 9],
+        expected_rows=3,
+        keypoint_run_name="kp_001",
+        mask_run_name="subject_001",
+    )
+
+    assert summary["row_identity_check"] == "source_crop_row_ids_match"
+    assert summary["rows_checked"] == 3
+
+
 def test_vectorized_keypoint_split_matches_row_reference() -> None:
     union = np.zeros((4, 18, 20), dtype=np.uint8)
     union[0, 4:9, 3:8] = 1
