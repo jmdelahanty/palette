@@ -2,7 +2,7 @@
 
 **To:** provenance-finalization agent (next assignment)
 **From:** commander session, 2026-07-04
-**Read first:** `docs/utils_reorganization_strategy.md` (whole doc; you are executing "Phase 2"), `HANDOFF_2026-07-04.md` (operating notes section).
+**Read first:** `docs/utils_reorganization_strategy.md` (whole doc; you are executing "Phase 2"), `HANDOFF_2026-07-04.md` (**operating-notes section only** — its status/"in flight" sections are stale; this brief supersedes its provenance section).
 
 ## Status of your last slice — merged, thank you
 
@@ -16,7 +16,8 @@ report, for your model of the world: the cluster checkout has since moved past
 ## Housekeeping before you start
 
 From the main checkout (`~/gitrepos/palette`):
-1. `git worktree remove /tmp/palette-provenance-finalization-enforcement`
+1. Confirm no stale provenance worktree remains (`git worktree list`; the
+   `/tmp/palette-provenance-finalization-enforcement` worktree has already been removed).
 2. `git branch -d agent/provenance-finalization-enforcement agent/provenance-finalization-design` (both fully merged; `-d` will confirm)
 3. Create a fresh worktree on a new branch `agent/utils-phase2` **from current local `sun`**
    (must be `c0e111b` or later — you need your own `shared/system_metadata.py` merge).
@@ -33,10 +34,16 @@ import-linter contract forbidding `fisheye.utils` (later slice — not yours).
 ### Scope, in order
 
 1. **Finish `system.py`** (you started this — highest edge count, 75 upward edges):
-   - 44 files still import via `fisheye.utils.system`. Retarget them to
-     `fisheye.shared.system_metadata`. Per-file, not blind-sed.
-   - The shim still *defines* `build_invocation_record` locally (~82-line file). Move it
-     into `shared/system_metadata.py`; shim becomes pure re-export.
+   - Recount importers on your branch first; current observed count is 45 `src/` files
+     plus 3 `tests/` files referencing or monkeypatching `fisheye.utils.system`.
+     Retarget them to `fisheye.shared.system_metadata`. Per-file, not blind-sed.
+   - `build_invocation_record` already exists in `shared/system_metadata.py`;
+     `utils/system.py` keeps a compatibility wrapper to preserve the old monkeypatch
+     seam. Remove that wrapper **only after** retargeting every import/test that relies
+     on the old `utils.system` patch seam; then the shim becomes pure re-export.
+   - **CHECKPOINT: after `system.py` is done and green, stop and report before
+     proceeding to items 2–5.** This move establishes the migration pattern and
+     surfaces import-cycle/test-seam issues while the blast radius is one module.
 2. **Move to `shared/`** with same-shape re-export shims:
    `zarr_io` (23 edges), `zarr_metadata`, `calibration`, `encoder_tags`,
    `recording_preflight`, `import_video_metadata`, `zarr_recording_context`.
