@@ -201,6 +201,34 @@ def test_approve_callable_dry_run_does_not_write_pointer(tmp_path) -> None:
     assert AUTHORITATIVE_RUN_ATTR not in reopened["subject_mask_runs"].attrs
 
 
+def test_status_callable_returns_envelope(tmp_path) -> None:
+    zarr_path = tmp_path / "status_callable.zarr"
+    root = _open_tmp_store(zarr_path)
+    _create_raw(root)
+
+    payload = palette.status(palette.StatusRequest(recording=zarr_path))
+
+    assert payload["command"] == "palette status"
+    assert payload["status"] == "ok"
+    assert payload["reason_code"] == "OK"
+    raw = next(stage for stage in payload["stages"] if stage["stage"] == "raw")
+    assert raw["state"] == "complete"
+
+
+def test_plan_callable_returns_envelope(tmp_path) -> None:
+    zarr_path = tmp_path / "plan_callable.zarr"
+    root = _open_tmp_store(zarr_path)
+    _create_raw(root)
+
+    payload = palette.plan(palette.PlanRequest(recording=zarr_path))
+
+    assert payload["command"] == "palette plan"
+    assert payload["status"] == "ok"
+    assert payload["reason_code"] == "OK"
+    assert any(item["stage"] == "detect" for item in payload["next"])
+    assert payload["next_hints"]
+
+
 def test_detect_default_dry_run_uses_runner_without_writing(monkeypatch, tmp_path, capsys) -> None:
     zarr_path = tmp_path / "detect_ready.zarr"
     root = _open_tmp_store(zarr_path)

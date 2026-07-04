@@ -906,32 +906,70 @@ def _blocked_payload(command: str, recording: str, hints: Sequence[str]) -> dict
     return payload
 
 
-def _run_readonly(command: str, recording: str, registry: Path | None, json_output: bool) -> int:
-    dataset, hints = _resolve_dataset(recording, registry)
+def _resolve_dataset_and_stages(
+    command: str,
+    recording: str | Path,
+    registry: Path | None,
+) -> tuple[DatasetRef | None, list[StageState], dict[str, Any] | None]:
+    recording_text = str(recording)
+    dataset, hints = _resolve_dataset(recording_text, registry)
     if dataset is None:
-        payload = _blocked_payload(f"palette {command}", recording, hints)
-        if json_output:
-            _print_json(payload)
-        else:
-            for hint in hints:
-                print(hint, file=sys.stderr)
-        return EXIT_BLOCKED
+        payload = _blocked_payload(f"palette {command}", recording_text, hints)
+        return None, [], payload
     root = open_zarr_group_direct(dataset.zarr_path, mode="r")
     stages = inspect_stages(root)
+    return dataset, stages, None
+
+
+def status(request: StatusRequest) -> dict[str, Any]:
+    dataset, stages, blocked = _resolve_dataset_and_stages(
+        "status",
+        request.recording,
+        request.registry,
+    )
+    if blocked is not None:
+        return blocked
+    if dataset is None:  # pragma: no cover - blocked covers this
+        return _blocked_payload("palette status", str(request.recording), [])
+    return build_status_payload(dataset, stages)
+
+
+def plan(request: PlanRequest) -> dict[str, Any]:
+    dataset, stages, blocked = _resolve_dataset_and_stages(
+        "plan",
+        request.recording,
+        request.registry,
+    )
+    if blocked is not None:
+        return blocked
+    if dataset is None:  # pragma: no cover - blocked covers this
+        return _blocked_payload("palette plan", str(request.recording), [])
+    return build_plan_payload(dataset, stages)
+
+
+def _run_readonly(command: str, recording: str, registry: Path | None, json_output: bool) -> int:
     if command == "status":
-        payload = build_status_payload(dataset, stages)
-        if json_output:
-            _print_json(payload)
-        else:
-            _print_status_table(dataset, stages)
+        payload = status(StatusRequest(recording=recording, registry=registry))
     elif command == "plan":
-        payload = build_plan_payload(dataset, stages)
-        if json_output:
-            _print_json(payload)
-        else:
-            _print_plan_table(dataset, payload)
+        payload = plan(PlanRequest(recording=recording, registry=registry))
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(f"unknown command: {command}")
+    if payload.get("status") == "blocked" and payload.get("reason_code") == "RECORDING_NOT_FOUND":
+        if json_output:
+            _print_json(payload)
+        else:
+            for hint in payload.get("next_hints") or []:
+                print(hint, file=sys.stderr)
+        return EXIT_BLOCKED
+    if json_output:
+        _print_json(payload)
+    else:
+        dataset, stages, _blocked = _resolve_dataset_and_stages(command, recording, registry)
+        if dataset is not None:
+            if command == "status":
+                _print_status_table(dataset, stages)
+            elif command == "plan":
+                _print_plan_table(dataset, payload)
     return EXIT_OK
 
 
