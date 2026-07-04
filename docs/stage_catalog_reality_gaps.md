@@ -74,6 +74,17 @@ catalog.
    with no registry-mediated selection. Consistency gap, not a catalog gap — parked here
    until it has a better home.
 
+## Stage-Array Enforcement Notes
+
+- **PROMOTED 2026-07-03: `keypoints` stage-array validation is now enforced at write time.**
+  The YOLO-pose writer now sizes `n_keypoints` from the run's own `frame_counts`
+  frame axis. Read-only RedScare shadow validation found 28 valid keypoint runs
+  and 3 legacy invalid runs: one older run missing `n_keypoints`, plus the two
+  short-`n_keypoints` RedScare runs diagnosed on
+  `agent/redscare-keypoint-frame-axis-diagnosis` at commit `285ab43`.
+  Those legacy runs predate the writer fix and should be handled by an explicit
+  backfill decision, not by weakening the spec.
+
 ## Coordination note
 
 `stage_catalog.py` edits are serialized: the eye-mask severance agent owns the file for

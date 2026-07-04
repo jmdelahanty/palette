@@ -176,6 +176,25 @@ def _add_valid_tracking_arrays(run: FakeGroup) -> None:
     run["track_arena_ids"] = FakeArray((1,), "int32")
 
 
+def _add_valid_keypoints_arrays(run: FakeGroup) -> None:
+    run["frame_indices"] = FakeArray((2,), "int32")
+    run["frame_counts"] = FakeArray((3,), "int32")
+    run["detection_indices"] = FakeArray((2,), "int32")
+    run["keypoints_roi"] = FakeArray((2, 5, 2), "float64")
+    run["keypoints_img"] = FakeArray((2, 5, 2), "float64")
+    run["keypoints_norm"] = FakeArray((2, 5, 2), "float64")
+    run["heading"] = FakeArray((2,), "float64")
+    run["confidence"] = FakeArray((2,), "float64")
+    run["keypoint_confidences"] = FakeArray((2, 5), "float64")
+    run["effective_threshold"] = FakeArray((2,), "float64")
+    run["effective_se2_radius"] = FakeArray((2,), "float64")
+    run["detection_success"] = FakeArray((2,), "bool")
+    run["detection_source"] = FakeArray((2,), "int8")
+    run["heading_finite"] = FakeArray((2,), "bool")
+    run["heading_usable"] = FakeArray((2,), "bool")
+    run["n_keypoints"] = FakeArray((3,), "int32")
+
+
 def _add_valid_track_kinematics_surface(run: FakeGroup) -> None:
     run["track_ids"] = FakeArray((2,), "int32")
     run["track_arena_ids"] = FakeArray((2,), "int32")
@@ -2063,6 +2082,46 @@ def test_emit_stage_completion_refuses_invalid_promoted_stage_arrays_by_default(
     assert wrote is False
     assert called is False
     assert expected_error in "\n".join(console.messages)
+
+
+def test_emit_stage_completion_refuses_keypoints_missing_required_array(tmp_path: Path) -> None:
+    root = FakeGroup()
+    keypoints_parent = FakeGroup()
+    run = FakeGroup()
+    root["keypoints_runs"] = keypoints_parent
+    keypoints_parent["keypoints_001"] = run
+    _add_valid_keypoints_arrays(run)
+    del run["n_keypoints"]
+    mark_run_started(run, run_name="keypoints_001", stage="keypoints")
+    mark_run_complete(run, parent_group=keypoints_parent, run_name="keypoints_001")
+
+    class FakeRegistry:
+        def close(self) -> None:
+            pass
+
+    called = False
+
+    def _upsert(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal called
+        called = True
+
+    wrote = emit_stage_completion(
+        root,  # type: ignore[arg-type]
+        tmp_path / "archive.zarr",
+        step_name="keypoints",
+        status="ok",
+        source="unit_test",
+        run_name="keypoints_001",
+        registry=FakeRegistry(),  # type: ignore[arg-type]
+        auto_registry_from_env=False,
+        upsert_dataset_row=False,
+        metadata=type("Metadata", (), {"dataset_id": "d", "recording_id": "r"})(),
+        upsert_step_status_fn=_upsert,
+        invalidate_steps_fn=lambda *args, **kwargs: None,
+    )
+
+    assert wrote is False
+    assert called is False
 
 
 def test_emit_stage_completion_accepts_complete_opted_in_run(tmp_path: Path) -> None:

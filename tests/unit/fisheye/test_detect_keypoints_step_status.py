@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
+
 from fisheye.detection import detect_keypoints_traditional as trad_mod
 from fisheye.detection import detect_keypoints_yolo as yolo_mod
 from fisheye.registry.db import Registry, RegistryPaths, resolve_dataset_id
@@ -17,6 +19,12 @@ class _FakeGroup(dict):
 
     def get(self, key: str, default: object = None) -> object:  # noqa: A003
         return super().get(key, default)
+
+
+class _FakeArray:
+    def __init__(self, shape: tuple[int, ...], dtype: str) -> None:
+        self.shape = shape
+        self.dtype = np.dtype(dtype)
 
 
 def _make_analysis_root(path: Path, *, session_uuid: str) -> tuple[_FakeGroup, Path]:
@@ -61,6 +69,22 @@ def _seed_keypoint_run(
     )
     if input_mode_effective is not None:
         run.attrs["input_mode_effective"] = input_mode_effective
+    run["frame_indices"] = _FakeArray((4,), "int32")
+    run["frame_counts"] = _FakeArray((6,), "int32")
+    run["detection_indices"] = _FakeArray((4,), "int32")
+    run["keypoints_roi"] = _FakeArray((4, 5, 2), "float64")
+    run["keypoints_img"] = _FakeArray((4, 5, 2), "float64")
+    run["keypoints_norm"] = _FakeArray((4, 5, 2), "float64")
+    run["heading"] = _FakeArray((4,), "float64")
+    run["confidence"] = _FakeArray((4,), "float64")
+    run["keypoint_confidences"] = _FakeArray((4, 5), "float64")
+    run["effective_threshold"] = _FakeArray((4,), "float64")
+    run["effective_se2_radius"] = _FakeArray((4,), "float64")
+    run["detection_success"] = _FakeArray((4,), "bool")
+    run["detection_source"] = _FakeArray((4,), "int8")
+    run["heading_finite"] = _FakeArray((4,), "bool")
+    run["heading_usable"] = _FakeArray((4,), "bool")
+    run["n_keypoints"] = _FakeArray((6,), "int32")
     parent[run_name] = run
     root["keypoints_runs"] = parent
     mark_run_complete(run, parent_group=parent, run_name=run_name)

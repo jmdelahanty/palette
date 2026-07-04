@@ -67,6 +67,7 @@ _ENFORCE_STAGE_ARRAY_VALIDATION_FOR = frozenset(
         "crop",
         "detect",
         "detect_quality",
+        "keypoints",
         "refined_keypoints",
         "tracking",
     }
