@@ -41,7 +41,11 @@ from ..tune.refined_subject_mask_review import (
     _normalize_component_name,
     _review_payload,
 )
-from .subject_eye_assignment import EYES_UNION_ASSIGNMENT_METHOD, assign_eyes_union_to_lr
+from .subject_eye_assignment import (
+    EYES_UNION_ASSIGNMENT_METHOD,
+    assign_eyes_union_to_lr,
+    reconcile_keypoint_mask_row_identity,
+)
 from ..utils.zarr_io import open_zarr_root
 
 ASSEMBLE_REFINED_SUBJECT_METHOD = "assemble_refined_subject_masks_v1"
@@ -577,6 +581,15 @@ def _assign_eyes_union_component_seeds(
         raise ValueError(f"Keypoint run {keypoint_run_name!r} missing keypoints_roi; cannot assign eyes_union.")
     keypoint_success, success_dataset = _resolve_keypoint_success_array(kp_group, keypoint_run_name)
     eye_keypoint_indices = _resolve_eye_keypoint_indices(kp_group, keypoint_run_name)
+    reconcile_keypoint_mask_row_identity(
+        keypoint_source_crop_row_ids=kp_group.get("source_crop_row_ids"),
+        mask_source_crop_row_ids=source.group.get("source_crop_row_ids"),
+        expected_rows=int(source.masks_roi.shape[0]),
+        keypoint_run_name=keypoint_run_name,
+        keypoint_group_name=keypoint_group_name,
+        mask_run_name=source.run_name,
+        mask_group_name="subject_mask_runs",
+    )
     assignment = assign_eyes_union_to_lr(
         np.asarray(source.masks_roi[:, comp_idx], dtype=np.uint8),
         keypoints_roi=np.asarray(keypoints_roi[:], dtype=np.float32),

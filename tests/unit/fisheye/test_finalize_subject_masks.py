@@ -52,7 +52,14 @@ def _patch_refined_subject_provenance(monkeypatch) -> None:
     )
 
 
-def _build_probability_root(store_path: Path | None = None) -> zarr.Group:
+def _build_probability_root(
+    store_path: Path | None = None,
+    *,
+    keypoint_source_crop_row_ids: np.ndarray | None = None,
+    subject_source_crop_row_ids: np.ndarray | None = None,
+    write_keypoint_source_crop_row_ids: bool = True,
+    write_subject_source_crop_row_ids: bool = True,
+) -> zarr.Group:
     root = zarr.open_group(str(store_path), mode="w") if store_path is not None else zarr.group()
     crop_parent = root.create_group("crop_runs")
     crop_parent.attrs["latest"] = "crop_001"
@@ -80,6 +87,15 @@ def _build_probability_root(store_path: Path | None = None) -> zarr.Group:
         overwrite=True,
     )
     kp.create_array("detection_success", data=np.asarray([True, True], dtype=bool), overwrite=True)
+    if write_keypoint_source_crop_row_ids:
+        kp.create_array(
+            "source_crop_row_ids",
+            data=np.asarray(
+                [0, 1] if keypoint_source_crop_row_ids is None else keypoint_source_crop_row_ids,
+                dtype=np.int64,
+            ),
+            overwrite=True,
+        )
 
     parent = root.create_group("subject_mask_runs")
     parent.attrs["latest"] = "subject_probs_001"
@@ -124,6 +140,15 @@ def _build_probability_root(store_path: Path | None = None) -> zarr.Group:
     run.create_array("detection_indices", data=np.asarray([0, 1], dtype=np.int32), overwrite=True)
     run.create_array("frame_counts", data=np.asarray([1, 1], dtype=np.int32), overwrite=True)
     run.create_array("available_channels", data=np.asarray([True, True, True], dtype=bool), overwrite=True)
+    if write_subject_source_crop_row_ids:
+        run.create_array(
+            "source_crop_row_ids",
+            data=np.asarray(
+                [0, 1] if subject_source_crop_row_ids is None else subject_source_crop_row_ids,
+                dtype=np.int64,
+            ),
+            overwrite=True,
+        )
 
     probs = np.zeros((2, 3, 10, 10), dtype=np.uint8)
     probs[:, 0, 2:9, 2:9] = 255
@@ -273,6 +298,22 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert run["components/subject_body"].attrs["source_seed_masks_status"] == "omitted"
     assert "source_seed_masks_roi" not in run["components/subject_body"]
     assert "relations" not in run
+
+
+def test_finalize_subject_mask_run_rejects_eye_union_keypoint_row_identity_mismatch(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root(keypoint_source_crop_row_ids=np.asarray([1, 0], dtype=np.int64))
+
+    with pytest.raises(ValueError, match="row identity mismatch.*refusing to split eye masks"):
+        mod.finalize_subject_mask_run(
+            root,
+            subject_run="subject_probs_001",
+            refined_run="refined_subject_masks_bad_eye_identity_001",
+            chunk_size=1,
+        )
+
+    refined_parent = root.get("refined_subject_masks_runs")
+    assert refined_parent is None or "refined_subject_masks_bad_eye_identity_001" not in refined_parent
 
 
 def test_finalize_subject_mask_run_requires_probabilities_encoding(monkeypatch) -> None:

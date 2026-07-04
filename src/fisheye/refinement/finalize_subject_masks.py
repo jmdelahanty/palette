@@ -118,7 +118,12 @@ from ..shared.refined_subject_component_contours import (
     extract_largest_external_contour,
     write_refined_subject_component_contours,
 )
-from .subject_eye_assignment import EYES_UNION_ASSIGNMENT_METHOD, EyesUnionAssignmentResult, assign_eyes_union_to_lr
+from .subject_eye_assignment import (
+    EYES_UNION_ASSIGNMENT_METHOD,
+    EyesUnionAssignmentResult,
+    assign_eyes_union_to_lr,
+    reconcile_keypoint_mask_row_identity,
+)
 from .subject_mask_finalization import (
     ComponentFinalizationPolicy,
     _default_policy_for_component,
@@ -834,6 +839,15 @@ def _resolve_eye_assignment_context(
         raise ValueError(f"Keypoint run {keypoint_run_name!r} missing keypoints_roi; cannot assign eyes_union.")
     keypoint_success, success_dataset = _resolve_keypoint_success_array(kp_group, keypoint_run_name)
     eye_keypoint_indices = _resolve_eye_keypoint_indices(kp_group, keypoint_run_name)
+    reconcile_keypoint_mask_row_identity(
+        keypoint_source_crop_row_ids=kp_group.get("source_crop_row_ids"),
+        mask_source_crop_row_ids=source.group.get("source_crop_row_ids"),
+        expected_rows=int(source.masks_roi.shape[0]),
+        keypoint_run_name=keypoint_run_name,
+        keypoint_group_name=keypoint_group_name,
+        mask_run_name=source.run_name,
+        mask_group_name="subject_mask_runs",
+    )
     return _EyeAssignmentContext(
         keypoints_roi=keypoints_roi,
         keypoint_success=np.asarray(keypoint_success, dtype=bool),

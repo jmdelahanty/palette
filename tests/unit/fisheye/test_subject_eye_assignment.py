@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from fisheye.refinement.subject_eye_assignment import (
     _split_union_by_keypoints,
@@ -9,7 +10,49 @@ from fisheye.refinement.subject_eye_assignment import (
     _split_union_by_keypoints_halfplane_batch_into,
     _split_union_by_keypoints_sparse_batch_into,
     assign_eyes_union_to_lr,
+    reconcile_keypoint_mask_row_identity,
 )
+
+
+def test_reconcile_keypoint_mask_row_identity_accepts_matching_source_crop_rows() -> None:
+    summary = reconcile_keypoint_mask_row_identity(
+        keypoint_source_crop_row_ids=np.asarray([4, 8, 9], dtype=np.int64),
+        mask_source_crop_row_ids=np.asarray([4, 8, 9], dtype=np.int64),
+        expected_rows=3,
+        keypoint_run_name="kp_001",
+        keypoint_group_name="refined_keypoints_runs",
+        mask_run_name="subject_001",
+    )
+
+    assert summary["row_identity_check"] == "source_crop_row_ids_match"
+    assert summary["rows_checked"] == 3
+
+
+def test_reconcile_keypoint_mask_row_identity_rejects_same_length_mismatch() -> None:
+    with pytest.raises(ValueError, match="row identity mismatch.*row 1.*keypoint=7.*mask=6"):
+        reconcile_keypoint_mask_row_identity(
+            keypoint_source_crop_row_ids=np.asarray([5, 7, 9], dtype=np.int64),
+            mask_source_crop_row_ids=np.asarray([5, 6, 9], dtype=np.int64),
+            expected_rows=3,
+            keypoint_run_name="kp_001",
+            keypoint_group_name="refined_keypoints_runs",
+            mask_run_name="subject_001",
+        )
+
+
+def test_reconcile_keypoint_mask_row_identity_skips_when_legacy_ids_missing() -> None:
+    summary = reconcile_keypoint_mask_row_identity(
+        keypoint_source_crop_row_ids=None,
+        mask_source_crop_row_ids=np.asarray([0, 1], dtype=np.int64),
+        expected_rows=2,
+        keypoint_run_name="legacy_kp",
+        keypoint_group_name="keypoints_runs",
+        mask_run_name="legacy_subject",
+    )
+
+    assert summary["row_identity_check"] == "skipped_missing_source_crop_row_ids"
+    assert summary["keypoint_has_source_crop_row_ids"] is False
+    assert summary["mask_has_source_crop_row_ids"] is True
 
 
 def test_vectorized_keypoint_split_matches_row_reference() -> None:

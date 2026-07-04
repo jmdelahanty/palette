@@ -66,6 +66,8 @@ def _create_subject_run(
     source_detect_review_status_ref: str = "refined_detect_runs/refined_detect_001/review_status",
     source_keypoints_run: str = "refined_kp_001",
     source_keypoint_group: str = "refined_keypoints_runs",
+    source_crop_row_ids: np.ndarray | None = None,
+    write_source_crop_row_ids: bool = True,
 ) -> zarr.Group:
     parent = root.require_group("subject_mask_runs")
     parent.attrs["latest"] = run_name
@@ -90,12 +92,24 @@ def _create_subject_run(
     run.create_array("frame_indices", data=np.asarray([10, 11], dtype=np.int32), overwrite=True)
     run.create_array("detection_indices", data=np.asarray([0, 1], dtype=np.int32), overwrite=True)
     run.create_array("frame_counts", data=np.asarray([1, 1], dtype=np.int32), overwrite=True)
+    if write_source_crop_row_ids:
+        row_ids = np.asarray(
+            [0, 1] if source_crop_row_ids is None else source_crop_row_ids,
+            dtype=np.int64,
+        )
+        run.create_array("source_crop_row_ids", data=row_ids, overwrite=True)
     run.create_array("available_channels", data=np.asarray(available_channels, dtype=bool), overwrite=True)
     run.create_array("masks_roi", data=np.asarray(masks, dtype=np.uint8), overwrite=True)
     return run
 
 
-def _create_keypoint_run(root: zarr.Group, *, run_name: str = "refined_kp_001") -> zarr.Group:
+def _create_keypoint_run(
+    root: zarr.Group,
+    *,
+    run_name: str = "refined_kp_001",
+    source_crop_row_ids: np.ndarray | None = None,
+    write_source_crop_row_ids: bool = True,
+) -> zarr.Group:
     parent = root.require_group("refined_keypoints_runs")
     parent.attrs["latest"] = run_name
     run = parent.create_group(run_name)
@@ -110,6 +124,12 @@ def _create_keypoint_run(root: zarr.Group, *, run_name: str = "refined_kp_001") 
     run.create_array("keypoints_roi", data=keypoints_roi, overwrite=True)
     run.create_array("heading", data=np.asarray([0.0, 0.0], dtype=np.float32), overwrite=True)
     run.create_array("detection_success", data=np.asarray([True, True], dtype=bool), overwrite=True)
+    if write_source_crop_row_ids:
+        row_ids = np.asarray(
+            [0, 1] if source_crop_row_ids is None else source_crop_row_ids,
+            dtype=np.int64,
+        )
+        run.create_array("source_crop_row_ids", data=row_ids, overwrite=True)
     return run
 
 
@@ -648,6 +668,66 @@ def test_assemble_refined_subject_run_assigns_subject_run_eye_union_with_keypoin
         np.asarray(run["relations/eye_pair/metrics/separation_valid"][:], dtype=bool),
         np.ones((2,), dtype=bool),
     )
+
+
+def test_assemble_refined_subject_run_rejects_eye_union_keypoint_row_identity_mismatch(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_assembly_root()
+    _create_keypoint_run(root, source_crop_row_ids=np.asarray([1, 0], dtype=np.int64))
+    masks = np.zeros((2, 3, 8, 8), dtype=np.uint8)
+    masks[:, 0, 1:7, 1:7] = 1
+    masks[0, 1, 1:4, 1:4] = 1
+    masks[0, 1, 1:4, 4:7] = 1
+    masks[1, 1, 3:6, 1:4] = 1
+    masks[1, 1, 3:6, 4:7] = 1
+    masks[:, 2, 4:6, 4:6] = 1
+    _create_subject_run(
+        root,
+        run_name="subject_body_eye_union_swim_001",
+        method="unet_subject_mask_segmenter",
+        mask_labels=["subject_body", "eyes_union", "swim_bladder"],
+        available_channels=np.asarray([True, True, True], dtype=bool),
+        masks=masks,
+    )
+
+    with pytest.raises(ValueError, match="row identity mismatch.*refusing to split eye masks"):
+        assemble_mod.assemble_refined_subject_run(
+            root,
+            subject_run="subject_body_eye_union_swim_001",
+            refined_run="refined_subject_masks_bad_eye_identity_001",
+        )
+
+    refined_parent = root.get("refined_subject_masks_runs")
+    assert refined_parent is None or "refined_subject_masks_bad_eye_identity_001" not in refined_parent
+
+
+def test_assemble_refined_subject_run_eye_union_allows_legacy_missing_row_identity(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_assembly_root()
+    _create_keypoint_run(root, write_source_crop_row_ids=False)
+    masks = np.zeros((2, 3, 8, 8), dtype=np.uint8)
+    masks[:, 0, 1:7, 1:7] = 1
+    masks[0, 1, 1:4, 1:4] = 1
+    masks[0, 1, 1:4, 4:7] = 1
+    masks[1, 1, 3:6, 1:4] = 1
+    masks[1, 1, 3:6, 4:7] = 1
+    masks[:, 2, 4:6, 4:6] = 1
+    _create_subject_run(
+        root,
+        run_name="subject_body_eye_union_swim_001",
+        method="unet_subject_mask_segmenter",
+        mask_labels=["subject_body", "eyes_union", "swim_bladder"],
+        available_channels=np.asarray([True, True, True], dtype=bool),
+        masks=masks,
+    )
+
+    summary = assemble_mod.assemble_refined_subject_run(
+        root,
+        subject_run="subject_body_eye_union_swim_001",
+        refined_run="refined_subject_masks_legacy_eye_identity_001",
+    )
+
+    assert summary["eyes_union_assignment_summary"]["assigned_rows"] == 2
 
 
 def test_assemble_refined_subject_run_prefers_assignment_keypoint_attrs(monkeypatch) -> None:

@@ -28,6 +28,77 @@ class EyesUnionAssignmentResult:
     eye_geometry: Mapping[str, object]
 
 
+def _read_optional_source_crop_row_ids(value: object | None) -> np.ndarray | None:
+    if value is None:
+        return None
+    try:
+        data = np.asarray(value[:], dtype=np.int64)  # type: ignore[index]
+    except Exception:
+        data = np.asarray(value, dtype=np.int64)
+    return data.reshape(-1)
+
+
+def reconcile_keypoint_mask_row_identity(
+    *,
+    keypoint_source_crop_row_ids: object | None,
+    mask_source_crop_row_ids: object | None,
+    expected_rows: int,
+    keypoint_run_name: str,
+    mask_run_name: str,
+    keypoint_group_name: str = "keypoints_runs",
+    mask_group_name: str = "subject_mask_runs",
+) -> dict[str, object]:
+    """Fail closed if keypoint and mask rows identify different crop instances.
+
+    The eye-union splitter binds keypoints to masks by row position. Modern runs
+    therefore need explicit row-identity equality before splitting. Legacy runs
+    that do not carry ``source_crop_row_ids`` keep the historical row-count-only
+    behavior; callers still pass through ``assign_eyes_union_to_lr`` for that
+    count check.
+    """
+
+    keypoint_ids = _read_optional_source_crop_row_ids(keypoint_source_crop_row_ids)
+    mask_ids = _read_optional_source_crop_row_ids(mask_source_crop_row_ids)
+    keypoint_path = f"{keypoint_group_name}/{keypoint_run_name}"
+    mask_path = f"{mask_group_name}/{mask_run_name}"
+    expected = int(expected_rows)
+
+    if keypoint_ids is None or mask_ids is None:
+        return {
+            "row_identity_check": "skipped_missing_source_crop_row_ids",
+            "keypoint_has_source_crop_row_ids": keypoint_ids is not None,
+            "mask_has_source_crop_row_ids": mask_ids is not None,
+            "expected_rows": expected,
+        }
+
+    if int(keypoint_ids.shape[0]) != expected:
+        raise ValueError(
+            f"Cannot assign eyes_union with {keypoint_path}: keypoint source_crop_row_ids "
+            f"has {int(keypoint_ids.shape[0])} rows, expected {expected} to match {mask_path}."
+        )
+    if int(mask_ids.shape[0]) != expected:
+        raise ValueError(
+            f"Cannot assign eyes_union from {mask_path}: mask source_crop_row_ids has "
+            f"{int(mask_ids.shape[0])} rows, expected {expected}."
+        )
+    if not np.array_equal(keypoint_ids, mask_ids):
+        mismatch_rows = np.flatnonzero(keypoint_ids != mask_ids)
+        first = int(mismatch_rows[0])
+        raise ValueError(
+            f"Keypoint-mask row identity mismatch before eyes_union split: {keypoint_path} "
+            f"and {mask_path} have different source_crop_row_ids at row {first} "
+            f"(keypoint={int(keypoint_ids[first])}, mask={int(mask_ids[first])}); "
+            "refusing to split eye masks by row index."
+        )
+
+    return {
+        "row_identity_check": "source_crop_row_ids_match",
+        "rows_checked": expected,
+        "keypoint_has_source_crop_row_ids": True,
+        "mask_has_source_crop_row_ids": True,
+    }
+
+
 def _split_union_by_keypoints(
     union_mask: np.ndarray,
     eye_left: np.ndarray,
@@ -592,4 +663,5 @@ __all__ = [
     "EYES_UNION_ASSIGNMENT_METHOD",
     "EyesUnionAssignmentResult",
     "assign_eyes_union_to_lr",
+    "reconcile_keypoint_mask_row_identity",
 ]
