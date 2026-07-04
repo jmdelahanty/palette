@@ -250,6 +250,60 @@ def test_auto_uses_curated_refined_instances_when_present() -> None:
     assert detection_source.tolist() == [0, 1]
 
 
+def test_auto_refined_resolution_preserves_review_pointer_matching_latest() -> None:
+    root = _build_root()
+    refined_runs = root.create_group("refined_detect_runs")
+    refined_runs.attrs["detect_review_status_latest"] = "refined_reviewed"
+    refined_runs.attrs["latest"] = "refined_reviewed"
+    reviewed = refined_runs.create_group("refined_reviewed")
+    _seed_curated_instances_source(reviewed)
+    later = refined_runs.create_group("refined_zzz_smoke")
+    _seed_curated_instances_source(later)
+
+    source_path, _group, detection_source, source_type = get_detection_source_info(
+        root=root,  # type: ignore[arg-type]
+        source_type="auto",
+    )
+
+    assert source_path == "refined_detect_runs/refined_reviewed/instances"
+    assert source_type == "refined"
+    assert detection_source is not None
+
+
+def test_auto_refined_resolution_preserves_latest_complete_parent() -> None:
+    root = _build_root()
+    refined_runs = root.create_group("refined_detect_runs")
+    refined_runs.attrs["latest"] = "refined_complete"
+    refined_runs.attrs["latest_complete"] = "refined_complete"
+    refined = refined_runs.create_group("refined_complete")
+    _seed_curated_instances_source(refined)
+    later = refined_runs.create_group("refined_zzz_smoke")
+    _seed_curated_instances_source(later)
+
+    source_path, _group, _detection_source, source_type = get_detection_source_info(
+        root=root,  # type: ignore[arg-type]
+        source_type="auto",
+    )
+
+    assert source_path == "refined_detect_runs/refined_complete/instances"
+    assert source_type == "refined"
+
+
+def test_auto_refined_resolution_handles_no_pointer_smoke_parent() -> None:
+    root = _build_root()
+    refined_runs = root.create_group("refined_detect_runs")
+    refined = refined_runs.create_group("refined_a")
+    _seed_curated_instances_source(refined)
+
+    source_path, _group, _detection_source, source_type = get_detection_source_info(
+        root=root,  # type: ignore[arg-type]
+        source_type="auto",
+    )
+
+    assert source_path == "refined_detect_runs/refined_a/instances"
+    assert source_type == "refined"
+
+
 def test_explicit_instances_override_uses_curated_detection_source_array() -> None:
     root = _build_root()
     refined_runs = root.create_group("refined_detect_runs")

@@ -2612,19 +2612,25 @@ def get_detection_source_info(
     elif source_type in ['filtered', 'interpolated', 'manual', 'refined', 'auto']:
         if source_type == 'auto':
             try:
-                refined_root, _ = _load_refined_root()
+                refined_root, refined_parent_path = _load_refined_root()
             except ValueError:
                 if console:
                     console.print("[yellow]No refined detections found; falling back to original detections.[/yellow]")
                 return _select_detect_run()
         else:
-            refined_root, _ = _load_refined_root()
+            refined_root, refined_parent_path = _load_refined_root()
 
-        latest_refined = refined_root.attrs.get('latest')
-        if latest_refined is None:
-            raise ValueError("No latest refined detection run found")
+        resolved_refined = resolve_run(
+            refined_root,
+            RunResolution.AUTHORITATIVE,
+            parent_path=refined_parent_path,
+            run_label="Refined detect run",
+        )
+        latest_refined = resolved_refined.run_name
+        if latest_refined is None or resolved_refined.run_group is None:
+            raise ValueError("No authoritative or latest-complete refined detection run found")
 
-        refined_group = refined_root[latest_refined]
+        refined_group = resolved_refined.run_group
 
         if source_type in ('refined', 'auto') and has_curated_refined_detect_surface(refined_group):
             source_path, source_group, detection_source, resolved_type = _build_curated_refined_source(
@@ -2633,7 +2639,10 @@ def get_detection_source_info(
                 latest_refined,
             )
             if console:
-                console.print(f"[cyan]Using canonical refined detections:[/cyan] {latest_refined}")
+                console.print(
+                    f"[cyan]Using canonical refined detections:[/cyan] {latest_refined} "
+                    f"({resolved_refined.resolution_source})"
+                )
             return source_path, source_group, detection_source, resolved_type
         if source_type == 'refined':
             raise ValueError(
@@ -2718,7 +2727,10 @@ def get_detection_source_info(
             resolved_source_type = resolved_type
 
         if console:
-            console.print(f"[cyan]Using refined detections ({resolved_source_type}):[/cyan] {latest_refined}")
+            console.print(
+                f"[cyan]Using refined detections ({resolved_source_type}):[/cyan] {latest_refined} "
+                f"({resolved_refined.resolution_source})"
+            )
             if detection_source is not None:
                 detection_source = _ensure_numpy_array(
                     detection_source,
