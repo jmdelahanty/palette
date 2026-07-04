@@ -20,6 +20,128 @@ system.** Small models fail at *selection* and *recovery*, not execution. The AP
 is to make selection trivial (few verbs, one oracle) and recovery mechanical (errors
 that are instructions).
 
+## Concepts primer (read this first)
+
+This design leans on three ideas — **verb**, **envelope**, **accessor** — plus one
+principle that ties them together. If you're new to building this kind of system, this
+section is the on-ramp; the rest of the doc assumes it.
+
+### The one principle: the narrow waist
+
+*One thing does one job, with one implementation, reachable from everywhere.* You see it
+first in the CLI: **12 verbs instead of 270 `python -m` modules.** The three concepts
+below are that same move applied to **actions**, **results**, and **reads**. Whenever you
+catch yourself about to write "just open the zarr inline here" or "just parse the args and
+do the work in the handler," you're about to duplicate one of these — and the duplicate is
+where the next drift bug will live.
+
+### Verb — the unit of *doing* (one what, many hows)
+
+A verb is a named workflow operation: "run detect," "approve this run." The rule: **there
+is exactly one implementation of a verb, and it does not know how it was invoked** — CLI,
+notebook, agent-over-MCP, or the webKnossos bridge all call the same function.
+
+The enabler is a **typed request** as input, instead of an `argparse.Namespace`:
+
+```python
+@dataclass
+class DetectRequest:
+    recording: str
+    model: str | None = None
+    apply: bool = False
+    force: bool = False
+
+def detect(request: DetectRequest) -> Envelope:   # the WHAT — one implementation
+    ...
+```
+
+- CLI = a shell: parse argv → build `DetectRequest` → call `detect()` → render the result.
+- Notebook/bridge = `detect(DetectRequest("rec_042", apply=True))`.
+
+Why a typed request, not a `Namespace` or loose kwargs? The request object **is the
+contract** — it states exactly what the operation needs, it autocompletes and type-checks,
+and any caller can build one. A `Namespace` is opaque and only argparse can build it.
+Principle name: **one what, many hows.** The verb is the *what*; front-ends are the *hows*;
+you never duplicate the *what*.
+
+### Envelope — the uniform *shape of the answer* (HTTP for your pipeline)
+
+Every verb returns the **same structure**, regardless of what it did:
+
+```python
+{
+  "command": "detect",
+  "status": "ok | blocked | failed | dry_run",
+  "reason_code": "DETECT_COMPLETE",
+  "recording": "...", "run": "...",
+  "artifacts": [...], "metrics": {...},
+  "next_hints": ["palette crop ..."],
+  "provenance": {"git_sha": ..., "config_hash": ...},
+}
+```
+
+`detect`, `approve`, and `status` all return this shape — not three different return
+types. Three payoffs:
+
+1. **Uniform handling.** Any caller processes any verb's result the same way: check
+   `status`, read `reason_code`, follow `next_hints`. No per-verb parsing.
+2. **Errors are data, not exceptions.** A blocked operation *returns* `status: "blocked"`
+   with `next_hints` — it does not throw. The failure is a value you can inspect, and it
+   **carries the instruction to fix itself**. This is what lets a small model recover: it
+   can't act on a Python traceback, but it can follow a `next_hint`.
+3. **Stable, extensible contract.** Adding a field (we added `provenance`,
+   `run_resolution`) breaks no caller — they read the fields they know.
+
+The analogy: **the envelope is HTTP for your pipeline.** Every HTTP response has the same
+envelope (status + headers + body) whether it's a GET or a 404; nobody writes per-endpoint
+response parsing. `status: blocked` is your `409`; `next_hints` is the response body
+telling the client what to do.
+
+### Accessor — the unit of *reading* (resolution in one place)
+
+Verbs *do*; accessors *read*. The `Recording` accessor is a handle that hides the storage:
+
+```python
+rec   = open_recording("2026-06-23T16-01-09Z_arena_1_RedScare")
+masks = rec.subject_masks()      # RLE-decoded, layout hidden, authoritative run resolved
+kps   = rec.keypoints(run="...") # or an explicit run
+```
+
+Why not open the zarr directly (as most current code does)? Three reasons, each mapping to
+a bug class already seen in this repo:
+
+1. **Hides layout.** The consumer needn't know the zarr group structure or RLE encoding.
+   Today every consumer re-derives it, so the knowledge is duplicated and drifts.
+2. **Answers "which run?" once, correctly.** Run resolution lives in *one* place
+   (authoritative-first), so every reader agrees on "current" — and agrees with what verbs
+   write. Re-implementing this per consumer is exactly what produced the false-stale bug.
+3. **One place for correctness.** Decode contract, RLE decode, run resolution — fix once,
+   every consumer benefits (vs. the silent-wrong-data fix, which had to touch seven files).
+
+Underneath is **Command-Query Separation**: operations that *change* state (commands =
+verbs, with dry-run/apply/provenance/blocking) stay separate from operations that *read*
+state (queries = accessors, always pure and safe). Don't conflate them — a `get_or_create`
+that sometimes writes is a classic bug nest.
+
+### How they compose — a self-guiding loop
+
+```python
+rec  = open_recording(rec_id)                     # ACCESSOR: read state
+plan = plan_verb(PlanRequest(rec_id))             # VERB → ENVELOPE: what's next?
+env  = detect(DetectRequest(rec_id, apply=True))  # VERB → ENVELOPE: do it
+# env.next_hints -> ["palette crop ..."]           # the envelope names the next verb
+masks = rec.subject_masks()                       # ACCESSOR: read the result
+```
+
+You **read** with the accessor, **act** with a verb, get an **envelope** whose
+`next_hints` points to the next verb. Internally a verb *uses the accessor* to read and
+resolve runs, so verbs and readers never disagree about "current." And this exact loop is
+identical whether the driver is a human at the CLI, a notebook, an agent over MCP, or the
+bridge — **one set of verbs, one envelope, one accessor; many drivers.**
+
+Mental model to keep: **verb = do (one impl, many callers) · envelope = the uniform answer
+(HTTP-response for the pipeline) · accessor = read (resolution in one place).**
+
 ## The abstraction-layer map
 
 Palette's surfaces, graded as of 2026-07-01 (see
