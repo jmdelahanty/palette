@@ -826,3 +826,159 @@ def test_extract_source_detection_rows_and_summary_reads_projection() -> None:
         "decision_duplicate": 0,
         "decision_manual_clear": 1,
     }
+
+
+def _add_detect_instance_keys(root: _FakeGroup, *, keys: list[int], run: str = "detect_001") -> None:
+    root["detect_runs"][run].create_array(
+        "instance_key",
+        data=np.asarray(keys, dtype=np.uint64),
+        overwrite=True,
+    )
+
+
+def _dense_root_kwargs_with_manual_row() -> dict[str, Any]:
+    """Five dense rows: detect-sourced present rows on frames 1 and 3, plus a
+    hand-drawn manual present row on frame 2 (source_detect_row_index == -1)."""
+
+    return dict(
+        refined_run_name="refined_detect_001",
+        frame_indices=np.asarray([0, 1, 2, 3, 4], dtype=np.int32),
+        entity_ids=np.zeros(5, dtype=np.int32),
+        bbox_norm_coords=np.asarray(
+            [
+                [np.nan, np.nan, np.nan, np.nan],
+                [0.5, 0.5, 0.2, 0.4],
+                [0.3, 0.6, 0.1, 0.1],
+                [0.25, 0.25, 0.1, 0.2],
+                [np.nan, np.nan, np.nan, np.nan],
+            ],
+            dtype=np.float64,
+        ),
+        status_labels=np.asarray(["missing", "present", "present", "present", "missing"], dtype=object),
+        source_kind_labels=np.asarray(["none", "raw_detect", "manual", "raw_detect", "none"], dtype=object),
+        reason_labels=np.asarray(
+            ["missing_detection", "clean", "manual_add", "clean", "missing_detection"],
+            dtype=object,
+        ),
+        source_detect_row_index=np.asarray([-1, 0, -1, 1, -1], dtype=np.int32),
+        manual_edit_flags=np.asarray([False, False, True, False, False], dtype=bool),
+        detection_source=np.zeros(5, dtype=np.int8),
+        confidence_scores=np.asarray([np.nan, 0.9, np.nan, 0.7, np.nan], dtype=np.float32),
+        class_ids=np.asarray([-1, 0, -1, 0, -1], dtype=np.int32),
+    )
+
+
+def test_write_curated_refined_detect_root_mints_keys_for_manual_rows() -> None:
+    from fisheye.shared.instance_keys import (
+        INSTANCE_KEY_CONTEXT_MANUAL_CURATION,
+        INSTANCE_KEY_ORIGIN_CODE_MAP,
+        mint_detection_instance_keys,
+    )
+
+    root = _build_root()
+    _add_detect_instance_keys(root, keys=[111, 222])
+
+    write_curated_refined_detect_root(root, **_dense_root_kwargs_with_manual_row())  # type: ignore[arg-type]
+
+    expected_minted = mint_detection_instance_keys(
+        recording_identity="unknown_recording",
+        frame_indices=np.asarray([2], dtype=np.int64),
+        bbox_norm_coords=np.asarray([[0.3, 0.6, 0.1, 0.1]], dtype=np.float64),
+        class_ids=np.asarray([-1], dtype=np.int64),
+        payload_context=INSTANCE_KEY_CONTEXT_MANUAL_CURATION,
+    )
+
+    instances = root["refined_detect_runs"]["refined_detect_001"]["instances"]
+    assert instances["frame_indices"][:].tolist() == [1, 2, 3]
+    assert instances["instance_key"][:].tolist() == [111, int(expected_minted[0]), 222]
+    assert instances["instance_key_origin_codes"][:].tolist() == [
+        INSTANCE_KEY_ORIGIN_CODE_MAP["copied_from_detect"],
+        INSTANCE_KEY_ORIGIN_CODE_MAP["minted_at_curation"],
+        INSTANCE_KEY_ORIGIN_CODE_MAP["copied_from_detect"],
+    ]
+    assert instances.attrs["instance_key_status"] == "present"
+    assert instances.attrs["instance_key_origin_code_map"] == dict(INSTANCE_KEY_ORIGIN_CODE_MAP)
+
+    present_rows = extract_present_curated_rows(
+        root["refined_detect_runs"]["refined_detect_001"]  # type: ignore[arg-type]
+    )
+    assert present_rows["instance_key"].tolist() == [111, int(expected_minted[0]), 222]
+    assert present_rows["instance_key_origin_codes"].tolist() == [0, 1, 0]
+
+
+def test_write_curated_refined_detect_root_minted_keys_are_deterministic_across_rewrites() -> None:
+    root = _build_root()
+    _add_detect_instance_keys(root, keys=[111, 222])
+
+    write_curated_refined_detect_root(root, **_dense_root_kwargs_with_manual_row())  # type: ignore[arg-type]
+    first = root["refined_detect_runs"]["refined_detect_001"]["instances"]["instance_key"][:].tolist()
+
+    write_curated_refined_detect_root(root, **_dense_root_kwargs_with_manual_row())  # type: ignore[arg-type]
+    second = root["refined_detect_runs"]["refined_detect_001"]["instances"]["instance_key"][:].tolist()
+
+    assert first == second
+
+
+def test_write_curated_refined_detect_root_rejects_duplicate_copied_instance_keys() -> None:
+    import pytest
+
+    root = _build_root()
+    _add_detect_instance_keys(root, keys=[333, 333])
+
+    with pytest.raises(ValueError, match="not unique after combining"):
+        write_curated_refined_detect_root(root, **_dense_root_kwargs_with_manual_row())  # type: ignore[arg-type]
+
+
+def test_write_curated_refined_detect_root_without_detect_keys_stamps_missing_and_warns(caplog) -> None:
+    import logging
+
+    root = _build_root()  # detect run has no instance_key array
+
+    with caplog.at_level(logging.WARNING, logger="fisheye.shared.refined_detect_curation"):
+        write_curated_refined_detect_root(root, **_dense_root_kwargs_with_manual_row())  # type: ignore[arg-type]
+
+    instances = root["refined_detect_runs"]["refined_detect_001"]["instances"]
+    assert "instance_key" not in instances
+    assert "instance_key_origin_codes" not in instances
+    assert instances.attrs["instance_key_status"] == "missing"
+    assert any("no instance_key array" in record.message for record in caplog.records)
+    assert any("without instance_key values" in record.message for record in caplog.records)
+
+
+def test_write_curated_refined_detect_root_mints_for_out_of_range_source_rows_and_warns(caplog) -> None:
+    import logging
+
+    root = _build_root()
+    _add_detect_instance_keys(root, keys=[111, 222])
+
+    kwargs = _dense_root_kwargs_with_manual_row()
+    # Point the frame-3 row at a detect row that does not exist.
+    kwargs["source_detect_row_index"] = np.asarray([-1, 0, -1, 7, -1], dtype=np.int32)
+
+    with caplog.at_level(logging.WARNING, logger="fisheye.shared.refined_detect_curation"):
+        write_curated_refined_detect_root(root, **kwargs)  # type: ignore[arg-type]
+
+    instances = root["refined_detect_runs"]["refined_detect_001"]["instances"]
+    assert instances["instance_key_origin_codes"][:].tolist() == [0, 1, 1]
+    keys = instances["instance_key"][:].tolist()
+    assert keys[0] == 111
+    assert len(set(keys)) == 3
+    assert any("out-of-range" in record.message for record in caplog.records)
+
+
+def test_write_curated_refined_detect_surfaces_rejects_origin_codes_without_keys() -> None:
+    import pytest
+
+    root = _build_root_with_same_frame_raw_candidates()
+
+    with pytest.raises(ValueError, match="instance_key_origin_codes requires instance_key"):
+        write_curated_refined_detect_surfaces(
+            root,  # type: ignore[arg-type]
+            refined_run_name="refined_detect_dup",
+            instance_frame_indices=np.asarray([1], dtype=np.int32),
+            instance_bbox_norm_coords=np.asarray([[0.5, 0.5, 0.2, 0.4]], dtype=np.float64),
+            instance_source_kind_labels=np.asarray(["raw_detect"], dtype=object),
+            instance_reason_labels=np.asarray(["clean"], dtype=object),
+            instance_source_detect_row_index=np.asarray([0], dtype=np.int32),
+            instance_key_origin_codes=np.asarray([0], dtype=np.int8),
+        )
