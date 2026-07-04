@@ -16,7 +16,7 @@ from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
 from fisheye.shared.batch_logging import utc_now
 from fisheye.utils.import_video_metadata import probe_video_metadata, write_video_metadata
-from fisheye.utils.recording_preflight import preflight_gate_reason
+from fisheye.shared.recording_preflight import preflight_gate_reason
 
 from .import_stimulus_to_zarr import import_stimulus_to_zarr
 
