@@ -18,6 +18,7 @@ import zarr
 
 from fisheye.detection.detect_keypoints_yolo import DEFAULT_POSE_SCHEMA_NAME, detect_keypoints_yolo
 from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.shared.run_provenance import build_run_provenance
 from fisheye.shared.flat_roi_cache import open_flat_roi_cache
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.utils.resolve_detect_model import Candidate, TargetProfile
@@ -258,6 +259,20 @@ def _prepare_roi_cache_manifest(
     return _stage_flat_roi_cache_manifest(requested, staging_dir=staging_dir)
 
 
+def _roi_cache_source_crop_run_name(manifest_path: Optional[Path]) -> Optional[str]:
+    if manifest_path is None:
+        return None
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    source = payload.get("source")
+    if not isinstance(source, dict):
+        return None
+    text = str(source.get("crop_run_name") or "").strip()
+    return text or None
+
+
 def _pick_best_candidate(candidates: list[Candidate], *, require_unique: bool) -> Candidate:
     if not candidates:
         raise SystemExit("No pose model candidates found.")
@@ -485,6 +500,7 @@ def run_keypoints_with_registry_model(
     verbose: bool = False,
     argv: Optional[list[str]] = None,
     cli_provenance: Optional[Mapping[str, Any]] = None,
+    run_provenance: Optional[Mapping[str, Any]] = None,
 ) -> KeypointRegistryResult:
     resolved_recording_dir = recording_dir.expanduser().resolve()
     registry_path = (registry or RegistryPaths.from_env(Path.cwd()).path).expanduser().resolve()
@@ -611,6 +627,28 @@ def run_keypoints_with_registry_model(
             stage_to_scratch=bool(stage_roi_cache_to_scratch),
             staging_dir=roi_cache_staging_dir,
         )
+        effective_crop_run = crop_run or _roi_cache_source_crop_run_name(effective_roi_cache_manifest)
+        effective_run_provenance = run_provenance if run_provenance is not None else cli_provenance
+        if effective_run_provenance is None:
+            effective_run_provenance = build_run_provenance(
+                command="fisheye.utils.run_keypoints_with_registry_model",
+                params={
+                    **vars(payload_args),
+                    "recording_dir": resolved_recording_dir,
+                    "output": output_path,
+                    "registry": registry_path,
+                    "selected_model_path": selected_model_path,
+                    "selected_run_id": selected_run_id,
+                    "selected_set_id": selected_set_id,
+                    "effective_roi_cache_manifest": effective_roi_cache_manifest,
+                },
+                input_run_ids={
+                    "crop_run": effective_crop_run,
+                    "model_run": selected_run_id,
+                    "model_set": selected_set_id,
+                },
+                cwd=Path.cwd(),
+            )
         keypoint_run = detect_keypoints_yolo(
             zarr_path=str(output_path),
             model_path=best.model_path,
@@ -636,7 +674,8 @@ def run_keypoints_with_registry_model(
             progress_jsonl=progress_jsonl,
             progress_every_batches=progress_every_batches,
             registry=registry_path,
-            cli_provenance=cli_provenance,
+            cli_provenance=effective_run_provenance,
+            run_provenance=effective_run_provenance,
         )
         if not keypoint_run:
             raise RuntimeError("Keypoint inference did not create a run; model resolution provenance cannot be written.")

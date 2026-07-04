@@ -6,6 +6,7 @@ import types
 
 import pytest
 
+from fisheye.shared.run_provenance import validate_run_provenance
 from fisheye.utils import run_detect_with_registry_model as mod
 
 
@@ -321,6 +322,15 @@ def test_main_runs_detect_resolution_and_writes_provenance(
     assert detect_kwargs.get("resize_dims") == [768, 1280]
     assert detect_kwargs.get("imgsz") is None
     assert detect_kwargs.get("decode_backend") == "pynvvc_luma_rgb"
+    assert detect_kwargs.get("run_provenance") == detect_kwargs.get("cli_provenance")
+    run_provenance = detect_kwargs.get("run_provenance")
+    assert isinstance(run_provenance, dict)
+    assert validate_run_provenance(run_provenance).valid is True
+    assert run_provenance["command"] == "fisheye.utils.run_detect_with_registry_model"
+    assert run_provenance["input_run_ids"] == {
+        "model_run": "detect_run_123",
+        "model_set": "detect_set_123",
+    }
 
     assert calls.get("write_zarr_path") == output_path.resolve()
     assert calls.get("write_run_name") == "detect_001"

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from fisheye.shared.run_provenance import validate_run_provenance
 from fisheye.utils import run_keypoints_with_registry_model as mod
 
 
@@ -288,6 +289,16 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
     assert staging_details.get("stage_to_scratch_requested") is False
     assert staging_details.get("staging_recommendation_min_bytes") == mod.ROI_CACHE_STAGING_RECOMMENDED_MIN_BYTES
     assert Path(str(detect_kwargs.get("registry"))) == registry_path.resolve()
+    assert detect_kwargs.get("run_provenance") == detect_kwargs.get("cli_provenance")
+    run_provenance = detect_kwargs.get("run_provenance")
+    assert isinstance(run_provenance, dict)
+    assert validate_run_provenance(run_provenance).valid is True
+    assert run_provenance["command"] == "fisheye.utils.run_keypoints_with_registry_model"
+    assert run_provenance["input_run_ids"] == {
+        "crop_run": None,
+        "model_run": "pose_run_123",
+        "model_set": "pose_set_123",
+    }
 
     assert calls.get("write_zarr_path") == output_path.resolve()
     assert calls.get("write_run_name") == "keypoints_001"

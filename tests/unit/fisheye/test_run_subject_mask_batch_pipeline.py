@@ -10,6 +10,7 @@ import pytest
 import zarr
 
 from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
+from fisheye.shared.run_provenance import validate_run_provenance
 from fisheye.shared.zarr_run_completion import RUN_COMPLETION_STATUS_ATTR
 from fisheye.utils import run_subject_mask_batch_pipeline as mod
 
@@ -44,6 +45,52 @@ def test_safe_artifact_filename_hashes_long_names() -> None:
     assert len(filename) <= mod.MAX_ARTIFACT_FILENAME_CHARS
     assert filename.endswith(".workflow.profile.jsonl")
     assert "__" in filename
+
+
+def test_subject_mask_publish_provenance_is_valid_for_subject_and_refined_runs(tmp_path: Path) -> None:
+    plan = mod.ArchivePlan(
+        zarr_path=str(tmp_path / "recording_analysis.zarr"),
+        subject_run="subject_run",
+        refined_run="refined_run",
+        crop_run="crop_run",
+        assignment_keypoint_group="keypoints_runs",
+        assignment_keypoint_run="keypoints_run",
+        has_subject_runs=False,
+        has_refined_subject_runs=False,
+        run_inference=True,
+        run_finalization=True,
+    )
+    ctx = mod.OutputStagingContext(
+        source_zarr_path=tmp_path / "recording_analysis.zarr",
+        staged_zarr_path=tmp_path / "scratch" / "recording_analysis.zarr",
+        staging_root=tmp_path / "scratch",
+    )
+    publish_payload = {"schema": "test"}
+
+    subject = mod._subject_mask_publish_provenance(  # noqa: SLF001
+        ctx=ctx,
+        plan=plan,
+        publish_payload=publish_payload,
+        refined=False,
+    )
+    refined = mod._subject_mask_publish_provenance(  # noqa: SLF001
+        ctx=ctx,
+        plan=plan,
+        publish_payload=publish_payload,
+        refined=True,
+    )
+
+    assert validate_run_provenance(subject).valid is True
+    assert validate_run_provenance(refined).valid is True
+    assert subject["input_run_ids"] == {
+        "crop": "crop_run",
+        "assignment_keypoints": "keypoints_run",
+    }
+    assert refined["input_run_ids"] == {
+        "crop": "crop_run",
+        "assignment_keypoints": "keypoints_run",
+        "subject_mask": "subject_run",
+    }
 
 
 def test_consolidate_metadata_quietly_suppresses_expected_zarr_noise(monkeypatch: pytest.MonkeyPatch) -> None:

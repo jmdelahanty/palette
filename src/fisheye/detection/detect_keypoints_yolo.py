@@ -34,9 +34,11 @@ from ..shared.provenance_attrs import build_source_crop_snapshot_attrs, build_so
 from ..registry.stage_complete import emit_stage_completion
 from ..shared.row_lineage import copy_row_lineage_arrays, write_direct_source_crop_row_ids
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from ..shared.run_provenance import CLI_RUN_PROVENANCE_ATTR, RUN_PROVENANCE_ATTR, build_run_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
 from ..shared.zarr_run_completion import (
+    COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     mark_run_complete,
     mark_run_started,
     note_pending_latest,
@@ -165,7 +167,11 @@ def _prepare_run_group(
     run_name: Optional[str],
     console: Console,
 ) -> Tuple[zarr.Group, str]:
-    parent = require_runs_parent(root, "keypoints_runs")
+    parent = require_runs_parent(
+        root,
+        "keypoints_runs",
+        completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+    )
     if run_name:
         if run_name in parent:
             raise ValueError(f"keypoints_runs/{run_name} already exists")
@@ -698,6 +704,7 @@ def detect_keypoints_yolo(
     registry: Optional[Path] = None,
     console: Optional[Console] = None,
     cli_provenance: Optional[Mapping[str, Any]] = None,
+    run_provenance: Optional[Mapping[str, Any]] = None,
 ) -> str:
     """Run YOLO pose inference and record outputs in ``keypoints_runs``.
 
@@ -1200,8 +1207,37 @@ def detect_keypoints_yolo(
         run_group.attrs["source_roi_cache_staging"] = roi_cache_staging_payload
     if source_refined_run:
         run_group.attrs["source_refined_run"] = source_refined_run
-    if cli_provenance is not None:
-        run_group.attrs["cli_provenance"] = dict(cli_provenance)
+    effective_run_provenance = run_provenance if run_provenance is not None else cli_provenance
+    if effective_run_provenance is None:
+        effective_run_provenance = build_run_provenance(
+            command="fisheye.detection.detect_keypoints_yolo",
+            params={
+                "zarr_path": str(zarr_path.resolve()),
+                "model_path": str(model_path_resolved),
+                "run_name": run_name,
+                "crop_run": crop_run,
+                "pose_schema": pose_schema,
+                "device": device,
+                "batch_size": batch_size,
+                "conf": conf,
+                "iou": iou,
+                "max_det": max_det,
+                "mask_threshold": mask_threshold,
+                "roi_cache_policy": roi_cache_policy,
+                "roi_cache_manifest": str(roi_cache_manifest) if roi_cache_manifest is not None else None,
+                "roi_live_acceleration": roi_live_acceleration,
+                "model_input_transform_mode": model_input_transform_mode,
+                "input_mode": input_mode,
+            },
+            input_run_ids={
+                "crop": latest_crop,
+                "refined_detect": source_refined_run,
+            },
+            cwd=Path.cwd(),
+        )
+    if effective_run_provenance is not None:
+        run_group.attrs[RUN_PROVENANCE_ATTR] = dict(effective_run_provenance)
+        run_group.attrs[CLI_RUN_PROVENANCE_ATTR] = dict(effective_run_provenance)
     provenance_record = build_stage_provenance(
         stage="keypoints_detect",
         command=" ".join(sys.argv),
@@ -1324,7 +1360,12 @@ def detect_keypoints_yolo(
         status_details["refined_roi_overrides"] = int(override_data["count"])
         status_details["refined_roi_source"] = str(override_data["path"])
 
-    mark_run_complete(run_group, parent_group=root["keypoints_runs"], run_name=resolved_run_name)
+    mark_run_complete(
+        run_group,
+        parent_group=root["keypoints_runs"],
+        run_name=resolved_run_name,
+        run_provenance=effective_run_provenance,
+    )
 
     try:
         _emit_keypoint_step_status(
