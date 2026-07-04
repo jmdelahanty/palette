@@ -82,6 +82,35 @@ split along the consumption-vs-inventory line. Reclassifying them onto explicit
 modes now is that the accessor is *built* against them from the start, rather than baking
 in one meaning and having to unpick it later.
 
+## Concrete reconciliation case: detect review authority (found 2026-07-04)
+
+Detect review state is currently split across **two parallel parent-level "which run to
+use" pointers**, written by different paths:
+
+- `detect_review_status_latest` (parent attr) + `detect_review_status` (per-run verdict
+  payload) — the **established** mechanism. Propagated through crop→keypoint lineage
+  (`tracking/crop.py:793,1965`), and written both by the review backend and by
+  `utils/backfill_detect_review_status.py:161` — the latter a writer that **bypasses
+  `approve()` entirely** (no fail-closed guarantee, no authoritative pointer).
+- `authoritative_run` (parent attr) — the **new** mechanism; the fail-closed approval
+  slice (2026-07-04) wired detect review to set it.
+
+These overlap: both answer "which reviewed detect run should downstream use." Today crop
+does not yet resolve its detect input via `authoritative_run` — so the new pointer detect
+review sets is **forward-looking**, not yet consumed. The reconciliation (part of the
+`Recording` accessor / RunResolution work, not a standalone patch):
+
+1. Make `authoritative_run` (resolved via `AUTHORITATIVE`) the single run-selection
+   pointer that crop and other consumers use for their detect input.
+2. Keep `detect_review_status` as the per-run *verdict*, feeding the pointer, not as a
+   second selector; retire or subsume `detect_review_status_latest`.
+3. Reconcile `backfill_detect_review_status.py` to set the authoritative pointer (or
+   retire it) so no writer bypasses the fail-closed approval path.
+
+This is a design reconciliation, not a utility-chase — it belongs in the accessor slice
+where "which run does the pipeline consume" becomes an explicit `AUTHORITATIVE`
+resolution.
+
 ## Non-goals
 
 - Not changing what any existing resolver returns — this names and unifies them.
