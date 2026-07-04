@@ -20,7 +20,7 @@ import zarr
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.type_conversions import normalize_attr as _shared_decode_attr
 from fisheye.training.config import PoseConfig
-from fisheye.utils.system import build_invocation_record
+from fisheye.shared.system_metadata import build_invocation_record
 from fisheye.utils.zarr_metadata import get_downsample_array_path, get_downsample_shape
 
 DEFAULT_KEYPOINT_SOURCE_TYPE = "refined"

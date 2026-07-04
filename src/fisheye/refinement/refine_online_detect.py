@@ -31,7 +31,7 @@ from scipy.signal import savgol_filter
 
 from ..analysis.chaser_metrics_loader import load_chaser_metrics
 from ..utils.calibration import load_run_calibration
-from ..utils.system import get_environment_info, get_git_info
+from ..shared.system_metadata import get_environment_info, get_git_info
 
 REFINED_ONLINE_GROUP = "refined_online_runs"
 

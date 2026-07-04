@@ -39,7 +39,7 @@ from ..training.zarr_subject_mask_dataset import (
     SubjectMaskChunkedDataset,
     build_subject_mask_training_datasets,
 )
-from ..utils.system import build_invocation_record, get_environment_info, get_git_info
+from ..shared.system_metadata import build_invocation_record, get_environment_info, get_git_info
 from .unet import UNetSmall
 
 try:

@@ -12,7 +12,7 @@ from ..shared.stage_provenance import build_stage_provenance, write_stage_proven
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
 from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
-from ..utils.system import get_environment_info
+from ..shared.system_metadata import get_environment_info
 
 
 TRACKING_METHOD_SINGLE_SUBJECT_PER_ARENA = "single_subject_per_arena"

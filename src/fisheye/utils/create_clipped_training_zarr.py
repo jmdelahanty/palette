@@ -26,7 +26,7 @@ from fisheye.utils.create_clipped_analysis_zarr import (
     DISH_MASK_POLICY_SCHEMA_VERSION,
     _dish_mask_policy_attrs,
 )
-from fisheye.utils.system import get_environment_summary, get_git_info, get_platform_info
+from fisheye.shared.system_metadata import get_environment_summary, get_git_info, get_platform_info
 
 
 MODULE_NAME = "fisheye.utils.create_clipped_training_zarr"

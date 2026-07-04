@@ -40,7 +40,7 @@ from fisheye.shared.zarr_run_completion import (
     require_runs_parent,
 )
 from fisheye.utils import prepare_keypoint_training_from_registry as prepare_pose
-from fisheye.utils.system import build_invocation_record
+from fisheye.shared.system_metadata import build_invocation_record
 
 try:
     from rich.console import Console

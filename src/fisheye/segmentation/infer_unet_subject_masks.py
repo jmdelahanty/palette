@@ -46,7 +46,7 @@ from ..utils.resolve_subject_mask_model import (
     build_resolution_payload,
     resolve_best_subject_mask_model,
 )
-from ..utils.system import get_environment_info, get_git_info
+from ..shared.system_metadata import get_environment_info, get_git_info
 from .unet import UNetSmall
 
 SUBJECT_MASK_SCHEMAS: dict[str, tuple[str, ...]] = {

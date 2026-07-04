@@ -19,7 +19,7 @@ import yaml
 
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.type_conversions import normalize_attr as _shared_as_text
-from fisheye.utils.system import build_invocation_record
+from fisheye.shared.system_metadata import build_invocation_record
 
 _as_text = _shared_as_text
 

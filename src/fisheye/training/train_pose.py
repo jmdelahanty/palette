@@ -64,7 +64,7 @@ from .training_console import (
     print_training_start,
 )
 from .zarr_yolo_dataset_loader import create_zarr_dataset, ZarrDatasetConfig
-from ..utils.system import build_invocation_record, get_git_info
+from ..shared.system_metadata import build_invocation_record, get_git_info
 
 
 # Custom DataLoader to ensure compatibility with Ultralytics YOLO's expected interface

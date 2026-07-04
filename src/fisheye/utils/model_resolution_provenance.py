@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from fisheye.shared.batch_logging import utc_now
-from fisheye.utils.system import build_invocation_record
+from fisheye.shared.system_metadata import build_invocation_record
 
 MODEL_RESOLUTION_CONTRACT_NAME = "palette_model_resolution_provenance"
 MODEL_RESOLUTION_CONTRACT_VERSION = 1

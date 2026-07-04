@@ -37,7 +37,7 @@ from fisheye.utils.export_acquisition_crop_pose_training_zarr import (
     load_crop_meta_table,
     resolve_crop_video_path,
 )
-from fisheye.utils.system import get_environment_info, get_git_info
+from fisheye.shared.system_metadata import get_environment_info, get_git_info
 
 
 SCHEMA_ID = "palette.acquisition_crop_video_training_append.v1"

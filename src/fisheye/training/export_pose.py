@@ -14,7 +14,7 @@ from rich.console import Console
 
 from .export_shared import write_registry_model_exports
 from ..registry.db import Registry, RegistryPaths
-from ..utils.system import build_invocation_record
+from ..shared.system_metadata import build_invocation_record
 
 
 def _first_existing(paths: list[Path]) -> Optional[Path]:

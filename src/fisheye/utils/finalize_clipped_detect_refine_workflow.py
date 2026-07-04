@@ -19,7 +19,7 @@ import pyarrow.parquet as pq
 
 from fisheye.shared.zarr_run_completion import require_runs_parent
 from fisheye.utils.plan_clipped_detect_refine_workflow import PLAN_SCHEMA
-from fisheye.utils.system import get_environment_summary, get_git_info, get_platform_info
+from fisheye.shared.system_metadata import get_environment_summary, get_git_info, get_platform_info
 from fisheye.utils.validate_refined_detect_run import validate_refined_detect_run
 
 

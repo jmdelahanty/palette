@@ -45,7 +45,7 @@ from ..shared.zarr_run_completion import (
     require_runs_parent,
 )
 from ..pose.heading import compute_heading_from_spec
-from ..utils.system import get_environment_info, get_git_info
+from ..shared.system_metadata import get_environment_info, get_git_info
 from ..pose.schema import PoseSchema, normalize_kpt_shape, schema_payload_from_package
 from ultralytics import YOLO, __version__ as ultralytics_version
 

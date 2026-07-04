@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from fisheye.registry.db import Registry, RegistryPaths
-from fisheye.utils.system import build_invocation_record
+from fisheye.shared.system_metadata import build_invocation_record
 
 
 def _safe_sha256_file(path: Optional[Path]) -> Optional[str]:

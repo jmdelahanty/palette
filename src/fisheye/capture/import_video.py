@@ -59,7 +59,7 @@ try:
 except Exception:
     _HAVE_KVIKIO = False
 
-from ..utils.system import get_git_info, get_environment_info, get_gds_config
+from ..shared.system_metadata import get_git_info, get_environment_info, get_gds_config
 from ..shared.zarr.schema import create_palette_zarr, update_import_duration
 
 

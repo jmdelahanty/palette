@@ -42,7 +42,7 @@ from fisheye.shared.roi_pixel_contract import (
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr.chunk_profiles import create_geometry_preload_array, stamp_geometry_preload_attrs
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_failed, mark_run_started, require_runs_parent
-from fisheye.utils.system import get_environment_info, get_git_info
+from fisheye.shared.system_metadata import get_environment_info, get_git_info
 
 
 SCHEMA_ID = "palette.hybrid_acquisition_offline_crop_run.v1"

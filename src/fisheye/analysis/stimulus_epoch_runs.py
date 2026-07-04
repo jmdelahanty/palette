@@ -25,7 +25,7 @@ from fisheye.shared.zarr_run_completion import (
     require_runs_parent,
     resolve_authoritative_run_name,
 )
-from fisheye.utils.system import get_git_info
+from fisheye.shared.system_metadata import get_git_info
 from fisheye.visualization.plot_detection_epoch_heatmaps import (
     _event_names_from_columns,
     _first_column,

@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
-from fisheye.utils.system import get_git_info
+from fisheye.shared.system_metadata import get_git_info
 from fisheye.utils.run_detection_artifact import (
     ARTIFACT_SCHEMA,
     LATEST_POLICY_CHOICES,

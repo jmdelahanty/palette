@@ -43,7 +43,7 @@ try:  # pragma: no cover - torch optional
 except ImportError:  # pragma: no cover
     torch = None  # type: ignore
 
-from ..utils.system import get_environment_info, get_git_info
+from ..shared.system_metadata import get_environment_info, get_git_info
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"

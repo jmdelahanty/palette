@@ -60,7 +60,7 @@ from ..shared.zarr_run_completion import (
     require_runs_parent,
     set_authoritative_run,
 )
-from ..utils.system import get_environment_info, get_git_info
+from ..shared.system_metadata import get_environment_info, get_git_info
 from ..utils.zarr_io import open_zarr_root
 
 try:
