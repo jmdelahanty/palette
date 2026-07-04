@@ -96,7 +96,16 @@ from .web_diagnostics import (
 from .web_identity import _identity_probe_html
 from .web_personal_api import register_personal_api_routes
 from .web_personal_pages import register_personal_page_routes
-from .web_personal_renderers import _dashboard_html, _datasets_html
+from .web_personal_renderers import (
+    _BROWSER_MUTATION_STATUS_JS,
+    _IMAGE_CANVAS_VIEWPORT_JS,
+    _SESSION_OPERATOR_SUPPORT_CSS,
+    _SESSION_OPERATOR_SUPPORT_HTML,
+    _SESSION_OPERATOR_SUPPORT_JS,
+    _dashboard_html,
+    _datasets_html,
+    _session_status_banner,
+)
 from .web_wsgi_adapter import handle_with_flask_if_claimed
 from .template_assets import read_labeling_asset, render_labeling_template
 from .web_responses import (

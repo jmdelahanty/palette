@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-__all__ = ["_dashboard_html", "_datasets_html"]
+import html
+from typing import Mapping
+
+from .template_assets import read_labeling_asset
+from .web_auth import PERSONAL_DATASET_QUEUE_PATH, _dashboard_url_for_expected_user
+from .web_policy import PERSONAL_WORK_PATH
+
+__all__ = ["_dashboard_html", "_datasets_html", "_session_status_banner"]
 
 def _dashboard_html() -> bytes:
     return b"""<!doctype html>
@@ -2749,6 +2756,16 @@ _BROWSER_MUTATION_STATUS_JS = read_labeling_asset("static/js/browser_mutation_st
 _IMAGE_CANVAS_VIEWPORT_JS = read_labeling_asset("static/js/image_canvas_viewport.js")
 
 
+def _session_return_url(session: Mapping[str, object], path: str) -> str:
+    expected_user = str(
+        session.get("user")
+        or session.get("assignee_user")
+        or session.get("expected_user")
+        or ""
+    ).strip()
+    return _dashboard_url_for_expected_user(path, expected_user) if expected_user else path
+
+
 def _session_status_banner(session: Mapping[str, object]) -> str:
     session_id = html.escape(str(session.get("session_id") or ""))
     expires_at = html.escape(str(session.get("expires_at_utc") or "unknown"))
@@ -2767,4 +2784,3 @@ def _session_status_banner(session: Mapping[str, object]) -> str:
       <span style="display:block;margin-top:4px;font-size:.88rem;">Session <code>{session_id}</code></span>
     </section>
 """
-
