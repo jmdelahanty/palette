@@ -11,6 +11,7 @@ from fisheye.tracking.crop import (
     get_detection_source_info,
     save_crop_metadata,
 )
+from fisheye.shared.zarr_run_completion import set_authoritative_run
 
 
 class _FakeArray:
@@ -123,6 +124,33 @@ def test_auto_falls_back_to_detect_when_refined_stage_is_incomplete() -> None:
 
     assert source_path == "detect_runs/detect_a"
     assert source_type == "detect"
+
+
+def test_detect_source_uses_authoritative_detect_run_when_present() -> None:
+    root = _build_root()
+    detect_runs = root["detect_runs"]
+    detect_b = detect_runs.create_group("detect_b")
+    detect_b.create_array(
+        "frame_indices",
+        data=np.array([7], dtype=np.int32),
+        overwrite=True,
+    )
+    detect_b.create_array(
+        "bbox_norm_coords",
+        data=np.array([[0.4, 0.4, 0.2, 0.2]], dtype=np.float32),
+        overwrite=True,
+    )
+    detect_runs.attrs["latest"] = "detect_b"
+    set_authoritative_run(detect_runs, "detect_a", approved_by="jeremy")
+
+    source_path, group, _detection_source, source_type = get_detection_source_info(
+        root=root,  # type: ignore[arg-type]
+        source_type="detect",
+    )
+
+    assert source_path == "detect_runs/detect_a"
+    assert source_type == "detect"
+    assert group["frame_indices"][:].tolist() == [0, 1]
 
 
 def test_explicit_refined_source_raises_clear_error_when_incomplete() -> None:

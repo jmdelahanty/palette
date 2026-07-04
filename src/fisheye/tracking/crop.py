@@ -64,6 +64,7 @@ from ..shared.roi_pixel_contract import (
     crop_run_pixel_contract,
 )
 from ..shared.type_conversions import normalize_attr
+from ..shared.run_resolution import RunResolution, resolve_run
 from ..shared.zarr_run_completion import (
     mark_run_complete,
     mark_run_failed,
@@ -2512,16 +2513,24 @@ def get_detection_source_info(
         if 'detect_runs' not in root:
             raise ValueError("No detect_runs found in zarr file")
 
-        latest = root['detect_runs'].attrs.get('latest')
-        if latest is None:
-            raise ValueError("No latest detect run found")
+        resolved = resolve_run(
+            root['detect_runs'],
+            RunResolution.AUTHORITATIVE,
+            parent_path='detect_runs',
+            run_label='Detect run',
+        )
+        if resolved.run_name is None or resolved.run_group is None:
+            raise ValueError("No authoritative or latest-complete detect run found")
 
-        source_path = f'detect_runs/{latest}'
-        source_group = root[source_path]
+        source_path = f'detect_runs/{resolved.run_name}'
+        source_group = resolved.run_group
         detection_source = None
 
         if console:
-            console.print(f"[cyan]Using original detections:[/cyan] {latest}")
+            console.print(
+                f"[cyan]Using original detections:[/cyan] {resolved.run_name} "
+                f"({resolved.resolution_source})"
+            )
         return source_path, source_group, detection_source, 'detect'
 
     def _load_refined_root() -> Tuple[zarr.Group, str]:
