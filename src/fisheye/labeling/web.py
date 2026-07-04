@@ -74,6 +74,7 @@ from .web_auth import (
 from .web_app import create_labeling_app
 from .web_admin_api import register_admin_api_routes
 from .web_admin_pages import register_admin_page_routes
+from .web_auth_errors import _authentication_required_error_details
 from .web_error_pages import _browser_error_html
 from .web_identity import _identity_probe_html
 from .web_personal_api import register_personal_api_routes
@@ -335,21 +336,6 @@ class ServerState:
     detect_sessions: dict[str, "DetectRuntimeSession"] = field(default_factory=dict)
     video_detect_sessions: dict[str, "VideoDetectRuntimeSession"] = field(default_factory=dict)
     subject_mask_sessions: dict[str, "SubjectMaskRuntimeSession"] = field(default_factory=dict)
-
-
-def _authentication_required_error_details(source: str, config: ServerConfig) -> str:
-    if source == "auth_header_not_trusted":
-        return (
-            "Header-based authentication is disabled. Start with --user for local development "
-            "or --trust-auth-header behind a trusted proxy."
-        )
-    if source == "signed_invites_disabled":
-        return "This invite link cannot be used because the server was not launched with --link-secret."
-    if source == "invite_expected_user_mismatch":
-        return "This invite link is for a different expected_user. Stop and ask the operator for a fresh invite."
-    if source and (source.startswith("invite_error:") or source.startswith("signed_link_")):
-        return "This invite link is invalid, expired, or revoked. Ask the operator for a fresh invite."
-    return f"No user found from trusted auth header {config.auth_header}."
 
 
 def _personal_api_response_payload(

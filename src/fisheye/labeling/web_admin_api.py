@@ -24,6 +24,7 @@ from .admin_dashboard import (
 )
 from .web_app import claimed_route
 from .web_auth import _is_admin_user, _resolve_user
+from .web_auth_errors import _authentication_required_error_details
 from .web_responses import _format_error, _json_response
 
 
@@ -39,28 +40,13 @@ def _request_adapter() -> SimpleNamespace:
     return SimpleNamespace(headers=request.headers, path=path)
 
 
-def _authentication_required_details(source: str, config: Any) -> str:
-    if source == "auth_header_not_trusted":
-        return (
-            "Header-based authentication is disabled. Start with --user for local development "
-            "or --trust-auth-header behind a trusted proxy."
-        )
-    if source == "signed_invites_disabled":
-        return "This invite link cannot be used because the server was not launched with --link-secret."
-    if source == "invite_expected_user_mismatch":
-        return "This invite link is for a different expected_user. Stop and ask the operator for a fresh invite."
-    if source and (source.startswith("invite_error:") or source.startswith("signed_link_")):
-        return "This invite link is invalid, expired, or revoked. Ask the operator for a fresh invite."
-    return f"No user found from trusted auth header {config.auth_header}."
-
-
 def _admin_user_or_error(state: Any) -> tuple[str | None, Response | None]:
     user, source = _resolve_user(_request_adapter(), state.config)
     if not user:
         return None, _json(
             _format_error(
                 "authentication_required",
-                details=_authentication_required_details(source, state.config),
+                details=_authentication_required_error_details(source, state.config),
                 status=HTTPStatus.UNAUTHORIZED,
             ),
             status=HTTPStatus.UNAUTHORIZED,
