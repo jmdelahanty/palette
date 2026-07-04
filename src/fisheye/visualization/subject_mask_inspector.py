@@ -15,7 +15,7 @@ import zarr
 from fisheye.shared.detect_reason_codec import read_reason_labels
 from fisheye.shared.mask_store import MaskStore, MaskStoreError, open_mask_store
 from fisheye.shared.zarr_helpers import resolve_zarr_run
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 WINDOW_NAME = "Subject Mask Inspector"
 DISPLAY_SCALE = 2.0

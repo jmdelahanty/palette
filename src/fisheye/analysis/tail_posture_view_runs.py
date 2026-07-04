@@ -23,7 +23,7 @@ from ..shared.stage_provenance import build_stage_provenance, write_stage_proven
 from ..shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
 from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from ..shared.system_metadata import get_environment_info, get_git_info
-from ..utils.zarr_io import open_zarr_root
+from ..shared.zarr_io import open_zarr_root
 from .megabouts_convention_audit import resample_tail_keypoints
 from .subject_shape_io import SubjectShapeRunTables, load_subject_shape_run_tables, resolve_subject_shape_run
 

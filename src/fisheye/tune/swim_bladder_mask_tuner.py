@@ -19,7 +19,7 @@ import zarr
 from skimage import measure
 
 from ..shared.roi_background import _prepare_panel, _resolve_run_name
-from ..utils.zarr_io import open_zarr_root
+from ..shared.zarr_io import open_zarr_root
 from ..visualization.visualize_swim_bladder_mask_patches import (
     _extract_patch_bounds,
     _load_keypoint_success_flags,

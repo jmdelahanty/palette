@@ -28,7 +28,7 @@ from ..shared.subject_mask_component_provenance import write_subject_mask_compon
 from ..tune import subject_mask_tuner as subject_tuning
 from ..tune import swim_bladder_mask_tuner as swim_tuning
 from ..shared.system_metadata import get_environment_info, get_git_info
-from ..utils.zarr_io import open_zarr_root
+from ..shared.zarr_io import open_zarr_root
 from ..visualization.visualize_swim_bladder_mask_patches import (
     _extract_patch_bounds,
     _load_keypoint_success_flags,

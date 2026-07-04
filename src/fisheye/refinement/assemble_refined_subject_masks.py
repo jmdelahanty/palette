@@ -46,7 +46,7 @@ from .subject_eye_assignment import (
     assign_eyes_union_to_lr,
     reconcile_keypoint_mask_row_identity,
 )
-from ..utils.zarr_io import open_zarr_root
+from ..shared.zarr_io import open_zarr_root
 
 ASSEMBLE_REFINED_SUBJECT_METHOD = "assemble_refined_subject_masks_v1"
 CANONICAL_COMPONENT_ORDER = ("subject_body", "eye_left", "eye_right", "swim_bladder")

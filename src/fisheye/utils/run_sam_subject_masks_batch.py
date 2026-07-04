@@ -26,7 +26,7 @@ from fisheye.utils.run_sam_subject_masks import (
     inspect_sam_subject_archive_path,
     run_sam_subject_mask_inference,
 )
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 DEFAULT_RECORDINGS_ROOT = Path("/nvme1/recordings")

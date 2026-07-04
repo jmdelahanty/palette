@@ -14,7 +14,7 @@ from typing import Any, Iterable, Optional
 import zarr
 
 from fisheye.shared.type_conversions import normalize_attr
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 TUNING_KEY = "subject_mask_tuning"

@@ -46,7 +46,7 @@ from fisheye.shared.zarr.chunk_profiles import (
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from fisheye.tracking.single_subject_per_arena import load_tracking_ids
 from fisheye.shared.system_metadata import get_git_info, get_environment_info
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 from .chaser_state_interpolator import load_structured_dataset
 from .swim_bout_io import SwimBoutIOError, load_default_swim_bout_tables, load_swim_bout_tables
 

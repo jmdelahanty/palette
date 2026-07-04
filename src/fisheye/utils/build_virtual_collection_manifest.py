@@ -16,7 +16,7 @@ from fisheye.utils.virtual_collection_manifest import (
     with_manifest_sha256,
     write_manifest,
 )
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 PROFILE_MOVEMENT_BOUTS = "movement_bouts"

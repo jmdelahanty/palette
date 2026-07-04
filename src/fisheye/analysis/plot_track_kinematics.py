@@ -29,7 +29,7 @@ from fisheye.shared.plot_artifacts import (
 )
 from fisheye.shared.stage_provenance import build_stage_provenance
 from fisheye.shared.system_metadata import get_environment_info, get_git_info
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 from .chaser_metrics_loader import load_chaser_metrics
 

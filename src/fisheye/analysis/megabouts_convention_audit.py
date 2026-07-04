@@ -14,7 +14,7 @@ import numpy as np
 import zarr
 
 from ..shared.json_safety import json_attr_safe
-from ..utils.zarr_io import open_zarr_root
+from ..shared.zarr_io import open_zarr_root
 
 DEFAULT_MEGABOUTS_KEYPOINT_COUNT = 11
 

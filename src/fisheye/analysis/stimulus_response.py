@@ -54,7 +54,7 @@ from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage
 from fisheye.shared.zarr_helpers import resolve_zarr_run
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from fisheye.shared.system_metadata import get_git_info
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 from fisheye.analysis.swim_bout_io import load_default_swim_bout_tables
 from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset

@@ -16,7 +16,7 @@ from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
 from fisheye.shared.coordinate_transform import load_calibration_transform, projector_to_camera_px
 from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.utils.view_zarr_visualization import load_png_artifact_bytes
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 GOODCOPBADCOP_CHASER_DASHBOARD_SPEC_SCHEMA_ID = "palette.plot_spec.goodcopbadcop_chaser_dashboard.v1"

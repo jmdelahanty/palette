@@ -10,7 +10,7 @@ from typing import Optional, Dict, Any
 
 import zarr
 
-from .zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 def _pick_refined_parent(root: zarr.Group) -> Optional[zarr.Group]:

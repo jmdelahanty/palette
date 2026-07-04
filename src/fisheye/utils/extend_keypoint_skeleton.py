@@ -15,7 +15,7 @@ from zarr.core.dtype import VariableLengthUTF8
 from fisheye.pose.schema import PoseSchema, schema_from_package
 from fisheye.shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from fisheye.shared.zarr_helpers import resolve_zarr_run
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 KEYPOINT_PARENT_CHOICES = ("auto", "keypoints_runs", "refined_keypoints_runs")

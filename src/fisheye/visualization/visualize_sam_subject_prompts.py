@@ -29,7 +29,7 @@ from fisheye.utils.run_sam_subject_masks import (
     resolve_prompt_keypoint_selection,
     resolve_sam_subject_inputs,
 )
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 WINDOW_NAME = "SAM Subject Prompt Visualizer"
 RESULT_WINDOW_NAME = "SAM Subject Prompt Result Overlay"

@@ -29,7 +29,7 @@ from fisheye.analysis.eye_angle_io import (
     EyeAngleIOError,
     load_eye_angle_run_tables,
 )
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 DEFAULT_TRACK_RUN = "tk_hyst4_low2_latch_s005"

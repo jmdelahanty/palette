@@ -20,7 +20,7 @@ from ..shared.detect_reason_codec import read_reason_labels, write_reason_column
 from ..shared.frame_flags import append_flagged_frame, load_row_identity_arrays, row_identity_payload
 from ..shared.subject_mask_stale import mark_downstream_subject_mask_runs_stale
 from ..shared.zarr_run_completion import resolve_latest_complete_run_name, set_authoritative_run
-from ..utils.zarr_io import open_zarr_root
+from ..shared.zarr_io import open_zarr_root
 from .keypoint_failure_review import (
     _DEFAULT_CONFIDENCE_THRESHOLD,
     _DEFAULT_LABELS,

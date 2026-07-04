@@ -20,7 +20,7 @@ from fisheye.shared.run_lineage_fingerprint import (
     compute_run_lineage_hash,
     write_run_lineage_attrs,
 )
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 @dataclass(frozen=True)

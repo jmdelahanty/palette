@@ -22,7 +22,7 @@ from ..shared.stage_provenance import build_stage_provenance, write_stage_proven
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
 from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
-from ..utils.zarr_io import open_zarr_root
+from ..shared.zarr_io import open_zarr_root
 from .single_subject_per_arena import (
     TRACKING_METHOD_SINGLE_SUBJECT_PER_ARENA,
     write_single_subject_per_arena_tracking_run,

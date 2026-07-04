@@ -45,7 +45,7 @@ from ..shared.workflow_profile import WorkflowProfiler
 from ..shared.workflow_profile import json_safe
 from ..shared.zarr_run_completion import require_runs_parent
 from ..tune.refined_subject_mask_review import _load_source_subject_mask_run
-from ..utils.zarr_io import open_zarr_root
+from ..shared.zarr_io import open_zarr_root
 
 _ROW_ARRAY_CANDIDATES = (
     "mask_probs_roi",

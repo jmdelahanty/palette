@@ -43,7 +43,7 @@ from fisheye.shared.zarr_run_completion import (
     note_pending_latest,
     require_runs_parent,
 )
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 TARGET_SCHEMAS: dict[str, tuple[str, ...]] = {

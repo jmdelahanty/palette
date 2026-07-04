@@ -56,7 +56,7 @@ from fisheye.pose.body_frame import (
 from fisheye.pose.schema import resolve_required_keypoint_indices_from_attrs
 from fisheye.utils.metadata import get_fps
 from fisheye.shared.system_metadata import get_git_info
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 # Reason-code bitmask values (shared across detection- and frame-level QA)
 REASON_NONE = np.uint16(0)

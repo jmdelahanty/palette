@@ -45,7 +45,7 @@ from fisheye.analysis.megabouts_classifier_inputs import (
     build_megabouts_classifier_input_pack,
     summarize_input_pack,
 )
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 COMPARISON_METHOD = "palette_megabouts_preprocessing_comparison"
 COMPARISON_METHOD_VERSION = 1

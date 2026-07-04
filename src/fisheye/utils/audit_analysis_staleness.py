@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from fisheye.shared.run_lineage_fingerprint import normalize_lineage_value
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 @dataclass(frozen=True)

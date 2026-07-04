@@ -44,7 +44,7 @@ from ..tune.refined_subject_mask_review import (
     _probability_encoding_for_group,
     _probability_thresholds_for_labels,
 )
-from ..utils.zarr_io import open_zarr_root
+from ..shared.zarr_io import open_zarr_root
 
 _SUPPORTED_SCHEDULERS = ("single-threaded", "threads", "processes", "distributed")
 _DEFAULT_COMPONENTS = ("subject_body", "eyes_union", "swim_bladder")

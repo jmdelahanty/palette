@@ -26,7 +26,7 @@ from ..refinement.subject_eye_assignment import (
 )
 from ..shared.json_safety import json_attr_safe
 from ..shared.mask_probability_encoding import decode_probability_values_from_attrs
-from ..utils.zarr_io import open_zarr_root
+from ..shared.zarr_io import open_zarr_root
 
 
 SplitFn = Callable[..., None]

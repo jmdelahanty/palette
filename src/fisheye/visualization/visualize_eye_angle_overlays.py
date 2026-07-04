@@ -38,7 +38,7 @@ from fisheye.shared.eye_geometry_source import (
     resolve_eye_geometry_source,
 )
 from fisheye.shared.provenance_attrs import resolve_source_keypoints_run
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 DEFAULT_LEFT_COLOR = np.array([0.90, 0.23, 0.31], dtype=np.float32)   # reddish

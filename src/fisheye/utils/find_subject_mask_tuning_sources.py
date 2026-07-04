@@ -16,7 +16,7 @@ from fisheye.utils.apply_tuning_by_camera import (
     _normalize_subject_mask_tuning_payload,
     _parse_subject_mask_components,
 )
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 DEFAULT_RECORDINGS_ROOT = Path("/nvme1/recordings")

@@ -18,7 +18,7 @@ from ..shared.environment import resolve_log_dir as resolve_shared_log_dir
 from ..shared.mask_store import MaskStoreError, open_mask_store
 from ..shared.refined_subject_eye_geometry import EYE_COMPONENTS, write_refined_subject_eye_geometry
 from ..shared.zarr_helpers import _direct_group_names, _group_names, _open_group_direct, _open_mode, _root_fs_path
-from .zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 JsonLogger = SharedJsonLogger

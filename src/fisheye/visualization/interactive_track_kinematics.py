@@ -28,7 +28,7 @@ from fisheye.analysis.swim_bout_io import (
     discover_swim_bout_candidates as discover_swim_bout_candidates_resolved,
     load_swim_bout_tables,
 )
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 TRACK_KINEMATICS_SPEC_SCHEMA_ID = "palette.plot_spec.track_kinematics_summary.v1"
