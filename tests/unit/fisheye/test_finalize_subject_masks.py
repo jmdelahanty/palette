@@ -1373,3 +1373,39 @@ def test_finalize_subject_mask_run_dry_run_and_overwrite_guard(monkeypatch) -> N
             refined_run="refined_subject_masks_smart_001",
             chunk_size=1,
         )
+
+
+def test_finalize_subject_mask_run_copies_instance_key_from_source(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root()
+    keys = np.asarray([11258999068426240, 22517998136852481], dtype=np.uint64)
+    root["subject_mask_runs"]["subject_probs_001"].create_array(
+        "instance_key", data=keys, overwrite=True
+    )
+
+    mod.finalize_subject_mask_run(
+        root,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_smart_001",
+        chunk_size=1,
+    )
+
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_001"]
+    assert "instance_key" in run
+    copied = np.asarray(run["instance_key"][:], dtype=np.uint64)
+    np.testing.assert_array_equal(copied, keys)
+
+
+def test_finalize_subject_mask_run_omits_instance_key_for_legacy_source(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root()
+
+    mod.finalize_subject_mask_run(
+        root,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_smart_001",
+        chunk_size=1,
+    )
+
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_001"]
+    assert "instance_key" not in run

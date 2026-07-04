@@ -1126,6 +1126,7 @@ def _source_lineage_map(source: SourceSubjectMaskRun) -> dict[str, object | None
         "source_crop_row_ids": source.source_crop_row_ids,
         "source_refined_row_ids": source.source_refined_row_ids,
         "source_detect_row_index": source.source_detect_row_index,
+        "instance_key": source.instance_key,
     }
 
 
