@@ -603,6 +603,44 @@ def test_apply_review_status_delegates_existing_status_writer(monkeypatch) -> No
 
     result = mod.apply_review_status(
         session,
+        state="pending",
+        method="manual",
+        intended_use="training",
+        reviewer="tester",
+        notes="ok",
+    )
+
+    assert result["review_status"]["state"] == "pending"
+    assert result["review_status"]["intended_use"] == "training"
+    assert result["postprocess_summary"]["total_rois"] == 4
+    assert parent.attrs["keypoint_review_status_latest"] == "refined_1"
+    assert result["authoritative_approval"]["attempted"] is False
+
+
+def test_apply_review_status_approved_is_fail_closed_when_authoritative_approval_fails(monkeypatch) -> None:
+    session = _build_session(keypoint_count=5)
+    parent = _FakeGroup({"refined_1": session.refined}, attrs={})
+    session.root["refined_keypoints_runs"] = parent
+    calls: list[str] = []
+
+    def _fake_apply(*_args: object, **_kwargs: object) -> tuple[dict[str, object], dict[str, object]]:
+        calls.append("apply")
+        return {"state": "approved"}, {"synced": True}
+
+    monkeypatch.setattr(mod, "_apply_review_status", _fake_apply)
+    monkeypatch.setattr(
+        mod,
+        "_approve_authoritative_refined_keypoints",
+        lambda *_args, **_kwargs: {
+            "attempted": True,
+            "status": "blocked",
+            "reason_code": "RUN_INCOMPLETE",
+            "next_hints": ["complete refined keypoint run first"],
+        },
+    )
+
+    result = mod.apply_review_status(
+        session,
         state="approved",
         method="manual",
         intended_use="training",
@@ -610,11 +648,11 @@ def test_apply_review_status_delegates_existing_status_writer(monkeypatch) -> No
         notes="ok",
     )
 
-    assert result["review_status"]["state"] == "approved"
-    assert result["review_status"]["intended_use"] == "training"
-    assert result["postprocess_summary"]["total_rois"] == 4
-    assert parent.attrs["keypoint_review_status_latest"] == "refined_1"
-    assert result["authoritative_approval"]["attempted"] is False
+    assert result["changed"] is False
+    assert result["authoritative_approval"]["status"] == "blocked"
+    assert calls == []
+    assert "keypoint_review_status" not in session.refined.attrs
+    assert "keypoint_review_status_latest" not in parent.attrs
 
 
 def test_apply_review_status_approved_sets_authoritative_refined_keypoint_run(monkeypatch, tmp_path) -> None:
@@ -642,7 +680,7 @@ def test_apply_review_status_approved_sets_authoritative_refined_keypoint_run(mo
     assert result["review_status"]["state"] == "approved"
     assert result["authoritative_approval"]["attempted"] is True
     assert result["authoritative_approval"]["status"] == "ok"
-    reopened = zarr.open_group(str(zarr_path), mode="r")
+    reopened = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
     assert reopened["refined_keypoints_runs"].attrs[AUTHORITATIVE_RUN_ATTR] == "refined_1"
 
 
@@ -684,6 +722,11 @@ def test_web_endpoints_cover_action_filter_jump_and_review_status(monkeypatch) -
         return payload, {"synced": True}
 
     monkeypatch.setattr(mod, "_apply_review_status", _fake_apply)
+    monkeypatch.setattr(
+        mod,
+        "_approve_authoritative_refined_keypoints",
+        lambda *_args, **_kwargs: {"attempted": True, "status": "ok", "reason_code": "OK"},
+    )
     monkeypatch.setattr(mod, "_update_postprocess_summary", lambda refined, *, root=None, print_summary=False: {"total_rois": 4})
 
     handler = web._build_handler(state=state, static_root=Path(__file__).parent, backend_module=mod)

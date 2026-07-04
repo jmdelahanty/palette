@@ -19,7 +19,7 @@ from ..refinement.keypoint_quality import (
 from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from ..shared.frame_flags import append_flagged_frame, load_row_identity_arrays, row_identity_payload
 from ..shared.subject_mask_stale import mark_downstream_subject_mask_runs_stale
-from ..shared.zarr_run_completion import resolve_latest_complete_run_name
+from ..shared.zarr_run_completion import resolve_latest_complete_run_name, set_authoritative_run
 from ..utils.zarr_io import open_zarr_root
 from .keypoint_failure_review import (
     _DEFAULT_CONFIDENCE_THRESHOLD,
@@ -981,6 +981,25 @@ def _approve_authoritative_refined_keypoints(
     }
 
 
+def _authoritative_approval_ok(payload: Mapping[str, object]) -> bool:
+    return bool(payload.get("attempted")) and str(payload.get("status") or "").strip().lower() == "ok"
+
+
+def _mirror_authoritative_approval(parent: zarr.Group, run_name: str, payload: Mapping[str, object]) -> None:
+    envelope = payload.get("envelope")
+    approval = envelope.get("approval") if isinstance(envelope, Mapping) else None
+    if not isinstance(approval, Mapping):
+        approval = {}
+    set_authoritative_run(
+        parent,
+        run_name,
+        approved_by=str(approval.get("approved_by") or "unknown"),
+        approved_at=str(approval.get("approved_at") or ""),
+        git_sha=str(approval.get("git_sha") or ""),
+        note=str(approval.get("note") or ""),
+    )
+
+
 def apply_review_status(
     session: ReviewSession,
     *,
@@ -999,6 +1018,23 @@ def apply_review_status(
         root=session.root,
         zarr_path=session.zarr_path,
     )
+    authoritative_approval = _approve_authoritative_refined_keypoints(
+        session,
+        state=str(state),
+        reviewer=reviewer,
+        notes=notes,
+    )
+    if str(state).strip().lower() == "approved" and not _authoritative_approval_ok(authoritative_approval):
+        return {
+            "action": "apply_review_status",
+            "changed": False,
+            "review_status": dict(session.refined.attrs.get("keypoint_review_status") or {}),
+            "registry_sync": None,
+            "postprocess_summary": None,
+            "authoritative_approval": authoritative_approval,
+        }
+    if _authoritative_approval_ok(authoritative_approval):
+        _mirror_authoritative_approval(refined_parent, session.refined_run, authoritative_approval)
     payload, sync = _apply_review_status(
         refined_parent,
         session.refined_run,
@@ -1014,12 +1050,6 @@ def apply_review_status(
         session.refined,
         root=session.root,
         print_summary=False,
-    )
-    authoritative_approval = _approve_authoritative_refined_keypoints(
-        session,
-        state=str(state),
-        reviewer=reviewer,
-        notes=notes,
     )
     return {
         "action": "apply_review_status",
