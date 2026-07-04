@@ -20,6 +20,11 @@ import dask
 from dask import delayed
 from dask.diagnostics import ProgressBar
 
+from ..shared.instance_keys import (
+    instance_key_attrs,
+    mint_detection_instance_keys,
+    resolve_recording_identity,
+)
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.zarr.chunk_profiles import create_geometry_preload_array
 from ..shared.zarr_run_completion import (
@@ -357,9 +362,17 @@ def detect_fish(
     console.print(f"Aggregating {total_detections} total detections...")
     
     # Write core detection arrays
+    recording_identity = resolve_recording_identity(root.attrs, fallback_path=zarr_path)
     if total_detections > 0:
         frame_indices_np = np.array(all_frame_indices, dtype='i4')
         bboxes_np = np.array(all_bboxes, dtype='f8')
+        class_ids_np = np.zeros(total_detections, dtype=np.int32)
+        instance_keys = mint_detection_instance_keys(
+            recording_identity=recording_identity,
+            frame_indices=frame_indices_np,
+            bbox_norm_coords=bboxes_np,
+            class_ids=class_ids_np,
+        )
         
         det_chunk = min(chunk_size * 4, total_detections)
 
@@ -384,7 +397,13 @@ def detect_fish(
         )
         detect_group.create_array(
             'class_ids',
-            data=np.zeros(total_detections, dtype=np.int32),
+            data=class_ids_np,
+            chunks=(det_chunk,),
+            overwrite=True
+        )
+        detect_group.create_array(
+            'instance_key',
+            data=instance_keys,
             chunks=(det_chunk,),
             overwrite=True
         )
@@ -411,6 +430,7 @@ def detect_fish(
         detect_group.create_array('bbox_norm_coords', data=np.empty((0, 4), dtype='f8'), overwrite=True)
         detect_group.create_array('scores', data=np.empty((0,), dtype=np.float32), overwrite=True)
         detect_group.create_array('class_ids', data=np.empty((0,), dtype=np.int32), overwrite=True)
+        detect_group.create_array('instance_key', data=np.empty((0,), dtype=np.uint64), overwrite=True)
         frame_counts_empty = np.zeros(num_images, dtype='i4')
         create_geometry_preload_array(
             detect_group,
@@ -460,6 +480,7 @@ def detect_fish(
         'detection_source': 'zarr_video',  # Blob uses imported video in zarr
         'total_frames': num_images,
         'has_raw_video': True,
+        **instance_key_attrs(recording_identity),
         
         # Detection parameters (method-specific)
         'parameters': detect_params,

@@ -46,6 +46,11 @@ from fisheye.shared.pynvvc_luma_rgb import PYNVVC_BACKENDS
 from fisheye.shared.pynvvc_luma_rgb import PynvvcLumaRgbReader
 from fisheye.shared.pynvvc_luma_rgb import preprocess_luma_rgb
 from fisheye.shared.pynvvc_luma_rgb import preprocess_nv12_rgb
+from fisheye.shared.instance_keys import (
+    instance_key_attrs,
+    mint_detection_instance_keys,
+    resolve_recording_identity,
+)
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr.schema import get_run_group
 from fisheye.shared.zarr.chunk_profiles import create_geometry_preload_array
@@ -1577,6 +1582,13 @@ def detect_yolo(
         frame_counts = np.bincount(frame_indices, minlength=n_frames).astype(np.int32, copy=False)
     else:
         frame_counts = np.zeros(n_frames, dtype=np.int32)
+    recording_identity = resolve_recording_identity(root.attrs, fallback_path=output_zarr)
+    instance_keys = mint_detection_instance_keys(
+        recording_identity=recording_identity,
+        frame_indices=frame_indices,
+        bbox_norm_coords=bbox_coords,
+        class_ids=class_ids,
+    )
     _record_timing(stage_timings, 'array_assembly_seconds_total', assembly_start)
     
     preferred_det_chunk = max(1024, max(1, batch_size) * 8)
@@ -1588,6 +1600,7 @@ def detect_yolo(
     detect_group.create_array('bbox_norm_coords', data=bbox_coords, chunks=(det_chunk, 4), overwrite=True)
     detect_group.create_array('scores', data=scores, chunks=(det_chunk,), overwrite=True)
     detect_group.create_array('class_ids', data=class_ids, chunks=(det_chunk,), overwrite=True)
+    detect_group.create_array('instance_key', data=instance_keys, chunks=(det_chunk,), overwrite=True)
     create_geometry_preload_array(detect_group, 'n_detections', data=frame_counts, overwrite=True)
     create_geometry_preload_array(detect_group, 'frame_counts', data=frame_counts, overwrite=True)
     _record_timing(stage_timings, 'zarr_write_seconds_total', zarr_write_start)
@@ -1644,6 +1657,7 @@ def detect_yolo(
         'source_full_height': source_full_height,
         'inference_width': int(inference_width),
         'inference_height': int(inference_height),
+        **instance_key_attrs(recording_identity),
         'parameters': {
             'conf_threshold': conf_threshold,
             'iou_threshold': iou_threshold,
