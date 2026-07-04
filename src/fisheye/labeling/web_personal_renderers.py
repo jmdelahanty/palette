@@ -2,14 +2,7 @@
 
 from __future__ import annotations
 
-import html
-from typing import Mapping
-
-from .template_assets import read_labeling_asset
-from .web_auth import PERSONAL_DATASET_QUEUE_PATH, _dashboard_url_for_expected_user
-from .web_policy import PERSONAL_WORK_PATH
-
-__all__ = ["_dashboard_html", "_datasets_html", "_session_status_banner"]
+__all__ = ["_dashboard_html", "_datasets_html"]
 
 def _dashboard_html() -> bytes:
     return b"""<!doctype html>
@@ -2747,40 +2740,3 @@ def _datasets_html() -> bytes:
 </html>
 """
     return body.encode("utf-8")
-
-
-_SESSION_OPERATOR_SUPPORT_CSS = read_labeling_asset("static/css/session_operator_support.css")
-_SESSION_OPERATOR_SUPPORT_HTML = read_labeling_asset("templates/partials/session_operator_support.html")
-_SESSION_OPERATOR_SUPPORT_JS = read_labeling_asset("static/js/operator_support.js")
-_BROWSER_MUTATION_STATUS_JS = read_labeling_asset("static/js/browser_mutation_status.js")
-_IMAGE_CANVAS_VIEWPORT_JS = read_labeling_asset("static/js/image_canvas_viewport.js")
-
-
-def _session_return_url(session: Mapping[str, object], path: str) -> str:
-    expected_user = str(
-        session.get("user")
-        or session.get("assignee_user")
-        or session.get("expected_user")
-        or ""
-    ).strip()
-    return _dashboard_url_for_expected_user(path, expected_user) if expected_user else path
-
-
-def _session_status_banner(session: Mapping[str, object]) -> str:
-    session_id = html.escape(str(session.get("session_id") or ""))
-    expires_at = html.escape(str(session.get("expires_at_utc") or "unknown"))
-    task_id = html.escape(str(session.get("task_id") or ""))
-    recording_id = html.escape(str(session.get("recording_id") or ""))
-    personal_queue_url = html.escape(_session_return_url(session, PERSONAL_DATASET_QUEUE_PATH))
-    personal_work_url = html.escape(_session_return_url(session, PERSONAL_WORK_PATH))
-    closed_at = str(session.get("closed_at_utc") or "").strip()
-    state_text = "closed" if closed_at else "active"
-    closed_bits = f" Closed at {html.escape(closed_at)}." if closed_at else ""
-    return f"""
-    <section style="border:1px solid #d7ded5;border-radius:18px;background:rgba(255,253,245,.82);padding:12px 14px;margin:-4px 0 18px;color:#5f6d62;box-shadow:0 10px 28px rgba(23,32,26,.08);">
-      <b style="color:#17201a;">Session {state_text}</b>
-      <span>Task <code>{task_id}</code> for recording <code>{recording_id}</code> expires at <code>{expires_at}</code>.{closed_bits}</span>
-      <span style="display:block;margin-top:4px;">If this tab reports a superseded session, expired session, or completed task, return to <a href="{personal_queue_url}">your personalized dataset queue</a> or <a href="{personal_work_url}">your personalized work dashboard</a> and reopen the task.</span>
-      <span style="display:block;margin-top:4px;font-size:.88rem;">Session <code>{session_id}</code></span>
-    </section>
-"""

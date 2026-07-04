@@ -96,15 +96,21 @@ from .web_diagnostics import (
 from .web_identity import _identity_probe_html
 from .web_personal_api import register_personal_api_routes
 from .web_personal_pages import register_personal_page_routes
-from .web_personal_renderers import (
+from .web_personal_renderers import _dashboard_html, _datasets_html
+from .web_session_renderers import (
     _BROWSER_MUTATION_STATUS_JS,
     _IMAGE_CANVAS_VIEWPORT_JS,
     _SESSION_OPERATOR_SUPPORT_CSS,
     _SESSION_OPERATOR_SUPPORT_HTML,
     _SESSION_OPERATOR_SUPPORT_JS,
-    _dashboard_html,
-    _datasets_html,
+    _detect_session_html,
+    _keypoint_session_html,
+    _session_html,
+    _session_return_links_html,
+    _session_return_url,
     _session_status_banner,
+    _subject_mask_session_html,
+    _video_detect_session_html,
 )
 from .web_wsgi_adapter import handle_with_flask_if_claimed
 from .template_assets import read_labeling_asset, render_labeling_template
@@ -3814,193 +3820,6 @@ def _project_approved_keypoint_review_to_recording_step_status(
 
 
 
-
-def _session_return_url(session: Mapping[str, object], path: str) -> str:
-    expected_user = str(
-        session.get("user")
-        or session.get("assignee_user")
-        or session.get("expected_user")
-        or ""
-    ).strip()
-    return _dashboard_url_for_expected_user(path, expected_user) if expected_user else path
-
-
-def _session_return_links_html(session: Mapping[str, object]) -> str:
-    personal_queue_url = html.escape(_session_return_url(session, PERSONAL_DATASET_QUEUE_PATH))
-    personal_work_url = html.escape(_session_return_url(session, PERSONAL_WORK_PATH))
-    return (
-        f'<a href="{personal_queue_url}" class="meta" data-session-return="dataset-queue">Personalized dataset queue</a> - '
-        f'<a href="{personal_work_url}" class="meta" data-session-return="work-dashboard">Personalized work dashboard</a>'
-    )
-
-
-def _keypoint_session_html(session: Mapping[str, object]) -> bytes:
-    safe_title = html.escape(_task_title(session))
-    session_id = html.escape(str(session.get("session_id") or ""))
-    status_banner = _session_status_banner(session)
-    return_links = _session_return_links_html(session)
-    body = render_labeling_template(
-        "sessions/keypoint.html.j2",
-        {
-            "safe_title": safe_title,
-            "session_id": session_id,
-            "return_links": return_links,
-            "status_banner": status_banner,
-            "session_operator_support_css": _SESSION_OPERATOR_SUPPORT_CSS,
-            "session_operator_support_html": _SESSION_OPERATOR_SUPPORT_HTML,
-            "operator_support_js": _SESSION_OPERATOR_SUPPORT_JS,
-            "browser_mutation_status_js": _BROWSER_MUTATION_STATUS_JS,
-            "image_canvas_viewport_js": _IMAGE_CANVAS_VIEWPORT_JS,
-            "keypoint_editor_js": read_labeling_asset("static/js/keypoint_editor.js"),
-            "session_id_json": json.dumps(str(session.get("session_id") or "")),
-        },
-    )
-    return body.encode("utf-8")
-
-
-
-def _detect_session_html(session: Mapping[str, object]) -> bytes:
-    safe_title = html.escape(_task_title(session))
-    session_id = html.escape(str(session.get("session_id") or ""))
-    status_banner = _session_status_banner(session)
-    return_links = _session_return_links_html(session)
-    body = render_labeling_template(
-        "sessions/detect.html.j2",
-        {
-            "safe_title": safe_title,
-            "session_id": session_id,
-            "return_links": return_links,
-            "status_banner": status_banner,
-            "session_operator_support_css": _SESSION_OPERATOR_SUPPORT_CSS,
-            "session_operator_support_html": _SESSION_OPERATOR_SUPPORT_HTML,
-            "operator_support_js": _SESSION_OPERATOR_SUPPORT_JS,
-            "browser_mutation_status_js": _BROWSER_MUTATION_STATUS_JS,
-            "image_canvas_viewport_js": _IMAGE_CANVAS_VIEWPORT_JS,
-            "detect_editor_js": read_labeling_asset("static/js/detect_editor.js"),
-            "session_id_json": json.dumps(str(session.get("session_id") or "")),
-        },
-    )
-    return body.encode("utf-8")
-
-
-
-def _video_detect_session_html(session: Mapping[str, object]) -> bytes:
-    safe_title = html.escape(_task_title(session))
-    session_id = html.escape(str(session.get("session_id") or ""))
-    status_banner = _session_status_banner(session)
-    return_links = _session_return_links_html(session)
-    body = render_labeling_template(
-        "sessions/video_detect.html.j2",
-        {
-            "safe_title": safe_title,
-            "session_id": session_id,
-            "return_links": return_links,
-            "status_banner": status_banner,
-            "session_operator_support_css": _SESSION_OPERATOR_SUPPORT_CSS,
-            "session_operator_support_html": _SESSION_OPERATOR_SUPPORT_HTML,
-            "operator_support_js": _SESSION_OPERATOR_SUPPORT_JS,
-            "browser_mutation_status_js": _BROWSER_MUTATION_STATUS_JS,
-            "video_detect_editor_js": read_labeling_asset("static/js/video_detect_editor.js"),
-            "session_id_json": json.dumps(str(session.get("session_id") or "")),
-        },
-    )
-    return body.encode("utf-8")
-
-
-
-def _subject_mask_session_html(session: Mapping[str, object]) -> bytes:
-    safe_title = html.escape(_task_title(session))
-    session_id = html.escape(str(session.get("session_id") or ""))
-    status_banner = _session_status_banner(session)
-    return_links = _session_return_links_html(session)
-    body = render_labeling_template(
-        "sessions/subject_mask.html.j2",
-        {
-            "safe_title": safe_title,
-            "session_id": session_id,
-            "return_links": return_links,
-            "status_banner": status_banner,
-            "session_operator_support_css": _SESSION_OPERATOR_SUPPORT_CSS,
-            "session_operator_support_html": _SESSION_OPERATOR_SUPPORT_HTML,
-            "operator_support_js": _SESSION_OPERATOR_SUPPORT_JS,
-            "browser_mutation_status_js": _BROWSER_MUTATION_STATUS_JS,
-            "image_canvas_viewport_js": _IMAGE_CANVAS_VIEWPORT_JS,
-            "subject_mask_editor_js": read_labeling_asset("static/js/subject_mask_editor.js"),
-            "session_id_json": json.dumps(str(session.get("session_id") or "")),
-        },
-    )
-    return body.encode("utf-8")
-
-
-
-def _session_html(session: Mapping[str, object]) -> bytes:
-    workflow_kind = str(session.get("workflow_kind") or "")
-    if workflow_kind == "keypoints":
-        return _keypoint_session_html(session)
-    if workflow_kind == "detect_training":
-        return _detect_session_html(session)
-    if workflow_kind == "detect_analysis":
-        return _video_detect_session_html(session)
-    if workflow_kind == "subject_mask_component":
-        return _subject_mask_session_html(session)
-    title = _task_title(session)
-    safe_title = html.escape(title)
-    status_banner = _session_status_banner(session)
-    personal_queue_url = html.escape(_session_return_url(session, PERSONAL_DATASET_QUEUE_PATH))
-    personal_work_url = html.escape(_session_return_url(session, PERSONAL_WORK_PATH))
-    body = f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{safe_title}</title>
-  <style>
-    body {{
-      margin: 0;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      background: linear-gradient(135deg, #f6f0dc, #eaf3ef);
-      color: #17201a;
-      font-family: "Trebuchet MS", Verdana, sans-serif;
-    }}
-    article {{
-      max-width: 760px;
-      margin: 24px;
-      padding: 28px;
-      border-radius: 24px;
-      background: rgba(255, 253, 245, 0.9);
-      box-shadow: 0 18px 48px rgba(23, 32, 26, 0.14);
-      border: 1px solid #d7ded5;
-    }}
-    h1 {{
-      font-family: Georgia, "Times New Roman", serif;
-      font-size: clamp(2rem, 6vw, 4rem);
-      line-height: 0.95;
-      margin: 0 0 16px;
-      letter-spacing: -0.05em;
-    }}
-    code {{
-      overflow-wrap: anywhere;
-    }}
-  </style>
-</head>
-<body>
-  <article>
-    <h1>{safe_title}</h1>
-    {status_banner}
-    <p><b>No browser editor is configured for this workflow.</b> Return to <a href="{personal_queue_url}">your personalized dataset queue</a> or <a href="{personal_work_url}">your personalized work dashboard</a> and ask the operator to inspect this task definition before doing any work.</p>
-    <p><a href="/">Return to your labeling landing page</a></p>
-    <p><a href="{html.escape(DASHBOARD_PATH)}">Return to the work dashboard</a></p>
-    <p><b>Recording:</b> <code>{html.escape(str(session.get("recording_id") or ""))}</code></p>
-    <p><b>Workflow:</b> <code>{html.escape(str(session.get("workflow_kind") or ""))}</code></p>
-    <p><b>Task:</b> <code>{html.escape(str(session.get("task_id") or ""))}</code></p>
-    <p><b>Session:</b> <code>{html.escape(str(session.get("session_id") or ""))}</code></p>
-  </article>
-</body>
-</html>
-"""
-    return body.encode("utf-8")
 
 
 def _make_handler(state: ServerState):
