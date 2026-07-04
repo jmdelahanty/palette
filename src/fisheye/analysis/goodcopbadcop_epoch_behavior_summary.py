@@ -25,7 +25,7 @@ from fisheye.analysis.swim_bout_io import load_default_swim_bout_tables
 from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
 from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
-from fisheye.utils.system import get_git_info
+from fisheye.shared.system_metadata import get_git_info
 
 
 SCHEMA_ID = "palette.goodcopbadcop.epoch_behavior_summary.v1"

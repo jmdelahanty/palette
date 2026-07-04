@@ -21,7 +21,7 @@ from ..shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
 from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
-from ..utils.system import get_environment_info, get_git_info
+from ..shared.system_metadata import get_environment_info, get_git_info
 from ..utils.zarr_io import open_zarr_root
 from .subject_shape_io import SubjectShapeRunTables, load_subject_shape_run_tables, resolve_subject_shape_run
 from .subject_shape_spline import tail_sample_positions

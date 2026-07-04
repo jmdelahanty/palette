@@ -1,6 +1,6 @@
 """Utility functions for FishEye."""
 
-from .system import (
+from ..shared.system_metadata import (
     get_git_info,
     get_platform_info,
     get_gpu_info,

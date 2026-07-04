@@ -42,7 +42,7 @@ from fisheye.shared.zarr_run_completion import (
     note_pending_latest,
     require_runs_parent,
 )
-from fisheye.utils.system import get_environment_info, get_git_info
+from fisheye.shared.system_metadata import get_environment_info, get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
 try:

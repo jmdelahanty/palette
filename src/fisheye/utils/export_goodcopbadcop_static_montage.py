@@ -17,7 +17,7 @@ from typing import Any, Mapping, Sequence
 from PIL import Image, ImageDraw, ImageFont
 
 from fisheye.shared.json_safety import json_attr_safe
-from fisheye.utils.system import get_git_info
+from fisheye.shared.system_metadata import get_git_info
 from fisheye.utils.view_zarr_visualization import load_png_artifact_bytes
 from fisheye.utils.zarr_io import open_zarr_root
 

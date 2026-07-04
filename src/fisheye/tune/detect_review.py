@@ -47,7 +47,7 @@ from fisheye.utils.accept_detect_review import (
     _pick_refined_parent_name,
     _write_profile_and_sync_registry,
 )
-from fisheye.utils.system import get_environment_info
+from fisheye.shared.system_metadata import get_environment_info
 
 
 def _get_latest_refined_run(root: zarr.Group) -> str:

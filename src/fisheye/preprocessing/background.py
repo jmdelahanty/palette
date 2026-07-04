@@ -12,7 +12,7 @@ from typing import Dict, Optional, List, Literal
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
-from ..utils.system import get_git_info, get_platform_info
+from ..shared.system_metadata import get_git_info, get_platform_info
 from ..shared.zarr_run_completion import (
     mark_run_complete,
     mark_run_started,

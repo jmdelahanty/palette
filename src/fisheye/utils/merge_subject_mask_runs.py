@@ -35,7 +35,7 @@ from fisheye.shared.subject_mask_chunks import subject_mask_metric_row_chunk, su
 from fisheye.shared.subject_mask_component_provenance import write_subject_mask_component_provenance
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest, require_runs_parent
-from fisheye.utils.system import get_environment_info, get_git_info
+from fisheye.shared.system_metadata import get_environment_info, get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
 TARGET_LABEL_SCHEMA = "subject_v1_lr"

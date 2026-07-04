@@ -27,7 +27,7 @@ from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_
 from ..shared.subject_mask_component_provenance import write_subject_mask_component_provenance
 from ..tune import subject_mask_tuner as subject_tuning
 from ..tune import swim_bladder_mask_tuner as swim_tuning
-from ..utils.system import get_environment_info, get_git_info
+from ..shared.system_metadata import get_environment_info, get_git_info
 from ..utils.zarr_io import open_zarr_root
 from ..visualization.visualize_swim_bladder_mask_patches import (
     _extract_patch_bounds,

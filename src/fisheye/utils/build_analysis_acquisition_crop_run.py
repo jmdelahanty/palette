@@ -26,7 +26,7 @@ from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_
 from fisheye.shared.zarr.chunk_profiles import create_geometry_preload_array, stamp_geometry_preload_attrs
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_failed, mark_run_started, require_runs_parent
 from fisheye.utils.import_acquisition_detections_to_detect_run import resolve_source_dimensions
-from fisheye.utils.system import get_environment_info, get_git_info
+from fisheye.shared.system_metadata import get_environment_info, get_git_info
 
 
 SCHEMA_ID = "palette.analysis_acquisition_crop_run.v1"

@@ -34,7 +34,7 @@ from fisheye.analysis.track_kinematics_io import (
     load_track_kinematics_track,
     resolve_track_kinematics_run,
 )
-from fisheye.utils.system import get_environment_info, get_git_info
+from fisheye.shared.system_metadata import get_environment_info, get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
 

@@ -41,7 +41,7 @@ from chaser_analysis.swimming_bout_analysis import (
     CalibrationData,
 )
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
-from fisheye.utils.system import get_git_info
+from fisheye.shared.system_metadata import get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
 try:

@@ -23,7 +23,7 @@ import pyarrow.parquet as pq
 import zarr
 
 from fisheye.shared.zarr_run_completion import require_runs_parent
-from fisheye.utils.system import get_environment_summary, get_git_info, get_platform_info
+from fisheye.shared.system_metadata import get_environment_summary, get_git_info, get_platform_info
 
 
 MODULE_NAME = "fisheye.utils.create_clipped_analysis_zarr"

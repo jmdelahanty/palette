@@ -129,7 +129,7 @@ except Exception:
 
 import cv2  # For explicit CPU crop/inspection paths.
 
-from ..utils.system import get_environment_info
+from ..shared.system_metadata import get_environment_info
 
 
 def check_gpu_crop_available() -> Tuple[bool, str]:

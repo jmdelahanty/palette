@@ -37,7 +37,7 @@ from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe, strict_json_dumps
 from fisheye.shared.zarr_helpers import resolve_zarr_run
 from fisheye.utils.index_analytics_manifests import index_export_manifest
-from fisheye.utils.system import get_git_info
+from fisheye.shared.system_metadata import get_git_info
 from fisheye.utils.virtual_collection_manifest import load_manifest, verify_manifest_sha256
 from fisheye.utils.zarr_io import open_zarr_root
 

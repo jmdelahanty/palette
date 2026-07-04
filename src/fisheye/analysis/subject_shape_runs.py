@@ -47,7 +47,7 @@ from ..shared.subject_mask_chunks import (
     refined_subject_mask_dask_worker_row_chunk,
     refined_subject_mask_metric_row_chunk,
 )
-from ..utils.system import get_environment_info, get_git_info
+from ..shared.system_metadata import get_environment_info, get_git_info
 from ..utils.zarr_io import open_zarr_root
 from .subject_shape_spline import (
     BSPLINE_METHOD,

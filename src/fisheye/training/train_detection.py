@@ -73,7 +73,7 @@ from ..shared.refined_detect_resolution import (
     resolve_detection_read_source,
 )
 from ..shared.zarr_run_completion import resolve_authoritative_run_name
-from ..utils.system import get_git_info, build_invocation_record
+from ..shared.system_metadata import get_git_info, build_invocation_record
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"

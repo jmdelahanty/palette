@@ -27,7 +27,7 @@ from .single_subject_per_arena import (
     TRACKING_METHOD_SINGLE_SUBJECT_PER_ARENA,
     write_single_subject_per_arena_tracking_run,
 )
-from ..utils.system import get_environment_info
+from ..shared.system_metadata import get_environment_info
 
 _ARENA_ASSIGN_STATUS_SOURCE = "runtime_arena_assignment"
 

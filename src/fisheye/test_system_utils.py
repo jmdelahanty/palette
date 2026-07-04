@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Test system utilities functionality."""
 
-from fisheye.utils.system import (
+from fisheye.shared.system_metadata import (
     get_git_info, 
     get_platform_info, 
     get_gpu_info,

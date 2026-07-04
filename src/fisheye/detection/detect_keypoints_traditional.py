@@ -57,7 +57,7 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     HAVE_DISTRIBUTED = False
 
-from ..utils.system import get_environment_info
+from ..shared.system_metadata import get_environment_info
 
 
 TRADITIONAL_POSE_SCHEMA, TRADITIONAL_POSE_ATTR_PAYLOAD = schema_payload_from_package(

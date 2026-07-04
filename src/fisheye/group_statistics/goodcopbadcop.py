@@ -16,7 +16,7 @@ import numpy as np
 import polars as pl
 
 from fisheye.shared.json_safety import json_attr_safe, strict_json_dumps
-from fisheye.utils.system import get_git_info
+from fisheye.shared.system_metadata import get_git_info
 
 from .paired import (
     ContrastDefinition,

@@ -39,7 +39,7 @@ from fisheye.analysis.chaser_metrics_loader import (
     ChaserMetricsBundle,
     load_chaser_metrics,
 )
-from fisheye.utils.system import get_git_info
+from fisheye.shared.system_metadata import get_git_info
 
 
 @dataclass

@@ -23,7 +23,7 @@ import zarr
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
-from fisheye.utils.system import get_environment_info, get_git_info
+from fisheye.shared.system_metadata import get_environment_info, get_git_info
 
 
 @dataclass(frozen=True)

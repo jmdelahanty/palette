@@ -34,7 +34,7 @@ from ..shared.zarr_run_completion import (
     require_runs_parent,
     resolve_authoritative_run_name,
 )
-from ..utils.system import get_git_info, get_platform_info
+from ..shared.system_metadata import get_git_info, get_platform_info
 from ..refinement.detect_quality import analyze_detect_quality, save_quality_report
 
 def _require_imported_detection_inputs(root: zarr.Group, latest_bg_run: str) -> None:

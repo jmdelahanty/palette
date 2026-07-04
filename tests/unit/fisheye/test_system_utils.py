@@ -8,8 +8,8 @@ import sys
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
-from fisheye.utils import system as system_mod
-from fisheye.utils.system import (
+from fisheye.shared import system_metadata as system_mod
+from fisheye.shared.system_metadata import (
     _which, _run, _find_git_root,
     get_git_info, get_platform_info, get_gpu_info,
     get_environment_info, get_environment_summary

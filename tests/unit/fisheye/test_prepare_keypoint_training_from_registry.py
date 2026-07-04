@@ -28,7 +28,7 @@ def test_prepare_keypoint_skeleton_signature_helpers() -> None:
 
 def _mock_invocation_sources(monkeypatch) -> None:
     monkeypatch.setattr(
-        "fisheye.utils.system.get_git_info",
+        "fisheye.shared.system_metadata.get_git_info",
         lambda: {
             "commit_hash": "abc123",
             "short_hash": "abc123",
@@ -37,7 +37,7 @@ def _mock_invocation_sources(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(
-        "fisheye.utils.system.get_environment_summary",
+        "fisheye.shared.system_metadata.get_environment_summary",
         lambda: {
             "environment_type": "conda",
             "environment_name": "pytest-env",
@@ -47,7 +47,7 @@ def _mock_invocation_sources(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(
-        "fisheye.utils.system.get_platform_info",
+        "fisheye.shared.system_metadata.get_platform_info",
         lambda **_kwargs: {
             "hostname": "pytest-host",
             "username": "pytest-user",

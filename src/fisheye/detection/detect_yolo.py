@@ -63,7 +63,7 @@ from fisheye.shared.zarr_run_completion import (
     require_runs_parent,
 )
 from fisheye.utils.import_video_metadata import write_video_metadata
-from fisheye.utils.system import get_environment_info, get_git_info
+from fisheye.shared.system_metadata import get_environment_info, get_git_info
 
 
 DECODE_BACKEND_AUTO = "auto"

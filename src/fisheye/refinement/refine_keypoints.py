@@ -82,7 +82,7 @@ from ..shared.zarr_run_completion import (
     note_pending_latest,
     require_runs_parent,
 )
-from ..utils.system import get_environment_info, get_git_info
+from ..shared.system_metadata import get_environment_info, get_git_info
 
 REFINED_KEYPOINT_GROUP = "refined_keypoints_runs"
 LEGACY_KEYPOINT_GROUP = "keypoints_refined_runs"

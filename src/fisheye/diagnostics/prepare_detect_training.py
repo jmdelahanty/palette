@@ -36,7 +36,7 @@ from ..shared.refined_detect_curation import (
 )
 from ..shared.zarr_helpers import open_zarr_group_direct
 from ..shared.zarr_run_completion import resolve_authoritative_run_name
-from ..utils.system import build_invocation_record
+from ..shared.system_metadata import build_invocation_record
 
 
 class CameraParameters(BaseModel):

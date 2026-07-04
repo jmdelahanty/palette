@@ -24,7 +24,7 @@ from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_sa
 from fisheye.shared.plot_artifacts import write_interactive_plot_spec_artifact, write_png_visualization_artifact
 from fisheye.shared.run_lineage_fingerprint import build_run_lineage_payload, write_run_lineage_attrs
 from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
-from fisheye.utils.system import get_git_info
+from fisheye.shared.system_metadata import get_git_info
 
 
 SCHEMA_ID = "palette.goodcopbadcop.cra_near_field.v1"
