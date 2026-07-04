@@ -168,6 +168,7 @@ def test_retry_failed_keypoints_yolo_uses_geometry_only_latest_any_crop(tmp_path
     source_run.create_array("heading_finite", data=np.zeros((1,), dtype=bool), overwrite=True)
     source_run.create_array("heading_usable", data=np.zeros((1,), dtype=bool), overwrite=True)
     source_run.create_array("frame_indices", data=np.array([0], dtype=np.int32), overwrite=True)
+    source_run.create_array("frame_counts", data=np.array([1, 0, 0, 0, 0], dtype=np.int32), overwrite=True)
     source_run.create_array("n_rois", data=np.array([1], dtype=np.int32), overwrite=True)
 
     refined_parent = root.create_group("refined_keypoints_runs")
@@ -216,6 +217,7 @@ def test_retry_failed_keypoints_yolo_uses_geometry_only_latest_any_crop(tmp_path
     assert bool(retry_group.attrs["source_roi_cache_used"]) is True
     assert bool(retry_group["detection_success"][0]) is True
     assert bool(retry_group["re_predicted_used"][0]) is True
+    np.testing.assert_array_equal(retry_group["n_keypoints"][:], np.array([3, 0, 0, 0, 0], dtype=np.int32))
 
 
 def test_retry_failed_keypoints_yolo_uses_source_run_labels_and_heading_contract(

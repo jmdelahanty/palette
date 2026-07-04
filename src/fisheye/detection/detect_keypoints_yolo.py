@@ -28,6 +28,7 @@ from ..registry.db import RegistryPaths
 from ..registry.inline_refresh import refresh_keypoint_performance_details
 from ..shared.crop_image_source import CropImageSource
 from ..shared.inference_timing import InferenceTimingProfiler
+from ..shared.keypoint_summary import build_frame_keypoint_counts
 from ..shared.model_input_transform import MODEL_INPUT_TRANSFORM_CHOICES, ModelInputTransform, resolve_model_input_transform
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs, build_source_roi_pixel_attrs
 from ..registry.stage_complete import emit_stage_completion
@@ -1055,17 +1056,12 @@ def detect_keypoints_yolo(
     success_rate = (success_total / total_rois * 100.0) if total_rois > 0 else 0.0
     failure_total = total_rois - success_total
 
-    if total_frames is not None:
-        full_frame_count = int(total_frames)
-    elif frame_indices.size > 0:
-        full_frame_count = int(frame_indices.max() + 1)
-    else:
-        full_frame_count = 0
-    if success_total > 0:
-        success_mask = arrays["detection_success"][:]
-        success_counts = np.bincount(frame_indices[success_mask], minlength=full_frame_count).astype("i4", copy=False)
-    else:
-        success_counts = np.zeros(full_frame_count, dtype="i4")
+    success_counts = build_frame_keypoint_counts(
+        frame_indices,
+        arrays["detection_success"][:],
+        frame_axis_len=int(frame_counts_total.shape[0]),
+        keypoint_count=n_keypoints,
+    )
     success_chunks = (min(len(success_counts), batch_size * 4),) if success_counts.size > 0 else None
     run_group.create_array(
         "n_keypoints",

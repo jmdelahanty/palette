@@ -34,6 +34,7 @@ from ..shared.frame_flags import (
     load_row_identity_arrays,
     resolve_flagged_roi_indices,
 )
+from ..shared.keypoint_summary import build_frame_keypoint_counts
 from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 from ..shared.subject_mask_stale import mark_downstream_subject_mask_runs_stale
 from ..tune.keypoint_review import _update_postprocess_summary
@@ -353,12 +354,15 @@ def _update_keypoints_summary(
     else:
         frame_count_len = int(frame_indices.max() + 1) if frame_indices.size else 0
 
-    if detection_success.size and np.any(detection_success):
-        success_counts = np.bincount(frame_indices[detection_success], minlength=frame_count_len).astype("i4", copy=False)
-    else:
-        success_counts = np.zeros(frame_count_len, dtype="i4")
+    keypoint_count = int(keypoints_group["keypoints_roi"].shape[1]) if "keypoints_roi" in keypoints_group else 0
+    success_counts = build_frame_keypoint_counts(
+        frame_indices,
+        detection_success,
+        frame_axis_len=frame_count_len,
+        keypoint_count=keypoint_count,
+    )
 
-    if "n_keypoints" in keypoints_group:
+    if "n_keypoints" in keypoints_group and keypoints_group["n_keypoints"].shape == success_counts.shape:
         keypoints_group["n_keypoints"][:] = success_counts
     else:
         chunk_len = max(1, min(10000, success_counts.size))

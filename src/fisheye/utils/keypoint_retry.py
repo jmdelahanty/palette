@@ -18,6 +18,7 @@ from ..pose.heading import compute_heading_from_attrs
 from ..pose.schema import resolve_keypoint_labels_from_attrs
 from ..shared.crop_image_source import CropImageSource
 from ..shared.detect_reason_codec import read_reason_labels
+from ..shared.keypoint_summary import build_frame_keypoint_counts
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs, build_source_roi_pixel_attrs
 from ..registry.stage_complete import emit_stage_completion
 from ..shared.type_conversions import normalize_attr as _as_text
@@ -629,16 +630,19 @@ def retry_failed_keypoints_yolo(
 
         if "frame_indices" in retry_group:
             frame_indices = np.asarray(retry_group["frame_indices"][:], dtype=np.int64)
-            if "n_rois" in retry_group:
+            if "frame_counts" in retry_group:
+                total_frames = int(retry_group["frame_counts"].shape[0])
+            elif "n_rois" in retry_group:
                 total_frames = int(retry_group["n_rois"].shape[0])
             elif frame_indices.size > 0:
                 total_frames = int(frame_indices.max() + 1)
             else:
                 total_frames = 0
-            success_counts = (
-                np.bincount(frame_indices[detection_success], minlength=total_frames).astype("i4", copy=False)
-                if total_frames > 0
-                else np.zeros(0, dtype="i4")
+            success_counts = build_frame_keypoint_counts(
+                frame_indices,
+                detection_success,
+                frame_axis_len=total_frames,
+                keypoint_count=expected_keypoint_count,
             )
             chunks = (min(max(1, int(batch_size) * 4), success_counts.shape[0]),) if success_counts.size > 0 else None
             retry_group.create_array("n_keypoints", data=success_counts, chunks=chunks, overwrite=True)

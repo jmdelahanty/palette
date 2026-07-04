@@ -29,6 +29,7 @@ from dask.diagnostics import ProgressBar
 from ..registry.db import RegistryPaths
 from ..registry.inline_refresh import refresh_keypoint_performance_details
 from ..shared.crop_image_source import resolve_materialized_crop_run
+from ..shared.keypoint_summary import build_frame_keypoint_counts
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
 from ..registry.stage_complete import emit_stage_completion
 from ..shared.row_lineage import copy_row_lineage_arrays
@@ -998,13 +999,14 @@ def detect_keypoints(
     total_failed = sum(r[1] for r in chunk_stats)
     success_rate = (total_successful / total_rois * 100) if total_rois > 0 else 0
 
-    # Store per-frame success counts
+    # Store per-frame keypoint counts on the run's frame axis.
     detection_success = keypoint_group['detection_success'][:]
-    if total_rois > 0 and np.any(detection_success):
-        success_counts = np.bincount(frame_indices[detection_success],
-                                     minlength=len(frame_counts_total)).astype('i4', copy=False)
-    else:
-        success_counts = np.zeros_like(frame_counts_total, dtype='i4')
+    success_counts = build_frame_keypoint_counts(
+        frame_indices,
+        detection_success,
+        frame_axis_len=len(frame_counts_total),
+        keypoint_count=TRADITIONAL_POSE_SCHEMA.num_keypoints,
+    )
     keypoint_group.create_array(
         'n_keypoints',
         data=success_counts,

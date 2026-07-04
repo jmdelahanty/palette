@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import torch
 import zarr
 
+from fisheye.detection import detect_keypoints_yolo as yolo_mod
 from fisheye.detection.detect_keypoints_yolo import (
     _create_output_arrays,
     _extract_keypoint_confidences,
     _extract_pose_bbox_xyxy_roi,
     _prepare_model_inputs,
+    detect_keypoints_yolo,
 )
 from fisheye.shared.model_input_transform import resolve_model_input_transform
 
@@ -21,6 +25,83 @@ class _KeypointsWithConf:
 class _BoxesWithXyxy:
     def __init__(self, xyxy: torch.Tensor | None) -> None:
         self.xyxy = xyxy
+
+
+class _FakeCropSource:
+    def __init__(self, crop_group: zarr.Group) -> None:
+        self.crop_group = crop_group
+        self.crop_run_name = "crop_001"
+        self.roi_coordinates_full = np.zeros((3, 2), dtype=np.int32)
+        self.frame_indices = np.array([0, 10, 19], dtype=np.int64)
+        self.total_rois = 3
+        self.roi_shape = (8, 8)
+        self.storage_mode = "zarr"
+        self.roi_read_mode = "unit_test"
+        self.roi_cache_policy = "never"
+        self.roi_cache_used = False
+        self.roi_cache_backend = None
+        self.roi_cache_key = None
+        self.roi_cache_path = None
+        self.roi_live_acceleration_requested = "none"
+        self.roi_live_acceleration_effective = "none"
+        self.roi_live_acceleration_fallback_reason = None
+        self.roi_live_gpu_chunk_frames = 1
+        self.frame_source_kind = "unit_test"
+        self.frame_source_path = None
+        self.roi_pixel_contract = None
+        self.roi_image_representation = "grayscale_uint8"
+        self._images = np.zeros((3, 8, 8), dtype=np.uint8)
+
+    def read_slice(self, start: int, end: int) -> np.ndarray:
+        return self._images[start:end]
+
+    def close(self) -> None:
+        return None
+
+
+class _FakeBoxes:
+    def __init__(self, *, success: bool) -> None:
+        if success:
+            self.conf = torch.tensor([0.9], dtype=torch.float32)
+            self.xyxy = torch.tensor([[1.0, 1.0, 6.0, 6.0]], dtype=torch.float32)
+        else:
+            self.conf = torch.empty((0,), dtype=torch.float32)
+            self.xyxy = torch.empty((0, 4), dtype=torch.float32)
+
+
+class _FakeKeypoints:
+    def __init__(self) -> None:
+        points = torch.arange(20, dtype=torch.float32).reshape(1, 10, 2)
+        self.xy = points
+        self.conf = torch.full((1, 10), 0.8, dtype=torch.float32)
+
+
+class _FakeResult:
+    def __init__(self, *, success: bool) -> None:
+        self.boxes = _FakeBoxes(success=success)
+        self.keypoints = _FakeKeypoints() if success else None
+
+
+class _FakeYOLO:
+    def __init__(self, _path: str) -> None:
+        self.model = SimpleNamespace(
+            names={0: "fish"},
+            parameters=lambda: iter([torch.nn.Parameter(torch.zeros((), dtype=torch.float32))]),
+        )
+        self._results = [
+            _FakeResult(success=True),
+            _FakeResult(success=True),
+            _FakeResult(success=False),
+        ]
+
+    def to(self, _device: str) -> "_FakeYOLO":
+        return self
+
+    def predict(self, inputs, **_kwargs):
+        batch_count = len(inputs) if isinstance(inputs, list) else int(inputs.shape[0])
+        out = self._results[:batch_count]
+        self._results = self._results[batch_count:]
+        return iter(out)
 
 
 def test_extract_keypoint_confidences_returns_values_when_present() -> None:
@@ -61,6 +142,73 @@ def test_create_output_arrays_includes_keypoint_confidences(tmp_path) -> None:
     assert "pose_bbox_xyxy_roi" in arrays
     assert arrays["pose_bbox_xyxy_roi"].shape == (10, 4)
     assert arrays["pose_bbox_xyxy_roi"].dtype.name == "float32"
+
+
+def test_detect_keypoints_yolo_sizes_n_keypoints_to_run_frame_counts(monkeypatch, tmp_path) -> None:
+    zarr_path = tmp_path / "training.zarr"
+    root = zarr.open_group(store=str(zarr_path), mode="w")
+    raw = root.create_group("raw_video")
+    raw.create_array("images_full", data=np.zeros((12, 16, 16), dtype=np.uint8))
+    crop_parent = root.create_group("crop_runs")
+    crop = crop_parent.create_group("crop_001")
+    crop.attrs["source_detect_run"] = "detect_001"
+    crop.create_array("frame_counts", data=np.array([1, *([0] * 9), 1, *([0] * 8), 1], dtype=np.int32))
+    crop.create_array("frame_indices", data=np.array([0, 10, 19], dtype=np.int32))
+    crop.create_array("detection_indices", data=np.arange(3, dtype=np.int32))
+    crop_parent.attrs["latest"] = "crop_001"
+
+    model_path = tmp_path / "pose.pt"
+    model_path.write_bytes(b"fake")
+
+    def _fake_open(root_group, **_kwargs):
+        return _FakeCropSource(root_group["crop_runs"]["crop_001"])
+
+    def _fake_copy_row_lineage(dst, src, *, total_rois, **_kwargs):
+        dst.create_array("frame_counts", data=src["frame_counts"][:], overwrite=True)
+        dst.create_array("frame_indices", data=src["frame_indices"][:], overwrite=True)
+        dst.create_array("detection_indices", data=src["detection_indices"][:], overwrite=True)
+        return SimpleNamespace(copied={"frame_counts", "frame_indices", "detection_indices"})
+
+    monkeypatch.setattr(yolo_mod, "YOLO", _FakeYOLO)
+    monkeypatch.setattr(yolo_mod.CropImageSource, "open", staticmethod(_fake_open))
+    monkeypatch.setattr(yolo_mod, "copy_row_lineage_arrays", _fake_copy_row_lineage)
+    monkeypatch.setattr(yolo_mod, "_prepare_refined_roi_overrides", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        yolo_mod,
+        "get_git_info",
+        lambda: {
+            "commit_hash": "test",
+            "short_hash": "test",
+            "branch": "test",
+            "is_dirty": False,
+            "remote_url": None,
+        },
+    )
+    monkeypatch.setattr(
+        yolo_mod,
+        "get_environment_info",
+        lambda **_kwargs: {"platform": {"hostname": "unit-test"}, "environment": {}, "gpu": {}},
+    )
+    monkeypatch.setattr(yolo_mod, "_emit_keypoint_step_status", lambda **_kwargs: None)
+
+    run_name = detect_keypoints_yolo(
+        zarr_path,
+        model_path,
+        run_name="keypoints_001",
+        pose_schema="traditional_v3",
+        batch_size=8,
+        imgsz=8,
+        input_mode="numpy-list",
+        registry=None,
+    )
+
+    run = zarr.open_group(store=str(zarr_path), mode="r")["keypoints_runs"][run_name]
+    actual = run["n_keypoints"][:]
+    assert actual.shape == run["frame_counts"].shape == (20,)
+    assert actual[0] == 10
+    assert actual[10] == 10
+    assert actual[19] == 0
+    assert int(np.count_nonzero(actual)) == 2
 
 
 def test_extract_pose_bbox_xyxy_roi_clips_to_roi_bounds() -> None:
