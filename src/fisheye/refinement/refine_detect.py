@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple, Any
 from rich.console import Console
 
-from ..utils.metadata import get_total_frames, get_detection_method
+from ..shared.metadata import get_total_frames, get_detection_method
 from ..shared.system_metadata import get_environment_info, get_git_info
 from ..shared.refined_detect_curation import write_curated_refined_detect_surfaces
 from ..registry.stage_complete import emit_stage_completion

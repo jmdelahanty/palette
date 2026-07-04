@@ -36,7 +36,7 @@ from fisheye.shared.refined_detect_curation import (
     write_curated_refined_detect_surfaces,
 )
 from fisheye.shared.type_conversions import normalize_attr
-from fisheye.utils.metadata import get_total_frames
+from fisheye.shared.metadata import get_total_frames
 
 
 REFINED_PARENT_NAMES = ("refined_detect_runs", "refined_runs")

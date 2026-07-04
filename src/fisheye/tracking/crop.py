@@ -35,7 +35,7 @@ from rich.align import Align
 # Metadata helpers
 from ..registry.db import Registry, RegistryPaths
 from ..registry.stage_complete import emit_stage_completion
-from ..utils.metadata import has_raw_video, get_video_source_path, get_total_frames, get_detection_method
+from ..shared.metadata import has_raw_video, get_video_source_path, get_total_frames, get_detection_method
 from ..shared.refined_detect_review import (
     DEFAULT_DETECT_GROUP_PREFERENCE,
     resolve_refined_detect_group,
@@ -857,7 +857,7 @@ def get_video_source(root: zarr.Group, console: Console) -> Tuple[str, Optional[
         - source_type: 'zarr' or 'external'
         - video_path: Path to video file (None if zarr)
     """
-    from ..utils.metadata import has_raw_video, get_video_source_path
+    from ..shared.metadata import has_raw_video, get_video_source_path
     
     # Try zarr first because it is typically faster.
     if has_raw_video(root):
