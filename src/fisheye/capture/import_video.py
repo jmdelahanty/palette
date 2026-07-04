@@ -31,7 +31,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, MofNCompleteColumn
 
-from ..utils.encoder_tags import parse_encoder_comment
+from ..shared.encoder_tags import parse_encoder_comment
 
 # Optional deps
 try:

@@ -14,7 +14,7 @@ import cv2
 import imageio.v3 as iio
 import zarr
 
-from .encoder_tags import parse_encoder_comment
+from fisheye.shared.encoder_tags import parse_encoder_comment
 
 def _probe_video(video_path: Path) -> Dict[str, Any]:
     cap = cv2.VideoCapture(str(video_path))
