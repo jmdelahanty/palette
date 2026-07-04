@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
@@ -10,10 +11,19 @@ from zarr.core.dtype import VariableLengthUTF8
 
 from .crop_geometry import bbox_img_xyxy_to_norm_cxcywh, bbox_norm_cxcywh_to_img_xyxy
 from .detect_reason_codec import read_reason_labels, update_reason_rows, write_reason_columns
+from .instance_keys import (
+    INSTANCE_KEY_CONTEXT_MANUAL_CURATION,
+    INSTANCE_KEY_ORIGIN_ARRAY,
+    INSTANCE_KEY_ORIGIN_CODE_MAP,
+    mint_detection_instance_keys,
+    resolve_recording_identity,
+)
 from .json_safety import json_attr_safe
 from .stage_provenance import build_stage_provenance
 from .type_conversions import as_int, clean_mapping, normalize_attr
 from .zarr_run_completion import resolve_latest_complete_run_name
+
+logger = logging.getLogger(__name__)
 
 
 REFINED_DETECT_STATUS_CODE_MAP: Dict[str, int] = {
@@ -626,6 +636,7 @@ def _extract_present_curated_rows_from_instances(refined_run: zarr.Group) -> Dic
         "confidence_scores",
         "class_ids",
         "instance_key",
+        INSTANCE_KEY_ORIGIN_ARRAY,
         "manual_edit_flags",
         "source_detect_row_index",
         "review_notes",
@@ -1463,6 +1474,7 @@ def _write_sparse_instances_arrays(
     confidence_scores: Optional[np.ndarray] = None,
     class_ids: Optional[np.ndarray] = None,
     instance_key: Optional[np.ndarray] = None,
+    instance_key_origin_codes: Optional[np.ndarray] = None,
     review_notes: Optional[np.ndarray] = None,
     bbox_norm_reference_width: Optional[int] = None,
     bbox_norm_reference_height: Optional[int] = None,
@@ -1555,8 +1567,27 @@ def _write_sparse_instances_arrays(
         if instance_key_arr.shape[0] != row_count:
             raise ValueError("instance instance_key length does not match row count.")
         _write_common_array(subgroup, "instance_key", instance_key_arr[sort_idx])
+        subgroup.attrs["instance_key_status"] = "present"
     else:
         _delete_if_present(subgroup, "instance_key")
+        subgroup.attrs["instance_key_status"] = "missing"
+        if row_count:
+            logger.warning(
+                "Curated instances rowset '%s' written without instance_key values "
+                "(%d rows); downstream lineage for this run degrades to positional matching.",
+                getattr(subgroup, "path", "instances"),
+                row_count,
+            )
+    if instance_key_origin_codes is not None:
+        if instance_key is None:
+            raise ValueError("instance_key_origin_codes requires instance_key values.")
+        instance_key_origin_codes_arr = np.asarray(instance_key_origin_codes, dtype=np.int8).reshape(-1)
+        if instance_key_origin_codes_arr.shape[0] != row_count:
+            raise ValueError("instance instance_key_origin_codes length does not match row count.")
+        _write_common_array(subgroup, INSTANCE_KEY_ORIGIN_ARRAY, instance_key_origin_codes_arr[sort_idx])
+        subgroup.attrs["instance_key_origin_code_map"] = dict(INSTANCE_KEY_ORIGIN_CODE_MAP)
+    else:
+        _delete_if_present(subgroup, INSTANCE_KEY_ORIGIN_ARRAY)
     if review_notes is not None:
         review_notes_arr = np.asarray(review_notes, dtype=object).reshape(-1)
         if review_notes_arr.shape[0] != row_count:
@@ -2114,6 +2145,75 @@ def _sync_dense_curated_refined_root_from_sparse_views(
     )
 
 
+def _resolve_curated_instance_keys(
+    root: zarr.Group,
+    *,
+    zarr_path: Optional[Path],
+    instance_frame_indices: np.ndarray,
+    instance_bbox_norm_coords: np.ndarray,
+    instance_class_ids: Optional[np.ndarray],
+    instance_source_detect_row_index: np.ndarray,
+    source_detection_instance_key: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Combine detect-copied and curation-minted instance keys for a curated rowset.
+
+    Rows with an in-range ``instance_source_detect_row_index`` copy the detect
+    key verbatim. Rows without a resolvable detect source (manual boxes carry
+    index ``-1``) are NEW instances whose point of origin is curation, so keys
+    are minted for them with the manual-curation payload context. Returns
+    ``(instance_key, instance_key_origin_codes)`` aligned to the instance rows.
+    """
+
+    row_index = np.asarray(instance_source_detect_row_index, dtype=np.int64).reshape(-1)
+    row_count = int(row_index.shape[0])
+    source_keys = np.asarray(source_detection_instance_key, dtype=np.uint64).reshape(-1)
+    copied_mask = (row_index >= 0) & (row_index < int(source_keys.shape[0]))
+    minted_mask = ~copied_mask
+
+    instance_key = np.zeros(row_count, dtype=np.uint64)
+    instance_key[copied_mask] = source_keys[row_index[copied_mask]]
+    origin_codes = np.full(
+        row_count,
+        INSTANCE_KEY_ORIGIN_CODE_MAP["copied_from_detect"],
+        dtype=np.int8,
+    )
+    if bool(np.any(minted_mask)):
+        origin_codes[minted_mask] = INSTANCE_KEY_ORIGIN_CODE_MAP["minted_at_curation"]
+        out_of_range_count = int(np.count_nonzero(row_index[minted_mask] >= 0))
+        if out_of_range_count:
+            logger.warning(
+                "Curated rowset has %d instance row(s) with out-of-range "
+                "instance_source_detect_row_index (source detect run has %d rows); "
+                "minting curation-origin instance keys for them.",
+                out_of_range_count,
+                int(source_keys.shape[0]),
+            )
+        recording_identity = resolve_recording_identity(root.attrs, fallback_path=zarr_path)
+        instance_key[minted_mask] = mint_detection_instance_keys(
+            recording_identity=recording_identity,
+            frame_indices=np.asarray(instance_frame_indices, dtype=np.int64).reshape(-1)[minted_mask],
+            bbox_norm_coords=np.asarray(instance_bbox_norm_coords, dtype=np.float64).reshape(-1, 4)[minted_mask],
+            class_ids=(
+                np.asarray(instance_class_ids, dtype=np.int64).reshape(-1)[minted_mask]
+                if instance_class_ids is not None
+                else None
+            ),
+            payload_context=INSTANCE_KEY_CONTEXT_MANUAL_CURATION,
+        )
+
+    if int(np.unique(instance_key).shape[0]) != row_count:
+        values, counts = np.unique(instance_key, return_counts=True)
+        duplicates = values[counts > 1]
+        raise ValueError(
+            "Curated instance_key rowset is not unique after combining copied and "
+            f"minted keys: {int(duplicates.shape[0])} duplicated value(s), e.g. "
+            f"{[int(value) for value in duplicates[:5].tolist()]}. Duplicate copied keys "
+            "mean multiple instance rows reference the same source detect row; refusing "
+            "to write a false-identity rowset."
+        )
+    return instance_key, origin_codes
+
+
 def write_curated_refined_detect_surfaces(
     root: zarr.Group,
     *,
@@ -2129,6 +2229,7 @@ def write_curated_refined_detect_surfaces(
     instance_confidence_scores: Optional[np.ndarray] = None,
     instance_class_ids: Optional[np.ndarray] = None,
     instance_key: Optional[np.ndarray] = None,
+    instance_key_origin_codes: Optional[np.ndarray] = None,
     instance_review_notes: Optional[Sequence[str]] = None,
     instance_refined_row_ids: Optional[np.ndarray] = None,
     source_detection_source_detect_row_index: Optional[np.ndarray] = None,
@@ -2204,6 +2305,18 @@ def write_curated_refined_detect_surfaces(
     )
     if instance_key_arr is not None and instance_key_arr.shape[0] != instance_row_count:
         raise ValueError("instance_key length does not match instance row count.")
+    instance_key_origin_codes_arr = (
+        np.asarray(instance_key_origin_codes, dtype=np.int8).reshape(-1)
+        if instance_key_origin_codes is not None
+        else None
+    )
+    if instance_key_origin_codes_arr is not None and instance_key_arr is None:
+        raise ValueError("instance_key_origin_codes requires instance_key.")
+    if (
+        instance_key_origin_codes_arr is not None
+        and instance_key_origin_codes_arr.shape[0] != instance_row_count
+    ):
+        raise ValueError("instance_key_origin_codes length does not match instance row count.")
     instance_review_notes_arr = (
         np.asarray(instance_review_notes, dtype=object).reshape(-1)
         if instance_review_notes is not None
@@ -2333,6 +2446,7 @@ def write_curated_refined_detect_surfaces(
         confidence_scores=instance_confidence_scores_arr,
         class_ids=instance_class_ids_arr,
         instance_key=instance_key_arr,
+        instance_key_origin_codes=instance_key_origin_codes_arr,
         review_notes=instance_review_notes_arr,
     )
     _write_source_detections_arrays(
@@ -2837,12 +2951,23 @@ def write_curated_refined_detect_root(
         ):
             raise ValueError("detect instance_key length does not match source detection row count.")
         instance_key = None
+        instance_key_origin_codes = None
         if source_detection_instance_key is not None:
-            valid_instance_rows = (
-                instance_source_detect_row_index >= 0
-            ) & (instance_source_detect_row_index < source_detection_instance_key.shape[0])
-            if bool(np.all(valid_instance_rows)):
-                instance_key = source_detection_instance_key[instance_source_detect_row_index]
+            instance_key, instance_key_origin_codes = _resolve_curated_instance_keys(
+                root,
+                zarr_path=zarr_path,
+                instance_frame_indices=instance_frame_indices,
+                instance_bbox_norm_coords=instance_bbox_norm_coords,
+                instance_class_ids=instance_class_ids,
+                instance_source_detect_row_index=instance_source_detect_row_index,
+                source_detection_instance_key=source_detection_instance_key,
+            )
+        elif int(instance_frame_indices.shape[0]):
+            logger.warning(
+                "Source detect run bound to refined run %r has no instance_key array; "
+                "curated instances will be written without instance keys.",
+                resolved_refined_run_name,
+            )
     else:
         source_detection_frame_indices = np.empty((0,), dtype=np.int32)
         source_detection_bbox_norm_coords = np.empty((0, 4), dtype=np.float64)
@@ -2853,6 +2978,13 @@ def write_curated_refined_detect_root(
         source_detection_class_ids = None
         source_detection_instance_key = None
         instance_key = None
+        instance_key_origin_codes = None
+        if int(instance_frame_indices.shape[0]):
+            logger.warning(
+                "No bound source detect group for refined run %r; curated instances "
+                "will be written without instance keys.",
+                resolved_refined_run_name,
+            )
 
     payload = write_curated_refined_detect_surfaces(
         root,
@@ -2867,6 +2999,7 @@ def write_curated_refined_detect_root(
         instance_confidence_scores=instance_confidence_scores,
         instance_class_ids=instance_class_ids,
         instance_key=instance_key,
+        instance_key_origin_codes=instance_key_origin_codes,
         instance_review_notes=instance_review_notes,
         source_detection_source_detect_row_index=source_detection_source_detect_row_index,
         source_detection_frame_indices=source_detection_frame_indices,

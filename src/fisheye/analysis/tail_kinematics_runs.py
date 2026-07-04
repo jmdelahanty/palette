@@ -467,7 +467,14 @@ def _prepare_tail_kinematics_run(
         copy_result = copy_row_lineage_arrays(
             row_index,
             shape_row_index,
-            names=("frame_indices", "detection_indices", "source_refined_row_ids", "source_detect_row_index"),
+            names=(
+                "frame_indices",
+                "detection_indices",
+                "source_refined_row_ids",
+                "source_detect_row_index",
+                "source_crop_row_ids",
+                "instance_key",
+            ),
             total_rois=row_count,
             overwrite=True,
         )
@@ -479,6 +486,8 @@ def _prepare_tail_kinematics_run(
         "detection_indices",
         "source_refined_row_ids",
         "source_detect_row_index",
+        "source_crop_row_ids",
+        "instance_key",
     ]
 
     if "frame_indices" in row_index:

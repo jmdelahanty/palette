@@ -182,3 +182,41 @@ def test_write_tail_kinematics_run_group_writes_schema_and_row_lineage(monkeypat
     assert np.asarray(run["tail_angle_rad"][:], dtype=np.float32).shape == (2, 10)
     np.testing.assert_allclose(np.asarray(run["tail_angle_deg"][:], dtype=np.float32), 0.0, atol=1e-5)
     assert run.attrs["provenance"]["stage"] == "analysis.tail_kinematics_runs"
+
+
+def test_write_tail_kinematics_run_group_copies_instance_key_lineage(monkeypatch) -> None:
+    _patch_provenance(monkeypatch)
+    root = _build_shape_root()
+    shape_row_index = root["analysis"]["subject_shape_runs"]["shape_001"]["row_index"]
+    shape_row_index.create_array("instance_key", data=np.asarray([11, 22], dtype=np.uint64), overwrite=True)
+    shape_row_index.create_array("source_crop_row_ids", data=np.asarray([5, 6], dtype=np.int64), overwrite=True)
+
+    mod.write_tail_kinematics_run_group(
+        root,
+        shape_run="shape_001",
+        run_name="tail_001",
+        tail_angle_sample_count=10,
+    )
+
+    run = root["analysis"]["tail_kinematics_runs"]["tail_001"]
+    assert run["row_index"]["instance_key"][:].tolist() == [11, 22]
+    assert run["row_index"]["source_crop_row_ids"][:].tolist() == [5, 6]
+    assert "instance_key" in run.attrs["row_lineage_copied"]
+    assert "source_crop_row_ids" in run.attrs["row_lineage_copied"]
+
+
+def test_write_tail_kinematics_run_group_reports_instance_key_missing_for_legacy_sources(monkeypatch) -> None:
+    _patch_provenance(monkeypatch)
+    root = _build_shape_root()
+
+    mod.write_tail_kinematics_run_group(
+        root,
+        shape_run="shape_001",
+        run_name="tail_001",
+        tail_angle_sample_count=10,
+    )
+
+    run = root["analysis"]["tail_kinematics_runs"]["tail_001"]
+    assert "instance_key" not in run["row_index"]
+    assert "instance_key" in run.attrs["row_lineage_missing"]
+    assert "source_crop_row_ids" in run.attrs["row_lineage_missing"]
