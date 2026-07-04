@@ -1512,6 +1512,37 @@ def _run_keypoints(args: argparse.Namespace, dataset: DatasetRef, stages: Sequen
     )
 
 
+def _first_int(payload: Mapping[str, Any], *names: str) -> int | None:
+    for name in names:
+        value = payload.get(name)
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _crop_result_status(payload: Mapping[str, Any]) -> tuple[str, str]:
+    ok_flag = payload.get("ok")
+    status_text = str(payload.get("status") or payload.get("run_status") or "").strip().lower()
+    total_crops = _first_int(payload, "rows_written", "total_crops", "n_crops", "total_rois")
+    frames_with_crops = _first_int(payload, "frames_with_crops", "n_frames_with_crops")
+    rows_failed = _first_int(payload, "rows_failed", "failed_rows", "n_failed", "total_failed") or 0
+
+    if ok_flag is False or status_text in {"failed", "error"}:
+        reason = str(payload.get("reason") or payload.get("reason_code") or "CROP_RUNNER_FAILED")
+        return "failed", reason.upper()
+    if rows_failed > 0 and (total_crops is not None and total_crops <= 0):
+        return "failed", "CROP_ALL_ROWS_FAILED"
+    if total_crops is not None and total_crops <= 0:
+        return "failed", "CROP_NO_ROWS_WRITTEN"
+    if frames_with_crops is not None and frames_with_crops <= 0:
+        return "failed", "CROP_NO_ROWS_WRITTEN"
+    return "ok", "OK"
+
+
 def _run_crop(args: argparse.Namespace, dataset: DatasetRef, stages: Sequence[StageState]) -> dict[str, Any]:
     with _runner_stdout_context(bool(args.json)):
         from fisheye.tracking.crop import crop_detections
@@ -1628,16 +1659,21 @@ def _run_crop(args: argparse.Namespace, dataset: DatasetRef, stages: Sequence[St
         )
     payload = _result_to_dict(result)
     run = payload.get("run_name") if isinstance(payload.get("run_name"), str) else None
+    status, reason_code = _crop_result_status(payload)
+    total_crops = _first_int(payload, "rows_written", "total_crops", "n_crops", "total_rois")
+    rows_failed = _first_int(payload, "rows_failed", "failed_rows", "n_failed", "total_failed")
     return build_envelope(
         command="palette crop",
-        status="ok",
-        reason_code="OK",
+        status=status,
+        reason_code=reason_code,
         recording=dataset.recording_id,
         dataset_id=dataset.dataset_id,
         zarr_path=dataset.zarr_path,
         run=run,
         artifacts=_run_artifacts(dataset.zarr_path, "crop_runs", run),
         metrics={
+            "rows_written": total_crops,
+            "rows_failed": rows_failed,
             "total_crops": payload.get("total_crops"),
             "frames_with_crops": payload.get("frames_with_crops"),
             "percent_cropped": payload.get("percent_cropped"),

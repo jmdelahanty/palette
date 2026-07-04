@@ -461,3 +461,91 @@ def test_crop_apply_writes_cli_provenance_to_real_tmp_zarr(monkeypatch, tmp_path
     assert stamped["command"] == "palette crop"
     assert stamped["config_hash"]
     assert stamped["input_run_ids"] == {"refined_detect": "refined_001"}
+
+
+def test_crop_apply_reports_no_rows_as_failed_envelope(monkeypatch, tmp_path, capsys) -> None:
+    zarr_path = tmp_path / "crop_no_rows.zarr"
+    root = _open_tmp_store(zarr_path)
+    _complete_run(root, "refined_detect_runs", "refined_001")
+
+    def fake_plan(zarr_path_arg, config, source_type, source_path, selection_policy, force_new, crop_storage_mode):
+        return CropPlan(
+            zarr_path=Path(zarr_path_arg),
+            status="ok",
+            source_type="refined",
+            source_path="refined_detect_runs/refined_001/instances",
+            roi_size=(512, 512),
+            crop_storage_mode="geometry_only",
+            selection_policy=selection_policy,
+        )
+
+    def fake_crop_detections(**kwargs):
+        return {
+            "run_name": "crop_empty_001",
+            "total_crops": 0,
+            "frames_with_crops": 0,
+            "percent_cropped": 0.0,
+            "duration_seconds": 0.01,
+            "detection_source_type": kwargs["source_type"],
+            "detection_source_path": kwargs["source_path"],
+            "crop_storage_mode": kwargs["crop_storage_mode"],
+        }
+
+    import fisheye.tracking.crop as crop_module
+    import fisheye.utils.crop_batch as crop_batch
+
+    monkeypatch.setattr(crop_batch, "_build_plan", fake_plan)
+    monkeypatch.setattr(crop_module, "crop_detections", fake_crop_detections)
+
+    rc, payload = _run_json(capsys, "crop", str(zarr_path), "--apply")
+
+    assert rc == palette.EXIT_FAILED
+    assert payload["status"] == "failed"
+    assert payload["reason_code"] == "CROP_NO_ROWS_WRITTEN"
+    assert payload["metrics"]["rows_written"] == 0
+    assert payload["metrics"]["rows_failed"] is None
+    assert payload["metrics"]["total_crops"] == 0
+
+
+def test_crop_apply_reports_all_failed_rows_as_failed_envelope(monkeypatch, tmp_path, capsys) -> None:
+    zarr_path = tmp_path / "crop_all_failed.zarr"
+    root = _open_tmp_store(zarr_path)
+    _complete_run(root, "refined_detect_runs", "refined_001")
+
+    def fake_plan(zarr_path_arg, config, source_type, source_path, selection_policy, force_new, crop_storage_mode):
+        return CropPlan(
+            zarr_path=Path(zarr_path_arg),
+            status="ok",
+            source_type="refined",
+            source_path="refined_detect_runs/refined_001/instances",
+            roi_size=(512, 512),
+            crop_storage_mode="geometry_only",
+            selection_policy=selection_policy,
+        )
+
+    def fake_crop_detections(**kwargs):
+        return {
+            "run_name": "crop_failed_001",
+            "total_crops": 0,
+            "rows_failed": 5,
+            "frames_with_crops": 0,
+            "percent_cropped": 0.0,
+            "duration_seconds": 0.01,
+            "detection_source_type": kwargs["source_type"],
+            "detection_source_path": kwargs["source_path"],
+            "crop_storage_mode": kwargs["crop_storage_mode"],
+        }
+
+    import fisheye.tracking.crop as crop_module
+    import fisheye.utils.crop_batch as crop_batch
+
+    monkeypatch.setattr(crop_batch, "_build_plan", fake_plan)
+    monkeypatch.setattr(crop_module, "crop_detections", fake_crop_detections)
+
+    rc, payload = _run_json(capsys, "crop", str(zarr_path), "--apply")
+
+    assert rc == palette.EXIT_FAILED
+    assert payload["status"] == "failed"
+    assert payload["reason_code"] == "CROP_ALL_ROWS_FAILED"
+    assert payload["metrics"]["rows_written"] == 0
+    assert payload["metrics"]["rows_failed"] == 5
