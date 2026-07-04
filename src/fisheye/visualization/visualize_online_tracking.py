@@ -17,7 +17,7 @@ import zarr
 from rich.console import Console
 
 from fisheye.analysis.chaser_metrics_loader import load_chaser_metrics
-from fisheye.utils.calibration import load_run_calibration
+from fisheye.shared.calibration import load_run_calibration
 
 
 def load_coordinate_transform(root: zarr.Group, stimulus_run: str, console: Console) -> float:
