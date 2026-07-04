@@ -75,6 +75,7 @@ from .web_app import create_labeling_app
 from .web_admin_api import register_admin_api_routes
 from .web_admin_pages import register_admin_page_routes
 from .web_personal_api import register_personal_api_routes
+from .web_personal_pages import register_personal_page_routes
 from .web_wsgi_adapter import handle_with_flask_if_claimed
 from .template_assets import read_labeling_asset, render_labeling_template
 from .web_responses import (
@@ -956,6 +957,97 @@ def _personal_api_response_payload(
             ),
         },
         HTTPStatus.OK,
+    )
+
+
+def _personal_page_response_payload(
+    state: ServerState,
+    *,
+    path: str,
+    request_adapter: object,
+) -> tuple[bytes, HTTPStatus, str]:
+    user, auth_source = _resolve_user(request_adapter, state.config)  # type: ignore[arg-type]
+    if user is None:
+        payload = _format_error(
+            "authentication_required",
+            details=_authentication_required_error_details(auth_source, state.config),
+            status=HTTPStatus.UNAUTHORIZED,
+        )
+        return (
+            _browser_error_html(payload),
+            HTTPStatus.UNAUTHORIZED,
+            "text/html; charset=utf-8",
+        )
+
+    request_path = str(getattr(request_adapter, "path", path) or path)
+    query = parse_qs(urlparse(request_path).query, keep_blank_values=True)
+    expected_user = str((query.get("expected_user") or [""])[-1]).strip()
+    if expected_user and str(user) != expected_user:
+        payload = _format_error(
+            "dashboard_user_mismatch",
+            details=(
+                f"This dashboard link is for {expected_user}, "
+                f"but the browser is authenticated as {user}. "
+                "Stop and contact the operator before labeling."
+            ),
+            status=HTTPStatus.FORBIDDEN,
+            extra=_labeler_read_authorization_denial_metadata(
+                user=user,
+                expected_user=expected_user,
+                route_path=path,
+                response_kind="html",
+            ),
+        )
+        return (
+            _browser_error_html(payload),
+            HTTPStatus.FORBIDDEN,
+            "text/html; charset=utf-8",
+        )
+
+    known_user_status = _known_labeler_status(state.store, user)
+    if not bool(known_user_status.get("is_active_labeling_user")):
+        error = (
+            "unknown_labeling_user"
+            if not bool(known_user_status.get("registry_row_present"))
+            else "inactive_labeling_user"
+        )
+        details = (
+            "This browser identity is not present in the labeling user registry. "
+            "Ask the operator to add or activate this user before labeling."
+            if error == "unknown_labeling_user"
+            else "This browser identity is present in the labeling user registry but is inactive. "
+            "Ask the operator to reactivate this user before labeling."
+        )
+        payload = _format_error(
+            error,
+            details=details,
+            status=HTTPStatus.FORBIDDEN,
+            extra={
+                **_labeler_read_authorization_denial_metadata(
+                    user=user,
+                    expected_user=expected_user or user,
+                    route_path=path,
+                    response_kind="html",
+                ),
+                "known_user_status": known_user_status,
+            },
+        )
+        return (
+            _browser_error_html(payload),
+            HTTPStatus.FORBIDDEN,
+            "text/html; charset=utf-8",
+        )
+
+    if path in {DASHBOARD_PATH, PERSONAL_WORK_PATH}:
+        return _dashboard_html(), HTTPStatus.OK, "text/html; charset=utf-8"
+    if path in {DATASET_QUEUE_PATH, PERSONAL_DATASET_QUEUE_PATH}:
+        return _datasets_html(), HTTPStatus.OK, "text/html; charset=utf-8"
+
+    payload = _format_error("not_found", status=HTTPStatus.NOT_FOUND)
+    return (
+        _browser_error_html(payload),
+        HTTPStatus.NOT_FOUND,
+        "text/html; charset=utf-8",
     )
 
 
@@ -7440,6 +7532,7 @@ def _make_handler(state: ServerState):
     register_admin_api_routes(flask_app, state)
     register_admin_page_routes(flask_app, state, _admin_page_response_payload)
     register_personal_api_routes(flask_app, state, _personal_api_response_payload)
+    register_personal_page_routes(flask_app, state, _personal_page_response_payload)
 
     class LabelingWorkHandler(BaseHTTPRequestHandler):
         server_version = "PaletteLabelingWork/0.1"
@@ -9177,10 +9270,6 @@ def _make_handler(state: ServerState):
                 "/",
                 "/me",
                 LABELING_HOME_PATH,
-                DASHBOARD_PATH,
-                DATASET_QUEUE_PATH,
-                PERSONAL_WORK_PATH,
-                PERSONAL_DATASET_QUEUE_PATH,
             }:
                 user, _auth_source = self._require_user(html_error=True)
                 if user is None:
