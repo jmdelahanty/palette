@@ -10,6 +10,8 @@ from urllib.parse import unquote
 from flask import Flask, Response, request
 
 from .admin_dashboard import (
+    _admin_dataset_export_csv,
+    _admin_dataset_export_rows,
     _admin_datasets_payload,
     _admin_recording_payload,
     _admin_recording_session_summary,
@@ -158,6 +160,72 @@ def register_admin_api_routes(app: Flask, state: Any) -> None:
                 status=HTTPStatus.INTERNAL_SERVER_ERROR,
             )
         return _json(payload)
+
+    @claimed_route(app, "/api/admin/datasets/export", methods=["GET"])
+    def admin_datasets_export() -> Response:
+        _user, error = _admin_user_or_error(state)
+        if error is not None:
+            return error
+        try:
+            payload = _admin_datasets_payload(
+                state.store,
+                config=state.config,
+                dataset_id=_last_arg("dataset_id") or None,
+                recording_id=_last_arg("recording_id") or None,
+                assignee_user=_last_arg_any("user", "assignee_user") or None,
+                status=_last_arg("status") or None,
+                warnings_only=_truthy_arg("warnings"),
+            )
+            rows = _admin_dataset_export_rows(payload)
+            export_format = _last_arg("format").lower() or "csv"
+        except Exception as exc:
+            return _json(
+                _format_error(
+                    "admin_datasets_export_failed",
+                    details=str(exc),
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                ),
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        if export_format == "json":
+            response = _json(
+                {
+                    "ok": True,
+                    "schema": "palette.web_labeling_admin_dataset_export.v1",
+                    "format": "json",
+                    "generated_at_utc": payload.get("generated_at_utc"),
+                    "store_path": payload.get("store_path"),
+                    "registry": payload.get("registry", {}),
+                    "filters": payload.get("filters", {}),
+                    "counts": payload.get("counts", {}),
+                    "warning_count": payload.get("warning_count", 0),
+                    "warnings": payload.get("warnings", []),
+                    "row_count": len(rows),
+                    "rows": rows,
+                },
+                status=HTTPStatus.OK,
+            )
+            response.headers["Content-Disposition"] = (
+                'attachment; filename="palette-admin-datasets.json"'
+            )
+            return response
+        if export_format != "csv":
+            return _json(
+                _format_error(
+                    "payload_validation",
+                    details="Unsupported export format. Use format=csv or format=json.",
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        return Response(
+            _admin_dataset_export_csv(rows).encode("utf-8"),
+            status=int(HTTPStatus.OK),
+            content_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": 'attachment; filename="palette-admin-datasets.csv"'
+            },
+        )
 
     @claimed_route(app, "/api/admin/users", methods=["GET"])
     def admin_users() -> Response:
