@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-04: dated point-in-time diagnostic snapshot, retained for history only. -->
+
 # Palette Full Docs Pass — Master Report (2026-05-20)
 
 Six-agent parallel audit covering 217+ active docs against current code, plus

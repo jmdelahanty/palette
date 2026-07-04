@@ -494,4 +494,3 @@ Required migration behavior:
 - [subject_mask_runs_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_runs_contract.md)
 - [review_status_schema_unification_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/review_status_schema_unification_contract.md)
 - [recording_step_status_parallel_agents_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/recording_step_status_parallel_agents_contract.md)
-- [eye_mask_data_profile_schema_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/eye_mask_data_profile_schema_contract.md)

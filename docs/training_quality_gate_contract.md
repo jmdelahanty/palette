@@ -356,10 +356,8 @@ The keypoint export zarr records row-gate metadata in three locations:
 
 - `docs/detection_data_profile_schema_contract.md` -- detection profile schema
 - `docs/keypoint_data_profile_schema_contract.md` -- keypoint profile schema
-- `docs/eye_mask_data_profile_schema_contract.md` -- eye mask profile schema
 - `docs/detection_merged_export_contract.md` -- detection merged export layout
 - `docs/keypoint_merged_row_gate_contract.md` -- keypoint row-gate design
-- `docs/eye_mask_training_artifact_contract.md` -- eye mask training artifact layout
 - `docs/keypoint_training_data_card_contract.md` -- keypoint training data card schema
 
 ## Implementation References

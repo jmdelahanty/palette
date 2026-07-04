@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-04: dated point-in-time diagnostic snapshot, retained for history only. -->
+
 # Palette repo state handoff: 2026-06-14
 
 Purpose: durable handoff for the current engineering state. This is an index

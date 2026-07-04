@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-04: dated point-in-time diagnostic snapshot, retained for history only. -->
+
 # Review/Training/Clipped Docs Audit (2026-05-20)
 
 ## Summary

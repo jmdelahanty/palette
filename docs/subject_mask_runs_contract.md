@@ -701,4 +701,3 @@ In both cases:
 ## Related Contracts
 
 - [subject_mask_training_artifact_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_training_artifact_contract.md)
-- [eye_mask_training_artifact_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/eye_mask_training_artifact_contract.md)

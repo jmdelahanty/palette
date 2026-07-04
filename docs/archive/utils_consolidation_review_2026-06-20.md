@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-04: dated point-in-time diagnostic snapshot, retained for history only. -->
+
 # `src/fisheye/utils/` Consolidation Review — what can be merged / shared (2026-06-20)
 
 ## Method
