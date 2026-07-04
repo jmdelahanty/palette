@@ -41,7 +41,7 @@ from fisheye.utils.model_resolution_provenance import build_model_resolution_pay
 from fisheye.utils import refine_keypoints_batch as refine_keypoints_batch_mod
 from fisheye.utils.resolve_detect_model import Candidate
 from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_profile, _resolve_recording_id
-from fisheye.utils.zarr_recording_context import infer_recording_context
+from fisheye.shared.zarr_recording_context import infer_recording_context
 from fisheye.utils.run_keypoints_with_registry_model import (
     _write_model_resolution_provenance as _write_keypoint_model_resolution_provenance,
 )

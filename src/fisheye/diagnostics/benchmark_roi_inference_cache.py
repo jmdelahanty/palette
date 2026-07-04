@@ -21,7 +21,7 @@ from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.crop_image_source import CropImageSource
 from fisheye.shared.crop_image_source import resolve_materialized_crop_run
 from fisheye.utils.resolve_detect_model import Candidate, _load_candidates, _load_target_profile, _resolve_recording_id
-from fisheye.utils.zarr_recording_context import infer_recording_context
+from fisheye.shared.zarr_recording_context import infer_recording_context
 
 
 SCENARIO_MATERIALIZED = "materialized"
