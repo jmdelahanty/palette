@@ -74,6 +74,7 @@ def _seed_lineage(group: _FakeGroup, *, detection_indices: np.ndarray | None = N
         chunks=(2,),
         overwrite=True,
     )
+    group.create_array("instance_key", data=np.array([1001, 1002, 1003], dtype=np.uint64), chunks=(2,), overwrite=True)
     group.create_array("source_crop_row_ids", data=np.array([0, 1, 2], dtype=np.int64), chunks=(2,), overwrite=True)
     group.create_array("source_refined_row_ids", data=np.array([100, 101, 102], dtype=np.int64), chunks=(2,), overwrite=True)
     group.create_array("source_detect_row_index", data=np.array([4, 5, -1], dtype=np.int32), chunks=(2,), overwrite=True)
@@ -91,6 +92,7 @@ def test_copy_row_lineage_arrays_copies_canonical_identity() -> None:
     assert target["source_frame_indices"][:].tolist() == [0, 5000, 5000]
     assert target["source_clip_indices"][:].tolist() == [0, 1, 1]
     assert target["source_clip_local_frame_indices"][:].tolist() == [0, 12, 12]
+    assert target["instance_key"][:].tolist() == [1001, 1002, 1003]
     assert target["source_crop_row_ids"][:].tolist() == [0, 1, 2]
     assert target["source_refined_row_ids"][:].tolist() == [100, 101, 102]
     assert target["source_detect_row_index"][:].tolist() == [4, 5, -1]
@@ -140,6 +142,7 @@ def test_copy_row_lineage_arrays_from_sources_accepts_resolved_arrays() -> None:
             "source_clip_local_frame_indices": source["source_clip_local_frame_indices"],
             "frame_counts": source["frame_counts"],
             "detection_indices": source["detection_indices"],
+            "instance_key": source["instance_key"],
             "source_crop_row_ids": source["source_crop_row_ids"],
             "source_refined_row_ids": source["source_refined_row_ids"],
             "source_detect_row_index": source["source_detect_row_index"],
@@ -198,6 +201,7 @@ def test_assert_row_lineage_sources_equal_uses_resolved_arrays() -> None:
             "source_clip_local_frame_indices": reference["source_clip_local_frame_indices"],
             "frame_counts": reference["frame_counts"],
             "detection_indices": reference["detection_indices"],
+            "instance_key": reference["instance_key"],
             "source_crop_row_ids": reference["source_crop_row_ids"],
             "source_refined_row_ids": reference["source_refined_row_ids"],
             "source_detect_row_index": reference["source_detect_row_index"],
@@ -209,8 +213,55 @@ def test_assert_row_lineage_sources_equal_uses_resolved_arrays() -> None:
             "source_clip_local_frame_indices": other["source_clip_local_frame_indices"],
             "frame_counts": other["frame_counts"],
             "detection_indices": other["detection_indices"],
+            "instance_key": other["instance_key"],
             "source_crop_row_ids": other["source_crop_row_ids"],
             "source_refined_row_ids": other["source_refined_row_ids"],
             "source_detect_row_index": other["source_detect_row_index"],
         },
+    )
+
+
+def test_assert_row_lineage_sources_equal_allows_reordered_rows_with_matching_instance_keys() -> None:
+    reference = _FakeGroup()
+    other = _FakeGroup()
+    _seed_lineage(reference)
+    order = np.array([2, 0, 1], dtype=np.int64)
+    for name in ROW_LINEAGE_ARRAYS:
+        data = reference[name][:]
+        if name == "frame_counts":
+            other.create_array(name, data=data, overwrite=True)
+        else:
+            other.create_array(name, data=data[order], overwrite=True)
+
+    assert_row_lineage_sources_equal(
+        {name: reference[name] for name in ROW_LINEAGE_ARRAYS},
+        {name: other[name] for name in ROW_LINEAGE_ARRAYS},
+    )
+
+
+def test_assert_row_lineage_sources_equal_rejects_instance_key_mismatch() -> None:
+    reference = _FakeGroup()
+    other = _FakeGroup()
+    _seed_lineage(reference)
+    _seed_lineage(other)
+    other.create_array("instance_key", data=np.array([1001, 9999, 1003], dtype=np.uint64), overwrite=True)
+
+    with pytest.raises(ValueError, match="Alignment mismatch for instance_key"):
+        assert_row_lineage_sources_equal(
+            {name: reference[name] for name in ROW_LINEAGE_ARRAYS},
+            {name: other[name] for name in ROW_LINEAGE_ARRAYS},
+        )
+
+
+def test_assert_row_lineage_sources_equal_legacy_without_instance_key_uses_positional_fallback() -> None:
+    reference = _FakeGroup()
+    other = _FakeGroup()
+    _seed_lineage(reference)
+    _seed_lineage(other)
+    del reference["instance_key"]
+    del other["instance_key"]
+
+    assert_row_lineage_sources_equal(
+        {name: reference.get(name) for name in ROW_LINEAGE_ARRAYS},
+        {name: other.get(name) for name in ROW_LINEAGE_ARRAYS},
     )

@@ -177,6 +177,7 @@ def test_per_frame_top_k_keeps_highest_score_and_marks_duplicates() -> None:
         dtype=np.float64,
     )
     raw_class_ids = np.zeros(raw_frame_indices.shape[0], dtype=np.int32)
+    raw_instance_keys = np.asarray([101, 102, 103, 104, 105], dtype=np.uint64)
     quality_labels = np.zeros(raw_frame_indices.shape[0], dtype=np.int8)
 
     selected, duplicate, stats = _select_per_frame_top_k_raw_indices(
@@ -197,6 +198,7 @@ def test_per_frame_top_k_keeps_highest_score_and_marks_duplicates() -> None:
         raw_scores=raw_scores,
         raw_frame_indices=raw_frame_indices,
         raw_class_ids=raw_class_ids,
+        raw_instance_keys=raw_instance_keys,
         detection_quality_labels=quality_labels,
         interp_bboxes=raw_bboxes[selected],
         interp_scores=raw_scores[selected],
@@ -208,6 +210,8 @@ def test_per_frame_top_k_keeps_highest_score_and_marks_duplicates() -> None:
 
     assert payload["instance_frame_indices"].tolist() == [0, 1]
     assert payload["instance_source_detect_row_index"].tolist() == [1, 4]
+    assert payload["instance_key"].tolist() == [102, 105]
+    assert payload["source_detection_instance_key"].tolist() == [101, 102, 103, 104, 105]
     assert payload["source_detection_decision_labels"].tolist() == [
         "duplicate",
         "accepted",

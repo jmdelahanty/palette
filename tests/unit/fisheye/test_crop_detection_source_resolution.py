@@ -329,6 +329,11 @@ def _seed_curated_instances_source(parent: _FakeGroup) -> _FakeGroup:
         overwrite=True,
     )
     instances.create_array(
+        "instance_key",
+        data=np.array([9001, 9002], dtype=np.uint64),
+        overwrite=True,
+    )
+    instances.create_array(
         "frame_counts",
         data=np.array([0, 0, 1, 1], dtype=np.int32),
         overwrite=True,
@@ -354,9 +359,11 @@ def test_save_crop_metadata_copies_refined_row_identity_from_curated_run_root() 
     assert crop["detection_indices"][:].tolist() == [0, 1]
     assert crop["source_refined_row_ids"][:].tolist() == [10, 12]
     assert crop["source_detect_row_index"][:].tolist() == [4, -1]
+    assert crop["instance_key"][:].tolist() == [9001, 9002]
     assert crop.attrs["source_refined_row_ids_available"] is True
     assert crop.attrs["source_refined_row_id_policy"] == "copied_from_detection_source"
     assert crop.attrs["source_detect_row_index_available"] is True
+    assert crop.attrs["instance_key_available"] is True
 
 
 def test_extract_detection_rows_supports_direct_curated_instances_group() -> None:
