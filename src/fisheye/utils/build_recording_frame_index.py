@@ -7,6 +7,7 @@ It intentionally does not store review state, edits, or downstream status.
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import csv
 import json
@@ -78,10 +79,6 @@ class BuildOutputs:
     parquet_path: Path
     manifest_path: Path
     csv_path: Path | None
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _json_default(value: object) -> object:

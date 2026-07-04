@@ -14,6 +14,7 @@ correct value can be derived from already-present top-level run attrs.
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import json
 from copy import deepcopy
@@ -67,10 +68,6 @@ RUN_GROUPS_WITH_SOURCE_CROP = (
     "subject_mask_runs",
     "refined_subject_masks_runs",
 )
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _json_safe(value: Any) -> Any:

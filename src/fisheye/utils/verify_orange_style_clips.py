@@ -7,6 +7,7 @@ because it requires ffprobe to scan each clip.
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import csv
 import json
@@ -37,10 +38,6 @@ class VerifyOptions:
     ffprobe_bin: str = "ffprobe"
     probe_video: bool = False
     max_clips: int | None = None
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _load_json(path: Path) -> dict[str, Any]:

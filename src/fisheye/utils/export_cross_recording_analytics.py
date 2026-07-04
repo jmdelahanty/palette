@@ -8,6 +8,7 @@ parent process so workers never append to the same file.
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now_compact
 import argparse
 import concurrent.futures
 import hashlib
@@ -115,12 +116,6 @@ class CollectionManifestSummary:
     schema_version: int | None
     record_count: int
     included_record_count: int
-
-
-def _utc_now_id() -> str:
-    # Prefix avoids eager hive-partition readers treating compact UTC stamps as
-    # dates with incompatible parser assumptions.
-    return "run_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 def _recording_id_from_path(zarr_path: Path) -> str:
@@ -4391,7 +4386,7 @@ def export_sources(
 ) -> dict[str, Any]:
     tables = _parse_tables(tables)
     output_root = Path(output_root).expanduser().resolve()
-    export_run_id = export_run_id or _utc_now_id()
+    export_run_id = export_run_id or "run_" + utc_now_compact()
     zarr_paths = [Path(path).expanduser().resolve() for path in zarr_paths]
     if not zarr_paths:
         raise ValueError("No analysis Zarr sources were provided or discovered.")

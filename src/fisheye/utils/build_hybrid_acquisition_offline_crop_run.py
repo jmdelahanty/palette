@@ -8,6 +8,7 @@ full camera video.
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import json
 import os
@@ -59,10 +60,6 @@ DETECTION_SOURCE_CODE_MAP = {
     "acquisition_live_detection": 0,
     "offline_refined_detection": 1,
 }
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _utc_run_name(prefix: str = DEFAULT_RUN_PREFIX) -> str:

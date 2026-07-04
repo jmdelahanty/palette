@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -28,10 +29,6 @@ REPORT_SCHEMA_ID = "palette.backfill_completion_epoch_report.v1"
 BLOCKED_PARENT_ROW_SCHEMA_ID = "palette.backfill_completion_epoch_blocked_parent.v1"
 WRITE_FAILED_PARENT_ROW_SCHEMA_ID = "palette.backfill_completion_epoch_write_failed_parent.v1"
 DEPRECATED_COMPLETION_BACKFILL_SCOPES = frozenset({"eye_masks", "refined_eye_masks"})
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _group_keys(group: Any) -> list[str]:

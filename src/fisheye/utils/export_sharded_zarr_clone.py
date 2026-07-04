@@ -7,6 +7,7 @@ sidecar manifest describing source/destination array layouts.
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now_iso
 import argparse
 import json
 import math
@@ -26,10 +27,6 @@ from fisheye.shared.subject_mask_chunks import (
 
 POLICY_CHOICES = ("raw_only", "raw_and_crops", "dense_readmostly_v1", "dense_readmostly_rechunk_v1")
 RAW_VIDEO_IMAGE_PATHS = {"raw_video/images_full", "raw_video/images_ds", "raw_video/images_ds_color"}
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _manifest_path_for(dest_zarr: Path) -> Path:

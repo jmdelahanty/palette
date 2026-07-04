@@ -7,6 +7,7 @@ sync-zarr hangs in sandboxed environments.
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import hashlib
 import json
@@ -59,10 +60,6 @@ class ZarrCandidate:
     path: Path
     source: str
     registry: dict[str, Any] | None = None
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _json_safe(value: Any) -> Any:

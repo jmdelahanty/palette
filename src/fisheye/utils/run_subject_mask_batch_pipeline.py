@@ -11,6 +11,7 @@ The utility is intentionally conservative:
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now_date as _utc_now_compact
 import argparse
 import hashlib
 import json
@@ -105,10 +106,6 @@ class RunGroupPublishPlan:
     tmp_path: Path
     target_path: Path
     overwrite: bool
-
-
-def _utc_now_compact() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%d")
 
 
 def _read_json(path: Path) -> Optional[dict[str, Any]]:

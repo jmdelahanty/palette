@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import contextlib
 import hashlib
@@ -49,10 +50,6 @@ REQUIRED_DETECT_ARRAYS = (
     "n_detections",
     "frame_counts",
 )
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _safe_label(value: str) -> str:

@@ -9,6 +9,7 @@ therefore still contains ``missing`` frames.
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import json
 import sys
@@ -66,10 +67,6 @@ class LegacyLabelApplyResult:
     review_state: str
     detection_profile_run: str | None
     registry_sync_status: str
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _normalize_text(value: Any) -> str | None:

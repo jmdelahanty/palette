@@ -7,6 +7,7 @@ projection for each selected archive.
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now_z as _utc_now
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import time
@@ -80,10 +81,6 @@ class EyeLayout:
     kind: str
     left_idx: Optional[int] = None
     right_idx: Optional[int] = None
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> Optional[str]:

@@ -7,6 +7,7 @@ browser-friendly H.264 MP4 representation.
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import json
 import os
@@ -58,10 +59,6 @@ class ReviewProxyOptions:
     write_manifest_only: bool = False
     require_existing_proxies: bool = False
     skip_existing_valid: bool = False
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _default_proxy_run_id() -> str:

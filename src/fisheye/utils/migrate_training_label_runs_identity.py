@@ -9,6 +9,7 @@ that point at the new crop run and records that the label transform is identity.
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import json
 import os
@@ -29,10 +30,6 @@ LABEL_FAMILIES = (
     "refined_subject_masks_runs",
 )
 MIGRATION_VERSION = "training_label_identity_crop_pixel_contract_v1"
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _json_safe(value: Any) -> Any:

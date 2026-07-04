@@ -7,6 +7,7 @@ reviewed before we fan out across many clips.
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import json
 import os
@@ -20,10 +21,6 @@ from typing import Any, Mapping, Optional, Sequence
 PLAN_SCHEMA = "palette.clipped_detect_refine_workflow_plan.v1"
 DEFAULT_CONFIG = "configs/fisheye/yolo_detect_config.yaml"
 DEFAULT_DECODE_BACKEND = "pynvvc_luma_rgb"
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _default_workflow_id() -> str:

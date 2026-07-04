@@ -11,6 +11,7 @@ It is intentionally conservative: the command is dry-run by default and requires
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import csv
 import json
@@ -51,10 +52,6 @@ class MaterializeOptions:
     apply: bool = False
     overwrite: bool = False
     max_clips: int | None = None
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _infer_recording_dir(video_path: Path) -> Path:

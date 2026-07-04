@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 from dataclasses import dataclass
@@ -27,10 +28,6 @@ REQUIRED_REFINED_KEYPOINT_ARRAYS = (
 class BackfillResult:
     status: str
     reason: Optional[str] = None
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> Optional[str]:

@@ -6,6 +6,7 @@ write model outputs, update a registry, or set stage ``latest`` aliases.
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import json
 import os
@@ -39,10 +40,6 @@ CLIP_RUN_FAMILIES = (
     "subject_mask_runs",
     "refined_subject_masks_runs",
 )
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _json_default(value: object) -> object:

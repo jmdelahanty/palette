@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now_z as _utc_now
 import argparse
 import sys
 import time
@@ -70,10 +71,6 @@ class ResolvedSubjectRun:
     source_crop_snapshot: dict[str, Any]
     probabilities_encoding: str
     probability_source_path: str
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _target_mask_chunks(total_rows: int, height: int, width: int) -> tuple[int, int, int, int]:

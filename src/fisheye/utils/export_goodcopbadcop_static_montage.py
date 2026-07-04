@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now_z as _utc_now
 import argparse
 import json
 import math
@@ -50,10 +51,6 @@ class LoadedTile:
     path: str
     image: Image.Image | None
     error: str | None
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _normalize_path(path: str) -> str:

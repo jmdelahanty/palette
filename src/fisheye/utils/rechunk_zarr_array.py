@@ -10,6 +10,7 @@ fine.
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now_iso
 import argparse
 import json
 import math
@@ -42,10 +43,6 @@ class RechunkArraySummary:
     applied: bool
     temp_name: str | None = None
     reason: str | None = None
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _array_data_type(arr: zarr.Array) -> Any:

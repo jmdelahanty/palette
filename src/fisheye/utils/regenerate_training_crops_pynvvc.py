@@ -9,6 +9,7 @@ unless explicitly requested.
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import json
 import os
@@ -41,10 +42,6 @@ from fisheye.shared.roi_pixel_contract import (
 SOURCE_FRAME_INDEX_MODES = ("auto", "direct", "original_frame_indices", "source_frame_index_parquet")
 DECODE_MODES = ("auto", "sequential", "indexed")
 MODULE_NAME = "fisheye.utils.regenerate_training_crops_pynvvc"
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _json_safe(value: Any) -> Any:

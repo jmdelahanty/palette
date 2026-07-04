@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now_compact as _utc_now_label
 import argparse
 import hashlib
 import json
@@ -31,10 +32,6 @@ SUPPORTED_LAYOUTS = {
         "required_arrays": REQUIRED_DETECT_ARRAYS,
     },
 }
-
-
-def _utc_now_label() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 def _json_default(value: object) -> object:

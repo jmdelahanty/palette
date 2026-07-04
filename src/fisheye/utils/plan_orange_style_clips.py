@@ -8,6 +8,7 @@ semantics. It does not split video files.
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import csv
 import json
@@ -49,10 +50,6 @@ class KeyframeSummary:
     fps: float
     keyframe_frames: np.ndarray
     payload: Mapping[str, Any]
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _json_safe(value: Any) -> Any:

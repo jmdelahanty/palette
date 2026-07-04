@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 from datetime import datetime, timezone
@@ -19,10 +20,6 @@ TUNING_KEY = "subject_mask_tuning"
 EYE_TUNING_KEY = "eye_mask_tuning"
 SUBJECT_TUNING_VERSION = "2.0"
 SUPPORTED_COMPONENTS = {"subject_body", "eyes_union", "eye_left", "eye_right", "swim_bladder"}
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _normalize_component_name(value: object) -> Optional[str]:

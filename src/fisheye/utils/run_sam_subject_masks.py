@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import gc
 import importlib
@@ -1298,10 +1299,6 @@ def _preview_batch_summary(batch: PreparedSamBatch) -> dict[str, Any]:
 
 def _default_output_run(inputs: ResolvedSamInputs) -> str:
     return f"sam_subject_masks_from_{inputs.keypoint_run}"
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _safe_sigmoid(logits: np.ndarray) -> np.ndarray:

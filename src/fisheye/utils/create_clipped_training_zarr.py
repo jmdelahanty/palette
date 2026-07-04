@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import json
 import os
@@ -82,10 +83,6 @@ class ClippedTrainingOptions:
     require_dish_mask: bool = False
     copy_analysis_metadata_from: Path | None = None
     copy_existing_detections_from: Path | None = None
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _json_default(value: object) -> object:

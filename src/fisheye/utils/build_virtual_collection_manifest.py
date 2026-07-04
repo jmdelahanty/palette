@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now_z as _utc_now
 import argparse
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -20,10 +21,6 @@ from fisheye.utils.zarr_io import open_zarr_root
 
 PROFILE_MOVEMENT_BOUTS = "movement_bouts"
 PROFILE_GOODCOPBADCOP_CHASER = "goodcopbadcop_chaser"
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _recording_id_from_path(zarr_path: Path) -> str:

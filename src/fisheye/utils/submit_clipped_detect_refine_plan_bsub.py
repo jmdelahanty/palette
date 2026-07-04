@@ -16,6 +16,8 @@ cluster workflow conservative:
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now_compact as _utc_now_compact
+from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import json
 import os
@@ -30,14 +32,6 @@ from typing import Any, Mapping, Optional, Sequence
 
 SUBMISSION_SCHEMA = "palette.clipped_detect_refine_bsub_submission.v1"
 PLAN_SCHEMA = "palette.clipped_detect_refine_workflow_plan.v1"
-
-
-def _utc_now_compact() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _json_default(value: object) -> object:

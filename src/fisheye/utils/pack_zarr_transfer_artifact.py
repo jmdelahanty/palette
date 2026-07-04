@@ -7,6 +7,7 @@ manifest/checksum sidecars.
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now_iso
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs
 import argparse
 import hashlib
@@ -19,10 +20,6 @@ from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
 import zstandard
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _top_level_entries(zarr_path: Path) -> list[str]:

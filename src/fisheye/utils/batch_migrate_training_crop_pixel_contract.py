@@ -11,6 +11,7 @@ JSONL report.
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import json
 import os
@@ -52,10 +53,6 @@ class MigrationCandidate:
     dataset_id: str | None = None
     registry_row: dict[str, Any] | None = None
     quality_row: dict[str, Any] | None = None
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _json_safe(value: Any) -> Any:

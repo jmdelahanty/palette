@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.batch_logging import utc_now as _utc_now
 import argparse
 import hashlib
 import json
@@ -23,10 +24,6 @@ from fisheye.utils.validate_refined_detect_run import validate_refined_detect_ru
 
 FINALIZER_SCHEMA = "palette.clipped_detect_refine_finalizer.v1"
 COLLECTION_SCHEMA = "palette.refined_detect_clip_collection.v1"
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _json_default(value: object) -> object:
