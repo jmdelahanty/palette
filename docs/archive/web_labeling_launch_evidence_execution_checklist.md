@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-04: consolidated — current pointer is docs/web_labeling_implementation_status.md. -->
+
 # Web Labeling Launch Evidence Execution Checklist
 
 This checklist is for the operator-only evidence collection step after the

@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-04: dated point-in-time snapshot / spent work ticket, retained for history only. -->
+
 # Import Step Design Review — 2026-06-04
 
 Scope: review of the video import stage as implemented in

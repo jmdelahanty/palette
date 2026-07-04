@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-04: dated point-in-time snapshot / spent work ticket, retained for history only. -->
+
 # Repository Enforcement & Sprawl Review — 2026-06-04
 
 Scope: a repo-wide critical review prompted by the owner's concern that shared

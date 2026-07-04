@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-04: superseded by docs/diagnostics/codebase_review_2026-07-01.md (current review). -->
+
 # Palette Codebase Engineering Review (2026-05-20)
 
 Scope: code quality, workflow, and distributed-pipeline best-practice posture.

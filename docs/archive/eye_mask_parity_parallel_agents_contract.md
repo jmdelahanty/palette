@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-04: dated point-in-time snapshot / spent work ticket, retained for history only. -->
+
 # Eye-Mask Parity Parallel Agent Contract
 <!-- contract-meta
 version: 1

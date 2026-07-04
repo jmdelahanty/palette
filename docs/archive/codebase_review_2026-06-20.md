@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-04: superseded by docs/diagnostics/codebase_review_2026-07-01.md (current review). -->
+
 # Palette — Whole-Repository Code Review (2026-06-20)
 
 ## Method

@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-04: dated point-in-time snapshot / spent work ticket, retained for history only. -->
+
 # Orange A16 TensorRT Engine Handoff
 
 Purpose: provide a copy/paste task for an Orange agent to build a

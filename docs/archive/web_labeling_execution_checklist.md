@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-04: consolidated — current pointer is docs/web_labeling_implementation_status.md. -->
+
 # Web Labeling Multi-User Execution Checklist
 
 Use this checklist before sharing the browser labeling workflow with additional labelers.

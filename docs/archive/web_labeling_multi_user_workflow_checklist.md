@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-04: consolidated — current pointer is docs/web_labeling_implementation_status.md. -->
+
 # Multi-User Web Labeling Workflow Implementation Checklist
 
 <!-- design-meta

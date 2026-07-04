@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-04: superseded by docs/diagnostics/codebase_review_2026-07-01.md (current review). -->
+
 # Palette codebase review — 2026-06-10
 
 Six parallel read-only review agents, each covering one dimension (architecture, Python

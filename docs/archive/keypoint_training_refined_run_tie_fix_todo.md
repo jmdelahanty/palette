@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-04: dated point-in-time snapshot / spent work ticket, retained for history only. -->
+
 # Keypoint Training Refined-Run Tie Fix TODO
 
 Purpose: capture the code fixes needed to stop `prepare_keypoint_training_from_registry`

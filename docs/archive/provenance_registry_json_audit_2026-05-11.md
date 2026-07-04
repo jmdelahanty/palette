@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-04: dated point-in-time snapshot / spent work ticket, retained for history only. -->
+
 # Provenance, Registry Export, and Strict-JSON Audit - 2026-05-11
 
 <!-- contract-meta

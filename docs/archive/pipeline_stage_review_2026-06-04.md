@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-04: dated point-in-time snapshot / spent work ticket, retained for history only. -->
+
 # Pipeline Stage-by-Stage Review — 2026-06-04
 
 A walk through the pipeline stages, reviewing design and implementation at the

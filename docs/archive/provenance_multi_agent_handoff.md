@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-04: dated point-in-time snapshot / spent work ticket, retained for history only. -->
+
 # Provenance Multi-Agent Handoff
 
 Purpose: provide a shared, up-to-date execution plan for parallel agents

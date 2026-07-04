@@ -11,8 +11,9 @@ in fisheye so the pipeline can correctly support:
 - multiple subjects across multiple dishes
 
 This document is the proposed follow-on to
-[`track_assignment_id_status.md`](./track_assignment_id_status.md), which
-describes the current implemented behavior.
+[`track_assignment_id_status.md`](./archive/track_assignment_id_status.md)
+(archived; captured the pre-`tracking_runs` state — see
+`single_subject_per_arena_tracking_contract.md` for current behavior).
 
 ## Executive Summary
 
