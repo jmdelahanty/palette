@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import os
+from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
 import numpy as np
 import zarr
 
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
-from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
+from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name, set_authoritative_run
 from fisheye.tune import detect_review as detect_review_mod
 
 
@@ -392,4 +395,113 @@ def apply_manual_edit(
         "row_idx": row_idx,
         "bbox_norm": _finite_bbox_or_none(np.asarray(session.payload["bbox_norm_coords"], dtype=np.float64).reshape(-1, 4)[row_idx]),
         "status": load_frame_payload(session, position)["status"],
+    }
+
+
+def _approve_authoritative_refined_detect(
+    session: DetectReviewSession,
+    *,
+    state: str,
+    reviewer: Optional[str],
+    notes: Optional[str],
+) -> dict[str, object]:
+    if str(state).strip().lower() != "approved":
+        return {"attempted": False, "reason": "review_state_not_approved"}
+    zarr_path = Path(session.zarr_path).expanduser()
+    if not zarr_path.exists():
+        return {"attempted": False, "reason": "zarr_path_unavailable", "zarr_path": str(session.zarr_path)}
+
+    from ..cli.palette import ApproveRequest, approve
+
+    envelope = approve(
+        ApproveRequest(
+            recording=zarr_path,
+            stage="refined_detect",
+            run=session.refined_run_name,
+            approved_by=reviewer,
+            note=notes or "detect review sign-off",
+            apply=True,
+        )
+    )
+    return {
+        "attempted": True,
+        "status": envelope.get("status"),
+        "reason_code": envelope.get("reason_code"),
+        "run": envelope.get("run"),
+        "envelope": envelope,
+    }
+
+
+def _authoritative_approval_ok(payload: Mapping[str, object]) -> bool:
+    return bool(payload.get("attempted")) and str(payload.get("status") or "").strip().lower() == "ok"
+
+
+def _mirror_authoritative_approval(parent: zarr.Group, run_name: str, payload: Mapping[str, object]) -> None:
+    envelope = payload.get("envelope")
+    approval = envelope.get("approval") if isinstance(envelope, Mapping) else None
+    if not isinstance(approval, Mapping):
+        approval = {}
+    set_authoritative_run(
+        parent,
+        run_name,
+        approved_by=str(approval.get("approved_by") or "unknown"),
+        approved_at=str(approval.get("approved_at") or ""),
+        git_sha=str(approval.get("git_sha") or ""),
+        note=str(approval.get("note") or ""),
+    )
+
+
+def apply_review_status(
+    session: DetectReviewSession,
+    *,
+    state: str = "approved",
+    method: str = "manual",
+    intended_use: str = "training",
+    reviewer: Optional[str] = None,
+    notes: Optional[str] = None,
+) -> dict[str, object]:
+    authoritative_approval = _approve_authoritative_refined_detect(
+        session,
+        state=state,
+        reviewer=reviewer,
+        notes=notes,
+    )
+    if str(state).strip().lower() == "approved" and not _authoritative_approval_ok(authoritative_approval):
+        return {
+            "action": "apply_review_status",
+            "changed": False,
+            "review_status": dict(session.refined_run.attrs.get("detect_review_status") or {}),
+            "authoritative_approval": authoritative_approval,
+        }
+
+    try:
+        refined_parent = session.root["refined_detect_runs"]
+    except Exception:
+        refined_parent = None
+    if refined_parent is not None and _authoritative_approval_ok(authoritative_approval):
+        _mirror_authoritative_approval(refined_parent, session.refined_run_name, authoritative_approval)
+    reviewer_name = reviewer or os.environ.get("USER") or os.environ.get("USERNAME")
+    timestamp = datetime.now(timezone.utc).isoformat()
+    payload: dict[str, object] = {
+        "state": str(state),
+        "method": str(method),
+        "intended_use": str(intended_use),
+        "timestamp": timestamp,
+        "timestamp_utc": timestamp,
+        "resolved_group": "refined",
+        "preference_chain": ["refined"],
+        "authoritative_approval": authoritative_approval,
+    }
+    if reviewer_name:
+        payload["reviewer"] = reviewer_name
+    if notes:
+        payload["notes"] = notes
+    session.refined_run.attrs["detect_review_status"] = payload
+    if refined_parent is not None:
+        refined_parent.attrs["detect_review_status_latest"] = session.refined_run_name
+    return {
+        "action": "apply_review_status",
+        "changed": True,
+        "review_status": payload,
+        "authoritative_approval": authoritative_approval,
     }

@@ -3,7 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import zarr
 
+from fisheye.shared.zarr_run_completion import AUTHORITATIVE_RUN_ATTR, mark_run_complete
 from fisheye.tune import detect_review_backend as backend
 
 
@@ -206,3 +208,91 @@ def test_apply_manual_clear_marks_filtered_out(monkeypatch) -> None:
     assert payload["status"]["source_kind_label"] == "none"
     assert payload["status"]["reason_label"] == "manual_clear"
     assert payload["status"]["manual_edit"] is True
+
+
+def test_apply_review_status_approved_sets_authoritative_refined_detect_run(tmp_path) -> None:
+    zarr_path = tmp_path / "detect_review_approval.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    refined_parent = root.create_group("refined_detect_runs")
+    refined = refined_parent.create_group("refined_detect_001")
+    mark_run_complete(refined, parent_group=refined_parent, run_name="refined_detect_001")
+    session = backend.DetectReviewSession(
+        zarr_path=str(zarr_path),
+        root=root,
+        refined_run=refined,
+        refined_run_name="refined_detect_001",
+        images=np.zeros((0, 1, 1), dtype=np.uint8),
+        payload={},
+        review_rows=np.zeros((0,), dtype=np.int32),
+        total_frames=0,
+        height=1,
+        width=1,
+        source_height=1,
+        source_width=1,
+        downsample_preserve_aspect=False,
+        manual_score=1.0,
+        manual_class_id=0,
+    )
+
+    result = backend.apply_review_status(
+        session,
+        state="approved",
+        method="manual",
+        intended_use="training",
+        reviewer="tester",
+        notes="detect approved",
+    )
+
+    assert result["changed"] is True
+    assert result["authoritative_approval"]["status"] == "ok"
+    assert refined.attrs["detect_review_status"]["state"] == "approved"
+    reopened = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    reopened_parent = reopened["refined_detect_runs"]
+    assert reopened_parent.attrs["detect_review_status_latest"] == "refined_detect_001"
+    assert reopened_parent.attrs[AUTHORITATIVE_RUN_ATTR] == "refined_detect_001"
+
+
+def test_apply_review_status_approved_is_fail_closed_when_authoritative_approval_fails(monkeypatch) -> None:
+    root = _make_root()
+    refined_parent = root["refined_detect_runs"]
+    refined = refined_parent["refined_detect_001"]
+    session = backend.DetectReviewSession(
+        zarr_path="/tmp/missing-detect-review.zarr",
+        root=root,
+        refined_run=refined,
+        refined_run_name="refined_detect_001",
+        images=np.zeros((0, 1, 1), dtype=np.uint8),
+        payload={},
+        review_rows=np.zeros((0,), dtype=np.int32),
+        total_frames=0,
+        height=1,
+        width=1,
+        source_height=1,
+        source_width=1,
+        downsample_preserve_aspect=False,
+        manual_score=1.0,
+        manual_class_id=0,
+    )
+    monkeypatch.setattr(
+        backend,
+        "_approve_authoritative_refined_detect",
+        lambda *_args, **_kwargs: {
+            "attempted": True,
+            "status": "blocked",
+            "reason_code": "RUN_INCOMPLETE",
+        },
+    )
+
+    result = backend.apply_review_status(
+        session,
+        state="approved",
+        method="manual",
+        intended_use="training",
+        reviewer="tester",
+        notes="detect approved",
+    )
+
+    assert result["changed"] is False
+    assert result["authoritative_approval"]["status"] == "blocked"
+    assert "detect_review_status" not in refined.attrs
+    assert "detect_review_status_latest" not in refined_parent.attrs

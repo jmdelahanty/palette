@@ -204,6 +204,26 @@ def _make_handler(state: _ServerState, static_root: Path, backend_module):
                 self._write_json({"ok": True, "result": result, "state": _state_payload(state, backend_module)})
                 return
 
+            if path == "/api/review_status":
+                try:
+                    result = backend_module.apply_review_status(
+                        state.session,
+                        state=str(body.get("state") or "approved"),
+                        method=str(body.get("method") or "manual"),
+                        intended_use=str(body.get("intended_use") or "training"),
+                        reviewer=str(body["reviewer"]) if body.get("reviewer") is not None else None,
+                        notes=str(body["notes"]) if body.get("notes") is not None else None,
+                    )
+                except Exception as exc:
+                    self._write_json(
+                        _format_error("review_status_failed", details=str(exc), status=HTTPStatus.BAD_REQUEST),
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                status = HTTPStatus.OK if bool(result.get("changed")) else HTTPStatus.CONFLICT
+                self._write_json({"ok": bool(result.get("changed")), "result": result, "state": _state_payload(state, backend_module)}, status=status)
+                return
+
             self._write_not_found()
 
         def log_message(self, fmt: str, *args: object) -> None:
