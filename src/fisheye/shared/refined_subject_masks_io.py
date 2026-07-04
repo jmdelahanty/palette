@@ -36,6 +36,7 @@ REFINED_SUBJECT_MASKS_ROW_LINEAGE_ARRAYS: tuple[str, ...] = (
     "source_crop_row_ids",
     "source_refined_row_ids",
     "source_detect_row_index",
+    "instance_key",
 )
 REFINED_SUBJECT_MASKS_SMALL_RUN_ARRAYS: tuple[str, ...] = (
     "available_channels",

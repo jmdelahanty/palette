@@ -487,6 +487,7 @@ def _subject_mask_row_identity(runtime: SubjectMaskRuntimeSession, roi_idx: int)
         "source_crop_row_ids",
         "source_refined_row_ids",
         "source_detect_row_index",
+        "instance_key",
         "frame_indices",
     ):
         if name not in runtime.refined.group:

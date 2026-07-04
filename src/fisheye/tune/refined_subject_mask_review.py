@@ -160,6 +160,7 @@ class SourceSubjectMaskRun:
     source_crop_row_ids: Any | None = None
     source_refined_row_ids: Any | None = None
     source_detect_row_index: Any | None = None
+    instance_key: Any | None = None
     mask_surface_kind: str = "binary"
     mask_surface_path: str = "masks_roi"
     probability_thresholds: tuple[float, ...] = ()
@@ -1327,6 +1328,7 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
         source_crop_row_ids=source_crop_row_ids,
         source_refined_row_ids=_lineage_array("source_refined_row_ids"),
         source_detect_row_index=_lineage_array("source_detect_row_index"),
+        instance_key=_lineage_array("instance_key"),
         mask_surface_kind=mask_surface_kind,
         mask_surface_path=mask_surface_path,
         probability_thresholds=probability_thresholds,
@@ -1475,6 +1477,12 @@ def _load_refined_eye_mask_source(root: zarr.Group, refined_eye_run: Optional[st
             source_crop_run=crop_run,
             array_name="source_detect_row_index",
         ),
+        instance_key=_resolve_source_lineage_array(
+            root,
+            source_group=group,
+            source_crop_run=crop_run,
+            array_name="instance_key",
+        ),
     )
 
 
@@ -1550,6 +1558,12 @@ def _load_refined_subject_component_source(
             source_group=refined.group,
             source_crop_run=crop_run,
             array_name="source_detect_row_index",
+        ),
+        instance_key=_resolve_source_lineage_array(
+            root,
+            source_group=refined.group,
+            source_crop_run=crop_run,
+            array_name="instance_key",
         ),
         mask_surface_kind="refined_subject_component",
         mask_surface_path=f"refined_subject_masks_runs/{refined_run}/masks_roi[{component_name}]",
@@ -1731,6 +1745,7 @@ def _create_refined_subject_run_from_component_seeds(
             "source_crop_row_ids": reference_source.source_crop_row_ids,
             "source_refined_row_ids": reference_source.source_refined_row_ids,
             "source_detect_row_index": reference_source.source_detect_row_index,
+            "instance_key": reference_source.instance_key,
         },
         total_rois=total_rois,
     )

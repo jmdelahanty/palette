@@ -837,6 +837,7 @@ def _build_sparse_refined_inputs_from_filtered(
     raw_scores: np.ndarray,
     raw_frame_indices: np.ndarray,
     raw_class_ids: np.ndarray,
+    raw_instance_keys: Optional[np.ndarray] = None,
     detection_quality_labels: np.ndarray,
     interp_bboxes: np.ndarray,
     interp_scores: np.ndarray,
@@ -849,6 +850,11 @@ def _build_sparse_refined_inputs_from_filtered(
     raw_scores_arr = np.asarray(raw_scores, dtype=np.float32).reshape(-1)
     raw_frame_indices_arr = np.asarray(raw_frame_indices, dtype=np.int32).reshape(-1)
     raw_class_ids_arr = np.asarray(raw_class_ids, dtype=np.int32).reshape(-1)
+    raw_instance_keys_arr = (
+        np.asarray(raw_instance_keys, dtype=np.uint64).reshape(-1)
+        if raw_instance_keys is not None
+        else None
+    )
     quality_labels_arr = np.asarray(detection_quality_labels, dtype=np.int8).reshape(-1)
     filtered_bboxes_arr = np.asarray(interp_bboxes, dtype=np.float64).reshape(-1, 4)
     filtered_scores_arr = np.asarray(interp_scores, dtype=np.float32).reshape(-1)
@@ -863,6 +869,8 @@ def _build_sparse_refined_inputs_from_filtered(
         == quality_labels_arr.shape[0]
     ):
         raise ValueError("Raw detect arrays and quality labels must agree on row count.")
+    if raw_instance_keys_arr is not None and raw_instance_keys_arr.shape[0] != raw_frame_indices_arr.shape[0]:
+        raise ValueError("raw_instance_keys length does not match raw detect row count.")
     if not (
         filtered_bboxes_arr.shape[0]
         == filtered_scores_arr.shape[0]
@@ -905,7 +913,7 @@ def _build_sparse_refined_inputs_from_filtered(
         source_decision_labels[selected_raw_indices] = "accepted"
         source_reason_labels[selected_raw_indices] = "clean"
 
-    return {
+    payload = {
         "instance_frame_indices": filtered_frame_indices_arr,
         "instance_bbox_norm_coords": filtered_bboxes_arr,
         "instance_source_kind_labels": np.full(filtered_frame_indices_arr.shape[0], "raw_detect", dtype=object),
@@ -922,6 +930,10 @@ def _build_sparse_refined_inputs_from_filtered(
         "source_detection_confidence_scores": raw_scores_arr,
         "source_detection_class_ids": raw_class_ids_arr,
     }
+    if raw_instance_keys_arr is not None:
+        payload["instance_key"] = raw_instance_keys_arr[selected_raw_indices]
+        payload["source_detection_instance_key"] = raw_instance_keys_arr
+    return payload
 
 
 def get_refinement_parameters(
@@ -1169,6 +1181,13 @@ def create_refined_run(
     else:
         class_ids = np.zeros(len(bbox_coords), dtype='i4')
         console.print("  [yellow]Note: No class_ids array found, defaulting to 0[/yellow]")
+    raw_instance_keys = (
+        np.asarray(detect_group["instance_key"][:], dtype=np.uint64).reshape(-1)
+        if "instance_key" in detect_group
+        else None
+    )
+    if raw_instance_keys is not None and raw_instance_keys.shape[0] != len(bbox_coords):
+        raise ValueError("detect instance_key length does not match detection row count.")
     
     console.print(f"  Total detections: {len(bbox_coords)}")
     console.print(f"  Total frames: {num_frames}")
@@ -1241,6 +1260,7 @@ def create_refined_run(
         raw_scores=scores,
         raw_frame_indices=frame_indices,
         raw_class_ids=class_ids,
+        raw_instance_keys=raw_instance_keys,
         detection_quality_labels=detection_quality_labels,
         interp_bboxes=filtered_bboxes,
         interp_scores=filtered_scores,
@@ -1397,6 +1417,11 @@ def create_refined_run(
         instance_manual_edit_flags=np.asarray(sparse_refined["instance_manual_edit_flags"], dtype=bool),
         instance_confidence_scores=np.asarray(sparse_refined["instance_confidence_scores"], dtype=np.float32),
         instance_class_ids=np.asarray(sparse_refined["instance_class_ids"], dtype=np.int32),
+        instance_key=(
+            np.asarray(sparse_refined["instance_key"], dtype=np.uint64)
+            if "instance_key" in sparse_refined
+            else None
+        ),
         source_detection_source_detect_row_index=np.asarray(
             sparse_refined["source_detection_source_detect_row_index"], dtype=np.int32
         ),
@@ -1408,6 +1433,11 @@ def create_refined_run(
             sparse_refined["source_detection_confidence_scores"], dtype=np.float32
         ),
         source_detection_class_ids=np.asarray(sparse_refined["source_detection_class_ids"], dtype=np.int32),
+        source_detection_instance_key=(
+            np.asarray(sparse_refined["source_detection_instance_key"], dtype=np.uint64)
+            if "source_detection_instance_key" in sparse_refined
+            else None
+        ),
         command=command or ' '.join(sys.argv),
         env_info=env_info,
         source_context={

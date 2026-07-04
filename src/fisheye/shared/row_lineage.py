@@ -8,6 +8,7 @@ from typing import Iterable, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import zarr
 
+from fisheye.shared.instance_keys import INSTANCE_KEY_ARRAY
 from fisheye.shared.zarr.chunk_profiles import (
     CRIMSON_LINEAGE_PRELOAD_ARRAYS,
     create_geometry_preload_array,
@@ -19,6 +20,7 @@ ROW_ALIGNMENT_ARRAYS: Tuple[str, ...] = (
     "detection_indices",
 )
 ROW_IDENTITY_ARRAYS: Tuple[str, ...] = (
+    INSTANCE_KEY_ARRAY,
     "source_frame_indices",
     "source_clip_indices",
     "source_clip_local_frame_indices",
@@ -28,6 +30,7 @@ ROW_IDENTITY_ARRAYS: Tuple[str, ...] = (
 )
 ROW_LINEAGE_ARRAYS: Tuple[str, ...] = ROW_ALIGNMENT_ARRAYS + ROW_IDENTITY_ARRAYS
 PER_ROI_ROW_LINEAGE_ARRAYS = {
+    INSTANCE_KEY_ARRAY,
     "frame_indices",
     "source_frame_indices",
     "source_clip_indices",
@@ -416,10 +419,84 @@ def _assert_optional_row_lineage_sources_equal(
             raise ValueError(f"Alignment mismatch for {name}")
 
 
+def _array_data(array: object | None) -> np.ndarray | None:
+    if array is None:
+        return None
+    return np.asarray(array[:])  # type: ignore[index]
+
+
+def _require_unique_instance_keys(keys: np.ndarray, *, label: str) -> None:
+    unique_count = int(np.unique(keys).shape[0])
+    if unique_count != int(keys.shape[0]):
+        raise ValueError(f"Alignment mismatch: duplicate instance_key values in {label}.")
+
+
+def _assert_instance_keyed_sources_equal(
+    reference_arrays: Mapping[str, object | None],
+    other_arrays: Mapping[str, object | None],
+) -> None:
+    reference_keys = np.asarray(_array_data(reference_arrays.get(INSTANCE_KEY_ARRAY)), dtype=np.uint64).reshape(-1)
+    other_keys = np.asarray(_array_data(other_arrays.get(INSTANCE_KEY_ARRAY)), dtype=np.uint64).reshape(-1)
+    _require_unique_instance_keys(reference_keys, label="reference source")
+    _require_unique_instance_keys(other_keys, label="other source")
+    if reference_keys.shape != other_keys.shape:
+        raise ValueError(
+            f"Alignment mismatch for instance_key: {reference_keys.shape} != {other_keys.shape}."
+        )
+    reference_order = np.argsort(reference_keys, kind="stable")
+    other_order = np.argsort(other_keys, kind="stable")
+    if not np.array_equal(reference_keys[reference_order], other_keys[other_order]):
+        raise ValueError("Alignment mismatch for instance_key")
+
+    for name in ROW_LINEAGE_ARRAYS:
+        if name == INSTANCE_KEY_ARRAY:
+            continue
+        reference_array = reference_arrays.get(name)
+        other_array = other_arrays.get(name)
+        if reference_array is None and other_array is None:
+            continue
+        if reference_array is None or other_array is None:
+            if name in ROW_ALIGNMENT_ARRAYS:
+                raise ValueError(f"Alignment mismatch: one source is missing {name}.")
+            continue
+        reference_data = np.asarray(reference_array[:])  # type: ignore[index]
+        other_data = np.asarray(other_array[:])  # type: ignore[index]
+        if name in PER_ROI_ROW_LINEAGE_ARRAYS:
+            if reference_data.shape[0] != reference_keys.shape[0]:
+                raise ValueError(
+                    f"Alignment mismatch for {name}: row count {reference_data.shape[0]} "
+                    f"does not match instance_key count {reference_keys.shape[0]}."
+                )
+            if other_data.shape[0] != other_keys.shape[0]:
+                raise ValueError(
+                    f"Alignment mismatch for {name}: row count {other_data.shape[0]} "
+                    f"does not match instance_key count {other_keys.shape[0]}."
+                )
+            reference_data = reference_data[reference_order]
+            other_data = other_data[other_order]
+        if reference_data.shape != other_data.shape:
+            raise ValueError(f"Alignment mismatch for {name}: {reference_data.shape} != {other_data.shape}.")
+        if not np.array_equal(reference_data, other_data):
+            raise ValueError(f"Alignment mismatch for {name}")
+
+
+def _both_sources_have_instance_key(
+    reference_arrays: Mapping[str, object | None],
+    other_arrays: Mapping[str, object | None],
+) -> bool:
+    return (
+        reference_arrays.get(INSTANCE_KEY_ARRAY) is not None
+        and other_arrays.get(INSTANCE_KEY_ARRAY) is not None
+    )
+
+
 def assert_row_lineage_alignment_equal(
     reference: Mapping[str, object],
     other: Mapping[str, object],
 ) -> None:
+    if _both_sources_have_instance_key(reference, other):
+        _assert_instance_keyed_sources_equal(reference, other)
+        return
     assert_optional_row_lineage_equal(
         reference,
         other,
@@ -438,6 +515,9 @@ def assert_row_lineage_sources_equal(
     reference_arrays: Mapping[str, object | None],
     other_arrays: Mapping[str, object | None],
 ) -> None:
+    if _both_sources_have_instance_key(reference_arrays, other_arrays):
+        _assert_instance_keyed_sources_equal(reference_arrays, other_arrays)
+        return
     _assert_optional_row_lineage_sources_equal(
         reference_arrays,
         other_arrays,

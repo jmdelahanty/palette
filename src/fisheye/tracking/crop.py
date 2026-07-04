@@ -663,6 +663,7 @@ def _extract_detection_row_payload(source_group: zarr.Group) -> Dict[str, np.nda
         for source_name, dtype in (
             ("refined_row_ids", "i8"),
             ("source_detect_row_index", "i4"),
+            ("instance_key", "u8"),
         ):
             if source_name in curated_rows:
                 payload[source_name] = _ensure_numpy_array(
@@ -690,6 +691,7 @@ def _extract_detection_row_payload(source_group: zarr.Group) -> Dict[str, np.nda
     for source_name, dtype in (
         ("refined_row_ids", "i8"),
         ("source_detect_row_index", "i4"),
+        ("instance_key", "u8"),
     ):
         values = _extract_optional_detection_row_array(
             source_group,
@@ -752,6 +754,28 @@ def _write_optional_detection_row_lineage(
         crop_group.attrs["source_detect_row_index_available"] = True
     else:
         crop_group.attrs["source_detect_row_index_available"] = False
+
+    instance_key = payload.get("instance_key")
+    if instance_key is not None:
+        instance_key = _ensure_numpy_array(
+            instance_key,
+            dtype="u8",
+            name="instance_key",
+        ).reshape(-1)
+        if instance_key.shape[0] != total_detections:
+            raise ValueError(
+                f"instance_key length {instance_key.shape[0]} does not match total detections {total_detections}"
+            )
+        create_geometry_preload_array(
+            crop_group,
+            "instance_key",
+            data=instance_key,
+            overwrite=True,
+        )
+        crop_group.attrs["instance_key_available"] = True
+        crop_group.attrs["instance_key_policy"] = "copied_from_detection_source"
+    else:
+        crop_group.attrs["instance_key_available"] = False
 
 
 def resolve_source_run_info(

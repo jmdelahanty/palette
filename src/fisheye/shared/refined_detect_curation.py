@@ -592,6 +592,7 @@ def _extract_present_curated_rows_from_dense_root(refined_run: zarr.Group) -> Di
         "bbox_img_xyxy": ("float64", (-1, 4)),
         "confidence_scores": ("float32", (-1,)),
         "class_ids": ("int32", (-1,)),
+        "instance_key": ("uint64", (-1,)),
         "manual_edit_flags": ("bool", (-1,)),
         "source_detect_row_index": ("int32", (-1,)),
         "reason": ("object", (-1,)),
@@ -624,6 +625,7 @@ def _extract_present_curated_rows_from_instances(refined_run: zarr.Group) -> Dic
         "bbox_img_xyxy",
         "confidence_scores",
         "class_ids",
+        "instance_key",
         "manual_edit_flags",
         "source_detect_row_index",
         "review_notes",
@@ -680,6 +682,7 @@ def extract_source_detection_rows(
     for name, dtype in (
         ("confidence_scores", np.float32),
         ("class_ids", np.int32),
+        ("instance_key", np.uint64),
         ("review_notes", object),
     ):
         arr = subgroup.get(name)
@@ -1070,6 +1073,13 @@ def _write_source_detections_projection(
     _write_common_array(subgroup, "frame_indices", raw_frame_indices)
     _write_common_array(subgroup, "bbox_img_xyxy", raw_bbox_img)
     _write_common_array(subgroup, "bbox_norm_coords", raw_bbox_norm)
+    if "instance_key" in detect_group:
+        raw_instance_key = np.asarray(detect_group["instance_key"][:], dtype=np.uint64).reshape(-1)
+        if raw_instance_key.shape[0] != row_count:
+            raise ValueError("detect instance_key length does not match source detection row count.")
+        _write_common_array(subgroup, "instance_key", raw_instance_key)
+    else:
+        _delete_if_present(subgroup, "instance_key")
     _write_common_array(subgroup, "decision_codes", decision_codes)
     _write_common_array(subgroup, "resolved_refined_row_id", resolved_refined_row_id)
     write_reason_columns(
@@ -1452,6 +1462,7 @@ def _write_sparse_instances_arrays(
     reason_labels: np.ndarray,
     confidence_scores: Optional[np.ndarray] = None,
     class_ids: Optional[np.ndarray] = None,
+    instance_key: Optional[np.ndarray] = None,
     review_notes: Optional[np.ndarray] = None,
     bbox_norm_reference_width: Optional[int] = None,
     bbox_norm_reference_height: Optional[int] = None,
@@ -1539,6 +1550,13 @@ def _write_sparse_instances_arrays(
         _write_common_array(subgroup, "class_ids", class_ids_arr[sort_idx])
     else:
         _delete_if_present(subgroup, "class_ids")
+    if instance_key is not None:
+        instance_key_arr = np.asarray(instance_key, dtype=np.uint64).reshape(-1)
+        if instance_key_arr.shape[0] != row_count:
+            raise ValueError("instance instance_key length does not match row count.")
+        _write_common_array(subgroup, "instance_key", instance_key_arr[sort_idx])
+    else:
+        _delete_if_present(subgroup, "instance_key")
     if review_notes is not None:
         review_notes_arr = np.asarray(review_notes, dtype=object).reshape(-1)
         if review_notes_arr.shape[0] != row_count:
@@ -1564,6 +1582,7 @@ def _write_source_detections_arrays(
     reason_labels: np.ndarray,
     confidence_scores: Optional[np.ndarray] = None,
     class_ids: Optional[np.ndarray] = None,
+    instance_key: Optional[np.ndarray] = None,
     review_notes: Optional[np.ndarray] = None,
     bbox_norm_reference_width: Optional[int] = None,
     bbox_norm_reference_height: Optional[int] = None,
@@ -1641,6 +1660,13 @@ def _write_source_detections_arrays(
         _write_common_array(subgroup, "class_ids", class_ids_arr[sort_idx])
     else:
         _delete_if_present(subgroup, "class_ids")
+    if instance_key is not None:
+        instance_key_arr = np.asarray(instance_key, dtype=np.uint64).reshape(-1)
+        if instance_key_arr.shape[0] != row_count:
+            raise ValueError("source_detections instance_key length does not match row count.")
+        _write_common_array(subgroup, "instance_key", instance_key_arr[sort_idx])
+    else:
+        _delete_if_present(subgroup, "instance_key")
     if review_notes is not None:
         review_notes_arr = np.asarray(review_notes, dtype=object).reshape(-1)
         if review_notes_arr.shape[0] != row_count:
@@ -2102,6 +2128,7 @@ def write_curated_refined_detect_surfaces(
     instance_manual_edit_flags: Optional[np.ndarray] = None,
     instance_confidence_scores: Optional[np.ndarray] = None,
     instance_class_ids: Optional[np.ndarray] = None,
+    instance_key: Optional[np.ndarray] = None,
     instance_review_notes: Optional[Sequence[str]] = None,
     instance_refined_row_ids: Optional[np.ndarray] = None,
     source_detection_source_detect_row_index: Optional[np.ndarray] = None,
@@ -2111,6 +2138,7 @@ def write_curated_refined_detect_surfaces(
     source_detection_reason_labels: Optional[Sequence[str]] = None,
     source_detection_confidence_scores: Optional[np.ndarray] = None,
     source_detection_class_ids: Optional[np.ndarray] = None,
+    source_detection_instance_key: Optional[np.ndarray] = None,
     source_detection_review_notes: Optional[Sequence[str]] = None,
     command: Optional[str] = None,
     env_info: Optional[Mapping[str, Any]] = None,
@@ -2169,6 +2197,13 @@ def write_curated_refined_detect_surfaces(
     )
     if instance_class_ids_arr is not None and instance_class_ids_arr.shape[0] != instance_row_count:
         raise ValueError("instance_class_ids length does not match instance row count.")
+    instance_key_arr = (
+        np.asarray(instance_key, dtype=np.uint64).reshape(-1)
+        if instance_key is not None
+        else None
+    )
+    if instance_key_arr is not None and instance_key_arr.shape[0] != instance_row_count:
+        raise ValueError("instance_key length does not match instance row count.")
     instance_review_notes_arr = (
         np.asarray(instance_review_notes, dtype=object).reshape(-1)
         if instance_review_notes is not None
@@ -2234,6 +2269,16 @@ def write_curated_refined_detect_surfaces(
     )
     if source_detection_class_ids_arr is not None and source_detection_class_ids_arr.shape[0] != source_row_count:
         raise ValueError("source_detection_class_ids length does not match source row count.")
+    source_detection_instance_key_arr = (
+        np.asarray(source_detection_instance_key, dtype=np.uint64).reshape(-1)
+        if source_detection_instance_key is not None
+        else None
+    )
+    if (
+        source_detection_instance_key_arr is not None
+        and source_detection_instance_key_arr.shape[0] != source_row_count
+    ):
+        raise ValueError("source_detection_instance_key length does not match source row count.")
     source_detection_review_notes_arr = (
         np.asarray(source_detection_review_notes, dtype=object).reshape(-1)
         if source_detection_review_notes is not None
@@ -2287,6 +2332,7 @@ def write_curated_refined_detect_surfaces(
         reason_labels=instance_reason_labels_arr,
         confidence_scores=instance_confidence_scores_arr,
         class_ids=instance_class_ids_arr,
+        instance_key=instance_key_arr,
         review_notes=instance_review_notes_arr,
     )
     _write_source_detections_arrays(
@@ -2303,6 +2349,7 @@ def write_curated_refined_detect_surfaces(
         reason_labels=normalized_reason_labels,
         confidence_scores=source_detection_confidence_scores_arr,
         class_ids=source_detection_class_ids_arr,
+        instance_key=source_detection_instance_key_arr,
         review_notes=source_detection_review_notes_arr,
     )
 
@@ -2779,6 +2826,23 @@ def write_curated_refined_detect_root(
             if "class_ids" in detect_group
             else None
         )
+        source_detection_instance_key = (
+            np.asarray(detect_group["instance_key"][:], dtype=np.uint64).reshape(-1)
+            if "instance_key" in detect_group
+            else None
+        )
+        if (
+            source_detection_instance_key is not None
+            and source_detection_instance_key.shape[0] != source_detection_frame_indices.shape[0]
+        ):
+            raise ValueError("detect instance_key length does not match source detection row count.")
+        instance_key = None
+        if source_detection_instance_key is not None:
+            valid_instance_rows = (
+                instance_source_detect_row_index >= 0
+            ) & (instance_source_detect_row_index < source_detection_instance_key.shape[0])
+            if bool(np.all(valid_instance_rows)):
+                instance_key = source_detection_instance_key[instance_source_detect_row_index]
     else:
         source_detection_frame_indices = np.empty((0,), dtype=np.int32)
         source_detection_bbox_norm_coords = np.empty((0, 4), dtype=np.float64)
@@ -2787,6 +2851,8 @@ def write_curated_refined_detect_root(
         source_detection_reason_labels = np.empty((0,), dtype=object)
         source_detection_confidence_scores = None
         source_detection_class_ids = None
+        source_detection_instance_key = None
+        instance_key = None
 
     payload = write_curated_refined_detect_surfaces(
         root,
@@ -2800,6 +2866,7 @@ def write_curated_refined_detect_root(
         instance_manual_edit_flags=instance_manual_edit_flags,
         instance_confidence_scores=instance_confidence_scores,
         instance_class_ids=instance_class_ids,
+        instance_key=instance_key,
         instance_review_notes=instance_review_notes,
         source_detection_source_detect_row_index=source_detection_source_detect_row_index,
         source_detection_frame_indices=source_detection_frame_indices,
@@ -2808,6 +2875,7 @@ def write_curated_refined_detect_root(
         source_detection_reason_labels=source_detection_reason_labels,
         source_detection_confidence_scores=source_detection_confidence_scores,
         source_detection_class_ids=source_detection_class_ids,
+        source_detection_instance_key=source_detection_instance_key,
         command=command,
         env_info=env_info,
         source_context=source_context,

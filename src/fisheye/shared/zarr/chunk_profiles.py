@@ -25,6 +25,7 @@ CRIMSON_LINEAGE_PRELOAD_ARRAYS = frozenset(
     {
         "detection_indices",
         "frame_indices",
+        "instance_key",
         "source_detect_row_index",
         "source_refined_row_ids",
     }

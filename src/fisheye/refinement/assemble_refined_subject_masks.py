@@ -196,6 +196,7 @@ def _source_lineage_arrays(source: SourceSubjectMaskRun) -> dict[str, object | N
         "source_crop_row_ids": getattr(source, "source_crop_row_ids", None),
         "source_refined_row_ids": source.source_refined_row_ids,
         "source_detect_row_index": source.source_detect_row_index,
+        "instance_key": getattr(source, "instance_key", None),
     }
 
 
@@ -356,6 +357,7 @@ def _load_refined_subject_mask_source(root: zarr.Group, refined_subject_run: Opt
         source_crop_row_ids=source_crop_row_ids,
         source_refined_row_ids=_lineage_array(root, group, crop_run=crop_run, name="source_refined_row_ids"),
         source_detect_row_index=_lineage_array(root, group, crop_run=crop_run, name="source_detect_row_index"),
+        instance_key=_lineage_array(root, group, crop_run=crop_run, name="instance_key"),
         mask_surface_kind="binary",
         mask_surface_path=mask_surface_path,
     )
