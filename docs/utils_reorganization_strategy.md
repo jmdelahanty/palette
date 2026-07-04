@@ -65,13 +65,12 @@ non-blocking for a `shared < apps` cut.
 what elevates helper-consolidation from tidiness to a correctness fix, same class as the
 silent-wrong-data work):
 
-- **`_iter_zarr` — 60 copies in 2 incompatible families that discover different recording
-  sets.** Family A globs `*.zarr` + `*/zarr/*.zarr` with dedup; Family B globs only
-  `zarr/*.zarr` / `*/zarr/*.zarr`, no dedup. So "find the recordings" returns a
-  *different set* depending on which tool you run — a tool on Family B can silently omit
-  recordings from a backfill/audit. The shared canonical
-  (`shared/zarr_discovery.py::iter_filesystem_zarrs`) is a *third* slightly-different
-  behavior (matches A's globs, no dedup, dir-only). **Real data-coverage hazard.**
+- **`_iter_zarr` — 64 files, 6 behavior families that discover different recording
+  sets.** The families differ in glob pattern, dedup, and file-vs-dir matching, so
+  "find the recordings" returns a *different set* depending on which tool you run — a
+  tool on a narrower family can silently omit recordings from a backfill/audit. The
+  shared canonical (`shared/zarr_discovery.py::iter_filesystem_zarrs`) is yet another
+  slightly-different behavior. **Real data-coverage hazard.**
 - **`_utc_now` — 35 copies emit 4 timestamp formats** (isoformat, two strftime variants,
   and one **date-only** in `run_subject_mask_batch_pipeline.py`). Any consumer that
   parses/compares these provenance timestamps disagrees across tools.
@@ -84,8 +83,11 @@ Plus ~110 more style-level copies (`_resolve_roots`, `_normalize_text`, coercion
 `shared/zarr_discovery.py::iter_filesystem_zarrs`, `shared/batch_logging.py::utc_now`
 (~33 files import it, 35 still define a local copy — half-migrated),
 `shared/environment.py::resolve_recording_roots`, `shared/type_conversions.py`. Only two
-need new homes: `infer_zarr_use()` (reconcile 6 variants) and `write_json_atomic()`
-(standardize on atomic). Finishing these migrations removes ~120 copies and kills the 3
+need new homes: `infer_zarr_use()` (reconcile 6 variants; canonical precedence is
+`zarr_purpose → zarr_use → filename-suffix → default` — `zarr_purpose` is the
+canonical store attr current producers write, `zarr_use` is the registry/vocabulary
+alias checked as a fallback) and `write_json_atomic()` (standardize on atomic).
+Finishing these migrations removes ~120 copies and kills the 3
 drifts. **Do not blind-sed** — `_iter_zarr` needs a generalized signature
 (glob-pattern/dedupe/is_file) decided per call-site so Family B callers don't silently
 change which recordings they see.
@@ -186,7 +188,7 @@ waist work. **Phases 1–3 can proceed now; runner moves (Phase 5) are gated on 
   **report-only** with the layered contract. Visibility before migration.
 - **Phase 1 — fix the drifts / finish helper migration (NOW; correctness win).**
   Migrate `_iter_zarr`→`iter_filesystem_zarrs` (generalize signature first, per-call-site,
-  reconciling the 3 discovery behaviors deliberately), `_utc_now`→`utc_now`,
+  reconciling the 6 discovery behavior families deliberately), `_utc_now`→`utc_now`,
   `_resolve_roots`/coercions onto existing homes; add `infer_zarr_use()` and
   `write_json_atomic()` homes. Removes ~120 copies + kills the 3 live drifts. Touches
   `shared/` + utils bodies, **not** `cli/palette.py` — low conflict with the API arc.

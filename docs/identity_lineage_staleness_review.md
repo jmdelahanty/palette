@@ -1,12 +1,26 @@
 # Identity, lineage, and staleness — design review
 
 <!-- contract-meta
-status: proposed
+status: partially delivered (Rec 1 done; Recs 2-3 open)
 created: 2026-07-02
+updated: 2026-07-04
 owner: jeremy
 related: docs/palette_cli_narrow_waist_design.md, docs/stage_catalog_reality_gaps.md,
          docs/diagnostics/codebase_review_2026-07-01.md
 -->
+
+## Status update (2026-07-04)
+
+See docs/diagnostics/codebase_review_2026-07-01.md ("Remediation delta") for the
+live, sourced status. Summary: **Rec 1 (authoritative-run pointers + `palette
+approve`) is DELIVERED** — `AUTHORITATIVE_RUN_ATTR` exists in
+`src/fisheye/shared/zarr_run_completion.py`, default-run resolution reads it
+authoritative-first, and `approve` is a callable verb in `src/fisheye/cli/palette.py`
+wired into keypoint/subject-mask/detect review approval. The in-flight `Recording`
+accessor + `RunResolution` slice (branch `agent/run-resolution-accessor`, not yet on
+`sun`) is expected to pick up the detect two-pointer reconciliation described in Rec
+1's design. **Recs 2 (content-derived instance keys) and 3 (a single `FrameDomains`
+resolver) remain open** — no evidence of either in the current codebase.
 
 ## Verdict
 
@@ -28,7 +42,7 @@ traces to one of the two:
 Three recommendations follow, ranked by leverage. All are **stamp-going-forward**
 designs — none migrates existing data.
 
-## 1. Authoritative-run pointers (do this first)
+## 1. Authoritative-run pointers (do this first) — DELIVERED
 
 A run currently has two machine-readable properties: **recency** (timestamps,
 latest-pointers) and **completeness** (markers). The property the science actually
@@ -103,10 +117,10 @@ One name must never keep two meanings permanently.
 
 ## Sequencing and relationship to other work
 
-1. **Authoritative pointers** — smallest change, fixes staleness + review-state
-   fragmentation + smoke-run pollution simultaneously; makes the `plan` oracle
-   trustworthy. Wants the `palette approve` verb (narrow-waist design) and connects to
-   provenance stamping (an approval carries who/when/git-sha).
+1. **Authoritative pointers — DELIVERED.** Smallest change, fixes staleness +
+   review-state fragmentation + smoke-run pollution simultaneously; makes the `plan`
+   oracle trustworthy. Shipped as the `palette approve` verb (narrow-waist design) and
+   connects to provenance stamping (an approval carries who/when/git-sha).
 2. **Instance keys** — one writer change (detect) + copy-through; converts a whole bug
    class from silent to loud. Complements (does not replace) the assertions landing in
    the silent-wrong-data slice.

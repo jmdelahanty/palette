@@ -31,9 +31,13 @@ marked complete without X" belongs. Enforce there and the bsub hole closes for f
 
 ## The five enforcement levers (current state)
 
-| Lever | State (2026-07-02) | File |
+Status pointer: see docs/diagnostics/codebase_review_2026-07-01.md ("Remediation
+delta") for the live, sourced count — the table below is corrected to match it as of
+2026-07-04 but will drift again, so treat the scoreboard as authoritative.
+
+| Lever | State (2026-07-04) | File |
 |---|---|---|
-| Stage-array validation | Runs for all specced stages; **raises for exactly 1** (`detect_quality`) | `registry/stage_complete.py:64` |
+| Stage-array validation | **Slice 1 partially landed** — enforcement (raise, not just warn) is live for 7 stages: `arena_assignment`, `crop`, `detect`, `detect_quality`, `keypoints`, `refined_keypoints`, `tracking` (verified via `_ENFORCE_STAGE_ARRAY_VALIDATION_FOR` frozenset). "Toward 100%" continues — not yet every non-deprecated specced stage. | `registry/stage_complete.py:64` |
 | Required provenance at finalization | None — `cli_provenance` optional, defaults None, bsub skips it | `run_*_with_registry_model.py` |
 | `legacy_default` strict mode | Still `True` — uninstrumented runs pass as complete | `shared/zarr_run_completion.py:178` |
 | Content hashes vs mtime | Still mtime (`zarr_mtime_ns`) | `registry/status_ledger.py` |
@@ -42,6 +46,10 @@ marked complete without X" belongs. Enforce there and the bsub hole closes for f
 ## Sequenced slices
 
 ### Slice 1 (first — safest high-leverage): stage-array validation → toward 100%
+
+**Partially landed** — the promotion allowlist has grown from 1 stage
+(`detect_quality`) to 7 (see the lever table above). The method below continues to
+apply to the remaining non-deprecated specced stages.
 
 Validation already runs for every stage with a `StageSpec`; results land in
 `details_json` as warnings. Only the allowlist

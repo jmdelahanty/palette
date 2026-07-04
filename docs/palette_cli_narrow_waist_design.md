@@ -306,18 +306,29 @@ webKnossos bridge, the marimo notebooks, and eventually colleagues. Same philoso
 front door: **one thin, typed, contract-carrying surface over the stable internals** —
 now for `import fisheye` as well as `palette`.
 
-### Current state (grounded 2026-07-03)
+### Current state (updated 2026-07-04 — see the scoreboard for the source data)
 
-- Verbs already **return envelope dicts** (`_run_detect` → `build_envelope(...)`): the
-  output contract is done.
-- But verbs take **`argparse.Namespace`** as input, so they are welded to the CLI parser
-  — not callable without faking a Namespace.
-- `fisheye/__init__.py` is ~10 lines: **no curated public surface.**
-- **No `Recording` accessor** — every consumer opens raw zarr and re-derives run
-  resolution + RLE decode itself.
+Status snapshot below is a pointer, not a duplicate ledger — for the live count of
+what's landed, check the "Remediation delta" entries in
+docs/diagnostics/codebase_review_2026-07-01.md rather than this section.
 
-So the gap is *programmatic invoke*, not CLI invoke — and it has concrete near-term
-consumers, not hypothetical ones.
+- **Move #1 (`verb(request) -> Envelope`) is done, verified directly in
+  `src/fisheye/cli/palette.py`.** `status`, `plan`, `approve`, `detect`, `keypoints`,
+  and `crop` are all `def verb(request: <Verb>Request) -> dict[str, Any]`, each backed
+  by a typed request dataclass (`StatusRequest`, `PlanRequest`, `ApproveRequest`,
+  `DetectRequest`, `KeypointsRequest`, `CropRequest`) and returning the
+  `build_envelope(...)` payload. No verb takes `argparse.Namespace` anymore — the CLI
+  parser builds a request object and calls the same function the library calls.
+- `fisheye/__init__.py` is still ~10 lines: **no curated public surface yet**
+  (`fisheye.api` does not exist).
+- **No `Recording` accessor merged to `sun` yet** — a `Recording` accessor and a
+  `RunResolution` resolver exist on branch `agent/run-resolution-accessor` but are not
+  an ancestor of `sun` HEAD (verified via `git merge-base --is-ancestor`); every
+  consumer on `sun` still opens raw zarr and re-derives run resolution + RLE decode
+  itself.
+
+So the remaining gap is the `Recording` accessor and the curated `fisheye.api`
+surface, not the request/verb decoupling — that part is done.
 
 ### The design: promote the waist to be the library (do not build a parallel API)
 
@@ -347,17 +358,20 @@ surface now; the deep cleanup rides on the import-linter/layering work later.
 
 ### Sequencing and the forcing function
 
-The review-backend→`approve` wiring is the **first real programmatic consumer of a
-verb**. It will hit the argparse coupling directly — either faking a `Namespace` (a
-smell) or extracting `approve` into a callable. Let that first consumer drive move #1 for
-one verb (`approve`), then generalize the `verb(request) -> Envelope` pattern to the
-others. Order:
+The review-backend→`approve` wiring was the **first real programmatic consumer of a
+verb**. It hit the argparse coupling directly, which drove move #1 for one verb
+(`approve`), then the `verb(request) -> Envelope` pattern generalized to the others.
+Order:
 
-1. Extract `approve` to a callable `approve(request) -> Envelope`; CLI wraps it. (Driven
-   by the review-backend wiring.)
-2. Generalize the request/verb split to `detect`/`crop`/`keypoints`/`status`/`plan`.
-3. Add `Recording` accessor (authoritative-first, read-only).
-4. Curated `fisheye.api` re-export surface + a programmatic-usage doc section.
+1. **DELIVERED.** Extract `approve` to a callable `approve(request) -> Envelope`; CLI
+   wraps it. (Driven by the review-backend wiring.)
+2. **DELIVERED.** Generalize the request/verb split to
+   `detect`/`crop`/`keypoints`/`status`/`plan` — all six verbs now take typed request
+   dataclasses (verified in `src/fisheye/cli/palette.py`).
+3. **In flight, not merged to `sun`.** Add `Recording` accessor (authoritative-first,
+   read-only) — exists on branch `agent/run-resolution-accessor`, not yet on `sun`.
+4. **Not started.** Curated `fisheye.api` re-export surface + a programmatic-usage doc
+   section.
 5. (Later, gated on layering work) public-API hygiene sweep.
 
 ### Risks

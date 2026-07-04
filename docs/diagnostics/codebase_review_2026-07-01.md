@@ -357,3 +357,73 @@ analyzed in docs/identity_lineage_staleness_review.md), #7
 (web.py monolith; modularization regressions were fixed in 2f05aa3), LICENSE/README,
 docs/root sprawl, `db.py` (8,234 — still growing), single-writer funnel, orchestrator
 convergence decision.
+
+## Remediation delta (2026-07-04, landed on `sun`)
+
+Note on sourcing: `origin/sun` is unreachable from this environment (no push-key
+access), and the cached `remotes/origin/sun` ref is stale (pinned at `e4b421f`, ~15
+commits behind). This delta is derived from local `sun` (HEAD `d31743e`), verified by
+`git log --oneline` + targeted `grep`, not transcribed from prior status docs.
+
+**Finding #3 (provenance), API-semantics arc — landed:**
+- **A — CLI import/packaging.** `palette` import is independent of the textual
+  launcher (c2e49ca) and an installed-entrypoint smoke test runs in CI (5cc344d).
+- **B — honest failure envelopes.** `crop` reports failed/empty outcomes as failed
+  envelopes rather than false-success (f3eecb4); `plan` hints are now replayable and
+  shell-safe (1c1d86c).
+- **C — fail-closed review approval.** Keypoint (177ad54) and subject-mask (f9d1726)
+  review approval are fail-closed; detect review is wired to the authoritative
+  `approve` path (7a5846b, following the two-pointer reconciliation write-up in
+  95b7ae2).
+- **D — verbs decoupled from argparse.** Verified directly in
+  `src/fisheye/cli/palette.py`: `status`, `plan`, `approve`, `detect`, `keypoints`, and
+  `crop` are all `def verb(request: <Verb>Request) -> dict[str, Any]`, built from typed
+  request dataclasses (`ApproveRequest`, `StatusRequest`, `PlanRequest`,
+  `DetectRequest`, `CropRequest`, `KeypointsRequest`) and returning the
+  `build_envelope(...)` payload — no `argparse.Namespace` in the verb signatures
+  (f4cbb44, ebfa966, 61a53ba). The CLI parser now constructs a request and calls the
+  same function the library would call.
+
+**Stage-array validation enforcement — landed, verified count.** Current
+`_ENFORCE_STAGE_ARRAY_VALIDATION_FOR` in `src/fisheye/registry/stage_complete.py`
+contains **7 stages**: `arena_assignment`, `crop`, `detect`, `detect_quality`,
+`keypoints`, `refined_keypoints`, `tracking` (up from the 1-stage `detect_quality`
+allowlist at the 07-01/07-02 checkpoints; catalog reconciliation in e846e17). Still
+short of "every specced, non-deprecated stage" — see
+docs/provenance_enforcement_roadmap.md.
+
+**Catalog accuracy — landed.** `detect`'s `invalidates` no longer includes
+`background` (verified in `stage_catalog.py`; reconciled together with the `--force`
+override in e846e17). `eye_mask_tuning` now carries `deprecated=True` (ae236bf,
+building on the eye-mask severance already noted above). `palette` verbs support an
+explicit `--force` catalog-dependency override, surfaced in the envelope as
+`forced_dependency_overrides`/`forced: true` (verified in `palette.py`, wired via
+e846e17).
+
+**Identity Rec 1 (authoritative-run pointers + `palette approve`) — landed.**
+`AUTHORITATIVE_RUN_ATTR` exists in `src/fisheye/shared/zarr_run_completion.py`
+(1d4aa07); default-run resolution reads it authoritative-first (708bd03); `approve`
+is a callable verb in `palette.py` (6894031, e6a4edb) with review tooling wired to it
+(f61956f, 7a5846b, f9d1726, 177ad54). Documented in
+docs/identity_lineage_staleness_review.md Rec 1.
+
+**IN-FLIGHT, not on `sun` — do not report as landed:**
+- The `Recording` accessor (`f78e092`) and the `RunResolution` resolver (`4293f7f`)
+  live on branch `agent/run-resolution-accessor` only; `git merge-base --is-ancestor`
+  against `sun` confirms neither commit is an ancestor of `sun` HEAD. This is the
+  narrow-waist doc's step 3 (`Recording` accessor) and picks up the detect
+  two-pointer reconciliation once merged.
+
+**Correction to the drafting brief for this delta:** the utils Phase 1 drift-fix
+slice (docs/utils_reorganization_strategy.md) is **not** in-flight — it is
+substantially landed on `sun` as of the last 6 commits at HEAD (1c8f5ce, fc756fa,
+cfff5f9, 7ff3448, 42311c8, d31743e), all timestamped within the hour before this
+delta was written. Verified by grep: local `_iter_zarr` definitions are down to 3
+(all in deprecated eye-mask diagnostics files slated for removal, not live call
+sites); local `_write_json` definitions are down to 2; the canonical
+`write_json_atomic` home exists at `src/fisheye/shared/json_safety.py:129`.
+(The `_utc_now` leg, noted partial while this delta was being drafted, completed in
+the final commit `42311c8` — re-verified: 0 local `_iter_zarr` / `_utc_now` / live
+`_write_json` definitions remain. Net: **Phase 1 is fully landed**, not merely
+planned; the remaining utils reorg — helper relocations, dead-code deletion, runner
+moves, the import-linter gate — is the separate later work per the strategy doc.)
