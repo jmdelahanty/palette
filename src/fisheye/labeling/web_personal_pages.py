@@ -41,6 +41,18 @@ def register_personal_page_routes(
 ) -> None:
     """Register read-only personal dashboard and dataset queue pages on ``app``."""
 
+    @claimed_route(app, "/", methods=["GET"])
+    def labeler_landing_home() -> Response:
+        return _respond(state, response_builder, path="/")
+
+    @claimed_route(app, "/me", methods=["GET"])
+    def labeler_landing_me() -> Response:
+        return _respond(state, response_builder, path="/me")
+
+    @claimed_route(app, "/labeling", methods=["GET"])
+    def labeler_landing_labeling() -> Response:
+        return _respond(state, response_builder, path="/labeling")
+
     @claimed_route(app, "/work", methods=["GET"])
     def personal_work_dashboard() -> Response:
         return _respond(state, response_builder, path="/work")

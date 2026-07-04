@@ -1040,7 +1040,7 @@ def _personal_page_response_payload(
 
     if path in {DASHBOARD_PATH, PERSONAL_WORK_PATH}:
         return _dashboard_html(), HTTPStatus.OK, "text/html; charset=utf-8"
-    if path in {DATASET_QUEUE_PATH, PERSONAL_DATASET_QUEUE_PATH}:
+    if path in {"/", "/me", LABELING_HOME_PATH, DATASET_QUEUE_PATH, PERSONAL_DATASET_QUEUE_PATH}:
         return _datasets_html(), HTTPStatus.OK, "text/html; charset=utf-8"
 
     payload = _format_error("not_found", status=HTTPStatus.NOT_FOUND)
@@ -9205,6 +9205,7 @@ def _make_handler(state: ServerState):
                         intended_use=str(body.get("intended_use") or runtime.review_intended_use or "training"),
                         reviewer=user,
                         notes=str(body.get("notes") or runtime.review_notes or "").strip() or None,
+                        zarr_path=runtime.zarr_path,
                     )
                     mutation_event = state.store.record_event(
                         task_id=runtime.task_id,
@@ -9265,12 +9266,7 @@ def _make_handler(state: ServerState):
                 return
             parsed = urlparse(self.path)
             path = parsed.path
-            if path in {
-                "",
-                "/",
-                "/me",
-                LABELING_HOME_PATH,
-            }:
+            if path == "":
                 user, _auth_source = self._require_user(html_error=True)
                 if user is None:
                     return
