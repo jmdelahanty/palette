@@ -68,6 +68,108 @@ class ApproveRequest:
     cwd: Path | None = None
 
 
+@dataclass(frozen=True)
+class StatusRequest:
+    recording: str | Path
+    registry: Path | None = None
+
+
+@dataclass(frozen=True)
+class PlanRequest:
+    recording: str | Path
+    registry: Path | None = None
+
+
+@dataclass(frozen=True)
+class DetectRequest:
+    recording: str | Path
+    registry: Path | None = None
+    apply: bool = False
+    force: bool = False
+    video: Path | None = None
+    output: Path | None = None
+    set_id: str | None = None
+    require_unique: bool = False
+    top_k: int = 5
+    include_non_success: bool = False
+    config: str | None = None
+    conf: float | None = None
+    iou: float | None = None
+    max_det: int | None = None
+    batch_size: int | None = None
+    resize_dims: Sequence[int] | None = None
+    imgsz: Sequence[int] | None = None
+    decode_backend: str | None = None
+    cpu: bool = False
+    write_raw_video_metadata: bool = False
+    overwrite_raw_video_metadata: bool = False
+    cwd: Path | None = None
+
+
+@dataclass(frozen=True)
+class CropRequest:
+    recording: str | Path
+    registry: Path | None = None
+    apply: bool = False
+    force: bool = False
+    config: Path | None = None
+    force_new: bool = False
+    crop_storage_mode: str | None = None
+    source_type: str | None = None
+    source_path: str | None = None
+    selection_policy: str | None = None
+    scheduler: str | None = None
+    num_workers: int | None = None
+    acceleration: str | None = None
+    external_write_backend: str | None = None
+    external_roi_storage: str | None = None
+    external_use_sharding: bool = False
+    no_external_use_sharding: bool = False
+    external_roi_chunk_size: int | None = None
+    external_roi_shard_size: int | None = None
+    external_gpu_chunk_frames: int | None = None
+    require_kvikio: bool = False
+    no_gpu: bool = False
+    force_cpu: bool = False
+    verbose: bool = False
+    cwd: Path | None = None
+
+
+@dataclass(frozen=True)
+class KeypointsRequest:
+    recording: str | Path
+    registry: Path | None = None
+    apply: bool = False
+    force: bool = False
+    output: Path | None = None
+    set_id: str | None = None
+    require_unique: bool = False
+    top_k: int = 5
+    include_non_success: bool = False
+    run_name: str | None = None
+    crop_run: str | None = None
+    pose_schema: str = "traditional_v1"
+    batch_size: int = 256
+    device: str | None = None
+    imgsz: int | None = None
+    conf: float = 0.25
+    iou: float = 0.5
+    max_det: int = 1
+    mask_threshold: float = 0.5
+    roi_cache_policy: str = "auto"
+    roi_cache_dir: Path | None = None
+    roi_cache_manifest: Path | None = None
+    stage_roi_cache_to_scratch: bool = False
+    roi_cache_staging_dir: Path | None = None
+    profile_timings: bool = False
+    progress_jsonl: Path | None = None
+    progress_every_batches: int = 1
+    input_mode: str = "numpy-list"
+    cpu: bool = False
+    verbose: bool = False
+    cwd: Path | None = None
+
+
 @dataclass
 class StageState:
     stage: str
