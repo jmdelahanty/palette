@@ -102,6 +102,19 @@ def _session_closure_support(event: Mapping[str, object] | None) -> dict[str, ob
 def register_admin_api_routes(app: Flask, state: Any) -> None:
     """Register read-only admin JSON endpoints on ``app``."""
 
+    @claimed_route(app, "/api/health", methods=["GET"])
+    def health() -> Response:
+        return _json(
+            {
+                "ok": True,
+                "store_path": str(state.config.store_path),
+                "preflight": _server_safety_payload(
+                    state.config,
+                    include_admin_details=False,
+                ),
+            }
+        )
+
     @claimed_route(app, "/api/admin/summary", methods=["GET"])
     def admin_summary() -> Response:
         _user, error = _admin_user_or_error(state)

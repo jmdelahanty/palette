@@ -9332,15 +9332,6 @@ def _make_handler(state: ServerState):
                     else _datasets_html()
                 )
                 return
-            if path == "/api/health":
-                self._write_json(
-                    {
-                        "ok": True,
-                        "store_path": str(state.config.store_path),
-                        "preflight": _server_safety_payload(state.config, include_admin_details=False),
-                    }
-                )
-                return
             if path == "/api/admin/datasets/export":
                 if self._require_admin() is None:
                     return
