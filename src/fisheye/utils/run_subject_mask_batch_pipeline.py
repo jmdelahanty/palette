@@ -36,12 +36,21 @@ import zarr
 
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.mask_store import MaskStoreError, open_mask_store
+from fisheye.shared.run_provenance import (
+    CLI_RUN_PROVENANCE_ATTR,
+    RUN_PROVENANCE_ATTR,
+    build_run_provenance,
+)
 from fisheye.shared.subject_mask_registry_status import (
     emit_refined_subject_mask_stage_completion,
     emit_subject_mask_stage_completion,
 )
 from fisheye.shared.workflow_profile import WorkflowProfiler
-from fisheye.shared.zarr_run_completion import mark_run_complete, require_runs_parent
+from fisheye.shared.zarr_run_completion import (
+    COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+    mark_run_complete,
+    require_runs_parent,
+)
 from fisheye.shared.zarr_discovery import discover_registry_zarr_entries
 
 
@@ -686,6 +695,43 @@ def _staging_publish_payload(ctx: OutputStagingContext) -> dict[str, Any]:
     }
 
 
+def _subject_mask_publish_provenance(
+    *,
+    ctx: OutputStagingContext,
+    plan: ArchivePlan,
+    publish_payload: dict[str, Any],
+    refined: bool,
+) -> dict[str, Any]:
+    input_run_ids: dict[str, Any] = {}
+    if plan.crop_run:
+        input_run_ids["crop"] = plan.crop_run
+    if plan.assignment_keypoint_run:
+        input_run_ids["assignment_keypoints"] = plan.assignment_keypoint_run
+    if refined:
+        input_run_ids["subject_mask"] = plan.subject_run
+
+    return build_run_provenance(
+        command="fisheye.utils.run_subject_mask_batch_pipeline",
+        params={
+            "zarr_path": plan.zarr_path,
+            "subject_run": plan.subject_run,
+            "refined_run": plan.refined_run,
+            "crop_run": plan.crop_run,
+            "assignment_keypoint_group": plan.assignment_keypoint_group,
+            "assignment_keypoint_run": plan.assignment_keypoint_run,
+            "run_inference": plan.run_inference,
+            "run_finalization": plan.run_finalization,
+            "source_zarr_path": str(ctx.source_zarr_path),
+            "staged_zarr_path": str(ctx.staged_zarr_path),
+            "staging_root": str(ctx.staging_root),
+            "publish": publish_payload,
+            "run_family": "refined_subject_masks_runs" if refined else "subject_mask_runs",
+        },
+        input_run_ids=input_run_ids,
+        cwd=Path.cwd(),
+    )
+
+
 def _refresh_subject_mask_registry_views(
     *,
     registry_path: Optional[Path],
@@ -756,9 +802,17 @@ def _publish_staged_outputs(
 ) -> dict[str, Any]:
     root = _open_group_mutable(ctx.source_zarr_path)
     if plan.run_inference:
-        require_runs_parent(root, "subject_mask_runs")
+        require_runs_parent(
+            root,
+            "subject_mask_runs",
+            completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+        )
     if plan.run_finalization:
-        require_runs_parent(root, "refined_subject_masks_runs")
+        require_runs_parent(
+            root,
+            "refined_subject_masks_runs",
+            completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+        )
 
     publish_plans: list[RunGroupPublishPlan] = []
     if plan.run_inference:
@@ -790,10 +844,27 @@ def _publish_staged_outputs(
     publish_payload = _staging_publish_payload(ctx)
     handoff_packages: list[dict[str, Any]] = []
     if plan.run_inference:
-        subject_parent = require_runs_parent(root, "subject_mask_runs")
+        subject_parent = require_runs_parent(
+            root,
+            "subject_mask_runs",
+            completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+        )
         subject_group = subject_parent[plan.subject_run]
         subject_group.attrs["cluster_output_staging"] = dict(publish_payload)
-        mark_run_complete(subject_group, parent_group=subject_parent, run_name=plan.subject_run)
+        subject_run_provenance = _subject_mask_publish_provenance(
+            ctx=ctx,
+            plan=plan,
+            publish_payload=publish_payload,
+            refined=False,
+        )
+        subject_group.attrs[RUN_PROVENANCE_ATTR] = dict(subject_run_provenance)
+        subject_group.attrs[CLI_RUN_PROVENANCE_ATTR] = dict(subject_run_provenance)
+        mark_run_complete(
+            subject_group,
+            parent_group=subject_parent,
+            run_name=plan.subject_run,
+            run_provenance=subject_run_provenance,
+        )
         if handoff_package_dir is not None:
             package_payload = _create_run_group_tar_package(
                 ctx.source_zarr_path / "subject_mask_runs" / plan.subject_run,
@@ -811,10 +882,27 @@ def _publish_staged_outputs(
         ):
             raise RuntimeError(f"Failed to emit registry status for subject_mask_runs/{plan.subject_run}")
     if plan.run_finalization:
-        refined_parent = require_runs_parent(root, "refined_subject_masks_runs")
+        refined_parent = require_runs_parent(
+            root,
+            "refined_subject_masks_runs",
+            completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+        )
         refined_group = refined_parent[plan.refined_run]
         refined_group.attrs["cluster_output_staging"] = dict(publish_payload)
-        mark_run_complete(refined_group, parent_group=refined_parent, run_name=plan.refined_run)
+        refined_run_provenance = _subject_mask_publish_provenance(
+            ctx=ctx,
+            plan=plan,
+            publish_payload=publish_payload,
+            refined=True,
+        )
+        refined_group.attrs[RUN_PROVENANCE_ATTR] = dict(refined_run_provenance)
+        refined_group.attrs[CLI_RUN_PROVENANCE_ATTR] = dict(refined_run_provenance)
+        mark_run_complete(
+            refined_group,
+            parent_group=refined_parent,
+            run_name=plan.refined_run,
+            run_provenance=refined_run_provenance,
+        )
         refined_parent.attrs["refined_subject_mask_review_status_latest"] = plan.refined_run
         if not emit_refined_subject_mask_stage_completion(
             root,

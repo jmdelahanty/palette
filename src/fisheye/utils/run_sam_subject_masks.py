@@ -29,12 +29,19 @@ from fisheye.shared.provenance_attrs import (
     build_source_roi_pixel_attrs,
 )
 from fisheye.shared.row_lineage import copy_row_lineage_arrays, write_direct_source_crop_row_ids
+from fisheye.shared.run_provenance import CLI_RUN_PROVENANCE_ATTR, RUN_PROVENANCE_ATTR, build_run_provenance
 from fisheye.shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from fisheye.shared.subject_mask_component_provenance import write_subject_mask_component_provenance
 from fisheye.shared.zarr_helpers import resolve_zarr_run
-from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest, require_runs_parent
+from fisheye.shared.zarr_run_completion import (
+    COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+    mark_run_complete,
+    mark_run_started,
+    note_pending_latest,
+    require_runs_parent,
+)
 from fisheye.utils.system import get_environment_info, get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
@@ -1625,8 +1632,13 @@ def write_sam_subject_mask_run(
     apply_limit: int | None = None,
     profile_timings: bool = False,
     timing_profile_summary: dict[str, Any] | None = None,
+    run_provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    parent = require_runs_parent(root, "subject_mask_runs")
+    parent = require_runs_parent(
+        root,
+        "subject_mask_runs",
+        completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+    )
     if output_run in parent and not overwrite:
         raise ValueError(
             f"subject_mask_runs/{output_run} already exists. Pass --overwrite to replace it."
@@ -1904,7 +1916,47 @@ def write_sam_subject_mask_run(
         },
     )
     write_stage_provenance(run_group, provenance)
-    mark_run_complete(run_group, parent_group=parent, run_name=output_run)
+    effective_run_provenance = run_provenance
+    if effective_run_provenance is None:
+        effective_run_provenance = build_run_provenance(
+            command="fisheye.utils.run_sam_subject_masks",
+            params={
+                "zarr_path": zarr_path_text,
+                "output_run": output_run,
+                "checkpoint_path": checkpoint_path,
+                "sam3_root": sam3_root,
+                "multimask_output": bool(multimask_output),
+                "use_box_prompt": bool(use_box_prompt),
+                "box_prompt_source": box_prompt_source,
+                "roi_inset_fraction": float(roi_inset_fraction) if use_box_prompt and box_prompt_source == "roi_inset" else None,
+                "pose_box_expand_fraction": float(pose_box_expand_fraction)
+                if use_box_prompt and box_prompt_source == "pose_roi"
+                else None,
+                "negative_point_policy": negative_point_policy,
+                "negative_point_margin_fraction": float(negative_point_margin_fraction)
+                if negative_point_policy != "none"
+                else None,
+                "device": device,
+                "apply_limit": int(apply_limit) if apply_limit is not None else None,
+                "profile_timings": bool(profile_timings),
+                "source_roi_read_mode": source_roi_read_mode,
+                "roi_cache_policy": source_roi_cache_policy,
+            },
+            input_run_ids={
+                "crop": inputs.crop_run,
+                "keypoints": inputs.keypoint_run,
+                "keypoint_group": inputs.keypoint_group,
+            },
+            cwd=Path.cwd(),
+        )
+    run_group.attrs[RUN_PROVENANCE_ATTR] = dict(effective_run_provenance)
+    run_group.attrs[CLI_RUN_PROVENANCE_ATTR] = dict(effective_run_provenance)
+    mark_run_complete(
+        run_group,
+        parent_group=parent,
+        run_name=output_run,
+        run_provenance=effective_run_provenance,
+    )
     return summary_statistics
 
 

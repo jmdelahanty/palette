@@ -20,7 +20,10 @@ from fisheye.shared.zarr_run_completion import (
     AUTHORITATIVE_RUN_ATTR,
     AUTHORITATIVE_RUN_PROVENANCE_ATTR,
     COMPLETION_EPOCH_ATTR,
+    COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     COMPLETION_EPOCH_STRICT,
+    RUN_PROVENANCE_ATTR,
+    RUN_PROVENANCE_BYPASS_ATTR,
     RUN_COMPLETED_AT_ATTR,
     RUN_COMPLETION_STATUS_ATTR,
     RUN_STATUS_RUNNING,
@@ -36,6 +39,7 @@ from fisheye.shared.zarr_run_completion import (
     mark_run_started,
     note_pending_latest,
     require_runs_parent,
+    requires_completion_provenance,
     resolve_authoritative_run_name,
     resolve_latest_complete_run_name,
     set_authoritative_run,
@@ -82,6 +86,19 @@ class FakeArray:
     def __init__(self, shape: tuple[int, ...], dtype: str) -> None:
         self.shape = shape
         self.dtype = np.dtype(dtype)
+
+
+def _valid_run_provenance(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "git_sha": "a" * 40,
+        "config_hash": "b" * 64,
+        "params": {},
+        "input_run_ids": {},
+        "command": "unit-test",
+        "fisheye_version": None,
+    }
+    payload.update(overrides)
+    return payload
 
 
 def _add_valid_detect_arrays(run: FakeGroup) -> None:
@@ -271,6 +288,21 @@ def test_require_runs_parent_stamps_new_empty_parent_strict() -> None:
     assert root["detect_runs"] is parent
     assert parent.attrs[COMPLETION_EPOCH_ATTR] == COMPLETION_EPOCH_STRICT
     assert effective_legacy_default(parent) is False
+    assert requires_completion_provenance(parent) is False
+
+
+def test_require_runs_parent_can_opt_new_empty_parent_into_provenance_epoch() -> None:
+    root = FakeGroup()
+
+    parent = require_runs_parent(
+        root,
+        "detect_runs",
+        completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+    )
+
+    assert parent.attrs[COMPLETION_EPOCH_ATTR] == COMPLETION_EPOCH_REQUIRE_PROVENANCE
+    assert effective_legacy_default(parent) is False
+    assert requires_completion_provenance(parent) is True
 
 
 def test_require_runs_parent_leaves_existing_parent_legacy_until_backfill() -> None:
@@ -360,6 +392,65 @@ def test_mark_complete_publishes_latest_and_latest_complete() -> None:
     assert is_run_complete(run) is True
     assert parent.attrs["latest"] == "run_001"
     assert parent.attrs["latest_complete"] == "run_001"
+
+
+def test_epoch_two_mark_complete_refuses_missing_run_provenance() -> None:
+    parent = FakeGroup(attrs={COMPLETION_EPOCH_ATTR: COMPLETION_EPOCH_REQUIRE_PROVENANCE})
+    run = FakeGroup()
+    parent["run_001"] = run
+    mark_run_started(run, run_name="run_001", stage="detect")
+
+    with pytest.raises(RuntimeError, match="requires valid run provenance"):
+        mark_run_complete(run, parent_group=parent, run_name="run_001")
+
+    assert is_run_complete(run) is False
+    assert "latest" not in parent.attrs
+    assert "latest_complete" not in parent.attrs
+
+
+def test_epoch_two_mark_complete_writes_valid_run_provenance() -> None:
+    parent = FakeGroup(attrs={COMPLETION_EPOCH_ATTR: COMPLETION_EPOCH_REQUIRE_PROVENANCE})
+    run = FakeGroup()
+    parent["run_001"] = run
+    provenance = _valid_run_provenance()
+
+    mark_run_complete(
+        run,
+        parent_group=parent,
+        run_name="run_001",
+        run_provenance=provenance,
+    )
+
+    assert is_run_complete(run) is True
+    assert run.attrs[RUN_PROVENANCE_ATTR]["git_sha"] == provenance["git_sha"]
+    assert parent.attrs["latest"] == "run_001"
+    assert parent.attrs["latest_complete"] == "run_001"
+
+
+def test_epoch_two_mark_complete_allows_recorded_bypass_only_with_reason() -> None:
+    parent = FakeGroup(attrs={COMPLETION_EPOCH_ATTR: COMPLETION_EPOCH_REQUIRE_PROVENANCE})
+    run = FakeGroup()
+    parent["legacy_run"] = run
+
+    with pytest.raises(RuntimeError, match="without missing_run_provenance_reason"):
+        mark_run_complete(
+            run,
+            parent_group=parent,
+            run_name="legacy_run",
+            allow_missing_run_provenance=True,
+        )
+
+    mark_run_complete(
+        run,
+        parent_group=parent,
+        run_name="legacy_run",
+        allow_missing_run_provenance=True,
+        missing_run_provenance_reason="migration re-mark",
+    )
+
+    assert is_run_complete(run) is True
+    assert run.attrs[RUN_PROVENANCE_BYPASS_ATTR]["reason"] == "migration re-mark"
+    assert run.attrs[RUN_PROVENANCE_BYPASS_ATTR]["errors"]
 
 
 def test_latest_resolver_handles_slash_qualified_nested_run_names() -> None:
@@ -599,6 +690,43 @@ def test_emit_stage_completion_refuses_unmarked_run_under_strict_parent(tmp_path
     root = FakeGroup()
     detect_parent = FakeGroup(attrs={COMPLETION_EPOCH_ATTR: COMPLETION_EPOCH_STRICT})
     run = FakeGroup()
+    root["detect_runs"] = detect_parent
+    detect_parent["detect_001"] = run
+    _add_valid_detect_arrays(run)
+
+    class FakeRegistry:
+        def close(self) -> None:
+            pass
+
+    called = False
+
+    def _upsert(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal called
+        called = True
+
+    wrote = emit_stage_completion(
+        root,  # type: ignore[arg-type]
+        tmp_path / "archive.zarr",
+        step_name="detect",
+        status="ok",
+        source="unit_test",
+        run_name="detect_001",
+        registry=FakeRegistry(),  # type: ignore[arg-type]
+        auto_registry_from_env=False,
+        upsert_dataset_row=False,
+        metadata=type("Metadata", (), {"dataset_id": "d", "recording_id": "r"})(),
+        upsert_step_status_fn=_upsert,
+        invalidate_steps_fn=lambda *args, **kwargs: None,
+    )
+
+    assert wrote is False
+    assert called is False
+
+
+def test_emit_stage_completion_refuses_epoch_two_run_missing_provenance(tmp_path: Path) -> None:
+    root = FakeGroup()
+    detect_parent = FakeGroup(attrs={COMPLETION_EPOCH_ATTR: COMPLETION_EPOCH_REQUIRE_PROVENANCE})
+    run = FakeGroup(attrs={RUN_COMPLETION_STATUS_ATTR: "complete"})
     root["detect_runs"] = detect_parent
     detect_parent["detect_001"] = run
     _add_valid_detect_arrays(run)

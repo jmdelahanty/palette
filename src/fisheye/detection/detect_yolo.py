@@ -52,9 +52,11 @@ from fisheye.shared.instance_keys import (
     resolve_recording_identity,
 )
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from fisheye.shared.run_provenance import CLI_RUN_PROVENANCE_ATTR, RUN_PROVENANCE_ATTR, build_run_provenance
 from fisheye.shared.zarr.schema import get_run_group
 from fisheye.shared.zarr.chunk_profiles import create_geometry_preload_array
 from fisheye.shared.zarr_run_completion import (
+    COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     mark_run_complete,
     mark_run_started,
     note_pending_latest,
@@ -624,6 +626,7 @@ def detect_yolo(
     overwrite_raw_video_metadata: bool = False,
     run_name: Optional[str] = None,
     cli_provenance: Optional[Mapping[str, Any]] = None,
+    run_provenance: Optional[Mapping[str, Any]] = None,
 ) -> str:
     """
     Run YOLO inference directly on video file, creating minimal zarr output.
@@ -1207,7 +1210,11 @@ def detect_yolo(
         run_name = str(run_name).strip()
         if not run_name or "/" in run_name or run_name in {".", ".."}:
             raise ValueError(f"Invalid detect run name: {run_name!r}")
-        parent_group = require_runs_parent(root, "detect_runs")
+        parent_group = require_runs_parent(
+            root,
+            "detect_runs",
+            completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+        )
         if run_name in parent_group:
             raise ValueError(f"detect_runs/{run_name} already exists")
         detect_group = parent_group.create_group(run_name)
@@ -1215,7 +1222,13 @@ def detect_yolo(
         note_pending_latest(parent_group, run_name)
         console.print(f"Created run group: [cyan]detect_runs/{run_name}[/cyan]")
     else:
-        detect_group, run_name = get_run_group(root, 'detect', console, create_new=True)
+        detect_group, run_name = get_run_group(
+            root,
+            'detect',
+            console,
+            create_new=True,
+            completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+        )
         parent_group = root["detect_runs"]
         mark_run_started(detect_group, run_name=run_name, stage="detect")
         note_pending_latest(parent_group, run_name)
@@ -1760,11 +1773,40 @@ def detect_yolo(
         },
     )
     provenance_record["timing"] = dict(timing_summary)
-    if cli_provenance is not None:
-        detect_group.attrs["cli_provenance"] = dict(cli_provenance)
+    effective_run_provenance = run_provenance if run_provenance is not None else cli_provenance
+    if effective_run_provenance is None:
+        effective_run_provenance = build_run_provenance(
+            command="fisheye.detection.detect_yolo",
+            params={
+                "video_path": str(video_path),
+                "model_path": str(model_path.absolute()),
+                "output_zarr": str(output_zarr) if output_zarr is not None else None,
+                "config_path": config_path,
+                "conf_threshold": conf_threshold,
+                "iou_threshold": iou_threshold,
+                "max_det": max_det,
+                "batch_size": batch_size,
+                "resize_dims": list(resize_dims) if resize_dims is not None else None,
+                "imgsz": imgsz,
+                "decode_backend_requested": decode_backend_requested,
+                "decode_backend_effective": decode_backend_effective,
+                "use_gpu": bool(use_gpu),
+                "run_name": run_name,
+            },
+            input_run_ids={},
+            cwd=Path.cwd(),
+        )
+    if effective_run_provenance is not None:
+        detect_group.attrs[RUN_PROVENANCE_ATTR] = dict(effective_run_provenance)
+        detect_group.attrs[CLI_RUN_PROVENANCE_ATTR] = dict(effective_run_provenance)
     write_stage_provenance(detect_group, provenance_record)
     
-    mark_run_complete(detect_group, parent_group=parent_group, run_name=run_name)
+    mark_run_complete(
+        detect_group,
+        parent_group=parent_group,
+        run_name=run_name,
+        run_provenance=effective_run_provenance,
+    )
     
     console.print(f"[green]✓[/green] Detections saved")
     

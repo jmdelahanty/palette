@@ -12,6 +12,7 @@ from typing import Any, Mapping, Optional
 import zarr
 
 from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.shared.run_provenance import build_run_provenance
 from fisheye.registry.stage_complete import emit_stage_completion
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
@@ -360,6 +361,7 @@ def run_detect_with_registry_model(
     overwrite_raw_video_metadata: bool = False,
     argv: Optional[list[str]] = None,
     cli_provenance: Optional[Mapping[str, Any]] = None,
+    run_provenance: Optional[Mapping[str, Any]] = None,
 ) -> DetectRegistryResult:
     resolved_recording_dir = recording_dir.expanduser().resolve()
     resolved_registry_path = (registry or RegistryPaths.from_env(Path.cwd()).path).expanduser().resolve()
@@ -485,6 +487,26 @@ def run_detect_with_registry_model(
     try:
         from fisheye.detection.detect_yolo import detect_yolo
 
+        effective_run_provenance = run_provenance if run_provenance is not None else cli_provenance
+        if effective_run_provenance is None:
+            effective_run_provenance = build_run_provenance(
+                command="fisheye.utils.run_detect_with_registry_model",
+                params={
+                    **vars(payload_args),
+                    "recording_dir": resolved_recording_dir,
+                    "video": resolved_video_path,
+                    "output": resolved_output_path,
+                    "registry": resolved_registry_path,
+                    "selected_model_path": selected_model_path,
+                    "selected_run_id": selected_run_id,
+                    "selected_set_id": selected_set_id,
+                },
+                input_run_ids={
+                    "model_run": selected_run_id,
+                    "model_set": selected_set_id,
+                },
+                cwd=Path.cwd(),
+            )
         run_name = detect_yolo(
             video_path=str(resolved_video_path),
             model_path=best.model_path,
@@ -500,7 +522,8 @@ def run_detect_with_registry_model(
             use_gpu=(False if cpu else None),
             write_raw_video_metadata=bool(write_raw_video_metadata),
             overwrite_raw_video_metadata=bool(overwrite_raw_video_metadata),
-            cli_provenance=cli_provenance,
+            cli_provenance=effective_run_provenance,
+            run_provenance=effective_run_provenance,
         )
     except Exception as exc:
         _emit_detect_step_status(

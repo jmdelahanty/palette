@@ -65,7 +65,13 @@ from ..shared.roi_pixel_contract import (
 )
 from ..shared.type_conversions import normalize_attr
 from ..shared.run_resolution import RunResolution, resolve_run
+from ..shared.run_provenance import (
+    CLI_RUN_PROVENANCE_ATTR,
+    RUN_PROVENANCE_ATTR,
+    build_run_provenance,
+)
 from ..shared.zarr_run_completion import (
+    COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     mark_run_complete,
     mark_run_failed,
     mark_run_started,
@@ -1773,6 +1779,7 @@ def crop_from_external_video(
     crop_storage_mode: str = "materialized",
     verbose: bool = False,
     cli_provenance: Optional[Mapping[str, Any]] = None,
+    run_provenance: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Crop detections from external video file (GPU or CPU).
@@ -1863,7 +1870,12 @@ def crop_from_external_video(
         
         # Create crop group
         from ..shared.zarr.schema import get_run_group
-        crop_group, run_name = get_run_group(root, 'crop', console)
+        crop_group, run_name = get_run_group(
+            root,
+            'crop',
+            console,
+            completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+        )
         crop_parent = root.get("crop_runs")
         if crop_parent is not None and run_name is not None:
             mark_run_started(crop_group, run_name=run_name, stage="crop")
@@ -1998,8 +2010,10 @@ def crop_from_external_video(
             video_source_type="external",
             acceleration=str(crop_group.attrs.get("acceleration") or ""),
         )
-        if cli_provenance is not None:
-            crop_group.attrs["cli_provenance"] = dict(cli_provenance)
+        effective_run_provenance = run_provenance if run_provenance is not None else cli_provenance
+        if effective_run_provenance is not None:
+            crop_group.attrs[RUN_PROVENANCE_ATTR] = dict(effective_run_provenance)
+            crop_group.attrs[CLI_RUN_PROVENANCE_ATTR] = dict(effective_run_provenance)
         crop_group.attrs['crop_signature'] = build_crop_signature(crop_group.attrs)
         effective_backend = 'kvikio_gds' if use_kvikio_writes else 'standard_zarr'
         crop_group.attrs['write_backend'] = effective_backend
@@ -2405,7 +2419,12 @@ def crop_from_external_video(
                 crop_group.attrs.pop('error_message', None)
                 crop_group.attrs.pop('failed_at_utc', None)
                 if crop_parent is not None and run_name is not None:
-                    mark_run_complete(crop_group, parent_group=crop_parent, run_name=run_name)
+                    mark_run_complete(
+                        crop_group,
+                        parent_group=crop_parent,
+                        run_name=run_name,
+                        run_provenance=effective_run_provenance,
+                    )
                 if verbose:
                     console.print("[debug] Crop run marked as completed")
             else:
@@ -3081,6 +3100,7 @@ def crop_detections(
     force_cpu: bool = False,
     verbose: bool = False,
     cli_provenance: Optional[Mapping[str, Any]] = None,
+    run_provenance: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Main function to crop ROIs from full-resolution frames based on detections.
@@ -3148,6 +3168,38 @@ def crop_detections(
     )
     crop_params['crop_storage_mode'] = crop_storage_mode_resolved
     roi_sz = tuple(crop_params.get('roi_sz', [512, 512]))
+    detect_run_name, background_run_name, refined_run_name = resolve_source_run_info(root, source_path)
+    effective_run_provenance = run_provenance if run_provenance is not None else cli_provenance
+    if effective_run_provenance is None:
+        effective_run_provenance = build_run_provenance(
+            command="fisheye.tracking.crop.crop_detections",
+            params={
+                "zarr_path": zarr_path,
+                "source_type": source_type,
+                "source_path": source_path,
+                "selection_policy": selection_policy,
+                "scheduler": scheduler,
+                "num_workers": num_workers,
+                "acceleration": acceleration,
+                "crop_storage_mode": crop_storage_mode_resolved,
+                "roi_size": list(roi_sz),
+                "external_write_backend": external_write_backend,
+                "external_roi_storage": external_roi_storage,
+                "external_use_sharding": external_use_sharding,
+                "external_roi_chunk_size": external_roi_chunk_size,
+                "external_roi_shard_size": external_roi_shard_size,
+                "external_gpu_chunk_frames": external_gpu_chunk_frames,
+                "external_require_kvikio": external_require_kvikio,
+                "use_gpu_allowed": use_gpu_allowed,
+                "force_cpu": force_cpu,
+            },
+            input_run_ids={
+                "detect": detect_run_name,
+                "background": background_run_name,
+                "refined_detect": refined_run_name,
+            },
+            cwd=Path.cwd(),
+        )
     
     # Determine video source
     video_source_type, video_path = get_video_source(root, console)
@@ -3270,7 +3322,8 @@ def crop_detections(
             external_require_kvikio=require_kvikio,
             crop_storage_mode=crop_storage_mode_resolved,
             verbose=verbose,
-            cli_provenance=cli_provenance,
+            cli_provenance=effective_run_provenance,
+            run_provenance=effective_run_provenance,
         )
         external_run_name = external_result.get('run_name') if isinstance(external_result, dict) else None
         external_run = (
@@ -3343,7 +3396,12 @@ def crop_detections(
         crop_parent_before.attrs.get("latest_materialized") if crop_parent_before is not None else None
     )
     previous_latest_any = crop_parent_before.attrs.get("latest_any") if crop_parent_before is not None else None
-    crop_group, run_group_name = get_run_group(root, 'crop', console)
+    crop_group, run_group_name = get_run_group(
+        root,
+        'crop',
+        console,
+        completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+    )
     success = False
     error_message: Optional[str] = None
     crop_parent = root.get("crop_runs")
@@ -3413,7 +3471,6 @@ def crop_detections(
     # Determine if GPU will be used
     use_distributed = (scheduler == "distributed") and HAVE_DISTRIBUTED
 
-    detect_run_name, background_run_name, refined_run_name = resolve_source_run_info(root, source_path)
     review_status, review_ref = _resolve_detect_review_status(
         root, refined_run_name, source_path
     )
@@ -3497,8 +3554,9 @@ def crop_detections(
         video_source_type="zarr",
         acceleration="cpu",
     )
-    if cli_provenance is not None:
-        crop_group.attrs["cli_provenance"] = dict(cli_provenance)
+    if effective_run_provenance is not None:
+        crop_group.attrs[RUN_PROVENANCE_ATTR] = dict(effective_run_provenance)
+        crop_group.attrs[CLI_RUN_PROVENANCE_ATTR] = dict(effective_run_provenance)
     provenance_record = _build_crop_stage_provenance(
         created_at_utc=str(crop_group.attrs.get("created_at_utc")),
         command=" ".join(sys.argv),
@@ -3864,7 +3922,12 @@ def crop_detections(
     crop_group.attrs.pop('error_message', None)
     crop_group.attrs.pop('failed_at_utc', None)
     if crop_parent is not None:
-        mark_run_complete(crop_group, parent_group=crop_parent, run_name=run_group_name)
+        mark_run_complete(
+            crop_group,
+            parent_group=crop_parent,
+            run_name=run_group_name,
+            run_provenance=effective_run_provenance,
+        )
         _finalize_crop_parent_pointers(
             crop_parent,
             run_name=run_group_name,
