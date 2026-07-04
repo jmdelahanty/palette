@@ -1214,6 +1214,7 @@ def create_viewer(
                 intended_use=review_intended_use,
                 reviewer=reviewer_name,
                 notes=review_notes,
+                zarr_path=zarr_path,
             )
             print(
                 f"Set swim_bladder review to {payload.get('state')} "

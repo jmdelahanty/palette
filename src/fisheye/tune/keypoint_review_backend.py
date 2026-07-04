@@ -947,6 +947,40 @@ def flag_followup_frame(
     }
 
 
+def _approve_authoritative_refined_keypoints(
+    session: ReviewSession,
+    *,
+    state: str,
+    reviewer: Optional[str],
+    notes: Optional[str],
+) -> dict[str, object]:
+    if str(state).strip().lower() != "approved":
+        return {"attempted": False, "reason": "review_state_not_approved"}
+    zarr_path = Path(session.zarr_path).expanduser()
+    if not zarr_path.exists():
+        return {"attempted": False, "reason": "zarr_path_unavailable", "zarr_path": str(session.zarr_path)}
+
+    from ..cli.palette import ApproveRequest, approve
+
+    envelope = approve(
+        ApproveRequest(
+            recording=zarr_path,
+            stage="refined_keypoints",
+            run=session.refined_run,
+            approved_by=reviewer,
+            note=notes or "keypoint review sign-off",
+            apply=True,
+        )
+    )
+    return {
+        "attempted": True,
+        "status": envelope.get("status"),
+        "reason_code": envelope.get("reason_code"),
+        "run": envelope.get("run"),
+        "envelope": envelope,
+    }
+
+
 def apply_review_status(
     session: ReviewSession,
     *,
@@ -981,10 +1015,17 @@ def apply_review_status(
         root=session.root,
         print_summary=False,
     )
+    authoritative_approval = _approve_authoritative_refined_keypoints(
+        session,
+        state=str(state),
+        reviewer=reviewer,
+        notes=notes,
+    )
     return {
         "action": "apply_review_status",
         "changed": True,
         "review_status": payload,
         "registry_sync": sync,
         "postprocess_summary": postprocess_summary,
+        "authoritative_approval": authoritative_approval,
     }

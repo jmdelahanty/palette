@@ -2136,6 +2136,43 @@ def _aggregate_run_state(component_reviews: Mapping[str, Mapping[str, object]]) 
     return states[0]
 
 
+def _approve_authoritative_refined_subject_masks(
+    zarr_path: str | Path | None,
+    *,
+    refined_run: str,
+    run_state: str,
+    reviewer: Optional[str],
+    notes: Optional[str],
+) -> dict[str, object]:
+    if str(run_state).strip().lower() != "approved":
+        return {"attempted": False, "reason": "run_review_state_not_approved"}
+    if zarr_path is None:
+        return {"attempted": False, "reason": "zarr_path_unavailable"}
+    resolved_path = Path(zarr_path).expanduser()
+    if not resolved_path.exists():
+        return {"attempted": False, "reason": "zarr_path_unavailable", "zarr_path": str(zarr_path)}
+
+    from ..cli.palette import ApproveRequest, approve
+
+    envelope = approve(
+        ApproveRequest(
+            recording=resolved_path,
+            stage="refined_subject_masks",
+            run=refined_run,
+            approved_by=reviewer,
+            note=notes or "refined subject-mask review sign-off",
+            apply=True,
+        )
+    )
+    return {
+        "attempted": True,
+        "status": envelope.get("status"),
+        "reason_code": envelope.get("reason_code"),
+        "run": envelope.get("run"),
+        "envelope": envelope,
+    }
+
+
 def apply_component_review_status(
     refined_parent: zarr.Group,
     refined_run: str,
@@ -2147,6 +2184,7 @@ def apply_component_review_status(
     intended_use: str,
     reviewer: Optional[str],
     notes: Optional[str],
+    zarr_path: str | Path | None = None,
 ) -> tuple[Dict[str, object], Dict[str, object]]:
     component_reviews = dict(refined.attrs.get("component_review_statuses") or {})
     component_reviews[str(component_name)] = _review_payload(
@@ -2168,7 +2206,16 @@ def apply_component_review_status(
     )
     refined.attrs["refined_subject_mask_review_status"] = run_payload
     refined_parent.attrs["refined_subject_mask_review_status_latest"] = refined_run
-    return component_reviews[str(component_name)], run_payload
+    authoritative_approval = _approve_authoritative_refined_subject_masks(
+        zarr_path,
+        refined_run=refined_run,
+        run_state=run_state,
+        reviewer=reviewer,
+        notes=notes,
+    )
+    returned_run_payload = dict(run_payload)
+    returned_run_payload["authoritative_approval"] = authoritative_approval
+    return component_reviews[str(component_name)], returned_run_payload
 
 
 def _normalize_refined_component_names(
@@ -4218,6 +4265,7 @@ def launch_review(
                 intended_use=review_intended_use,
                 reviewer=reviewer_name,
                 notes=review_notes,
+                zarr_path=zarr_path,
             )
             print(
                 f"Set {component_names[active_idx]} review to {component_payload.get('state')} "

@@ -20,6 +20,7 @@ from fisheye.shared.subject_mask_chunks import (
     refined_subject_mask_metric_row_chunk,
     refined_subject_mask_storage_chunks,
 )
+from fisheye.shared.zarr_run_completion import AUTHORITATIVE_RUN_ATTR
 from fisheye.tune import refined_subject_mask_review as mod
 
 
@@ -27,8 +28,9 @@ def _build_subject_review_root(
     *,
     frame_indices: tuple[int, int] = (10, 11),
     frame_counts: tuple[int, ...] = (1, 1),
+    zarr_path=None,
 ):
-    root = zarr.group()
+    root = zarr.open_group(str(zarr_path), mode="w") if zarr_path is not None else zarr.group()
     frame_indices_arr = np.asarray(frame_indices, dtype=np.int32)
     source_crop_row_ids = np.arange(frame_indices_arr.shape[0], dtype=np.int64)
 
@@ -1487,3 +1489,49 @@ def test_apply_component_review_status_aggregates_run_review_state() -> None:
     )
     assert run_payload["state"] == "approved"
     assert refined.parent.attrs["refined_subject_mask_review_status_latest"] == refined.run_name
+    assert run_payload["authoritative_approval"]["attempted"] is False
+
+
+def test_apply_component_review_status_sets_authoritative_when_run_approved(tmp_path) -> None:
+    zarr_path = tmp_path / "subject_mask_review_approval.zarr"
+    root = _build_subject_review_root(zarr_path=zarr_path)
+    _source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+
+    _body_payload, run_payload = mod.apply_component_review_status(
+        refined.parent,
+        refined.run_name,
+        refined.group,
+        component_name="subject_body",
+        state="approved",
+        method="manual",
+        intended_use="training",
+        reviewer="tester",
+        notes="body approved",
+        zarr_path=zarr_path,
+    )
+    assert run_payload["state"] == "pending"
+    assert run_payload["authoritative_approval"]["attempted"] is False
+
+    _swim_payload, run_payload = mod.apply_component_review_status(
+        refined.parent,
+        refined.run_name,
+        refined.group,
+        component_name="swim_bladder",
+        state="approved",
+        method="manual",
+        intended_use="training",
+        reviewer="tester",
+        notes="all components approved",
+        zarr_path=zarr_path,
+    )
+
+    assert run_payload["state"] == "approved"
+    assert run_payload["authoritative_approval"]["attempted"] is True
+    assert run_payload["authoritative_approval"]["status"] == "ok"
+    reopened = zarr.open_group(str(zarr_path), mode="r")
+    assert reopened["refined_subject_masks_runs"].attrs[AUTHORITATIVE_RUN_ATTR] == refined.run_name

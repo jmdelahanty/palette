@@ -9,10 +9,12 @@ from typing import Any
 
 import numpy as np
 import pytest
+import zarr
 
 from fisheye.refinement.keypoint_quality import compute_geometry_metrics, select_head_triangle_points
 from fisheye.pose.metric_schema import DerivedMetricStorage, metric_schema_from_package
 from fisheye.registry.db import Registry
+from fisheye.shared.zarr_run_completion import AUTHORITATIVE_RUN_ATTR, mark_run_complete
 from fisheye.tune import keypoint_review_backend as mod
 from fisheye.tune import keypoint_review_web as web
 from fisheye.utils import zarr_io
@@ -612,6 +614,36 @@ def test_apply_review_status_delegates_existing_status_writer(monkeypatch) -> No
     assert result["review_status"]["intended_use"] == "training"
     assert result["postprocess_summary"]["total_rois"] == 4
     assert parent.attrs["keypoint_review_status_latest"] == "refined_1"
+    assert result["authoritative_approval"]["attempted"] is False
+
+
+def test_apply_review_status_approved_sets_authoritative_refined_keypoint_run(monkeypatch, tmp_path) -> None:
+    zarr_path = tmp_path / "keypoint_review_approval.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    refined_parent = root.create_group("refined_keypoints_runs")
+    refined = refined_parent.create_group("refined_1")
+    mark_run_complete(refined, parent_group=refined_parent, run_name="refined_1")
+
+    session = _build_session(keypoint_count=5)
+    session.zarr_path = str(zarr_path)
+    session.root = root
+    session.refined = refined
+    monkeypatch.setattr(mod, "_update_postprocess_summary", lambda refined, *, root=None, print_summary=False: {"total_rois": 4})
+
+    result = mod.apply_review_status(
+        session,
+        state="approved",
+        method="manual",
+        intended_use="training",
+        reviewer="tester",
+        notes="keypoints approved",
+    )
+
+    assert result["review_status"]["state"] == "approved"
+    assert result["authoritative_approval"]["attempted"] is True
+    assert result["authoritative_approval"]["status"] == "ok"
+    reopened = zarr.open_group(str(zarr_path), mode="r")
+    assert reopened["refined_keypoints_runs"].attrs[AUTHORITATIVE_RUN_ATTR] == "refined_1"
 
 
 def _post_json(url: str, payload: dict[str, object]) -> dict[str, object]:
