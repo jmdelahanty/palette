@@ -7,6 +7,7 @@ expose complete refined authoring revisions or source content hashes.
 
 from __future__ import annotations
 
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr_paths
 import argparse
 import json
 from collections.abc import Iterable, Sequence
@@ -151,29 +152,6 @@ def backfill_zarr_run_lineage_fingerprints(
                 )
             )
     return results
-
-
-def _iter_zarr_paths(paths: Sequence[Path], *, recursive: bool) -> Iterable[Path]:
-    seen: set[str] = set()
-    for raw in paths:
-        path = raw.expanduser()
-        if path.suffix == ".zarr" and path.is_dir():
-            candidates = [path]
-        elif recursive and path.is_dir():
-            candidates = sorted(candidate for candidate in path.rglob("*.zarr") if candidate.is_dir())
-        elif path.is_dir():
-            candidates = sorted(path.glob("*.zarr")) + sorted(path.glob("*/zarr/*.zarr"))
-        else:
-            candidates = []
-        for candidate in candidates:
-            try:
-                key = str(candidate.resolve())
-            except OSError:
-                key = str(candidate)
-            if key in seen:
-                continue
-            seen.add(key)
-            yield candidate
 
 
 def _build_parser() -> argparse.ArgumentParser:

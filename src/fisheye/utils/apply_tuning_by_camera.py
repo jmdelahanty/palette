@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 from copy import deepcopy
 import json
@@ -87,21 +88,6 @@ def _resolve_root(paths: Optional[List[Path]]) -> List[Path]:
     if env_root:
         return [Path(env_root)]
     return [Path("/nvme1/recordings")]
-
-
-def _iter_zarr(paths: List[Path], recursive: bool) -> Iterable[Path]:
-    for path in paths:
-        path = path.expanduser()
-        if path.is_dir() and path.suffix == ".zarr":
-            yield path
-            continue
-        if not path.exists():
-            continue
-        if recursive:
-            yield from path.rglob("*.zarr")
-        else:
-            yield from path.glob("*/zarr/*.zarr")
-            yield from path.glob("*.zarr")
 
 
 def _open_group(path: Path, mode: str) -> zarr.Group:

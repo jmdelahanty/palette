@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,21 +20,6 @@ class UpdateResult:
     updated: Optional[str] = None
     detail: Optional[str] = None
     dataset_id: Optional[str] = None
-
-
-def _iter_zarr(paths: Iterable[Path], recursive: bool) -> Iterable[Path]:
-    for path in paths:
-        candidate = path.expanduser()
-        if candidate.is_dir() and candidate.suffix == ".zarr":
-            yield candidate
-            continue
-        if not candidate.exists():
-            continue
-        if recursive:
-            yield from candidate.rglob("*.zarr")
-        else:
-            yield from candidate.glob("*/zarr/*.zarr")
-            yield from candidate.glob("*.zarr")
 
 
 def _load_file_list(path: Path) -> List[Path]:

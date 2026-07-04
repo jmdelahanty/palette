@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import os
 from dataclasses import dataclass
@@ -61,23 +62,6 @@ def _resolve_log_dir(arg_log_dir: Optional[Path], roots: List[Path]) -> Path:
 
 
 _run_id = make_run_id
-
-
-def _iter_zarr(roots: List[Path], recursive: bool) -> Iterable[Path]:
-    for root in roots:
-        root = root.expanduser()
-        if root.is_file() and root.suffix == ".zarr":
-            yield root
-            continue
-        if root.is_dir() and root.suffix == ".zarr":
-            yield root
-            continue
-        if not root.exists():
-            continue
-        if recursive:
-            yield from root.rglob("zarr/*.zarr")
-        else:
-            yield from root.glob("*/zarr/*.zarr")
 
 
 def _load_file_list(path: Path) -> List[Path]:

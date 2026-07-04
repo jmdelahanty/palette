@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,19 +16,6 @@ class CropCleanupPlan:
     delete_runs: list[str]
     latest_before: Optional[str]
     latest_after: Optional[str]
-
-
-def _iter_zarr(paths: list[Path], recursive: bool) -> Iterable[Path]:
-    for path in paths:
-        if path.suffix == ".zarr" and path.exists():
-            yield path
-            continue
-        if not path.exists():
-            continue
-        if recursive:
-            yield from path.rglob("zarr/*.zarr")
-        else:
-            yield from path.glob("*/zarr/*.zarr")
 
 
 def _parse_iso_utc(value: object) -> float:

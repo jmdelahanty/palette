@@ -1,3 +1,4 @@
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import json
 import os
@@ -86,22 +87,6 @@ def _load_paths_file(path: Path) -> List[Path]:
             continue
         items.append(Path(value))
     return items
-
-
-def _iter_zarr(roots: List[Path], recursive: bool) -> Iterable[Path]:
-    for root in roots:
-        root = root.expanduser()
-        if root.suffix == ".zarr" and (root.is_file() or root.is_dir()):
-            yield root
-            continue
-        if not root.exists():
-            continue
-        if recursive:
-            for candidate in sorted(root.rglob("zarr/*.zarr")):
-                yield candidate
-        else:
-            for candidate in sorted(root.glob("*/zarr/*.zarr")):
-                yield candidate
 
 
 def _decode_text(value: object) -> Optional[str]:

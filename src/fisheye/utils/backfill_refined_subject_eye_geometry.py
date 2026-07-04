@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -31,20 +32,6 @@ class BackfillResult:
     ellipse_success_count: Optional[int] = None
     pair_success_count: Optional[int] = None
     geometry_existing: bool = False
-
-
-def _iter_zarr(roots: list[Path], recursive: bool) -> Iterable[Path]:
-    for root in roots:
-        root = root.expanduser()
-        if root.suffix == ".zarr" and (root.is_dir() or root.is_file()):
-            yield root
-            continue
-        if not root.exists():
-            continue
-        if recursive:
-            yield from root.rglob("zarr/*.zarr")
-        else:
-            yield from root.glob("*/zarr/*.zarr")
 
 
 def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> Optional[str]:

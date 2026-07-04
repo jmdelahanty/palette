@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,20 +20,6 @@ CANONICAL_TRADITIONAL_EDGES = ((0, 1), (0, 2), (1, 2))
 class BackfillResult:
     status: str
     reason: Optional[str] = None
-
-
-def _iter_zarr(roots: list[Path], recursive: bool) -> Iterable[Path]:
-    for root in roots:
-        root = root.expanduser()
-        if root.is_file() and root.suffix == ".zarr":
-            yield root
-            continue
-        if not root.exists():
-            continue
-        if recursive:
-            yield from root.rglob("zarr/*.zarr")
-        else:
-            yield from root.glob("*/zarr/*.zarr")
 
 
 def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> Optional[str]:

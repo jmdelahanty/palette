@@ -7,6 +7,7 @@ Defaults to a dry-run; pass --apply to write.
 
 from __future__ import annotations
 
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import json
 from pathlib import Path
@@ -16,21 +17,6 @@ import h5py
 import zarr
 
 from fisheye.analysis import import_stimulus_to_zarr as stim_import
-
-
-def _iter_zarr(paths: List[Path], recursive: bool) -> Iterable[Path]:
-    for path in paths:
-        path = path.expanduser()
-        if path.is_dir() and path.suffix == ".zarr":
-            yield path
-            continue
-        if not path.exists():
-            continue
-        if recursive:
-            yield from path.rglob("*.zarr")
-        else:
-            yield from path.glob("*/zarr/*.zarr")
-            yield from path.glob("*.zarr")
 
 
 def _read_file_list(path: Path) -> List[Path]:

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr_paths
 import argparse
 import json
 from pathlib import Path
@@ -15,32 +16,6 @@ from fisheye.utils import prepare_keypoint_training_from_registry as prep_pose
 
 ISSUE_STATUSES = {"switch_needed", "cross_method_review", "no_review_match", "error"}
 DIVERGENCE_ISSUE_STATUSES = {"conflict", "attrs_missing_disk_present", "attrs_present_disk_missing"}
-
-
-def _iter_zarr_paths(paths: Iterable[Path], recursive: bool) -> List[Path]:
-    results: List[Path] = []
-    for path in paths:
-        expanded = path.expanduser()
-        if expanded.is_dir() and expanded.suffix == ".zarr":
-            results.append(expanded)
-            continue
-        if not expanded.exists():
-            continue
-        if recursive:
-            results.extend(sorted(expanded.rglob("*.zarr")))
-        else:
-            results.extend(sorted(expanded.glob("*.zarr")))
-            results.extend(sorted(expanded.glob("*/zarr/*.zarr")))
-    # Stable order and de-duplicate
-    seen = set()
-    unique: List[Path] = []
-    for candidate in results:
-        key = str(candidate.resolve()) if candidate.exists() else str(candidate)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(candidate)
-    return unique
 
 
 def _state_and_intended_use(review_status: Any) -> tuple[Optional[str], Optional[str]]:

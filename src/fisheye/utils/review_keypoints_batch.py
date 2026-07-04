@@ -5,6 +5,7 @@ Batch wrapper for keypoint review (manual/retune/audit) across many recordings.
 
 from __future__ import annotations
 
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import json
 import os
@@ -71,21 +72,6 @@ def _resolve_temporal_outlier_targets(zarr_path: Path, refined_run: str) -> Opti
             item["frame_idx"] = int(frame_indices[int(roi_idx)])
         targets.append(item)
     return targets
-
-
-def _iter_zarr(paths: List[Path], recursive: bool) -> Iterable[Path]:
-    for path in paths:
-        path = path.expanduser()
-        if path.is_dir() and path.suffix == ".zarr":
-            yield path
-            continue
-        if not path.exists():
-            continue
-        if recursive:
-            yield from path.rglob("*.zarr")
-        else:
-            yield from path.glob("*/zarr/*.zarr")
-            yield from path.glob("*.zarr")
 
 
 def _load_paths_file(path: Path) -> List[Path]:

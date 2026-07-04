@@ -9,6 +9,7 @@ available, then by the affiliated ``raw/*.h5`` file under the recording folder.
 
 from __future__ import annotations
 
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,31 +43,6 @@ def _resolve_roots(paths: Sequence[Path]) -> list[Path]:
     if paths:
         return [Path(path).expanduser() for path in paths]
     return [Path("/nvme1/recordings")]
-
-
-def _iter_zarr(roots: Sequence[Path], *, recursive: bool) -> Iterable[Path]:
-    seen: set[str] = set()
-    for root in roots:
-        root = Path(root).expanduser()
-        if root.suffix == ".zarr" and root.is_dir():
-            candidates = [root]
-        elif root.exists():
-            if recursive:
-                candidates = sorted(path for path in root.rglob("*.zarr") if path.is_dir())
-            else:
-                candidates = sorted(root.glob("*.zarr")) + sorted(root.glob("*/zarr/*.zarr"))
-        else:
-            candidates = []
-
-        for candidate in candidates:
-            try:
-                key = str(candidate.resolve())
-            except OSError:
-                key = str(candidate)
-            if key in seen:
-                continue
-            seen.add(key)
-            yield candidate
 
 
 def _open_zarr(path: Path, *, mode: str) -> zarr.Group:

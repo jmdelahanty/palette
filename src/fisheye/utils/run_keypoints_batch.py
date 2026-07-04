@@ -1,3 +1,4 @@
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import hashlib
 import json
@@ -161,21 +162,6 @@ def _iter_h5(paths: List[Path], recursive: bool) -> Iterable[Path]:
         else:
             yield from path.glob("*/raw/*.h5")
             yield from path.glob("*/raw/*.hdf5")
-
-
-def _iter_zarr(paths: List[Path], recursive: bool) -> Iterable[Path]:
-    for path in paths:
-        path = path.expanduser()
-        if path.is_file() and path.suffix == ".zarr":
-            yield path
-            continue
-        if not path.exists():
-            continue
-        if recursive:
-            yield from path.rglob("*.zarr")
-        else:
-            yield from path.glob("*/zarr/*.zarr")
-            yield from path.glob("*.zarr")
 
 
 def _is_zarr_path(path: Path) -> bool:

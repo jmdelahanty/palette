@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import os
 from datetime import datetime, timezone
@@ -10,24 +11,6 @@ from typing import Iterable, Optional
 import zarr
 
 from fisheye.shared.refined_detect_resolution import resolve_detect_review_target
-
-
-def _iter_zarr(roots: Iterable[Path], recursive: bool) -> Iterable[Path]:
-    for root in roots:
-        root = root.expanduser()
-        if root.is_dir() and root.suffix == ".zarr":
-            yield root
-            continue
-        if root.is_file() and root.suffix == ".zarr":
-            yield root
-            continue
-        if not root.exists():
-            continue
-        if recursive:
-            yield from root.rglob("*.zarr")
-        else:
-            yield from root.glob("*/zarr/*.zarr")
-            yield from root.glob("*.zarr")
 
 
 def _pick_refined_parent(root: zarr.Group) -> Optional[zarr.Group]:

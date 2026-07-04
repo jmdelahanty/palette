@@ -1,3 +1,4 @@
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import json
 import os
@@ -77,20 +78,6 @@ def _progress(console: Optional[Console], total: int):
         TimeRemainingColumn(),
         console=console,
     )
-
-
-def _iter_zarr(roots: List[Path], recursive: bool) -> Iterable[Path]:
-    for root in roots:
-        root = root.expanduser()
-        if root.name.endswith(".zarr") and (root.is_file() or root.is_dir()):
-            yield root
-            continue
-        if not root.exists():
-            continue
-        if recursive:
-            yield from root.rglob("zarr/*.zarr")
-        else:
-            yield from root.glob("*/zarr/*.zarr")
 
 
 def _has_refined(root: zarr.Group) -> bool:

@@ -8,6 +8,7 @@ Hough parameters from the source dish_mask.
 
 from __future__ import annotations
 
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import json
 import os
@@ -29,21 +30,6 @@ from fisheye.utils.dish_mask_registry_sync import sync_dish_mask_registry_status
 _utc_now = utc_now
 _run_id = make_run_id
 JsonLogger = SharedJsonLogger
-
-
-def _iter_zarr(paths: List[Path], recursive: bool) -> Iterable[Path]:
-    for path in paths:
-        path = path.expanduser()
-        if path.is_dir() and path.suffix == ".zarr":
-            yield path
-            continue
-        if not path.exists():
-            continue
-        if recursive:
-            yield from path.rglob("*.zarr")
-        else:
-            yield from path.glob("*/zarr/*.zarr")
-            yield from path.glob("*.zarr")
 
 
 def _load_dish_mask(source_zarr: Path) -> Optional[dict]:

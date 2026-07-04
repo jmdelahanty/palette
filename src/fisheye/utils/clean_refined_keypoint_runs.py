@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,20 +23,6 @@ class CleanupPlan:
     delete_runs: tuple[str, ...]
     latest_before: Optional[str]
     latest_after: Optional[str]
-
-
-def _iter_zarr(paths: list[Path], recursive: bool) -> Iterable[Path]:
-    for path in paths:
-        path = path.expanduser()
-        if path.suffix == ".zarr" and path.exists():
-            yield path
-            continue
-        if not path.exists():
-            continue
-        if recursive:
-            yield from path.rglob("zarr/*.zarr")
-        else:
-            yield from path.glob("*/zarr/*.zarr")
 
 
 def _source_keypoints_run(run_group: zarr.Group) -> Optional[str]:

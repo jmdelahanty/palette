@@ -7,6 +7,7 @@ Opens visualize_swim_bladder_mask_patches per selected Zarr/source-refined pair.
 
 from __future__ import annotations
 
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import sqlite3
 import subprocess
@@ -42,21 +43,6 @@ class ReviewPlan:
     @property
     def opens_new_refined_run(self) -> bool:
         return self.refined_run is None
-
-
-def _iter_zarr(paths: List[Path], recursive: bool) -> Iterable[Path]:
-    for path in paths:
-        path = path.expanduser()
-        if path.is_dir() and path.suffix == ".zarr":
-            yield path
-            continue
-        if not path.exists():
-            continue
-        if recursive:
-            yield from path.rglob("*.zarr")
-        else:
-            yield from path.glob("*/zarr/*.zarr")
-            yield from path.glob("*.zarr")
 
 
 def _load_paths_file(path: Path) -> List[Path]:

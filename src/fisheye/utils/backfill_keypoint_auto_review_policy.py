@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 import json
 import os
@@ -82,29 +83,6 @@ def _resolve_roots(paths: list[Path]) -> list[Path]:
     if env_root:
         return [Path(env_root)]
     return [DEFAULT_RECORDINGS_ROOT]
-
-
-def _iter_zarr(roots: list[Path], recursive: bool) -> Iterable[Path]:
-    seen: set[str] = set()
-    for root in roots:
-        root = root.expanduser()
-        candidates: list[Path] = []
-        if root.suffix == ".zarr" and (root.is_file() or root.is_dir()):
-            candidates = [root]
-        elif root.exists():
-            if recursive:
-                candidates = sorted(root.rglob("*.zarr"))
-            else:
-                candidates = sorted(root.glob("*.zarr")) + sorted(root.glob("*/zarr/*.zarr"))
-        for candidate in candidates:
-            try:
-                key = str(candidate.resolve())
-            except OSError:
-                key = str(candidate)
-            if key in seen:
-                continue
-            seen.add(key)
-            yield candidate
 
 
 def _pick_refined_parent(root: zarr.Group) -> Optional[zarr.Group]:

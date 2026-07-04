@@ -7,6 +7,7 @@ manifest/checksum sidecars.
 
 from __future__ import annotations
 
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs
 import argparse
 import hashlib
 import json
@@ -22,41 +23,6 @@ import zstandard
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _is_zarr_root(path: Path) -> bool:
-    if not path.is_dir():
-        return False
-    if path.name.endswith(".zarr"):
-        return True
-    if (path / "zarr.json").exists() or (path / ".zgroup").exists():
-        return True
-    if (path / ".zarray").exists():
-        return True
-    return False
-
-
-def _iter_zarr_roots(paths: Sequence[Path], recursive: bool) -> Iterable[Path]:
-    seen: set[str] = set()
-    for base in paths:
-        root = base.expanduser()
-        if _is_zarr_root(root):
-            candidates = [root]
-        elif root.exists() and recursive:
-            candidates = [candidate for candidate in sorted(root.rglob("*.zarr")) if _is_zarr_root(candidate)]
-        elif root.exists():
-            candidates = [candidate for candidate in sorted(root.glob("*.zarr")) if _is_zarr_root(candidate)]
-        else:
-            candidates = []
-        for candidate in candidates:
-            try:
-                key = str(candidate.resolve())
-            except OSError:
-                key = str(candidate)
-            if key in seen:
-                continue
-            seen.add(key)
-            yield candidate
 
 
 def _top_level_entries(zarr_path: Path) -> list[str]:
@@ -323,7 +289,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--json", action="store_true", help="Emit JSON rows instead of text.")
     args = parser.parse_args(argv)
 
-    roots = list(_iter_zarr_roots(args.paths, recursive=bool(args.recursive)))
+    roots = list(
+        iter_filesystem_zarrs(
+            args.paths,
+            recursive=bool(args.recursive),
+            pattern_policy="top_level",
+            require_zarr_root=True,
+            include_zarr_files=False,
+        )
+    )
     if not roots:
         if args.json:
             print(json.dumps({"rows": [], "summary": {"zarr_scanned": 0}}, indent=2))
