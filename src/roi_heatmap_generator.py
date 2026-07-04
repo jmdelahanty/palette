@@ -23,7 +23,7 @@ from rich.progress import (BarColumn, Progress, SpinnerColumn, TaskProgressColum
                            TextColumn)
 from scipy.ndimage import gaussian_filter
 
-from fisheye.utils.zarr_metadata import get_downsample_shape
+from fisheye.shared.zarr_metadata import get_downsample_shape
 
 import warnings
 warnings.filterwarnings('ignore')

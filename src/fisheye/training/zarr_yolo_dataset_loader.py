@@ -28,7 +28,7 @@ from ..shared.refined_detect_curation import (
     has_sparse_curated_refined_detect_instances_arrays,
 )
 from ..shared.zarr_run_completion import resolve_authoritative_run_name
-from ..utils.zarr_metadata import get_downsample_array_path, get_downsample_formats
+from ..shared.zarr_metadata import get_downsample_array_path, get_downsample_formats
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

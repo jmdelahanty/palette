@@ -18,7 +18,7 @@ import zarr
 from tqdm import tqdm
 from ultralytics import YOLO
 
-from fisheye.utils.zarr_metadata import get_downsample_array_path, get_downsample_formats
+from fisheye.shared.zarr_metadata import get_downsample_array_path, get_downsample_formats
 
 
 def parse_imgsz(value: Optional[str]) -> Optional[Union[int, Tuple[int, int]]]:
