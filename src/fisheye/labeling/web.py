@@ -982,6 +982,34 @@ def _personal_page_response_payload(
     request_path = str(getattr(request_adapter, "path", path) or path)
     query = parse_qs(urlparse(request_path).query, keep_blank_values=True)
     expected_user = str((query.get("expected_user") or [""])[-1]).strip()
+    if path == IDENTITY_PROBE_PATH:
+        identity_check_report = _store_consistency_report(state.store)
+        identity_assignment_ownership_integrity = (
+            identity_check_report.get("assignment_ownership_integrity")
+            if isinstance(
+                identity_check_report.get("assignment_ownership_integrity"),
+                Mapping,
+            )
+            else {}
+        )
+        payload = _identity_probe_payload(
+            user=user,
+            auth_source=auth_source,
+            expected_user=expected_user,
+            config=state.config,
+            store=state.store,
+            assignment_ownership_integrity=identity_assignment_ownership_integrity,
+        )
+        known_user_status = _known_labeler_status(state.store, user)
+        payload["known_user_status"] = known_user_status
+        if bool(payload.get("ok")) and not bool(known_user_status.get("is_known_labeler")):
+            _mark_identity_probe_unknown_labeling_user(payload)
+        return (
+            _identity_probe_html(payload),
+            HTTPStatus.OK if bool(payload.get("ok")) else HTTPStatus.FORBIDDEN,
+            "text/html; charset=utf-8",
+        )
+
     if expected_user and str(user) != expected_user:
         payload = _format_error(
             "dashboard_user_mismatch",
@@ -9302,39 +9330,6 @@ def _make_handler(state: ServerState):
                     _dashboard_html()
                     if path in {DASHBOARD_PATH, PERSONAL_WORK_PATH}
                     else _datasets_html()
-                )
-                return
-            if path == IDENTITY_PROBE_PATH:
-                user, auth_source = self._require_user(html_error=True)
-                if user is None:
-                    return
-                query = parse_qs(parsed.query, keep_blank_values=True)
-                expected_user = str((query.get("expected_user") or [""])[-1]).strip()
-                identity_check_report = _store_consistency_report(state.store)
-                identity_assignment_ownership_integrity = (
-                    identity_check_report.get("assignment_ownership_integrity")
-                    if isinstance(
-                        identity_check_report.get("assignment_ownership_integrity"),
-                        Mapping,
-                    )
-                    else {}
-                )
-                payload = _identity_probe_payload(
-                    user=user,
-                    auth_source=auth_source,
-                    expected_user=expected_user,
-                    config=state.config,
-                    store=state.store,
-                    assignment_ownership_integrity=identity_assignment_ownership_integrity,
-                )
-                known_user_status = _known_labeler_status(state.store, user)
-                payload["known_user_status"] = known_user_status
-                if bool(payload.get("ok")) and not bool(known_user_status.get("is_known_labeler")):
-                    _mark_identity_probe_unknown_labeling_user(payload)
-                self._write(
-                    _identity_probe_html(payload),
-                    status=HTTPStatus.OK if bool(payload.get("ok")) else HTTPStatus.FORBIDDEN,
-                    content_type="text/html; charset=utf-8",
                 )
                 return
             if path == "/api/health":

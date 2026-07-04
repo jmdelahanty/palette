@@ -53,6 +53,10 @@ def register_personal_page_routes(
     def labeler_landing_labeling() -> Response:
         return _respond(state, response_builder, path="/labeling")
 
+    @claimed_route(app, "/identity", methods=["GET"])
+    def labeler_identity_probe() -> Response:
+        return _respond(state, response_builder, path="/identity")
+
     @claimed_route(app, "/work", methods=["GET"])
     def personal_work_dashboard() -> Response:
         return _respond(state, response_builder, path="/work")
