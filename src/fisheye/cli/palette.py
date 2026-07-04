@@ -56,6 +56,18 @@ class DatasetRef:
     registry_path: Path | None = None
 
 
+@dataclass(frozen=True)
+class ApproveRequest:
+    recording: str | Path
+    stage: str
+    run: str
+    registry: Path | None = None
+    approved_by: str | None = None
+    note: str | None = None
+    apply: bool = False
+    cwd: Path | None = None
+
+
 @dataclass
 class StageState:
     stage: str
@@ -910,14 +922,23 @@ def _resolved_palette_command(verb: str, dataset: DatasetRef, args: argparse.Nam
     return _join_command(parts)
 
 
-def _resolved_approve_command(dataset: DatasetRef, args: argparse.Namespace, *, apply: bool) -> str:
-    parts: list[Any] = ["palette", "approve", dataset.zarr_path, args.stage, args.run]
-    registry = _registry_for_dataset(dataset, getattr(args, "registry", None))
+def _resolved_approve_command(
+    dataset: DatasetRef,
+    *,
+    stage: str,
+    run: str,
+    registry: Path | None,
+    approved_by: str | None,
+    note: str | None,
+    apply: bool,
+) -> str:
+    parts: list[Any] = ["palette", "approve", dataset.zarr_path, stage, run]
+    registry = _registry_for_dataset(dataset, registry)
     if registry is not None:
         parts.extend(["--registry", registry])
     parts.append("--apply" if apply else "--dry-run")
-    _append_option(parts, "--by", getattr(args, "by", None))
-    _append_option(parts, "--note", getattr(args, "note", None))
+    _append_option(parts, "--by", approved_by)
+    _append_option(parts, "--note", note)
     return _join_command(parts)
 
 
@@ -1087,27 +1108,46 @@ def _validate_approval_target(parent: Any, run_name: str) -> tuple[bool, str, st
     return True, "OK", ""
 
 
-def _run_approve(args: argparse.Namespace) -> int:
-    dataset, hints = _resolve_dataset(str(args.recording), args.registry)
+def _approve_request_params(request: ApproveRequest, *, stage: str, run_name: str) -> dict[str, Any]:
+    return {
+        "registry": request.registry,
+        "stage": stage,
+        "run": run_name,
+        "by": request.approved_by,
+        "note": request.note,
+        "dry_run": not bool(request.apply),
+    }
+
+
+def approve(request: ApproveRequest) -> dict[str, Any]:
+    dataset, hints = _resolve_dataset(str(request.recording), request.registry)
     command = "palette approve"
     if dataset is None:
-        payload = _blocked_payload(command, str(args.recording), hints)
-        return _emit_run_payload(payload, bool(args.json))
+        return _blocked_payload(command, str(request.recording), hints)
 
-    apply = bool(args.apply)
+    apply = bool(request.apply)
+    cwd = request.cwd or Path.cwd()
     root = open_zarr_group_direct(dataset.zarr_path, mode="r+" if apply else "r")
-    resolved_command = _resolved_approve_command(dataset, args, apply=apply)
-    stage = str(args.stage).strip()
-    run_name = str(args.run).strip()
+    stage = str(request.stage).strip()
+    run_name = str(request.run).strip()
+    resolved_command = _resolved_approve_command(
+        dataset,
+        stage=stage,
+        run=run_name,
+        registry=request.registry,
+        approved_by=request.approved_by,
+        note=request.note,
+        apply=apply,
+    )
     try:
         parent_path, parent, candidate_paths = _approval_parent_for_stage(root, stage, run_name)
     except KeyError:
         provenance = build_run_provenance(
             command=command,
-            params=_arg_params(args),
-            cwd=Path.cwd(),
+            params=_approve_request_params(request, stage=stage, run_name=run_name),
+            cwd=cwd,
         )
-        payload = build_envelope(
+        return build_envelope(
             command=command,
             status="blocked",
             reason_code="UNKNOWN_STAGE",
@@ -1121,32 +1161,25 @@ def _run_approve(args: argparse.Namespace) -> int:
             provenance=provenance,
             resolved_command=resolved_command,
         )
-        return _emit_run_payload(payload, bool(args.json))
 
-    git = git_identity(cwd=Path.cwd())
+    git = git_identity(cwd=cwd)
     approved_at = _utc_now()
     approval = {
-        "approved_by": _approval_actor(args.by),
+        "approved_by": _approval_actor(request.approved_by),
         "approved_at": approved_at,
         "git_sha": git.get("git_sha"),
-        "note": _normalize_text(args.note),
-    }
-    params = {
-        **_arg_params(args),
-        "stage": stage,
-        "run": run_name,
-        "dry_run": not apply,
+        "note": _normalize_text(request.note),
     }
     provenance = build_run_provenance(
         command=command,
-        params=params,
+        params=_approve_request_params(request, stage=stage, run_name=run_name),
         input_run_ids={stage: run_name},
-        cwd=Path.cwd(),
+        cwd=cwd,
     )
     provenance["approval"] = dict(approval)
 
     if parent is None or parent_path is None:
-        payload = build_envelope(
+        return build_envelope(
             command=command,
             status="blocked",
             reason_code="STAGE_HAS_NO_RUN_PARENT",
@@ -1160,11 +1193,10 @@ def _run_approve(args: argparse.Namespace) -> int:
             provenance=provenance,
             resolved_command=resolved_command,
         )
-        return _emit_run_payload(payload, bool(args.json))
 
     valid, reason_code, reason = _validate_approval_target(parent, run_name)
     if not valid:
-        payload = build_envelope(
+        return build_envelope(
             command=command,
             status="blocked",
             reason_code=reason_code,
@@ -1178,7 +1210,6 @@ def _run_approve(args: argparse.Namespace) -> int:
             provenance=provenance,
             resolved_command=resolved_command,
         )
-        return _emit_run_payload(payload, bool(args.json))
 
     previous = _normalize_text(getattr(parent, "attrs", {}).get(AUTHORITATIVE_RUN_ATTR))
     if apply:
@@ -1191,7 +1222,7 @@ def _run_approve(args: argparse.Namespace) -> int:
             note=_normalize_text(approval.get("note")),
         )
     status = "ok" if apply else "dry_run"
-    payload = build_envelope(
+    return build_envelope(
         command=command,
         status=status,
         reason_code="OK" if apply else "DRY_RUN",
@@ -1210,11 +1241,35 @@ def _run_approve(args: argparse.Namespace) -> int:
         next_hints=(
             _next_hints_from_plan(dataset)
             if apply
-            else [_resolved_approve_command(dataset, args, apply=True)]
+            else [
+                _resolved_approve_command(
+                    dataset,
+                    stage=stage,
+                    run=run_name,
+                    registry=request.registry,
+                    approved_by=request.approved_by,
+                    note=request.note,
+                    apply=True,
+                )
+            ]
         ),
         provenance=provenance,
         resolved_command=resolved_command,
         approval=approval,
+    )
+
+
+def _run_approve(args: argparse.Namespace) -> int:
+    payload = approve(
+        ApproveRequest(
+            recording=str(args.recording),
+            stage=str(args.stage),
+            run=str(args.run),
+            registry=args.registry,
+            approved_by=args.by,
+            note=args.note,
+            apply=bool(args.apply),
+        )
     )
     return _emit_run_payload(payload, bool(args.json))
 

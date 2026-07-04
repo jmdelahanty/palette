@@ -150,6 +150,57 @@ def test_approve_blocks_incomplete_run(tmp_path, capsys) -> None:
     assert AUTHORITATIVE_RUN_ATTR not in reopened["subject_mask_runs"].attrs
 
 
+def test_approve_callable_writes_authoritative_pointer(tmp_path) -> None:
+    zarr_path = tmp_path / "approve_callable.zarr"
+    root = _open_tmp_store(zarr_path)
+    _create_raw(root)
+    _complete_run(root, "subject_mask_runs", "subject_full")
+
+    payload = palette.approve(
+        palette.ApproveRequest(
+            recording=zarr_path,
+            stage="subject_masks",
+            run="subject_full",
+            approved_by="jeremy",
+            note="callable approval",
+            apply=True,
+        )
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["reason_code"] == "OK"
+    assert payload["metrics"]["authoritative_run"] == "subject_full"
+    reopened = zarr.open_group(str(zarr_path), mode="r")
+    parent = reopened["subject_mask_runs"]
+    assert parent.attrs[AUTHORITATIVE_RUN_ATTR] == "subject_full"
+    provenance = dict(parent.attrs[AUTHORITATIVE_RUN_PROVENANCE_ATTR])
+    assert provenance["approved_by"] == "jeremy"
+    assert provenance["note"] == "callable approval"
+
+
+def test_approve_callable_dry_run_does_not_write_pointer(tmp_path) -> None:
+    zarr_path = tmp_path / "approve_callable_dry_run.zarr"
+    root = _open_tmp_store(zarr_path)
+    _create_raw(root)
+    _complete_run(root, "subject_mask_runs", "subject_full")
+
+    payload = palette.approve(
+        palette.ApproveRequest(
+            recording=zarr_path,
+            stage="subject_masks",
+            run="subject_full",
+            approved_by="jeremy",
+            apply=False,
+        )
+    )
+
+    assert payload["status"] == "dry_run"
+    assert payload["reason_code"] == "DRY_RUN"
+    assert "--apply" in payload["next_hints"][0]
+    reopened = zarr.open_group(str(zarr_path), mode="r")
+    assert AUTHORITATIVE_RUN_ATTR not in reopened["subject_mask_runs"].attrs
+
+
 def test_detect_default_dry_run_uses_runner_without_writing(monkeypatch, tmp_path, capsys) -> None:
     zarr_path = tmp_path / "detect_ready.zarr"
     root = _open_tmp_store(zarr_path)
