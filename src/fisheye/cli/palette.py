@@ -551,76 +551,124 @@ def _find_stale(stages: Sequence[StageState]) -> list[dict[str, Any]]:
     return stale
 
 
-def _command_context(dataset: DatasetRef) -> dict[str, str]:
-    zarr_path = str(dataset.zarr_path)
-    recording_dir = str(dataset.zarr_path.parent.parent) if dataset.zarr_path.parent.name == "zarr" else str(dataset.zarr_path.parent)
-    registry = str(dataset.registry_path) if dataset.registry_path is not None else "<registry.sqlite>"
-    recording = dataset.recording_id or dataset.dataset_id or dataset.zarr_path.stem
-    return {
-        "zarr_path": zarr_path,
-        "recording_dir": recording_dir,
-        "registry": registry,
-        "recording": recording,
-    }
+def _recording_dir_for_action(dataset: DatasetRef) -> Path:
+    return dataset.zarr_path.parent.parent if dataset.zarr_path.parent.name == "zarr" else dataset.zarr_path.parent
+
+
+def _action_payload(
+    *,
+    verb: str,
+    parts: Sequence[Any] = (),
+    missing_inputs: Sequence[str] = (),
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"palette_verb": verb}
+    if missing_inputs:
+        payload.update(
+            {
+                "action": "",
+                "action_status": "needs_input",
+                "missing_inputs": list(missing_inputs),
+                "mismatch": "action_requires_unresolved_inputs",
+            }
+        )
+        return payload
+    payload.update({"action": _join_command(parts), "action_status": "mapped"})
+    return payload
+
+
+def _with_optional_registry(parts: list[Any], registry: Path | None) -> list[Any]:
+    if registry is not None:
+        parts.extend(["--registry", registry])
+    return parts
 
 
 def _action_for_stage(stage_id: str, dataset: DatasetRef) -> dict[str, Any]:
-    ctx = _command_context(dataset)
-    actions: dict[str, tuple[str, str]] = {
-        "raw": (
-            "import",
-            "scripts/py -m fisheye.utils.import_organized_recordings_analysis --registry {registry} {recording_dir}",
-        ),
-        "background": (
-            "background",
-            "scripts/py -m fisheye.preprocessing.background {zarr_path}",
-        ),
-        "detect": (
-            "detect",
-            "palette detect {zarr_path} --registry {registry} --apply",
-        ),
-        "detect_quality": (
-            "detect-quality",
-            "scripts/submit_detect_quality_refine_bsub.sh --registry {registry} --path-contains {recording}",
-        ),
-        "refined_detect": (
-            "refine-detect",
-            "scripts/submit_detect_quality_refine_bsub.sh --registry {registry} --path-contains {recording}",
-        ),
-        "crop": (
-            "crop",
-            "palette crop {zarr_path} --registry {registry} --apply",
-        ),
-        "keypoints": (
-            "keypoints",
-            "palette keypoints {zarr_path} --registry {registry} --apply",
-        ),
-        "subject_masks": (
-            "subject-masks",
-            "scripts/py -m fisheye.utils.run_subject_mask_batch_pipeline {zarr_path}",
-        ),
-        "refined_subject_masks": (
-            "refine-subject-masks",
-            "scripts/py -m fisheye.utils.run_subject_mask_batch_pipeline {zarr_path} --workflow-stage finalization",
-        ),
-        "tracks": (
-            "track",
-            "scripts/py -m fisheye.utils.run_recording_analysis_pipeline --registry {registry} --recording-dir {recording_dir}",
-        ),
-    }
-    item = actions.get(stage_id)
-    if item is None:
-        return {
-            "palette_verb": stage_id.replace("_", "-"),
-            "action": "",
-            "action_status": "unmapped",
-            "mismatch": "no_current_command_mapping_for_catalog_stage",
-        }
-    verb, template = item
+    zarr_path = dataset.zarr_path
+    recording_dir = _recording_dir_for_action(dataset)
+    registry = dataset.registry_path
+    recording = dataset.recording_id or dataset.dataset_id or dataset.zarr_path.stem
+
+    if stage_id == "raw":
+        return _action_payload(
+            verb="import",
+            parts=[
+                "scripts/py",
+                "-m",
+                "fisheye.utils.import_organized_recordings_analysis",
+                "--registry",
+                registry,
+                recording_dir,
+            ],
+            missing_inputs=[] if registry is not None else ["registry"],
+        )
+    if stage_id == "background":
+        return _action_payload(
+            verb="background",
+            parts=["scripts/py", "-m", "fisheye.preprocessing.background", zarr_path],
+        )
+    if stage_id == "detect":
+        return _action_payload(
+            verb="detect",
+            parts=[*_with_optional_registry(["palette", "detect", zarr_path], registry), "--apply"],
+        )
+    if stage_id == "detect_quality":
+        return _action_payload(
+            verb="detect-quality",
+            parts=["scripts/submit_detect_quality_refine_bsub.sh", "--registry", registry, "--path-contains", recording],
+            missing_inputs=[] if registry is not None else ["registry"],
+        )
+    if stage_id == "refined_detect":
+        return _action_payload(
+            verb="refine-detect",
+            parts=["scripts/submit_detect_quality_refine_bsub.sh", "--registry", registry, "--path-contains", recording],
+            missing_inputs=[] if registry is not None else ["registry"],
+        )
+    if stage_id == "crop":
+        return _action_payload(
+            verb="crop",
+            parts=[*_with_optional_registry(["palette", "crop", zarr_path], registry), "--apply"],
+        )
+    if stage_id == "keypoints":
+        return _action_payload(
+            verb="keypoints",
+            parts=[*_with_optional_registry(["palette", "keypoints", zarr_path], registry), "--apply"],
+        )
+    if stage_id == "subject_masks":
+        return _action_payload(
+            verb="subject-masks",
+            parts=["scripts/py", "-m", "fisheye.utils.run_subject_mask_batch_pipeline", zarr_path],
+        )
+    if stage_id == "refined_subject_masks":
+        return _action_payload(
+            verb="refine-subject-masks",
+            parts=[
+                "scripts/py",
+                "-m",
+                "fisheye.utils.run_subject_mask_batch_pipeline",
+                zarr_path,
+                "--workflow-stage",
+                "finalization",
+            ],
+        )
+    if stage_id == "tracks":
+        return _action_payload(
+            verb="track",
+            parts=[
+                "scripts/py",
+                "-m",
+                "fisheye.utils.run_recording_analysis_pipeline",
+                "--registry",
+                registry,
+                "--recording-dir",
+                recording_dir,
+            ],
+            missing_inputs=[] if registry is not None else ["registry"],
+        )
     return {
-        "palette_verb": verb,
-        "action": template.format(**ctx),
-        "action_status": "mapped",
+        "palette_verb": stage_id.replace("_", "-"),
+        "action": "",
+        "action_status": "unmapped",
+        "mismatch": "no_current_command_mapping_for_catalog_stage",
     }
 
 
@@ -685,6 +733,11 @@ def build_plan_payload(dataset: DatasetRef, stages: Sequence[StageState]) -> dic
     stale = _find_stale(stages)
     payload = _base_envelope("palette plan", dataset, status="ok", reason_code="OK")
     payload["next"] = next_items
+    payload["next_hints"] = [
+        str(item["action"])
+        for item in next_items
+        if item.get("action_status") == "mapped" and item.get("action")
+    ]
     payload["stale"] = stale
     payload["metrics"] = {
         "next_count": len(next_items),
@@ -729,7 +782,11 @@ def _print_plan_table(dataset: DatasetRef, payload: dict[str, Any]) -> None:
     if payload["next"]:
         print("next:")
         for item in payload["next"]:
-            action = item.get("action") or "(no current command mapping)"
+            if item.get("action_status") == "needs_input":
+                missing = ", ".join(str(value) for value in item.get("missing_inputs") or [])
+                action = f"(needs input: {missing})"
+            else:
+                action = item.get("action") or "(no current command mapping)"
             print(f"  - {item['stage']} [{item['palette_verb']}]: {action}")
     if payload["stale"]:
         print("stale:")

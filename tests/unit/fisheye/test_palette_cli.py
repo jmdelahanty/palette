@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import sqlite3
 from pathlib import Path
 
@@ -51,6 +52,13 @@ def test_plan_fresh_store_recommends_import_frontier(tmp_path, capsys) -> None:
     assert payload["status"] == "ok"
     assert payload["metrics"]["complete"] == 0
     assert any(item["stage"] == "raw" and item["palette_verb"] == "import" for item in payload["next"])
+    assert not any("<registry.sqlite>" in str(item.get("action") or "") for item in payload["next"])
+    raw_action = next(item for item in payload["next"] if item["stage"] == "raw")
+    assert raw_action["action_status"] == "needs_input"
+    assert raw_action["missing_inputs"] == ["registry"]
+    assert raw_action["action"] == ""
+    assert not any("<registry.sqlite>" in hint for hint in payload["next_hints"])
+    assert raw_action["action"] not in payload["next_hints"]
     assert not any(item["stage"] in {"eye_masks", "refined_eye_masks", "eye_mask_tuning"} for item in payload["next"])
     eye_masks = next(stage for stage in payload["stages"] if stage["stage"] == "eye_masks")
     assert eye_masks["deprecated"] is True
@@ -73,6 +81,22 @@ def test_plan_mid_pipeline_recommends_frontier(tmp_path, capsys) -> None:
     keypoints = next(stage for stage in payload["stages"] if stage["stage"] == "keypoints")
     assert keypoints["state"] == "blocked"
     assert "crop" in keypoints["blocked_by"]
+
+
+def test_plan_hint_for_path_with_space_is_shell_quoted(tmp_path, capsys) -> None:
+    zarr_path = tmp_path / "recording with space" / "space training.zarr"
+    zarr_path.parent.mkdir(parents=True)
+    root = _open_tmp_store(zarr_path)
+    _create_raw(root)
+
+    rc, payload = _run_json(capsys, "plan", str(zarr_path))
+
+    assert rc == palette.EXIT_OK
+    detect = next(item for item in payload["next"] if item["stage"] == "detect")
+    assert detect["action_status"] == "mapped"
+    assert "<registry.sqlite>" not in detect["action"]
+    assert shlex.split(detect["action"]) == ["palette", "detect", str(zarr_path.resolve()), "--apply"]
+    assert detect["action"] in payload["next_hints"]
 
 
 def test_status_surfaces_legacy_assumed_completion(tmp_path, capsys) -> None:
