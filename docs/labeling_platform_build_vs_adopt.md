@@ -79,7 +79,10 @@ options) require hands-on verification, not assertion.
 - **Named pose keypoints are a semantic mismatch.** webKnossos skeletons are
   node/edge trees (built for neuron tracing). Palette pose is *named landmarks against
   a schema* (left_eye, swim_bladder, …). Forcible but lossy; the weakest-fit of the
-  three annotation types. Bbox and masks map cleanly; keypoints do not.
+  three annotation types. Masks are the strongest fit. Bbox support requires a
+  hands-on check: webKnossos has bounding-box geometry and uses bounding boxes in
+  task/view/tool contexts, but this is not yet confirmed as a first-class
+  object-detection annotation surface.
 - **Round-trip is the hard part — and it is where Palette's value lives.** Getting
   annotations back *in* as a proper Palette run (lineage, provenance, completion
   markers, `source_crop_row_ids`) is a bridge owned and maintained in perpetuity. The
@@ -104,13 +107,48 @@ because the three types differ sharply in difficulty.
 
 | Type | webKnossos representation | Palette target | Difficulty |
 |---|---|---|---|
-| Segmentation masks | segmentation layer (labeled voxels) | `subject_mask_runs` | **Medium** — voxels round-trip; work is mapping segment IDs → component channels (subject_body/eye_left/…) + re-attaching lineage |
-| Bounding boxes | bbox objects | `detect_runs` | **Easy** — coordinates only |
+| Segmentation masks | component-specific segmentation layer/task | `refined_subject_masks_runs` component channels | **Medium** — voxels round-trip; work is preserving component channels + re-attaching lineage |
+| Bounding boxes | unconfirmed: bbox geometry/task/view support exists, first-class detection annotation UI not yet verified | `detect_runs` | **Unknown-to-medium** — coordinates are simple if the annotation primitive exists |
 | Named pose keypoints | skeleton (node/edge trees) | `keypoint_runs` (named schema) | **Hard** — semantic mismatch; may stay in a light Palette tool |
 
 **Start with masks.** Highest value (aligns with the active SAM3 teacher-label work),
-webKnossos's strongest suit, and it proves the hard half of the round-trip. Then bbox.
-Decide keypoints last — they may not move at all.
+webKnossos's strongest suit, and it proves the hard half of the round-trip. Then test
+bbox explicitly. Decide keypoints last — they may not move at all.
+
+### Mask component-channel bridge contract
+
+Palette subject masks are not one mutually exclusive class map. They are independent
+component masks/channels, for example:
+
+| Component | Palette semantic |
+|---|---|
+| `subject_body` | binary body mask |
+| `swim_bladder` | binary swim-bladder mask |
+| `eye_left` | binary left-eye mask |
+| `eye_right` | binary right-eye mask |
+
+These components may overlap semantically. For example, an eye mask can lie inside the
+body mask. Therefore the bridge must not flatten Palette components into a single
+integer label image like `0=background, 1=body, 2=eye_left, ...`, because a single
+integer label volume is mutually exclusive per pixel and would require lossy priority
+rules.
+
+For v1, the safe bridge representation is one independent editable surface per
+component:
+
+| Palette component | webKnossos bridge surface | Import target |
+|---|---|---|
+| `subject_body` | binary segmentation layer or component-specific task | `refined_subject_masks_runs/<run>/masks_roi[:, subject_body, ...]` or equivalent `MaskStore` component |
+| `swim_bladder` | binary segmentation layer or component-specific task | `refined_subject_masks_runs/<run>/masks_roi[:, swim_bladder, ...]` or equivalent `MaskStore` component |
+| `eye_left` | binary segmentation layer or component-specific task | `refined_subject_masks_runs/<run>/masks_roi[:, eye_left, ...]` or equivalent `MaskStore` component |
+| `eye_right` | binary segmentation layer or component-specific task | `refined_subject_masks_runs/<run>/masks_roi[:, eye_right, ...]` or equivalent `MaskStore` component |
+
+If webKnossos can expose multiple segmentation layers cleanly for one annotation task,
+the bridge can present all components together as separate layers. If that is awkward or
+ambiguous, the safer first implementation is component-specific tasks: one task for
+body, one for swim bladder, one for left eye, one for right eye. In both cases, Palette
+remains the source of truth for component names, channel order, row lineage, and review
+state.
 
 ### Integration pattern
 
