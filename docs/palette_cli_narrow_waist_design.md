@@ -173,3 +173,76 @@ instructs — fix the message, not the model.
 - **Two doc sources of truth during transition** — operator guide vs `--help`. Rule:
   when a verb lands, its guide section is replaced by the `palette` command in the same
   commit.
+
+---
+
+## Extension (2026-07-03): the library API — programmatic invoke
+
+The waist so far is a *CLI* for agents and operators. A second consumer class needs the
+same workflows **programmatically** — the review-backend→`palette approve` wiring, the
+webKnossos bridge, the marimo notebooks, and eventually colleagues. Same philosophy, new
+front door: **one thin, typed, contract-carrying surface over the stable internals** —
+now for `import fisheye` as well as `palette`.
+
+### Current state (grounded 2026-07-03)
+
+- Verbs already **return envelope dicts** (`_run_detect` → `build_envelope(...)`): the
+  output contract is done.
+- But verbs take **`argparse.Namespace`** as input, so they are welded to the CLI parser
+  — not callable without faking a Namespace.
+- `fisheye/__init__.py` is ~10 lines: **no curated public surface.**
+- **No `Recording` accessor** — every consumer opens raw zarr and re-derives run
+  resolution + RLE decode itself.
+
+So the gap is *programmatic invoke*, not CLI invoke — and it has concrete near-term
+consumers, not hypothetical ones.
+
+### The design: promote the waist to be the library (do not build a parallel API)
+
+1. **Decouple verbs from argparse — `verb(request) -> Envelope`.** Lift the input side
+   off `Namespace` onto a typed request object (dataclass per verb, or one request type
+   with per-verb fields). The CLI becomes: parse argv → request → verb → envelope →
+   render. The library becomes: build request → verb → envelope. One implementation, two
+   front-ends. Small, because the envelope-return half already exists. This is the
+   highest-leverage move.
+
+2. **A `Recording` accessor.** `fisheye.open_recording(path_or_id)` → a read handle with
+   `.detections(run=…)`, `.subject_masks(…)`, `.keypoints(…)`, resolving
+   **authoritative-first** (composes with the authoritative-run pointer work) and hiding
+   zarr layout + RLE decode. Biggest ergonomics win for programmatic consumers. Read-only
+   first; a mutating counterpart later if needed.
+
+3. **A curated `fisheye.api` surface** re-exporting the ~15–20 things a consumer needs:
+   `open_recording`, the verbs, the request/envelope types, the stage catalog. The thin
+   public front door — the `import`-side equivalent of `palette --help`.
+
+### Explicitly deferred (needs layering debt paid first)
+
+Broad public-API hygiene — `__all__` across ~790 files, eliminating the ~61 `_private`
+cross-module imports, the `Any`→typed sweep. A public surface laid over a tangled
+internal graph is a facade that leaks (consumers reach past it). Do the thin curated
+surface now; the deep cleanup rides on the import-linter/layering work later.
+
+### Sequencing and the forcing function
+
+The review-backend→`approve` wiring is the **first real programmatic consumer of a
+verb**. It will hit the argparse coupling directly — either faking a `Namespace` (a
+smell) or extracting `approve` into a callable. Let that first consumer drive move #1 for
+one verb (`approve`), then generalize the `verb(request) -> Envelope` pattern to the
+others. Order:
+
+1. Extract `approve` to a callable `approve(request) -> Envelope`; CLI wraps it. (Driven
+   by the review-backend wiring.)
+2. Generalize the request/verb split to `detect`/`crop`/`keypoints`/`status`/`plan`.
+3. Add `Recording` accessor (authoritative-first, read-only).
+4. Curated `fisheye.api` re-export surface + a programmatic-usage doc section.
+5. (Later, gated on layering work) public-API hygiene sweep.
+
+### Risks
+
+- **Two invocation paths diverging** — mitigated because CLI and library call the *same*
+  verb function; the CLI is only a parse+render shell. Never let a verb grow
+  CLI-only logic.
+- **Premature public surface** — exporting internals before they're stable re-creates the
+  `_private`-import problem at the package boundary. Keep `fisheye.api` deliberately
+  small; add only what a consumer demonstrably needs.
