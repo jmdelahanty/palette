@@ -18,6 +18,19 @@ INSTANCE_KEY_ALGORITHM = "palette.blake2b64.recording_frame_bbox_class_v1"
 INSTANCE_KEY_BBOX_QUANTIZATION = 1_000_000
 INSTANCE_KEY_DUPLICATE_POLICY = "duplicate_base_keys_get_detect_time_occurrence_ordinal"
 
+# Payload context appended when curation mints keys for rows whose point of
+# origin is manual curation (no source detect row). Namespacing the payload
+# guarantees a manual box that quantizes identically to a detection cannot
+# collide with that detection's copied key.
+INSTANCE_KEY_CONTEXT_MANUAL_CURATION = "manual_curation"
+
+# Per-row provenance for curated rowsets that mix copied and minted keys.
+INSTANCE_KEY_ORIGIN_ARRAY = "instance_key_origin_codes"
+INSTANCE_KEY_ORIGIN_CODE_MAP: dict[str, int] = {
+    "copied_from_detect": 0,
+    "minted_at_curation": 1,
+}
+
 
 def resolve_recording_identity(attrs: Mapping[str, Any], *, fallback_path: str | Path | None = None) -> str:
     """Resolve the stable recording identity used as one instance-key input."""
@@ -46,6 +59,7 @@ def mint_detection_instance_keys(
     bbox_norm_coords: np.ndarray,
     class_ids: np.ndarray | None = None,
     bbox_quantization: int = INSTANCE_KEY_BBOX_QUANTIZATION,
+    payload_context: str | None = None,
 ) -> np.ndarray:
     """Mint deterministic per-detection keys from recording, frame, class, and bbox.
 
@@ -53,6 +67,12 @@ def mint_detection_instance_keys(
     a detect-time duplicate ordinal is appended to those duplicate payloads so the
     final key remains unique within the run. Downstream stages must copy the key;
     they must not recompute it.
+
+    ``payload_context`` namespaces the hash payload for keys legitimately minted
+    at a later point of origin (e.g. ``INSTANCE_KEY_CONTEXT_MANUAL_CURATION`` for
+    hand-drawn curation boxes), so contexted keys cannot collide with detect-time
+    keys minted from identical content. When ``None`` (the default) the payload is
+    bit-identical to the historical detect-time format.
     """
 
     frames = np.asarray(frame_indices, dtype=np.int64).reshape(-1)
@@ -89,6 +109,9 @@ def mint_detection_instance_keys(
         )
         for frame, cls, (x, y, w, h) in zip(frames, classes, quantized, strict=True)
     ]
+    context = str(payload_context).strip() if payload_context is not None else ""
+    if context:
+        base_payloads = [f"{payload}|context={context}" for payload in base_payloads]
     duplicate_counts = Counter(base_payloads)
     occurrences: dict[str, int] = {}
     out = np.empty(frames.shape[0], dtype=np.uint64)

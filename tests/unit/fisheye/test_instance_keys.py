@@ -5,10 +5,112 @@ import pytest
 
 from fisheye.shared.instance_keys import (
     INSTANCE_KEY_ALGORITHM,
+    INSTANCE_KEY_CONTEXT_MANUAL_CURATION,
+    INSTANCE_KEY_ORIGIN_CODE_MAP,
     instance_key_attrs,
     mint_detection_instance_keys,
     resolve_recording_identity,
 )
+
+
+def test_mint_detection_instance_keys_no_context_payload_digest_is_locked() -> None:
+    """Determinism lock: payload `rec_a|5|0|500000|500000|200000|400000` must hash
+    to this exact digest forever. If this test fails, detect-minted keys on
+    re-run would no longer match keys already persisted in recordings."""
+
+    keys = mint_detection_instance_keys(
+        recording_identity="rec_a",
+        frame_indices=np.asarray([5], dtype=np.int32),
+        bbox_norm_coords=np.asarray([[0.5, 0.5, 0.2, 0.4]], dtype=np.float64),
+        class_ids=np.asarray([0], dtype=np.int32),
+    )
+
+    assert keys.tolist() == [6452298236220910697]
+
+
+def test_mint_detection_instance_keys_manual_curation_context_digest_is_locked() -> None:
+    """Determinism lock for the namespaced payload
+    `rec_a|5|0|500000|500000|200000|400000|context=manual_curation`."""
+
+    keys = mint_detection_instance_keys(
+        recording_identity="rec_a",
+        frame_indices=np.asarray([5], dtype=np.int32),
+        bbox_norm_coords=np.asarray([[0.5, 0.5, 0.2, 0.4]], dtype=np.float64),
+        class_ids=np.asarray([0], dtype=np.int32),
+        payload_context=INSTANCE_KEY_CONTEXT_MANUAL_CURATION,
+    )
+
+    assert keys.tolist() == [11787561743960230441]
+
+
+def test_mint_detection_instance_keys_payload_context_namespaces_identical_content() -> None:
+    frames = np.asarray([5, 7], dtype=np.int32)
+    bboxes = np.asarray(
+        [[0.5, 0.5, 0.2, 0.4], [0.25, 0.25, 0.1, 0.2]],
+        dtype=np.float64,
+    )
+    classes = np.asarray([0, 0], dtype=np.int32)
+
+    detect_keys = mint_detection_instance_keys(
+        recording_identity="rec_a",
+        frame_indices=frames,
+        bbox_norm_coords=bboxes,
+        class_ids=classes,
+    )
+    curation_keys = mint_detection_instance_keys(
+        recording_identity="rec_a",
+        frame_indices=frames,
+        bbox_norm_coords=bboxes,
+        class_ids=classes,
+        payload_context=INSTANCE_KEY_CONTEXT_MANUAL_CURATION,
+    )
+    curation_keys_again = mint_detection_instance_keys(
+        recording_identity="rec_a",
+        frame_indices=frames,
+        bbox_norm_coords=bboxes,
+        class_ids=classes,
+        payload_context=INSTANCE_KEY_CONTEXT_MANUAL_CURATION,
+    )
+
+    # No cross-origin collision on identical content, and contexted minting is
+    # deterministic across calls.
+    assert not np.any(np.isin(curation_keys, detect_keys))
+    np.testing.assert_array_equal(curation_keys, curation_keys_again)
+
+
+def test_mint_detection_instance_keys_empty_and_blank_context_match_no_context() -> None:
+    kwargs = dict(
+        recording_identity="rec_a",
+        frame_indices=np.asarray([5], dtype=np.int32),
+        bbox_norm_coords=np.asarray([[0.5, 0.5, 0.2, 0.4]], dtype=np.float64),
+        class_ids=np.asarray([0], dtype=np.int32),
+    )
+
+    baseline = mint_detection_instance_keys(**kwargs)
+
+    np.testing.assert_array_equal(mint_detection_instance_keys(**kwargs, payload_context=None), baseline)
+    np.testing.assert_array_equal(mint_detection_instance_keys(**kwargs, payload_context=""), baseline)
+    np.testing.assert_array_equal(mint_detection_instance_keys(**kwargs, payload_context="   "), baseline)
+
+
+def test_mint_detection_instance_keys_context_still_breaks_duplicate_ties() -> None:
+    keys = mint_detection_instance_keys(
+        recording_identity="rec_a",
+        frame_indices=np.asarray([10, 10], dtype=np.int32),
+        bbox_norm_coords=np.asarray([[0.5, 0.5, 0.1, 0.1], [0.5, 0.5, 0.1, 0.1]], dtype=np.float64),
+        class_ids=np.asarray([0, 0], dtype=np.int32),
+        payload_context=INSTANCE_KEY_CONTEXT_MANUAL_CURATION,
+    )
+
+    assert keys.shape == (2,)
+    assert keys[0] != keys[1]
+
+
+def test_instance_key_origin_code_map_is_stable() -> None:
+    assert INSTANCE_KEY_ORIGIN_CODE_MAP == {
+        "copied_from_detect": 0,
+        "minted_at_curation": 1,
+    }
 
 
 def test_mint_detection_instance_keys_is_deterministic_and_reorder_stable() -> None:
