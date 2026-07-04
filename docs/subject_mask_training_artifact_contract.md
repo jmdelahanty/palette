@@ -709,7 +709,6 @@ when `--promote-source-review` is passed explicitly.
 
 ## Related Contracts
 
-- [eye_mask_training_artifact_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/eye_mask_training_artifact_contract.md)
 - [refined_subject_masks_runs_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/refined_subject_masks_runs_contract.md)
 - [eye_subject_mask_unification_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/eye_subject_mask_unification_design.md)
 - [subject_mask_runs_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_runs_contract.md)

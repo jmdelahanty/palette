@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-04: documents eye-mask code deleted in commit 4a85e5d (eye-mask stage severance). Retained for history only; NOT current. Live replacement: docs/eye_subject_mask_unification_design.md. -->
+
 # Eye-Mask Profile Registry Ops Runbook
 
 Purpose: triage and repair eye-mask training data-card aggregation failures caused by missing

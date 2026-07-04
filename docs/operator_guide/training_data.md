@@ -478,28 +478,6 @@ scripts/py -m fisheye.utils.export_keypoint_training_zarr \
   --seed 42
 ```
 
-### Eye mask merge
-
-```bash
-scripts/py -m fisheye.utils.export_eye_mask_training_zarr \
-  /path/to/source.zarr \
-  /path/to/eye_mask_merged.zarr \
-  --label-mode lr \
-  --input-format gray \
-  --split-train 0.8 \
-  --split-val 0.2 \
-  --split-seed 42
-```
-
-By default, eye-mask export uses `--eye-stage auto`, which prefers canonical
-`refined_subject_masks_runs` eye geometry when `eye_left` and `eye_right`
-components are available. It falls back to `refined_eye_masks_runs` and then
-`eye_masks_runs` for historical archives.
-
-`--label-mode` controls how eye masks are encoded:
-- `lr`: separate left/right eye channels
-- `union`: single combined channel
-
 ### Subject mask merge
 
 For the unified subject-mask model, prepare source selection from the registry
@@ -674,14 +652,6 @@ scripts/py -m fisheye.training.train_pose \
   --no-log-registry
 ```
 
-### Eye masks
-
-```bash
-scripts/py -m fisheye.training.train_eye_masks \
-  /path/to/eye_mask_config.yaml \
-  --run-name my_eye_masks_v1
-```
-
 ### Subject masks
 
 ```bash
@@ -806,7 +776,7 @@ If you have the Palette model registry set up, you can automate dataset
 selection and model tracking. The registry-based prepare commands
 (`prepare_detect_training_from_registry`,
 `prepare_keypoint_training_from_registry`,
-`prepare_eye_mask_training_from_registry`) query the registry to find approved
+`prepare_subject_mask_training_from_registry`) query the registry to find approved
 datasets matching your criteria (dish design, rig, review state) and build
 configs automatically.
 

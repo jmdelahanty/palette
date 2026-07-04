@@ -259,24 +259,6 @@ constraints. Saved to `analysis_metadata.attrs["keypoint_tuning"]`.
 
 ---
 
-## Eye mask tuning
-
-Controls traditional (threshold + Sobel) eye segmentation parameters.
-
-```bash
-scripts/py -m fisheye.tune.eye_mask_tuner \
-  /path/to/zarr/..._analysis.zarr
-```
-
-Options:
-- `--crop-run NAME` — specific crop run (default: latest)
-- `--keypoint-run NAME` — keypoint run for eye center hints
-- `--roi-index N` — start on a specific ROI
-
-Saved to `analysis_metadata.attrs["eye_mask_tuning"]`.
-
----
-
 ## Subject body mask tuning
 
 Controls traditional body segmentation: background subtraction threshold,
