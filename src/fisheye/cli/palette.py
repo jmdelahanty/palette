@@ -28,7 +28,7 @@ from fisheye.cli.envelope import (
     json_ready,
 )
 from fisheye.registry.stage_catalog import STAGE_SPECS, StageSpec
-from fisheye.registry.stage_complete import _STEP_RUN_PARENTS
+from fisheye.shared.stage_run_groups import stage_run_parent_paths
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.shared.zarr_run_completion import (
     AUTHORITATIVE_RUN_ATTR,
@@ -38,13 +38,6 @@ from fisheye.shared.zarr_run_completion import (
     set_authoritative_run,
 )
 from fisheye.status_page.query import open_readonly_connection, resolve_registry_path
-
-_COMPLETION_PARENT_OVERRIDES: dict[str, tuple[str, ...]] = {
-    # Catalog-vs-reality bridge: stage_catalog still names this artifact
-    # "background", while the live background runner writes background_runs/.
-    "background": ("background_runs", "background"),
-}
-
 
 @dataclass(frozen=True)
 class DatasetRef:
@@ -391,13 +384,7 @@ def _resolve_dataset(recording: str, registry: Path | None) -> tuple[DatasetRef 
 
 
 def _stage_parent_paths(spec: StageSpec) -> list[str]:
-    override = _COMPLETION_PARENT_OVERRIDES.get(spec.id)
-    if override:
-        return list(override)
-    mapped = list(_STEP_RUN_PARENTS.get(spec.id, ()))
-    if mapped:
-        return mapped
-    return list(spec.artifact_families)
+    return list(stage_run_parent_paths(spec.id, artifact_families=spec.artifact_families))
 
 
 def _is_run_parent(group: Any) -> bool:

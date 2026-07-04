@@ -17,6 +17,7 @@ from .stage_catalog import canonical_stage_id
 from .status_ledger import upsert_recording_step_status
 from .step_cascade import invalidate_downstream_steps
 from ..shared.zarr.stage_arrays import STAGES, StageSpec, validate_run
+from ..shared.stage_run_groups import STAGE_RUN_PARENTS
 from ..shared.zarr_helpers import open_zarr_group_direct
 from ..shared.zarr_run_completion import is_run_complete_in_parent
 
@@ -26,24 +27,7 @@ UpsertStepStatusFn = Callable[..., None]
 InvalidateStepsFn = Callable[..., None]
 
 
-_STEP_RUN_PARENTS = {
-    "detect": ("detect_runs",),
-    "detect_quality": ("detect_runs",),
-    "refined_detect": ("refined_detect_runs", "refined_runs"),
-    "refine": ("refined_detect_runs", "refined_runs"),
-    "crop": ("crop_runs",),
-    "keypoints": ("keypoints_runs",),
-    "refined_keypoints": ("refined_keypoints_runs", "keypoints_refined_runs"),
-    "keypoints_refine": ("refined_keypoints_runs", "keypoints_refined_runs"),
-    "eye_masks": ("eye_masks_runs",),
-    "refined_eye_masks": ("refined_eye_masks_runs",),
-    "subject_masks": ("subject_mask_runs",),
-    "refined_subject_masks": ("refined_subject_masks_runs",),
-    "arena_assignment": ("arena_assignment_runs",),
-    "assign_ids": ("arena_assignment_runs",),
-    "track": ("tracking_runs",),
-    "tracks": ("tracking_runs",),
-}
+_STEP_RUN_PARENTS = STAGE_RUN_PARENTS
 
 _STAGE_ARRAY_SPEC_ALIASES = {
     # Defensive aliases for legacy callers and tests; current production
