@@ -11,8 +11,20 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def utc_now_compact() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def utc_now_date() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d")
+
+
+def utc_now_z() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def make_run_id() -> str:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = utc_now_compact()
     return f"{stamp}_{os.getpid()}"
 
 

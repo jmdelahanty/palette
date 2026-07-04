@@ -10,6 +10,7 @@ import zarr
 from fisheye.shared.zarr_helpers import (
     first_array_length,
     first_array_length_in_group,
+    infer_zarr_use,
     normalize_zarr_path,
     read_zarr_array_mapping,
     reconsolidate_zarr_metadata,
@@ -119,6 +120,39 @@ def test_zarr_reader_helpers_normalize_attrs_groups_and_arrays() -> None:
     assert zarr_array_names(group) == ["a_array", "b_array"]
     assert safe_int("7") == 7
     assert safe_int("not-int") is None
+
+
+def test_infer_zarr_use_prefers_canonical_store_purpose_attr() -> None:
+    root = _FakeGroup()
+    root.attrs["zarr_use"] = "training"
+    root.attrs["zarr_purpose"] = "analysis"
+
+    assert infer_zarr_use(root, Path("recording_training.zarr")) == "analysis"
+
+
+def test_infer_zarr_use_accepts_legacy_purpose_and_filename_fallback() -> None:
+    root = _FakeGroup()
+    root.attrs["zarr_purpose"] = "analysis"
+
+    assert infer_zarr_use(root, Path("unknown.zarr")) == "analysis"
+    assert infer_zarr_use({}, Path("recording_training.zarr")) == "training"
+    assert infer_zarr_use({}, Path("recording.zarr"), default="unknown") == "unknown"
+
+
+def test_infer_zarr_use_ignores_invalid_attrs_before_suffix_fallback() -> None:
+    root = _FakeGroup()
+    root.attrs["zarr_use"] = "not-a-use"
+    root.attrs["zarr_purpose"] = "also-not-a-use"
+
+    assert infer_zarr_use(root, Path("recording_analysis.zarr")) == "analysis"
+
+
+def test_infer_zarr_use_can_accept_extended_or_arbitrary_vocab() -> None:
+    root = _FakeGroup()
+    root.attrs["zarr_use"] = "custom_review"
+
+    assert infer_zarr_use(root, Path("recording.zarr")) is None
+    assert infer_zarr_use(root, Path("recording.zarr"), valid_uses=None) == "custom_review"
 
 
 def test_read_zarr_array_mapping_records_logical_source_paths() -> None:

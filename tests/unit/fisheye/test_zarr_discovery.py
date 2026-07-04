@@ -31,6 +31,74 @@ def test_iter_filesystem_zarrs_nonrecursive_matches_recording_layout(tmp_path: P
     assert discovered == {direct, recording_layout}
 
 
+def test_iter_filesystem_zarrs_accepts_explicit_zarr_file(tmp_path: Path) -> None:
+    archive = tmp_path / "recording_training.zarr"
+    archive.write_text("placeholder", encoding="utf-8")
+
+    assert list(iter_filesystem_zarrs([archive], recursive=False)) == [archive]
+    assert (
+        list(
+            iter_filesystem_zarrs(
+                [archive],
+                recursive=False,
+                include_zarr_files=False,
+            )
+        )
+        == []
+    )
+
+
+def test_iter_filesystem_zarrs_dedupes_by_resolved_path(tmp_path: Path) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    archive.mkdir()
+    alias = tmp_path / "alias_analysis.zarr"
+    try:
+        alias.symlink_to(archive, target_is_directory=True)
+    except OSError:
+        pytest.skip("filesystem does not support directory symlinks")
+
+    assert list(iter_filesystem_zarrs([archive, alias], recursive=False)) == [archive]
+    assert list(iter_filesystem_zarrs([archive, alias], recursive=False, dedupe=False)) == [
+        archive,
+        alias,
+    ]
+
+
+def test_iter_filesystem_zarrs_can_preserve_under_zarr_dir_policy(tmp_path: Path) -> None:
+    direct = tmp_path / "direct_analysis.zarr"
+    recording_layout = tmp_path / "recording" / "zarr" / "recording_analysis.zarr"
+    direct.mkdir()
+    recording_layout.mkdir(parents=True)
+
+    discovered = set(
+        iter_filesystem_zarrs(
+            [tmp_path],
+            recursive=False,
+            pattern_policy="under_zarr_dir",
+        )
+    )
+
+    assert discovered == {recording_layout}
+
+
+def test_iter_filesystem_zarrs_can_require_zarr_root_metadata(tmp_path: Path) -> None:
+    empty = tmp_path / "empty_analysis.zarr"
+    valid = tmp_path / "valid_analysis.zarr"
+    empty.mkdir()
+    valid.mkdir()
+    (valid / "zarr.json").write_text("{}", encoding="utf-8")
+
+    discovered = list(
+        iter_filesystem_zarrs(
+            [tmp_path],
+            recursive=False,
+            require_zarr_root=True,
+        )
+    )
+
+    assert discovered == [valid]
+
+
 def test_iter_filesystem_zarrs_recursive_finds_nested_zarrs(tmp_path: Path) -> None:
     first = tmp_path / "recording" / "zarr" / "recording_analysis.zarr"
     second = tmp_path / "recording" / "nested" / "also_analysis.zarr"

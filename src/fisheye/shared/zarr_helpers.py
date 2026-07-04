@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, TypeAlias
+from typing import Any, Collection, Mapping, TypeAlias
 from urllib.parse import unquote, urlparse
 
 import numpy as np
@@ -14,6 +14,7 @@ from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
 
 
 ParentPath: TypeAlias = str | Sequence[str]
+DEFAULT_ZARR_USES: tuple[str, ...] = ("analysis", "training", "inference", "export")
 
 
 def _path_tokens(parent_path: ParentPath) -> tuple[str, ...]:
@@ -50,6 +51,57 @@ def zarr_attrs_dict(group: Any | None) -> dict[str, Any]:
         return {str(key): value for key, value in attrs.items()}
     except Exception:
         return {}
+
+
+def _attrs_from_group_or_mapping(group_or_attrs: Any | None) -> Mapping[str, Any]:
+    if group_or_attrs is None:
+        return {}
+    if isinstance(group_or_attrs, Mapping):
+        return group_or_attrs
+    attrs = getattr(group_or_attrs, "attrs", None)
+    if attrs is None:
+        return {}
+    try:
+        return {str(key): value for key, value in attrs.items()}
+    except Exception:
+        return {}
+
+
+def infer_zarr_use(
+    group_or_attrs: Any | None,
+    zarr_path: str | Path | None = None,
+    *,
+    default: str | None = None,
+    valid_uses: Collection[str] | None = DEFAULT_ZARR_USES,
+) -> str | None:
+    """Infer a Palette Zarr role from attrs, then filename suffix.
+
+    ``zarr_purpose`` is the canonical store attr written by current Zarr
+    producers. ``zarr_use`` is the registry/vocabulary alias and is checked as
+    a fallback. Promoting ``zarr_use`` to canonical store metadata would be a
+    separate explicit attr migration, not a reader precedence change.
+    """
+
+    allowed = (
+        {str(value).strip().lower() for value in valid_uses}
+        if valid_uses is not None
+        else None
+    )
+    attrs = _attrs_from_group_or_mapping(group_or_attrs)
+    for key in ("zarr_purpose", "zarr_use"):
+        value = normalize_attr(attrs.get(key))
+        if value is None:
+            continue
+        value = value.strip().lower()
+        if allowed is None or value in allowed:
+            return value
+    if zarr_path is not None:
+        name = Path(zarr_path).name.lower()
+        if name.endswith("_analysis.zarr"):
+            return "analysis"
+        if name.endswith("_training.zarr"):
+            return "training"
+    return default
 
 
 def safe_int(value: Any) -> int | None:

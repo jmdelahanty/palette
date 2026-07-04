@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -96,10 +98,87 @@ def strict_json_dumps(
     )
 
 
+def _atomic_text_write(path: Path, text: str, *, create_parents: bool = True) -> None:
+    path = path.expanduser()
+    if create_parents:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp.write(text)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            tmp_path = Path(tmp.name)
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def write_json_atomic(
+    path: Path,
+    payload: Any,
+    *,
+    sort_keys: bool = True,
+    indent: int | None = 2,
+    ensure_ascii: bool = True,
+    trailing_newline: bool = True,
+    create_parents: bool = True,
+) -> None:
+    """Atomically write one strict-JSON document."""
+
+    text = json.dumps(
+        json_attr_safe(payload),
+        allow_nan=False,
+        sort_keys=sort_keys,
+        indent=indent,
+        ensure_ascii=ensure_ascii,
+    )
+    if trailing_newline:
+        text += "\n"
+    _atomic_text_write(path, text, create_parents=create_parents)
+
+
+def write_jsonl_atomic(
+    path: Path,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    sort_keys: bool = True,
+    ensure_ascii: bool = True,
+    create_parents: bool = True,
+) -> None:
+    """Atomically write newline-delimited strict-JSON rows."""
+
+    lines = [
+        json.dumps(
+            json_attr_safe_mapping(row),
+            allow_nan=False,
+            sort_keys=sort_keys,
+            ensure_ascii=ensure_ascii,
+        )
+        for row in rows
+    ]
+    text = "".join(f"{line}\n" for line in lines)
+    _atomic_text_write(path, text, create_parents=create_parents)
+
+
 __all__ = [
     "decode_fixed_width_bytes",
     "decode_null_terminated_text",
     "json_attr_safe",
     "json_attr_safe_mapping",
     "strict_json_dumps",
+    "write_json_atomic",
+    "write_jsonl_atomic",
 ]

@@ -12,6 +12,8 @@ from fisheye.shared.json_safety import (
     json_attr_safe,
     json_attr_safe_mapping,
     strict_json_dumps,
+    write_json_atomic,
+    write_jsonl_atomic,
 )
 
 
@@ -52,3 +54,44 @@ def test_json_attr_safe_mapping_stringifies_keys() -> None:
 
 def test_strict_json_dumps_rejects_nan_after_sanitizing_to_null() -> None:
     assert strict_json_dumps({"x": math.nan, "y": np.asarray([1, 2])}) == '{"x":null,"y":[1,2]}'
+
+
+def test_write_json_atomic_writes_strict_json(tmp_path: Path) -> None:
+    out = tmp_path / "nested" / "payload.json"
+
+    write_json_atomic(out, {"b": np.asarray([1, 2]), "a": math.nan})
+
+    assert json.loads(out.read_text(encoding="utf-8")) == {"a": None, "b": [1, 2]}
+
+
+def test_write_json_atomic_failed_replace_leaves_prior_file(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "payload.json"
+    out.write_text('{"old": true}\n', encoding="utf-8")
+
+    def _raise_replace(_src: object, _dst: object) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr("fisheye.shared.json_safety.os.replace", _raise_replace)
+
+    try:
+        write_json_atomic(out, {"old": False})
+    except OSError:
+        pass
+    else:  # pragma: no cover - defensive guard
+        raise AssertionError("write_json_atomic did not raise")
+
+    assert out.read_text(encoding="utf-8") == '{"old": true}\n'
+
+
+def test_write_jsonl_atomic_writes_one_strict_json_object_per_line(tmp_path: Path) -> None:
+    out = tmp_path / "rows.jsonl"
+
+    write_jsonl_atomic(out, [{"row": 1, "value": np.float32("nan")}, {"row": 2}])
+
+    assert out.read_text(encoding="utf-8").splitlines() == [
+        '{"row": 1, "value": null}',
+        '{"row": 2}',
+    ]

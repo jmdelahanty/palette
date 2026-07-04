@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Iterable, Literal, Optional, Sequence
 
 from fisheye.shared.type_conversions import normalize_attr
+
+ZarrDiscoveryPolicy = Literal["recording", "under_zarr_dir", "top_level"]
 
 
 @dataclass(frozen=True)
@@ -32,23 +34,124 @@ def load_path_list(path: Path, *, wrap_errors: bool = False) -> list[Path]:
     return items
 
 
-def iter_filesystem_zarrs(paths: Iterable[Path], recursive: bool) -> Iterable[Path]:
+def _candidate_key(path: Path) -> str:
+    try:
+        return str(path.resolve())
+    except OSError:
+        return str(path)
+
+
+def _is_zarr_root(path: Path) -> bool:
+    return (path / "zarr.json").is_file() or (path / ".zgroup").is_file()
+
+
+def _explicit_zarr_candidate(
+    path: Path,
+    *,
+    include_zarr_files: bool,
+    require_zarr_root: bool,
+) -> bool:
+    if path.suffix != ".zarr":
+        return False
+    if path.is_dir():
+        return not require_zarr_root or _is_zarr_root(path)
+    return include_zarr_files and path.is_file()
+
+
+def _iter_policy_candidates(
+    path: Path,
+    *,
+    recursive: bool,
+    pattern_policy: ZarrDiscoveryPolicy,
+) -> Iterable[Path]:
+    if recursive:
+        if pattern_policy in {"recording", "top_level"}:
+            yield from sorted(path.rglob("*.zarr"))
+            return
+        if pattern_policy == "under_zarr_dir":
+            yield from sorted(path.rglob("zarr/*.zarr"))
+            return
+    if pattern_policy == "recording":
+        yield from sorted(path.glob("*.zarr"))
+        yield from sorted(path.glob("*/zarr/*.zarr"))
+        return
+    if pattern_policy == "under_zarr_dir":
+        yield from sorted(path.glob("*/zarr/*.zarr"))
+        return
+    if pattern_policy == "top_level":
+        yield from sorted(path.glob("*.zarr"))
+        return
+    raise ValueError(f"Unsupported Zarr discovery policy: {pattern_policy}")
+
+
+def iter_filesystem_zarrs(
+    paths: Iterable[Path],
+    recursive: bool,
+    *,
+    pattern_policy: ZarrDiscoveryPolicy = "recording",
+    dedupe: bool = True,
+    include_zarr_files: bool = True,
+    require_zarr_root: bool = False,
+) -> Iterable[Path]:
+    """Yield filesystem Zarr candidates from roots.
+
+    ``pattern_policy="recording"`` is Palette's canonical recording discovery:
+    non-recursive search finds loose ``*.zarr`` archives plus
+    ``*/zarr/*.zarr`` recording-layout archives, while recursive search finds
+    every nested ``*.zarr``. Narrower legacy policies remain explicit so
+    migrations can preserve intent where needed.
+    """
+
+    seen: set[str] = set()
     for path in paths:
         path = path.expanduser()
-        if path.is_dir() and path.suffix == ".zarr":
-            yield path
-            continue
-        if not path.exists():
-            continue
-        if recursive:
-            yield from path.rglob("*.zarr")
-        else:
-            yield from path.glob("*/zarr/*.zarr")
-            yield from path.glob("*.zarr")
+        candidates: list[Path] = []
+        if _explicit_zarr_candidate(
+            path,
+            include_zarr_files=include_zarr_files,
+            require_zarr_root=require_zarr_root,
+        ):
+            candidates = [path]
+        elif path.is_dir():
+            candidates = list(
+                _iter_policy_candidates(
+                    path,
+                    recursive=recursive,
+                    pattern_policy=pattern_policy,
+                )
+            )
+        for candidate in candidates:
+            if require_zarr_root and (not candidate.is_dir() or not _is_zarr_root(candidate)):
+                continue
+            if not include_zarr_files and candidate.is_file():
+                continue
+            if dedupe:
+                key = _candidate_key(candidate)
+                if key in seen:
+                    continue
+                seen.add(key)
+            yield candidate
 
 
-def discover_filesystem_zarrs(paths: Iterable[Path], *, recursive: bool) -> list[Path]:
-    return list(iter_filesystem_zarrs(paths, recursive))
+def discover_filesystem_zarrs(
+    paths: Iterable[Path],
+    *,
+    recursive: bool,
+    pattern_policy: ZarrDiscoveryPolicy = "recording",
+    dedupe: bool = True,
+    include_zarr_files: bool = True,
+    require_zarr_root: bool = False,
+) -> list[Path]:
+    return list(
+        iter_filesystem_zarrs(
+            paths,
+            recursive,
+            pattern_policy=pattern_policy,
+            dedupe=dedupe,
+            include_zarr_files=include_zarr_files,
+            require_zarr_root=require_zarr_root,
+        )
+    )
 
 
 def _is_within_scope(path: Path, scope: Path) -> bool:
