@@ -1031,7 +1031,7 @@ def _append_option(parts: list[Any], flag: str, value: Any, *, multi: bool = Fal
         parts.append(value)
 
 
-def _resolved_palette_command(verb: str, dataset: DatasetRef, args: argparse.Namespace, *, apply: bool) -> str:
+def _resolved_palette_command(verb: str, dataset: DatasetRef, args: Any, *, apply: bool) -> str:
     parts: list[Any] = ["palette", verb, dataset.zarr_path]
     registry = _registry_for_dataset(dataset, getattr(args, "registry", None))
     if registry is not None:
@@ -1139,8 +1139,8 @@ def _resolved_approve_command(
     return _join_command(parts)
 
 
-def _arg_params(args: argparse.Namespace, exclude: Iterable[str] = ()) -> dict[str, Any]:
-    excluded = {"command", "recording", "json", "apply", "dry_run", *set(exclude)}
+def _arg_params(args: Any, exclude: Iterable[str] = ()) -> dict[str, Any]:
+    excluded = {"command", "recording", "json", "apply", "dry_run", "cwd", *set(exclude)}
     return {key: value for key, value in vars(args).items() if key not in excluded}
 
 
@@ -1475,24 +1475,34 @@ def _runner_stdout_context(json_output: bool):
     return redirect_stdout(sys.stderr) if json_output else nullcontext()
 
 
-def _run_detect(args: argparse.Namespace, dataset: DatasetRef, stages: Sequence[StageState]) -> dict[str, Any]:
-    with _runner_stdout_context(bool(args.json)):
-        from fisheye.utils.run_detect_with_registry_model import run_detect_with_registry_model
+def detect(request: DetectRequest) -> dict[str, Any]:
+    from fisheye.utils.run_detect_with_registry_model import run_detect_with_registry_model
 
-    apply = bool(args.apply)
-    resolved_command = _resolved_palette_command("detect", dataset, args, apply=apply)
+    dataset, stages, blocked_resolution = _resolve_dataset_and_stages(
+        "detect",
+        request.recording,
+        request.registry,
+    )
+    if blocked_resolution is not None:
+        blocked_resolution["status"] = "blocked"
+        return blocked_resolution
+    if dataset is None:  # pragma: no cover - blocked covers this
+        return _blocked_payload("palette detect", str(request.recording), [])
+
+    apply = bool(request.apply)
+    resolved_command = _resolved_palette_command("detect", dataset, request, apply=apply)
     spec = _stage_spec("detect")
     params = {
-        **_arg_params(args),
+        **_arg_params(request),
         "recording_dir": _recording_dir_for_dataset(dataset),
-        "output": args.output or dataset.zarr_path,
+        "output": request.output or dataset.zarr_path,
         "dry_run": not apply,
     }
     provenance = build_run_provenance(
         command="palette detect",
         params=params,
         input_run_ids=_input_run_ids(stages, spec.depends_on),
-        cwd=Path.cwd(),
+        cwd=request.cwd or Path.cwd(),
     )
     blocked = _precondition_payload(
         verb="detect",
@@ -1500,43 +1510,42 @@ def _run_detect(args: argparse.Namespace, dataset: DatasetRef, stages: Sequence[
         dataset=dataset,
         stages=stages,
         provenance=provenance,
-        force=bool(args.force),
+        force=bool(request.force),
     )
     if blocked is not None:
         blocked["resolved_command"] = resolved_command
         return blocked
 
-    with _runner_stdout_context(bool(args.json)):
-        result = run_detect_with_registry_model(
-            recording_dir=_recording_dir_for_dataset(dataset),
-            video=args.video,
-            output=args.output or dataset.zarr_path,
-            registry=_registry_for_dataset(dataset, args.registry),
-            set_id=args.set_id,
-            require_unique=bool(args.require_unique),
-            top_k=int(args.top_k),
-            include_non_success=bool(args.include_non_success),
-            dry_run=not apply,
-            config=args.config,
-            conf=args.conf,
-            iou=args.iou,
-            max_det=args.max_det,
-            batch_size=args.batch_size,
-            resize_dims=args.resize_dims,
-            imgsz=args.imgsz,
-            decode_backend=args.decode_backend,
-            cpu=bool(args.cpu),
-            write_raw_video_metadata=bool(args.write_raw_video_metadata),
-            overwrite_raw_video_metadata=bool(args.overwrite_raw_video_metadata),
-            argv=[],
-            cli_provenance=provenance if apply else None,
-        )
+    result = run_detect_with_registry_model(
+        recording_dir=_recording_dir_for_dataset(dataset),
+        video=request.video,
+        output=request.output or dataset.zarr_path,
+        registry=_registry_for_dataset(dataset, request.registry),
+        set_id=request.set_id,
+        require_unique=bool(request.require_unique),
+        top_k=int(request.top_k),
+        include_non_success=bool(request.include_non_success),
+        dry_run=not apply,
+        config=request.config,
+        conf=request.conf,
+        iou=request.iou,
+        max_det=request.max_det,
+        batch_size=request.batch_size,
+        resize_dims=request.resize_dims,
+        imgsz=request.imgsz,
+        decode_backend=request.decode_backend,
+        cpu=bool(request.cpu),
+        write_raw_video_metadata=bool(request.write_raw_video_metadata),
+        overwrite_raw_video_metadata=bool(request.overwrite_raw_video_metadata),
+        argv=[],
+        cli_provenance=provenance if apply else None,
+    )
     payload = _result_to_dict(result)
     ok = bool(payload.get("ok"))
     status = "dry_run" if ok and not apply else ("ok" if ok else "failed")
     reason = "DRY_RUN" if status == "dry_run" else ("OK" if ok else str(payload.get("reason") or "RUNNER_FAILED").upper())
     run = payload.get("detect_run") if isinstance(payload.get("detect_run"), str) else None
-    hints = [_resolved_palette_command("detect", dataset, args, apply=True)] if status == "dry_run" else _next_hints_from_plan(dataset)
+    hints = [_resolved_palette_command("detect", dataset, request, apply=True)] if status == "dry_run" else _next_hints_from_plan(dataset)
     return build_envelope(
         command="palette detect",
         status=status,
@@ -1559,24 +1568,34 @@ def _run_detect(args: argparse.Namespace, dataset: DatasetRef, stages: Sequence[
     )
 
 
-def _run_keypoints(args: argparse.Namespace, dataset: DatasetRef, stages: Sequence[StageState]) -> dict[str, Any]:
-    with _runner_stdout_context(bool(args.json)):
-        from fisheye.utils.run_keypoints_with_registry_model import run_keypoints_with_registry_model
+def keypoints(request: KeypointsRequest) -> dict[str, Any]:
+    from fisheye.utils.run_keypoints_with_registry_model import run_keypoints_with_registry_model
 
-    apply = bool(args.apply)
-    resolved_command = _resolved_palette_command("keypoints", dataset, args, apply=apply)
+    dataset, stages, blocked_resolution = _resolve_dataset_and_stages(
+        "keypoints",
+        request.recording,
+        request.registry,
+    )
+    if blocked_resolution is not None:
+        blocked_resolution["status"] = "blocked"
+        return blocked_resolution
+    if dataset is None:  # pragma: no cover - blocked covers this
+        return _blocked_payload("palette keypoints", str(request.recording), [])
+
+    apply = bool(request.apply)
+    resolved_command = _resolved_palette_command("keypoints", dataset, request, apply=apply)
     spec = _stage_spec("keypoints")
     params = {
-        **_arg_params(args),
+        **_arg_params(request),
         "recording_dir": _recording_dir_for_dataset(dataset),
-        "output": args.output or dataset.zarr_path,
+        "output": request.output or dataset.zarr_path,
         "dry_run": not apply,
     }
     provenance = build_run_provenance(
         command="palette keypoints",
         params=params,
         input_run_ids=_input_run_ids(stages, spec.depends_on),
-        cwd=Path.cwd(),
+        cwd=request.cwd or Path.cwd(),
     )
     blocked = _precondition_payload(
         verb="keypoints",
@@ -1584,52 +1603,51 @@ def _run_keypoints(args: argparse.Namespace, dataset: DatasetRef, stages: Sequen
         dataset=dataset,
         stages=stages,
         provenance=provenance,
-        force=bool(args.force),
+        force=bool(request.force),
     )
     if blocked is not None:
         blocked["resolved_command"] = resolved_command
         return blocked
 
-    with _runner_stdout_context(bool(args.json)):
-        result = run_keypoints_with_registry_model(
-            recording_dir=_recording_dir_for_dataset(dataset),
-            output=args.output or dataset.zarr_path,
-            registry=_registry_for_dataset(dataset, args.registry),
-            set_id=args.set_id,
-            require_unique=bool(args.require_unique),
-            top_k=int(args.top_k),
-            include_non_success=bool(args.include_non_success),
-            dry_run=not apply,
-            run_name=args.run_name,
-            crop_run=args.crop_run,
-            pose_schema=args.pose_schema,
-            batch_size=int(args.batch_size),
-            device=args.device,
-            imgsz=args.imgsz,
-            conf=float(args.conf),
-            iou=float(args.iou),
-            max_det=int(args.max_det),
-            mask_threshold=float(args.mask_threshold),
-            roi_cache_policy=args.roi_cache_policy,
-            roi_cache_dir=args.roi_cache_dir,
-            roi_cache_manifest=args.roi_cache_manifest,
-            stage_roi_cache_to_scratch=bool(args.stage_roi_cache_to_scratch),
-            roi_cache_staging_dir=args.roi_cache_staging_dir,
-            profile_timings=bool(args.profile_timings),
-            progress_jsonl=args.progress_jsonl,
-            progress_every_batches=int(args.progress_every_batches),
-            input_mode=args.input_mode,
-            cpu=bool(args.cpu),
-            verbose=bool(args.verbose),
-            argv=[],
-            cli_provenance=provenance if apply else None,
-        )
+    result = run_keypoints_with_registry_model(
+        recording_dir=_recording_dir_for_dataset(dataset),
+        output=request.output or dataset.zarr_path,
+        registry=_registry_for_dataset(dataset, request.registry),
+        set_id=request.set_id,
+        require_unique=bool(request.require_unique),
+        top_k=int(request.top_k),
+        include_non_success=bool(request.include_non_success),
+        dry_run=not apply,
+        run_name=request.run_name,
+        crop_run=request.crop_run,
+        pose_schema=request.pose_schema,
+        batch_size=int(request.batch_size),
+        device=request.device,
+        imgsz=request.imgsz,
+        conf=float(request.conf),
+        iou=float(request.iou),
+        max_det=int(request.max_det),
+        mask_threshold=float(request.mask_threshold),
+        roi_cache_policy=request.roi_cache_policy,
+        roi_cache_dir=request.roi_cache_dir,
+        roi_cache_manifest=request.roi_cache_manifest,
+        stage_roi_cache_to_scratch=bool(request.stage_roi_cache_to_scratch),
+        roi_cache_staging_dir=request.roi_cache_staging_dir,
+        profile_timings=bool(request.profile_timings),
+        progress_jsonl=request.progress_jsonl,
+        progress_every_batches=int(request.progress_every_batches),
+        input_mode=request.input_mode,
+        cpu=bool(request.cpu),
+        verbose=bool(request.verbose),
+        argv=[],
+        cli_provenance=provenance if apply else None,
+    )
     payload = _result_to_dict(result)
     ok = bool(payload.get("ok"))
     status = "dry_run" if ok and not apply else ("ok" if ok else "failed")
     reason = "DRY_RUN" if status == "dry_run" else ("OK" if ok else str(payload.get("reason") or "RUNNER_FAILED").upper())
     run = payload.get("keypoint_run") if isinstance(payload.get("keypoint_run"), str) else None
-    hints = [_resolved_palette_command("keypoints", dataset, args, apply=True)] if status == "dry_run" else _next_hints_from_plan(dataset)
+    hints = [_resolved_palette_command("keypoints", dataset, request, apply=True)] if status == "dry_run" else _next_hints_from_plan(dataset)
     return build_envelope(
         command="palette keypoints",
         status=status,
@@ -1683,19 +1701,29 @@ def _crop_result_status(payload: Mapping[str, Any]) -> tuple[str, str]:
     return "ok", "OK"
 
 
-def _run_crop(args: argparse.Namespace, dataset: DatasetRef, stages: Sequence[StageState]) -> dict[str, Any]:
-    with _runner_stdout_context(bool(args.json)):
-        from fisheye.tracking.crop import crop_detections
-        from fisheye.utils.crop_batch import _build_plan, _load_config, _normalize_path
+def crop(request: CropRequest) -> dict[str, Any]:
+    from fisheye.tracking.crop import crop_detections
+    from fisheye.utils.crop_batch import _build_plan, _load_config, _normalize_path
 
-    apply = bool(args.apply)
-    resolved_command = _resolved_palette_command("crop", dataset, args, apply=apply)
+    dataset, stages, blocked_resolution = _resolve_dataset_and_stages(
+        "crop",
+        request.recording,
+        request.registry,
+    )
+    if blocked_resolution is not None:
+        blocked_resolution["status"] = "blocked"
+        return blocked_resolution
+    if dataset is None:  # pragma: no cover - blocked covers this
+        return _blocked_payload("palette crop", str(request.recording), [])
+
+    apply = bool(request.apply)
+    resolved_command = _resolved_palette_command("crop", dataset, request, apply=apply)
     spec = _stage_spec("crop")
-    config = _load_config(args.config)
-    source_type = args.source_type or "auto"
-    source_path = _normalize_path(args.source_path)
+    config = _load_config(request.config)
+    source_type = request.source_type or "auto"
+    source_path = _normalize_path(request.source_path)
     params = {
-        **_arg_params(args),
+        **_arg_params(request),
         "zarr_path": dataset.zarr_path,
         "source_type": source_type,
         "source_path": source_path,
@@ -1705,7 +1733,7 @@ def _run_crop(args: argparse.Namespace, dataset: DatasetRef, stages: Sequence[St
         command="palette crop",
         params=params,
         input_run_ids=_input_run_ids(stages, spec.depends_on),
-        cwd=Path.cwd(),
+        cwd=request.cwd or Path.cwd(),
     )
     blocked = _precondition_payload(
         verb="crop",
@@ -1713,7 +1741,7 @@ def _run_crop(args: argparse.Namespace, dataset: DatasetRef, stages: Sequence[St
         dataset=dataset,
         stages=stages,
         provenance=provenance,
-        force=bool(args.force),
+        force=bool(request.force),
     )
     if blocked is not None:
         blocked["resolved_command"] = resolved_command
@@ -1724,9 +1752,9 @@ def _run_crop(args: argparse.Namespace, dataset: DatasetRef, stages: Sequence[St
         config,
         source_type,
         source_path,
-        args.selection_policy,
-        bool(args.force_new),
-        args.crop_storage_mode,
+        request.selection_policy,
+        bool(request.force_new),
+        request.crop_storage_mode,
     )
     if plan.status in {"missing", "invalid"}:
         return build_envelope(
@@ -1761,7 +1789,7 @@ def _run_crop(args: argparse.Namespace, dataset: DatasetRef, stages: Sequence[St
                 "roi_size": plan.roi_size,
                 "crop_storage_mode": plan.crop_storage_mode,
             },
-            next_hints=[_resolved_palette_command("crop", dataset, args, apply=True)],
+            next_hints=[_resolved_palette_command("crop", dataset, request, apply=True)],
             provenance=provenance,
             resolved_command=resolved_command,
             crop_plan=json_ready(plan),
@@ -1769,34 +1797,33 @@ def _run_crop(args: argparse.Namespace, dataset: DatasetRef, stages: Sequence[St
         )
 
     external_use_sharding = None
-    if bool(args.external_use_sharding):
+    if bool(request.external_use_sharding):
         external_use_sharding = True
-    if bool(args.no_external_use_sharding):
+    if bool(request.no_external_use_sharding):
         external_use_sharding = False
-    with _runner_stdout_context(bool(args.json)):
-        result = crop_detections(
-            zarr_path=str(dataset.zarr_path),
-            config=config,
-            source_type=plan.source_type or source_type,
-            source_path=plan.source_path,
-            selection_policy=plan.selection_policy,
-            scheduler=args.scheduler,
-            num_workers=args.num_workers,
-            console=None,
-            acceleration=args.acceleration,
-            external_write_backend=args.external_write_backend,
-            external_roi_storage=args.external_roi_storage,
-            external_use_sharding=external_use_sharding,
-            external_roi_chunk_size=args.external_roi_chunk_size,
-            external_roi_shard_size=args.external_roi_shard_size,
-            external_gpu_chunk_frames=args.external_gpu_chunk_frames,
-            external_require_kvikio=args.require_kvikio,
-            crop_storage_mode=plan.crop_storage_mode,
-            use_gpu_allowed=not bool(args.no_gpu),
-            force_cpu=bool(args.force_cpu),
-            verbose=bool(args.verbose),
-            cli_provenance=provenance,
-        )
+    result = crop_detections(
+        zarr_path=str(dataset.zarr_path),
+        config=config,
+        source_type=plan.source_type or source_type,
+        source_path=plan.source_path,
+        selection_policy=plan.selection_policy,
+        scheduler=request.scheduler,
+        num_workers=request.num_workers,
+        console=None,
+        acceleration=request.acceleration,
+        external_write_backend=request.external_write_backend,
+        external_roi_storage=request.external_roi_storage,
+        external_use_sharding=external_use_sharding,
+        external_roi_chunk_size=request.external_roi_chunk_size,
+        external_roi_shard_size=request.external_roi_shard_size,
+        external_gpu_chunk_frames=request.external_gpu_chunk_frames,
+        external_require_kvikio=request.require_kvikio,
+        crop_storage_mode=plan.crop_storage_mode,
+        use_gpu_allowed=not bool(request.no_gpu),
+        force_cpu=bool(request.force_cpu),
+        verbose=bool(request.verbose),
+        cli_provenance=provenance,
+    )
     payload = _result_to_dict(result)
     run = payload.get("run_name") if isinstance(payload.get("run_name"), str) else None
     status, reason_code = _crop_result_status(payload)
@@ -1830,27 +1857,114 @@ def _run_crop(args: argparse.Namespace, dataset: DatasetRef, stages: Sequence[St
     )
 
 
+def _detect_request_from_args(args: argparse.Namespace) -> DetectRequest:
+    return DetectRequest(
+        recording=str(args.recording),
+        registry=args.registry,
+        apply=bool(args.apply),
+        force=bool(args.force),
+        video=args.video,
+        output=args.output,
+        set_id=args.set_id,
+        require_unique=bool(args.require_unique),
+        top_k=int(args.top_k),
+        include_non_success=bool(args.include_non_success),
+        config=args.config,
+        conf=args.conf,
+        iou=args.iou,
+        max_det=args.max_det,
+        batch_size=args.batch_size,
+        resize_dims=args.resize_dims,
+        imgsz=args.imgsz,
+        decode_backend=args.decode_backend,
+        cpu=bool(args.cpu),
+        write_raw_video_metadata=bool(args.write_raw_video_metadata),
+        overwrite_raw_video_metadata=bool(args.overwrite_raw_video_metadata),
+    )
+
+
+def _crop_request_from_args(args: argparse.Namespace) -> CropRequest:
+    return CropRequest(
+        recording=str(args.recording),
+        registry=args.registry,
+        apply=bool(args.apply),
+        force=bool(args.force),
+        config=args.config,
+        force_new=bool(args.force_new),
+        crop_storage_mode=args.crop_storage_mode,
+        source_type=args.source_type,
+        source_path=args.source_path,
+        selection_policy=args.selection_policy,
+        scheduler=args.scheduler,
+        num_workers=args.num_workers,
+        acceleration=args.acceleration,
+        external_write_backend=args.external_write_backend,
+        external_roi_storage=args.external_roi_storage,
+        external_use_sharding=bool(args.external_use_sharding),
+        no_external_use_sharding=bool(args.no_external_use_sharding),
+        external_roi_chunk_size=args.external_roi_chunk_size,
+        external_roi_shard_size=args.external_roi_shard_size,
+        external_gpu_chunk_frames=args.external_gpu_chunk_frames,
+        require_kvikio=bool(args.require_kvikio),
+        no_gpu=bool(args.no_gpu),
+        force_cpu=bool(args.force_cpu),
+        verbose=bool(args.verbose),
+    )
+
+
+def _keypoints_request_from_args(args: argparse.Namespace) -> KeypointsRequest:
+    return KeypointsRequest(
+        recording=str(args.recording),
+        registry=args.registry,
+        apply=bool(args.apply),
+        force=bool(args.force),
+        output=args.output,
+        set_id=args.set_id,
+        require_unique=bool(args.require_unique),
+        top_k=int(args.top_k),
+        include_non_success=bool(args.include_non_success),
+        run_name=args.run_name,
+        crop_run=args.crop_run,
+        pose_schema=args.pose_schema,
+        batch_size=int(args.batch_size),
+        device=args.device,
+        imgsz=args.imgsz,
+        conf=float(args.conf),
+        iou=float(args.iou),
+        max_det=int(args.max_det),
+        mask_threshold=float(args.mask_threshold),
+        roi_cache_policy=args.roi_cache_policy,
+        roi_cache_dir=args.roi_cache_dir,
+        roi_cache_manifest=args.roi_cache_manifest,
+        stage_roi_cache_to_scratch=bool(args.stage_roi_cache_to_scratch),
+        roi_cache_staging_dir=args.roi_cache_staging_dir,
+        profile_timings=bool(args.profile_timings),
+        progress_jsonl=args.progress_jsonl,
+        progress_every_batches=int(args.progress_every_batches),
+        input_mode=args.input_mode,
+        cpu=bool(args.cpu),
+        verbose=bool(args.verbose),
+    )
+
+
 def _run_mutating_verb(args: argparse.Namespace) -> int:
-    dataset, hints = _resolve_dataset(str(args.recording), args.registry)
-    if dataset is None:
-        payload = _blocked_payload(f"palette {args.command}", str(args.recording), hints)
-        payload["status"] = "blocked"
+    if args.command == "detect":
+        call = lambda: detect(_detect_request_from_args(args))
+    elif args.command == "crop":
+        call = lambda: crop(_crop_request_from_args(args))
+    elif args.command == "keypoints":
+        call = lambda: keypoints(_keypoints_request_from_args(args))
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(f"unknown run verb: {args.command}")
+    with _runner_stdout_context(bool(args.json)):
+        payload = call()
+    if payload.get("status") == "blocked" and payload.get("reason_code") == "RECORDING_NOT_FOUND":
         if bool(getattr(args, "json", False)):
             _print_json(payload)
         else:
-            for hint in hints:
+            for hint in payload.get("next_hints") or []:
                 print(hint, file=sys.stderr)
         return EXIT_BLOCKED
-    root = open_zarr_group_direct(dataset.zarr_path, mode="r")
-    stages = inspect_stages(root)
-    if args.command == "detect":
-        payload = _run_detect(args, dataset, stages)
-    elif args.command == "crop":
-        payload = _run_crop(args, dataset, stages)
-    elif args.command == "keypoints":
-        payload = _run_keypoints(args, dataset, stages)
-    else:  # pragma: no cover - argparse prevents this
-        raise ValueError(f"unknown run verb: {args.command}")
     return _emit_run_payload(payload, bool(args.json))
 
 

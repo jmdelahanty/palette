@@ -266,6 +266,40 @@ def test_detect_default_dry_run_uses_runner_without_writing(monkeypatch, tmp_pat
     assert calls["cli_provenance"] is None
 
 
+def test_detect_callable_returns_envelope(monkeypatch, tmp_path) -> None:
+    zarr_path = tmp_path / "detect_callable.zarr"
+    root = _open_tmp_store(zarr_path)
+    _create_raw(root)
+    _complete_run(root, "background_runs", "background_001")
+    calls: dict = {}
+
+    def fake_detect(**kwargs):
+        calls.update(kwargs)
+        return _runner_result(
+            ok=True,
+            status="dry_run",
+            output_zarr=str(kwargs["output"]),
+            detect_run=None,
+            selected_model_path="/models/detect.pt",
+            selected_run_id="detect_model_run",
+            selected_set_id="detect_set",
+        )
+
+    import fisheye.utils.run_detect_with_registry_model as runner
+
+    monkeypatch.setattr(runner, "run_detect_with_registry_model", fake_detect)
+
+    payload = palette.detect(palette.DetectRequest(recording=zarr_path, set_id="detect_set"))
+
+    assert payload["command"] == "palette detect"
+    assert payload["status"] == "dry_run"
+    assert payload["reason_code"] == "DRY_RUN"
+    assert payload["metrics"]["selected_set_id"] == "detect_set"
+    assert calls["dry_run"] is True
+    assert calls["set_id"] == "detect_set"
+    assert calls["cli_provenance"] is None
+
+
 def test_detect_apply_passes_cli_provenance(monkeypatch, tmp_path, capsys) -> None:
     zarr_path = tmp_path / "detect_apply.zarr"
     root = _open_tmp_store(zarr_path)
@@ -360,6 +394,44 @@ def test_keypoints_apply_constructs_registry_runner_invocation(monkeypatch, tmp_
     assert calls["output"] == zarr_path.resolve()
     assert calls["pose_schema"] == "traditional_v3"
     assert calls["cli_provenance"]["input_run_ids"] == {"crop": "crop_001"}
+
+
+def test_keypoints_callable_returns_envelope(monkeypatch, tmp_path) -> None:
+    zarr_path = tmp_path / "keypoints_callable.zarr"
+    root = _open_tmp_store(zarr_path)
+    _complete_run(root, "crop_runs", "crop_001")
+    calls: dict = {}
+
+    def fake_keypoints(**kwargs):
+        calls.update(kwargs)
+        return _runner_result(
+            ok=True,
+            status="dry_run",
+            output_zarr=str(kwargs["output"]),
+            keypoint_run=None,
+            selected_model_path="/models/keypoints.pt",
+            selected_run_id="keypoint_model_run",
+            selected_set_id="keypoint_set",
+        )
+
+    fake_module = ModuleType("fisheye.utils.run_keypoints_with_registry_model")
+    fake_module.run_keypoints_with_registry_model = fake_keypoints
+    monkeypatch.setitem(sys.modules, "fisheye.utils.run_keypoints_with_registry_model", fake_module)
+
+    payload = palette.keypoints(
+        palette.KeypointsRequest(
+            recording=zarr_path,
+            pose_schema="traditional_v3",
+            set_id="keypoint_set",
+        )
+    )
+
+    assert payload["command"] == "palette keypoints"
+    assert payload["status"] == "dry_run"
+    assert payload["reason_code"] == "DRY_RUN"
+    assert payload["metrics"]["selected_set_id"] == "keypoint_set"
+    assert calls["pose_schema"] == "traditional_v3"
+    assert calls["cli_provenance"] is None
 
 
 def test_keypoints_force_overrides_missing_crop_with_loud_provenance(monkeypatch, tmp_path, capsys) -> None:
@@ -489,6 +561,42 @@ def test_crop_apply_writes_cli_provenance_to_real_tmp_zarr(monkeypatch, tmp_path
     assert stamped["command"] == "palette crop"
     assert stamped["config_hash"]
     assert stamped["input_run_ids"] == {"refined_detect": "refined_001"}
+
+
+def test_crop_callable_returns_dry_run_envelope(monkeypatch, tmp_path) -> None:
+    zarr_path = tmp_path / "crop_callable.zarr"
+    root = _open_tmp_store(zarr_path)
+    _complete_run(root, "refined_detect_runs", "refined_001")
+
+    def fake_plan(zarr_path_arg, config, source_type, source_path, selection_policy, force_new, crop_storage_mode):
+        return CropPlan(
+            zarr_path=Path(zarr_path_arg),
+            status="ok",
+            source_type="refined",
+            source_path="refined_detect_runs/refined_001/instances",
+            roi_size=(512, 512),
+            crop_storage_mode="geometry_only",
+            selection_policy=selection_policy,
+        )
+
+    import fisheye.utils.crop_batch as crop_batch
+
+    monkeypatch.setattr(crop_batch, "_build_plan", fake_plan)
+
+    payload = palette.crop(
+        palette.CropRequest(
+            recording=zarr_path,
+            crop_storage_mode="geometry_only",
+            selection_policy="training",
+        )
+    )
+
+    assert payload["command"] == "palette crop"
+    assert payload["status"] == "dry_run"
+    assert payload["reason_code"] == "DRY_RUN"
+    assert payload["metrics"]["crop_plan_status"] == "ok"
+    assert payload["metrics"]["crop_storage_mode"] == "geometry_only"
+    assert "--apply" in payload["next_hints"][0]
 
 
 def test_crop_apply_reports_no_rows_as_failed_envelope(monkeypatch, tmp_path, capsys) -> None:
