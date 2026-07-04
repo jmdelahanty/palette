@@ -1,7 +1,7 @@
 # Identity, lineage, and staleness — design review
 
 <!-- contract-meta
-status: partially delivered (Rec 1 done; Recs 2-3 open)
+status: partially delivered (Recs 1-2 done; Rec 3 open)
 created: 2026-07-02
 updated: 2026-07-04
 owner: jeremy
@@ -16,11 +16,16 @@ live, sourced status. Summary: **Rec 1 (authoritative-run pointers + `palette
 approve`) is DELIVERED** — `AUTHORITATIVE_RUN_ATTR` exists in
 `src/fisheye/shared/zarr_run_completion.py`, default-run resolution reads it
 authoritative-first, and `approve` is a callable verb in `src/fisheye/cli/palette.py`
-wired into keypoint/subject-mask/detect review approval. The in-flight `Recording`
-accessor + `RunResolution` slice (branch `agent/run-resolution-accessor`, not yet on
-`sun`) is expected to pick up the detect two-pointer reconciliation described in Rec
-1's design. **Recs 2 (content-derived instance keys) and 3 (a single `FrameDomains`
-resolver) remain open** — no evidence of either in the current codebase.
+wired into keypoint/subject-mask/detect review approval. The `Recording` accessor +
+`RunResolution` slice and the detect two-pointer reconciliation have since merged to
+`sun`. **Rec 2 (content-derived instance keys) is DELIVERED** (2026-07-04 audit):
+minted at detect in `src/fisheye/shared/instance_keys.py`, copied verbatim through
+crop/refined-detect/keypoints/subject-mask lineage, and verified by key equality in
+`src/fisheye/shared/row_lineage.py` with positional fallback for legacy runs. The
+related RedScare `n_keypoints` frame-axis sizing bug is fixed on `sun` (662eea3);
+only the optional backfill of the two affected historical runs remains. **Rec 3 (a
+single `FrameDomains` resolver) remains open** — no resolver exists; consumers still
+re-derive frame-domain arithmetic locally (see §3 for the design).
 
 ## Verdict
 
