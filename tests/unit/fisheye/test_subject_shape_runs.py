@@ -441,3 +441,41 @@ def test_subject_shape_run_records_and_audits_source_row_revisions(monkeypatch) 
     assert audit["stale_row_count"] == 1
     assert audit["stale_rows"] == [1]
     assert audit["stale_rows_by_component"] == {"subject_body": [1]}
+
+
+def test_write_subject_shape_run_group_copies_instance_key_lineage(monkeypatch) -> None:
+    _patch_provenance(monkeypatch)
+    root = _build_refined_root()
+    refined = root["refined_subject_masks_runs"]["refined_001"]
+    refined.create_array("instance_key", data=np.asarray([11, 22, 33], dtype=np.uint64), overwrite=True)
+    refined.create_array("source_crop_row_ids", data=np.asarray([5, 6, 7], dtype=np.int64), overwrite=True)
+
+    mod.write_subject_shape_run_group(
+        root,
+        refined_run="refined_001",
+        run_name="shape_001",
+        chunk_size=2,
+    )
+
+    run = root["analysis"]["subject_shape_runs"]["shape_001"]
+    assert run["row_index"]["instance_key"][:].tolist() == [11, 22, 33]
+    assert run["row_index"]["source_crop_row_ids"][:].tolist() == [5, 6, 7]
+    assert "instance_key" in run.attrs["row_lineage_copied"]
+    assert "source_crop_row_ids" in run.attrs["row_lineage_copied"]
+
+
+def test_write_subject_shape_run_group_reports_instance_key_missing_for_legacy_sources(monkeypatch) -> None:
+    _patch_provenance(monkeypatch)
+    root = _build_refined_root()
+
+    mod.write_subject_shape_run_group(
+        root,
+        refined_run="refined_001",
+        run_name="shape_001",
+        chunk_size=2,
+    )
+
+    run = root["analysis"]["subject_shape_runs"]["shape_001"]
+    assert "instance_key" not in run["row_index"]
+    assert "instance_key" in run.attrs["row_lineage_missing"]
+    assert "source_crop_row_ids" in run.attrs["row_lineage_missing"]

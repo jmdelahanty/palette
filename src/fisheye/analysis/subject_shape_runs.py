@@ -975,7 +975,14 @@ def _prepare_subject_shape_run(
     copy_result = copy_row_lineage_arrays(
         row_index,
         refined_group,
-        names=("frame_indices", "detection_indices", "source_refined_row_ids", "source_detect_row_index"),
+        names=(
+            "frame_indices",
+            "detection_indices",
+            "source_refined_row_ids",
+            "source_detect_row_index",
+            "source_crop_row_ids",
+            "instance_key",
+        ),
         total_rois=total_rows,
         overwrite=True,
     )
