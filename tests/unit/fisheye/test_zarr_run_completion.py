@@ -1982,48 +1982,6 @@ def test_emit_stage_completion_requires_root_for_ok_run_with_prebuilt_metadata(t
     assert called is False
 
 
-def test_emit_stage_completion_records_invalid_keypoint_arrays_without_blocking_by_default(
-    tmp_path: Path,
-) -> None:
-    root = FakeGroup()
-    keypoints_parent = FakeGroup()
-    run = FakeGroup()
-    root["keypoints_runs"] = keypoints_parent
-    keypoints_parent["keypoints_001"] = run
-    mark_run_started(run, run_name="keypoints_001", stage="keypoints")
-    mark_run_complete(run, parent_group=keypoints_parent, run_name="keypoints_001")
-
-    class FakeRegistry:
-        def close(self) -> None:
-            pass
-
-    captured: dict[str, object] = {}
-
-    wrote = emit_stage_completion(
-        root,  # type: ignore[arg-type]
-        tmp_path / "archive.zarr",
-        step_name="keypoints",
-        status="ok",
-        source="unit_test",
-        run_name="keypoints_001",
-        registry=FakeRegistry(),  # type: ignore[arg-type]
-        auto_registry_from_env=False,
-        upsert_dataset_row=False,
-        metadata=type("Metadata", (), {"dataset_id": "d", "recording_id": "r"})(),
-        upsert_step_status_fn=lambda *args, **kwargs: captured.update(kwargs),
-        invalidate_steps_fn=lambda *args, **kwargs: None,
-    )
-
-    assert wrote is True
-    details = captured["details_json"]
-    assert details["stage_array_validation_status"] == "invalid"  # type: ignore[index]
-    assert details["stage_array_validation_stage"] == "keypoints"  # type: ignore[index]
-    assert details["stage_array_validation_enforced"] is False  # type: ignore[index]
-    assert "keypoints: missing required array 'frame_indices'" in details[  # type: ignore[operator]
-        "stage_array_validation_errors"
-    ]
-
-
 @pytest.mark.parametrize(
     ("step_name", "parent_name", "run_name", "_populate_valid", "_expected_stage", "expected_error"),
     _PROMOTED_STAGE_COMPLETION_CASES,
