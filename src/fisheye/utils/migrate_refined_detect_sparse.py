@@ -661,6 +661,8 @@ def apply_sparse_migration(
     output_refined_run.attrs["detect_review_status"] = review_status
     if promote_latest:
         refined_parent.attrs["latest"] = plan.output_refined_run_name
+        # Legacy-pointer write retained deliberately: archive-repair migrations keep
+        # minting detect_review_status_latest for old stores (2026-07 writer retirement).
         refined_parent.attrs["detect_review_status_latest"] = plan.output_refined_run_name
 
     return {
