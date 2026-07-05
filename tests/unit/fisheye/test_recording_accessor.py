@@ -86,10 +86,21 @@ def test_recording_subject_masks_decode_compact_store_without_materializing_dens
 
 
 def test_fisheye_api_exports_accessor_and_verbs() -> None:
-    from fisheye.api import DetectRequest, Recording, RunResolution, detect, open_recording as api_open
+    from fisheye.api import (
+        ArtifactsRequest,
+        DetectRequest,
+        Recording,
+        RunResolution,
+        artifacts,
+        detect,
+        open_recording as api_open,
+    )
 
     assert api_open is open_recording
     assert Recording.__name__ == "Recording"
     assert RunResolution.AUTHORITATIVE.value == "authoritative"
     assert DetectRequest.__name__ == "DetectRequest"
+    assert ArtifactsRequest.__name__ == "ArtifactsRequest"
+    assert callable(artifacts)
+    assert callable(detect)
     assert callable(detect)
