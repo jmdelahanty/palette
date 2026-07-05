@@ -55,6 +55,212 @@ def _coerce_mapping(value: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _open_child_group(parent: Any, key: str) -> Any:
+    store = getattr(parent, "store", None)
+    if store is None:
+        return None
+    parent_path = _decode_attr(getattr(parent, "path", None))
+    child_path = f"{parent_path}/{key}" if parent_path else key
+    try:
+        return zarr.open_group(store=store, path=child_path, mode="r")
+    except TypeError:
+        try:
+            return zarr.open_group(store, mode="r", path=child_path)
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def _get_group(parent: Any, key: str) -> Any:
+    child = None
+    getter = getattr(parent, "get", None)
+    if callable(getter):
+        try:
+            child = getter(key)
+        except Exception:
+            child = None
+    if child is not None:
+        return child
+    try:
+        child = parent[key]
+    except Exception:
+        child = None
+    if child is not None:
+        return child
+    return _open_child_group(parent, key)
+
+
+def _profile_run_names(parent: zarr.Group) -> List[str]:
+    try:
+        names = list(parent.group_keys())
+    except Exception:
+        names = [name for name in parent.keys() if isinstance(name, str)]
+    return sorted(str(name) for name in names)
+
+
+def _profile_json_text(value: Mapping[str, Any]) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _geometry_percentile(
+    geometry: Mapping[str, Any],
+    *,
+    axis: str,
+    percentile_key: str,
+) -> Optional[float]:
+    value = geometry.get(axis)
+    if not isinstance(value, Mapping):
+        return None
+    return _as_float(value.get(percentile_key))
+
+
+def _build_detection_data_profile_row(
+    *,
+    dataset_id: str,
+    profile_run: str,
+    summary: Mapping[str, Any],
+    run_attrs: Optional[Mapping[str, Any]],
+    fallback_recording_id: Optional[str],
+    fallback_zarr_use: Optional[str],
+    fallback_genotype: Optional[str],
+    fallback_dpf_at_acquisition: Optional[int],
+    zarr_mtime_ns: Optional[int],
+) -> Dict[str, Any]:
+    """Build one ``detection_data_profile`` row from a profile summary.
+
+    This is the row shape historically produced by
+    ``utils/sync_detection_profile_registry.py::_build_profile_payload`` and is
+    kept byte-for-byte compatible so the reconcile orchestrator produces rows
+    identical to the retired sync script.
+    """
+
+    dataset_map = _coerce_mapping(summary.get("dataset")) or {}
+    source_map = _coerce_mapping(summary.get("source")) or {}
+    coverage_map = _coerce_mapping(summary.get("coverage")) or {}
+    counts_map = _coerce_mapping(summary.get("counts")) or {}
+    geometry_map = _coerce_mapping(summary.get("geometry_norm")) or {}
+    spatial_map = _coerce_mapping(summary.get("spatial")) or {}
+    composition_map = _coerce_mapping(summary.get("composition")) or {}
+    run_attrs_map = dict(run_attrs) if isinstance(run_attrs, Mapping) else {}
+    detections_per_frame_map = _coerce_mapping(counts_map.get("detections_per_frame")) or {}
+
+    dpf_at_acquisition = _as_int(composition_map.get("dpf_at_acquisition"))
+    if dpf_at_acquisition is None:
+        dpf_at_acquisition = fallback_dpf_at_acquisition
+
+    return {
+        "dataset_id": str(dataset_id),
+        "profile_run": str(profile_run),
+        "recording_id": (
+            _decode_attr(run_attrs_map.get("source_recording_id"))
+            or _decode_attr(dataset_map.get("recording_id"))
+            or fallback_recording_id
+        ),
+        "zarr_use": (
+            _decode_attr(run_attrs_map.get("source_zarr_use"))
+            or _decode_attr(dataset_map.get("zarr_use"))
+            or fallback_zarr_use
+        ),
+        "detection_type": (
+            _decode_attr(run_attrs_map.get("source_detection_type"))
+            or _decode_attr(source_map.get("detection_type"))
+        ),
+        "detection_path": (
+            _decode_attr(run_attrs_map.get("source_detection_path"))
+            or _decode_attr(source_map.get("detection_path"))
+        ),
+        "profile_created_utc": (
+            _decode_attr(run_attrs_map.get("created_at_utc"))
+            or _decode_attr(summary.get("created_at_utc"))
+        ),
+        "frames_total": _as_int(coverage_map.get("frames_total")),
+        "frames_with_detections": _as_int(coverage_map.get("frames_with_detections")),
+        "coverage_percent": _as_float(coverage_map.get("coverage_percent")),
+        "detections_total": _as_int(counts_map.get("detections_total")),
+        "detections_per_frame_p50": _as_float(detections_per_frame_map.get("p50")),
+        "detections_per_frame_p90": _as_float(detections_per_frame_map.get("p90")),
+        "w_p10": _geometry_percentile(geometry_map, axis="w", percentile_key="p10"),
+        "w_p50": _geometry_percentile(geometry_map, axis="w", percentile_key="p50"),
+        "w_p90": _geometry_percentile(geometry_map, axis="w", percentile_key="p90"),
+        "h_p10": _geometry_percentile(geometry_map, axis="h", percentile_key="p10"),
+        "h_p50": _geometry_percentile(geometry_map, axis="h", percentile_key="p50"),
+        "h_p90": _geometry_percentile(geometry_map, axis="h", percentile_key="p90"),
+        "area_p10": _geometry_percentile(geometry_map, axis="area", percentile_key="p10"),
+        "area_p50": _geometry_percentile(geometry_map, axis="area", percentile_key="p50"),
+        "area_p90": _geometry_percentile(geometry_map, axis="area", percentile_key="p90"),
+        "aspect_ratio_p10": _geometry_percentile(geometry_map, axis="aspect_ratio", percentile_key="p10"),
+        "aspect_ratio_p50": _geometry_percentile(geometry_map, axis="aspect_ratio", percentile_key="p50"),
+        "aspect_ratio_p90": _geometry_percentile(geometry_map, axis="aspect_ratio", percentile_key="p90"),
+        "edge_proximity_rate": _as_float(spatial_map.get("edge_proximity_rate")),
+        "rig_id": _decode_attr(composition_map.get("rig_id")),
+        "camera_id": _decode_attr(composition_map.get("camera_id")),
+        "arena_id": _decode_attr(composition_map.get("arena_id")),
+        "dish_design": _decode_attr(composition_map.get("dish_design")),
+        "canvas_name": _decode_attr(composition_map.get("canvas_name")),
+        "protocol_name": _decode_attr(composition_map.get("protocol_name")),
+        "genotype": _decode_attr(composition_map.get("genotype")) or fallback_genotype,
+        "dpf_at_acquisition": dpf_at_acquisition,
+        "profile_json": _profile_json_text(summary),
+        "zarr_mtime_ns": zarr_mtime_ns,
+    }
+
+
+def _extract_detection_data_profile_rows(
+    root: zarr.Group,
+    *,
+    zarr_path: Path,
+    dataset_id: str,
+    recording_id: Optional[str],
+    zarr_use: Optional[str],
+    genotype: Optional[str],
+    dpf_at_acquisition: Optional[int],
+) -> List[Dict[str, Any]]:
+    """Extract ``detection_data_profile`` rows from ``analysis/detection_profile_runs``.
+
+    One row per profile run (mirrors ``_extract_keypoint_profile_rows``). Rows are
+    inserted via ``Registry.replace_detection_data_profile`` under the reconcile
+    orchestrator, replacing the standalone ``sync_detection_profile_registry.py``.
+    """
+
+    analysis = _get_group(root, "analysis")
+    if analysis is None:
+        return []
+    runs_parent = _get_group(analysis, "detection_profile_runs")
+    if runs_parent is None:
+        return []
+
+    try:
+        zarr_mtime_ns = int(zarr_path.stat().st_mtime_ns)
+    except Exception:
+        zarr_mtime_ns = None
+    updated_utc = utc_now()
+
+    rows: List[Dict[str, Any]] = []
+    for profile_run in _profile_run_names(runs_parent):
+        run_group = _get_group(runs_parent, profile_run)
+        if run_group is None:
+            continue
+        summary = _coerce_mapping(run_group.attrs.get("profile_summary"))
+        if not summary:
+            continue
+        row = _build_detection_data_profile_row(
+            dataset_id=dataset_id,
+            profile_run=profile_run,
+            summary=summary,
+            run_attrs=dict(run_group.attrs),
+            fallback_recording_id=recording_id,
+            fallback_zarr_use=zarr_use,
+            fallback_genotype=genotype,
+            fallback_dpf_at_acquisition=dpf_at_acquisition,
+            zarr_mtime_ns=zarr_mtime_ns,
+        )
+        row["updated_utc"] = updated_utc
+        rows.append(row)
+
+    return rows
+
+
 def _detect_run_names(detect_parent: zarr.Group) -> List[str]:
     try:
         names = list(detect_parent.group_keys())
@@ -191,4 +397,8 @@ def _extract_detect_performance_rows(
     return rows
 
 
-__all__ = ["_extract_detect_performance_rows"]
+__all__ = [
+    "_extract_detect_performance_rows",
+    "_extract_detection_data_profile_rows",
+    "_build_detection_data_profile_row",
+]
