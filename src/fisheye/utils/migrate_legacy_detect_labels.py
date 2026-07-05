@@ -521,6 +521,8 @@ def migrate_legacy_detect_labels_for_zarr(
     output_run.attrs["detect_review_status"] = json_attr_safe(review)
     if promote_latest:
         parent.attrs["latest"] = plan.output_refined_run
+        # Legacy-pointer write retained deliberately: archive-repair migrations keep
+        # minting detect_review_status_latest for old stores (2026-07 writer retirement).
         parent.attrs["detect_review_status_latest"] = plan.output_refined_run
 
     profile_run: str | None = None
