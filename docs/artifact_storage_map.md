@@ -9,6 +9,9 @@ This doc clarifies where PNG/JSON artifacts are persisted today.
 - **Profile/refinement visual artifacts** are written **inside zarr** under
   `visualizations/<artifact_name>`.
 - Some tools export zarr-stored PNG artifacts back out to filesystem paths for viewing.
+- Use `fisheye.utils.recording_artifact_inventory` for a read-only
+  per-recording index of run families, run-local visualizations, nested
+  reports, and acquisition stream mirrors.
 - Major analysis run types should expose a run-local PNG summary writer; static
   plot snapshots and future interactive plot specs should follow
   `docs/plot_visualization_artifact_contract.md`.
@@ -66,6 +69,8 @@ This doc clarifies where PNG/JSON artifacts are persisted today.
 - For eye-mask profile finalize flow, the same `--apply` rule applies, and review-state /
   intended-use filters may also exclude a run from artifact generation.
 - Export/view helpers for zarr-stored artifacts:
+  - per-recording artifact inventory:
+    `fisheye.utils.recording_artifact_inventory`
   - generic visualization artifact viewer: `fisheye.utils.view_zarr_visualization`
   - combined detection occupancy + chaser distance viewer:
     `fisheye.utils.view_detection_chaser_overview`
@@ -115,4 +120,11 @@ Check whether zarr visual artifacts exist:
 
 ```bash
 find /nvme1/recordings -type d -path '*/visualizations/*_png' | head
+```
+
+Inventory one recording Zarr:
+
+```bash
+scripts/py -m fisheye.utils.recording_artifact_inventory <archive.zarr>
+scripts/py -m fisheye.utils.recording_artifact_inventory <archive.zarr> --json
 ```
