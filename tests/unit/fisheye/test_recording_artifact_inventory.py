@@ -7,11 +7,11 @@ from pathlib import Path
 import zarr
 from zarr.errors import ZarrUserWarning
 
+from fisheye.cli.palette import main as palette_main
 from fisheye.shared.plot_artifacts import write_png_visualization_artifact
 from fisheye.shared.recording import open_recording
 from fisheye.shared.recording_artifact_inventory import _group_names, build_recording_artifact_inventory
 from fisheye.shared.zarr_run_completion import COMPLETION_EPOCH_STRICT, mark_run_complete, require_runs_parent
-from fisheye.utils import recording_artifact_inventory as cli
 
 
 def _make_inventory_zarr(tmp_path: Path) -> Path:
@@ -171,15 +171,16 @@ def test_recording_accessor_artifact_inventory_returns_schema_v1_dict(tmp_path: 
     assert json.loads(json.dumps(inventory)) == inventory
 
 
-def test_recording_artifact_inventory_cli_emits_json(tmp_path: Path, capsys) -> None:
+def test_palette_artifacts_cli_emits_inventory_json(tmp_path: Path, capsys) -> None:
     zarr_path = _make_inventory_zarr(tmp_path)
 
-    assert cli.main([str(zarr_path), "--json"]) == 0
+    assert palette_main(["artifacts", str(zarr_path), "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["zarr_path"] == str(zarr_path)
-    assert payload["root_attrs"]["recording_id"] == "rec_001"
-    assert payload["run_family_count"] == 4
+    inventory = payload["inventory"]
+    assert inventory["zarr_path"] == str(zarr_path.resolve())
+    assert inventory["root_attrs"]["recording_id"] == "rec_001"
+    assert inventory["run_family_count"] == 4
 
 
 def test_inventory_suppresses_known_non_zarr_sidecar_warnings() -> None:

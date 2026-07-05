@@ -9,7 +9,7 @@ This doc clarifies where PNG/JSON artifacts are persisted today.
 - **Profile/refinement visual artifacts** are written **inside zarr** under
   `visualizations/<artifact_name>`.
 - Some tools export zarr-stored PNG artifacts back out to filesystem paths for viewing.
-- Use `fisheye.utils.recording_artifact_inventory` for a read-only
+- Use `palette artifacts <recording>` for a read-only
   per-recording index of run families, run-local visualizations, nested
   reports, and acquisition stream mirrors.
 - Major analysis run types should expose a run-local PNG summary writer; static
@@ -70,7 +70,7 @@ This doc clarifies where PNG/JSON artifacts are persisted today.
   intended-use filters may also exclude a run from artifact generation.
 - Export/view helpers for zarr-stored artifacts:
   - per-recording artifact inventory:
-    `fisheye.utils.recording_artifact_inventory`
+    `palette artifacts <recording>` (also `fisheye.api`: `Recording.artifact_inventory()`)
   - generic visualization artifact viewer: `fisheye.utils.view_zarr_visualization`
   - combined detection occupancy + chaser distance viewer:
     `fisheye.utils.view_detection_chaser_overview`
@@ -125,6 +125,6 @@ find /nvme1/recordings -type d -path '*/visualizations/*_png' | head
 Inventory one recording Zarr:
 
 ```bash
-scripts/py -m fisheye.utils.recording_artifact_inventory <archive.zarr>
-scripts/py -m fisheye.utils.recording_artifact_inventory <archive.zarr> --json
+palette artifacts <archive.zarr>
+palette artifacts <archive.zarr> --json
 ```

@@ -12,7 +12,9 @@ CLI against 12 GoodCopBadCop analysis Zarrs under:
 Command shape:
 
 ```bash
-scripts/py -m fisheye.utils.recording_artifact_inventory <analysis.zarr> --json
+# Run at the time via the since-removed fisheye.utils wrapper; the current
+# equivalent surface is:
+palette artifacts <analysis.zarr> --json
 ```
 
 The transient combined JSON summary was written to:
