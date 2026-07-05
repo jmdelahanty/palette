@@ -117,7 +117,7 @@ Flask route ownership, no change to Zarr write semantics.
 
 ## Checkpoint: 2026-07-05
 
-Current `src/fisheye/labeling/web.py` size on `sun`: 13,345 lines.
+Current `src/fisheye/labeling/web.py` size on `sun`: 13,284 lines.
 
 Recent low-risk extractions completed:
 
@@ -141,6 +141,9 @@ Recent low-risk extractions completed:
   detect-analysis, and subject-mask workflows moved into `web_runtimes.py`.
   The actual browser save/apply/complete handlers and Zarr mutation boundaries
   remain in `web.py`.
+- Browser navigation and mutation-target-token support helpers moved into
+  `web_runtimes.py`, including the server-owned mutation target selector field
+  list used by handoff/shareability reports.
 
 Current direction:
 
@@ -151,10 +154,8 @@ Current direction:
 
 Best next code candidates:
 
-- Browser navigation and mutation-target-token support helpers:
-  `_next_browser_nav_position`, `_browser_mutation_target_selector_keys`,
-  `_browser_mutation_target_selector_details`, and
-  `_require_browser_mutation_target_token`.
+- Pure detect-analysis promotion formatting helpers:
+  `_parse_clip_index`, `_jsonish`, and `_compact_promotion_result`.
 - Assignment/package freshness helpers not already isolated:
   `_inspect_handoff_assignment_freshness`,
   `_handoff_assignment_snapshot_from_work`,
