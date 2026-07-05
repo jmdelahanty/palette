@@ -121,6 +121,7 @@ def _setup_resolution_mocks(monkeypatch: pytest.MonkeyPatch) -> mod.Candidate:
         run_id="detect_run_123",
         set_id="detect_set_123",
         model_path="/tmp/detect_model.pt",
+        model_sha256="d" * 64,
         created_utc="2026-02-09T00:00:00+00:00",
         status="success",
         dataset_count=4,
@@ -247,6 +248,7 @@ def test_main_runs_detect_resolution_and_writes_provenance(
         run_id="detect_run_123",
         set_id="detect_set_123",
         model_path="/tmp/detect_model.pt",
+        model_sha256="d" * 64,
         created_utc="2026-02-09T00:00:00+00:00",
         status="success",
         dataset_count=4,
@@ -318,6 +320,7 @@ def test_main_runs_detect_resolution_and_writes_provenance(
     assert isinstance(detect_kwargs, dict)
     assert detect_kwargs.get("video_path") == str(video_path.resolve())
     assert detect_kwargs.get("model_path") == "/tmp/detect_model.pt"
+    assert detect_kwargs.get("model_sha256") == "d" * 64
     assert detect_kwargs.get("output_zarr") == str(output_path.resolve())
     assert detect_kwargs.get("resize_dims") == [768, 1280]
     assert detect_kwargs.get("imgsz") is None
@@ -337,5 +340,8 @@ def test_main_runs_detect_resolution_and_writes_provenance(
     payload = calls.get("write_payload")
     assert isinstance(payload, dict)
     assert payload.get("task") == "detect"
+    selected = payload.get("selected")
+    assert isinstance(selected, dict)
+    assert selected.get("model_sha256") == "d" * 64
     for key in ("contract", "command", "git", "environment", "platform", "parameters", "inputs", "artifacts"):
         assert key in payload

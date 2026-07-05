@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
+
+import pytest
 
 from fisheye.registry.db import Registry
 from fisheye.registry import model_resolution as mod
@@ -22,6 +25,73 @@ def _target() -> mod.TargetProfile:
         genotype="Casper_HHMI",
         dpf_at_acquisition=12,
     )
+
+
+def test_verify_deployment_artifact_content_reports_match(tmp_path: Path) -> None:
+    engine_path = tmp_path / "detect.engine"
+    engine_bytes = b"engine bytes"
+    engine_path.write_bytes(engine_bytes)
+    expected = hashlib.sha256(engine_bytes).hexdigest()
+
+    result = mod.verify_deployment_artifact_content(
+        {
+            "engine_path": str(engine_path),
+            "engine_sha256": expected,
+        }
+    )
+
+    assert result.status == "match"
+    assert result.role == "deployment_engine"
+    assert result.expected_sha256 == expected
+    assert result.actual_sha256 == expected
+    assert result.fingerprint_scheme == "content_v1"
+    assert result.to_dict()["status"] == "match"
+
+
+def test_verify_deployment_artifact_content_reports_mismatch(tmp_path: Path) -> None:
+    engine_path = tmp_path / "detect.engine"
+    engine_path.write_bytes(b"actual")
+    expected = hashlib.sha256(b"expected").hexdigest()
+
+    with pytest.warns(RuntimeWarning, match="does not match registry hash"):
+        result = mod.verify_deployment_artifact_content(
+            {
+                "engine_path": str(engine_path),
+                "engine_sha256": expected,
+            }
+        )
+
+    assert result.status == "mismatch"
+    assert result.mismatch is True
+    assert result.expected_sha256 == expected
+    assert result.actual_sha256 == hashlib.sha256(b"actual").hexdigest()
+
+
+def test_verify_deployment_artifact_content_reports_missing_hash(tmp_path: Path) -> None:
+    engine_path = tmp_path / "detect.engine"
+    engine_path.write_bytes(b"engine")
+
+    result = mod.verify_deployment_artifact_content({"engine_path": str(engine_path)})
+
+    assert result.status == "missing"
+    assert result.path == str(engine_path)
+    assert result.error == "missing engine_sha256"
+
+
+def test_verify_deployment_artifact_content_reports_missing_file(tmp_path: Path) -> None:
+    engine_path = tmp_path / "missing.engine"
+
+    with pytest.warns(RuntimeWarning, match="Could not fingerprint"):
+        result = mod.verify_deployment_artifact_content(
+            {
+                "engine_path": str(engine_path),
+                "engine_sha256": hashlib.sha256(b"engine").hexdigest(),
+            }
+        )
+
+    assert result.status == "missing"
+    assert result.path == str(engine_path)
+    assert result.error is not None
 
 
 def _seed_source_recording_with_legacy_provenance(registry: Registry, *, root: Path) -> None:

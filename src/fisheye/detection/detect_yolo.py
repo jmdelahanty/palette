@@ -52,7 +52,13 @@ from fisheye.shared.instance_keys import (
     resolve_recording_identity,
 )
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
-from fisheye.shared.run_provenance import CLI_RUN_PROVENANCE_ATTR, RUN_PROVENANCE_ATTR, build_run_provenance
+from fisheye.shared.artifact_fingerprint import fingerprint_artifact
+from fisheye.shared.run_provenance import (
+    CLI_RUN_PROVENANCE_ATTR,
+    RUN_PROVENANCE_ATTR,
+    append_input_artifacts,
+    build_run_provenance,
+)
 from fisheye.shared.zarr.schema import get_run_group
 from fisheye.shared.zarr.chunk_profiles import create_geometry_preload_array
 from fisheye.shared.zarr_run_completion import (
@@ -625,6 +631,7 @@ def detect_yolo(
     write_raw_video_metadata: bool = False,
     overwrite_raw_video_metadata: bool = False,
     run_name: Optional[str] = None,
+    model_sha256: Optional[str] = None,
     cli_provenance: Optional[Mapping[str, Any]] = None,
     run_provenance: Optional[Mapping[str, Any]] = None,
 ) -> str:
@@ -637,6 +644,7 @@ def detect_yolo(
     Args:
         video_path: Path to input video file
         model_path: Path to trained YOLO model (.pt) - optional if in config
+        model_sha256: Optional expected SHA-256 for the model path from registry metadata
         output_zarr: Path for output zarr - optional, will auto-generate if None
         config_path: Path to YAML config file (optional)
         conf_threshold: Confidence threshold (overrides config)
@@ -769,6 +777,11 @@ def detect_yolo(
         raise FileNotFoundError(f"Video not found: {video_path}")
     if not model_path.exists():
         raise FileNotFoundError(f"Model not found: {model_path}")
+    model_artifact = fingerprint_artifact(
+        model_path,
+        role="detect_model",
+        registry_hash=model_sha256,
+    )
     console.print(f"Video: [cyan]{video_path}[/cyan]")
     console.print(f"Model: [cyan]{model_path}[/cyan]")
     console.print(f"Output: [cyan]{output_zarr}[/cyan]")
@@ -1796,6 +1809,7 @@ def detect_yolo(
             input_run_ids={},
             cwd=Path.cwd(),
         )
+    effective_run_provenance = append_input_artifacts(effective_run_provenance, [model_artifact])
     if effective_run_provenance is not None:
         detect_group.attrs[RUN_PROVENANCE_ATTR] = dict(effective_run_provenance)
         detect_group.attrs[CLI_RUN_PROVENANCE_ATTR] = dict(effective_run_provenance)

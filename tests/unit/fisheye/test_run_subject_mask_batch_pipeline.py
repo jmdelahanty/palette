@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import warnings
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -91,6 +91,60 @@ def test_subject_mask_publish_provenance_is_valid_for_subject_and_refined_runs(t
         "assignment_keypoints": "keypoints_run",
         "subject_mask": "subject_run",
     }
+
+
+def test_subject_mask_publish_preserves_staged_input_artifacts(tmp_path: Path) -> None:
+    plan = mod.ArchivePlan(
+        zarr_path=str(tmp_path / "recording_analysis.zarr"),
+        subject_run="subject_run",
+        refined_run="refined_run",
+        crop_run="crop_run",
+        assignment_keypoint_group="keypoints_runs",
+        assignment_keypoint_run="keypoints_run",
+        has_subject_runs=False,
+        has_refined_subject_runs=False,
+        run_inference=True,
+        run_finalization=False,
+    )
+    ctx = mod.OutputStagingContext(
+        source_zarr_path=tmp_path / "recording_analysis.zarr",
+        staged_zarr_path=tmp_path / "scratch" / "recording_analysis.zarr",
+        staging_root=tmp_path / "scratch",
+    )
+    run_group = SimpleNamespace(
+        attrs={
+            "run_provenance": {
+                "input_artifacts": [
+                    {
+                        "role": "sam3_checkpoint",
+                        "path": "/tmp/sam3.pt",
+                        "fingerprint_scheme": "content_v1",
+                        "sha256": "a" * 64,
+                    }
+                ]
+            }
+        }
+    )
+
+    provenance = mod._subject_mask_publish_provenance(  # noqa: SLF001
+        ctx=ctx,
+        plan=plan,
+        publish_payload={"schema": "test"},
+        refined=False,
+    )
+    provenance = mod.append_input_artifacts(  # noqa: SLF001
+        provenance,
+        mod._existing_run_input_artifacts(run_group),  # noqa: SLF001
+    )
+
+    assert provenance["input_artifacts"] == [
+        {
+            "role": "sam3_checkpoint",
+            "path": "/tmp/sam3.pt",
+            "fingerprint_scheme": "content_v1",
+            "sha256": "a" * 64,
+        }
+    ]
 
 
 def test_consolidate_metadata_quietly_suppresses_expected_zarr_noise(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from fisheye.shared.run_provenance import append_input_artifacts
 from fisheye.shared.run_provenance import build_run_provenance
 from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.run_provenance import build_writer_run_provenance
@@ -25,6 +26,13 @@ def _valid_payload(**overrides: object) -> dict[str, object]:
 
 def test_run_provenance_validator_requires_only_git_sha_and_config_hash_values() -> None:
     result = validate_run_provenance(_valid_payload(command="", fisheye_version=None))
+
+    assert result.valid is True
+    assert result.errors == ()
+
+
+def test_run_provenance_validator_does_not_require_input_artifacts() -> None:
+    result = validate_run_provenance(_valid_payload())
 
     assert result.valid is True
     assert result.errors == ()
@@ -72,6 +80,7 @@ def test_build_run_provenance_hashes_normalized_params_without_system_context() 
     assert left["config_hash"] == right["config_hash"]
     assert left["config_hash"] == sha256_payload({"a": 1, "path": "/tmp/a"})
     assert left["input_run_ids"] == {"detect": "detect_001"}
+    assert left["input_artifacts"] == []
     assert "system" not in left
 
 
@@ -85,8 +94,114 @@ def test_build_writer_run_provenance_defaults_to_minimal_valid_payload() -> None
     assert payload["command"] == "unit-writer"
     assert payload["config_hash"] == sha256_payload({"a": 1, "b": 2})
     assert payload["input_run_ids"] == {"detect": "detect_001"}
+    assert payload["input_artifacts"] == []
     assert "system" not in payload
     assert validate_run_provenance(payload).valid is True
+
+
+def test_build_run_provenance_accepts_input_artifacts() -> None:
+    payload = build_run_provenance(
+        command="unit",
+        params={},
+        input_artifacts=[
+            {
+                "role": "detect_model",
+                "path": Path("/tmp/model.pt"),
+                "fingerprint_scheme": "content_v1",
+                "sha256": "a" * 64,
+            }
+        ],
+        include_system_context=False,
+    )
+
+    assert payload["input_artifacts"] == [
+        {
+            "role": "detect_model",
+            "path": "/tmp/model.pt",
+            "fingerprint_scheme": "content_v1",
+            "sha256": "a" * 64,
+        }
+    ]
+    assert validate_run_provenance(payload).valid is True
+
+
+def test_append_input_artifacts_merges_into_caller_supplied_provenance() -> None:
+    provenance = _valid_payload(
+        params={"threshold": 0.5},
+        input_artifacts=[
+            {
+                "role": "detect_model",
+                "path": "/tmp/old.pt",
+                "fingerprint_scheme": "content_v1",
+                "sha256": "a" * 64,
+            }
+        ],
+    )
+
+    merged = append_input_artifacts(
+        provenance,
+        [
+            {
+                "role": "keypoint_model",
+                "path": Path("/tmp/pose.pt"),
+                "fingerprint_scheme": "content_v1",
+                "sha256": "b" * 64,
+            }
+        ],
+    )
+
+    assert merged is not provenance
+    assert merged["params"] == {"threshold": 0.5}
+    assert merged["input_artifacts"] == [
+        {
+            "role": "detect_model",
+            "path": "/tmp/old.pt",
+            "fingerprint_scheme": "content_v1",
+            "sha256": "a" * 64,
+        },
+        {
+            "role": "keypoint_model",
+            "path": "/tmp/pose.pt",
+            "fingerprint_scheme": "content_v1",
+            "sha256": "b" * 64,
+        },
+    ]
+
+
+def test_append_input_artifacts_replaces_duplicate_role_path() -> None:
+    provenance = _valid_payload(
+        input_artifacts=[
+            {
+                "role": "detect_model",
+                "path": "/tmp/model.pt",
+                "fingerprint_scheme": "content_v1",
+                "sha256": "a" * 64,
+            }
+        ],
+    )
+
+    merged = append_input_artifacts(
+        provenance,
+        [
+            {
+                "role": "detect_model",
+                "path": "/tmp/model.pt",
+                "fingerprint_scheme": "content_v1",
+                "sha256": "c" * 64,
+                "source": "computed",
+            }
+        ],
+    )
+
+    assert merged["input_artifacts"] == [
+        {
+            "role": "detect_model",
+            "path": "/tmp/model.pt",
+            "fingerprint_scheme": "content_v1",
+            "sha256": "c" * 64,
+            "source": "computed",
+        }
+    ]
 
 
 def test_build_run_provenance_from_stage_record_reuses_parameters_and_inputs() -> None:

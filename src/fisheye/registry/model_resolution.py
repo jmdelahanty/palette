@@ -5,9 +5,10 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 from fisheye.registry.db import Registry
+from fisheye.shared.artifact_fingerprint import fingerprint_artifact
 from fisheye.shared.batch_logging import utc_now
 
 
@@ -71,6 +72,93 @@ class Candidate:
     weighted_score: float
     feature_match_counts: dict[str, int]
     feature_weights_used: float
+    model_sha256: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class DeploymentArtifactVerification:
+    status: str
+    role: str
+    path: Optional[str]
+    expected_sha256: Optional[str]
+    actual_sha256: Optional[str]
+    fingerprint_scheme: Optional[str]
+    source: Optional[str]
+    error: Optional[str] = None
+    mismatch: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def verify_deployment_artifact_content(
+    row: Mapping[str, Any],
+    *,
+    artifact: str = "engine",
+    path: str | Path | None = None,
+    role: str | None = None,
+) -> DeploymentArtifactVerification:
+    """Verify a registered deployment artifact path against its recorded hash.
+
+    The registry currently stores content hashes for deployment artifacts but not
+    first-class size/mtime metadata. This helper therefore re-hashes the on-disk
+    file unless a local sidecar cache is valid, and reports the result without
+    mutating registry state.
+    """
+
+    artifact_key = str(artifact).strip() or "engine"
+    path_key = f"{artifact_key}_path"
+    hash_key = f"{artifact_key}_sha256"
+    path_value = path if path is not None else row.get(path_key)
+    expected = _norm_text(row.get(hash_key))
+    role_value = role or f"deployment_{artifact_key}"
+
+    if path_value is None or str(path_value).strip() == "":
+        return DeploymentArtifactVerification(
+            status="missing",
+            role=role_value,
+            path=None,
+            expected_sha256=expected,
+            actual_sha256=None,
+            fingerprint_scheme=None,
+            source=None,
+            error=f"missing {path_key}",
+        )
+    path_obj = Path(path_value).expanduser()
+    if expected is None:
+        return DeploymentArtifactVerification(
+            status="missing",
+            role=role_value,
+            path=str(path_obj),
+            expected_sha256=None,
+            actual_sha256=None,
+            fingerprint_scheme=None,
+            source=None,
+            error=f"missing {hash_key}",
+        )
+
+    fingerprint = fingerprint_artifact(path_obj, role=role_value, registry_hash=expected)
+    actual = _norm_text(fingerprint.get("sha256"))
+    error = _norm_text(fingerprint.get("error"))
+    mismatch = bool(fingerprint.get("mismatch"))
+    if error is not None or actual is None:
+        status = "missing"
+    elif mismatch or actual.lower() != expected.lower():
+        status = "mismatch"
+        mismatch = True
+    else:
+        status = "match"
+    return DeploymentArtifactVerification(
+        status=status,
+        role=role_value,
+        path=str(path_obj),
+        expected_sha256=expected,
+        actual_sha256=actual,
+        fingerprint_scheme=_norm_text(fingerprint.get("fingerprint_scheme")),
+        source=_norm_text(fingerprint.get("source")),
+        error=error,
+        mismatch=mismatch,
+    )
 
 
 def _normalize_task_type(value: Any) -> Optional[str]:
@@ -332,6 +420,7 @@ def load_candidates(
         "  tr.task_type AS run_task_type,",
         "  ts.task_type AS set_task_type,",
         "  COALESCE(tm.model_path, tr.model_path) AS model_path,",
+        "  COALESCE(tm.model_sha256, tr.model_sha256) AS model_sha256,",
         "  COALESCE(tm.status, tr.status) AS status,",
         "  tr.created_utc AS created_utc,",
         "  ts.dataset_ids_json AS dataset_ids_json",
@@ -375,6 +464,7 @@ def load_candidates(
                 run_id=run_id,
                 set_id=set_id,
                 model_path=model_path,
+                model_sha256=_norm_text(row["model_sha256"]),
                 created_utc=_norm_text(row["created_utc"]),
                 status=_norm_text(row["status"]),
                 dataset_count=len(source_rows),

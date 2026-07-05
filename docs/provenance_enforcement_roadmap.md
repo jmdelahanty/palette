@@ -80,9 +80,15 @@ cluster runs populate it going forward.
 
 ### Slice 3 (lower urgency): content hashes
 
+Status: landed in `agent/provenance-content-hashes`.
+
 Move artifact identity from `stat_v1` (path+size+mtime) toward content hashes, or
-explicitly mark weak fingerprints as weak. mtime works day-to-day; the risk is subtle
-(a rewritten-in-place file reads as unchanged).
+explicitly mark weak fingerprints as weak. The run-provenance payload now carries
+non-gating `input_artifacts` entries for model/checkpoint inputs (`content_v1`
+file hashes and `manifest_v1` runtime manifests where exact checkpoint files are
+not exposed), and deployment artifacts have a read-only verification helper for
+comparing registry hashes to on-disk files. This remains a recorded audit field;
+the epoch-2 finalization gate still blocks only on `git_sha` and `config_hash`.
 
 ### Slice 4 (feature, not enforcement): `subject_mask_data_profile`
 

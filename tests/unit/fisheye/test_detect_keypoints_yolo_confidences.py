@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from types import SimpleNamespace
 
 import numpy as np
@@ -14,6 +15,7 @@ from fisheye.detection.detect_keypoints_yolo import (
     _prepare_model_inputs,
     detect_keypoints_yolo,
 )
+from fisheye.shared.run_provenance import RUN_PROVENANCE_ATTR, build_writer_run_provenance
 from fisheye.shared.model_input_transform import resolve_model_input_transform
 
 
@@ -194,6 +196,10 @@ def test_detect_keypoints_yolo_sizes_n_keypoints_to_run_frame_counts(monkeypatch
     run_name = detect_keypoints_yolo(
         zarr_path,
         model_path,
+        run_provenance=build_writer_run_provenance(
+            command="unit-keypoint-writer",
+            params={"model_path": model_path},
+        ),
         run_name="keypoints_001",
         pose_schema="traditional_v3",
         batch_size=8,
@@ -209,6 +215,18 @@ def test_detect_keypoints_yolo_sizes_n_keypoints_to_run_frame_counts(monkeypatch
     assert actual[10] == 10
     assert actual[19] == 0
     assert int(np.count_nonzero(actual)) == 2
+    run_provenance = run.attrs[RUN_PROVENANCE_ATTR]
+    assert run_provenance["input_artifacts"] == [
+        {
+            "role": "keypoint_model",
+            "path": str(model_path.resolve()),
+            "fingerprint_scheme": "content_v1",
+            "sha256": hashlib.sha256(b"fake").hexdigest(),
+            "size_bytes": 4,
+            "mtime_ns": model_path.stat().st_mtime_ns,
+            "source": "computed",
+        }
+    ]
 
 
 def test_extract_pose_bbox_xyxy_roi_clips_to_roi_bounds() -> None:

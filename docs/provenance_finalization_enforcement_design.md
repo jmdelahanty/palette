@@ -258,7 +258,14 @@ field into the blocking tier "for completeness" and silently breaking the local 
 |---|---|---|
 | **Value-required (blocks epoch-2 finalization)** | `git_sha`, `config_hash` | The reproducibility identity — *which code, which params*. Missing or empty → refuse to finalize. Keep this set to exactly these two. |
 | **Structurally-required (key present, value may be empty)** | `params`, `input_run_ids`, `command`, `fisheye_version` | The key must exist so the record is well-formed, but an empty/`None` value does not block (guards the local path and editable installs). Promoting any of these to *value-required* is a deliberate, separate decision, not a default. |
-| **Captured, never blocks (execution context)** | `git_dirty` (+unavailable reasons), `git_short_sha`, **job/submission identifiers**, **system metadata** | Recorded whenever available; absence never blocks. Traceability and forensics, not identity. |
+| **Captured, never blocks (execution context and artifacts)** | `git_dirty` (+unavailable reasons), `git_short_sha`, **job/submission identifiers**, **system metadata**, `input_artifacts` | Recorded whenever available; absence never blocks. Traceability and forensics, not identity. |
+
+**Input artifacts (captured).** Model/checkpoint inputs are recorded in
+`run_provenance.input_artifacts` when the writer can identify them. File artifacts use
+`content_v1` SHA-256 records; runtime-only identities such as a SAM3 checkout with
+builder-resolved weights can use an honestly labeled `manifest_v1` runtime manifest
+instead of pretending to be checkpoint content. These entries are useful for audit and
+re-execution, but they are deliberately non-gating in epoch 2.
 
 **Job/submission identifiers (captured).** Under LSF the runner reads `LSB_JOBID` and
 `LSB_JOBINDEX` from the environment (the index ties a specific recording's run to a

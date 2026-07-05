@@ -200,6 +200,7 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
         run_id="pose_run_123",
         set_id="pose_set_123",
         model_path="/tmp/pose_model.pt",
+        model_sha256="e" * 64,
         created_utc="2026-02-09T00:00:00+00:00",
         status="success",
         dataset_count=4,
@@ -275,6 +276,7 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
     assert isinstance(detect_kwargs, dict)
     assert detect_kwargs.get("zarr_path") == str(output_path.resolve())
     assert detect_kwargs.get("model_path") == "/tmp/pose_model.pt"
+    assert detect_kwargs.get("model_sha256") == "e" * 64
     assert detect_kwargs.get("pose_schema") == "traditional_v2"
     assert detect_kwargs.get("device") == "cpu"
     assert detect_kwargs.get("roi_cache_policy") == "always"
@@ -305,6 +307,9 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
     payload = calls.get("write_payload")
     assert isinstance(payload, dict)
     assert payload.get("task") == "pose"
+    selected = payload.get("selected")
+    assert isinstance(selected, dict)
+    assert selected.get("model_sha256") == "e" * 64
     parameters = payload.get("parameters")
     assert isinstance(parameters, dict)
     assert parameters.get("pose_schema") == "traditional_v2"

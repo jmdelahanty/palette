@@ -147,11 +147,13 @@ def build_run_provenance(
     command: str,
     params: Mapping[str, Any],
     input_run_ids: Mapping[str, Any] | None = None,
+    input_artifacts: Sequence[Mapping[str, Any]] | None = None,
     cwd: Path | None = None,
     include_system_context: bool = True,
 ) -> dict[str, Any]:
     normalized_params = json_ready(dict(params))
     normalized_input_run_ids = json_ready(dict(input_run_ids or {}))
+    normalized_input_artifacts = json_ready(list(input_artifacts or []))
     provenance = {
         "schema": RUN_PROVENANCE_SCHEMA,
         **git_identity(cwd=cwd),
@@ -159,6 +161,7 @@ def build_run_provenance(
         "config_hash": sha256_payload(normalized_params),
         "params": normalized_params,
         "input_run_ids": normalized_input_run_ids,
+        "input_artifacts": normalized_input_artifacts,
         "command": str(command),
     }
     scheduler = scheduler_context()
@@ -174,6 +177,7 @@ def build_writer_run_provenance(
     command: str,
     params: Mapping[str, Any] | None = None,
     input_run_ids: Mapping[str, Any] | None = None,
+    input_artifacts: Sequence[Mapping[str, Any]] | None = None,
     cwd: Path | None = None,
     include_system_context: bool = False,
 ) -> dict[str, Any]:
@@ -189,6 +193,7 @@ def build_writer_run_provenance(
         command=command,
         params=params or {},
         input_run_ids=input_run_ids or {},
+        input_artifacts=input_artifacts or [],
         cwd=cwd,
         include_system_context=include_system_context,
     )
@@ -222,6 +227,56 @@ def normalize_run_provenance(payload: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(normalized, dict):
         return {}
     normalized.setdefault("schema", RUN_PROVENANCE_SCHEMA)
+    return normalized
+
+
+def _artifact_dedup_key(artifact: Any) -> tuple[str, str] | None:
+    if not isinstance(artifact, Mapping):
+        return None
+    role = artifact.get("role")
+    path = artifact.get("path")
+    if role is None or path is None:
+        return None
+    return str(role), str(path)
+
+
+def append_input_artifacts(
+    provenance: Mapping[str, Any],
+    artifacts: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Return provenance with ``artifacts`` merged into ``input_artifacts``.
+
+    Existing provenance may be supplied by CLI/registry wrappers before a writer
+    resolves its model files. Writers use this helper at model-load time so the
+    model fingerprints are recorded regardless of who built the original
+    provenance payload. Artifacts deduplicate on ``(role, path)``; later entries
+    replace earlier entries for the same key.
+    """
+
+    normalized = normalize_run_provenance(provenance)
+    existing_raw = normalized.get("input_artifacts")
+    existing = existing_raw if isinstance(existing_raw, list) else []
+    merged: list[Any] = []
+    indices: dict[tuple[str, str], int] = {}
+
+    for item in existing:
+        normalized_item = json_ready(item)
+        key = _artifact_dedup_key(normalized_item)
+        if key is not None:
+            indices[key] = len(merged)
+        merged.append(normalized_item)
+
+    for item in artifacts:
+        normalized_item = json_ready(item)
+        key = _artifact_dedup_key(normalized_item)
+        if key is not None and key in indices:
+            merged[indices[key]] = normalized_item
+        else:
+            if key is not None:
+                indices[key] = len(merged)
+            merged.append(normalized_item)
+
+    normalized["input_artifacts"] = merged
     return normalized
 
 

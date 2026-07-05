@@ -29,7 +29,14 @@ from fisheye.shared.provenance_attrs import (
     build_source_roi_pixel_attrs,
 )
 from fisheye.shared.row_lineage import copy_row_lineage_arrays, write_direct_source_crop_row_ids
-from fisheye.shared.run_provenance import CLI_RUN_PROVENANCE_ATTR, RUN_PROVENANCE_ATTR, build_run_provenance
+from fisheye.shared.artifact_fingerprint import fingerprint_artifact, fingerprint_directory_manifest
+from fisheye.shared.run_provenance import (
+    CLI_RUN_PROVENANCE_ATTR,
+    RUN_PROVENANCE_ATTR,
+    append_input_artifacts,
+    build_run_provenance,
+    git_identity,
+)
 from fisheye.shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
@@ -1540,6 +1547,60 @@ def _load_sam3_builder(
         raise
 
 
+def _sam3_model_manifest_dir(root: Path) -> Path | None:
+    candidates = (
+        root / "sam3" / "model",
+        root / "model",
+    )
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _sam3_input_artifacts(
+    *,
+    sam3_root: str | Path | None,
+    checkpoint_path: str | Path | None,
+) -> list[dict[str, Any]]:
+    artifacts: list[dict[str, Any]] = []
+    root_path = Path(sam3_root).expanduser() if sam3_root is not None else None
+    if root_path is not None:
+        try:
+            root_path = root_path.resolve()
+        except OSError:
+            pass
+        manifest_dir = _sam3_model_manifest_dir(root_path)
+        if manifest_dir is not None:
+            runtime = fingerprint_directory_manifest(
+                manifest_dir,
+                role="sam3_runtime",
+                identity_kind="runtime_manifest",
+            )
+        else:
+            runtime = {
+                "role": "sam3_runtime",
+                "path": str(root_path),
+                "fingerprint_scheme": None,
+                "identity_kind": "runtime_manifest",
+                "error": "sam3 model directory not found",
+            }
+        runtime["sam3_root"] = str(root_path)
+        runtime["sam3_git"] = git_identity(cwd=root_path)
+        artifacts.append(runtime)
+
+    if checkpoint_path is not None:
+        checkpoint = fingerprint_artifact(
+            checkpoint_path,
+            role="sam3_checkpoint",
+        )
+        checkpoint["identity_kind"] = "checkpoint_content"
+        artifacts.append(checkpoint)
+    elif artifacts:
+        artifacts[0]["checkpoint_identity"] = "not_recorded_hf_or_builder_resolved"
+    return artifacts
+
+
 def _resolve_runtime_device(build_model_fn, explicit_device: str | None) -> str:
     if explicit_device:
         return explicit_device
@@ -1949,6 +2010,10 @@ def write_sam_subject_mask_run(
             },
             cwd=Path.cwd(),
         )
+    effective_run_provenance = append_input_artifacts(
+        effective_run_provenance,
+        _sam3_input_artifacts(sam3_root=sam3_root, checkpoint_path=checkpoint_path),
+    )
     run_group.attrs[RUN_PROVENANCE_ATTR] = dict(effective_run_provenance)
     run_group.attrs[CLI_RUN_PROVENANCE_ATTR] = dict(effective_run_provenance)
     mark_run_complete(

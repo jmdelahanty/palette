@@ -56,10 +56,12 @@ been demonstrated; no offline TRT adoption is planned.
 These inherit the repo's silent-wrong-data and provenance discipline; none are done yet:
 
 1. **Engine identity in provenance.** A `.engine` is a derived artifact pinned to GPU
-   architecture + TensorRT version. It should be registered with a content hash and
-   its build inputs (source `.pt` hash, ONNX opset, TRT version, GPU arch, precision
-   flags). Today fingerprints are `stat_v1` and the TRT version field is broken (above).
-   Same gap class as the SAM3-checkpoint canary in the provenance roadmap.
+   architecture + TensorRT version. Registry deployment-artifact rows already record
+   content hashes, and Palette now has a read-only helper to verify those hashes against
+   the on-disk engine file. Realtime-side enforcement is still external to this repo: the
+   acquisition library must check the engine it actually loads against the registered
+   content hash and build context (source `.pt` hash, ONNX opset, TRT version, GPU arch,
+   precision flags).
 2. **Numeric parity.** FP16/INT8 engines shift outputs relative to the `.pt`. Realtime
    detections that feed closed-loop behavior AND later analysis must be comparable to
    the offline path — `docs/diagnostics/realtime_offline_detection_comparison_design_2026-06-17.md`
