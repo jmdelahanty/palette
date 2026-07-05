@@ -24,7 +24,7 @@ from fisheye.utils.batch_registry_model_resolution import ResolvedModel
 from fisheye.utils.batch_registry_model_resolution import (
     resolve_registry_models_for_plans as resolve_shared_registry_models_for_plans,
 )
-from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_profile, _resolve_recording_id
+from fisheye.registry.model_resolution import load_candidates, load_target_profile, resolve_recording_id
 from fisheye.utils.run_detect_with_registry_model import DetectRegistryResult
 from fisheye.utils.run_detect_with_registry_model import _build_payload_args as _build_detect_payload_args
 from fisheye.utils.run_detect_with_registry_model import _pick_best_candidate as _pick_detect_candidate
@@ -487,13 +487,13 @@ def _resolve_registry_model_for_plan(
 
     registry = Registry(registry_path)
     try:
-        recording_id = _resolve_recording_id(
+        recording_id = resolve_recording_id(
             registry,
             recording_id=context.recording_id,
             recording_dir=context.recording_dir,
         )
-        target = _load_target_profile(registry, recording_id)
-        candidates = _load_candidates(
+        target = load_target_profile(registry, recording_id)
+        candidates = load_candidates(
             registry,
             target=target,
             task="detect",

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fisheye.registry.db import Registry
-from fisheye.utils import resolve_detect_model as mod
+from fisheye.registry import model_resolution as mod
 
 
 def _target() -> mod.TargetProfile:
@@ -210,7 +210,7 @@ def test_resolve_recording_id_falls_back_to_recording_dir_for_alias(tmp_path: Pa
         )
         registry.conn.commit()
 
-        resolved = mod._resolve_recording_id(  # noqa: SLF001
+        resolved = mod.resolve_recording_id(  # noqa: SLF001
             registry,
             recording_id="2026-06-23T16-01-09Z_arena_2_RedScare",
             recording_dir=rec_dir,
@@ -225,7 +225,7 @@ def test_load_target_profile_prefers_dataset_context_current(tmp_path: Path) -> 
     registry = Registry(tmp_path / "registry.sqlite")
     try:
         _seed_source_recording_with_legacy_provenance(registry, root=tmp_path)
-        profile = mod._load_target_profile(registry, "recording_ctx")  # noqa: SLF001
+        profile = mod.load_target_profile(registry, "recording_ctx")  # noqa: SLF001
     finally:
         registry.close()
 

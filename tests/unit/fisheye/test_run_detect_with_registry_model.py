@@ -137,9 +137,9 @@ def _setup_resolution_mocks(monkeypatch: pytest.MonkeyPatch) -> mod.Candidate:
             return
 
     monkeypatch.setattr(mod, "Registry", _FakeRegistry)
-    monkeypatch.setattr(mod, "_resolve_recording_id", lambda *_args, **_kwargs: "rec_001")
-    monkeypatch.setattr(mod, "_load_target_profile", lambda *_args, **_kwargs: target)
-    monkeypatch.setattr(mod, "_load_candidates", lambda *_args, **_kwargs: [best])
+    monkeypatch.setattr(mod, "resolve_recording_id", lambda *_args, **_kwargs: "rec_001")
+    monkeypatch.setattr(mod, "load_target_profile", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(mod, "load_candidates", lambda *_args, **_kwargs: [best])
     return best
 
 
@@ -256,8 +256,8 @@ def test_main_runs_detect_resolution_and_writes_provenance(
     )
 
     monkeypatch.setattr(mod, "Registry", _FakeRegistry)
-    monkeypatch.setattr(mod, "_resolve_recording_id", lambda *_args, **_kwargs: "rec_001")
-    monkeypatch.setattr(mod, "_load_target_profile", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(mod, "resolve_recording_id", lambda *_args, **_kwargs: "rec_001")
+    monkeypatch.setattr(mod, "load_target_profile", lambda *_args, **_kwargs: target)
 
     def _fake_load_candidates(
         _registry,
@@ -273,7 +273,7 @@ def test_main_runs_detect_resolution_and_writes_provenance(
         calls["resolver_include_non_success"] = include_non_success
         return [best]
 
-    monkeypatch.setattr(mod, "_load_candidates", _fake_load_candidates)
+    monkeypatch.setattr(mod, "load_candidates", _fake_load_candidates)
 
     def _fake_detect_yolo(**kwargs: object) -> str:
         calls["detect_kwargs"] = kwargs

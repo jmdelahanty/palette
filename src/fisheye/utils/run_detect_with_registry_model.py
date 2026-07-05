@@ -16,8 +16,7 @@ from fisheye.shared.run_provenance import build_run_provenance
 from fisheye.registry.stage_complete import emit_stage_completion
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
-from fisheye.utils.resolve_detect_model import Candidate, TargetProfile
-from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_profile, _resolve_recording_id
+from fisheye.registry.model_resolution import Candidate, TargetProfile, load_candidates, load_target_profile, resolve_recording_id
 
 _DETECT_STATUS_SOURCE = "runtime_detect_with_registry_model"
 
@@ -393,13 +392,13 @@ def run_detect_with_registry_model(
         )
 
     try:
-        recording_id = _resolve_recording_id(
+        recording_id = resolve_recording_id(
             registry_db,
             recording_id=None,
             recording_dir=resolved_recording_dir,
         )
-        target = _load_target_profile(registry_db, recording_id)
-        candidates = _load_candidates(
+        target = load_target_profile(registry_db, recording_id)
+        candidates = load_candidates(
             registry_db,
             target=target,
             task="detect",
