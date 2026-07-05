@@ -28,6 +28,7 @@ from fisheye.cli.envelope import (
     json_ready,
 )
 from fisheye.registry.stage_catalog import STAGE_SPECS, StageSpec
+from fisheye.shared.recording import open_recording
 from fisheye.shared.stage_run_groups import stage_run_parent_paths
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.shared.zarr_run_completion import (
@@ -69,6 +70,12 @@ class StatusRequest:
 
 @dataclass(frozen=True)
 class PlanRequest:
+    recording: str | Path
+    registry: Path | None = None
+
+
+@dataclass(frozen=True)
+class ArtifactsRequest:
     recording: str | Path
     registry: Path | None = None
 
@@ -841,6 +848,22 @@ def build_plan_payload(dataset: DatasetRef, stages: Sequence[StageState]) -> dic
     return payload
 
 
+def build_artifacts_payload(dataset: DatasetRef, inventory: dict[str, Any]) -> dict[str, Any]:
+    payload = _base_envelope("palette artifacts", dataset, status="ok", reason_code="OK")
+    payload["inventory"] = inventory
+    payload["metrics"] = {
+        "run_family_count": inventory.get("run_family_count", 0),
+        "run_count": inventory.get("run_count", 0),
+        "visualization_artifact_count": inventory.get("visualization_artifact_count", 0),
+    }
+    payload["next_hints"] = [
+        "inventory covers only this resolved zarr store; "
+        "pass an explicit zarr path to inventory a sibling analysis/training store",
+    ]
+    payload["provenance"]["inventory_source"] = "fisheye.shared.recording_artifact_inventory"
+    return payload
+
+
 def _print_status_table(dataset: DatasetRef, stages: Sequence[StageState]) -> None:
     print(f"recording: {dataset.recording_id or '(unknown)'}")
     print(f"dataset_id: {dataset.dataset_id or '(explicit zarr path)'}")
@@ -883,6 +906,48 @@ def _print_plan_table(dataset: DatasetRef, payload: dict[str, Any]) -> None:
             print(
                 f"  - {item['stage']} invalidated_by={item['invalidated_by']} "
                 f"basis={item['basis']}"
+            )
+
+
+def _print_artifacts_summary(payload: Mapping[str, Any]) -> None:
+    inventory = payload.get("inventory")
+    if not isinstance(inventory, Mapping):
+        inventory = {}
+    print(f"recording: {payload.get('recording') or '(unknown)'}")
+    print(f"dataset_id: {payload.get('dataset_id') or '(explicit zarr path)'}")
+    print(f"zarr_path: {payload.get('zarr_path')}")
+    print(f"zarr_use: {inventory.get('zarr_use') or 'unknown'}")
+    print(f"run families: {inventory.get('run_family_count', 0)}")
+    print(f"runs: {inventory.get('run_count', 0)}")
+    print(f"visualization artifacts: {inventory.get('visualization_artifact_count', 0)}")
+    acquisition = inventory.get("acquisition_video_streams")
+    if isinstance(acquisition, Mapping) and acquisition.get("available"):
+        print(
+            "acquisition streams: "
+            f"{acquisition.get('stream_count', 0)} "
+            f"status={acquisition.get('inventory_status') or 'unknown'}"
+        )
+    for section_name, label in (
+        ("root_run_families", "root"),
+        ("analysis_run_families", "analysis"),
+        ("nested_report_families", "nested"),
+    ):
+        families = inventory.get(section_name)
+        if not isinstance(families, list) or not families:
+            continue
+        print(f"\n{label} run families:")
+        for family in families:
+            if not isinstance(family, Mapping):
+                continue
+            parent = family.get("parent") if isinstance(family.get("parent"), Mapping) else {}
+            resolved = (
+                parent.get("resolved_authoritative")
+                or parent.get("resolved_latest_complete")
+                or "-"
+            )
+            print(
+                f"  {family.get('run_parent_path')}: "
+                f"{family.get('run_count', 0)} runs, resolved={resolved}"
             )
 
 
@@ -934,11 +999,22 @@ def plan(request: PlanRequest) -> dict[str, Any]:
     return build_plan_payload(dataset, stages)
 
 
+def artifacts(request: ArtifactsRequest) -> dict[str, Any]:
+    recording_text = str(request.recording)
+    dataset, hints = _resolve_dataset(recording_text, request.registry)
+    if dataset is None:
+        return _blocked_payload("palette artifacts", recording_text, hints)
+    recording = open_recording(dataset.zarr_path, registry=request.registry)
+    return build_artifacts_payload(dataset, recording.artifact_inventory())
+
+
 def _run_readonly(command: str, recording: str, registry: Path | None, json_output: bool) -> int:
     if command == "status":
         payload = status(StatusRequest(recording=recording, registry=registry))
     elif command == "plan":
         payload = plan(PlanRequest(recording=recording, registry=registry))
+    elif command == "artifacts":
+        payload = artifacts(ArtifactsRequest(recording=recording, registry=registry))
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(f"unknown command: {command}")
     if payload.get("status") == "blocked" and payload.get("reason_code") == "RECORDING_NOT_FOUND":
@@ -950,6 +1026,8 @@ def _run_readonly(command: str, recording: str, registry: Path | None, json_outp
         return EXIT_BLOCKED
     if json_output:
         _print_json(payload)
+    elif command == "artifacts":
+        _print_artifacts_summary(payload)
     else:
         dataset, stages, _blocked = _resolve_dataset_and_stages(command, recording, registry)
         if dataset is not None:
@@ -2068,6 +2146,10 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("recording", help="Recording id, dataset id, zarr path, or directory containing one zarr.")
         sub.add_argument("--registry", type=Path, help="Path to palette_registry.sqlite.")
         sub.add_argument("--json", action="store_true", help="Print a JSON envelope.")
+    artifacts_sub = subparsers.add_parser("artifacts", help="Read-only per-recording artifact inventory.")
+    artifacts_sub.add_argument("recording", help="Recording id, dataset id, zarr path, or directory containing one zarr.")
+    artifacts_sub.add_argument("--registry", type=Path, help="Path to palette_registry.sqlite.")
+    artifacts_sub.add_argument("--json", action="store_true", help="Print a JSON envelope.")
     _add_detect_args(subparsers.add_parser("detect", help="Resolve and run detection through the registry model shim."))
     _add_crop_args(subparsers.add_parser("crop", help="Plan or run crop extraction through the live crop runner."))
     _add_keypoints_args(subparsers.add_parser("keypoints", help="Resolve and run keypoints through the registry model shim."))

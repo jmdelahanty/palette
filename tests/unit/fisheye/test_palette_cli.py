@@ -255,6 +255,79 @@ def test_status_resolves_recording_from_readonly_registry(tmp_path, capsys) -> N
     assert payload["zarr_path"] == str(zarr_path.resolve())
 
 
+def test_artifacts_verb_returns_inventory_envelope(tmp_path) -> None:
+    zarr_path = tmp_path / "inventory_training.zarr"
+    root = _open_tmp_store(zarr_path)
+    _create_raw(root)
+    _complete_run(root, "detect_runs", "detect_001")
+
+    payload = palette.artifacts(palette.ArtifactsRequest(recording=zarr_path))
+
+    assert payload["schema"] == palette.SCHEMA
+    assert payload["command"] == "palette artifacts"
+    assert payload["status"] == "ok"
+    assert payload["reason_code"] == "OK"
+    assert payload["zarr_path"] == str(zarr_path.resolve())
+    assert payload["run"] is None
+    assert payload["artifacts"] == [str(zarr_path.resolve())]
+    assert payload["provenance"]["read_only"] is True
+    assert payload["provenance"]["inventory_source"] == "fisheye.shared.recording_artifact_inventory"
+    assert payload["next_hints"]
+    inventory = payload["inventory"]
+    assert inventory["schema_id"] == "palette.recording_artifact_inventory.v1"
+    assert payload["metrics"]["run_count"] == inventory["run_count"] == 1
+    detect_family = next(
+        family for family in inventory["root_run_families"] if family["run_parent_path"] == "detect_runs"
+    )
+    assert detect_family["runs"][0]["name"] == "detect_001"
+
+
+def test_artifacts_verb_missing_recording_returns_blocked_envelope(tmp_path) -> None:
+    payload = palette.artifacts(
+        palette.ArtifactsRequest(recording="missing_rec", registry=tmp_path / "absent_registry.sqlite")
+    )
+
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == "RECORDING_NOT_FOUND"
+    assert payload["command"] == "palette artifacts"
+    assert payload["recording"] == "missing_rec"
+    assert payload["next_hints"]
+
+
+def test_artifacts_cli_json_round_trips_inventory(tmp_path, capsys) -> None:
+    zarr_path = tmp_path / "inventory_cli_training.zarr"
+    root = _open_tmp_store(zarr_path)
+    _create_raw(root)
+    _complete_run(root, "detect_runs", "detect_001")
+
+    rc, payload = _run_json(capsys, "artifacts", str(zarr_path))
+
+    assert rc == palette.EXIT_OK
+    assert payload["status"] == "ok"
+    assert payload["inventory"]["zarr_path"] == str(zarr_path.resolve())
+    assert payload["inventory"]["run_count"] == 1
+
+    direct = palette.artifacts(palette.ArtifactsRequest(recording=zarr_path))
+    direct["provenance"].pop("generated_at_utc")
+    payload["provenance"].pop("generated_at_utc")
+    assert payload == json.loads(json.dumps(direct, default=str))
+
+
+def test_artifacts_cli_text_summary(tmp_path, capsys) -> None:
+    zarr_path = tmp_path / "inventory_text_training.zarr"
+    root = _open_tmp_store(zarr_path)
+    _create_raw(root)
+    _complete_run(root, "detect_runs", "detect_001")
+
+    rc = palette.main(["artifacts", str(zarr_path)])
+
+    out = capsys.readouterr().out
+    assert rc == palette.EXIT_OK
+    assert f"zarr_path: {zarr_path.resolve()}" in out
+    assert "runs: 1" in out
+    assert "detect_runs: 1 runs, resolved=detect_001" in out
+
+
 def test_missing_recording_returns_blocked_exit_code(tmp_path, capsys) -> None:
     registry = tmp_path / "palette_registry.sqlite"
     conn = sqlite3.connect(registry)
