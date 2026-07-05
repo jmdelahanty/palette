@@ -7019,6 +7019,203 @@ def _recording_step_row_signature(row: Dict[str, object]) -> tuple[object, ...]:
     )
 
 
+def _apply_recording_step_status_rows(
+    registry: Registry,
+    *,
+    current_upserts: Sequence[Dict[str, object]],
+    history_inserts: Sequence[Dict[str, object]],
+) -> int:
+    """Persist recording-step-status upserts + append-only history rows.
+
+    Shared by the maintenance backfill and the per-dataset reconcile helper so
+    both paths use the identical write shape (ON CONFLICT upsert on the current
+    table + append to the history log). Returns the number of history rows.
+    """
+
+    recorded_utc = datetime.now(timezone.utc).isoformat()
+    with registry.conn:
+        for payload in current_upserts:
+            registry.conn.execute(
+                """
+                INSERT INTO recording_step_status (
+                    dataset_id,
+                    recording_id,
+                    step_name,
+                    status,
+                    run_name,
+                    method,
+                    coverage_pct,
+                    review_status_json,
+                    details_json,
+                    source,
+                    zarr_mtime_ns,
+                    updated_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(dataset_id, step_name) DO UPDATE SET
+                    recording_id=excluded.recording_id,
+                    status=excluded.status,
+                    run_name=excluded.run_name,
+                    method=excluded.method,
+                    coverage_pct=excluded.coverage_pct,
+                    review_status_json=excluded.review_status_json,
+                    details_json=excluded.details_json,
+                    source=excluded.source,
+                    zarr_mtime_ns=excluded.zarr_mtime_ns,
+                    updated_utc=excluded.updated_utc;
+                """,
+                (
+                    payload.get("dataset_id"),
+                    payload.get("recording_id"),
+                    payload.get("step_name"),
+                    payload.get("status"),
+                    payload.get("run_name"),
+                    payload.get("method"),
+                    payload.get("coverage_pct"),
+                    payload.get("review_status_json"),
+                    payload.get("details_json"),
+                    payload.get("source"),
+                    payload.get("zarr_mtime_ns"),
+                    payload.get("updated_utc"),
+                ),
+            )
+        for payload in history_inserts:
+            registry.conn.execute(
+                """
+                INSERT INTO recording_step_status_history (
+                    dataset_id,
+                    recording_id,
+                    step_name,
+                    status,
+                    run_name,
+                    method,
+                    coverage_pct,
+                    review_status_json,
+                    details_json,
+                    source,
+                    zarr_mtime_ns,
+                    updated_utc,
+                    recorded_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    payload.get("dataset_id"),
+                    payload.get("recording_id"),
+                    payload.get("step_name"),
+                    payload.get("status"),
+                    payload.get("run_name"),
+                    payload.get("method"),
+                    payload.get("coverage_pct"),
+                    payload.get("review_status_json"),
+                    payload.get("details_json"),
+                    payload.get("source"),
+                    payload.get("zarr_mtime_ns"),
+                    payload.get("updated_utc"),
+                    recorded_utc,
+                ),
+            )
+    return len(history_inserts)
+
+
+def reconcile_recording_step_status_for_dataset(
+    registry: Registry,
+    *,
+    dataset_id: str,
+    zarr_path: Path,
+    root: Optional[object] = None,
+    recording_id: Optional[str] = None,
+    zarr_use: Optional[str] = None,
+) -> Dict[str, int]:
+    """Refresh ``recording_step_status`` for a single dataset from its Zarr root.
+
+    Per-dataset analog of ``_backfill_recording_step_status``, invoked by
+    ``Registry.reconcile_dataset_from_root(..., include_step_status=True)``. Uses
+    the same builder + signature-diffed upsert/append-history semantics: a
+    history row is only appended when a step's status actually changes, so
+    re-running on a converged dataset inserts no new history rows (idempotent).
+    """
+
+    zarr = _import_zarr()
+    resolved_recording_id = recording_id if recording_id is not None else str(dataset_id)
+
+    try:
+        zarr_mtime_ns: Optional[int] = int(Path(zarr_path).stat().st_mtime_ns)
+    except Exception:
+        zarr_mtime_ns = None
+
+    source = "reconcile_recording_step_status"
+    summary: Dict[str, int] = {
+        "rows_evaluated": 0,
+        "rows_inserted": 0,
+        "rows_updated": 0,
+        "rows_skipped": 0,
+        "history_rows_inserted": 0,
+    }
+
+    try:
+        if root is None:
+            try:
+                root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+            except TypeError:
+                try:
+                    root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+                except TypeError:
+                    root = zarr.open_group(str(zarr_path), mode="r")
+        extracted_rows = _build_recording_step_rows_from_root(
+            root=root,
+            dataset_id=str(dataset_id),
+            recording_id=resolved_recording_id,
+            zarr_use=zarr_use,
+            zarr_mtime_ns=zarr_mtime_ns,
+            source=source,
+        )
+    except Exception as exc:
+        extracted_rows = _build_recording_step_error_rows(
+            dataset_id=str(dataset_id),
+            recording_id=resolved_recording_id,
+            zarr_mtime_ns=zarr_mtime_ns,
+            error_detail=str(exc),
+            source=source,
+        )
+
+    existing_rows = registry.conn.execute(
+        "SELECT * FROM recording_step_status WHERE dataset_id = ?;",
+        (str(dataset_id),),
+    ).fetchall()
+    existing_by_step: Dict[str, Dict[str, object]] = {
+        str(existing["step_name"]): {key: existing[key] for key in existing.keys()}
+        for existing in existing_rows
+        if existing["step_name"] is not None
+    }
+
+    current_upserts: List[Dict[str, object]] = []
+    history_inserts: List[Dict[str, object]] = []
+    for extracted in extracted_rows:
+        summary["rows_evaluated"] += 1
+        existing = existing_by_step.get(str(extracted["step_name"]))
+        if existing is None:
+            summary["rows_inserted"] += 1
+            current_upserts.append(extracted)
+            history_inserts.append(extracted)
+            continue
+        if _recording_step_row_signature(existing) == _recording_step_row_signature(extracted):
+            summary["rows_skipped"] += 1
+            continue
+        summary["rows_updated"] += 1
+        current_upserts.append(extracted)
+        history_inserts.append(extracted)
+
+    if current_upserts:
+        summary["history_rows_inserted"] = _apply_recording_step_status_rows(
+            registry,
+            current_upserts=current_upserts,
+            history_inserts=history_inserts,
+        )
+
+    return summary
+
+
 def _backfill_recording_step_status(
     registry: Registry,
     *,
@@ -7167,90 +7364,11 @@ def _backfill_recording_step_status(
                 history_inserts.append(extracted)
 
     if not dry_run and current_upserts:
-        recorded_utc = datetime.now(timezone.utc).isoformat()
-        with registry.conn:
-            for payload in current_upserts:
-                registry.conn.execute(
-                    """
-                    INSERT INTO recording_step_status (
-                        dataset_id,
-                        recording_id,
-                        step_name,
-                        status,
-                        run_name,
-                        method,
-                        coverage_pct,
-                        review_status_json,
-                        details_json,
-                        source,
-                        zarr_mtime_ns,
-                        updated_utc
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(dataset_id, step_name) DO UPDATE SET
-                        recording_id=excluded.recording_id,
-                        status=excluded.status,
-                        run_name=excluded.run_name,
-                        method=excluded.method,
-                        coverage_pct=excluded.coverage_pct,
-                        review_status_json=excluded.review_status_json,
-                        details_json=excluded.details_json,
-                        source=excluded.source,
-                        zarr_mtime_ns=excluded.zarr_mtime_ns,
-                        updated_utc=excluded.updated_utc;
-                    """,
-                    (
-                        payload.get("dataset_id"),
-                        payload.get("recording_id"),
-                        payload.get("step_name"),
-                        payload.get("status"),
-                        payload.get("run_name"),
-                        payload.get("method"),
-                        payload.get("coverage_pct"),
-                        payload.get("review_status_json"),
-                        payload.get("details_json"),
-                        payload.get("source"),
-                        payload.get("zarr_mtime_ns"),
-                        payload.get("updated_utc"),
-                    ),
-                )
-            for payload in history_inserts:
-                registry.conn.execute(
-                    """
-                    INSERT INTO recording_step_status_history (
-                        dataset_id,
-                        recording_id,
-                        step_name,
-                        status,
-                        run_name,
-                        method,
-                        coverage_pct,
-                        review_status_json,
-                        details_json,
-                        source,
-                        zarr_mtime_ns,
-                        updated_utc,
-                        recorded_utc
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                    """,
-                    (
-                        payload.get("dataset_id"),
-                        payload.get("recording_id"),
-                        payload.get("step_name"),
-                        payload.get("status"),
-                        payload.get("run_name"),
-                        payload.get("method"),
-                        payload.get("coverage_pct"),
-                        payload.get("review_status_json"),
-                        payload.get("details_json"),
-                        payload.get("source"),
-                        payload.get("zarr_mtime_ns"),
-                        payload.get("updated_utc"),
-                        recorded_utc,
-                    ),
-                )
-        summary["history_rows_inserted"] = len(history_inserts)
+        summary["history_rows_inserted"] = _apply_recording_step_status_rows(
+            registry,
+            current_upserts=current_upserts,
+            history_inserts=history_inserts,
+        )
 
     return summary
 
