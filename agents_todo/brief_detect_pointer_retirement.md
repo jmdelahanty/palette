@@ -1,9 +1,9 @@
 # Brief: retire the `detect_review_status_latest` writer surface
 
-**Status: HOLD — do not start until the utils Phase 2 `system.py` checkpoint and
-`metadata.py` move have merged to `sun`** (two files below overlap with that slice:
-`tune/detect_review.py` imports `utils.system`; `utils/migrate_refined_detect_sparse.py`
-imports `utils.metadata`). The commander will clear the hold.
+**Status: READY (hold cleared 2026-07-04, commander).** Both hold conditions merged to
+`sun`: the `system.py` checkpoint (3f1f1f6) and the `metadata.py` move (72dcd68).
+Verified: no model-resolver imports in the files below, so this slice is parallel-safe
+with utils Phase 2 items 4–5. Branch from `sun` at 72dcd68 or later.
 
 **From:** commander session, 2026-07-04
 **Read first:** `docs/diagnostics/refined_detect_pointer_census_2026-07-04.md` (lines
