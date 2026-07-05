@@ -8,6 +8,7 @@ import zarr
 from zarr.errors import ZarrUserWarning
 
 from fisheye.shared.plot_artifacts import write_png_visualization_artifact
+from fisheye.shared.recording import open_recording
 from fisheye.shared.recording_artifact_inventory import _group_names, build_recording_artifact_inventory
 from fisheye.shared.zarr_run_completion import COMPLETION_EPOCH_STRICT, mark_run_complete, require_runs_parent
 from fisheye.utils import recording_artifact_inventory as cli
@@ -154,6 +155,20 @@ def test_build_recording_artifact_inventory_lists_runs_visualizations_and_sideca
     assert acquisition["streams"][0]["stream_key"] == "crop"
     assert acquisition["streams"][0]["video_exists"] is True
     assert "recording_artifacts" in inventory["registry_projection_names"]["optional"]
+
+
+def test_recording_accessor_artifact_inventory_returns_schema_v1_dict(tmp_path: Path) -> None:
+    zarr_path = _make_inventory_zarr(tmp_path)
+
+    inventory = open_recording(zarr_path).artifact_inventory()
+
+    assert inventory["schema_id"] == "palette.recording_artifact_inventory.v1"
+    assert inventory["zarr_path"] == str(zarr_path.resolve())
+    assert inventory["zarr_use"] == "analysis"
+    assert inventory["run_family_count"] == 4
+    assert inventory["run_count"] == 4
+    assert inventory["visualization_artifact_count"] == 1
+    assert json.loads(json.dumps(inventory)) == inventory
 
 
 def test_recording_artifact_inventory_cli_emits_json(tmp_path: Path, capsys) -> None:
