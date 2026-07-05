@@ -421,3 +421,115 @@ def test_write_dense_curated_edit_payload_maps_payload_rows_back_to_storage_rows
     assert instances["manual_edit_flags"][:].tolist() == [True, False, False]
     assert instances["reason"][:].tolist() == ["manual_correction", "clean", "clean"]
     assert "bbox_norm_coords" not in refined
+
+
+def test_write_dense_curated_edit_payload_sparse_branch_threads_instance_keys(tmp_path, monkeypatch) -> None:
+    import zarr
+
+    from fisheye.shared.instance_keys import (
+        INSTANCE_KEY_CONTEXT_MANUAL_CURATION,
+        INSTANCE_KEY_ORIGIN_CODE_MAP,
+        mint_detection_instance_keys,
+        resolve_recording_identity,
+    )
+    from fisheye.shared.refined_detect_curation import write_curated_refined_detect_root
+
+    zarr_path = tmp_path / "rec.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.attrs["width"] = 200
+    root.attrs["height"] = 100
+    root.attrs["total_frames"] = 5
+
+    detect_parent = root.create_group("detect_runs")
+    detect_parent.attrs["latest"] = "detect_001"
+    detect = detect_parent.create_group("detect_001")
+    detect.create_array("frame_indices", data=np.asarray([1, 3], dtype=np.int32))
+    detect.create_array(
+        "bbox_norm_coords",
+        data=np.asarray([[0.5, 0.5, 0.2, 0.4], [0.25, 0.25, 0.1, 0.2]], dtype=np.float64),
+    )
+    detect.create_array("scores", data=np.asarray([0.9, 0.7], dtype=np.float32))
+    detect.create_array("class_ids", data=np.asarray([0, 0], dtype=np.int32))
+    detect.create_array("instance_key", data=np.asarray([111, 222], dtype=np.uint64))
+
+    refined_parent = root.create_group("refined_detect_runs")
+    refined_parent.attrs["latest"] = "refined_detect_001"
+    refined = refined_parent.create_group("refined_detect_001")
+    refined.attrs["source_detect_run"] = "detect_001"
+
+    write_curated_refined_detect_root(
+        root,
+        zarr_path=zarr_path,
+        refined_run_name="refined_detect_001",
+        frame_indices=np.asarray([0, 1, 2, 3, 4], dtype=np.int32),
+        entity_ids=np.zeros(5, dtype=np.int32),
+        bbox_norm_coords=np.asarray(
+            [
+                [np.nan, np.nan, np.nan, np.nan],
+                [0.5, 0.5, 0.2, 0.4],
+                [np.nan, np.nan, np.nan, np.nan],
+                [0.25, 0.25, 0.1, 0.2],
+                [np.nan, np.nan, np.nan, np.nan],
+            ],
+            dtype=np.float64,
+        ),
+        status_labels=np.asarray(["missing", "present", "missing", "present", "missing"], dtype=object),
+        source_kind_labels=np.asarray(["none", "raw_detect", "none", "raw_detect", "none"], dtype=object),
+        reason_labels=np.asarray(
+            ["missing_detection", "clean", "missing_detection", "clean", "missing_detection"],
+            dtype=object,
+        ),
+        source_detect_row_index=np.asarray([-1, 0, -1, 1, -1], dtype=np.int32),
+        manual_edit_flags=np.zeros(5, dtype=bool),
+        detection_source=np.zeros(5, dtype=np.int8),
+        confidence_scores=np.asarray([np.nan, 0.9, np.nan, 0.7, np.nan], dtype=np.float32),
+        class_ids=np.asarray([-1, 0, -1, 0, -1], dtype=np.int32),
+    )
+
+    monkeypatch.setattr(
+        mod,
+        "get_environment_info",
+        lambda **_kwargs: {"git": {}, "platform": {}, "environment": {}},
+    )
+
+    payload = mod._load_dense_curated_edit_payload(refined, total_frames=5)
+    assert "source_surface_source_detect_row_index" in payload
+
+    payload["bbox_norm_coords"][2] = np.asarray([0.3, 0.6, 0.1, 0.1], dtype=np.float64)
+    payload["status_labels"][2] = "present"
+    payload["source_kind_labels"][2] = "manual"
+    payload["manual_edit_flags"][2] = True
+    payload["reason_labels"][2] = "manual_correction"
+    payload["confidence_scores"][2] = np.float32(1.0)
+    payload["class_ids"][2] = np.int32(0)
+    payload["source_detect_row_index"][2] = -1
+
+    mod._write_dense_curated_edit_payload(
+        root,
+        zarr_path=str(zarr_path),
+        refined_run_name="refined_detect_001",
+        payload=payload,
+        row_indices=np.asarray([2], dtype=np.int32),
+        command_label="detect_review",
+        source_context={"editor": "detect_review", "edit_mode": "manual"},
+    )
+
+    expected_minted = mint_detection_instance_keys(
+        recording_identity=resolve_recording_identity(root.attrs, fallback_path=zarr_path),
+        frame_indices=np.asarray([2], dtype=np.int64),
+        bbox_norm_coords=np.asarray([[0.3, 0.6, 0.1, 0.1]], dtype=np.float64),
+        class_ids=np.asarray([0], dtype=np.int64),
+        payload_context=INSTANCE_KEY_CONTEXT_MANUAL_CURATION,
+    )
+
+    instances = refined["instances"]
+    assert instances.attrs["instance_key_status"] == "present"
+    assert instances["frame_indices"][:].tolist() == [1, 2, 3]
+    assert instances["instance_key"][:].tolist() == [111, int(expected_minted[0]), 222]
+    assert instances["instance_key_origin_codes"][:].tolist() == [
+        INSTANCE_KEY_ORIGIN_CODE_MAP["copied_from_detect"],
+        INSTANCE_KEY_ORIGIN_CODE_MAP["minted_at_curation"],
+        INSTANCE_KEY_ORIGIN_CODE_MAP["copied_from_detect"],
+    ]
+    source_detections = refined["source_detections"]
+    assert source_detections["instance_key"][:].tolist() == [111, 222]

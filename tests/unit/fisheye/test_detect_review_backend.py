@@ -248,7 +248,7 @@ def test_apply_review_status_approved_sets_authoritative_refined_detect_run(tmp_
     assert refined.attrs["detect_review_status"]["state"] == "approved"
     reopened = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
     reopened_parent = reopened["refined_detect_runs"]
-    assert reopened_parent.attrs["detect_review_status_latest"] == "refined_detect_001"
+    assert "detect_review_status_latest" not in reopened_parent.attrs
     assert reopened_parent.attrs[AUTHORITATIVE_RUN_ATTR] == "refined_detect_001"
 
 

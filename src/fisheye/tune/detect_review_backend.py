@@ -497,8 +497,6 @@ def apply_review_status(
     if notes:
         payload["notes"] = notes
     session.refined_run.attrs["detect_review_status"] = payload
-    if refined_parent is not None:
-        refined_parent.attrs["detect_review_status_latest"] = session.refined_run_name
     return {
         "action": "apply_review_status",
         "changed": True,
