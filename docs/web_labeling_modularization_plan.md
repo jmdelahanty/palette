@@ -117,7 +117,7 @@ Flask route ownership, no change to Zarr write semantics.
 
 ## Checkpoint: 2026-07-05
 
-Current `src/fisheye/labeling/web.py` size on `sun`: 13,831 lines.
+Current `src/fisheye/labeling/web.py` size on `sun`: 13,345 lines.
 
 Recent low-risk extractions completed:
 
@@ -137,6 +137,10 @@ Recent low-risk extractions completed:
 - Post-completion queue metadata, authorization metadata, identity probe
   payloads, page response payloads, and promotion-retry support helpers moved
   into focused modules.
+- Runtime session lookup/open helpers for keypoint, detect-training,
+  detect-analysis, and subject-mask workflows moved into `web_runtimes.py`.
+  The actual browser save/apply/complete handlers and Zarr mutation boundaries
+  remain in `web.py`.
 
 Current direction:
 
@@ -147,7 +151,10 @@ Current direction:
 
 Best next code candidates:
 
-- Runtime/session read helpers that do not perform writes.
+- Browser navigation and mutation-target-token support helpers:
+  `_next_browser_nav_position`, `_browser_mutation_target_selector_keys`,
+  `_browser_mutation_target_selector_details`, and
+  `_require_browser_mutation_target_token`.
 - Assignment/package freshness helpers not already isolated:
   `_inspect_handoff_assignment_freshness`,
   `_handoff_assignment_snapshot_from_work`,
