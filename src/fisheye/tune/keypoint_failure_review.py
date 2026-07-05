@@ -42,7 +42,7 @@ from ..shared.subject_mask_stale import mark_downstream_subject_mask_runs_stale
 from ..registry.stage_complete import DatasetMetadata, emit_stage_completion
 from ..shared.type_conversions import normalize_attr as _normalize_attr
 from ..shared.zarr_run_completion import resolve_latest_complete_run_name
-from ..utils.zarr_io import open_zarr_root
+from ..shared.zarr_io import open_zarr_root
 from ..refinement.keypoint_quality import (
     compute_geometry_metrics,
     resolve_head_triangle_for_labels,

@@ -18,8 +18,8 @@ from typing import Callable, List, Optional
 import zarr
 
 from fisheye.shared.acquisition_video_streams import write_acquisition_video_stream_inventory
-from fisheye.utils.import_video_metadata import probe_video_metadata, write_video_metadata
-from fisheye.utils.recording_preflight import preflight_gate_reason
+from fisheye.shared.import_video_metadata import probe_video_metadata, write_video_metadata
+from fisheye.shared.recording_preflight import preflight_gate_reason
 
 
 @dataclass

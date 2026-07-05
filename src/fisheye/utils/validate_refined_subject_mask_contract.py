@@ -15,7 +15,7 @@ from fisheye.shared.detect_reason_codec import write_reason_columns
 from fisheye.shared.mask_store import MaskStoreError, open_mask_store
 from fisheye.shared.row_lineage import direct_source_crop_row_ids
 from fisheye.shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 REQUIRED_COMPONENTS = ("subject_body", "eye_left", "eye_right", "swim_bladder")
 REQUIRED_RUN_ARRAYS = (

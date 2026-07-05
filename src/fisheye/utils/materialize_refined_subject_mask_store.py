@@ -19,7 +19,7 @@ from fisheye.shared.mask_store import (
     refresh_component_rle_mask_store_from_dense,
     update_mask_storage_attrs,
 )
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 def _resolve_refined_run(root: zarr.Group, refined_run: str | None) -> tuple[str, zarr.Group]:

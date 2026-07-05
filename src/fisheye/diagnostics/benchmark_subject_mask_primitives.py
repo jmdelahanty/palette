@@ -29,7 +29,7 @@ from skimage.measure import label as skimage_label
 from ..shared.json_safety import json_attr_safe
 from ..shared.mask_geometry import fill_holes
 from ..shared.mask_probability_encoding import decode_probability_values_from_attrs
-from ..utils.zarr_io import open_zarr_root
+from ..shared.zarr_io import open_zarr_root
 
 
 _DEFAULT_COMPONENT = "subject_body"

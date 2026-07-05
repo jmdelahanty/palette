@@ -33,7 +33,7 @@ from fisheye.utils.import_recording_analysis import (
     RecordingAnalysisPlan as SingleRecordingPlan,
     stimulus_runs_present,
 )
-from fisheye.utils.recording_preflight import preflight_gate_reason
+from fisheye.shared.recording_preflight import preflight_gate_reason
 from fisheye.utils.run_recording_analysis_pipeline import (
     RecordingPipelineOptions,
     process_recording_analysis_pipeline,

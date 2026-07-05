@@ -39,7 +39,7 @@ from fisheye.shared.zarr_helpers import resolve_zarr_run
 from fisheye.utils.index_analytics_manifests import index_export_manifest
 from fisheye.shared.system_metadata import get_git_info
 from fisheye.utils.virtual_collection_manifest import load_manifest, verify_manifest_sha256
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 EXPORT_SCHEMA_VERSION = 1

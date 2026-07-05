@@ -10,7 +10,7 @@ from typing import Iterable, Optional, Sequence
 import zarr
 
 from ..shared.zarr_helpers import _direct_group_names, _group_names, _open_group_direct, _open_mode, _root_fs_path
-from .zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 CANONICAL_LABELS = ("swim_bladder", "eye_left", "eye_right")

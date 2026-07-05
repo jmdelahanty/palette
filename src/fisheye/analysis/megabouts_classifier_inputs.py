@@ -15,7 +15,7 @@ import zarr
 
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
 from fisheye.analysis.swim_bout_io import load_swim_bout_tables
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 DEFAULT_TAIL_POSTURE_VIEW_FAMILY = "megabouts_compatible"
 DEFAULT_BOUT_DURATION_S = 0.2

@@ -13,7 +13,7 @@ import zarr
 
 from fisheye.pose.schema import resolve_head_triangle_indices, resolve_keypoint_labels_from_attrs
 from fisheye.shared.derived_metrics_schema import build_refined_keypoint_derived_metrics_schema
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 REQUIRED_REFINED_KEYPOINT_ARRAYS = (

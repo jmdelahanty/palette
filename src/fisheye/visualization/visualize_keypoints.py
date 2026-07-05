@@ -23,7 +23,7 @@ import zarr
 from matplotlib.widgets import Slider, Button
 
 from ..pose.schema import PoseSchema, schema_from_metadata, schema_from_package
-from ..utils.zarr_io import open_zarr_root
+from ..shared.zarr_io import open_zarr_root
 
 
 @dataclass

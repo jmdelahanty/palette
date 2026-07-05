@@ -39,7 +39,7 @@ from fisheye.shared.zarr_run_completion import (
     require_runs_parent,
 )
 from fisheye.shared.system_metadata import build_invocation_record
-from fisheye.utils.zarr_metadata import get_downsample_array_name, get_downsample_array_path
+from fisheye.shared.zarr_metadata import get_downsample_array_name, get_downsample_array_path
 
 try:
     from rich.console import Console

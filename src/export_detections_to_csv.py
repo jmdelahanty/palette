@@ -16,7 +16,7 @@ import yaml
 import zarr
 from tqdm import tqdm
 
-from fisheye.utils.zarr_metadata import get_downsample_shape
+from fisheye.shared.zarr_metadata import get_downsample_shape
 
 def load_config(config_path: str) -> Dict:
     """Load pipeline configuration if available."""

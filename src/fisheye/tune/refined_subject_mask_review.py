@@ -61,7 +61,7 @@ from ..shared.zarr_run_completion import (
     set_authoritative_run,
 )
 from ..shared.system_metadata import get_environment_info, get_git_info
-from ..utils.zarr_io import open_zarr_root
+from ..shared.zarr_io import open_zarr_root
 
 try:
     cv2_threads = max(1, int(os.environ.get("OMP_NUM_THREADS", "2")))

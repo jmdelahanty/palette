@@ -30,7 +30,7 @@ from ..tune.refined_subject_mask_review import (
     prepare_refined_subject_run,
     save_refined_subject_roi,
 )
-from ..utils.zarr_io import open_zarr_root
+from ..shared.zarr_io import open_zarr_root
 
 try:
     cv2_threads = max(1, int(os.environ.get("OMP_NUM_THREADS", "2")))

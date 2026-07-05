@@ -22,7 +22,7 @@ from fisheye.diagnostics.video.batch import build_batch_report
 from fisheye.diagnostics.video.camera_csv import expected_camera_csv_path
 from fisheye.diagnostics.video.probe import inspect_stream
 from fisheye.shared.batch_logging import make_run_id, utc_now
-from fisheye.utils.recording_preflight import (
+from fisheye.shared.recording_preflight import (
     PRECHECK_FAIL,
     PRECHECK_NOT_RUN,
     PRECHECK_PASS,

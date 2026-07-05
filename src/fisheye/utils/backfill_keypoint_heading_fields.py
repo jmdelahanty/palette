@@ -19,7 +19,7 @@ from ..shared.environment import resolve_log_dir as resolve_shared_log_dir
 from ..shared.zarr_helpers import _direct_group_names, _group_names, _open_group_direct, _open_mode, _root_fs_path
 from ..tune.keypoint_review import _update_postprocess_summary
 from .backfill_keypoint_label_names import _canonicalize_label_seq
-from .zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 @dataclass

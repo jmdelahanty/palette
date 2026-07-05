@@ -25,7 +25,7 @@ from fisheye.utils.audit_analysis_staleness import (
     audit_source_ref,
     discover_source_refs,
 )
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 LINEAGE_DAG_SCHEMA_ID = "palette.run_lineage_dag"

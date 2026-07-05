@@ -1,0 +1,87 @@
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Optional
+
+
+def _read_attrs(group_dir: Path) -> dict[str, object]:
+    zarr_json = group_dir / "zarr.json"
+    if zarr_json.exists():
+        try:
+            payload = json.loads(zarr_json.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        attrs = payload.get("attributes")
+        return attrs if isinstance(attrs, dict) else {}
+
+    zattrs = group_dir / ".zattrs"
+    if zattrs.exists():
+        try:
+            payload = json.loads(zattrs.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    return {}
+
+
+def _norm_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _path_recording_dir(path_text: Optional[str]) -> Optional[Path]:
+    if not path_text:
+        return None
+    path = Path(path_text).expanduser()
+    parent_name = path.parent.name.lower()
+    if parent_name in {"cams", "raw", "zarr"}:
+        return path.parent.parent.resolve()
+    return None
+
+
+@dataclass(frozen=True)
+class ZarrRecordingContext:
+    recording_dir: Path
+    recording_id: Optional[str]
+    source_video_path: Optional[Path]
+
+
+def infer_recording_context(zarr_path: Path) -> ZarrRecordingContext:
+    resolved_zarr = zarr_path.expanduser().resolve()
+    fallback_recording_dir = (
+        resolved_zarr.parent.parent if resolved_zarr.parent.name == "zarr" else resolved_zarr.parent
+    )
+
+    root_attrs = _read_attrs(resolved_zarr)
+    analysis_attrs = _read_attrs(resolved_zarr / "analysis_metadata")
+
+    recording_id = (
+        _norm_text(root_attrs.get("recording_id"))
+        or _norm_text(analysis_attrs.get("recording_id"))
+        or _norm_text(analysis_attrs.get("source_recording_id"))
+        or _norm_text(analysis_attrs.get("session_uuid"))
+    )
+
+    source_video_text = (
+        _norm_text(root_attrs.get("source_video_path"))
+        or _norm_text(root_attrs.get("source_path"))
+        or _norm_text(root_attrs.get("video_source_path"))
+    )
+    source_video_path = Path(source_video_text).expanduser().resolve() if source_video_text else None
+
+    recording_dir = (
+        _path_recording_dir(source_video_text)
+        or _path_recording_dir(_norm_text(root_attrs.get("source_h5_path")))
+        or fallback_recording_dir
+    )
+
+    return ZarrRecordingContext(
+        recording_dir=recording_dir,
+        recording_id=recording_id,
+        source_video_path=source_video_path,
+    )

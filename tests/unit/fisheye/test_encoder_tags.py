@@ -1,4 +1,4 @@
-from fisheye.utils.encoder_tags import parse_encoder_comment
+from fisheye.shared.encoder_tags import parse_encoder_comment
 
 
 def test_parse_encoder_comment_extracts_resolution_dimensions() -> None:

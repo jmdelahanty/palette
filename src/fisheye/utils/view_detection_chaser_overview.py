@@ -18,7 +18,7 @@ import zarr  # noqa: E402
 from fisheye.analysis.chaser_distance_runs import PNG_ARTIFACT_NAME as CHASER_DISTANCE_ARTIFACT
 from fisheye.analysis.detection_occupancy_runs import PNG_ARTIFACT_NAME as DETECTION_OCCUPANCY_ARTIFACT
 from fisheye.utils.view_zarr_visualization import load_png_artifact_bytes
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 DETECTION_OCCUPANCY_PARENT = "analysis/detection_occupancy_runs"

@@ -27,7 +27,7 @@ from ..shared.frame_flags import (
 )
 from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 from ..shared.zarr_run_completion import resolve_latest_complete_run_name
-from ..utils.zarr_io import open_zarr_root
+from ..shared.zarr_io import open_zarr_root
 
 
 def _get_latest_refined_run(root: zarr.Group) -> str:

@@ -12,7 +12,7 @@ import zarr
 
 from ..shared.zarr_helpers import _direct_group_names, _group_names, _open_group_direct, _open_mode, _root_fs_path
 from .backfill_keypoint_label_names import _canonicalize_label_seq
-from .zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 SWIM_LABEL_ALIASES = ("swim_bladder", "bladder")

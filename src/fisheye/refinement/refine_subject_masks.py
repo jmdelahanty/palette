@@ -43,7 +43,7 @@ from ..tune.refined_subject_mask_review import (
 )
 from ..shared.mask_store import MaskStoreError, open_mask_store
 from ..shared.subject_mask_registry_status import emit_refined_subject_mask_stage_completion
-from ..utils.zarr_io import open_zarr_root
+from ..shared.zarr_io import open_zarr_root
 
 _REFINED_SUBJECT_MASKS_STATUS_SOURCE = "runtime_refine_subject_masks"
 

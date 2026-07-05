@@ -27,7 +27,7 @@ from ..shared.json_safety import json_attr_safe
 from ..shared.mask_geometry import hole_stats
 from ..shared.mask_store import MaskStoreError, open_mask_store
 from ..shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
-from ..utils.zarr_io import open_zarr_root
+from ..shared.zarr_io import open_zarr_root
 
 SUBJECT_BODY_MASK_QC_SCHEMA_ID = "refined_subject_body_mask_qc"
 SUBJECT_BODY_MASK_QC_SCHEMA_VERSION = 1

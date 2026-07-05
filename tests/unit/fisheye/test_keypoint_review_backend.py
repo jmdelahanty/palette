@@ -17,7 +17,7 @@ from fisheye.registry.db import Registry
 from fisheye.shared.zarr_run_completion import AUTHORITATIVE_RUN_ATTR, mark_run_complete
 from fisheye.tune import keypoint_review_backend as mod
 from fisheye.tune import keypoint_review_web as web
-from fisheye.utils import zarr_io
+from fisheye.shared import zarr_io
 
 
 class _FakeArray:

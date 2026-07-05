@@ -29,7 +29,7 @@ from fisheye.utils.recording_manifest_import_status import (
     ManifestImportStatusUpdate,
     write_manifest_import_status,
 )
-from fisheye.utils.recording_preflight import preflight_gate_reason
+from fisheye.shared.recording_preflight import preflight_gate_reason
 
 
 DEFAULT_RECORDINGS_ROOT = Path("/nvme1/recordings")

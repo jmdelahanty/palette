@@ -26,7 +26,7 @@ from fisheye.analysis.eye_angle_io import load_eye_angle_run_tables
 from fisheye.shared.plot_artifacts import write_png_visualization_artifact
 from fisheye.shared.stage_provenance import build_stage_provenance
 from fisheye.shared.system_metadata import get_environment_info, get_git_info
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 try:
     from scipy.stats import gaussian_kde

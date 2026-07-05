@@ -12,7 +12,7 @@ from typing import Iterable, Optional
 import numpy as np
 import zarr
 
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 @dataclass(frozen=True)

@@ -10,7 +10,7 @@ from typing import Any, Iterable, Optional
 
 import zarr
 
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr.stage_arrays import (
     REFINED_SUBJECT_COMPONENT_ARRAYS,
     REFINED_SUBJECT_COMPONENT_METRICS,

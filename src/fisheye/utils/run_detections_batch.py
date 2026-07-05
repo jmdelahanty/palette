@@ -34,7 +34,7 @@ from fisheye.utils.run_detect_with_registry_model import (
 from fisheye.utils.run_detect_with_registry_model import (
     _write_model_resolution_provenance as _write_detect_model_resolution_provenance,
 )
-from fisheye.utils.zarr_recording_context import infer_recording_context
+from fisheye.shared.zarr_recording_context import infer_recording_context
 
 try:
     from rich.console import Console

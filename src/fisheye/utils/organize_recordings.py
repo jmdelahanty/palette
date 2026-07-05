@@ -24,7 +24,7 @@ from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
-from fisheye.utils.recording_preflight import (
+from fisheye.shared.recording_preflight import (
     PRECHECK_FAIL,
     PRECHECK_NOT_RUN,
     PRECHECK_PASS,

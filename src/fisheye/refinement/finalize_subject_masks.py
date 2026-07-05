@@ -97,7 +97,7 @@ from ..tune.refined_subject_mask_review import (
     _source_component_provenance_payload,
 )
 from ..shared.system_metadata import get_environment_info, get_git_info
-from ..utils.zarr_io import open_zarr_root
+from ..shared.zarr_io import open_zarr_root
 from .assemble_refined_subject_masks import (
     CANONICAL_COMPONENT_ORDER,
     _has_available_component,

@@ -30,7 +30,7 @@ from rich.progress import (BarColumn, Progress, SpinnerColumn, TaskProgressColum
 from rich.table import Table
 from scipy.ndimage import gaussian_filter1d
 
-from fisheye.utils.zarr_metadata import get_downsample_shape
+from fisheye.shared.zarr_metadata import get_downsample_shape
 warnings.filterwarnings('ignore')
 
 console = Console()

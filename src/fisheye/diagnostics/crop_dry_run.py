@@ -25,7 +25,7 @@ from fisheye.tracking.crop import (
     infer_detection_source_type,
     get_detection_source_info,
 )
-from fisheye.utils.metadata import get_total_frames
+from fisheye.shared.metadata import get_total_frames
 
 
 def _load_config(path: Optional[Path]) -> Dict:

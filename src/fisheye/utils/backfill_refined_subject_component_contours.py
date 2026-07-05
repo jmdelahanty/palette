@@ -17,7 +17,7 @@ from fisheye.shared.refined_subject_component_contours import (
     summarize_existing_component_contours,
     write_refined_subject_component_contours,
 )
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 DEFAULT_COMPONENTS = ("subject_body", "swim_bladder")

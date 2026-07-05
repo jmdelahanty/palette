@@ -35,7 +35,7 @@ from fisheye.analysis.track_kinematics_io import (
     resolve_track_kinematics_run,
 )
 from fisheye.shared.system_metadata import get_environment_info, get_git_info
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 STIMULUS_RESPONSE_OMR_PLOT_SCHEMA_ID = "palette.stimulus_response.omr_summary_plot.v1"

@@ -20,7 +20,7 @@ detected_circle = None
 rectangle_roi = None
 mask_mode = "circle"
 
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.utils.dish_mask_registry_sync import sync_dish_mask_registry_status
 
 

@@ -16,7 +16,7 @@ from skimage.morphology import skeletonize
 from fisheye.analysis.subject_shape_runs import _longest_skeleton_endpoint_path_xy
 from fisheye.shared.crop_image_source import CropImageSource
 from fisheye.shared.mask_store import MaskStore, open_mask_store
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 DEFAULT_OUTPUT_DIR = Path("/tmp/palette_subject_shape_overlays")

@@ -15,7 +15,7 @@ import zarr
 from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
 from fisheye.shared.batch_logging import utc_now
-from .import_video_metadata import _probe_video, _write_metadata
+from fisheye.shared.import_video_metadata import _probe_video, _write_metadata
 
 
 @dataclass

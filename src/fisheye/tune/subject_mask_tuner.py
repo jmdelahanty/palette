@@ -29,7 +29,7 @@ from ..shared.roi_background import (
     _resolve_run_name,
 )
 from ..shared import mask_tuning_helpers as mask_tuning_ops
-from ..utils.zarr_io import open_zarr_root
+from ..shared.zarr_io import open_zarr_root
 
 
 TUNING_KEY = "subject_mask_tuning"

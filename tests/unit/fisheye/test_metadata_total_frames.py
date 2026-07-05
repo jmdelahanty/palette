@@ -4,7 +4,7 @@ from typing import Any
 
 import numpy as np
 
-from fisheye.utils.metadata import get_total_frames
+from fisheye.shared.metadata import get_total_frames
 
 
 class _Array:

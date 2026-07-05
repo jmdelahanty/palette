@@ -26,7 +26,7 @@ from ..shared.crop_signature import build_crop_signature
 from fisheye.cli.shared_args import add_log_args
 from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
-from fisheye.utils.metadata import get_total_frames
+from fisheye.shared.metadata import get_total_frames
 from fisheye.shared.environment import resolve_log_dir
 from fisheye.shared.environment import resolve_recording_roots
 

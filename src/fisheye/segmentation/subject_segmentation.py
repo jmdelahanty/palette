@@ -36,7 +36,7 @@ from ..shared.zarr_run_completion import (
 )
 from ..tune import subject_mask_tuner as tuning
 from ..shared.system_metadata import get_environment_info, get_git_info
-from ..utils.zarr_io import open_zarr_root
+from ..shared.zarr_io import open_zarr_root
 
 try:
     from rich.console import Console

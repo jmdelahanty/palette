@@ -34,7 +34,7 @@ from fisheye.shared.provenance_attrs import (
 )
 from fisheye.shared.row_alignment import assert_row_alignment
 from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 
 SUCCESS_DATASET_CANDIDATES = (
