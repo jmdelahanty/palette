@@ -365,8 +365,12 @@ class Pipeline:
                     existing_stages.add('detect')
                 if 'arena_assignment_runs' in root and _latest_complete(root['arena_assignment_runs']):
                     existing_stages.add('assign_ids')
-            except:
-                pass
+            except Exception as exc:
+                LOGGER.warning(
+                    "Failed to inspect existing stages in %s while resolving dependencies: %s",
+                    self.config.zarr_path,
+                    exc,
+                )
         
         for stage in requested_stages:
             # Add the stage itself
