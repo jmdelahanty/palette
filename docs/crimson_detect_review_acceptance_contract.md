@@ -102,7 +102,6 @@ Proposed arguments:
 - `--reviewer <id>` (recommended; required for approve in strict mode)
 - `--notes <text>`
 - `--strict` (enable policy guardrails)
-- `--no-latest` (do not move parent latest pointer)
 - `--dry-run` (show resolved target + payload only)
 - `--json` (machine-readable output)
 
@@ -110,7 +109,7 @@ Output contract:
 - Human-readable summary by default.
 - JSON payload with:
   - `zarr_path`, `refined_run`, `resolved_group`, `state`, `method`,
-    `intended_use`, `reviewer`, `latest_updated`, `dry_run`.
+    `intended_use`, `reviewer`, `authoritative_approval`, `dry_run`.
 
 ## Crimson Integration Pattern
 
@@ -129,7 +128,9 @@ Recommended flow from Crimson:
 After acceptance write:
 1. `refined_detect_runs/<run>.attrs["detect_review_status"]` exists.
 2. `resolved_group` equals the expected surface, normally `refined`.
-3. Parent latest pointer updated unless `--no-latest`.
+3. For `--state approved`: `refined_detect_runs.attrs["authoritative_run"]` points at
+   the run (approval routes through `palette approve`; the legacy
+   `detect_review_status_latest` pointer is no longer written — 2026-07-05).
 4. `check_recording_steps` shows updated detect review state.
 
 ## Non-Goals / Stability Notes
