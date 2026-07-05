@@ -708,6 +708,102 @@ def _signed_link_contract_policy(policy: Mapping[str, object]) -> dict[str, obje
         "operator_validation_start_gate_checked_before_session_create": runtime_operator_validation_start_gate_enforced,
     }
 
+def _browser_workflow_scope_runtime_checklist(
+    *,
+    task_state_policy: Mapping[str, object],
+    browser_workflows: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    workflow_rows = [dict(row) for row in browser_workflows]
+    workflow_kinds = [
+        str(row.get("workflow_kind") or "").strip()
+        for row in workflow_rows
+        if str(row.get("workflow_kind") or "").strip()
+    ]
+    mutable_workflow_kinds: list[str] = []
+    workflows_missing_target_token: list[str] = []
+    workflows_missing_write_scope: list[str] = []
+    workflows_missing_session_guard: list[str] = []
+    for row in workflow_rows:
+        workflow_kind = str(row.get("workflow_kind") or "").strip() or "unknown"
+        if not bool(row.get("server_mutation")):
+            continue
+        mutable_workflow_kinds.append(workflow_kind)
+        write_scope = str(row.get("write_scope") or "").strip()
+        if not write_scope:
+            workflows_missing_write_scope.append(workflow_kind)
+        write_contract = row.get("write_contract") if isinstance(row.get("write_contract"), Mapping) else {}
+        if str(write_contract.get("guard") or "") != "session_for_user":
+            workflows_missing_session_guard.append(workflow_kind)
+        payload_fields = {
+            str(field)
+            for field in (
+                write_contract.get("payload_fields")
+                if isinstance(write_contract.get("payload_fields"), list)
+                else []
+            )
+            if str(field or "").strip()
+        }
+        required_fields = {
+            str(field)
+            for field in (
+                write_contract.get("required_fields")
+                if isinstance(write_contract.get("required_fields"), list)
+                else []
+            )
+            if str(field or "").strip()
+        }
+        if "target_token" not in payload_fields or "target_token" not in required_fields:
+            workflows_missing_target_token.append(workflow_kind)
+    absolute_navigation_out_of_scope = str(
+        task_state_policy.get("absolute_navigation_out_of_scope") or ""
+    )
+    browser_mutation_target_selectors = str(
+        task_state_policy.get("browser_mutation_target_selectors") or ""
+    )
+    browser_mutation_target_token = str(task_state_policy.get("browser_mutation_target_token") or "")
+    absolute_navigation_out_of_scope_rejects = absolute_navigation_out_of_scope == "reject_nav_error"
+    browser_mutation_targets_server_owned = (
+        browser_mutation_target_selectors == "server_owned_reject_client_fields"
+    )
+    current_target_token_required = browser_mutation_target_token == "required_current_target_token"
+    mutable_workflows_require_target_token = not workflows_missing_target_token
+    mutable_workflows_session_guarded = not workflows_missing_session_guard
+    mutable_workflows_have_write_scope = not workflows_missing_write_scope
+    target_scope_enforced = (
+        absolute_navigation_out_of_scope_rejects
+        and browser_mutation_targets_server_owned
+        and current_target_token_required
+        and mutable_workflows_require_target_token
+        and mutable_workflows_session_guarded
+        and mutable_workflows_have_write_scope
+        and bool(workflow_kinds)
+    )
+    return {
+        "schema": "palette.web_labeling_browser_workflow_scope_runtime_checklist.v1",
+        "ready": target_scope_enforced,
+        "supported_browser_workflow_kinds": workflow_kinds,
+        "browser_workflow_count": len(workflow_kinds),
+        "mutable_browser_workflow_kinds": mutable_workflow_kinds,
+        "mutable_browser_workflow_count": len(mutable_workflow_kinds),
+        "absolute_navigation_out_of_scope": absolute_navigation_out_of_scope,
+        "absolute_navigation_out_of_scope_rejects": absolute_navigation_out_of_scope_rejects,
+        "browser_mutation_target_selectors": browser_mutation_target_selectors,
+        "browser_mutation_targets_server_owned": browser_mutation_targets_server_owned,
+        "browser_mutation_target_token": browser_mutation_target_token,
+        "current_target_token_required": current_target_token_required,
+        "mutable_workflows_require_target_token": mutable_workflows_require_target_token,
+        "workflows_missing_target_token": workflows_missing_target_token,
+        "mutable_workflows_session_guarded": mutable_workflows_session_guarded,
+        "workflows_missing_session_guard": workflows_missing_session_guard,
+        "mutable_workflows_have_write_scope": mutable_workflows_have_write_scope,
+        "workflows_missing_write_scope": workflows_missing_write_scope,
+        "browser_direct_target_selection_rejected": browser_mutation_targets_server_owned,
+        "target_selector_fields_rejected": list(BROWSER_MUTATION_TARGET_SELECTOR_KEYS),
+        "target_indices_components_labels_frames_inside_task_scope": target_scope_enforced,
+        "labeler_visible_scope": "assigned_recordings_for_resolved_user",
+        "data_plane_mutation_scope": "current_guarded_session_task_target",
+    }
+
 def _browser_response_security_contract_policy(policy: Mapping[str, object]) -> dict[str, object]:
     headers = policy.get("headers") if isinstance(policy.get("headers"), Mapping) else {}
     cache_control = str(headers.get("Cache-Control") or "")
