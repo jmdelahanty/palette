@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from http import HTTPStatus
-from typing import Mapping
+from pathlib import Path
+from typing import Mapping, Sequence
+
+import numpy as np
 
 from .assignment_store import LabelingStore
 from .web_authorization_metadata import (
@@ -12,6 +15,49 @@ from .web_authorization_metadata import (
 )
 from .web_policy import _browser_mutation_write_runtime_checklist
 from .web_responses import _format_error
+
+
+def _parse_clip_index(clip_id: object) -> int:
+    text = str(clip_id or "").strip()
+    if text.startswith("clip_"):
+        text = text[len("clip_") :]
+    try:
+        return int(text)
+    except ValueError:
+        return -1
+
+
+def _jsonish(value: object) -> object:
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, np.ndarray):
+        return [_jsonish(item) for item in value.tolist()]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(key): _jsonish(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_jsonish(item) for item in value]
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _compact_promotion_result(result: Mapping[str, object]) -> dict[str, object]:
+    compact: dict[str, object] = {
+        "status": result.get("status"),
+        "target_crop_run": result.get("target_crop_run"),
+        "action_counts": result.get("action_counts", {}),
+    }
+    items = result.get("items")
+    if isinstance(items, list):
+        compact["item_count"] = len(items)
+        compact["items"] = [dict(item) for item in items[:3] if isinstance(item, Mapping)]
+    if result.get("target_refined_run") is not None:
+        compact["target_refined_run"] = result.get("target_refined_run")
+    return _jsonish(compact)  # type: ignore[return-value]
 
 
 def _labeler_promotion_retry_operator_support_payload(
