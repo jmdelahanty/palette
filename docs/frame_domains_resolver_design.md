@@ -1,7 +1,7 @@
 # FrameDomains Resolver Design
 
 <!-- contract-meta
-status: proposed
+status: approved (2026-07-05, maintainer; see Approval Record)
 created: 2026-07-05
 owner: jeremy
 related: docs/identity_lineage_staleness_review.md, docs/palette_cli_narrow_waist_design.md,
@@ -368,3 +368,18 @@ is small: `shared/frame_domains.py`, writer modules that create mappings, and te
 3. Which legacy stage/schema adapters are acceptable for old stores that do not stamp
    frame-domain attrs? The design recommends adapters, but the approved allowlist should
    be explicit before consumer migration starts.
+
+## Approval Record (2026-07-05)
+
+Maintainer approved the design with all five recommended decisions and these answers:
+
+1. **Both, sequenced.** A synthetic drops+subsampling fixture is sufficient to BUILD the
+   resolver (first implementation slice). A read-only `/groups` acquisition-crop census
+   is a HARD GATE before migrating any crop-video consumer — building is unblocked,
+   crop-video migration is not, until real dropped-frame stores are observed.
+2. **Yes.** Future full imports write the explicit `stored_zarr_frame ->
+   acquisition_frame` identity mapping (stamp-going-forward, same philosophy as
+   completion-epoch provenance). Historical stores are not backfilled.
+3. **Deferred to consumer-migration slices.** No upfront adapter allowlist; each adapter
+   is approved one at a time with per-store evidence when a migration slice needs it.
+   The first implementation slice ships ZERO legacy adapters.
