@@ -14,7 +14,7 @@ All three pipelines follow the same six-step workflow:
 | Step | Detection | Keypoints | Eye Masks |
 |------|-----------|-----------|-----------|
 | Profile backfill | `backfill_detection_profiles.py` | `backfill_keypoint_profiles.py` | `backfill_eye_mask_profiles.py` |
-| Profile sync | `sync_detection_profile_registry.py` | `sync_keypoint_profile_registry.py` | `sync_eye_mask_profile_registry.py` |
+| Profile sync | `Registry.reconcile_dataset_from_root` (`--reconcile-dataset`) | `Registry.reconcile_dataset_from_root` (`--reconcile-dataset`) | `sync_eye_mask_profile_registry.py` |
 | Prepare manifest | `prepare_detect_training_from_registry.py` | `prepare_keypoint_training_from_registry.py` | `prepare_eye_mask_training_from_registry.py` |
 | Export training zarr | `export_detect_training_zarr.py` | `export_keypoint_training_zarr.py` | `export_eye_mask_training_zarr.py` |
 | Validate training zarr | `validate_detect_training_zarr.py` | `validate_keypoint_training_zarr.py` | `validate_eye_mask_training_zarr.py` |

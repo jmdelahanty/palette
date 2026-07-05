@@ -35,7 +35,7 @@ from fisheye.shared.refined_detect_curation import (
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.utils.detection_profile import write_detection_profile
-from fisheye.utils.sync_detection_profile_registry import sync_latest_detection_profile_for_zarr
+from fisheye.registry.inline_refresh import sync_latest_detection_profile_for_zarr
 
 
 _REFINED_PARENTS = ("refined_detect_runs", "refined_runs")

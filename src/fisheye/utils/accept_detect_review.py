@@ -14,7 +14,7 @@ from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.refined_detect_resolution import resolve_detect_review_target
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.utils.detection_profile import write_detection_profile
-from fisheye.utils.sync_detection_profile_registry import sync_latest_detection_profile_for_zarr
+from fisheye.registry.inline_refresh import sync_latest_detection_profile_for_zarr
 
 
 def _approve_refined_detect_authority(
