@@ -60,10 +60,16 @@ loaded.
       re-hash. If the re-hash DISAGREES with the registry hash, record both
       (`sha256` = actual, `registry_sha256` = expected, `source: "computed"`,
       `mismatch: true`) and emit a loud warning — do NOT fail the run in this slice.
+      **Expectation, not failure:** deployment rows store hashes but NOT size/mtime as
+      first-class fields today, so this path will mostly re-hash. That is correct
+      behavior per this rule — report it as expected, don't chase it.
    b. **Sidecar cache**: best-effort `<artifact>.content_v1.json` (`{sha256, size_bytes,
       mtime_ns}`) written next to the artifact after a computed hash; trusted on exact
       `(size, mtime_ns)` match; ALL sidecar write failures silently ignored (read-only
-      NFS artifact dirs are normal).
+      NFS artifact dirs are normal). Writes must be ATOMIC (temp file in the same dir +
+      `os.replace`) and tolerate concurrent races — parallel cluster jobs may fingerprint
+      the same artifact simultaneously; a torn sidecar is worse than none. On read,
+      treat unparseable sidecar JSON as a cache miss, never an error.
    c. Otherwise compute directly.
 5. **SAM3 identity (the hard case):** record the sam3 checkout's `git_sha` (it is a git
    checkout; use the `run_provenance.git_identity(cwd=sam3_root)` helper) plus
@@ -72,7 +78,12 @@ loaded.
    determination is not feasible without touching SAM3 internals, fall back to a
    `manifest_v1` fingerprint of the sam3 `model/` dir (sorted relative-path + size +
    mtime_ns list, sha256 of that manifest) and REPORT the fallback — do not hash
-   multi-GB weight trees file-by-file speculatively.
+   multi-GB weight trees file-by-file speculatively. **Honest labeling:** when no
+   explicit checkpoint path is in play (HF-internal / builder-resolved weights), the
+   recorded entry must say what it is — `role: "sam3_runtime"`,
+   `identity_kind: "runtime_manifest"` (or `"checkpoint_content"` only when actual
+   weight files were hashed) — never present a manifest/runtime identity as a
+   checkpoint content hash.
 6. **Writers in scope** = the epoch-2 instrumented writers that load a model file:
    `detection/detect_yolo.py`, `detection/detect_keypoints_yolo.py`,
    `utils/run_sam_subject_masks.py`, `utils/run_subject_mask_batch_pipeline.py`.
@@ -96,13 +107,28 @@ registry-hash trust + mismatch path, unwritable-sidecar tolerance.
 UNCHANGED in what it requires (add a test asserting a payload with no `input_artifacts`
 still validates — the non-gating guarantee).
 
+**Also required here — the merge helper:** `append_input_artifacts(provenance, artifacts)
+-> dict` that merges/appends into an EXISTING provenance mapping (deduping on
+`(role, path)`, preserving all other keys). This exists because the registry/CLI
+wrappers build `run_provenance` BEFORE calling the writers — if writers only attach
+artifacts when they build provenance themselves, the main production path silently
+records none. Test both directions: writer-built provenance and caller-supplied
+provenance both end up with the artifacts.
+
 ### 3. Writer instrumentation
 Each in-scope writer records the model artifact(s) it loads: detect/keypoints record
 their `.pt` (`role: "detect_model"` / `"keypoint_model"`), the SAM writers record the
-SAM3 identity per decision 5 (`role: "sam3_runtime"` / checkpoint roles). Where
-resolution came through `registry/model_resolution.py` candidates carrying
-`model_sha256`, pass it as `registry_hash` so decision 4a applies. Keep writer diffs
-minimal — resolve-then-fingerprint-then-include; no restructuring.
+SAM3 identity per decision 5 (`role: "sam3_runtime"` / checkpoint roles). **Artifacts
+must land regardless of who built the provenance:** use concern 2's
+`append_input_artifacts` at the point the model is loaded, so caller-supplied
+provenance (the registry/CLI wrapper path) gets the hashes too — do not gate the append
+on the writer having built provenance itself. Where resolution came through
+`registry/model_resolution.py` candidates carrying `model_sha256`, pass it as
+`registry_hash` so decision 4a applies. **Generic detect/keypoint `Candidate` does not
+currently expose `model_sha256` even though the DB tables carry it** — add that field
+to the generic candidate (read-through only) if trivial so detect/keypoint writers can
+pass `registry_hash`; if it is not trivial, skip it (they'll compute) and report why.
+Keep writer diffs minimal — resolve-then-fingerprint-then-append; no restructuring.
 
 ### 4. Deployment-artifact verification + docs
 - A small verification helper (natural home: `registry/model_resolution.py` or the new
