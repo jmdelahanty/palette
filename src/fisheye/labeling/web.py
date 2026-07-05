@@ -66,7 +66,12 @@ from .web_operator_evidence_records import (
     _record_identity_source_evidence,
 )
 from . import web_zarr_backup as _web_zarr_backup
-from . import web_assignment_freshness as _web_assignment_freshness
+from .web_assignment_freshness import (
+    _assignment_snapshot_rows_impl as _assignment_snapshot_rows,
+    _handoff_assignment_snapshot_from_work_impl as _handoff_assignment_snapshot_from_work,
+    _handoff_dataset_queue_state_counts_impl as _handoff_dataset_queue_state_counts,
+    _inspect_handoff_assignment_freshness_impl as _inspect_handoff_assignment_freshness,
+)
 from .web_auth import (
     DASHBOARD_PATH,
     DATASET_QUEUE_PATH,
@@ -6990,36 +6995,6 @@ def _handoff_status_from_manifest(
             '_zarr_backup_policy': _zarr_backup_policy
         },
     )
-
-
-
-
-def _handoff_dataset_queue_state_counts(handoffs: Sequence[Mapping[str, object]]) -> dict[str, int]:
-    return _web_assignment_freshness._handoff_dataset_queue_state_counts_impl(handoffs)
-
-
-def _handoff_assignment_snapshot_from_work(work: Mapping[str, object], user: str) -> dict[str, object]:
-    return _web_assignment_freshness._handoff_assignment_snapshot_from_work_impl(work, user)
-
-
-def _assignment_snapshot_rows(snapshot: Mapping[str, object], fallback_user: str) -> list[dict[str, object]]:
-    return _web_assignment_freshness._assignment_snapshot_rows_impl(snapshot, fallback_user)
-
-
-def _inspect_handoff_assignment_freshness(
-    manifests: Sequence[Mapping[str, object]],
-    *,
-    store: LabelingStore | None,
-    package_kind: str = "",
-) -> dict[str, object]:
-    return _web_assignment_freshness._inspect_handoff_assignment_freshness_impl(
-        manifests,
-        store=store,
-        package_kind=package_kind,
-    )
-
-
-
 
 
 def _assignment_snapshot_from_assignments(
