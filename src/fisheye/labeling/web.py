@@ -59,6 +59,7 @@ from .web_operator_evidence_records import (
     _identity_source_personal_queue_status,
     _identity_source_row_approved,
     _operator_evidence_truthy,
+    _parse_header_evidence_values,
     _record_browser_response_security_evidence,
     _record_browser_smoke_evidence,
     _record_disposable_zarr_mutation_smoke_evidence,
