@@ -2,16 +2,24 @@
 
 ## Decision
 
-Do not migrate the Palette web-labeling workflow directly to Django or Flask as the next step.
+Do not rewrite the Palette web-labeling workflow directly into Django or Flask.
 
-The current problem is not primarily the HTTP server. The main issue is that `src/fisheye/labeling/web.py` mixes routing, authorization, HTML templates, browser JavaScript, admin pages, operator validation, task generation, and Zarr mutation APIs in one large module. A framework would improve some routing/template ergonomics, but it would also create migration risk around the parts that matter most: assignment ownership, active sessions, target-token checks, browser mutation authorization, and server-owned Zarr writes.
+The current problem is not primarily the HTTP server. The main issue is that
+`src/fisheye/labeling/web.py` mixes routing, authorization, HTML templates,
+browser JavaScript, admin pages, operator validation, task generation, and Zarr
+mutation APIs in one large module. A framework improves routing/template
+ergonomics, but it does not solve the parts that matter most: assignment
+ownership, active sessions, target-token checks, browser mutation authorization,
+and server-owned Zarr writes.
 
-The preferred path is incremental:
+The current path is incremental:
 
 1. Extract templates, JavaScript, and CSS from Python strings.
 2. Continue splitting pure backend helpers into focused modules.
 3. Convert route handlers into standalone handler functions.
-4. Only then consider replacing `ThreadingHTTPServer` with Flask, FastAPI, Starlette, or Django.
+4. Use Flask as a strangler only for stable dashboard/status/API families.
+5. Keep editor/session mutation routes in the legacy shell unless there is a
+   specific maintenance need or the webKnossos bridge fails.
 
 ## Framework stance
 
@@ -25,13 +33,19 @@ Django is appropriate if this becomes a formal internal product with Django ORM 
 - custom Zarr mutation rules,
 - direct operator validation and launch evidence workflows.
 
-### Flask is plausible later, but not first
+### Flask is useful as a strangler, not a rewrite
 
-Flask would make route registration and template rendering cleaner. It does not automatically solve the hardest parts: mutation authorization, target-token enforcement, stale session handling, or active assignment checks. Flask becomes a safer option after templates and route logic are already separated.
+Flask makes route registration and template rendering cleaner. It does not
+automatically solve mutation authorization, target-token enforcement, stale
+session handling, or active assignment checks. Use it one route family at a
+time, through the existing synchronous WSGI bridge, while preserving the current
+server and policy code.
 
 ### Best near-term fit
 
-Use `Jinja2` templates plus the current server first. This removes the largest maintainability problem without changing deployment, auth, or mutation semantics.
+Use extracted helpers/templates plus the current server/Flask bridge first.
+This removes the largest maintainability problems without changing deployment,
+auth, or mutation semantics.
 
 Later, consider:
 
@@ -53,12 +67,22 @@ Later, consider:
 These slices have already been moved out of `web.py`:
 
 - `src/fisheye/labeling/admin_registry.py`
+- `src/fisheye/labeling/admin_dashboard.py`
 - `src/fisheye/labeling/notification_events.py`
 - `src/fisheye/labeling/notifications.py`
 - `src/fisheye/labeling/report_io.py`
 - `src/fisheye/labeling/task_generation.py`
+- `src/fisheye/labeling/web_admin_api.py`
+- `src/fisheye/labeling/web_admin_pages.py`
+- `src/fisheye/labeling/web_admin_renderers.py`
+- `src/fisheye/labeling/web_app.py`
+- `src/fisheye/labeling/web_assignment_freshness.py`
 - `src/fisheye/labeling/web_auth.py`
+- `src/fisheye/labeling/web_auth_errors.py`
+- `src/fisheye/labeling/web_authorization_metadata.py`
 - `src/fisheye/labeling/web_batch_readiness.py`
+- `src/fisheye/labeling/web_diagnostics.py`
+- `src/fisheye/labeling/web_error_pages.py`
 - `src/fisheye/labeling/web_handoff_bundle.py`
 - `src/fisheye/labeling/web_handoff_fields.py`
 - `src/fisheye/labeling/web_handoff_files.py`
@@ -68,14 +92,32 @@ These slices have already been moved out of `web.py`:
 - `src/fisheye/labeling/web_handoff_shareability.py`
 - `src/fisheye/labeling/web_handoff_validation.py`
 - `src/fisheye/labeling/web_handoff_validation_refresh.py`
+- `src/fisheye/labeling/web_identity.py`
+- `src/fisheye/labeling/web_implementation_status.py`
+- `src/fisheye/labeling/web_launch_bundle_files.py`
+- `src/fisheye/labeling/web_operator_evidence_records.py`
+- `src/fisheye/labeling/web_operator_evidence_templates.py`
+- `src/fisheye/labeling/web_personal_api.py`
+- `src/fisheye/labeling/web_personal_pages.py`
+- `src/fisheye/labeling/web_personal_renderers.py`
+- `src/fisheye/labeling/web_policy.py`
+- `src/fisheye/labeling/web_post_completion_queue.py`
+- `src/fisheye/labeling/web_promotion_retry.py`
 - `src/fisheye/labeling/web_report_renderers.py`
+- `src/fisheye/labeling/web_responses.py`
+- `src/fisheye/labeling/web_runtimes.py`
+- `src/fisheye/labeling/web_session_renderers.py`
+- `src/fisheye/labeling/web_validation_checklist.py`
 - `src/fisheye/labeling/web_validation_reports.py`
+- `src/fisheye/labeling/web_wsgi_adapter.py`
+- `src/fisheye/labeling/web_zarr_backup.py`
 
-These are good precedents: low-risk helper extraction, no route rewrite, no change to Zarr write semantics.
+These are good precedents: low-risk helper extraction, selective read-only
+Flask route ownership, no change to Zarr write semantics.
 
 ## Checkpoint: 2026-07-05
 
-Current `src/fisheye/labeling/web.py` size on `sun`: approximately 18,284 lines.
+Current `src/fisheye/labeling/web.py` size on `sun`: 13,831 lines.
 
 Recent low-risk extractions completed:
 
@@ -84,6 +126,17 @@ Recent low-risk extractions completed:
 - Validation-checklist handoff refresh/application helpers moved to `web_handoff_validation_refresh.py`.
 - Batch readiness report helper moved to `web_batch_readiness.py`.
 - Dashboard ready-row roster HTML rendering moved into `web_report_renderers.py`.
+- Flask WSGI bridge and route-claiming infrastructure moved into `web_app.py`
+  and `web_wsgi_adapter.py`.
+- Read-only admin/personal API and page payload helpers moved into
+  `web_admin_api.py`, `web_admin_pages.py`, `web_personal_api.py`, and
+  `web_personal_pages.py`.
+- Operator evidence template/record helpers moved into
+  `web_operator_evidence_templates.py` and
+  `web_operator_evidence_records.py`.
+- Post-completion queue metadata, authorization metadata, identity probe
+  payloads, page response payloads, and promotion-retry support helpers moved
+  into focused modules.
 
 Current direction:
 
@@ -94,24 +147,19 @@ Current direction:
 
 Best next code candidates:
 
-- Operator evidence template/report helpers:
-  `_identity_source_evidence_template`, `_browser_smoke_evidence_template`,
-  `_disposable_zarr_mutation_smoke_evidence_template`,
-  `_zarr_backup_evidence_template`, and `_browser_response_security_evidence_template`.
-- Zarr backup plan/evidence report helpers:
-  `_zarr_backup_plan`, `_execute_zarr_backup_plan`,
-  `_restore_zarr_backup_manifest`, `_record_zarr_backup_evidence`.
-- Assignment/package freshness helpers:
+- Runtime/session read helpers that do not perform writes.
+- Assignment/package freshness helpers not already isolated:
   `_inspect_handoff_assignment_freshness`,
   `_handoff_assignment_snapshot_from_work`,
   `_handoff_dataset_queue_state_counts`.
+- Remaining dashboard/page renderer helpers that can be shared by legacy and
+  Flask routes.
 
 Defer until a deliberate route or CLI decomposition slice:
 
 - `_make_handler`
 - `build_parser`
 - `main`
-- `_personal_api_response_payload`
 - live editor/session/runtime helpers
 - browser save/open/complete mutation handlers
 

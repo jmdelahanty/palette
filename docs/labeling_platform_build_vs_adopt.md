@@ -58,10 +58,29 @@ building the annotation UI.
 runs with lineage/provenance) and the named-pose-keypoint mismatch. These are unchanged
 and remain the real work.
 
+## External webKnossos guidance received 2026-07-05
+
+Norman Rzepka confirmed that the intended annotation classes should be possible in
+webKnossos:
+
+- boxes,
+- points via the skeleton tools,
+- segmentations.
+
+His recommended first step is to import sample Palette images into webKnossos. Palette
+can present the data either as a 3D stack or as 2D images with a time axis. If the
+representation is not too confusing for labelers, the 3D stack is expected to provide
+better performance.
+
+This moves the bridge spike from "can webKnossos represent the primitives?" to "can
+Palette present the data in a useful webKnossos dataset layout and round-trip the
+annotations back into Palette runs with correct lineage?"
+
 ## webKnossos — fit assessment
 
-Confidence: directional. Exact 2026 capabilities (keypoint model, zarr flavor, SSO
-options) require hands-on verification, not assertion.
+Confidence: improved by external confirmation for boxes, skeleton/point tools, and
+segmentation. Exact Palette fit still requires hands-on verification of import layout,
+annotation export, and round-trip semantics.
 
 ### Likely strong fit
 - **Correct tool class.** Purpose-built to annotate data too large for the browser
@@ -76,13 +95,12 @@ options) require hands-on verification, not assertion.
 
 ### Real mismatches
 - **Custom zarr, not OME-NGFF** (above) — conversion layer required regardless.
-- **Named pose keypoints are a semantic mismatch.** webKnossos skeletons are
-  node/edge trees (built for neuron tracing). Palette pose is *named landmarks against
-  a schema* (left_eye, swim_bladder, …). Forcible but lossy; the weakest-fit of the
-  three annotation types. Masks are the strongest fit. Bbox support requires a
-  hands-on check: webKnossos has bounding-box geometry and uses bounding boxes in
-  task/view/tool contexts, but this is not yet confirmed as a first-class
-  object-detection annotation surface.
+- **Named pose keypoints are a semantic mismatch.** webKnossos skeleton tools are
+  available, but they are node/edge trees built for neuron tracing. Palette pose is
+  *named landmarks against a schema* (left_eye, swim_bladder, …). Forcible but lossy;
+  the weakest-fit of the three annotation types. Masks are the strongest fit. Bbox
+  support requires a hands-on check of export/import semantics even though box tooling
+  is available.
 - **Round-trip is the hard part — and it is where Palette's value lives.** Getting
   annotations back *in* as a proper Palette run (lineage, provenance, completion
   markers, `source_crop_row_ids`) is a bridge owned and maintained in perpetuity. The
@@ -108,8 +126,8 @@ because the three types differ sharply in difficulty.
 | Type | webKnossos representation | Palette target | Difficulty |
 |---|---|---|---|
 | Segmentation masks | component-specific segmentation layer/task | `refined_subject_masks_runs` component channels | **Medium** — voxels round-trip; work is preserving component channels + re-attaching lineage |
-| Bounding boxes | unconfirmed: bbox geometry/task/view support exists, first-class detection annotation UI not yet verified | `detect_runs` | **Unknown-to-medium** — coordinates are simple if the annotation primitive exists |
-| Named pose keypoints | skeleton (node/edge trees) | `keypoint_runs` (named schema) | **Hard** — semantic mismatch; may stay in a light Palette tool |
+| Bounding boxes | box tooling, with export/import semantics still to verify | `detect_runs` | **Medium** — coordinates are simple if the exported primitive maps cleanly |
+| Named pose keypoints | skeleton/point tooling | `keypoint_runs` (named schema) | **Hard** — semantic mismatch; may stay in a light Palette tool |
 
 **Start with masks.** Highest value (aligns with the active SAM3 teacher-label work),
 webKnossos's strongest suit, and it proves the hard half of the round-trip. Then test
@@ -156,18 +174,33 @@ Prefer **data-in-place streaming** (webKnossos reads Palette imagery as a remote
 OME-Zarr dataset) over export/upload batches, if webKnossos's remote-dataset support
 fits. Either way an OME-NGFF view/adapter over Palette imagery is required.
 
+For the first sample import, evaluate both candidate layouts:
+
+| Layout | Use | Tradeoff |
+|---|---|---|
+| 3D stack | Treat sampled ROIs/timepoints as slices in one stack | Better expected webKnossos performance; may be conceptually odd if labelers think in ROI/time rows |
+| 2D images with time axis | Closer to Palette row/time semantics | Potentially slower or less native to webKnossos |
+
+The first spike should choose the simpler representation for labeler comprehension only
+if the performance difference is acceptable.
+
 ### Focused spike — decisive questions (4 & 5 already answered by campus adoption)
+
+Operational runbook: `docs/webknossos_palette_bridge_spike.md`.
 
 1. **Existing campus export workflow (fastest, highest-value).** Ask the campus
    webKnossos power users *how they get annotations out* — the export format they
    already use IS the round-trip input for the bridge. This may shortcut most of the
    design.
-2. **Mask round-trip (the crux).** Thinnest possible: one Palette recording → OME-NGFF
+2. **Sample image import.** One small RedScare training zarr crop run exported or
+   adapted into webKnossos as both candidate layouts if feasible: 3D stack and 2D+t.
+   Pick the layout that is fast enough and least confusing.
+3. **Mask round-trip (the crux).** Thinnest possible: one Palette recording → OME-NGFF
    → webKnossos → annotate one subject mask → export → import as a `subject_mask_run`
    with lineage/provenance intact. What breaks?
-3. **Conversion + pixel contract.** Cost of Palette-zarr → OME-NGFF for one recording;
+4. **Conversion + pixel contract.** Cost of Palette-zarr → OME-NGFF for one recording;
    does the range/grayscale contract survive (depends on the silent-wrong-data slice)?
-4. **Keypoint degradation.** How lossy is named-landmark pose as skeletons — decide
+5. **Keypoint degradation.** How lossy is named-landmark pose as skeletons — decide
    whether keypoints move to webKnossos or stay in a light Palette surface.
 
 ### Strongest plausible future
@@ -186,9 +219,9 @@ review, QC). The strangler should port *those survivors*, not the annotation edi
 | Work | Disposition |
 |---|---|
 | Flask strangler — admin/dashboard/status/review routes | **Continue** — these survive as the data-management surface |
-| Flask strangler — session annotation editors (keypoint/mask/detect) | **Stop investing** — webKnossos replaces these; do not port them |
-| Homegrown Okta/SSO auth | **Drop** — webKnossos owns campus auth |
-| Multi-user concurrency hardening (labeling writes) | **Drop for annotation**; revisit only for any residual dashboard mutations |
-| Self-hosted deployment contract | **Drop** — campus already hosts webKnossos |
-| Production decision record sign-off | **Retire** — was gating a labeling app that won't ship as the labeler |
+| Flask strangler — session annotation editors (keypoint/mask/detect) | **Deprioritize** — keep current editors viable, but do not port them to Flask unless webKnossos fails or active maintenance requires it |
+| Homegrown Okta/SSO auth | **Avoid expanding** — webKnossos likely owns campus auth for annotation; keep only the current minimal Palette dashboard/auth needs |
+| Multi-user concurrency hardening (labeling writes) | **Avoid expanding for annotation**; revisit only for residual Palette dashboard/review mutations |
+| Self-hosted deployment contract | **Pause** — campus webKnossos may carry hosted annotation; current Palette internal use still needs safe operator controls until the bridge lands |
+| Production decision record sign-off | **Keep while Palette editors are active** — do not retire until webKnossos actually replaces the annotation surface |
 | OME-NGFF bridge (masks → bbox → keypoints?) | **New primary web-track work** |
