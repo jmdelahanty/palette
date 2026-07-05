@@ -442,10 +442,10 @@ def test_iter_run_groups_includes_direct_fs_run_names(monkeypatch) -> None:
     zarr_path = Path("/tmp/fake_training.zarr")
     seen_modes: list[str] = []
 
-    monkeypatch.setattr(mod, "_direct_group_names", lambda path: ["keypoints_001", "keypoints_002"])
+    monkeypatch.setattr(mod, "direct_zarr_group_names", lambda path: ["keypoints_001", "keypoints_002"])
     monkeypatch.setattr(
         mod,
-        "_open_group_direct",
+        "open_zarr_group_direct",
         lambda path, mode: seen_modes.append(mode) or direct_groups[Path(path).name],
     )
 

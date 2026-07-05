@@ -27,12 +27,18 @@ def _path_tokens(parent_path: ParentPath) -> tuple[str, ...]:
     return tokens
 
 
-def _group_names(parent: zarr.Group) -> list[str]:
+def zarr_group_names(parent: zarr.Group) -> list[str]:
+    """Return sorted child group names from a Zarr-like parent."""
+
     if hasattr(parent, "group_keys"):
         names = parent.group_keys()
     else:  # pragma: no cover - defensive fallback for fake group variants
         names = parent.keys()
     return sorted(str(name) for name in names)
+
+
+def _group_names(parent: zarr.Group) -> list[str]:
+    return zarr_group_names(parent)
 
 
 def normalize_zarr_path(path: str) -> str:
@@ -241,7 +247,9 @@ def _normalize_run_name(value: object) -> str | None:
     return normalized or None
 
 
-def _root_fs_path(root: zarr.Group) -> Path | None:
+def zarr_root_fs_path(root: zarr.Group) -> Path | None:
+    """Best-effort local filesystem path for a Zarr root group."""
+
     raw = getattr(root, "_palette_fs_path", None)
     if raw is None:
         raw = getattr(root, "store_path", None)
@@ -261,11 +269,21 @@ def _root_fs_path(root: zarr.Group) -> Path | None:
         return None
 
 
-def _open_mode(root: zarr.Group) -> str:
+def _root_fs_path(root: zarr.Group) -> Path | None:
+    return zarr_root_fs_path(root)
+
+
+def zarr_open_mode(root: zarr.Group) -> str:
+    """Return the mode used to open a Zarr root, defaulting to read-only."""
+
     raw = getattr(root, "_palette_open_mode", None)
     if isinstance(raw, str) and raw:
         return raw
     return "r"
+
+
+def _open_mode(root: zarr.Group) -> str:
+    return zarr_open_mode(root)
 
 
 def open_zarr_group_direct(path: str | Path, *, mode: str) -> zarr.Group:
@@ -338,11 +356,9 @@ def reconsolidate_zarr_metadata(
     return report
 
 
-def _open_group_direct(path: Path, *, mode: str) -> zarr.Group:
-    return open_zarr_group_direct(path, mode=mode)
+def direct_zarr_group_names(path: Path | None) -> list[str]:
+    """Return child group names by inspecting local Zarr metadata files directly."""
 
-
-def _direct_group_names(path: Path | None) -> list[str]:
     if path is None or not path.is_dir():
         return []
     names: list[str] = []
@@ -352,6 +368,14 @@ def _direct_group_names(path: Path | None) -> list[str]:
         if (candidate / "zarr.json").is_file() or (candidate / ".zgroup").is_file():
             names.append(candidate.name)
     return names
+
+
+def _open_group_direct(path: Path, *, mode: str) -> zarr.Group:
+    return open_zarr_group_direct(path, mode=mode)
+
+
+def _direct_group_names(path: Path | None) -> list[str]:
+    return direct_zarr_group_names(path)
 
 
 def resolve_zarr_run(
@@ -374,7 +398,7 @@ def resolve_zarr_run(
     tokens = _path_tokens(parent_path)
     display_path = "/".join(tokens)
     parent: zarr.Group = root
-    root_fs_path = _root_fs_path(root)
+    root_fs_path = zarr_root_fs_path(root)
     current_fs_path = root_fs_path
     try:
         for token in tokens:
@@ -386,7 +410,7 @@ def resolve_zarr_run(
                 candidate_path = current_fs_path / token
                 if not candidate_path.is_dir():
                     raise exc
-                parent = _open_group_direct(candidate_path, mode=_open_mode(root))
+                parent = open_zarr_group_direct(candidate_path, mode=zarr_open_mode(root))
             if current_fs_path is not None:
                 current_fs_path = current_fs_path / token
     except Exception as exc:
@@ -397,12 +421,12 @@ def resolve_zarr_run(
     if requested in alias_set:
         requested = None
 
-    available = sorted(set(_group_names(parent)) | set(_direct_group_names(current_fs_path)))
+    available = sorted(set(zarr_group_names(parent)) | set(direct_zarr_group_names(current_fs_path)))
 
     if requested is not None:
         if requested not in parent:
             if current_fs_path is not None and requested in available:
-                return _open_group_direct(current_fs_path / requested, mode=_open_mode(root)), requested
+                return open_zarr_group_direct(current_fs_path / requested, mode=zarr_open_mode(root)), requested
             available_text = ", ".join(available) or "(none)"
             raise ValueError(
                 f"{run_label} '{requested}' not found under {display_path}. "
@@ -427,7 +451,7 @@ def resolve_zarr_run(
         if latest in parent:
             return parent[latest], latest
         if current_fs_path is not None and latest in available:
-            return _open_group_direct(current_fs_path / latest, mode=_open_mode(root)), latest
+            return open_zarr_group_direct(current_fs_path / latest, mode=zarr_open_mode(root)), latest
         if fallback_to_sorted is None:
             available_text = ", ".join(available) or "(none)"
             raise ValueError(
@@ -443,7 +467,7 @@ def resolve_zarr_run(
             if resolved in parent:
                 return parent[resolved], resolved
             if current_fs_path is not None:
-                return _open_group_direct(current_fs_path / resolved, mode=_open_mode(root)), resolved
+                return open_zarr_group_direct(current_fs_path / resolved, mode=zarr_open_mode(root)), resolved
             return parent[resolved], resolved
 
     if fallback_to_latest:

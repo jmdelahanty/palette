@@ -35,7 +35,7 @@ def test_pick_best_candidate_enforces_unique_when_tied() -> None:
         ),
     ]
     with pytest.raises(SystemExit, match="Top candidate score tied"):
-        mod._pick_best_candidate(candidates, require_unique=True)  # noqa: SLF001
+        mod.pick_best_keypoint_candidate(candidates, require_unique=True)
 
 
 def test_write_model_resolution_provenance_updates_keypoint_run_attrs(
@@ -79,7 +79,7 @@ def test_write_model_resolution_provenance_updates_keypoint_run_attrs(
         "candidates": [{"run_id": "pose_run_001", "score": 0.88}],
     }
 
-    mod._write_model_resolution_provenance(  # noqa: SLF001
+    mod.write_keypoint_model_resolution_provenance(
         zarr_path=tmp_path / "sample_analysis.zarr",
         run_name="keypoints_20260209_000000",
         payload=payload,
@@ -239,7 +239,7 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
         calls["write_run_name"] = run_name
         calls["write_payload"] = payload
 
-    monkeypatch.setattr(mod, "_write_model_resolution_provenance", _fake_write_model_resolution_provenance)
+    monkeypatch.setattr(mod, "write_keypoint_model_resolution_provenance", _fake_write_model_resolution_provenance)
 
     rc = mod.main(
         [

@@ -33,7 +33,7 @@ class _FakeRootAnalysis:
 
 def _install_fake_roots(monkeypatch, roots: dict[Path, _FakeRoot]) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setattr(mod, "open_zarr_root", lambda path, mode="r": roots[Path(path)])
-    monkeypatch.setattr(mod, "_camera_id_for_zarr", lambda zarr_path, root: "2010093")
+    monkeypatch.setattr(mod, "camera_id_for_zarr", lambda zarr_path, root: "2010093")
 
 
 def _default_options(**overrides) -> mod.BatchOptions:

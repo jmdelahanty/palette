@@ -46,7 +46,7 @@ def test_scan_zarr_path_matches_selected_subject_mask_component(monkeypatch, tmp
     )
 
     monkeypatch.setattr(mod, "open_zarr_root", lambda path, mode="r": root)
-    monkeypatch.setattr(mod, "_camera_id_for_zarr", lambda path, root: "2010093")
+    monkeypatch.setattr(mod, "camera_id_for_zarr", lambda path, root: "2010093")
 
     row = mod._scan_zarr_path(  # noqa: SLF001
         zarr_path,
@@ -78,7 +78,7 @@ def test_scan_zarr_path_reports_missing_selected_component(monkeypatch, tmp_path
     )
 
     monkeypatch.setattr(mod, "open_zarr_root", lambda path, mode="r": root)
-    monkeypatch.setattr(mod, "_camera_id_for_zarr", lambda path, root: "2010093")
+    monkeypatch.setattr(mod, "camera_id_for_zarr", lambda path, root: "2010093")
 
     row = mod._scan_zarr_path(  # noqa: SLF001
         zarr_path,
@@ -131,7 +131,7 @@ def test_main_lists_matches_and_summary(monkeypatch, tmp_path: Path, capsys) -> 
 
     monkeypatch.setattr(mod, "_iter_zarr", lambda roots, recursive: [match_path, miss_path, analysis_path])
     monkeypatch.setattr(mod, "open_zarr_root", lambda path, mode="r": roots[Path(path)])
-    monkeypatch.setattr(mod, "_camera_id_for_zarr", lambda path, root: "2010093")
+    monkeypatch.setattr(mod, "camera_id_for_zarr", lambda path, root: "2010093")
 
     rc = mod.main([str(tmp_path), "--recursive", "--subject-mask-components", "swim_bladder"])
     out = capsys.readouterr().out

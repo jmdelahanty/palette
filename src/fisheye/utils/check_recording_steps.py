@@ -11,7 +11,7 @@ import numpy as np
 import zarr
 
 from fisheye.diagnostics.check_provenance_consistency import collect_provenance
-from fisheye.utils.apply_tuning_by_camera import _normalize_subject_mask_tuning_payload
+from fisheye.utils.apply_tuning_by_camera import normalize_subject_mask_tuning_payload
 from fisheye.registry.db import Registry
 from fisheye.shared.refined_detect_curation import (
     extract_present_curated_rows,
@@ -552,7 +552,7 @@ def _registry_subject_component_fields_by_stage(
 
 
 def _subject_mask_tuning_component_statuses(raw: object) -> Dict[str, str]:
-    payload = _normalize_subject_mask_tuning_payload(raw)
+    payload = normalize_subject_mask_tuning_payload(raw)
     components = payload.get("components", {})
     if not isinstance(components, dict):
         components = {}

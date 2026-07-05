@@ -472,7 +472,7 @@ def test_run_detect_plan_skips_registry_provenance_for_explicit_model(monkeypatc
     def _unexpected_provenance(**_kwargs):
         raise AssertionError("registry model-resolution provenance should be skipped for explicit models")
 
-    monkeypatch.setattr(mod, "_write_detect_model_resolution_provenance", _unexpected_provenance)
+    monkeypatch.setattr(mod, "write_detect_model_resolution_provenance", _unexpected_provenance)
 
     result = mod._run_detect_plan(  # noqa: SLF001
         plan=plan,
