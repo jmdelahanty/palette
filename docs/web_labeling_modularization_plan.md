@@ -58,8 +58,62 @@ These slices have already been moved out of `web.py`:
 - `src/fisheye/labeling/report_io.py`
 - `src/fisheye/labeling/task_generation.py`
 - `src/fisheye/labeling/web_auth.py`
+- `src/fisheye/labeling/web_batch_readiness.py`
+- `src/fisheye/labeling/web_handoff_bundle.py`
+- `src/fisheye/labeling/web_handoff_fields.py`
+- `src/fisheye/labeling/web_handoff_files.py`
+- `src/fisheye/labeling/web_handoff_inspection.py`
+- `src/fisheye/labeling/web_handoff_package_io.py`
+- `src/fisheye/labeling/web_handoff_roster.py`
+- `src/fisheye/labeling/web_handoff_shareability.py`
+- `src/fisheye/labeling/web_handoff_validation.py`
+- `src/fisheye/labeling/web_handoff_validation_refresh.py`
+- `src/fisheye/labeling/web_report_renderers.py`
+- `src/fisheye/labeling/web_validation_reports.py`
 
 These are good precedents: low-risk helper extraction, no route rewrite, no change to Zarr write semantics.
+
+## Checkpoint: 2026-07-05
+
+Current `src/fisheye/labeling/web.py` size on `sun`: approximately 18,284 lines.
+
+Recent low-risk extractions completed:
+
+- Handoff shareability and inspection-report helpers moved to `web_handoff_shareability.py`.
+- Validation log/checklist report builders moved to `web_validation_reports.py`.
+- Validation-checklist handoff refresh/application helpers moved to `web_handoff_validation_refresh.py`.
+- Batch readiness report helper moved to `web_batch_readiness.py`.
+- Dashboard ready-row roster HTML rendering moved into `web_report_renderers.py`.
+
+Current direction:
+
+- Continue extracting pure helper/report/template code first.
+- Keep the active browser editors viable for now; do not delete them while the webKnossos round-trip remains unresolved.
+- Deprioritize porting editor/session surfaces to Flask unless the webKnossos path fails or a specific editor maintenance need appears.
+- Treat Flask as a dashboard/status/review-control strangler, not as a mandate to port every annotation editor.
+
+Best next code candidates:
+
+- Operator evidence template/report helpers:
+  `_identity_source_evidence_template`, `_browser_smoke_evidence_template`,
+  `_disposable_zarr_mutation_smoke_evidence_template`,
+  `_zarr_backup_evidence_template`, and `_browser_response_security_evidence_template`.
+- Zarr backup plan/evidence report helpers:
+  `_zarr_backup_plan`, `_execute_zarr_backup_plan`,
+  `_restore_zarr_backup_manifest`, `_record_zarr_backup_evidence`.
+- Assignment/package freshness helpers:
+  `_inspect_handoff_assignment_freshness`,
+  `_handoff_assignment_snapshot_from_work`,
+  `_handoff_dataset_queue_state_counts`.
+
+Defer until a deliberate route or CLI decomposition slice:
+
+- `_make_handler`
+- `build_parser`
+- `main`
+- `_personal_api_response_payload`
+- live editor/session/runtime helpers
+- browser save/open/complete mutation handlers
 
 ## Phase 1: finish backend helper extraction
 
