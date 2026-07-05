@@ -10,6 +10,7 @@ import sqlite3
 import numpy as np
 
 from fisheye.registry.db import RegistryPaths
+from fisheye.shared.frame_domains import FrameDomains
 from fisheye.shared.mask_store import open_mask_store
 from fisheye.shared.run_resolution import RunResolution, RunResolutionResult, resolve_run
 from fisheye.shared.stage_run_groups import stage_run_parent_paths
@@ -334,6 +335,31 @@ class Recording:
             masks=masks,
             mask_labels=labels,
             mask_encoding=mask_store.encoding,
+        )
+
+    def frame_domains(
+        self,
+        *,
+        stage: str | None = None,
+        run: str | None = None,
+        resolution: RunResolution | str = RunResolution.AUTHORITATIVE,
+    ) -> FrameDomains:
+        """Return the explicit frame-domain resolver for this recording or run."""
+
+        if stage is None:
+            return FrameDomains(root=self.root)
+        parent_path, run_group, resolved = self._resolve_stage_run(
+            stage,
+            run=run,
+            resolution=resolution,
+        )
+        return FrameDomains(
+            root=self.root,
+            stage=stage,
+            run_group=run_group,
+            parent_path=parent_path,
+            run_name=resolved.run_name,
+            resolution=resolved,
         )
 
 
