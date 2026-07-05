@@ -29,6 +29,7 @@ import zarr  # noqa: E402
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.plot_artifacts import write_png_visualization_artifact
 from fisheye.shared.refined_detect_resolution import resolve_detection_read_source
+from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
     mark_run_failed,
@@ -1252,7 +1253,24 @@ def write_comparison_run(
                 },
                 overwrite=True,
             )
-        mark_run_complete(run, parent_group=parent, run_name=run_name)
+        mark_run_complete(
+            run,
+            parent_group=parent,
+            run_name=run_name,
+            run_provenance=build_writer_run_provenance(
+                command="fisheye.diagnostics.compare_realtime_offline_detections",
+                params={
+                    "realtime_frame_offset": int(result.realtime_frame_offset),
+                    "offline_source_kind": result.offline_source_kind,
+                },
+                input_run_ids={
+                    "offline_source_path": result.offline_source_path,
+                    "realtime_source_path": result.realtime_source_path,
+                    "offline_run": result.offline_run_name,
+                    "stimulus_run": result.stimulus_run_name,
+                },
+            ),
+        )
     except Exception as exc:
         mark_run_failed(run, error=str(exc))
         raise

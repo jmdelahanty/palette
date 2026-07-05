@@ -35,6 +35,7 @@ from fisheye.shared.plot_artifacts import (
 )
 from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
+from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
@@ -3307,7 +3308,12 @@ def compute_and_save_bout_kinematics(
             raise
 
     run_group.attrs["status"] = "complete"
-    mark_run_complete(run_group, parent_group=parent, run_name=run_name)
+    mark_run_complete(
+        run_group,
+        parent_group=parent,
+        run_name=run_name,
+        run_provenance=build_run_provenance_from_stage_record(provenance),
+    )
 
     return str(run_name)
 

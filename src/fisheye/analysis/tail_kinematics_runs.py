@@ -17,6 +17,7 @@ import zarr
 from ..shared.detect_reason_codec import decode_reason_bytes
 from ..shared.json_safety import json_attr_safe
 from ..shared.row_lineage import copy_row_lineage_arrays
+from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
@@ -702,6 +703,10 @@ def write_tail_kinematics_run_group(
         run_group,
         parent_group=root["analysis"]["tail_kinematics_runs"],
         run_name=target_run,
+        run_provenance=build_run_provenance_from_stage_record(
+            run_group.attrs.get("provenance", {}),
+            fallback_command=command,
+        ),
     )
 
     reason_counts: dict[str, int] = {}

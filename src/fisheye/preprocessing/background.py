@@ -13,6 +13,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
 from ..shared.system_metadata import get_git_info, get_platform_info
+from ..shared.run_provenance import build_writer_run_provenance
 from ..shared.zarr_run_completion import (
     mark_run_complete,
     mark_run_started,
@@ -258,7 +259,26 @@ def compute_background(
     results['duration_seconds'] = duration
     results['frames_used'] = len(frame_indices)
     results['run_name'] = run_name
-    mark_run_complete(bg_group, parent_group=parent_group, run_name=run_name)
+    mark_run_complete(
+        bg_group,
+        parent_group=parent_group,
+        run_name=run_name,
+        run_provenance=build_writer_run_provenance(
+            command="compute_background",
+            params={
+                "sample_size": sample_size,
+                "seed": seed,
+                "method": method,
+                "compute_full": compute_full,
+                "compute_ds": compute_ds,
+                "config_path": config_path,
+            },
+            input_run_ids={
+                "raw_video": "raw_video",
+                "source_video_path": root.attrs.get("source_video_path"),
+            },
+        ),
+    )
     
     console.print(f"\n[green]Background computation completed in {duration:.2f} seconds[/green]")
     console.print(f"Results stored in: background_runs/{run_name}/background_{{full,ds}}")

@@ -39,6 +39,7 @@ from fisheye.shared.roi_pixel_contract import (
     flat_cache_pixel_contract_for_backend,
     orange_mono_pynvvc_luma_pixel_contract,
 )
+from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr.chunk_profiles import create_geometry_preload_array, stamp_geometry_preload_attrs
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_failed, mark_run_started, require_runs_parent
@@ -941,7 +942,12 @@ def build_hybrid_acquisition_offline_crop_run(
             },
         )
         write_stage_provenance(group, provenance)
-        mark_run_complete(group, parent_group=crop_parent, run_name=resolved_run_name)
+        mark_run_complete(
+            group,
+            parent_group=crop_parent,
+            run_name=resolved_run_name,
+            run_provenance=build_run_provenance_from_stage_record(provenance),
+        )
         crop_parent.attrs["latest_any"] = resolved_run_name
         if set_latest_any:
             crop_parent.attrs["latest_hybrid_acquisition_offline"] = resolved_run_name

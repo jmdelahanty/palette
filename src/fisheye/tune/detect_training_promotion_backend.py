@@ -24,6 +24,7 @@ import zarr
 from zarr.core.dtype import VariableLengthUTF8
 
 from fisheye.shared.detect_reason_codec import read_reason_labels, write_reason_columns
+from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.refined_detect_curation import (
     REFINED_DETECT_STATUS_CODE_MAP,
     REFINED_REVIEW_STATE_CODE_MAP,
@@ -612,7 +613,20 @@ def _write_crop_payload(root: zarr.Group, crop_run: str, payload: Mapping[str, n
             "updated_at_utc": _utc_now(),
         }
     )
-    mark_run_complete(crop, parent_group=crop_parent, run_name=str(crop_run))
+    mark_run_complete(
+        crop,
+        parent_group=crop_parent,
+        run_name=str(crop_run),
+        run_provenance=build_writer_run_provenance(
+            command="fisheye.tune.detect_training_promotion_backend",
+            params={
+                "promotion_schema_version": PROMOTION_SCHEMA_VERSION,
+                "detection_source_type": "manual",
+                "n_rows": count,
+            },
+            input_run_ids={"crop_run": str(crop_run)},
+        ),
+    )
 
 
 def _write_source_index(root: zarr.Group, source_index: Mapping[str, np.ndarray]) -> None:
@@ -1004,7 +1018,24 @@ def _sync_training_refined_instances_from_crop(
     authoritative_approval: dict[str, object] | None = None
     if refined_parent is not None:
         _drop_inline_consolidated_metadata(refined_parent)
-        mark_run_complete(refined_run, parent_group=refined_parent, run_name=run_name)
+        mark_run_complete(
+            refined_run,
+            parent_group=refined_parent,
+            run_name=run_name,
+            run_provenance=build_writer_run_provenance(
+                command="fisheye.tune.detect_training_promotion_backend",
+                params={
+                    "promotion_schema_version": PROMOTION_SCHEMA_VERSION,
+                    "target_refined_run": run_name,
+                    "source_instances_path": instances.path,
+                },
+                input_run_ids={
+                    "training_zarr_path": str(training_zarr_path),
+                    "source_crop_run": crop.attrs.get("source_crop_run"),
+                    "promoted_crop_run": str(target_crop_run),
+                },
+            ),
+        )
         envelope = _approve_promoted_refined_detect_authority(
             training_zarr_path=training_zarr_path,
             run_name=run_name,

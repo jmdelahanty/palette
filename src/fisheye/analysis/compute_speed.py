@@ -48,6 +48,7 @@ from rich.console import Console
 from rich.table import Table
 from scipy.signal import savgol_filter
 
+from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 
 
@@ -908,9 +909,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
     detection_source = detect_group["detection_source"][:] if "detection_source" in detect_group else None
 
+    id_metadata: Dict[str, Optional[str]] = {}
     if is_refined:
         arena_ids = None
-        id_metadata: Dict[str, Optional[str]] = {}
         try:
             arena_ids, id_metadata = load_arena_ids(
                 root,
@@ -1052,7 +1053,43 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         }
     )
     run_group.attrs["num_tracks"] = len(ordered_track_ids)
-    mark_run_complete(run_group, parent_group=root["analysis"]["speed_runs"], run_name=run_name)
+    mark_run_complete(
+        run_group,
+        parent_group=root["analysis"]["speed_runs"],
+        run_name=run_name,
+        run_provenance=build_writer_run_provenance(
+            command=" ".join(sys.argv),
+            params={
+                "fps": fps,
+                "smooth_seconds": args.smooth_seconds,
+                "distance_smoothing_seconds": distance_smooth_seconds,
+                "skip_unassigned": bool(args.skip_unassigned),
+                "hysteresis_enabled": not args.no_hysteresis,
+                "hysteresis_high_px": float(args.hysteresis_high_px) if not args.no_hysteresis else None,
+                "hysteresis_low_px": float(args.hysteresis_low_px) if not args.no_hysteresis else None,
+                "hysteresis_min_frames": int(args.hysteresis_min_frames) if not args.no_hysteresis else None,
+                "hysteresis_band_policy": args.hysteresis_band_policy if not args.no_hysteresis else None,
+                "smoothing_method": args.smoothing_method,
+                "smoothing_alignment": args.smoothing_alignment,
+                "savgol_polyorder": (
+                    int(args.savgol_polyorder)
+                    if args.smoothing_method == "savitzky_golay"
+                    else None
+                ),
+            },
+            input_run_ids={
+                "detection_run": detect_run_name,
+                "detection_variant": "refined" if is_refined else "raw",
+                "source_detect_run": source_detect_run if is_refined else detect_run_name,
+                "tracking_run": id_metadata.get("track_run") if id_metadata else None,
+                "arena_assignment_run": (
+                    id_metadata.get("source_arena_assignment_run")
+                    if id_metadata
+                    else None
+                ),
+            },
+        ),
+    )
 
     console.print(f"[green]✓[/green] Saved speed run to [bold]analysis/speed_runs/{run_name}[/bold]")
 

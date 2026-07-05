@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from fisheye.shared.run_provenance import build_run_provenance
+from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
+from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.run_provenance import scheduler_context
 from fisheye.shared.run_provenance import sha256_payload
 from fisheye.shared.run_provenance import validate_run_provenance
@@ -71,6 +73,36 @@ def test_build_run_provenance_hashes_normalized_params_without_system_context() 
     assert left["config_hash"] == sha256_payload({"a": 1, "path": "/tmp/a"})
     assert left["input_run_ids"] == {"detect": "detect_001"}
     assert "system" not in left
+
+
+def test_build_writer_run_provenance_defaults_to_minimal_valid_payload() -> None:
+    payload = build_writer_run_provenance(
+        command="unit-writer",
+        params={"b": 2, "a": 1},
+        input_run_ids={"detect": "detect_001"},
+    )
+
+    assert payload["command"] == "unit-writer"
+    assert payload["config_hash"] == sha256_payload({"a": 1, "b": 2})
+    assert payload["input_run_ids"] == {"detect": "detect_001"}
+    assert "system" not in payload
+    assert validate_run_provenance(payload).valid is True
+
+
+def test_build_run_provenance_from_stage_record_reuses_parameters_and_inputs() -> None:
+    payload = build_run_provenance_from_stage_record(
+        {
+            "stage": "detect_quality",
+            "command": "quality --run detect_001",
+            "parameters": {"jump_threshold": 100},
+            "inputs": {"source_detect_run": "detect_001"},
+        }
+    )
+
+    assert payload["command"] == "quality --run detect_001"
+    assert payload["params"] == {"jump_threshold": 100}
+    assert payload["input_run_ids"] == {"source_detect_run": "detect_001"}
+    assert validate_run_provenance(payload).valid is True
 
 
 def test_scheduler_context_captures_lsf_job_identity(monkeypatch) -> None:

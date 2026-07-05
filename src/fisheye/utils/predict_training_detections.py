@@ -21,6 +21,7 @@ import numpy as np
 import zarr
 
 from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from fisheye.shared.system_metadata import get_environment_info, get_git_info
@@ -506,7 +507,12 @@ def run_training_zarr_prediction(
     )
     write_stage_provenance(detect_group, provenance)
 
-    mark_run_complete(detect_group, parent_group=detect_parent, run_name=run_name)
+    mark_run_complete(
+        detect_group,
+        parent_group=detect_parent,
+        run_name=run_name,
+        run_provenance=build_run_provenance_from_stage_record(provenance),
+    )
     return {
         "ok": True,
         "zarr_path": str(zarr_path),

@@ -351,7 +351,15 @@ def _summarize_parent(
             if child is None:
                 continue
             try:
-                mark_run_complete(child, run_name=child_name, completed_at_utc=timestamp_utc)
+                mark_run_complete(
+                    child,
+                    run_name=child_name,
+                    completed_at_utc=timestamp_utc,
+                    allow_missing_run_provenance=True,
+                    missing_run_provenance_reason=(
+                        "legacy completion backfill re-mark of a pre-provenance run"
+                    ),
+                )
                 report["marked_complete"] = True
             except Exception as exc:
                 write_failure = {

@@ -52,6 +52,7 @@ from ..shared.subject_mask_chunks import (
     refined_subject_mask_storage_chunks,
 )
 from ..shared.subject_mask_stale import sync_source_subject_mask_stale_payload
+from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.zarr_run_completion import (
     mark_run_complete,
@@ -1906,7 +1907,12 @@ def _create_refined_subject_run_from_component_seeds(
         from ..shared.refined_subject_eye_geometry import write_refined_subject_eye_geometry
 
         write_refined_subject_eye_geometry(run_group)
-    mark_run_complete(run_group, parent_group=refined_parent, run_name=target_run)
+    mark_run_complete(
+        run_group,
+        parent_group=refined_parent,
+        run_name=target_run,
+        run_provenance=build_run_provenance_from_stage_record(provenance),
+    )
     refined_parent.attrs["refined_subject_mask_review_status_latest"] = target_run
     return RefinedSubjectMaskRun(
         run_name=target_run,

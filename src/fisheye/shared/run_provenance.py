@@ -169,6 +169,54 @@ def build_run_provenance(
     return provenance
 
 
+def build_writer_run_provenance(
+    *,
+    command: str,
+    params: Mapping[str, Any] | None = None,
+    input_run_ids: Mapping[str, Any] | None = None,
+    cwd: Path | None = None,
+    include_system_context: bool = False,
+) -> dict[str, Any]:
+    """Build finalization provenance for direct writer paths.
+
+    Lower-volume writers often already store richer stage provenance. This
+    helper keeps the finalization gate narrow: command, normalized parameters,
+    input identifiers, and code identity. System context remains opt-in because
+    it is captured-never-blocks and can be comparatively expensive in tests.
+    """
+
+    return build_run_provenance(
+        command=command,
+        params=params or {},
+        input_run_ids=input_run_ids or {},
+        cwd=cwd,
+        include_system_context=include_system_context,
+    )
+
+
+def build_run_provenance_from_stage_record(
+    stage_record: Mapping[str, Any],
+    *,
+    fallback_command: str | None = None,
+    cwd: Path | None = None,
+    include_system_context: bool = False,
+) -> dict[str, Any]:
+    """Derive finalization provenance from a stage-provenance payload."""
+
+    command = stage_record.get("command") or fallback_command or stage_record.get("stage") or "unknown"
+    raw_params = stage_record.get("parameters")
+    params = raw_params if isinstance(raw_params, Mapping) else {}
+    raw_inputs = stage_record.get("inputs")
+    input_run_ids = raw_inputs if isinstance(raw_inputs, Mapping) else {}
+    return build_writer_run_provenance(
+        command=str(command),
+        params=params,
+        input_run_ids=input_run_ids,
+        cwd=cwd,
+        include_system_context=include_system_context,
+    )
+
+
 def normalize_run_provenance(payload: Mapping[str, Any]) -> dict[str, Any]:
     normalized = json_ready(dict(payload))
     if not isinstance(normalized, dict):

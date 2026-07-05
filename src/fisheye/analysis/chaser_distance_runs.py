@@ -23,6 +23,7 @@ from fisheye.analysis.detection_occupancy_runs import _read_epoch_windows, _reso
 from fisheye.shared.coordinate_transform import load_calibration_transform, projector_to_camera_px
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.plot_artifacts import write_interactive_plot_spec_artifact, write_png_visualization_artifact
+from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.run_lineage_fingerprint import (
     build_run_lineage_payload,
     write_run_lineage_attrs,
@@ -1088,7 +1089,23 @@ def write_chaser_distance_run(
                     summary=summary,
                     overwrite=True,
                 )
-        mark_run_complete(run, parent_group=parent, run_name=run_name)
+        mark_run_complete(
+            run,
+            parent_group=parent,
+            run_name=run_name,
+            run_provenance=build_writer_run_provenance(
+                command="fisheye.analysis.chaser_distance_runs",
+                params=parameters,
+                input_run_ids={
+                    "source_detection_path": result.source_detection_path,
+                    "source_detection_kind": result.source_detection_kind,
+                    "source_stimulus_run": result.source_stimulus_run,
+                    "source_stimulus_path": result.source_stimulus_path,
+                    "source_stimulus_epoch_run": result.source_stimulus_epoch_run,
+                    "source_stimulus_epoch_path": result.source_stimulus_epoch_path,
+                },
+            ),
+        )
     except Exception as exc:
         mark_run_failed(run, error=str(exc))
         raise

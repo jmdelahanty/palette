@@ -73,6 +73,7 @@ from ..registry.stage_complete import (
     extract_dataset_metadata,
 )
 from ..shared.row_lineage import copy_row_lineage_arrays, resolve_source_crop_row_ids, write_direct_source_crop_row_ids
+from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import as_float, normalize_attr
 from ..shared.zarr_helpers import open_zarr_group_direct
@@ -1801,7 +1802,12 @@ def create_refined_keypoint_run(
     console.print("\n".join(report_lines))
     console.print(f"[green]✓[/green] Saved refined keypoints run: [cyan]{run_name}[/cyan]")
 
-    mark_run_complete(kp_refined, parent_group=kp_refined_root, run_name=run_name)
+    mark_run_complete(
+        kp_refined,
+        parent_group=kp_refined_root,
+        run_name=run_name,
+        run_provenance=build_run_provenance_from_stage_record(provenance_record),
+    )
 
     _emit_refined_keypoint_status(
         context=status_context,

@@ -110,6 +110,7 @@ from fisheye.shared.citrus_enums import (
     STIMULUS_MODE_NAME_TO_ID,
 )
 from fisheye.shared.json_safety import json_attr_safe, strict_json_dumps
+from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 
 
@@ -1986,7 +1987,24 @@ def import_stimulus_to_zarr(
         run_attrs["source_stimulus_video_path"] = str(rendered_video)
     run_group.attrs.update(run_attrs)
 
-    mark_run_complete(run_group, parent_group=runs_parent, run_name=run_name)
+    mark_run_complete(
+        run_group,
+        parent_group=runs_parent,
+        run_name=run_name,
+        run_provenance=build_writer_run_provenance(
+            command="fisheye.analysis.import_stimulus_to_zarr",
+            params={
+                "import_version": run_attrs["import_version"],
+                "repair_chaser_gaps": bool(repair_chaser_gaps),
+            },
+            input_run_ids={
+                "source_h5": str(resolved_h5),
+                "source_stimulus_video_path": (
+                    str(rendered_video) if rendered_video is not None else None
+                ),
+            },
+        ),
+    )
     _log(console, f"\n[bold green] Imported stimulus data to analysis/stimulus_runs/{run_name}[/bold green]")
     return run_name
 

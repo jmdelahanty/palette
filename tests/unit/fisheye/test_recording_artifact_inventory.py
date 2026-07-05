@@ -9,7 +9,7 @@ from zarr.errors import ZarrUserWarning
 
 from fisheye.shared.plot_artifacts import write_png_visualization_artifact
 from fisheye.shared.recording_artifact_inventory import _group_names, build_recording_artifact_inventory
-from fisheye.shared.zarr_run_completion import mark_run_complete, require_runs_parent
+from fisheye.shared.zarr_run_completion import COMPLETION_EPOCH_STRICT, mark_run_complete, require_runs_parent
 from fisheye.utils import recording_artifact_inventory as cli
 
 
@@ -24,7 +24,7 @@ def _make_inventory_zarr(tmp_path: Path) -> Path:
         }
     )
 
-    detect_parent = require_runs_parent(root, "detect_runs")
+    detect_parent = require_runs_parent(root, "detect_runs", completion_epoch=COMPLETION_EPOCH_STRICT)
     detect_run = detect_parent.create_group("detect_001")
     write_png_visualization_artifact(
         detect_run,
@@ -40,7 +40,7 @@ def _make_inventory_zarr(tmp_path: Path) -> Path:
     mark_run_complete(quality_run, parent_group=quality_parent, run_name="quality_001")
     mark_run_complete(detect_run, parent_group=detect_parent, run_name="detect_001")
 
-    refined_parent = require_runs_parent(root, "refined_detect_runs")
+    refined_parent = require_runs_parent(root, "refined_detect_runs", completion_epoch=COMPLETION_EPOCH_STRICT)
     refined_run = refined_parent.create_group("refined_001")
     refined_run.create_group("instances")
     refined_run.create_group("source_detections")

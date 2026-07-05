@@ -67,6 +67,7 @@ from fisheye.analysis.chaser_state_interpolator import store_array, write_column
 from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
 from fisheye.shared.json_safety import json_attr_safe, json_attr_safe_mapping, strict_json_dumps
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
+from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from fisheye.shared.system_metadata import get_environment_info, get_git_info
@@ -2734,7 +2735,12 @@ def detect_and_save_bouts(
             write_columnar_dataset(level_group, 'bout_points', payload["bout_points"], attrs=None)
             print(f"  Saved {level}: {len(payload['bouts'])} bouts, {len(payload['intervals'])} intervals")
 
-    mark_run_complete(run_group, parent_group=swim_bout_runs, run_name=run_name)
+    mark_run_complete(
+        run_group,
+        parent_group=swim_bout_runs,
+        run_name=run_name,
+        run_provenance=build_run_provenance_from_stage_record(provenance),
+    )
 
     print()
     print(f"{'='*60}")

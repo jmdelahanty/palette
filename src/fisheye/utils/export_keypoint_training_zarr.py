@@ -33,6 +33,7 @@ from fisheye.pose.schema import (
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.frame_flags import resolve_row_identity_arrays
 from fisheye.shared.detect_reason_codec import read_reason_labels
+from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.type_conversions import normalize_attr as _shared_as_text
 from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
@@ -1571,8 +1572,28 @@ def _export_merged(
             "created_at_utc": _utc_now(),
         }
     )
-    mark_run_complete(crop_group, parent_group=crop_parent, run_name=run_name)
-    mark_run_complete(keypoint_group, parent_group=keypoint_parent, run_name=run_name)
+    run_provenance = build_writer_run_provenance(
+        command="fisheye.utils.export_keypoint_training_zarr",
+        params=training_export,
+        input_run_ids={
+            "source_dataset_ids": [spec.dataset_id for spec in source_specs],
+            "source_zarr_paths": [str(spec.source_zarr) for spec in source_specs],
+            "source_crop_runs": [spec.source_crop_run for spec in source_specs],
+            "keypoint_runs": [spec.keypoint_run for spec in source_specs],
+        },
+    )
+    mark_run_complete(
+        crop_group,
+        parent_group=crop_parent,
+        run_name=run_name,
+        run_provenance=run_provenance,
+    )
+    mark_run_complete(
+        keypoint_group,
+        parent_group=keypoint_parent,
+        run_name=run_name,
+        run_provenance=run_provenance,
+    )
 
     return PoseMergeResult(
         run_name=run_name,

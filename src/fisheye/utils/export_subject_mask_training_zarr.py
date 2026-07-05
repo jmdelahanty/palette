@@ -24,6 +24,7 @@ from fisheye.shared.training_zarr_helpers import (
     write_string_array as _write_string_array,
 )
 from fisheye.shared.type_conversions import normalize_attr as _as_text
+from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
     mark_run_started,
@@ -1104,8 +1105,28 @@ def export_merged_subject_mask_training_zarr_from_sources(
         training_export["registry_registration"] = registry_summary
         root.attrs["training_export"] = training_export
 
-    mark_run_complete(crop_group, parent_group=crop_parent, run_name=export_run_name)
-    mark_run_complete(subject_group, parent_group=subject_parent, run_name=export_run_name)
+    run_provenance = build_writer_run_provenance(
+        command="fisheye.utils.export_subject_mask_training_zarr",
+        params=training_export,
+        input_run_ids={
+            "source_zarr_paths": source_paths,
+            "source_stage_groups": list(source_stage_groups),
+            "source_subject_mask_runs": list(source_run_names),
+            "source_crop_runs": list(source_crop_runs),
+        },
+    )
+    mark_run_complete(
+        crop_group,
+        parent_group=crop_parent,
+        run_name=export_run_name,
+        run_provenance=run_provenance,
+    )
+    mark_run_complete(
+        subject_group,
+        parent_group=subject_parent,
+        run_name=export_run_name,
+        run_provenance=run_provenance,
+    )
 
     return {
         "out_zarr": str(out_path),

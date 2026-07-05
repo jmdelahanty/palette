@@ -31,6 +31,7 @@ from ..shared.provenance_attrs import (
 )
 from ..shared.row_alignment import assert_row_alignment
 from ..shared.row_lineage import copy_row_lineage_arrays, write_direct_source_crop_row_ids
+from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
@@ -1255,7 +1256,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         },
     )
     write_stage_provenance(run_group, provenance)
-    mark_run_complete(run_group, parent_group=root["subject_mask_runs"], run_name=resolved_run_name)
+    mark_run_complete(
+        run_group,
+        parent_group=root["subject_mask_runs"],
+        run_name=resolved_run_name,
+        run_provenance=build_run_provenance_from_stage_record(provenance),
+    )
     if not args.defer_registry_status:
         emit_subject_mask_stage_completion(
             root,

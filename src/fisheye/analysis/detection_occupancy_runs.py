@@ -19,6 +19,7 @@ import zarr  # noqa: E402
 
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
 from fisheye.shared.plot_artifacts import write_png_visualization_artifact
+from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.run_lineage_fingerprint import (
     build_run_lineage_payload,
     write_run_lineage_attrs,
@@ -808,7 +809,21 @@ def write_detection_occupancy_run(
                 extra_attrs={"occupancy_schema_id": SCHEMA_ID, "summary": json_attr_safe(summary)},
                 overwrite=True,
             )
-        mark_run_complete(run, parent_group=parent, run_name=run_name)
+        mark_run_complete(
+            run,
+            parent_group=parent,
+            run_name=run_name,
+            run_provenance=build_writer_run_provenance(
+                command="fisheye.analysis.detection_occupancy_runs",
+                params=parameters,
+                input_run_ids={
+                    "source_detection_path": result.source_detection_path,
+                    "source_detection_kind": result.source_detection_kind,
+                    "source_stimulus_epoch_run": result.source_stimulus_epoch_run,
+                    "source_stimulus_epoch_path": result.source_stimulus_epoch_path,
+                },
+            ),
+        )
     except Exception as exc:
         mark_run_failed(run, error=str(exc))
         raise

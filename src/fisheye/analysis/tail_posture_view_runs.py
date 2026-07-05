@@ -18,6 +18,7 @@ import zarr
 from ..shared.detect_reason_codec import decode_reason_bytes
 from ..shared.json_safety import json_attr_safe
 from ..shared.row_lineage import copy_row_lineage_arrays
+from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
@@ -587,7 +588,15 @@ def write_tail_posture_view_run_group(
     run_group.attrs["invalid_row_count"] = invalid_count
     run_group.attrs["failure_reason_counts"] = reason_counts
     parent = root["analysis"]["tail_posture_view_runs"]
-    mark_run_complete(run_group, parent_group=parent, run_name=target_run)
+    mark_run_complete(
+        run_group,
+        parent_group=parent,
+        run_name=target_run,
+        run_provenance=build_run_provenance_from_stage_record(
+            run_group.attrs.get("provenance", {}),
+            fallback_command=command,
+        ),
+    )
     if str(view_family):
         parent.attrs[f"latest_{view_family}"] = target_run
 

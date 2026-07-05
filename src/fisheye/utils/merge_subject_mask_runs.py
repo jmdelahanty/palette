@@ -30,6 +30,7 @@ from fisheye.shared.mask_probability_encoding import (
     probabilities_encoding_from_attrs,
 )
 from fisheye.shared.row_lineage import assert_row_lineage_sources_equal, copy_row_lineage_arrays
+from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from fisheye.shared.subject_mask_component_provenance import write_subject_mask_component_provenance
@@ -629,7 +630,12 @@ def merge_subject_mask_runs(
         },
     )
     write_stage_provenance(run_group, provenance)
-    mark_run_complete(run_group, parent_group=parent, run_name=run_name)
+    mark_run_complete(
+        run_group,
+        parent_group=parent,
+        run_name=run_name,
+        run_provenance=build_run_provenance_from_stage_record(provenance),
+    )
     summary["duration_seconds"] = duration
     return summary
 

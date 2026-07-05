@@ -13,6 +13,7 @@ import zarr
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.refined_detect_review import DEFAULT_DETECT_GROUP_PREFERENCE, resolve_refined_detect_group
 from fisheye.shared.run_lineage_fingerprint import build_run_lineage_payload, write_run_lineage_attrs
+from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 
 
@@ -964,7 +965,22 @@ def write_detection_profile(
         overwrite=True,
     )
     runs_parent.attrs["latest"] = run_name
-    mark_run_complete(run_group, parent_group=runs_parent, run_name=run_name)
+    mark_run_complete(
+        run_group,
+        parent_group=runs_parent,
+        run_name=run_name,
+        run_provenance=build_writer_run_provenance(
+            command="fisheye.utils.detection_profile",
+            params=merged_config,
+            input_run_ids={
+                "source_detection_path": source.get("detection_path"),
+                "source_detection_type": source.get("detection_type"),
+                "source_detection_content_hash": source.get("content_hash"),
+                "source_dataset_id": dataset.get("dataset_id"),
+                "source_recording_id": dataset.get("recording_id"),
+            },
+        ),
+    )
 
     return DetectionProfileWriteResult(
         run_name=run_name,

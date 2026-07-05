@@ -38,6 +38,7 @@ from fisheye.shared.roi_pixel_contract import (
     orange_mono_pynvvc_luma_pixel_contract,
 )
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
     mark_run_started,
@@ -844,6 +845,7 @@ def _write_output_zarr(
     )
     git_info = get_git_info(Path(__file__).resolve().parents[3])
     env_info = get_environment_info(include_all_packages=False, disk_path=str(out_zarr), collect_ip=False)
+    stage_provenances: dict[str, dict[str, Any]] = {}
     for stage, group, run_name in (("crop", crop_group, crop_run_name), ("keypoints", keypoint_group, keypoint_run_name)):
         provenance = build_stage_provenance(
             stage=stage,
@@ -863,8 +865,19 @@ def _write_output_zarr(
             artifacts={"run_name": run_name, "out_zarr": str(out_zarr)},
         )
         write_stage_provenance(group, provenance)
-    mark_run_complete(crop_group, parent_group=crop_parent, run_name=crop_run_name)
-    mark_run_complete(keypoint_group, parent_group=keypoint_parent, run_name=keypoint_run_name)
+        stage_provenances[stage] = provenance
+    mark_run_complete(
+        crop_group,
+        parent_group=crop_parent,
+        run_name=crop_run_name,
+        run_provenance=build_run_provenance_from_stage_record(stage_provenances["crop"]),
+    )
+    mark_run_complete(
+        keypoint_group,
+        parent_group=keypoint_parent,
+        run_name=keypoint_run_name,
+        run_provenance=build_run_provenance_from_stage_record(stage_provenances["keypoints"]),
+    )
 
 
 def export_acquisition_crop_pose_training_zarr(

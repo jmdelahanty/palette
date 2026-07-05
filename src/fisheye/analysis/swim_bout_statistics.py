@@ -40,6 +40,7 @@ from chaser_analysis.swimming_bout_analysis import (
     EnhancedBoutAnalyzer,
     CalibrationData,
 )
+from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from fisheye.shared.system_metadata import get_git_info
 from fisheye.shared.zarr_io import open_zarr_root
@@ -928,7 +929,21 @@ def _save_report_to_zarr(
         for name, array in storage.items()
     }
     run_group.attrs["report_version"] = "1.0"
-    mark_run_complete(run_group, parent_group=runs_parent, run_name=target_name)
+    stored_provenance = run_group.attrs["provenance"]
+    mark_run_complete(
+        run_group,
+        parent_group=runs_parent,
+        run_name=target_name,
+        run_provenance=build_writer_run_provenance(
+            command=str(stored_provenance.get("script") or "fisheye.analysis.swim_bout_statistics"),
+            params=stored_provenance.get("arguments", {}),
+            input_run_ids={
+                "zarr_path": stored_provenance.get("zarr_path"),
+                "detect_source": stored_provenance.get("detect_source"),
+                "zarr_run": stored_provenance.get("zarr_run"),
+            },
+        ),
+    )
 
     if verbose:
         print(f"Saved swim bout analysis to analysis/swim_bout_runs/{target_name}")

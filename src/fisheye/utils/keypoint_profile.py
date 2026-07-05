@@ -10,6 +10,7 @@ import numpy as np
 import zarr
 
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from fisheye.utils.detection_profile import infer_zarr_use
 
@@ -897,7 +898,22 @@ def write_keypoint_profile(
         }
     )
     runs_parent.attrs["latest"] = run_name
-    mark_run_complete(run_group, parent_group=runs_parent, run_name=run_name)
+    mark_run_complete(
+        run_group,
+        parent_group=runs_parent,
+        run_name=run_name,
+        run_provenance=build_writer_run_provenance(
+            command="fisheye.utils.keypoint_profile",
+            params={},
+            input_run_ids={
+                "source_keypoint_path": source.get("keypoint_path"),
+                "source_keypoint_run": source.get("keypoint_run"),
+                "source_refined_run": source.get("refined_run"),
+                "source_dataset_id": dataset.get("dataset_id"),
+                "source_recording_id": dataset.get("recording_id"),
+            },
+        ),
+    )
 
     return KeypointProfileWriteResult(
         run_name=run_name,

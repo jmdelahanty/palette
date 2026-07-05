@@ -51,6 +51,7 @@ from fisheye.shared.stage_provenance import (
     write_stage_provenance,
 )
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
+from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.zarr_helpers import resolve_zarr_run
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from fisheye.shared.system_metadata import get_git_info
@@ -2024,7 +2025,12 @@ def write_stimulus_response_run(
             f"  Wrote stimulus_response_runs/{run_name}/ "
             f"({len(steps)} steps, {len(fish_ids)} fish, layout {layout})"
         )
-        mark_run_complete(run_group, parent_group=parent, run_name=run_name)
+        mark_run_complete(
+            run_group,
+            parent_group=parent,
+            run_name=run_name,
+            run_provenance=build_run_provenance_from_stage_record(provenance),
+        )
         return run_name
 
     # Global group.
@@ -2202,7 +2208,12 @@ def write_stimulus_response_run(
         f"  Wrote stimulus_response_runs/{run_name}/ "
         f"({len(steps)} steps, {len(fish_ids)} fish)"
     )
-    mark_run_complete(run_group, parent_group=parent, run_name=run_name)
+    mark_run_complete(
+        run_group,
+        parent_group=parent,
+        run_name=run_name,
+        run_provenance=build_run_provenance_from_stage_record(provenance),
+    )
     return run_name
 
 

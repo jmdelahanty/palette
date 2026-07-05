@@ -33,6 +33,7 @@ from ..shared.keypoint_summary import build_frame_keypoint_counts
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
 from ..registry.stage_complete import emit_stage_completion
 from ..shared.row_lineage import copy_row_lineage_arrays
+from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
@@ -1142,7 +1143,12 @@ def detect_keypoints(
     }
     if source_refined_run:
         status_details["source_refined_run"] = source_refined_run
-    mark_run_complete(keypoint_group, parent_group=root["keypoints_runs"], run_name=run_group_name)
+    mark_run_complete(
+        keypoint_group,
+        parent_group=root["keypoints_runs"],
+        run_name=run_group_name,
+        run_provenance=build_run_provenance_from_stage_record(provenance_record),
+    )
     _emit_keypoint_step_status(
         root=root,
         zarr_path=Path(zarr_path).expanduser().resolve(),

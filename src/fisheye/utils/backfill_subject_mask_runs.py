@@ -33,6 +33,7 @@ from fisheye.shared.row_lineage import (
     SOURCE_CROP_ROW_IDS_ARRAY,
     resolve_source_crop_row_ids,
 )
+from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.subject_mask_chunks import subject_mask_storage_chunks
 from fisheye.shared.subject_mask_component_provenance import write_subject_mask_component_provenance
 from fisheye.shared.type_conversions import normalize_attr
@@ -659,7 +660,25 @@ def backfill_subject_mask_run(
     }
     run_group.attrs["duration_seconds"] = duration
     run_group.attrs["summary_statistics"] = summary_statistics
-    mark_run_complete(run_group, parent_group=subject_parent, run_name=target_run)
+    mark_run_complete(
+        run_group,
+        parent_group=subject_parent,
+        run_name=target_run,
+        run_provenance=build_writer_run_provenance(
+            command=BACKFILL_SUBJECT_MASK_METHOD,
+            params={
+                "label_schema": target_label_schema,
+                "projection_mode": projection_mode,
+                "batch_size": int(batch_size),
+                "use_probability_source": bool(use_probability_source),
+            },
+            input_run_ids={
+                "source_stage": source.stage_group,
+                "source_run": source.run_name,
+                "probability_source": prob_source_path,
+            },
+        ),
+    )
     summary["duration_seconds"] = duration
     return summary
 

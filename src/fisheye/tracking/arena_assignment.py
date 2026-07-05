@@ -18,6 +18,7 @@ from rich.panel import Panel
 
 from ..shared.experiment_setup import infer_experiment_setup
 from ..registry.stage_complete import emit_stage_completion
+from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
@@ -811,7 +812,12 @@ def assign_arenas_spatial(
     })
     
     if arena_parent is not None:
-        mark_run_complete(assign_group, parent_group=arena_parent, run_name=run_group_name)
+        mark_run_complete(
+            assign_group,
+            parent_group=arena_parent,
+            run_name=run_group_name,
+            run_provenance=build_run_provenance_from_stage_record(provenance_record),
+        )
 
     try:
         track_run_name, _track_group, tracking_summary = (

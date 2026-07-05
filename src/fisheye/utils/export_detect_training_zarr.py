@@ -32,6 +32,7 @@ from fisheye.shared.refined_detect_curation import (
     write_curated_refined_detect_surfaces,
 )
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
@@ -294,7 +295,21 @@ def _export_dataset(plan: ExportPlan, *, overwrite: bool, run_name: str, manifes
             },
         }
     )
-    mark_run_complete(crop_group, parent_group=crop_parent, run_name=run_name)
+    mark_run_complete(
+        crop_group,
+        parent_group=crop_parent,
+        run_name=run_name,
+        run_provenance=build_writer_run_provenance(
+            command="fisheye.utils.export_detect_training_zarr",
+            params=dest_root.attrs.get("training_export", {}),
+            input_run_ids={
+                "source_zarr": str(plan.source_zarr),
+                "source_bbox_path": plan.bbox_path,
+                "source_crop_run": plan.crop_run,
+                "source_detection_source_path": plan.detection_source_path,
+            },
+        ),
+    )
 
 
 def _update_manifest_paths(
@@ -1973,7 +1988,20 @@ def _export_merged(
             "created_at_utc": _utc_now(),
         }
     )
-    mark_run_complete(refined_run, parent_group=refined_parent, run_name=run_name)
+    mark_run_complete(
+        refined_run,
+        parent_group=refined_parent,
+        run_name=run_name,
+        run_provenance=build_writer_run_provenance(
+            command="fisheye.utils.export_detect_training_zarr",
+            params=training_export,
+            input_run_ids={
+                "source_dataset_ids": [spec.dataset_id for spec in source_specs],
+                "source_zarr_paths": [str(spec.source_zarr) for spec in source_specs],
+                "source_bbox_paths": [spec.bbox_path for spec in source_specs],
+            },
+        ),
+    )
 
     return MergeResult(
         run_name=run_name,

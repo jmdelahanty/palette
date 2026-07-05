@@ -13,6 +13,7 @@ import numpy as np
 import zarr
 
 from fisheye.shared.json_safety import json_attr_safe
+from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.run_lineage_fingerprint import (
     build_run_lineage_payload,
     write_run_lineage_attrs,
@@ -412,7 +413,16 @@ def write_stimulus_epoch_run(
             code={"git_commit": git.get("commit_hash"), "git_dirty": git.get("is_dirty")},
         )
         write_run_lineage_attrs(run, lineage_payload, fingerprint_status="best_effort", overwrite=True)
-        mark_run_complete(run, parent_group=parent, run_name=run_name)
+        mark_run_complete(
+            run,
+            parent_group=parent,
+            run_name=run_name,
+            run_provenance=build_writer_run_provenance(
+                command="fisheye.analysis.stimulus_epoch_runs",
+                params=parameters,
+                input_run_ids=source_refs,
+            ),
+        )
     except Exception as exc:
         mark_run_failed(run, error=str(exc))
         raise

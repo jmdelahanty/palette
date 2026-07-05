@@ -18,6 +18,7 @@ from fisheye.diagnostics.compare_realtime_offline_detections import (
     load_crop_meta_realtime_detection_rows,
     resolve_crop_meta_path,
 )
+from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_failed, mark_run_started, require_runs_parent
 from fisheye.shared.system_metadata import get_environment_info, get_git_info
@@ -358,7 +359,12 @@ def import_acquisition_detections_to_detect_run(
             },
         )
         write_stage_provenance(run, provenance)
-        mark_run_complete(run, parent_group=parent, run_name=resolved_run_name)
+        mark_run_complete(
+            run,
+            parent_group=parent,
+            run_name=resolved_run_name,
+            run_provenance=build_run_provenance_from_stage_record(provenance),
+        )
     except Exception as exc:
         mark_run_failed(run, error=str(exc))
         raise

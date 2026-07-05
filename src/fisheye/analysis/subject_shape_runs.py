@@ -33,6 +33,7 @@ from ..shared.detect_reason_codec import decode_reason_bytes
 from ..shared.json_safety import json_attr_safe
 from ..shared.mask_geometry import batch_mask_spatial_metrics, measure_mask_ellipse as _measure_mask
 from ..shared.row_lineage import copy_row_lineage_arrays
+from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
@@ -2533,7 +2534,15 @@ def write_subject_shape_run_group(
     }
     run_group.attrs["subject_shape_chunk_timings"] = list(_json_safe(chunk_timings))
     parent = root["analysis"]["subject_shape_runs"]
-    mark_run_complete(run_group, parent_group=parent, run_name=target_run)
+    mark_run_complete(
+        run_group,
+        parent_group=parent,
+        run_name=target_run,
+        run_provenance=build_run_provenance_from_stage_record(
+            run_group.attrs.get("provenance", {}),
+            fallback_command="subject_shape_runs",
+        ),
+    )
     summary.update(
         {
             "status": "updated",

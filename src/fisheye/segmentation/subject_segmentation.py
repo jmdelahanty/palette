@@ -24,6 +24,7 @@ from ..shared.roi_background import (
 from ..shared.crop_image_source import CropImageSource
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs, build_source_roi_pixel_attrs
 from ..shared.row_lineage import copy_row_lineage_arrays, write_direct_source_crop_row_ids
+from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
@@ -691,7 +692,12 @@ def segment_subject_masks_from_root(
             inputs=provenance_inputs,
         )
         write_stage_provenance(run_group, provenance)
-        mark_run_complete(run_group, parent_group=root["subject_mask_runs"], run_name=run_name)
+        mark_run_complete(
+            run_group,
+            parent_group=root["subject_mask_runs"],
+            run_name=run_name,
+            run_provenance=build_run_provenance_from_stage_record(provenance),
+        )
         if zarr_path is not None:
             emit_subject_mask_stage_completion(
                 root,

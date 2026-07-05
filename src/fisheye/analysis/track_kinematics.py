@@ -38,6 +38,7 @@ from fisheye.shared.stage_provenance import (
     build_stage_provenance,
     write_stage_provenance,
 )
+from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.shared.zarr.chunk_profiles import (
     geometry_preload_chunks_for_shape,
@@ -583,7 +584,15 @@ def mark_track_kinematics_run_complete(
     track_parent = root["analysis"]["track_kinematics_runs"]
     type_parent = track_parent[run_type]
     qualified_name = f"{run_type}/{run_name}"
-    mark_run_complete(run_group, parent_group=track_parent, run_name=qualified_name)
+    mark_run_complete(
+        run_group,
+        parent_group=track_parent,
+        run_name=qualified_name,
+        run_provenance=build_run_provenance_from_stage_record(
+            run_group.attrs.get("provenance", {}),
+            fallback_command="track_kinematics",
+        ),
+    )
     type_parent.attrs["latest"] = run_name
     attr_key = "latest_online" if run_type == "online" else "latest_offline"
     track_parent.attrs[attr_key] = run_name

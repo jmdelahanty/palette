@@ -22,6 +22,7 @@ from fisheye.shared.roi_pixel_contract import (
     orange_mono_pynvvc_luma_pixel_contract,
 )
 from fisheye.shared.json_safety import write_jsonl_atomic
+from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr.chunk_profiles import create_geometry_preload_array, stamp_geometry_preload_attrs
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_failed, mark_run_started, require_runs_parent
@@ -510,7 +511,12 @@ def _write_crop_run(
             artifacts={"run_path": f"crop_runs/{run_name}", "selected_rows": int(payload.frame_indices.shape[0])},
         )
         write_stage_provenance(group, provenance)
-        mark_run_complete(group, parent_group=parent, run_name=run_name)
+        mark_run_complete(
+            group,
+            parent_group=parent,
+            run_name=run_name,
+            run_provenance=build_run_provenance_from_stage_record(provenance),
+        )
         _finalize_geometry_only_crop_parent(parent, run_name=run_name)
     except Exception as exc:
         mark_run_failed(group, error=str(exc))

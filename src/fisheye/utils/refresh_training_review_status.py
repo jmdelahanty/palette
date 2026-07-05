@@ -278,7 +278,15 @@ def audit_and_stamp_review_runs(
 
             counts["valid"] += 1
             if apply and stamp_completion_markers:
-                mark_run_complete(run_group, parent_group=parent, run_name=spec.run_name)
+                mark_run_complete(
+                    run_group,
+                    parent_group=parent,
+                    run_name=spec.run_name,
+                    allow_missing_run_provenance=True,
+                    missing_run_provenance_reason=(
+                        "training review status refresh re-marks existing runs"
+                    ),
+                )
                 if spec.family == "refined_subject_masks":
                     parent.attrs["refined_subject_mask_review_status_latest"] = spec.run_name
                 counts["stamped"] += 1

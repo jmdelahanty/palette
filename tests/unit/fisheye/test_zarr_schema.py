@@ -21,6 +21,7 @@ from fisheye.shared.zarr.schema import (
     ZARR_SCHEMA,
     ZARR_SCHEMA_VERSION
 )
+from fisheye.shared.run_provenance import build_writer_run_provenance
 
 class TestZarrSchema:
     """Test Zarr schema creation and structure."""
@@ -160,7 +161,15 @@ class TestZarrSchema:
 
         from fisheye.shared.zarr_run_completion import mark_run_complete
 
-        mark_run_complete(run_group, parent_group=root["detect_runs"], run_name=run_name)
+        mark_run_complete(
+            run_group,
+            parent_group=root["detect_runs"],
+            run_name=run_name,
+            run_provenance=build_writer_run_provenance(
+                command="test_zarr_schema",
+                params={"stage": "detect"},
+            ),
+        )
 
         # Getting latest run should return existing complete run when create_new=False
         run_group2, run_name2 = get_run_group(root, 'detect', create_new=False)

@@ -81,7 +81,16 @@ def test_audit_and_stamp_review_runs_validates_before_marking(monkeypatch, tmp_p
     monkeypatch.setattr(mod, "_open_zarr_group", lambda *_args, **_kwargs: root)
     monkeypatch.setattr(mod, "validate_run", lambda *_args, **_kwargs: SimpleNamespace(valid=True))
 
-    def _fake_mark_run_complete(group, *, parent_group, run_name):  # type: ignore[no-untyped-def]
+    def _fake_mark_run_complete(  # type: ignore[no-untyped-def]
+        group,
+        *,
+        parent_group,
+        run_name,
+        allow_missing_run_provenance=False,
+        missing_run_provenance_reason=None,
+    ):
+        assert allow_missing_run_provenance is True
+        assert missing_run_provenance_reason == "training review status refresh re-marks existing runs"
         stamped.append(run_name)
         group.attrs[mod.RUN_COMPLETION_STATUS_ATTR] = mod.RUN_STATUS_COMPLETE
         parent_group.attrs["latest_complete"] = run_name

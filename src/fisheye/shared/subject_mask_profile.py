@@ -27,6 +27,7 @@ import numpy as np
 import zarr
 
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.type_conversions import as_float, as_int, normalize_attr
 from fisheye.shared.zarr_helpers import infer_zarr_use, zarr_group_names
 from fisheye.shared.zarr_run_completion import (
@@ -689,7 +690,24 @@ def write_subject_mask_profile(
         }
     )
     runs_parent.attrs["latest"] = run_name
-    mark_run_complete(run_group, parent_group=runs_parent, run_name=run_name)
+    mark_run_complete(
+        run_group,
+        parent_group=runs_parent,
+        run_name=run_name,
+        run_provenance=build_writer_run_provenance(
+            command="fisheye.shared.subject_mask_profile",
+            params={},
+            input_run_ids={
+                "source_mask_path": source.get("mask_path"),
+                "source_stage_group": source.get("stage_group"),
+                "source_mask_run": source.get("mask_run"),
+                "source_keypoints_run": source.get("source_keypoints_run"),
+                "source_crop_run": source.get("source_crop_run"),
+                "source_dataset_id": dataset.get("dataset_id"),
+                "source_recording_id": dataset.get("recording_id"),
+            },
+        ),
+    )
 
     return SubjectMaskProfileWriteResult(
         run_name=run_name,

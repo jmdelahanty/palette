@@ -280,29 +280,29 @@ _PROMOTED_STAGE_COMPLETION_CASES = (
 )
 
 
-def test_require_runs_parent_stamps_new_empty_parent_strict() -> None:
+def test_require_runs_parent_stamps_new_empty_parent_provenance_strict() -> None:
     root = FakeGroup()
 
     parent = require_runs_parent(root, "detect_runs")
 
     assert root["detect_runs"] is parent
-    assert parent.attrs[COMPLETION_EPOCH_ATTR] == COMPLETION_EPOCH_STRICT
+    assert parent.attrs[COMPLETION_EPOCH_ATTR] == COMPLETION_EPOCH_REQUIRE_PROVENANCE
     assert effective_legacy_default(parent) is False
-    assert requires_completion_provenance(parent) is False
+    assert requires_completion_provenance(parent) is True
 
 
-def test_require_runs_parent_can_opt_new_empty_parent_into_provenance_epoch() -> None:
+def test_require_runs_parent_can_opt_new_empty_parent_into_legacy_strict_epoch() -> None:
     root = FakeGroup()
 
     parent = require_runs_parent(
         root,
         "detect_runs",
-        completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
+        completion_epoch=COMPLETION_EPOCH_STRICT,
     )
 
-    assert parent.attrs[COMPLETION_EPOCH_ATTR] == COMPLETION_EPOCH_REQUIRE_PROVENANCE
+    assert parent.attrs[COMPLETION_EPOCH_ATTR] == COMPLETION_EPOCH_STRICT
     assert effective_legacy_default(parent) is False
-    assert requires_completion_provenance(parent) is True
+    assert requires_completion_provenance(parent) is False
 
 
 def test_require_runs_parent_leaves_existing_parent_legacy_until_backfill() -> None:

@@ -39,6 +39,7 @@ from fisheye.shared.provenance_attrs import (
     resolve_source_keypoints_run,
 )
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
+from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from fisheye.shared.detect_reason_codec import REASON_BYTES_ENCODING, REASON_BYTES_MIN_WIDTH
 from fisheye.shared.eye_geometry_source import (
@@ -3531,7 +3532,23 @@ def run(args: argparse.Namespace) -> None:
     }
     run_group.attrs["provenance"] = json.loads(json.dumps(provenance, default=_to_serializable))
     write_best_effort_run_lineage_attrs(run_group, run_family="eye_angle_run")
-    mark_run_complete(run_group, parent_group=parent_group, run_name=resolved_run_name)
+    mark_run_complete(
+        run_group,
+        parent_group=parent_group,
+        run_name=resolved_run_name,
+        run_provenance=build_writer_run_provenance(
+            command="fisheye.analysis.eye_angle_analysis",
+            params=provenance.get("arguments", {}),
+            input_run_ids={
+                "eye_geometry_stage": eye_geometry.stage_group,
+                "eye_geometry_run": eye_geometry.run_name,
+                "subject_shape_run": eye_geometry.source_subject_shape_run,
+                "refined_eye_run": eye_geometry.source_refined_eye_run,
+                "refined_subject_run": eye_geometry.source_refined_subject_run,
+                "keypoint_run": keypoint_run_name,
+            },
+        ),
+    )
 
     if not args.quiet:
         console.print(

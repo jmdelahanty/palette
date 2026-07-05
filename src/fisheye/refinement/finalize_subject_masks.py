@@ -53,6 +53,7 @@ from ..shared.provenance_attrs import (
     build_source_keypoints_attrs,
 )
 from ..shared.row_lineage import copy_row_lineage_arrays_from_sources
+from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.mask_store import (
     MASK_RLE_VALIDATION_MODES,
@@ -4165,7 +4166,15 @@ def finalize_subject_mask_run(
     run_group.attrs["worker_process_count"] = normalized_num_workers
     run_group.attrs["dask_chunk_size"] = int(worker_chunk_size)
     run_group.attrs["dask_version"] = getattr(dask, "__version__", "unknown")
-    mark_run_complete(run_group, parent_group=refined_parent, run_name=target_run)
+    mark_run_complete(
+        run_group,
+        parent_group=refined_parent,
+        run_name=target_run,
+        run_provenance=build_run_provenance_from_stage_record(
+            run_group.attrs.get("provenance", {}),
+            fallback_command="finalize_subject_masks",
+        ),
+    )
     refined_parent.attrs["refined_subject_mask_review_status_latest"] = target_run
 
     summary.update(

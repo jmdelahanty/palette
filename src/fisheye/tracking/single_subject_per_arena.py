@@ -8,6 +8,7 @@ import numpy as np
 import zarr
 from rich.console import Console
 
+from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
@@ -315,7 +316,12 @@ def write_single_subject_per_arena_tracking_run(
 
     write_stage_provenance(run_group, provenance)
     if tracking_parent is not None:
-        mark_run_complete(run_group, parent_group=tracking_parent, run_name=run_name)
+        mark_run_complete(
+            run_group,
+            parent_group=tracking_parent,
+            run_name=run_name,
+            run_provenance=build_run_provenance_from_stage_record(provenance),
+        )
 
     return run_name, run_group, summary_statistics
 

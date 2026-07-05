@@ -26,6 +26,7 @@ from ..shared.instance_keys import (
     resolve_recording_identity,
 )
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.zarr.chunk_profiles import create_geometry_preload_array
 from ..shared.zarr_run_completion import (
     mark_run_complete,
@@ -556,7 +557,12 @@ def detect_fish(
         },
     )
     write_stage_provenance(detect_group, provenance_record)
-    mark_run_complete(detect_group, parent_group=parent_group, run_name=run_name)
+    mark_run_complete(
+        detect_group,
+        parent_group=parent_group,
+        run_name=run_name,
+        run_provenance=build_run_provenance_from_stage_record(provenance_record),
+    )
     
     # Run quality analysis
     console.print("\n[bold]Running detection quality analysis...[/bold]")

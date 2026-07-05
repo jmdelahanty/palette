@@ -24,6 +24,7 @@ from ..shared.metadata import get_total_frames, get_detection_method
 from ..shared.system_metadata import get_environment_info, get_git_info
 from ..shared.refined_detect_curation import write_curated_refined_detect_surfaces
 from ..registry.stage_complete import emit_stage_completion
+from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr_run_completion import (
@@ -1517,7 +1518,12 @@ def create_refined_run(
             except Exception as exc:
                 console.print(f"[yellow]Warning:[/yellow] Failed to render detection visualization: {exc}")
 
-    mark_run_complete(refined_group, parent_group=refined_runs, run_name=run_name)
+    mark_run_complete(
+        refined_group,
+        parent_group=refined_runs,
+        run_name=run_name,
+        run_provenance=build_run_provenance_from_stage_record(provenance_record),
+    )
 
     detect_review_status = _parse_mapping(refined_group.attrs.get("detect_review_status"))
     _emit_refined_detect_status(

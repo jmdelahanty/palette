@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 from fisheye.registry.db import Registry
 from fisheye.shared.zarr_run_completion import (
     COMPLETION_EPOCH_ATTR,
-    COMPLETION_EPOCH_STRICT,
+    COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     RUN_COMPLETION_STATUS_ATTR,
 )
 from fisheye.utils import backfill_keypoint_profiles as backfill_mod
@@ -436,7 +436,7 @@ def test_write_keypoint_profile_writes_run_attrs_and_latest_pointer() -> None:
 
     parent = root["analysis/keypoint_profile_runs"]
     assert parent.attrs["latest"] == "keypoint_profile_2026-02-24_10-10-10"
-    assert parent.attrs[COMPLETION_EPOCH_ATTR] == COMPLETION_EPOCH_STRICT
+    assert parent.attrs[COMPLETION_EPOCH_ATTR] == COMPLETION_EPOCH_REQUIRE_PROVENANCE
 
     run_group = parent["keypoint_profile_2026-02-24_10-10-10"]
     assert run_group.attrs[RUN_COMPLETION_STATUS_ATTR] == "complete"

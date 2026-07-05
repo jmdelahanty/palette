@@ -82,11 +82,10 @@ def require_runs_parent(
     *,
     completion_epoch: Optional[int] = None,
 ) -> Any:
-    """Return a runs-parent group, stamping new empty parents as strict.
+    """Return a runs-parent group, stamping new empty parents as provenance-strict.
 
-    ``completion_epoch`` is an opt-in for families whose writers are ready for
-    newer completion policies. The default remains epoch 1 so under-instrumented
-    writers do not start failing merely because they create a new parent.
+    Existing parents with children are not stamped here; they remain grandfathered
+    until an explicit backfill/migration sets their epoch.
     """
 
     if hasattr(root, "require_group"):
@@ -102,7 +101,7 @@ def require_runs_parent(
         attrs[COMPLETION_EPOCH_ATTR] = (
             int(completion_epoch)
             if completion_epoch is not None
-            else COMPLETION_EPOCH_STRICT
+            else COMPLETION_EPOCH_REQUIRE_PROVENANCE
         )
     return parent
 

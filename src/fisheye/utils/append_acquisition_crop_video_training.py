@@ -24,6 +24,7 @@ from fisheye.shared.roi_pixel_contract import (
     orange_mono_pynvvc_luma_pixel_contract,
 )
 from fisheye.shared.pynvvc_luma_rgb import PynvvcLumaRgbReader
+from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
@@ -346,7 +347,12 @@ def _write_crop_run(
         artifacts={"run_name": run_name, "row_count": row_count},
     )
     write_stage_provenance(crop_group, provenance)
-    mark_run_complete(crop_group, parent_group=crop_parent, run_name=run_name)
+    mark_run_complete(
+        crop_group,
+        parent_group=crop_parent,
+        run_name=run_name,
+        run_provenance=build_run_provenance_from_stage_record(provenance),
+    )
 
 
 def append_acquisition_crop_video_training(

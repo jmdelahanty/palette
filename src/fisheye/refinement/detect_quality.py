@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from .utils import identify_gaps, categorize_gaps, calculate_coverage_stats, Gap
 
 from ..registry.stage_complete import emit_stage_completion
+from ..shared.run_provenance import build_writer_run_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr_helpers import open_zarr_group_direct, reconsolidate_zarr_metadata
 from ..shared.zarr_run_completion import (
@@ -741,7 +742,24 @@ def save_quality_report(
         if n_multi_detections > 0:
             print(f"  Multi-detection: {n_multi_detections}")
 
-    mark_run_complete(quality_group, parent_group=quality_reports_group, run_name=run_name)
+    mark_run_complete(
+        quality_group,
+        parent_group=quality_reports_group,
+        run_name=run_name,
+        run_provenance=build_writer_run_provenance(
+            command=str(quality_group.attrs["provenance"].get("command") or "detect_quality"),
+            params={
+                "artifact_detection_params": quality_group.attrs.get("artifact_detection_params"),
+                "count_policy": count_policy,
+                "sampling": quality_group.attrs.get("sampling"),
+            },
+            input_run_ids={
+                "source_detect_run": source_run,
+                "source_detect_family_path": detect_family_path,
+                "source_detect_path": _join_group_path(detect_family_path, source_run),
+            },
+        ),
+    )
 
     if consolidate_metadata:
         report = reconsolidate_zarr_metadata(

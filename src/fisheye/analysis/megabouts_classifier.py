@@ -36,6 +36,7 @@ from fisheye.analysis.megabouts_classifier_inputs import (
 )
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
+from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from fisheye.shared.system_metadata import get_environment_info, get_git_info
@@ -528,7 +529,12 @@ def write_megabouts_classification_run(
     )
     write_stage_provenance(run_group, provenance)
     write_best_effort_run_lineage_attrs(run_group, run_family="bout_classification_run")
-    mark_run_complete(run_group, parent_group=parent, run_name=resolved_run_name)
+    mark_run_complete(
+        run_group,
+        parent_group=parent,
+        run_name=resolved_run_name,
+        run_provenance=build_run_provenance_from_stage_record(provenance),
+    )
     return resolved_run_name
 
 
