@@ -64,7 +64,7 @@ detection's `geometry_norm`/`histograms`.
 
 ## Proposed shape (mirrors the existing three layers)
 
-1. **Builder:** `utils/subject_mask_profile.py::build_subject_mask_profile_summary(...)`
+1. **Builder:** `shared/subject_mask_profile.py::build_subject_mask_profile_summary(...)`
    → `schema_name="subject_mask_dataset_profile"`, `schema_version="v1"`, sections
    `dataset` / `source` / `coverage` / `components` (per-label distribution stats) /
    `composition`. Reuse the percentile/stats helpers already shared across the profile

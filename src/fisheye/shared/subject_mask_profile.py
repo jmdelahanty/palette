@@ -19,24 +19,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 import zarr
 
-from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
-from fisheye.utils.detection_profile import infer_zarr_use
-from fisheye.utils.keypoint_profile import (
-    _as_float,
-    _as_int,
-    _coerce_mapping,
-    _extract_composition,
-    _metric_stats,
-    _normalize_text,
-    _safe_ratio,
-    _select_latest_run,
-    _utc_now,
+from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.type_conversions import as_float, as_int, normalize_attr
+from fisheye.shared.zarr_helpers import infer_zarr_use, zarr_group_names
+from fisheye.shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_started,
+    require_runs_parent,
+    resolve_authoritative_run_name,
 )
 
 
@@ -48,6 +45,22 @@ REFINED_PARENT_NAME = "refined_subject_masks_runs"
 SUBJECT_MASK_PARENT_NAMES = (REFINED_PARENT_NAME, RAW_PARENT_NAME)
 
 REVIEW_TIMESTAMP_KEYS = ("timestamp_utc", "timestamp", "reviewed_at_utc", "reviewed_at", "updated_utc")
+COMPOSITION_FIELDS = (
+    "rig_id",
+    "camera_id",
+    "arena_id",
+    "dish_design",
+    "canvas_name",
+    "protocol_name",
+    "genotype",
+    "dpf_at_acquisition",
+)
+PROFILE_PERCENTILES = (10, 50, 90)
+
+_as_float = as_float
+_as_int = as_int
+_normalize_text = normalize_attr
+_utc_now = utc_now
 
 
 class SubjectMaskProfileError(RuntimeError):
@@ -95,6 +108,123 @@ def _default_profile_run_name(created_at_utc: str) -> str:
         stamp = stamp.replace(tzinfo=timezone.utc)
     stamp = stamp.astimezone(timezone.utc)
     return f"subject_mask_profile_{stamp.strftime('%Y-%m-%d_%H-%M-%S')}"
+
+
+def _coerce_mapping(value: Any) -> Optional[dict[str, Any]]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, (bytes, bytearray)):
+        raw = value.decode("utf-8", "ignore")
+    elif isinstance(value, str):
+        raw = value
+    else:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return None
+    return dict(payload) if isinstance(payload, Mapping) else None
+
+
+def _select_source_run(parent: zarr.Group) -> Optional[str]:
+    """Resolve the mask source run using authority first, then latest-complete."""
+
+    try:
+        return resolve_authoritative_run_name(parent)
+    except Exception:
+        names = zarr_group_names(parent)
+        return names[-1] if names else None
+
+
+def _extract_subject_snapshot(root: zarr.Group) -> dict[str, Any]:
+    analysis_meta = root.get("analysis_metadata")
+    if analysis_meta is None:
+        return {}
+    for key in ("subject_metadata", "zebrobot_snapshot"):
+        payload = _coerce_mapping(analysis_meta.attrs.get(key))
+        if payload:
+            return payload
+    return {}
+
+
+def _extract_composition(root: zarr.Group) -> dict[str, Any]:
+    session_context: dict[str, Any] = {}
+    analysis_meta = root.get("analysis_metadata")
+    if analysis_meta is not None:
+        payload = _coerce_mapping(analysis_meta.attrs.get("session_context"))
+        if payload:
+            session_context = payload
+    subject_snapshot = _extract_subject_snapshot(root)
+    dish_map = _coerce_mapping(subject_snapshot.get("dish")) if subject_snapshot else None
+    dish_map = dish_map or {}
+
+    protocol_from_context = _normalize_text(
+        session_context.get("protocol_name") or session_context.get("protocol_name_from_definition")
+    )
+    genotype_from_snapshot = _normalize_text(
+        dish_map.get("genotype") or subject_snapshot.get("genotype")
+    )
+    dpf_from_snapshot = _as_int(
+        subject_snapshot.get("dpf_at_acquisition")
+        or subject_snapshot.get("days_post_fertilization")
+    )
+
+    composition: dict[str, Any] = {}
+    for key in COMPOSITION_FIELDS:
+        if key == "protocol_name":
+            value = _normalize_text(root.attrs.get("protocol_name")) or protocol_from_context
+        elif key == "genotype":
+            value = (
+                _normalize_text(root.attrs.get("genotype"))
+                or _normalize_text(session_context.get("genotype"))
+                or genotype_from_snapshot
+            )
+        elif key == "dpf_at_acquisition":
+            value = _as_int(root.attrs.get("dpf_at_acquisition"))
+            if value is None:
+                value = _as_int(session_context.get("dpf_at_acquisition"))
+            if value is None:
+                value = _as_int(session_context.get("days_post_fertilization"))
+            if value is None:
+                value = dpf_from_snapshot
+        else:
+            value = _normalize_text(root.attrs.get(key)) or _normalize_text(session_context.get(key))
+        if value is not None:
+            composition[key] = value
+    return composition
+
+
+def _safe_ratio(numerator: Optional[float], denominator: Optional[float]) -> Optional[float]:
+    if numerator is None or denominator is None:
+        return None
+    if float(denominator) <= 0.0:
+        return None
+    return float(numerator) / float(denominator)
+
+
+def _metric_stats(values: np.ndarray) -> dict[str, Any]:
+    arr = np.asarray(values, dtype=np.float64)
+    arr = arr[np.isfinite(arr)]
+    stats: dict[str, Any] = {"count": int(arr.size)}
+    if arr.size == 0:
+        stats.update({"min": None, "max": None, "mean": None, "std": None})
+        for percentile in PROFILE_PERCENTILES:
+            stats[f"p{percentile}"] = None
+        return stats
+    stats.update(
+        {
+            "min": float(np.min(arr)),
+            "max": float(np.max(arr)),
+            "mean": float(np.mean(arr)),
+            "std": float(np.std(arr)),
+        }
+    )
+    for percentile in PROFILE_PERCENTILES:
+        stats[f"p{percentile}"] = float(np.quantile(arr, percentile / 100.0))
+    return stats
 
 
 def _coerce_text_list(value: Any) -> list[str]:
@@ -248,9 +378,9 @@ def resolve_subject_mask_source(
 ) -> ResolvedSubjectMaskSource:
     """Resolve the subject-mask run to profile.
 
-    Preference order mirrors the keypoint profile builder: an explicit path wins,
-    then the refined parent (``latest`` pointer or last sorted run), then the raw
-    ``subject_mask_runs`` parent.
+    Preference order: an explicit path/run wins, then the authoritative refined
+    run (falling back to latest-complete when no pointer exists), then the raw
+    ``subject_mask_runs`` parent with the same authoritative-first resolution.
     """
 
     if source_mask_path:
@@ -269,14 +399,14 @@ def resolve_subject_mask_source(
     if subject_mask_run is not None:
         return _resolve_run(root, RAW_PARENT_NAME, subject_mask_run)
     if refined_parent is not None:
-        chosen = _select_latest_run(refined_parent)
+        chosen = _select_source_run(refined_parent)
         if chosen is not None:
             return _resolve_run(root, REFINED_PARENT_NAME, chosen)
 
     raw_parent = root.get(RAW_PARENT_NAME)
     if raw_parent is None:
         raise SubjectMaskSourceError("no subject mask run parent found")
-    chosen = _select_latest_run(raw_parent)
+    chosen = _select_source_run(raw_parent)
     if chosen is None:
         raise SubjectMaskSourceError("no subject mask run available")
     return _resolve_run(root, RAW_PARENT_NAME, chosen)

@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry
 from fisheye.registry import maintenance as maintenance_cli
-from fisheye.utils.subject_mask_profile import (
+from fisheye.shared.subject_mask_profile import (
     SCHEMA_NAME,
     SCHEMA_VERSION,
     build_subject_mask_profile_summary,
