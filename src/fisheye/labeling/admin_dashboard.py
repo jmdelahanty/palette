@@ -2925,6 +2925,54 @@ def _labeler_route_authorization_runtime_checklist(
 def _assignment_ownership_policy() -> dict[str, object]:
     return dict(ASSIGNMENT_OWNERSHIP_POLICY)
 
+def _single_owner_assignment_live_contract_fields(
+    store: LabelingStore,
+    *,
+    integrity: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    policy = _assignment_ownership_policy()
+    single_owner_assignment_contract = store.single_owner_assignment_contract()
+    integrity_source = (
+        integrity
+        if isinstance(integrity, Mapping)
+        else {
+            "ok": bool(single_owner_assignment_contract.get("ready")),
+            "recording_id_primary_key": bool(
+                single_owner_assignment_contract.get("recording_id_primary_key")
+            ),
+            "schema_enforced_recording_primary_key": bool(
+                single_owner_assignment_contract.get(
+                    "schema_enforced_recording_primary_key"
+                )
+            ),
+            "primary_key_columns": (
+                single_owner_assignment_contract.get("primary_key_columns")
+                if isinstance(
+                    single_owner_assignment_contract.get("primary_key_columns"),
+                    list,
+                )
+                else []
+            ),
+            "schema_integrity_source": "LabelingStore.single_owner_assignment_contract",
+            "duplicate_active_owner_count": 0,
+        }
+    )
+    assignment_ownership_contract = _assignment_ownership_contract_policy(
+        policy,
+        integrity_source,
+        store_single_owner_contract=single_owner_assignment_contract,
+    )
+    return {
+        "assignment_ownership_integrity": dict(integrity_source),
+        "single_owner_assignment_contract": single_owner_assignment_contract,
+        "assignment_ownership_contract": assignment_ownership_contract,
+        **_assignment_ownership_contract_fields(assignment_ownership_contract),
+        "single_owner_policy_contract_met": bool(
+            assignment_ownership_contract.get("ready")
+        )
+        and int(integrity_source.get("duplicate_active_owner_count") or 0) == 0,
+    }
+
 def _single_owner_policy_fields(
     policy: Mapping[str, object] | None = None,
 ) -> dict[str, object]:

@@ -124,7 +124,11 @@ from .web_diagnostics import (
     _personalized_launch_readiness_summary,
     _queue_first_entry_contract_flat_fields,
 )
-from .web_identity import _identity_probe_html
+from .web_identity import (
+    _identity_probe_html,
+    _identity_probe_payload,
+    _mark_identity_probe_unknown_labeling_user,
+)
 from .web_personal_api import register_personal_api_routes
 from .web_personal_pages import register_personal_page_routes
 from .web_personal_renderers import _dashboard_html, _datasets_html
@@ -449,6 +453,7 @@ from .admin_dashboard import (
     _shareability_labeler_route_authorization_runtime_checklist_fields,
     _shareability_labeler_route_authorization_runtime_checklist_gate,
     _shareability_labeler_route_authorization_runtime_checklist_required_values,
+    _single_owner_assignment_live_contract_fields,
     _single_owner_policy_fields,
     _store_consistency_report,
     _unresolved_failed_promotions,
@@ -1392,284 +1397,8 @@ def _drop_runtime_sessions(state: ServerState, session_ids: Sequence[str]) -> No
 
 
 
-def _identity_probe_payload(
-    *,
-    user: str,
-    auth_source: str,
-    expected_user: str | None = None,
-    config: ServerConfig | None = None,
-    store: LabelingStore | None = None,
-    assignment_ownership_integrity: Mapping[str, object] | None = None,
-) -> dict[str, object]:
-    expected = str(expected_user or "").strip()
-    resolved_user = str(user or "").strip()
-    expected_user_guard_present = bool(expected)
-    matches_expected = bool(expected_user_guard_present and resolved_user == expected)
-    expected_user_dataset_queue_url = (
-        _dashboard_url_for_expected_user(DATASET_QUEUE_PATH, expected) if expected else ""
-    )
-    expected_user_labeling_home_url = (
-        _dashboard_url_for_expected_user(LABELING_HOME_PATH, expected) if expected else LABELING_HOME_PATH
-    )
-    expected_user_personal_dataset_queue_url = (
-        _dashboard_url_for_expected_user(PERSONAL_DATASET_QUEUE_PATH, expected) if expected else ""
-    )
-    expected_user_labeler_landing_url = (
-        _dashboard_url_for_expected_user("/", expected) if expected else "/"
-    )
-    expected_user_dashboard_url = (
-        _dashboard_url_for_expected_user(DASHBOARD_PATH, expected) if expected else ""
-    )
-    expected_user_personal_work_url = (
-        _dashboard_url_for_expected_user(PERSONAL_WORK_PATH, expected) if expected else ""
-    )
-    expected_user_identity_probe_url = (
-        _dashboard_url_for_expected_user(IDENTITY_PROBE_PATH, expected)
-        if expected
-        else IDENTITY_PROBE_PATH
-    )
-    preferred_labeler_entry_url = (
-        expected_user_personal_dataset_queue_url
-        or expected_user_dataset_queue_url
-        or (_dashboard_url_for_expected_user("/", expected) if expected else "/")
-    )
-    labeler_safety = _labeler_safety_policy()
-    queue_first_entry_contract = _queue_first_entry_contract_policy(
-        labeler_safety=labeler_safety,
-        labeler_landing_page_path="/",
-        labeler_landing_url="/",
-        expected_user_labeler_landing_url=expected_user_labeler_landing_url,
-        labeling_home_page_path=LABELING_HOME_PATH,
-        labeling_home_url=LABELING_HOME_PATH,
-        expected_user_labeling_home_url=expected_user_labeling_home_url,
-        dataset_queue_page_path=DATASET_QUEUE_PATH,
-        dataset_queue_url=DATASET_QUEUE_PATH,
-        expected_user_dataset_queue_url=expected_user_dataset_queue_url,
-        dashboard_url=DASHBOARD_PATH,
-        expected_user_dashboard_url=expected_user_dashboard_url,
-        personal_dataset_queue_page_path=PERSONAL_DATASET_QUEUE_PATH,
-        personal_dataset_queue_url=PERSONAL_DATASET_QUEUE_PATH,
-        expected_user_personal_dataset_queue_url=expected_user_personal_dataset_queue_url,
-        personal_work_page_path=PERSONAL_WORK_PATH,
-        personal_work_url=PERSONAL_WORK_PATH,
-        expected_user_personal_work_url=expected_user_personal_work_url,
-    )
-    single_owner_policy = _assignment_ownership_policy()
-    single_owner_live_contract_fields = (
-        _single_owner_assignment_live_contract_fields(
-            store,
-            integrity=assignment_ownership_integrity,
-        )
-        if store is not None
-        else {}
-    )
-    browser_mutation_write_policy = _browser_mutation_write_policy()
-    browser_mutation_write_checklist = _browser_mutation_write_runtime_checklist(
-        browser_mutation_write_policy
-    )
-    dataset_queue_direct_start_policy = _dataset_queue_direct_start_policy()
-    identity: dict[str, object] = {
-        "resolved_user": resolved_user,
-        "auth_source": str(auth_source or ""),
-        "expected_user": expected,
-        "matches_expected_user": matches_expected,
-        "assignment_user_match_required": True,
-        "dashboard_path": DASHBOARD_PATH,
-        "dataset_queue_page_path": DATASET_QUEUE_PATH,
-        "labeling_home_page_path": LABELING_HOME_PATH,
-        "personal_work_page_path": PERSONAL_WORK_PATH,
-        "personal_dataset_queue_page_path": PERSONAL_DATASET_QUEUE_PATH,
-        "personal_work_alias_for": DASHBOARD_PATH,
-        "personal_dataset_queue_alias_for": DATASET_QUEUE_PATH,
-        "labeler_landing_page_path": "/",
-        "identity_probe_path": IDENTITY_PROBE_PATH,
-        "identity_probe_api_path": "/api/me/identity",
-        "identity_probe_expected_user_guard_required": bool(
-            labeler_safety.get("identity_probe_expected_user_guard_required")
-        ),
-        "identity_probe_diagnostic_only": bool(
-            labeler_safety.get("identity_probe_diagnostic_only")
-        ),
-        "identity_probe_does_not_authorize_work": bool(
-            labeler_safety.get("identity_probe_does_not_authorize_work")
-        ),
-        "identity_probe_unknown_user_blocks_work_surfaces": bool(
-            labeler_safety.get("identity_probe_unknown_user_blocks_work_surfaces")
-        ),
-        "expected_user_guard_present": expected_user_guard_present,
-        "identity_probe_launch_ctas_rendered": matches_expected,
-        "identity_probe_launch_ctas_suppressed": not matches_expected,
-        "identity_probe_failed_support_urls_diagnostic_only": not matches_expected,
-        "expected_user_labeler_landing_url": expected_user_labeler_landing_url,
-        "expected_user_labeling_home_url": expected_user_labeling_home_url,
-        "expected_user_dashboard_url": expected_user_dashboard_url,
-        "expected_user_dataset_queue_url": expected_user_dataset_queue_url,
-        "expected_user_personal_work_url": expected_user_personal_work_url,
-        "expected_user_personal_dataset_queue_url": expected_user_personal_dataset_queue_url,
-        "expected_user_identity_probe_url": expected_user_identity_probe_url,
-        "preferred_labeler_entrypoint": "personal_datasets_waiting_queue",
-        "preferred_labeler_entry_url": preferred_labeler_entry_url,
-        "personalized_labeler_entrypoint": "personal_datasets_waiting_queue",
-        "personalized_labeler_entry_url": preferred_labeler_entry_url,
-        "preferred_labeler_entry_url_matches_dataset_queue": bool(
-            preferred_labeler_entry_url
-            and preferred_labeler_entry_url
-            in {
-                expected_user_personal_dataset_queue_url,
-                expected_user_dataset_queue_url,
-            }
-        ),
-        "preferred_labeler_entry_url_matches_personal_dataset_queue": bool(
-            expected_user_personal_dataset_queue_url
-            and preferred_labeler_entry_url == expected_user_personal_dataset_queue_url
-        ),
-        "personalized_labeler_entry_url_matches_personal_dataset_queue": bool(
-            expected_user_personal_dataset_queue_url
-            and preferred_labeler_entry_url == expected_user_personal_dataset_queue_url
-        ),
-        "personal_dataset_queue_link_role": "preferred_queue",
-        "dataset_queue_link_role": "canonical_queue_fallback",
-        "canonical_dataset_queue_link_role": "canonical_queue_fallback",
-        "labeler_safety": labeler_safety,
-        "queue_first_entry_contract": queue_first_entry_contract,
-        "single_owner_policy": single_owner_policy,
-        "single_owner_assignment_contract": single_owner_live_contract_fields.get(
-            "single_owner_assignment_contract",
-            {
-                "schema": "palette.web_labeling_assignment_single_owner_contract.v1",
-                "ready": True,
-                "browser_mutation_target_resolved_server_side": True,
-                "browser_mutation_target_source": "recording_assignments.active_assignment",
-                "labelers_mutate_assigned_training_zarrs": True,
-                "labelers_mutate_intermediate_csvs": False,
-            },
-        ),
-        **_single_owner_policy_fields(single_owner_policy),
-        **single_owner_live_contract_fields,
-        "browser_mutation_write_policy": browser_mutation_write_policy,
-        "browser_mutation_write_checklist": browser_mutation_write_checklist,
-        **_browser_mutation_target_contract_compact_fields(
-            browser_mutation_write_checklist,
-            user=resolved_user,
-        ),
-        "dataset_queue_direct_start_policy": dataset_queue_direct_start_policy,
-        **_dataset_queue_direct_start_policy_fields(dataset_queue_direct_start_policy),
-        **_direct_browser_start_contract_compact_fields(
-            dataset_queue_direct_start_policy,
-            user=resolved_user,
-        ),
-        "browser_label_write_target": str(
-            browser_mutation_write_checklist.get("browser_label_write_target") or ""
-        ),
-        "label_mutation_target_kind": str(
-            browser_mutation_write_checklist.get("label_mutation_target_kind") or ""
-        ),
-        "csv_handoff_artifact_role": str(
-            browser_mutation_write_checklist.get("csv_handoff_artifact_role") or ""
-        ),
-        "csv_handoff_artifacts_are_label_write_targets": bool(
-            browser_mutation_write_checklist.get("csv_handoff_artifacts_are_label_write_targets")
-        ),
-        "handoff_csv_artifacts_are_label_write_targets": bool(
-            browser_mutation_write_checklist.get("handoff_csv_artifacts_are_label_write_targets")
-        ),
-        "intermediate_csv_artifacts_are_label_write_targets": bool(
-            browser_mutation_write_checklist.get(
-                "intermediate_csv_artifacts_are_label_write_targets"
-            )
-        ),
-        "browser_writes_csv_or_handoff_files": bool(
-            browser_mutation_write_checklist.get("browser_writes_csv_or_handoff_files")
-        ),
-        "browser_has_direct_zarr_write_authority": bool(
-            browser_mutation_write_checklist.get("browser_has_direct_zarr_write_authority")
-        ),
-        "handoff_artifacts_are_metadata_only": bool(
-            browser_mutation_write_policy.get("handoff_artifacts_are_metadata_only")
-        ),
-        "signed_links_are_not_identity": True,
-        "operator_action": (
-            "Identity matches the expected assignment user; open the guarded dataset queue first and use /work only as the full-dashboard fallback."
-            if matches_expected
-            else (
-                "Stop before labeling. The operator must provide an expected-user guarded identity probe before sharing labeling links."
-                if not expected_user_guard_present
-                else "Stop before labeling. The operator must fix the signed-in browser identity or the recording assignment user."
-            )
-        ),
-    }
-    if config is not None:
-        identity["identity_source_policy"] = _identity_source_policy(config)
-    _add_payload_contract_compact_fields(identity)
-    payload: dict[str, object] = {
-        "ok": matches_expected,
-        "identity": identity,
-        "identity_probe_diagnostic_only": identity["identity_probe_diagnostic_only"],
-        "identity_probe_does_not_authorize_work": identity[
-            "identity_probe_does_not_authorize_work"
-        ],
-        "identity_probe_unknown_user_blocks_work_surfaces": identity[
-            "identity_probe_unknown_user_blocks_work_surfaces"
-        ],
-        "identity_probe_expected_user_guard_required": identity[
-            "identity_probe_expected_user_guard_required"
-        ],
-        "identity_probe_launch_ctas_rendered": identity[
-            "identity_probe_launch_ctas_rendered"
-        ],
-        "identity_probe_launch_ctas_suppressed": identity[
-            "identity_probe_launch_ctas_suppressed"
-        ],
-        "identity_probe_failed_support_urls_diagnostic_only": identity[
-            "identity_probe_failed_support_urls_diagnostic_only"
-        ],
-        "personalized_launch_readiness": identity["personalized_launch_readiness"],
-    }
-    if not expected_user_guard_present:
-        payload["error"] = "identity_expected_user_required"
-        payload["details"] = (
-            "This identity probe is missing an expected_user guard. "
-            "Stop and contact the operator before labeling."
-        )
-    elif not matches_expected:
-        payload["error"] = "identity_user_mismatch"
-        payload["details"] = (
-            f"This identity probe is for {expected}, but the browser is authenticated as {resolved_user}. "
-            "Stop and contact the operator before labeling."
-        )
-    return payload
 
 
-def _mark_identity_probe_unknown_labeling_user(payload: dict[str, object]) -> None:
-    action = (
-        "Stop before labeling. This browser identity is not assigned any active labeling "
-        "recording; ask the operator to assign a recording or confirm the expected login identity."
-    )
-    payload["ok"] = False
-    payload["error"] = "unknown_labeling_user"
-    payload["details"] = (
-        "This browser identity is not present in the labeling assignment store. "
-        "Ask the operator to assign a recording or confirm the expected login identity."
-    )
-    payload["identity_probe_diagnostic_only"] = True
-    payload["identity_probe_does_not_authorize_work"] = True
-    payload["identity_probe_unknown_user_blocks_work_surfaces"] = True
-    payload["identity_probe_expected_user_guard_required"] = True
-    payload["identity_probe_launch_ctas_rendered"] = False
-    payload["identity_probe_launch_ctas_suppressed"] = True
-    payload["identity_probe_failed_support_urls_diagnostic_only"] = True
-    identity = payload.get("identity")
-    if isinstance(identity, dict):
-        identity["operator_action"] = action
-        identity["matches_known_labeling_user"] = False
-        identity["known_assignment_store_user"] = False
-        identity["identity_probe_diagnostic_only"] = True
-        identity["identity_probe_does_not_authorize_work"] = True
-        identity["identity_probe_unknown_user_blocks_work_surfaces"] = True
-        identity["identity_probe_expected_user_guard_required"] = True
-        identity["identity_probe_launch_ctas_rendered"] = False
-        identity["identity_probe_launch_ctas_suppressed"] = True
-        identity["identity_probe_failed_support_urls_diagnostic_only"] = True
 
 
 def _bool_from_scope(scope: Mapping[str, object], key: str, default: bool = False) -> bool:
@@ -7019,53 +6748,6 @@ def _assignment_control_plane_report_fields(store: LabelingStore) -> dict[str, o
     }
 
 
-def _single_owner_assignment_live_contract_fields(
-    store: LabelingStore,
-    *,
-    integrity: Mapping[str, object] | None = None,
-) -> dict[str, object]:
-    policy = _assignment_ownership_policy()
-    single_owner_assignment_contract = store.single_owner_assignment_contract()
-    integrity_source = (
-        integrity
-        if isinstance(integrity, Mapping)
-        else {
-            "ok": bool(single_owner_assignment_contract.get("ready")),
-            "recording_id_primary_key": bool(
-                single_owner_assignment_contract.get("recording_id_primary_key")
-            ),
-            "schema_enforced_recording_primary_key": bool(
-                single_owner_assignment_contract.get(
-                    "schema_enforced_recording_primary_key"
-                )
-            ),
-            "primary_key_columns": (
-                single_owner_assignment_contract.get("primary_key_columns")
-                if isinstance(
-                    single_owner_assignment_contract.get("primary_key_columns"),
-                    list,
-                )
-                else []
-            ),
-            "schema_integrity_source": "LabelingStore.single_owner_assignment_contract",
-            "duplicate_active_owner_count": 0,
-        }
-    )
-    assignment_ownership_contract = _assignment_ownership_contract_policy(
-        policy,
-        integrity_source,
-        store_single_owner_contract=single_owner_assignment_contract,
-    )
-    return {
-        "assignment_ownership_integrity": dict(integrity_source),
-        "single_owner_assignment_contract": single_owner_assignment_contract,
-        "assignment_ownership_contract": assignment_ownership_contract,
-        **_assignment_ownership_contract_fields(assignment_ownership_contract),
-        "single_owner_policy_contract_met": bool(
-            assignment_ownership_contract.get("ready")
-        )
-        and int(integrity_source.get("duplicate_active_owner_count") or 0) == 0,
-    }
 
 
 def _labeler_route_authorization_contract_policy(policy: Mapping[str, object]) -> dict[str, object]:
