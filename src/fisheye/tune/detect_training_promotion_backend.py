@@ -649,7 +649,6 @@ def _resolve_training_refined_run(
     run = parent.require_group(run_name)
     mark_run_started(run, run_name=run_name, stage="refined_detect")
     mark_run_pending(parent, run_name)
-    parent.attrs["detect_review_status_latest"] = run_name
     return run_name, run
 
 
