@@ -31,6 +31,7 @@ from .extractors.masks import (
     _extract_eye_mask_performance_rows,
     _extract_eye_mask_quality_rows,
     _extract_subject_mask_component_quality_rows,
+    _extract_subject_mask_data_profile_rows,
     _extract_subject_mask_performance_rows,
 )
 from .extractors.quality import _extract_detect_quality_rows, _extract_keypoint_quality_rows
@@ -5164,6 +5165,107 @@ class Registry(RegistryMigrationMixin):
                     payload,
                 )
 
+    def replace_subject_mask_data_profile(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        write_legacy_recording_context_snapshot, write_legacy_biology_snapshot = (
+            self._profile_duplicate_context_write_policy(str(dataset_id))
+        )
+        with self._maybe_transaction():
+            self.conn.execute("DELETE FROM subject_mask_data_profile WHERE dataset_id = ?;", (str(dataset_id),))
+            for record in records:
+                payload = dict(record)
+                payload["dataset_id"] = str(dataset_id)
+                payload.setdefault("updated_utc", _utc_now())
+                for key in (
+                    "subject_mask_method",
+                    "label_schema_id",
+                    "source_keypoints_run",
+                    "source_crop_run",
+                    "run_semantics",
+                    "total_rois",
+                    "rows_with_any_mask",
+                    "coverage_percent",
+                    "available_component_count",
+                    "subject_body_presence_rate",
+                    "subject_body_area_p10",
+                    "subject_body_area_p50",
+                    "subject_body_area_p90",
+                    "eyes_union_presence_rate",
+                    "eyes_union_area_p10",
+                    "eyes_union_area_p50",
+                    "eyes_union_area_p90",
+                    "eye_left_presence_rate",
+                    "eye_left_area_p10",
+                    "eye_left_area_p50",
+                    "eye_left_area_p90",
+                    "eye_right_presence_rate",
+                    "eye_right_area_p10",
+                    "eye_right_area_p50",
+                    "eye_right_area_p90",
+                    "swim_bladder_presence_rate",
+                    "swim_bladder_area_p10",
+                    "swim_bladder_area_p50",
+                    "swim_bladder_area_p90",
+                    "rig_id",
+                    "camera_id",
+                    "arena_id",
+                    "dish_design",
+                    "canvas_name",
+                    "protocol_name",
+                    "genotype",
+                    "dpf_at_acquisition",
+                ):
+                    payload.setdefault(key, None)
+                payload = self._apply_profile_duplicate_context_write_policy(
+                    payload,
+                    write_legacy_recording_context_snapshot=write_legacy_recording_context_snapshot,
+                    write_legacy_biology_snapshot=write_legacy_biology_snapshot,
+                )
+                self.conn.execute(
+                    """
+                    INSERT INTO subject_mask_data_profile (
+                        dataset_id, profile_run, recording_id, zarr_use,
+                        subject_mask_method, label_schema_id, source_keypoints_run,
+                        source_crop_run, run_semantics, profile_created_utc,
+                        zarr_mtime_ns, updated_utc,
+                        total_rois, rows_with_any_mask, coverage_percent, available_component_count,
+                        subject_body_presence_rate,
+                        subject_body_area_p10, subject_body_area_p50, subject_body_area_p90,
+                        eyes_union_presence_rate,
+                        eyes_union_area_p10, eyes_union_area_p50, eyes_union_area_p90,
+                        eye_left_presence_rate,
+                        eye_left_area_p10, eye_left_area_p50, eye_left_area_p90,
+                        eye_right_presence_rate,
+                        eye_right_area_p10, eye_right_area_p50, eye_right_area_p90,
+                        swim_bladder_presence_rate,
+                        swim_bladder_area_p10, swim_bladder_area_p50, swim_bladder_area_p90,
+                        rig_id, camera_id, arena_id, dish_design, canvas_name, protocol_name,
+                        genotype, dpf_at_acquisition,
+                        profile_json
+                    )
+                    VALUES (
+                        :dataset_id, :profile_run, :recording_id, :zarr_use,
+                        :subject_mask_method, :label_schema_id, :source_keypoints_run,
+                        :source_crop_run, :run_semantics, :profile_created_utc,
+                        :zarr_mtime_ns, :updated_utc,
+                        :total_rois, :rows_with_any_mask, :coverage_percent, :available_component_count,
+                        :subject_body_presence_rate,
+                        :subject_body_area_p10, :subject_body_area_p50, :subject_body_area_p90,
+                        :eyes_union_presence_rate,
+                        :eyes_union_area_p10, :eyes_union_area_p50, :eyes_union_area_p90,
+                        :eye_left_presence_rate,
+                        :eye_left_area_p10, :eye_left_area_p50, :eye_left_area_p90,
+                        :eye_right_presence_rate,
+                        :eye_right_area_p10, :eye_right_area_p50, :eye_right_area_p90,
+                        :swim_bladder_presence_rate,
+                        :swim_bladder_area_p10, :swim_bladder_area_p50, :swim_bladder_area_p90,
+                        :rig_id, :camera_id, :arena_id, :dish_design, :canvas_name, :protocol_name,
+                        :genotype, :dpf_at_acquisition,
+                        :profile_json
+                    );
+                    """,
+                    payload,
+                )
+
     def replace_eye_mask_data_profile(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
         _raise_eye_mask_registry_writes_retired()
         write_legacy_recording_context_snapshot, write_legacy_biology_snapshot = (
@@ -6296,6 +6398,74 @@ class Registry(RegistryMigrationMixin):
         sql.append("ORDER BY recording_id, keypoint_method")
         return list(self.conn.execute(" ".join(sql), params).fetchall())
 
+    def query_subject_mask_data_profile_latest(
+        self,
+        *,
+        dataset_ids: Optional[Sequence[str]] = None,
+        recording_ids: Optional[Sequence[str]] = None,
+        zarr_use: Optional[str] = None,
+        subject_mask_method: Optional[str] = None,
+        min_coverage_percent: Optional[float] = None,
+    ) -> List[sqlite3.Row]:
+        sql = ["SELECT * FROM subject_mask_data_profile_latest WHERE 1=1"]
+        params: List[Any] = []
+
+        if dataset_ids:
+            normalized_ids = [str(dataset_id) for dataset_id in dataset_ids if dataset_id]
+            if not normalized_ids:
+                return []
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            sql.append(f"AND dataset_id IN ({placeholders})")
+            params.extend(normalized_ids)
+        if recording_ids:
+            normalized_ids = [str(recording_id) for recording_id in recording_ids if recording_id]
+            if not normalized_ids:
+                return []
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            sql.append(f"AND recording_id IN ({placeholders})")
+            params.extend(normalized_ids)
+        if zarr_use is not None:
+            sql.append("AND zarr_use = ?")
+            params.append(str(zarr_use))
+        if subject_mask_method is not None:
+            sql.append("AND subject_mask_method = ?")
+            params.append(str(subject_mask_method))
+        if min_coverage_percent is not None:
+            sql.append("AND coverage_percent IS NOT NULL AND coverage_percent >= ?")
+            params.append(float(min_coverage_percent))
+        sql.append("ORDER BY dataset_id, profile_run")
+        return list(self.conn.execute(" ".join(sql), params).fetchall())
+
+    def query_recording_subject_mask_data_profile_latest(
+        self,
+        *,
+        recording_ids: Optional[Sequence[str]] = None,
+        zarr_use: Optional[str] = None,
+        subject_mask_method: Optional[str] = None,
+        min_coverage_percent: Optional[float] = None,
+    ) -> List[sqlite3.Row]:
+        sql = ["SELECT * FROM recording_subject_mask_data_profile_latest WHERE 1=1"]
+        params: List[Any] = []
+
+        if recording_ids:
+            normalized_ids = [str(recording_id) for recording_id in recording_ids if recording_id]
+            if not normalized_ids:
+                return []
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            sql.append(f"AND recording_id IN ({placeholders})")
+            params.extend(normalized_ids)
+        if zarr_use is not None:
+            sql.append("AND zarr_use = ?")
+            params.append(str(zarr_use))
+        if subject_mask_method is not None:
+            sql.append("AND subject_mask_method = ?")
+            params.append(str(subject_mask_method))
+        if min_coverage_percent is not None:
+            sql.append("AND coverage_percent IS NOT NULL AND coverage_percent >= ?")
+            params.append(float(min_coverage_percent))
+        sql.append("ORDER BY recording_id, profile_run")
+        return list(self.conn.execute(" ".join(sql), params).fetchall())
+
     def query_eye_mask_data_profile_latest(
         self,
         *,
@@ -6584,9 +6754,9 @@ class Registry(RegistryMigrationMixin):
         """Re-derive ALL registry state for one dataset from Zarr truth, idempotently.
 
         Strict superset of :meth:`register_from_root`: runs every zarr-derived
-        extractor (via ``register_from_root``) plus the detection and keypoint
-        data-profile extractors, composing the existing ``replace_*`` primitives
-        (DELETE-then-INSERT). No new write paths are introduced. Optionally
+        extractor (via ``register_from_root``) plus the detection, keypoint, and
+        subject-mask data-profile extractors, composing the existing
+        ``replace_*`` primitives (DELETE-then-INSERT). No new write paths are introduced. Optionally
         refreshes the ``recording_step_status`` surface for the dataset.
 
         This is the orchestrator that retires the standalone
@@ -6620,10 +6790,22 @@ class Registry(RegistryMigrationMixin):
             )
             self.replace_keypoint_data_profile(dataset_id, keypoint_profile_rows)
 
+            subject_mask_profile_rows = _extract_subject_mask_data_profile_rows(
+                root,
+                zarr_path=zarr_path,
+                dataset_id=dataset_id,
+                recording_id=fallbacks["recording_id"],
+                zarr_use=fallbacks["zarr_use"],
+                genotype=fallbacks["genotype"],
+                dpf_at_acquisition=fallbacks["dpf_at_acquisition"],
+            )
+            self.replace_subject_mask_data_profile(dataset_id, subject_mask_profile_rows)
+
         result: Dict[str, Any] = {
             "dataset_id": dataset_id,
             "detection_data_profile_rows": len(detection_profile_rows),
             "keypoint_data_profile_rows": len(keypoint_profile_rows),
+            "subject_mask_data_profile_rows": len(subject_mask_profile_rows),
         }
 
         if include_step_status:
