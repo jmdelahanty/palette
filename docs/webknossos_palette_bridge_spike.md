@@ -14,6 +14,8 @@ related: docs/labeling_platform_build_vs_adopt.md,
 Evaluate whether webKnossos can become the multi-user annotation surface for
 Palette while Palette remains the source-of-truth data-management backbone.
 
+Prep worksheet: `docs/webknossos_bridge_spike_prep_checklist.md`.
+
 The spike must answer one operational question before larger integration work:
 
 > Can webKnossos read a Palette-derived dataset view without creating a
@@ -613,4 +615,3 @@ Palette training Zarr
 
 The first path preserves Palette's current strength: one canonical data plane
 with explicit assignment, lineage, review state, and training-run provenance.
-
