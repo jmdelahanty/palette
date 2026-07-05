@@ -716,10 +716,12 @@ def build_source_detection_decision_summary(refined_run: zarr.Group) -> Dict[str
     return summary
 
 
-def _resolve_bound_source_detect_group(
+def resolve_bound_source_detect_group(
     root: zarr.Group,
     refined_run: zarr.Group,
 ) -> tuple[Optional[zarr.Group], Optional[str]]:
+    """Resolve the source detect group bound to a refined run, if any."""
+
     source_detect_run = normalize_attr(refined_run.attrs.get("source_detect_run"))
     source_detect_path = normalize_attr(refined_run.attrs.get("source_detect_path"))
     if source_detect_path:
@@ -731,6 +733,13 @@ def _resolve_bound_source_detect_group(
     if detect_parent is None or not source_detect_run or source_detect_run not in detect_parent:
         return None, source_detect_run
     return detect_parent[source_detect_run], source_detect_run
+
+
+def _resolve_bound_source_detect_group(
+    root: zarr.Group,
+    refined_run: zarr.Group,
+) -> tuple[Optional[zarr.Group], Optional[str]]:
+    return resolve_bound_source_detect_group(root, refined_run)
 
 
 def _shape_hw(shape: Any) -> Tuple[Optional[int], Optional[int]]:
@@ -2145,7 +2154,7 @@ def _sync_dense_curated_refined_root_from_sparse_views(
     )
 
 
-def _resolve_curated_instance_keys(
+def resolve_curated_instance_keys(
     root: zarr.Group,
     *,
     zarr_path: Optional[Path],
@@ -2212,6 +2221,27 @@ def _resolve_curated_instance_keys(
             "to write a false-identity rowset."
         )
     return instance_key, origin_codes
+
+
+def _resolve_curated_instance_keys(
+    root: zarr.Group,
+    *,
+    zarr_path: Optional[Path],
+    instance_frame_indices: np.ndarray,
+    instance_bbox_norm_coords: np.ndarray,
+    instance_class_ids: Optional[np.ndarray],
+    instance_source_detect_row_index: np.ndarray,
+    source_detection_instance_key: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    return resolve_curated_instance_keys(
+        root,
+        zarr_path=zarr_path,
+        instance_frame_indices=instance_frame_indices,
+        instance_bbox_norm_coords=instance_bbox_norm_coords,
+        instance_class_ids=instance_class_ids,
+        instance_source_detect_row_index=instance_source_detect_row_index,
+        source_detection_instance_key=source_detection_instance_key,
+    )
 
 
 def write_curated_refined_detect_surfaces(

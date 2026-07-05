@@ -37,12 +37,14 @@ from fisheye.shared.refined_detect_curation import (
     has_curated_refined_source_detections_projection,
     has_sparse_curated_refined_detect_instances_arrays,
     materialize_refined_detect_curation,
+    resolve_bound_source_detect_group,
+    resolve_curated_instance_keys,
     update_curated_refined_detect_rows,
     write_curated_refined_detect_surfaces,
 )
 from fisheye.shared.refined_detect_resolution import resolve_detect_review_target
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
-from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
+from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name, set_authoritative_run
 from fisheye.utils.accept_detect_review import (
     _pick_refined_parent_name,
     _write_profile_and_sync_registry,
@@ -896,6 +898,24 @@ def _load_dense_curated_edit_payload(
     }
 
 
+def _load_bound_detect_instance_keys(
+    root: zarr.Group,
+    *,
+    refined_run_name: str,
+) -> Optional[np.ndarray]:
+    """Return detect-row-aligned instance keys from the bound source detect run."""
+
+    refined_parent = root.get("refined_detect_runs")
+    if refined_parent is None:
+        refined_parent = root.get("refined_runs")
+    if refined_parent is None or refined_run_name not in refined_parent:
+        return None
+    detect_group, _ = resolve_bound_source_detect_group(root, refined_parent[refined_run_name])
+    if detect_group is None or "instance_key" not in detect_group:
+        return None
+    return np.asarray(detect_group["instance_key"][:], dtype=np.uint64).reshape(-1)
+
+
 def _write_dense_curated_edit_payload(
     root: zarr.Group,
     *,
@@ -916,23 +936,59 @@ def _write_dense_curated_edit_payload(
         status_labels = np.asarray(payload["status_labels"], dtype=object).reshape(-1)
         bbox_norm = np.asarray(payload["bbox_norm_coords"], dtype=np.float64).reshape(-1, 4)
         present_mask = (status_labels == "present") & np.all(np.isfinite(bbox_norm), axis=1)
+        instance_frame_indices = np.asarray(payload["frame_indices"], dtype=np.int32).reshape(-1)[present_mask]
+        instance_bbox_norm_coords = bbox_norm[present_mask]
+        instance_source_detect_row_index = np.asarray(
+            payload["source_detect_row_index"],
+            dtype=np.int32,
+        ).reshape(-1)[present_mask]
+        instance_class_ids = np.asarray(payload["class_ids"], dtype=np.int32).reshape(-1)[present_mask]
+        source_surface_source_detect_row_index = np.asarray(
+            payload["source_surface_source_detect_row_index"],
+            dtype=np.int32,
+        ).reshape(-1)
+
+        detect_instance_keys = _load_bound_detect_instance_keys(root, refined_run_name=refined_run_name)
+        instance_key = None
+        instance_key_origin_codes = None
+        source_detection_instance_key = None
+        if detect_instance_keys is not None:
+            source_rows = source_surface_source_detect_row_index.astype(np.int64, copy=False)
+            if source_rows.size and (
+                int(source_rows.min()) < 0 or int(source_rows.max()) >= int(detect_instance_keys.shape[0])
+            ):
+                raise ValueError(
+                    "Curated source_detections rows reference detect rows outside the bound "
+                    f"detect run ({int(detect_instance_keys.shape[0])} rows); refusing to rewrite "
+                    "instance keys against a mismatched detect binding."
+                )
+            source_detection_instance_key = detect_instance_keys[source_rows]
+            instance_key, instance_key_origin_codes = resolve_curated_instance_keys(
+                root,
+                zarr_path=Path(zarr_path),
+                instance_frame_indices=instance_frame_indices,
+                instance_bbox_norm_coords=instance_bbox_norm_coords,
+                instance_class_ids=instance_class_ids,
+                instance_source_detect_row_index=instance_source_detect_row_index,
+                source_detection_instance_key=detect_instance_keys,
+            )
+
         write_curated_refined_detect_surfaces(
             root,
             zarr_path=Path(zarr_path),
             refined_run_name=refined_run_name,
-            instance_frame_indices=np.asarray(payload["frame_indices"], dtype=np.int32).reshape(-1)[present_mask],
-            instance_bbox_norm_coords=bbox_norm[present_mask],
+            instance_frame_indices=instance_frame_indices,
+            instance_bbox_norm_coords=instance_bbox_norm_coords,
             instance_source_kind_labels=np.asarray(payload["source_kind_labels"], dtype=object).reshape(-1)[present_mask],
             instance_reason_labels=np.asarray(payload["reason_labels"], dtype=object).reshape(-1)[present_mask],
-            instance_source_detect_row_index=np.asarray(payload["source_detect_row_index"], dtype=np.int32).reshape(-1)[present_mask],
+            instance_source_detect_row_index=instance_source_detect_row_index,
             instance_manual_edit_flags=np.asarray(payload["manual_edit_flags"], dtype=bool).reshape(-1)[present_mask],
             instance_confidence_scores=np.asarray(payload["confidence_scores"], dtype=np.float32).reshape(-1)[present_mask],
-            instance_class_ids=np.asarray(payload["class_ids"], dtype=np.int32).reshape(-1)[present_mask],
+            instance_class_ids=instance_class_ids,
+            instance_key=instance_key,
+            instance_key_origin_codes=instance_key_origin_codes,
             instance_refined_row_ids=np.asarray(payload["refined_row_ids"], dtype=np.int64).reshape(-1)[present_mask],
-            source_detection_source_detect_row_index=np.asarray(
-                payload["source_surface_source_detect_row_index"],
-                dtype=np.int32,
-            ).reshape(-1),
+            source_detection_source_detect_row_index=source_surface_source_detect_row_index,
             source_detection_frame_indices=np.asarray(
                 payload["source_surface_frame_indices"],
                 dtype=np.int32,
@@ -957,6 +1013,7 @@ def _write_dense_curated_edit_payload(
                 payload["source_surface_class_ids"],
                 dtype=np.int32,
             ).reshape(-1),
+            source_detection_instance_key=source_detection_instance_key,
             source_detection_review_notes=np.asarray(
                 payload["source_surface_review_notes"],
                 dtype=object,
@@ -1406,7 +1463,69 @@ def run_manual_review(
         arena_definitions = []
         arena_roi_lookup: Dict[int, Tuple[int, int, int, int]] = {}
 
+    def _approve_authoritative_refined_detect() -> Dict[str, object]:
+        if str(review_state).strip().lower() != "approved":
+            return {"attempted": False, "reason": "review_state_not_approved"}
+        resolved_zarr_path = Path(zarr_path).expanduser()
+        if not resolved_zarr_path.exists():
+            return {
+                "attempted": False,
+                "reason": "zarr_path_unavailable",
+                "zarr_path": str(zarr_path),
+            }
+
+        from fisheye.cli.palette import ApproveRequest, approve
+
+        envelope = approve(
+            ApproveRequest(
+                recording=resolved_zarr_path,
+                stage="refined_detect",
+                run=refined_run_name,
+                approved_by=reviewer,
+                note=review_notes or "detect review sign-off",
+                apply=True,
+            )
+        )
+        return {
+            "attempted": True,
+            "status": envelope.get("status"),
+            "reason_code": envelope.get("reason_code"),
+            "run": envelope.get("run"),
+            "envelope": envelope,
+        }
+
     def _apply_review_status() -> Dict[str, object]:
+        authoritative_approval = _approve_authoritative_refined_detect()
+        approval_ok = bool(authoritative_approval.get("attempted")) and (
+            str(authoritative_approval.get("status") or "").strip().lower() == "ok"
+        )
+        if str(review_state).strip().lower() == "approved" and not approval_ok:
+            reason = (
+                authoritative_approval.get("reason_code")
+                or authoritative_approval.get("reason")
+                or "unknown"
+            )
+            print(
+                "Refused to set detect_review_status on "
+                f"refined_detect_runs/{refined_run_name}: authoritative approval failed ({reason})."
+            )
+            return {
+                "state": "approval_failed",
+                "authoritative_approval": authoritative_approval,
+            }
+        if approval_ok:
+            envelope = authoritative_approval.get("envelope")
+            approval = envelope.get("approval") if isinstance(envelope, Mapping) else None
+            if not isinstance(approval, Mapping):
+                approval = {}
+            set_authoritative_run(
+                refined_parent,
+                refined_run_name,
+                approved_by=str(approval.get("approved_by") or "unknown"),
+                approved_at=str(approval.get("approved_at") or ""),
+                git_sha=str(approval.get("git_sha") or ""),
+                note=str(approval.get("note") or ""),
+            )
         resolved = resolve_detect_review_target(
             root,
             refined_run_name=refined_run_name,
@@ -1421,13 +1540,13 @@ def run_manual_review(
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "resolved_group": resolved.resolved_group,
             "preference_chain": list(resolved.preference_chain),
+            "authoritative_approval": authoritative_approval,
         }
         if reviewer_name:
             payload["reviewer"] = reviewer_name
         if review_notes:
             payload["notes"] = review_notes
         refined_run.attrs["detect_review_status"] = payload
-        refined_parent.attrs["detect_review_status_latest"] = refined_run_name
         print(f"Set detect_review_status on refined_detect_runs/{refined_run_name}")
         return payload
 
@@ -1439,7 +1558,7 @@ def run_manual_review(
         if skip_detection_profile:
             print("Detection profile: skipped by --skip-detection-profile")
             return
-        if review_state != "approved" or review_intended_use != "training":
+        if str(status_payload.get("state") or "") != "approved" or review_intended_use != "training":
             return
         refined_parent_name = _pick_refined_parent_name(root)
         if refined_parent_name is None:
