@@ -8,7 +8,7 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -99,6 +99,361 @@ class SubjectMaskRuntimeSession:
 def _session_scope(session: Mapping[str, object]) -> Mapping[str, object]:
     scope = session.get("scope")
     return scope if isinstance(scope, Mapping) else {}
+
+def _bool_from_scope(scope: Mapping[str, object], key: str, default: bool = False) -> bool:
+    value = scope.get(key)
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    return text in {"1", "true", "yes", "on"}
+
+def _int_list_from_scope(scope: Mapping[str, object], key: str) -> list[int] | None:
+    value = scope.get(key)
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        raw_values: Sequence[object] = value.replace(",", " ").split()
+    elif isinstance(value, Sequence):
+        raw_values = value
+    else:
+        raw_values = [value]
+    out: list[int] = []
+    for item in raw_values:
+        try:
+            out.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return sorted(set(out)) if out else None
+
+def _tuple2_int_from_scope(scope: Mapping[str, object], key: str) -> tuple[int, int] | None:
+    value = scope.get(key)
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        raw_values: Sequence[object] = value.replace(",", " ").split()
+    elif isinstance(value, Sequence):
+        raw_values = value
+    else:
+        raw_values = [value]
+    if len(raw_values) < 2:
+        return None
+    return int(raw_values[0]), int(raw_values[1])
+
+def _detect_analysis_promotion_from_scope(scope: Mapping[str, object]) -> DetectAnalysisPromotionConfig | None:
+    training_zarr = str(scope.get("promote_training_zarr") or scope.get("training_zarr") or "").strip()
+    if not training_zarr:
+        return None
+    return DetectAnalysisPromotionConfig(
+        training_zarr=training_zarr,
+        target_crop_run=str(scope.get("promote_target_crop_run") or "").strip() or None,
+        target_refined_run=str(scope.get("promote_target_refined_run") or "").strip() or None,
+        label_origin=str(scope.get("promote_label_origin") or "palette_labeling_work"),
+        include_negative=_bool_from_scope(scope, "promote_include_negative", default=True),
+        allow_unreviewed_negative=_bool_from_scope(scope, "promote_allow_unreviewed_negative", default=False),
+        target_size=_tuple2_int_from_scope(scope, "promote_target_size"),
+    )
+
+def _get_keypoint_runtime(state: Any, session: Mapping[str, object]) -> KeypointRuntimeSession:
+    session_id = str(session.get("session_id") or "")
+    existing = state.keypoint_sessions.get(session_id)
+    if existing is not None:
+        return existing
+
+    if str(session.get("workflow_kind") or "") != "keypoints":
+        raise ValueError("Session is not a keypoints workflow.")
+
+    scope = _session_scope(session)
+    zarr_path = str(scope.get("zarr_path") or "").strip()
+    if not zarr_path:
+        raise ValueError("Keypoint task scope must include zarr_path.")
+
+    from fisheye.tune import keypoint_review_backend as backend_module
+
+    include_all = _bool_from_scope(scope, "include_all", default=False)
+    review_session = backend_module.resolve_review_session(
+        zarr_path,
+        refined_run=str(scope.get("refined_run") or "").strip() or None,
+        crop_run=str(scope.get("crop_run") or "").strip() or None,
+        include_all=include_all,
+        target_frames=_int_list_from_scope(scope, "target_frames"),
+        target_roi_indices=_int_list_from_scope(scope, "target_roi_indices"),
+    )
+    runtime = KeypointRuntimeSession(
+        session_id=session_id,
+        task_id=str(session.get("task_id") or ""),
+        recording_id=str(session.get("recording_id") or ""),
+        user=str(session.get("user") or ""),
+        review_session=review_session,
+        filter_mode=str(scope.get("filter_mode") or ("all" if include_all else "failed")),
+        search=str(scope.get("search") or ""),
+        review_method=str(scope.get("review_method") or "manual"),
+        review_intended_use=str(scope.get("review_intended_use") or "").strip() or None,
+        review_notes=str(scope.get("review_notes") or "").strip() or None,
+        auto_advance_on_save=_bool_from_scope(scope, "auto_advance_on_save", default=False),
+    )
+    _refresh_keypoint_queue(runtime, backend_module)
+    state.keypoint_sessions[session_id] = runtime
+    return runtime
+
+def _get_detect_runtime(state: Any, session: Mapping[str, object]) -> DetectRuntimeSession:
+    session_id = str(session.get("session_id") or "")
+    existing = state.detect_sessions.get(session_id)
+    if existing is not None:
+        return existing
+
+    if str(session.get("workflow_kind") or "") != "detect_training":
+        raise ValueError("Session is not a detect_training workflow.")
+
+    scope = _session_scope(session)
+    zarr_path = str(scope.get("zarr_path") or "").strip()
+    if not zarr_path:
+        raise ValueError("Detect task scope must include zarr_path.")
+
+    from fisheye.tune import detect_review_backend as backend_module
+
+    max_items_raw = scope.get("max_items")
+    max_items: int | None = None
+    if max_items_raw is not None and str(max_items_raw).strip():
+        max_items = int(max_items_raw)  # type: ignore[arg-type]
+
+    review_session = backend_module.resolve_review_context(
+        zarr_path,
+        refined_run=str(scope.get("refined_run") or "").strip() or None,
+        include_all=_bool_from_scope(scope, "include_all", default=False),
+        target_frames=_int_list_from_scope(scope, "target_frames"),
+        max_items=max_items,
+        manual_score=float(scope.get("manual_score") or 1.0),
+        manual_class_id=int(scope.get("manual_class_id") or 0),
+    )
+    runtime = DetectRuntimeSession(
+        session_id=session_id,
+        task_id=str(session.get("task_id") or ""),
+        recording_id=str(session.get("recording_id") or ""),
+        user=str(session.get("user") or ""),
+        review_session=review_session,
+        auto_advance_on_save=_bool_from_scope(scope, "auto_advance_on_save", default=False),
+    )
+    state.detect_sessions[session_id] = runtime
+    return runtime
+
+def _get_video_detect_runtime(state: Any, session: Mapping[str, object]) -> VideoDetectRuntimeSession:
+    session_id = str(session.get("session_id") or "")
+    existing = state.video_detect_sessions.get(session_id)
+    if existing is not None:
+        return existing
+
+    if str(session.get("workflow_kind") or "") != "detect_analysis":
+        raise ValueError("Session is not a detect_analysis workflow.")
+
+    scope = _session_scope(session)
+    zarr_path = str(scope.get("zarr_path") or "").strip()
+    if not zarr_path:
+        raise ValueError("Detect-analysis task scope must include zarr_path.")
+
+    from fisheye.tune import video_detect_review_backend as backend_module
+
+    editable = _bool_from_scope(scope, "editable", default=False)
+    review_session = backend_module.resolve_video_detect_review_session(
+        zarr_path,
+        collection_id=str(scope.get("collection_id") or "").strip() or None,
+        refined_run=str(scope.get("refined_run") or "").strip() or None,
+        recording_frame_index=str(scope.get("recording_frame_index") or "").strip() or None,
+        review_proxy_manifest=str(scope.get("review_proxy_manifest") or "").strip() or None,
+        editable=editable,
+        manual_score=float(scope.get("manual_score") or 1.0),
+        manual_class_id=int(scope.get("manual_class_id") or 0),
+    )
+    total_frames = int(len(review_session.frame_records))
+    scoped_frames = _int_list_from_scope(scope, "target_frames")
+    if scoped_frames:
+        frames = [idx for idx in scoped_frames if 0 <= int(idx) < total_frames]
+    else:
+        frames = list(range(total_frames))
+    if not frames:
+        raise ValueError("No valid detect-analysis frames are available for this task.")
+    runtime = VideoDetectRuntimeSession(
+        session_id=session_id,
+        task_id=str(session.get("task_id") or ""),
+        recording_id=str(session.get("recording_id") or ""),
+        user=str(session.get("user") or ""),
+        review_session=review_session,
+        frame_indices=np.asarray(frames, dtype=np.int32),
+        editable=editable,
+        auto_advance_on_save=_bool_from_scope(scope, "auto_advance_on_save", default=False),
+        promotion=_detect_analysis_promotion_from_scope(scope),
+    )
+    state.video_detect_sessions[session_id] = runtime
+    return runtime
+
+def _get_subject_mask_runtime(state: Any, session: Mapping[str, object]) -> SubjectMaskRuntimeSession:
+    session_id = str(session.get("session_id") or "")
+    existing = state.subject_mask_sessions.get(session_id)
+    if existing is not None:
+        return existing
+
+    if str(session.get("workflow_kind") or "") != "subject_mask_component":
+        raise ValueError("Session is not a subject_mask_component workflow.")
+
+    scope = _session_scope(session)
+    zarr_path = str(scope.get("zarr_path") or "").strip()
+    if not zarr_path:
+        raise ValueError("Subject-mask task scope must include zarr_path.")
+
+    from fisheye.tune import refined_subject_mask_review as review_mod
+
+    component_name = str(scope.get("component_name") or session.get("component_name") or "").strip()
+    if not component_name:
+        raise ValueError("Subject-mask task scope must include component_name.")
+
+    root = review_mod.open_zarr_root(zarr_path, mode="a")
+    requested_subject_run = str(scope.get("subject_run") or "").strip() or None
+    requested_refined_run = str(scope.get("refined_run") or "").strip() or None
+    source, refined = review_mod.prepare_refined_subject_run(
+        root,
+        subject_run=requested_subject_run,
+        refined_run=requested_refined_run,
+        components=[component_name],
+    )
+    normalized_component = review_mod._normalize_component_name(component_name)  # type: ignore[attr-defined]
+    if normalized_component is None or normalized_component not in refined.component_to_index:
+        raise ValueError(f"Component {component_name!r} is not available in refined_subject_masks_runs/{refined.run_name}.")
+
+    component_group = review_mod._get_component_group(refined.group, str(normalized_component))  # type: ignore[attr-defined]
+    provenance_group = review_mod._get_component_provenance_group(refined.group, str(normalized_component))  # type: ignore[attr-defined]
+    provenance_attrs = dict(provenance_group.attrs) if provenance_group is not None else {}
+    run_component_sources = refined.group.attrs.get("source_component_sources")
+    run_component_source = {}
+    if isinstance(run_component_sources, Mapping):
+        raw_component_source = run_component_sources.get(str(normalized_component))
+        if isinstance(raw_component_source, Mapping):
+            run_component_source = dict(raw_component_source)
+    component_source_stage = str(
+        run_component_source.get("source_stage")
+        or provenance_attrs.get("source_stage")
+        or ""
+    ).strip()
+    component_source_run = str(
+        run_component_source.get("source_run")
+        or provenance_attrs.get("source_run")
+        or ""
+    ).strip()
+    component_source_component = str(
+        run_component_source.get("source_component")
+        or run_component_source.get("source_channel")
+        or provenance_attrs.get("source_component")
+        or provenance_attrs.get("source_channel")
+        or provenance_attrs.get("component_name")
+        or normalized_component
+    ).strip()
+    component_source_seed_masks_present = bool(
+        component_group is not None and component_group.get("source_seed_masks_roi") is not None
+    )
+    component_source_resolution = "task_subject_run"
+    if component_source_stage == "subject_mask_runs" and component_source_run:
+        if requested_subject_run is not None and requested_subject_run != component_source_run:
+            raise ValueError(
+                "Subject-mask task source mismatch: "
+                f"task requested subject_mask_runs/{requested_subject_run}, but component "
+                f"{normalized_component!r} in refined_subject_masks_runs/{refined.run_name} "
+                f"declares subject_mask_runs/{component_source_run}."
+            )
+        if str(source.run_name) != component_source_run:
+            source, refined = review_mod.prepare_refined_subject_run(
+                root,
+                subject_run=component_source_run,
+                refined_run=requested_refined_run or refined.run_name,
+                components=[str(normalized_component)],
+            )
+        component_source_resolution = "component_provenance_subject_mask_run"
+    elif component_source_stage == "refined_subject_masks_runs":
+        if not component_source_run:
+            raise RuntimeError(
+                f"Component {normalized_component!r} in refined_subject_masks_runs/{refined.run_name} "
+                "declares refined-subject provenance but no source_run."
+            )
+        try:
+            _primary_source, component_sources = review_mod._load_refined_component_source_runs(  # type: ignore[attr-defined]
+                root,
+                refined,
+                default_source=source,
+            )
+            resolved_source = component_sources.get(str(normalized_component))
+        except Exception as exc:
+            raise RuntimeError(
+                f"Unable to resolve refined-subject source for component {normalized_component!r} from "
+                f"refined_subject_masks_runs/{component_source_run}."
+            ) from exc
+        if resolved_source is None:
+            raise RuntimeError(
+                f"No refined-subject source available for component {normalized_component!r} in "
+                f"refined_subject_masks_runs/{refined.run_name}."
+            )
+        source = resolved_source
+        component_source_resolution = "component_provenance_refined_subject_run"
+    elif component_source_stage:
+        try:
+            _primary_source, component_sources = review_mod._load_refined_component_source_runs(  # type: ignore[attr-defined]
+                root,
+                refined,
+                default_source=source,
+            )
+            resolved_source = component_sources.get(str(normalized_component))
+        except Exception as exc:
+            raise RuntimeError(
+                f"Unable to resolve source for component {normalized_component!r} from "
+                f"{component_source_stage}/{component_source_run or '<missing>'}."
+            ) from exc
+        if resolved_source is None:
+            raise RuntimeError(
+                f"No resolved source available for component {normalized_component!r} in "
+                f"refined_subject_masks_runs/{refined.run_name}."
+            )
+        source = resolved_source
+        component_source_resolution = "component_provenance_resolved_source_run"
+
+    crop_run_name = str(scope.get("crop_run") or source.crop_run)
+    crop_parent = root.get("crop_runs")
+    if crop_parent is None or crop_run_name not in crop_parent:
+        raise RuntimeError(f"crop_runs/{crop_run_name} not found.")
+    crop_group = crop_parent[crop_run_name]
+    if "roi_images" not in crop_group:
+        raise RuntimeError(f"crop_runs/{crop_run_name} missing roi_images.")
+    roi_images = crop_group["roi_images"]
+    total_rois = int(refined.group["masks_roi"].shape[0])
+    scoped_rows = _int_list_from_scope(scope, "target_roi_indices")
+    if scoped_rows:
+        rows = [idx for idx in scoped_rows if 0 <= int(idx) < total_rois]
+    else:
+        rows = list(range(total_rois))
+    if not rows:
+        raise ValueError("No valid subject-mask ROI rows are available for this task.")
+    runtime = SubjectMaskRuntimeSession(
+        session_id=session_id,
+        task_id=str(session.get("task_id") or ""),
+        recording_id=str(session.get("recording_id") or ""),
+        user=str(session.get("user") or ""),
+        zarr_path=zarr_path,
+        root=root,
+        source=source,
+        refined=refined,
+        roi_images=roi_images,
+        component_name=str(normalized_component),
+        comp_idx=int(refined.component_to_index[str(normalized_component)]),
+        roi_indices=np.asarray(rows, dtype=np.int32),
+        review_method=str(scope.get("review_method") or "manual"),
+        review_intended_use=str(scope.get("review_intended_use") or "training"),
+        review_notes=str(scope.get("review_notes") or "").strip() or None,
+        auto_advance_on_save=_bool_from_scope(scope, "auto_advance_on_save", default=False),
+        component_source_stage=component_source_stage,
+        component_source_run=component_source_run,
+        component_source_component=component_source_component,
+        component_source_resolution=component_source_resolution,
+        component_source_seed_masks_present=component_source_seed_masks_present,
+    )
+    state.subject_mask_sessions[session_id] = runtime
+    return runtime
 
 LABELER_RUNTIME_REDACTED_KEYS = frozenset(
     {
