@@ -67,15 +67,15 @@ def _read_trtexec_version(trtexec_path: Path | None) -> tuple[str | None, str | 
             [part for part in [result.stdout.strip(), result.stderr.strip()] if part]
         ).strip()
         if raw_output:
-            dotted = re.search(r"TensorRT\\s+Version[:\\s]+(\\d+\\.\\d+\\.\\d+\\.\\d+)", raw_output)
+            dotted = re.search(r"TensorRT\s+Version[:\s]+(\d+\.\d+\.\d+\.\d+)", raw_output)
             if dotted:
                 return dotted.group(1), "trtexec", raw_output
-            dotted = re.search(r"TensorRT\\s*v?(\\d+\\.\\d+\\.\\d+\\.\\d+)", raw_output)
+            dotted = re.search(r"TensorRT\s*v?(\d+\.\d+\.\d+\.\d+)", raw_output)
             if dotted:
                 return dotted.group(1), "trtexec", raw_output
     except Exception:
         raw_output = None
-    path_match = re.search(r"TensorRT-(\\d+\\.\\d+\\.\\d+\\.\\d+)", str(trtexec_path))
+    path_match = re.search(r"TensorRT-(\d+\.\d+\.\d+\.\d+)", str(trtexec_path))
     if path_match:
         return path_match.group(1), "path", raw_output
     return None, None, raw_output

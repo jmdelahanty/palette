@@ -2,7 +2,10 @@
 
 from pathlib import Path
 import json
+import subprocess
 import sys
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
@@ -11,6 +14,7 @@ from fisheye.training.onnx_to_tensorrt import (
     _load_output_contract_from_manifest,
     _format_output_contract,
 )
+from fisheye.training.export_shared import _read_trtexec_version
 
 
 def test_infer_onnx_manifest_path_appends_manifest_suffix() -> None:
@@ -47,3 +51,42 @@ def test_format_output_contract_renders_expected_string() -> None:
     assert "scores[FLOAT,(1,1)]" in text
     assert "labels[INT32,(1,1)]" in text
 
+
+def test_read_trtexec_version_parses_version_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=["trtexec", "--version"],
+            returncode=0,
+            stdout="TensorRT Version: 10.0.1.6\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    version, source, raw = _read_trtexec_version(Path("/usr/bin/trtexec"))
+
+    assert version == "10.0.1.6"
+    assert source == "trtexec"
+    assert raw == "TensorRT Version: 10.0.1.6"
+
+
+def test_read_trtexec_version_falls_back_to_tensorrt_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=["trtexec", "--version"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    version, source, raw = _read_trtexec_version(
+        Path("/usr/local/TensorRT-10.0.1.6/bin/trtexec")
+    )
+
+    assert version == "10.0.1.6"
+    assert source == "path"
+    assert raw == ""
