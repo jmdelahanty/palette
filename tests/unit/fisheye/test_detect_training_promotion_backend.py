@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 import zarr
 
 from fisheye.tune import detect_training_promotion_backend as promotion_backend
@@ -267,6 +268,73 @@ def test_promote_positive_frame_appends_then_no_changes(tmp_path: Path) -> None:
     assert dry_run["items"][0]["target_row"] == 0
 
 
+def test_promotion_completion_routes_authority_through_approve(tmp_path: Path) -> None:
+    analysis = tmp_path / "analysis.zarr"
+    training = tmp_path / "training.zarr"
+    _write_analysis_zarr(analysis)
+    _write_empty_training_zarr(training)
+
+    result = promote_detection_frames(analysis, training, [0], apply=True)
+
+    sync = result["refined_instances_sync"]
+    assert sync["authoritative_approval"]["status"] == "ok"
+    assert sync["authoritative_approval"]["run"] == "refined_detect_promoted_manual"
+    root = zarr.open_group(str(training), mode="r", use_consolidated=False)
+    parent = root["refined_detect_runs"]
+    assert "detect_review_status_latest" not in parent.attrs
+    assert parent.attrs["authoritative_run"] == "refined_detect_promoted_manual"
+    provenance = dict(parent.attrs["authoritative_run_provenance"])
+    assert provenance["approved_by"]
+    assert provenance["note"] == "detect training promotion"
+    status = dict(parent["refined_detect_promoted_manual"].attrs["detect_review_status"])
+    assert status["state"] == "approved"
+    assert status["method"] == "promotion"
+
+
+def test_promoted_run_resolves_via_authoritative_run_resolution(tmp_path: Path) -> None:
+    from fisheye.shared.run_resolution import RunResolution, resolve_run
+
+    analysis = tmp_path / "analysis.zarr"
+    training = tmp_path / "training.zarr"
+    _write_analysis_zarr(analysis)
+    _write_empty_training_zarr(training)
+
+    promote_detection_frames(analysis, training, [0], apply=True)
+
+    root = zarr.open_group(str(training), mode="r", use_consolidated=False)
+    parent = root["refined_detect_runs"]
+    resolved = resolve_run(parent, RunResolution.AUTHORITATIVE, parent_path="refined_detect_runs")
+    assert resolved.run_name == "refined_detect_promoted_manual"
+    assert resolved.resolution_source == "authoritative"
+    assert resolved.fallback_used is False
+
+
+def test_promotion_fails_loudly_when_authority_approval_blocked(tmp_path: Path, monkeypatch) -> None:
+    import fisheye.cli.palette as palette_cli
+
+    analysis = tmp_path / "analysis.zarr"
+    training = tmp_path / "training.zarr"
+    _write_analysis_zarr(analysis)
+    _write_empty_training_zarr(training)
+    monkeypatch.setattr(
+        palette_cli,
+        "approve",
+        lambda _request: {
+            "status": "blocked",
+            "reason_code": "RUN_NOT_COMPLETE",
+            "next_hints": ["complete the run first"],
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="RUN_NOT_COMPLETE"):
+        promote_detection_frames(analysis, training, [0], apply=True)
+
+    root = zarr.open_group(str(training), mode="r", use_consolidated=False)
+    parent = root["refined_detect_runs"]
+    assert "authoritative_run" not in parent.attrs
+    assert "detect_review_status_latest" not in parent.attrs
+
+
 def test_promote_manual_clear_frame_as_negative(tmp_path: Path) -> None:
     analysis = tmp_path / "analysis.zarr"
     training = tmp_path / "training.zarr"
@@ -368,6 +436,9 @@ def test_promote_clipped_positive_frame_appends_with_clip_identity(tmp_path: Pat
     np.testing.assert_allclose(instances["bbox_norm_coords"][:], [[0.5, 0.5, 0.5, 0.5]])
     assert instances["manual_edit_flags"][:].tolist() == [True]
     assert instances["source_detect_row_index"][:].tolist() == [-1]
+    refined_parent = root["refined_detect_runs"]
+    assert "detect_review_status_latest" not in refined_parent.attrs
+    assert refined_parent.attrs["authoritative_run"] == "refined_detect_promoted_manual"
 
     dry_run = promote_clipped_detection_frames(analysis, training, [frame], apply=False)
 

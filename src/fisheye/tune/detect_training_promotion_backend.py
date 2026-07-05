@@ -41,6 +41,7 @@ from fisheye.shared.zarr_run_completion import (
     mark_run_started,
     require_runs_parent,
     resolve_latest_complete_run_name,
+    set_authoritative_run,
 )
 from fisheye.tune import detect_review as detect_review_mod
 
@@ -652,6 +653,53 @@ def _resolve_training_refined_run(
     return run_name, run
 
 
+def _approve_promoted_refined_detect_authority(
+    *,
+    training_zarr_path: Path,
+    run_name: str,
+) -> dict[str, object]:
+    """Route promotion authority through the palette approve funnel (fail-closed)."""
+
+    from fisheye.cli.palette import ApproveRequest, approve
+
+    envelope = approve(
+        ApproveRequest(
+            recording=training_zarr_path,
+            stage="refined_detect",
+            run=run_name,
+            approved_by=None,
+            note="detect training promotion",
+            apply=True,
+        )
+    )
+    if str(envelope.get("status") or "").strip().lower() != "ok":
+        reason = envelope.get("reason_code") or "UNKNOWN"
+        hints = envelope.get("next_hints") or []
+        raise RuntimeError(
+            "promotion could not set authoritative refined detect run "
+            f"{run_name!r} for {training_zarr_path}: {reason}; hints={hints}"
+        )
+    return envelope
+
+
+def _mirror_authoritative_approval(
+    parent: zarr.Group,
+    run_name: str,
+    envelope: Mapping[str, object],
+) -> None:
+    approval = envelope.get("approval")
+    if not isinstance(approval, Mapping):
+        approval = {}
+    set_authoritative_run(
+        parent,
+        run_name,
+        approved_by=str(approval.get("approved_by") or "unknown"),
+        approved_at=str(approval.get("approved_at") or ""),
+        git_sha=str(approval.get("git_sha") or ""),
+        note=str(approval.get("note") or ""),
+    )
+
+
 def _read_optional_instance_array(
     instances: zarr.Group | None,
     name: str,
@@ -737,6 +785,7 @@ def _reopen_group_direct(group: zarr.Group, *, mode: str = "a") -> zarr.Group:
 def _sync_training_refined_instances_from_crop(
     root: zarr.Group,
     *,
+    training_zarr_path: Path,
     target_crop_run: str,
     target_refined_run: str | None,
     source_index: Mapping[str, np.ndarray],
@@ -952,12 +1001,24 @@ def _sync_training_refined_instances_from_crop(
         _drop_inline_consolidated_metadata(source_detections)
     _drop_inline_consolidated_metadata(refined_run)
     refined_parent = root.get("refined_detect_runs")
+    authoritative_approval: dict[str, object] | None = None
     if refined_parent is not None:
         _drop_inline_consolidated_metadata(refined_parent)
         mark_run_complete(refined_run, parent_group=refined_parent, run_name=run_name)
+        envelope = _approve_promoted_refined_detect_authority(
+            training_zarr_path=training_zarr_path,
+            run_name=run_name,
+        )
+        _mirror_authoritative_approval(refined_parent, run_name, envelope)
+        authoritative_approval = {
+            "status": envelope.get("status"),
+            "reason_code": envelope.get("reason_code"),
+            "run": envelope.get("run"),
+        }
     return {
         "status": "ok",
         "refined_detect_run": run_name,
+        "authoritative_approval": authoritative_approval,
         "refined_instances_path": f"refined_detect_runs/{run_name}/instances",
         "rows_instances": row_count,
         "manual_rows": int(np.sum(manual_edit_flags)),
@@ -1474,6 +1535,7 @@ def promote_detection_frames(
         if opts.sync_refined_instances:
             refined_instances_sync = _sync_training_refined_instances_from_crop(
                 training_root,
+                training_zarr_path=training_path,
                 target_crop_run=target_crop_run,
                 target_refined_run=opts.target_refined_run,
                 source_index=source_index,
@@ -1855,6 +1917,7 @@ def promote_clipped_detection_frames(
             t_refined_sync = time.perf_counter()
             refined_instances_sync = _sync_training_refined_instances_from_crop(
                 training_root,
+                training_zarr_path=training_path,
                 target_crop_run=target_crop_run,
                 target_refined_run=opts.target_refined_run,
                 source_index=source_index,
