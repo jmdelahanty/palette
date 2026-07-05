@@ -59,6 +59,7 @@ gpu = [
   "onnxsim",
 ]
 dev = [
+  "import-linter>=2,<3",
   "pytest>=8.4,<9",
   "plotly",
 ]
@@ -76,3 +77,53 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 fisheye = ["**/*.json", "**/*.yaml", "**/*.yml", "**/*.html", "**/*.css", "**/*.js"]
+
+[tool.importlinter]
+root_package = "fisheye"
+exclude_type_checking_imports = true
+
+[[tool.importlinter.contracts]]
+id = "shared-layer"
+name = "Shared layer must not import higher application layers"
+type = "layers"
+containers = ["fisheye"]
+layers = [
+  "(analysis) : (apps) : capture : cli : core : detection : diagnostics : (docs) : (group_analytics) : group_analytics_viewer : group_statistics : inference : io : labeling : (pose) : preprocessing : refinement : registry : segmentation : status_page : tracking : training : tune : utils : visualization",
+  "shared",
+]
+ignore_imports = [
+  # RATCHET: existing clipped-collection cache helper still reaches a legacy utils resolver.
+  "fisheye.shared.clipped_collection_flat_roi_cache -> fisheye.utils.resolve_clipped_refined_detect_collection",
+  # RATCHET: GPU image source helpers call the current crop implementation until the crop backend is split lower.
+  "fisheye.shared.crop_image_source -> fisheye.tracking.crop",
+  # RATCHET: Recording accessor still resolves registries through RegistryPaths.
+  "fisheye.shared.recording -> fisheye.registry.db",
+  # RATCHET: compatibility bridge while stage-completion readers migrate to the shared home.
+  "fisheye.shared.registry_stage_complete -> fisheye.registry.stage_complete",
+  # RATCHET: training export helpers still register datasets through the registry API.
+  "fisheye.shared.training_zarr_helpers -> fisheye.registry.db",
+  # RATCHET: discovery helper still uses Registry when explicit registry paths are supplied.
+  "fisheye.shared.zarr_discovery -> fisheye.registry.db",
+  # RATCHET: subject-mask registry status helper still bridges to registry finalization status.
+  "fisheye.shared.subject_mask_registry_status -> fisheye.registry.stage_complete",
+]
+unmatched_ignore_imports_alerting = "error"
+
+[[tool.importlinter.contracts]]
+id = "phase2-utils-shims"
+name = "Phase 2 moved utils shims must not be imported"
+type = "forbidden"
+source_modules = ["fisheye.**"]
+forbidden_modules = [
+  "fisheye.utils.calibration",
+  "fisheye.utils.encoder_tags",
+  "fisheye.utils.import_video_metadata",
+  "fisheye.utils.recording_preflight",
+  "fisheye.utils.resolve_detect_model",
+  "fisheye.utils.resolve_subject_mask_model",
+  "fisheye.utils.system",
+  "fisheye.utils.zarr_io",
+  "fisheye.utils.zarr_metadata",
+]
+as_packages = false
+unmatched_ignore_imports_alerting = "error"

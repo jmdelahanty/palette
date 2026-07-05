@@ -39,6 +39,15 @@ jobs:
           palette --help >/dev/null
           palette status --help >/dev/null
 
+      - name: Lint import boundaries
+        run: |
+          lint-imports --config pyproject.toml
+
+      - name: Check file-size ratchet
+        run: |
+          python scripts/check_file_size_ratchet.py
+          git diff --exit-code -- scripts/file_size_ratchet_baseline.json
+
       - name: Collect tests
         run: |
           python -m pytest --collect-only -q tests/
