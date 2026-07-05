@@ -32,6 +32,7 @@ from rich.panel import Panel
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, MofNCompleteColumn
 
 from ..shared.encoder_tags import parse_encoder_comment
+from ..shared.frame_domains import FRAME_DOMAIN_MAPS_GROUP, STORED_ZARR_TO_ACQUISITION_MAP
 
 # Optional deps
 try:
@@ -92,6 +93,33 @@ def _compute_frame_indices(
     else:
         # Uniform sampling: [0, step, 2*step, ...]
         return list(range(0, effective_total, frame_step))
+
+
+def stamp_stored_zarr_frame_identity_mapping(raw_group: Any, frame_count: int) -> None:
+    """Stamp full-import stored-frame -> acquisition-frame identity mapping."""
+
+    frame_count_i = int(frame_count)
+    if frame_count_i < 0:
+        raise ValueError(f"frame_count must be non-negative, got {frame_count_i}")
+    if FRAME_DOMAIN_MAPS_GROUP in raw_group:
+        maps = raw_group[FRAME_DOMAIN_MAPS_GROUP]
+    else:
+        maps = raw_group.create_group(FRAME_DOMAIN_MAPS_GROUP)
+    maps.attrs["schema_id"] = "palette.frame_domain_maps.v1"
+    maps.attrs["description"] = "Explicit frame-domain conversion maps for this raw_video group."
+    chunks = (max(1, min(65536, frame_count_i)),)
+    mapping = maps.create_array(
+        STORED_ZARR_TO_ACQUISITION_MAP,
+        data=np.arange(frame_count_i, dtype=np.int64),
+        chunks=chunks,
+        overwrite=True,
+    )
+    mapping.attrs["source_domain"] = "stored_zarr_frame"
+    mapping.attrs["target_domain"] = "acquisition_frame"
+    mapping.attrs["semantics"] = "identity_map_zero_based_full_import"
+    raw_group.attrs["stored_zarr_frame_to_acquisition_frame_map"] = (
+        f"{FRAME_DOMAIN_MAPS_GROUP}/{STORED_ZARR_TO_ACQUISITION_MAP}"
+    )
 
 
 def _default_import_config() -> Dict[str, Any]:
@@ -1143,13 +1171,15 @@ def import_video(
                     use_sharding=use_sharding,
                 )
 
-                # Store original frame indices if sampled import
-                if training_data_mode and frame_step and frame_indices_to_import:
-                    console.print("[cyan]Creating original_frame_indices array...[/cyan]")
-                    # Reopen with LocalStore to write the frame indices array
+                # Store explicit stored-frame -> source/acquisition mappings.
+                if (training_data_mode and frame_step and frame_indices_to_import) or not (
+                    training_data_mode and frame_step
+                ):
                     store_local = LocalStore(str(zarr_path))
                     root_local = zarr.open_group(store=store_local, mode='r+')
                     raw_local = root_local['raw_video']
+                if training_data_mode and frame_step and frame_indices_to_import:
+                    console.print("[cyan]Creating original_frame_indices array...[/cyan]")
                     raw_local.create_array(
                         'original_frame_indices',
                         data=np.array(frame_indices_to_import, dtype=np.int32),
@@ -1157,6 +1187,13 @@ def import_video(
                         overwrite=True
                     )
                     console.print(f"[green]✓ Stored mapping of {n_import_frames} imported frames to original video indices[/green]")
+                elif not (training_data_mode and frame_step):
+                    console.print("[cyan]Creating frame-domain identity mapping...[/cyan]")
+                    stamp_stored_zarr_frame_identity_mapping(raw_local, n_import_frames)
+                    console.print(
+                        "[green]✓ Stored identity mapping of "
+                        f"{n_import_frames} stored frames to acquisition frames[/green]"
+                    )
             else:
                 # TODO: Add CPU processing path
                 console.print("[red]CPU processing not implemented in this example[/red]")
@@ -1383,6 +1420,12 @@ def import_video(
                 output_arrays.append(f"  - raw_video/images_ds_rgb: ({n_import_frames}, {h}, {w}, {c})")
             if training_data_mode and frame_step:
                 output_arrays.append(f"  - raw_video/original_frame_indices: ({n_import_frames},)")
+            else:
+                output_arrays.append(
+                    "  - raw_video/"
+                    f"{FRAME_DOMAIN_MAPS_GROUP}/{STORED_ZARR_TO_ACQUISITION_MAP}: "
+                    f"({n_import_frames},)"
+                )
 
             perf_lines = [
                 f"  Time: {duration:.1f}s ({duration/60:.1f} min)",
