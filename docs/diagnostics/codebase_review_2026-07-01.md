@@ -427,3 +427,32 @@ the final commit `42311c8` — re-verified: 0 local `_iter_zarr` / `_utc_now` / 
 `_write_json` definitions remain. Net: **Phase 1 is fully landed**, not merely
 planned; the remaining utils reorg — helper relocations, dead-code deletion, runner
 moves, the import-linter gate — is the separate later work per the strategy doc.)
+
+## Proportion finding (2026-07-05) — the meta-observation this review omitted
+
+Findings #1–7 catalog defects; none states the forest. Measured 2026-07-05:
+**~488k LOC source / 802 files**, 158k LOC tests, **131k lines across 406 docs**.
+The shape, not any single number, is the finding:
+
+- **58% of source files (463/802) carry `__main__`.** This is an application layer
+  wearing a library's name — nearly every schema change deposited a permanent script.
+  `utils/` is 144k LOC / 272 files (30% of source; down from 165k as Phase 1 landed),
+  `diagnostics/` another 108 files / 33k of un-deleted one-off investigations.
+- **Docs outweigh the science-core code.** 43 design + 43 todo + 42 diagnostics + 18
+  review docs; 86 formal `contract-meta` files whose `status:` vocabulary has drifted
+  to ~20 ad-hoc one-offs (governance grew slower than the corpus).
+- **The science/CV core** (detection + tracking + segmentation + refinement + pose +
+  training ≈ 41k LOC, or ~96k counting analysis) **is a minority of the codebase**;
+  the majority is infrastructure. This is the advisor's science-vs-engineering
+  tension made measurable — a proportion problem, not a competence one.
+
+**Direction of travel is correct, and worth recording as such.** Every slice landed
+the week of 2026-07-04/05 was *subtraction*: eye-mask severance (−48,912 lines), utils
+Phase 1–2 (edges severed, scripts→shims), the registry-reconcile collapse (sync scripts
+deleted with equality proofs), the legacy detect-pointer retirement (writers down to two
+annotated migrations), authority unified through one `approve` verb. The overengineering
+is accreted history; this week bent the curve the other way. The highest-leverage next
+move is not more code but the two forcing functions from `utils_reorganization_strategy.md`
+(import-linter `forbidden_modules = fisheye.utils` + the `__main__`-only-in-`apps/`
+predicate) — they make the sprawl deletable and stop re-accretion. See
+[[user-context-solo-lm]] for the advisory framing.
