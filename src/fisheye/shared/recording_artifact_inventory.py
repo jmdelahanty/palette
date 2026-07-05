@@ -10,10 +10,13 @@ reimplementing Zarr traversal.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+import warnings
 
 import zarr
+from zarr.errors import ZarrUserWarning
 
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.stage_run_groups import STAGE_RUN_PARENTS
@@ -90,6 +93,23 @@ _ACQUISITION_STREAM_ATTRS = (
 )
 
 _ANALYSIS_SCOPE_NAMES = frozenset({"online", "offline"})
+_EXPECTED_NON_ZARR_SIDECAR_WARNING_RE = (
+    r"Object at (logs|\.failed|\.imports|\.incoming) is not recognized as a component "
+    r"of a Zarr hierarchy\."
+)
+
+
+@contextmanager
+def _suppress_expected_non_zarr_sidecar_warnings():
+    """Hide known root-sidecar traversal warnings without masking other issues."""
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=_EXPECTED_NON_ZARR_SIDECAR_WARNING_RE,
+            category=ZarrUserWarning,
+        )
+        yield
 
 
 def _group_names(group: Any | None) -> list[str]:
@@ -98,11 +118,13 @@ def _group_names(group: Any | None) -> list[str]:
     keys_fn = getattr(group, "group_keys", None)
     if callable(keys_fn):
         try:
-            return sorted(str(name) for name in keys_fn())
+            with _suppress_expected_non_zarr_sidecar_warnings():
+                return sorted(str(name) for name in keys_fn())
         except Exception:
             return []
     try:
-        return sorted(str(name) for name, value in group.items() if _is_group(value))
+        with _suppress_expected_non_zarr_sidecar_warnings():
+            return sorted(str(name) for name, value in group.items() if _is_group(value))
     except Exception:
         return []
 
@@ -113,11 +135,13 @@ def _array_names(group: Any | None) -> list[str]:
     keys_fn = getattr(group, "array_keys", None)
     if callable(keys_fn):
         try:
-            return sorted(str(name) for name in keys_fn())
+            with _suppress_expected_non_zarr_sidecar_warnings():
+                return sorted(str(name) for name in keys_fn())
         except Exception:
             return []
     try:
-        return sorted(str(name) for name, value in group.items() if _is_array(value))
+        with _suppress_expected_non_zarr_sidecar_warnings():
+            return sorted(str(name) for name, value in group.items() if _is_array(value))
     except Exception:
         return []
 

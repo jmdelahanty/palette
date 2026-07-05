@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 
 import zarr
+from zarr.errors import ZarrUserWarning
 
 from fisheye.shared.plot_artifacts import write_png_visualization_artifact
-from fisheye.shared.recording_artifact_inventory import build_recording_artifact_inventory
+from fisheye.shared.recording_artifact_inventory import _group_names, build_recording_artifact_inventory
 from fisheye.shared.zarr_run_completion import mark_run_complete, require_runs_parent
 from fisheye.utils import recording_artifact_inventory as cli
 
@@ -163,3 +165,20 @@ def test_recording_artifact_inventory_cli_emits_json(tmp_path: Path, capsys) -> 
     assert payload["zarr_path"] == str(zarr_path)
     assert payload["root_attrs"]["recording_id"] == "rec_001"
     assert payload["run_family_count"] == 4
+
+
+def test_inventory_suppresses_known_non_zarr_sidecar_warnings() -> None:
+    class NoisyGroup:
+        def group_keys(self):
+            warnings.warn(
+                "Object at logs is not recognized as a component of a Zarr hierarchy.",
+                ZarrUserWarning,
+                stacklevel=2,
+            )
+            return ["detect_runs"]
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert _group_names(NoisyGroup()) == ["detect_runs"]
+
+    assert caught == []
