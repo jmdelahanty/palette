@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from fisheye.cli.palette import (
     ApproveRequest,
+    ArtifactsRequest,
     CropRequest,
     DetectRequest,
     KeypointsRequest,
     PlanRequest,
     StatusRequest,
     approve,
+    artifacts,
     crop,
     detect,
     keypoints,
@@ -21,6 +23,7 @@ from fisheye.shared.run_resolution import RunResolution, RunResolutionResult, re
 
 __all__ = [
     "ApproveRequest",
+    "ArtifactsRequest",
     "CropRequest",
     "DetectRequest",
     "KeypointsRequest",
@@ -31,6 +34,7 @@ __all__ = [
     "RunResolutionResult",
     "StatusRequest",
     "approve",
+    "artifacts",
     "crop",
     "detect",
     "keypoints",

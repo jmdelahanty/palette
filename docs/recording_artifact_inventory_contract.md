@@ -5,7 +5,7 @@ Status: initial read-only surface.
 This contract describes the per-recording artifact inventory produced by:
 
 ```bash
-scripts/py -m fisheye.utils.recording_artifact_inventory <archive.zarr> --json
+palette artifacts <recording> --json
 ```
 
 The inventory is a discovery surface. It does not choose scientific authority,

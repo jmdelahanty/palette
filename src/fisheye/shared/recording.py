@@ -12,6 +12,7 @@ import numpy as np
 from fisheye.registry.db import RegistryPaths
 from fisheye.shared.frame_domains import FrameDomains
 from fisheye.shared.mask_store import open_mask_store
+from fisheye.shared.recording_artifact_inventory import build_recording_artifact_inventory
 from fisheye.shared.run_resolution import RunResolution, RunResolutionResult, resolve_run
 from fisheye.shared.stage_run_groups import stage_run_parent_paths
 from fisheye.shared.zarr_helpers import (
@@ -361,6 +362,11 @@ class Recording:
             run_name=resolved.run_name,
             resolution=resolved,
         )
+
+    def artifact_inventory(self) -> dict[str, Any]:
+        """Build the read-only artifact inventory spanning all run families."""
+
+        return build_recording_artifact_inventory(self.root, zarr_path=self.path)
 
 
 def open_recording(path_or_id: str | Path, *, registry: Path | str | None = None) -> Recording:
