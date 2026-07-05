@@ -86,7 +86,9 @@ def test_accept_detect_review_writes_status_and_latest(tmp_path: Path) -> None:
     assert "timestamp_utc" in status
     assert status["timestamp"] == status["timestamp_utc"]
     assert status["resolved_group"] == "interpolated"
-    assert parent.attrs["detect_review_status_latest"] == "refined_1"
+    assert "detect_review_status_latest" not in parent.attrs
+    assert parent.attrs["authoritative_run"] == "refined_1"
+    assert status["authoritative_approval"]["status"] == "ok"
     profile_parent = root["analysis/detection_profile_runs"]
     profile_run = profile_parent.attrs["latest"]
     profile_group = profile_parent[profile_run]
@@ -222,3 +224,45 @@ def test_accept_detect_review_syncs_detection_profile_registry(tmp_path: Path) -
     assert row["recording_id"] == "recording_detect_review"
     assert row["zarr_use"] == "training"
     assert row["coverage_percent"] == 100.0
+
+
+def test_accept_detect_review_approved_is_fail_closed_when_run_is_incomplete(tmp_path: Path) -> None:
+    zarr_path = _make_zarr(tmp_path / "strict.zarr", with_group="interpolated")
+    root = zarr.open_group(store=zarr_path, mode="a")
+    # Strict completion epoch: unmarked runs are no longer legacy-complete, so
+    # the authoritative approval path must block and the CLI must not write
+    # detect_review_status.
+    root["refined_detect_runs"].attrs["palette_completion_epoch"] = 1
+
+    rc = mod.main(
+        [
+            str(zarr_path),
+            "--state",
+            "approved",
+            "--intended-use",
+            "training",
+            "--reviewer",
+            "operator5",
+        ]
+    )
+    assert rc == 1
+
+    reopened = zarr.open_group(store=zarr_path, mode="r")
+    parent = reopened["refined_detect_runs"]
+    assert "detect_review_status" not in parent["refined_1"].attrs
+    assert "authoritative_run" not in parent.attrs
+    assert "detect_review_status_latest" not in parent.attrs
+
+
+def test_accept_detect_review_non_approved_state_skips_authoritative_approval(tmp_path: Path) -> None:
+    zarr_path = _make_zarr(tmp_path / "pending.zarr", with_group="interpolated")
+    rc = mod.main([str(zarr_path), "--state", "pending"])
+    assert rc == 0
+
+    root = zarr.open_group(store=zarr_path, mode="r")
+    parent = root["refined_detect_runs"]
+    status = dict(parent["refined_1"].attrs["detect_review_status"])
+    assert status["state"] == "pending"
+    assert "authoritative_approval" not in status
+    assert "authoritative_run" not in parent.attrs
+    assert "detect_review_status_latest" not in parent.attrs

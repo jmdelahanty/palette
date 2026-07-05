@@ -17,6 +17,37 @@ from fisheye.utils.detection_profile import write_detection_profile
 from fisheye.utils.sync_detection_profile_registry import sync_latest_detection_profile_for_zarr
 
 
+def _approve_refined_detect_authority(
+    *,
+    zarr_path: Path,
+    refined_run_name: str,
+    reviewer: Optional[str],
+    notes: Optional[str],
+) -> dict[str, object]:
+    """Route an approved review through the authoritative approval path (fail-closed)."""
+
+    from fisheye.cli.palette import ApproveRequest, approve
+
+    envelope = approve(
+        ApproveRequest(
+            recording=zarr_path,
+            stage="refined_detect",
+            run=refined_run_name,
+            approved_by=reviewer,
+            note=notes or "detect review sign-off",
+            apply=True,
+        )
+    )
+    if str(envelope.get("status") or "").strip().lower() != "ok":
+        reason = envelope.get("reason_code") or "UNKNOWN"
+        hints = envelope.get("next_hints") or []
+        raise RuntimeError(
+            "could not set authoritative refined detect run "
+            f"{refined_run_name!r} for {zarr_path}: {reason}; hints={hints}"
+        )
+    return envelope
+
+
 def _pick_refined_parent(root: zarr.Group) -> Optional[zarr.Group]:
     if "refined_detect_runs" in root:
         return root["refined_detect_runs"]
@@ -68,7 +99,11 @@ def _emit(result: dict[str, object], *, as_json: bool) -> None:
         registry_sync = profile_result.get("registry_sync")
         if isinstance(registry_sync, dict):
             print(f"detection_profile_registry_sync: {registry_sync.get('status')}")
-    print(f"latest_updated: {result['latest_updated']}")
+    approval = result.get("authoritative_approval")
+    if isinstance(approval, dict):
+        print(f"authoritative_approval: {approval.get('status')} ({approval.get('run')})")
+    else:
+        print("authoritative_approval: —")
     print(f"dry_run: {result['dry_run']}")
 
 
@@ -266,11 +301,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="Resolve target and payload without writing zarr attrs.",
     )
-    parser.add_argument(
-        "--no-latest",
-        action="store_true",
-        help="Do not update refined_detect_runs.attrs['detect_review_status_latest'].",
-    )
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON output.")
     args = parser.parse_args(argv)
 
@@ -322,12 +352,22 @@ def main(argv: Optional[list[str]] = None) -> int:
             payload["notes"] = args.notes
         payload = {k: v for k, v in payload.items() if v is not None}
 
-        latest_updated = False
+        authoritative_approval: Optional[dict[str, object]] = None
         if not args.dry_run:
+            if args.state == "approved":
+                envelope = _approve_refined_detect_authority(
+                    zarr_path=args.zarr_path.expanduser().resolve(),
+                    refined_run_name=refined_run_name,
+                    reviewer=args.reviewer,
+                    notes=args.notes,
+                )
+                authoritative_approval = {
+                    "status": envelope.get("status"),
+                    "reason_code": envelope.get("reason_code"),
+                    "run": envelope.get("run"),
+                }
+                payload["authoritative_approval"] = authoritative_approval
             refined_run.attrs["detect_review_status"] = payload
-            if not args.no_latest:
-                refined_parent.attrs["detect_review_status_latest"] = refined_run_name
-                latest_updated = True
 
         detection_profile_result: dict[str, object] = {"enabled": False, "status": "skipped"}
         should_write_profile = (
@@ -362,7 +402,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             "method": args.method,
             "intended_use": intended_use,
             "reviewer": args.reviewer,
-            "latest_updated": latest_updated,
+            "authoritative_approval": authoritative_approval,
             "dry_run": bool(args.dry_run),
             "payload": payload,
             "detection_profile": detection_profile_result,
