@@ -150,6 +150,11 @@ from .web_handoff_validation import (
     _inspect_handoff_operator_evidence_commands,
     _launch_evidence_execution_checklist_status,
     _inspect_handoff_launch_evidence_execution_checklist,
+    _load_operator_evidence_template_from_directory,
+    _load_operator_evidence_template_from_zip,
+    _operator_evidence_commands_public_summary,
+    _launch_evidence_execution_checklist_public_summary,
+    _launch_evidence_execution_checklist_inspection_target,
 )
 from .web_handoff_inspection import (
     _handoff_status_from_manifest as _handoff_status_from_manifest_impl,
@@ -16227,40 +16232,8 @@ def _operator_evidence_template_summary(
     }
 
 
-def _load_operator_evidence_template_from_directory(root: Path, template_path: str) -> tuple[dict[str, object] | None, bool, bool, str]:
-    candidates: list[Path] = []
-    if template_path:
-        raw = Path(template_path)
-        candidates.append(raw if raw.is_absolute() else root / raw)
-        candidates.append(root / raw.name)
-    for candidate in dict.fromkeys(candidates):
-        if not candidate.is_file():
-            continue
-        try:
-            loaded = json.loads(candidate.read_text(encoding="utf-8"))
-            return (loaded if isinstance(loaded, dict) else {}, True, isinstance(loaded, dict), "")
-        except (OSError, json.JSONDecodeError) as exc:
-            return None, True, False, str(exc)
-    return None, False, False, ""
 
 
-def _load_operator_evidence_template_from_zip(archive, template_path: str) -> tuple[dict[str, object] | None, bool, bool, str]:
-    basename = Path(str(template_path or "")).name
-    if not basename:
-        return None, False, False, ""
-    matches = sorted(
-        name
-        for name in archive.namelist()
-        if name == basename or name.endswith(f"/{basename}")
-    )
-    if not matches:
-        return None, False, False, ""
-    chosen = min(matches, key=lambda name: (len([part for part in name.split("/") if part]), name))
-    try:
-        loaded = json.loads(archive.read(chosen).decode("utf-8"))
-        return (loaded if isinstance(loaded, dict) else {}, True, isinstance(loaded, dict), "")
-    except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return None, True, False, str(exc)
 
 
 def _inspect_handoff_validation_checklist(path: Path) -> dict[str, object]:
@@ -16478,156 +16451,10 @@ def _inspect_handoff_validation_checklist(path: Path) -> dict[str, object]:
 
 
 
-def _operator_evidence_commands_public_summary(
-    operator_evidence_commands: Mapping[str, object],
-) -> dict[str, object]:
-    required = bool(operator_evidence_commands.get("required"))
-    present = bool(operator_evidence_commands.get("present"))
-    valid = bool(operator_evidence_commands.get("valid"))
-    boundary_present = bool(operator_evidence_commands.get("operator_only_boundary_present"))
-    missing_phrases = [
-        str(phrase)
-        for phrase in (
-            operator_evidence_commands.get("operator_only_boundary_missing_phrases")
-            if isinstance(
-                operator_evidence_commands.get("operator_only_boundary_missing_phrases"),
-                list,
-            )
-            else []
-        )
-        if str(phrase)
-    ]
-    matched_paths = (
-        operator_evidence_commands.get("matched_paths")
-        if isinstance(operator_evidence_commands.get("matched_paths"), list)
-        else []
-    )
-    related_paths = (
-        operator_evidence_commands.get("related_paths")
-        if isinstance(operator_evidence_commands.get("related_paths"), list)
-        else []
-    )
-    blocking_reason_id = ""
-    if required and not valid:
-        blocking_reason_id = (
-            "operator_evidence_commands_missing"
-            if not present
-            else (
-                "operator_evidence_commands_boundary_missing"
-                if not boundary_present
-                else "operator_evidence_commands_invalid"
-            )
-        )
-    return {
-        "schema": "palette.web_labeling_operator_evidence_commands_summary.v1",
-        "required": required,
-        "present": present,
-        "valid": valid,
-        "operator_only_boundary_present": boundary_present,
-        "operator_only_boundary_missing_phrases": missing_phrases,
-        "operator_only_boundary_missing_phrase_count": len(missing_phrases),
-        "matched_path_count": len(matched_paths),
-        "related_path_count": len(related_paths),
-        "required_path": str(operator_evidence_commands.get("required_path") or ""),
-        "blocking_reason_id": blocking_reason_id,
-    }
 
 
-def _launch_evidence_execution_checklist_public_summary(
-    launch_evidence_execution_checklist: Mapping[str, object],
-) -> dict[str, object]:
-    required = bool(launch_evidence_execution_checklist.get("required"))
-    present = bool(launch_evidence_execution_checklist.get("present"))
-    valid = bool(launch_evidence_execution_checklist.get("valid"))
-    contract_present = bool(
-        launch_evidence_execution_checklist.get("checklist_contract_present")
-    )
-    missing_phrases = [
-        str(phrase)
-        for phrase in (
-            launch_evidence_execution_checklist.get("checklist_missing_phrases")
-            if isinstance(
-                launch_evidence_execution_checklist.get("checklist_missing_phrases"),
-                list,
-            )
-            else []
-        )
-        if str(phrase)
-    ]
-    matched_paths = (
-        launch_evidence_execution_checklist.get("matched_paths")
-        if isinstance(launch_evidence_execution_checklist.get("matched_paths"), list)
-        else []
-    )
-    related_paths = (
-        launch_evidence_execution_checklist.get("related_paths")
-        if isinstance(launch_evidence_execution_checklist.get("related_paths"), list)
-        else []
-    )
-    blocking_reason_id = ""
-    if required and not valid:
-        blocking_reason_id = (
-            "launch_evidence_execution_checklist_missing"
-            if not present
-            else (
-                "launch_evidence_execution_checklist_incomplete"
-                if not contract_present
-                else "launch_evidence_execution_checklist_invalid"
-            )
-        )
-    return {
-        "schema": "palette.web_labeling_launch_evidence_execution_checklist_summary.v1",
-        "required": required,
-        "present": present,
-        "valid": valid,
-        "checklist_contract_present": contract_present,
-        "checklist_missing_phrases": missing_phrases,
-        "checklist_missing_phrase_count": len(missing_phrases),
-        "matched_path_count": len(matched_paths),
-        "related_path_count": len(related_paths),
-        "required_path": str(launch_evidence_execution_checklist.get("required_path") or ""),
-        "blocking_reason_id": blocking_reason_id,
-    }
 
 
-def _launch_evidence_execution_checklist_inspection_target() -> dict[str, object]:
-    return {
-        "shareability_launch_evidence_execution_checklist_required": True,
-        "shareability_launch_evidence_execution_checklist_file": (
-            "launch-evidence-execution-checklist.txt"
-        ),
-        "shareability_launch_evidence_execution_checklist_field": (
-            "launch_evidence_execution_checklist"
-        ),
-        "shareability_launch_evidence_execution_checklist_summary_field": (
-            "launch_evidence_execution_checklist_summary"
-        ),
-        "shareability_launch_evidence_execution_checklist_top_level_fields": [
-            "launch_evidence_execution_checklist_required",
-            "launch_evidence_execution_checklist_present",
-            "launch_evidence_execution_checklist_valid",
-            "launch_evidence_execution_checklist_contract_present",
-            "launch_evidence_execution_checklist_missing_phrases",
-            "launch_evidence_execution_checklist_blocking_reason_id",
-        ],
-        "shareability_launch_evidence_execution_checklist_required_phrases": [
-            "Palette web-labeling launch evidence execution checklist",
-            "Operator-only checklist",
-            "record-zarr-backup-evidence",
-            "record-browser-response-security-evidence",
-            "record-identity-source-evidence",
-            "record-browser-smoke-evidence",
-            "record-disposable-zarr-mutation-smoke-evidence",
-            "apply-operator-evidence-templates",
-            "inspect-handoff --path PACKAGE_PATH --require-shareable",
-            "labeler_links_safe_to_share=true",
-        ],
-        "shareability_launch_evidence_execution_checklist_blocking_reason_ids": [
-            "launch_evidence_execution_checklist_missing",
-            "launch_evidence_execution_checklist_incomplete",
-            "launch_evidence_execution_checklist_invalid",
-        ],
-    }
 
 
 def _inspection_failure_actions(
