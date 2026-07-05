@@ -88,7 +88,7 @@ name = "Shared layer must not import higher application layers"
 type = "layers"
 containers = ["fisheye"]
 layers = [
-  "(analysis) : (apps) : capture : cli : core : detection : diagnostics : (docs) : (group_analytics) : group_analytics_viewer : group_statistics : inference : io : labeling : (pose) : preprocessing : refinement : registry : segmentation : status_page : tracking : training : tune : utils : visualization",
+  "(analysis) : (apps) : capture : cli : core : detection : diagnostics : (docs) : (group_analytics) : group_analytics_viewer : group_statistics : inference : labeling : (pose) : preprocessing : refinement : registry : segmentation : status_page : tracking : training : tune : utils : visualization",
   "shared",
 ]
 ignore_imports = [
