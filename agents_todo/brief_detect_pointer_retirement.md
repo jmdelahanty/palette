@@ -75,8 +75,10 @@ Branch from current `sun` (re-verify lines; `sun` moves between turns):
 - `git diff --check` + `py_compile` clean.
 - Focused tests for every touched file, plus the review-approval fail-closed tests.
 - Full non-GPU suite green on branch tip rebased on current `sun`
-  (`~/miniconda3/envs/palette-py311/bin/python -m pytest tests -m "not gpu"`;
-  baseline 3346 passed / 2 skipped / 2 deselected as of 182d1be — recount, it grows).
+  (`~/miniconda3/envs/palette-py311/bin/python -m pytest tests -m "not gpu" -n 16`;
+  pytest-xdist is installed and verified parallel-safe (2026-07-04, identical counts
+  serial vs -n 16 twice) — ~50s instead of ~8.5min. Baseline 3346 passed / 2 skipped
+  / 2 deselected as of 182d1be — recount, it grows).
 - Grep proof in report: remaining `detect_review_status_latest` assignment sites are
   exactly the two annotated migrations + nothing else in `src/`.
 
