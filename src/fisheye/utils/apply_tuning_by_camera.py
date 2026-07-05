@@ -131,7 +131,7 @@ def _normalize_subject_mask_component_name(value: object) -> Optional[str]:
     return normalized
 
 
-def _parse_subject_mask_components(values: Optional[Sequence[str]]) -> List[str]:
+def parse_subject_mask_components(values: Optional[Sequence[str]]) -> List[str]:
     components: List[str] = []
     seen: set[str] = set()
     for raw_value in values or ():
@@ -153,7 +153,11 @@ def _parse_subject_mask_components(values: Optional[Sequence[str]]) -> List[str]
     return components
 
 
-def _normalize_subject_mask_tuning_payload(raw: object) -> Dict[str, Any]:
+def _parse_subject_mask_components(values: Optional[Sequence[str]]) -> List[str]:
+    return parse_subject_mask_components(values)
+
+
+def normalize_subject_mask_tuning_payload(raw: object) -> Dict[str, Any]:
     if not isinstance(raw, Mapping):
         return {"version": SUBJECT_TUNING_VERSION, "components": {}}
 
@@ -192,11 +196,15 @@ def _normalize_subject_mask_tuning_payload(raw: object) -> Dict[str, Any]:
     }
 
 
+def _normalize_subject_mask_tuning_payload(raw: object) -> Dict[str, Any]:
+    return normalize_subject_mask_tuning_payload(raw)
+
+
 def _filter_subject_mask_tuning_payload(
     raw: object,
     components: Sequence[str],
 ) -> tuple[Dict[str, Any], List[str]]:
-    payload = _normalize_subject_mask_tuning_payload(raw)
+    payload = normalize_subject_mask_tuning_payload(raw)
     source_components = payload.get("components", {})
     filtered_components: Dict[str, Any] = {}
     missing: List[str] = []
@@ -265,9 +273,9 @@ def _apply_subject_mask_component_updates(
     merge_dicts: bool,
 ) -> tuple[List[str], List[str]]:
     target_raw = attrs.get(SUBJECT_MASK_TUNING_KEY)
-    target_payload = _normalize_subject_mask_tuning_payload(target_raw)
+    target_payload = normalize_subject_mask_tuning_payload(target_raw)
     target_components = dict(target_payload.get("components", {}))
-    source_payload = _normalize_subject_mask_tuning_payload(value)
+    source_payload = normalize_subject_mask_tuning_payload(value)
     source_components = dict(source_payload.get("components", {}))
 
     updated_paths: List[str] = []
@@ -365,7 +373,7 @@ def _find_h5_for_zarr(zarr_path: Path) -> Optional[Path]:
     return None
 
 
-def _camera_id_for_zarr(zarr_path: Path, root: zarr.Group) -> Optional[str]:
+def camera_id_for_zarr(zarr_path: Path, root: zarr.Group) -> Optional[str]:
     camera_id = _read_camera_id_from_zarr(root)
     if camera_id:
         return camera_id
@@ -376,6 +384,10 @@ def _camera_id_for_zarr(zarr_path: Path, root: zarr.Group) -> Optional[str]:
         return _read_camera_id(h5_path)
     except Exception:
         return None
+
+
+def _camera_id_for_zarr(zarr_path: Path, root: zarr.Group) -> Optional[str]:
+    return camera_id_for_zarr(zarr_path, root)
 
 
 def _load_source_tuning(
@@ -477,7 +489,7 @@ def _build_plans(
         if target_use is not None and zarr_use != target_use:
             continue
 
-        target_camera = _camera_id_for_zarr(resolved, root)
+        target_camera = camera_id_for_zarr(resolved, root)
         if target_camera is None:
             plans.append(
                 TargetPlan(
@@ -596,14 +608,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(str(exc))
         return 1
 
-    camera_id = args.camera_id or _camera_id_for_zarr(source, source_root)
+    camera_id = args.camera_id or camera_id_for_zarr(source, source_root)
     if not camera_id:
         print("Unable to infer camera_id from source; pass --camera-id explicitly.")
         return 1
 
     keys = _parse_keys(args.keys)
     try:
-        subject_mask_components = _parse_subject_mask_components(args.subject_mask_components)
+        subject_mask_components = parse_subject_mask_components(args.subject_mask_components)
     except RuntimeError as exc:
         print(str(exc))
         return 1

@@ -39,12 +39,10 @@ from fisheye.utils.batch_registry_model_resolution import (
 from fisheye.utils.keypoint_retry import retry_failed_keypoints_yolo
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.utils import refine_keypoints_batch as refine_keypoints_batch_mod
-from fisheye.utils.resolve_detect_model import Candidate
-from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_profile, _resolve_recording_id
+from fisheye.registry.model_resolution import Candidate
+from fisheye.registry.model_resolution import load_candidates, load_target_profile, resolve_recording_id
 from fisheye.shared.zarr_recording_context import infer_recording_context
-from fisheye.utils.run_keypoints_with_registry_model import (
-    _write_model_resolution_provenance as _write_keypoint_model_resolution_provenance,
-)
+from fisheye.utils.run_keypoints_with_registry_model import write_keypoint_model_resolution_provenance
 
 try:
     from rich.console import Console
@@ -1104,13 +1102,13 @@ def _resolve_registry_model_for_plan(
     context = infer_recording_context(plan.zarr_path)
     registry = Registry(registry_path)
     try:
-        recording_id = _resolve_recording_id(
+        recording_id = resolve_recording_id(
             registry,
             recording_id=context.recording_id,
             recording_dir=context.recording_dir,
         )
-        target = _load_target_profile(registry, recording_id)
-        candidates = _load_candidates(
+        target = load_target_profile(registry, recording_id)
+        candidates = load_candidates(
             registry,
             target=target,
             task="pose",
@@ -1475,7 +1473,7 @@ def _run_plan(
                 retry_result.get("created_new_run") or retry_result.get("reused_existing")
             )
             if resolved_model is not None and bool(retry_result.get("created_new_run")):
-                _write_keypoint_model_resolution_provenance(
+                write_keypoint_model_resolution_provenance(
                     zarr_path=plan.zarr_path,
                     run_name=run_name,
                     payload=resolved_model.payload,
@@ -1556,7 +1554,7 @@ def _run_plan(
             )
             updated_keypoint_outputs = True
             if resolved_model is not None:
-                _write_keypoint_model_resolution_provenance(
+                write_keypoint_model_resolution_provenance(
                     zarr_path=plan.zarr_path,
                     run_name=run_name,
                     payload=resolved_model.payload,

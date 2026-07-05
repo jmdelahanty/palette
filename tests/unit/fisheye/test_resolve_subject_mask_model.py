@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fisheye.registry.db import Registry
-from fisheye.utils.resolve_subject_mask_model import (
+from fisheye.registry.model_resolution import (
     load_subject_mask_model_candidates,
     resolve_best_subject_mask_model,
 )

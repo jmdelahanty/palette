@@ -24,16 +24,12 @@ from fisheye.utils.batch_registry_model_resolution import ResolvedModel
 from fisheye.utils.batch_registry_model_resolution import (
     resolve_registry_models_for_plans as resolve_shared_registry_models_for_plans,
 )
-from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_profile, _resolve_recording_id
+from fisheye.registry.model_resolution import load_candidates, load_target_profile, resolve_recording_id
 from fisheye.utils.run_detect_with_registry_model import DetectRegistryResult
-from fisheye.utils.run_detect_with_registry_model import _build_payload_args as _build_detect_payload_args
-from fisheye.utils.run_detect_with_registry_model import _pick_best_candidate as _pick_detect_candidate
-from fisheye.utils.run_detect_with_registry_model import (
-    _resolution_payload as _build_detect_resolution_payload,
-)
-from fisheye.utils.run_detect_with_registry_model import (
-    _write_model_resolution_provenance as _write_detect_model_resolution_provenance,
-)
+from fisheye.utils.run_detect_with_registry_model import build_detect_payload_args
+from fisheye.utils.run_detect_with_registry_model import build_detect_resolution_payload
+from fisheye.utils.run_detect_with_registry_model import pick_best_detect_candidate
+from fisheye.utils.run_detect_with_registry_model import write_detect_model_resolution_provenance
 from fisheye.shared.zarr_recording_context import infer_recording_context
 
 try:
@@ -487,13 +483,13 @@ def _resolve_registry_model_for_plan(
 
     registry = Registry(registry_path)
     try:
-        recording_id = _resolve_recording_id(
+        recording_id = resolve_recording_id(
             registry,
             recording_id=context.recording_id,
             recording_dir=context.recording_dir,
         )
-        target = _load_target_profile(registry, recording_id)
-        candidates = _load_candidates(
+        target = load_target_profile(registry, recording_id)
+        candidates = load_candidates(
             registry,
             target=target,
             task="detect",
@@ -503,8 +499,8 @@ def _resolve_registry_model_for_plan(
     finally:
         registry.close()
 
-    best = _pick_detect_candidate(candidates, require_unique=require_unique)
-    payload_args = _build_detect_payload_args(
+    best = pick_best_detect_candidate(candidates, require_unique=require_unique)
+    payload_args = build_detect_payload_args(
         set_id=set_id_filter,
         require_unique=bool(require_unique),
         top_k=int(top_k),
@@ -520,7 +516,7 @@ def _resolve_registry_model_for_plan(
         imgsz=imgsz,
         decode_backend=decode_backend,
     )
-    payload = _build_detect_resolution_payload(
+    payload = build_detect_resolution_payload(
         args=payload_args,
         argv=None,
         recording_dir=plan.recording_dir,
@@ -717,7 +713,7 @@ def _run_detect_plan(
             overwrite_raw_video_metadata=bool(overwrite_raw_video_metadata),
         )
         if resolved_model.payload.get("mode") == "registry":
-            _write_detect_model_resolution_provenance(
+            write_detect_model_resolution_provenance(
                 zarr_path=plan.zarr_path,
                 run_name=run_name,
                 payload=resolved_model.payload,

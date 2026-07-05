@@ -21,8 +21,7 @@ from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.run_provenance import build_run_provenance
 from fisheye.shared.flat_roi_cache import open_flat_roi_cache
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
-from fisheye.utils.resolve_detect_model import Candidate, TargetProfile
-from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_profile, _resolve_recording_id
+from fisheye.registry.model_resolution import Candidate, TargetProfile, load_candidates, load_target_profile, resolve_recording_id
 
 ROI_CACHE_STAGING_RECOMMENDED_MIN_BYTES = 5 * 1024**3
 ROI_CACHE_STAGING_BENCHMARK_NOTE = (
@@ -273,7 +272,7 @@ def _roi_cache_source_crop_run_name(manifest_path: Optional[Path]) -> Optional[s
     return text or None
 
 
-def _pick_best_candidate(candidates: list[Candidate], *, require_unique: bool) -> Candidate:
+def pick_best_keypoint_candidate(candidates: list[Candidate], *, require_unique: bool) -> Candidate:
     if not candidates:
         raise SystemExit("No pose model candidates found.")
     best = candidates[0]
@@ -283,7 +282,11 @@ def _pick_best_candidate(candidates: list[Candidate], *, require_unique: bool) -
     return best
 
 
-def _resolution_payload(
+def _pick_best_candidate(candidates: list[Candidate], *, require_unique: bool) -> Candidate:
+    return pick_best_keypoint_candidate(candidates, require_unique=require_unique)
+
+
+def build_keypoint_resolution_payload(
     *,
     args: argparse.Namespace,
     argv: Optional[list[str]],
@@ -362,7 +365,13 @@ def _resolution_payload(
     )
 
 
-def _write_model_resolution_provenance(
+def _resolution_payload(
+    **kwargs: Any,
+) -> dict[str, Any]:
+    return build_keypoint_resolution_payload(**kwargs)
+
+
+def write_keypoint_model_resolution_provenance(
     *,
     zarr_path: Path,
     run_name: str,
@@ -394,6 +403,15 @@ def _write_model_resolution_provenance(
     provenance["model_resolution"] = payload
     attrs["provenance"] = provenance
     keypoint_group.attrs.put(attrs)
+
+
+def _write_model_resolution_provenance(
+    *,
+    zarr_path: Path,
+    run_name: str,
+    payload: dict[str, Any],
+) -> None:
+    write_keypoint_model_resolution_provenance(zarr_path=zarr_path, run_name=run_name, payload=payload)
 
 
 @dataclass(frozen=True)
@@ -551,13 +569,13 @@ def run_keypoints_with_registry_model(
         )
 
     try:
-        recording_id = _resolve_recording_id(
+        recording_id = resolve_recording_id(
             registry_db,
             recording_id=None,
             recording_dir=resolved_recording_dir,
         )
-        target = _load_target_profile(registry_db, recording_id)
-        candidates = _load_candidates(
+        target = load_target_profile(registry_db, recording_id)
+        candidates = load_candidates(
             registry_db,
             target=target,
             task="pose",
@@ -577,7 +595,7 @@ def run_keypoints_with_registry_model(
         registry_db.close()
 
     try:
-        best = _pick_best_candidate(candidates, require_unique=bool(require_unique))
+        best = pick_best_keypoint_candidate(candidates, require_unique=bool(require_unique))
     except SystemExit as exc:
         return _failure_result(
             reason="candidate_selection_failed",
@@ -588,7 +606,7 @@ def run_keypoints_with_registry_model(
             registry_path=registry_path,
         )
 
-    payload = _resolution_payload(
+    payload = build_keypoint_resolution_payload(
         args=payload_args,
         argv=argv,
         recording_dir=resolved_recording_dir,
@@ -679,7 +697,7 @@ def run_keypoints_with_registry_model(
         )
         if not keypoint_run:
             raise RuntimeError("Keypoint inference did not create a run; model resolution provenance cannot be written.")
-        _write_model_resolution_provenance(
+        write_keypoint_model_resolution_provenance(
             zarr_path=output_path,
             run_name=keypoint_run,
             payload=payload,

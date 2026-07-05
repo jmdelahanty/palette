@@ -13,8 +13,8 @@ from typing import Iterable, Mapping, Optional, Sequence
 
 from fisheye.segmentation import swim_bladder_segmentation as swim_mod
 from fisheye.utils.apply_tuning_by_camera import (
-    _camera_id_for_zarr,
-    _normalize_subject_mask_tuning_payload,
+    camera_id_for_zarr,
+    normalize_subject_mask_tuning_payload,
 )
 from fisheye.shared.zarr_io import open_zarr_root
 
@@ -73,7 +73,7 @@ def _matched_tuning_components(root: object) -> tuple[str, ...]:
     subject_tuning = attrs.get("subject_mask_tuning")
     if not isinstance(subject_tuning, Mapping):
         return ()
-    payload = _normalize_subject_mask_tuning_payload(subject_tuning)
+    payload = normalize_subject_mask_tuning_payload(subject_tuning)
     components = payload.get("components", {})
     if not isinstance(components, Mapping):
         return ()
@@ -100,7 +100,7 @@ def _process_zarr_path(zarr_path: Path, options: BatchOptions) -> BatchRow:
         return BatchRow(zarr_path=zarr_path, status="error", reason=f"failed to open archive ({exc})")
 
     observed_use = _infer_zarr_use(root, zarr_path)
-    camera_id = _camera_id_for_zarr(zarr_path, root)
+    camera_id = camera_id_for_zarr(zarr_path, root)
     if options.zarr_use_filter != "any" and observed_use != options.zarr_use_filter:
         return BatchRow(
             zarr_path=zarr_path,

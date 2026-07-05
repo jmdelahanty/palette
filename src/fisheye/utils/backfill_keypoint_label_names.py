@@ -9,7 +9,11 @@ from typing import Iterable, Optional, Sequence
 
 import zarr
 
-from ..shared.zarr_helpers import _direct_group_names, _group_names, _open_group_direct, _open_mode, _root_fs_path
+from fisheye.shared.zarr_helpers import direct_zarr_group_names
+from fisheye.shared.zarr_helpers import open_zarr_group_direct
+from fisheye.shared.zarr_helpers import zarr_group_names
+from fisheye.shared.zarr_helpers import zarr_open_mode
+from fisheye.shared.zarr_helpers import zarr_root_fs_path
 from fisheye.shared.zarr_io import open_zarr_root
 
 
@@ -31,8 +35,8 @@ def _select_runs(
     open_mode: Optional[str] = None,
 ) -> list[zarr.Group]:
     groups: list[zarr.Group] = []
-    root_fs_path = zarr_path.expanduser().resolve() if zarr_path is not None else _root_fs_path(root)
-    resolved_open_mode = open_mode or _open_mode(root)
+    root_fs_path = zarr_path.expanduser().resolve() if zarr_path is not None else zarr_root_fs_path(root)
+    resolved_open_mode = open_mode or zarr_open_mode(root)
     for parent_name in ("keypoints_runs", "refined_keypoints_runs", "keypoints_refined_runs"):
         parent_fs_path = root_fs_path
         if parent_fs_path is not None:
@@ -41,13 +45,13 @@ def _select_runs(
         parent = root.get(parent_name)
         if parent is None and parent_fs_path is not None and parent_fs_path.is_dir():
             try:
-                parent = _open_group_direct(parent_fs_path, mode=resolved_open_mode)
+                parent = open_zarr_group_direct(parent_fs_path, mode=resolved_open_mode)
             except Exception:
                 parent = None
         if parent is None:
             continue
 
-        names = sorted(set(_group_names(parent)) | set(_direct_group_names(parent_fs_path)))
+        names = sorted(set(zarr_group_names(parent)) | set(direct_zarr_group_names(parent_fs_path)))
         if all_runs:
             selected_names = names
         else:
@@ -61,7 +65,7 @@ def _select_runs(
             direct_path = (parent_fs_path / name) if parent_fs_path is not None else None
             if direct_path is not None and name in names:
                 try:
-                    groups.append(_open_group_direct(direct_path, mode=resolved_open_mode))
+                    groups.append(open_zarr_group_direct(direct_path, mode=resolved_open_mode))
                 except Exception:
                     if name in parent:
                         groups.append(parent[name])

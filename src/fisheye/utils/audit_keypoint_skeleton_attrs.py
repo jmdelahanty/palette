@@ -16,7 +16,11 @@ from fisheye.pose.schema import normalize_kpt_shape, resolve_skeleton_identity_f
 from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
 from fisheye.shared.environment import resolve_log_dir as resolve_shared_log_dir
-from fisheye.shared.zarr_helpers import _direct_group_names, _group_names, _open_group_direct, _open_mode, _root_fs_path
+from fisheye.shared.zarr_helpers import direct_zarr_group_names
+from fisheye.shared.zarr_helpers import open_zarr_group_direct
+from fisheye.shared.zarr_helpers import zarr_group_names
+from fisheye.shared.zarr_helpers import zarr_open_mode
+from fisheye.shared.zarr_helpers import zarr_root_fs_path
 from fisheye.shared.zarr_io import open_zarr_root
 
 JsonLogger = SharedJsonLogger
@@ -30,8 +34,8 @@ def _iter_run_groups(
     zarr_path: Optional[Path] = None,
     open_mode: Optional[str] = None,
 ) -> Iterable[tuple[str, str, zarr.Group]]:
-    root_fs_path = zarr_path.expanduser().resolve() if zarr_path is not None else _root_fs_path(root)
-    resolved_open_mode = open_mode or _open_mode(root)
+    root_fs_path = zarr_path.expanduser().resolve() if zarr_path is not None else zarr_root_fs_path(root)
+    resolved_open_mode = open_mode or zarr_open_mode(root)
     for parent_name in ("keypoints_runs", "refined_keypoints_runs", "keypoints_refined_runs"):
         parent_fs_path = root_fs_path
         if parent_fs_path is not None:
@@ -40,12 +44,12 @@ def _iter_run_groups(
         parent = root.get(parent_name)
         if parent is None and parent_fs_path is not None and parent_fs_path.is_dir():
             try:
-                parent = _open_group_direct(parent_fs_path, mode=resolved_open_mode)
+                parent = open_zarr_group_direct(parent_fs_path, mode=resolved_open_mode)
             except Exception:
                 parent = None
         if parent is None:
             continue
-        available = sorted(set(_group_names(parent)) | set(_direct_group_names(parent_fs_path)))
+        available = sorted(set(zarr_group_names(parent)) | set(direct_zarr_group_names(parent_fs_path)))
         if not available:
             continue
         if all_runs:
@@ -57,7 +61,7 @@ def _iter_run_groups(
             direct_path = (parent_fs_path / run_name) if parent_fs_path is not None else None
             if direct_path is not None and run_name in available:
                 try:
-                    run_group = _open_group_direct(direct_path, mode=resolved_open_mode)
+                    run_group = open_zarr_group_direct(direct_path, mode=resolved_open_mode)
                 except Exception:
                     if run_name in parent:
                         yield parent_name, run_name, parent[run_name]

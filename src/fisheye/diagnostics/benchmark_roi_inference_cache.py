@@ -20,7 +20,7 @@ import zarr
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.crop_image_source import CropImageSource
 from fisheye.shared.crop_image_source import resolve_materialized_crop_run
-from fisheye.utils.resolve_detect_model import Candidate, _load_candidates, _load_target_profile, _resolve_recording_id
+from fisheye.registry.model_resolution import Candidate, load_candidates, load_target_profile, resolve_recording_id
 from fisheye.shared.zarr_recording_context import infer_recording_context
 
 
@@ -93,9 +93,9 @@ def _resolve_model_from_registry(
 ) -> Candidate:
     registry = Registry(registry_path)
     try:
-        recording_id = _resolve_recording_id(registry, recording_id=None, recording_dir=recording_dir)
-        target = _load_target_profile(registry, recording_id)
-        candidates = _load_candidates(
+        recording_id = resolve_recording_id(registry, recording_id=None, recording_dir=recording_dir)
+        target = load_target_profile(registry, recording_id)
+        candidates = load_candidates(
             registry,
             target=target,
             task=task,

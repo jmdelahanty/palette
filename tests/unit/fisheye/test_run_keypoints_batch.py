@@ -1082,7 +1082,7 @@ def test_run_plan_retry_failed_only_routes_to_retry_helper(
     )
     monkeypatch.setattr(
         mod,
-        "_write_keypoint_model_resolution_provenance",
+        "write_keypoint_model_resolution_provenance",
         lambda **kwargs: captured_provenance.update(kwargs),  # noqa: ANN003
     )
 

@@ -14,7 +14,7 @@ from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 from fisheye.shared.zarr_helpers import infer_zarr_use
 from fisheye.utils.apply_tuning_by_camera import (
     SOURCE_SPECIFIC_SUBJECT_TUNING_CONTEXT_KEYS,
-    _normalize_subject_mask_tuning_payload,
+    normalize_subject_mask_tuning_payload,
 )
 
 
@@ -178,7 +178,7 @@ def _scan_zarr_path(
             status="missing_swim_tuning",
         )
 
-    payload = _normalize_subject_mask_tuning_payload(subject_tuning)
+    payload = normalize_subject_mask_tuning_payload(subject_tuning)
     components = payload.get("components", {})
     if not isinstance(components, Mapping):
         return AuditRow(

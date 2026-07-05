@@ -55,7 +55,7 @@ def test_camera_id_for_zarr_falls_back_to_suffixless_h5(tmp_path: Path) -> None:
     _make_zarr(zarr_path, zarr_use="training")
 
     root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
-    assert mod._camera_id_for_zarr(zarr_path, root) == "2010093"
+    assert mod.camera_id_for_zarr(zarr_path, root) == "2010093"
 
 
 def test_main_apply_defaults_to_source_use_scope(tmp_path: Path) -> None:
@@ -200,7 +200,7 @@ def test_main_apply_merge_dicts_preserves_unrelated_subject_mask_components(tmp_
 
 
 def test_parse_subject_mask_components_normalizes_aliases() -> None:
-    assert mod._parse_subject_mask_components(["swim-bladder,body", "left-eye"]) == [  # noqa: SLF001
+    assert mod.parse_subject_mask_components(["swim-bladder,body", "left-eye"]) == [
         "swim_bladder",
         "subject_body",
         "eye_left",

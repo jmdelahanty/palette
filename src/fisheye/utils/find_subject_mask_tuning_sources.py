@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Iterable, Mapping, Optional, Sequence
 
 from fisheye.utils.apply_tuning_by_camera import (
-    _camera_id_for_zarr,
-    _normalize_subject_mask_tuning_payload,
-    _parse_subject_mask_components,
+    camera_id_for_zarr,
+    normalize_subject_mask_tuning_payload,
+    parse_subject_mask_components,
 )
 from fisheye.shared.zarr_io import open_zarr_root
 
@@ -88,17 +88,17 @@ def _scan_zarr_path(
             zarr_path=zarr_path,
             status="missing_subject_mask_tuning",
             observed_use=observed_use,
-            camera_id=_camera_id_for_zarr(zarr_path, root),
+            camera_id=camera_id_for_zarr(zarr_path, root),
         )
 
-    payload = _normalize_subject_mask_tuning_payload(subject_tuning)
+    payload = normalize_subject_mask_tuning_payload(subject_tuning)
     components_raw = payload.get("components", {})
     if not isinstance(components_raw, Mapping) or not components_raw:
         return ScanRow(
             zarr_path=zarr_path,
             status="missing_subject_mask_tuning",
             observed_use=observed_use,
-            camera_id=_camera_id_for_zarr(zarr_path, root),
+            camera_id=camera_id_for_zarr(zarr_path, root),
         )
 
     component_names = tuple(sorted(str(name) for name in components_raw))
@@ -107,7 +107,7 @@ def _scan_zarr_path(
     else:
         matched_components = component_names
 
-    camera_id = _camera_id_for_zarr(zarr_path, root)
+    camera_id = camera_id_for_zarr(zarr_path, root)
     latest_component = payload.get("latest_component")
     latest_component_text = str(latest_component) if latest_component is not None else None
     latest_timestamp = payload.get("latest_timestamp")
@@ -188,7 +188,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        subject_mask_components = _parse_subject_mask_components(args.subject_mask_components)
+        subject_mask_components = parse_subject_mask_components(args.subject_mask_components)
     except RuntimeError as exc:
         print(str(exc))
         return 1

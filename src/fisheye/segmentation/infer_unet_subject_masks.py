@@ -42,7 +42,7 @@ from ..shared.zarr_run_completion import (
     require_runs_parent,
 )
 from ..registry.db import Registry, RegistryPaths
-from ..utils.resolve_subject_mask_model import (
+from ..registry.model_resolution import (
     build_resolution_payload,
     resolve_best_subject_mask_model,
 )
