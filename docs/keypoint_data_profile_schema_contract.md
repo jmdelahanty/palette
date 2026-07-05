@@ -53,9 +53,12 @@ This is a derived-cache model, not a many-writer model:
 
 Operational refresh policy:
 
-- refresh registry rows from current profile payloads:
-  - `scripts/py -m fisheye.utils.sync_keypoint_profile_registry --registry <registry.sqlite> --zarr-use any --apply`
-- refresh via maintenance:
+- re-derive one dataset from Zarr truth (runs every extractor plus the
+  detection/keypoint profile extractors idempotently):
+  - `scripts/py -m fisheye.registry.maintenance --registry <registry.sqlite> --reconcile-dataset <recording_analysis.zarr>`
+  - (the standalone `sync_keypoint_profile_registry` CLI was retired in favor of
+    `Registry.reconcile_dataset_from_root`).
+- bulk refresh across datasets via maintenance:
   - `scripts/py -m fisheye.registry.maintenance --registry <registry.sqlite> --refresh-keypoint-profiles`
 
 ## Source Association Policy

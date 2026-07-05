@@ -194,6 +194,22 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help="Prune training_runs rows with failed statuses.",
     )
     parser.add_argument(
+        "--reconcile-dataset",
+        type=Path,
+        metavar="ZARR_PATH",
+        help=(
+            "Re-derive ALL registry state for one dataset from its Zarr root, idempotently: "
+            "runs every zarr extractor (via register_from_root) plus the detection/keypoint "
+            "data-profile extractors. Composes existing replace_* primitives; replaces the "
+            "retired sync_detection_profile_registry / sync_keypoint_profile_registry scripts."
+        ),
+    )
+    parser.add_argument(
+        "--reconcile-step-status",
+        action="store_true",
+        help="With --reconcile-dataset, also refresh recording_step_status for the dataset.",
+    )
+    parser.add_argument(
         "--reconcile-in-progress-runs",
         action="store_true",
         help=(
@@ -7019,6 +7035,203 @@ def _recording_step_row_signature(row: Dict[str, object]) -> tuple[object, ...]:
     )
 
 
+def _apply_recording_step_status_rows(
+    registry: Registry,
+    *,
+    current_upserts: Sequence[Dict[str, object]],
+    history_inserts: Sequence[Dict[str, object]],
+) -> int:
+    """Persist recording-step-status upserts + append-only history rows.
+
+    Shared by the maintenance backfill and the per-dataset reconcile helper so
+    both paths use the identical write shape (ON CONFLICT upsert on the current
+    table + append to the history log). Returns the number of history rows.
+    """
+
+    recorded_utc = datetime.now(timezone.utc).isoformat()
+    with registry.conn:
+        for payload in current_upserts:
+            registry.conn.execute(
+                """
+                INSERT INTO recording_step_status (
+                    dataset_id,
+                    recording_id,
+                    step_name,
+                    status,
+                    run_name,
+                    method,
+                    coverage_pct,
+                    review_status_json,
+                    details_json,
+                    source,
+                    zarr_mtime_ns,
+                    updated_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(dataset_id, step_name) DO UPDATE SET
+                    recording_id=excluded.recording_id,
+                    status=excluded.status,
+                    run_name=excluded.run_name,
+                    method=excluded.method,
+                    coverage_pct=excluded.coverage_pct,
+                    review_status_json=excluded.review_status_json,
+                    details_json=excluded.details_json,
+                    source=excluded.source,
+                    zarr_mtime_ns=excluded.zarr_mtime_ns,
+                    updated_utc=excluded.updated_utc;
+                """,
+                (
+                    payload.get("dataset_id"),
+                    payload.get("recording_id"),
+                    payload.get("step_name"),
+                    payload.get("status"),
+                    payload.get("run_name"),
+                    payload.get("method"),
+                    payload.get("coverage_pct"),
+                    payload.get("review_status_json"),
+                    payload.get("details_json"),
+                    payload.get("source"),
+                    payload.get("zarr_mtime_ns"),
+                    payload.get("updated_utc"),
+                ),
+            )
+        for payload in history_inserts:
+            registry.conn.execute(
+                """
+                INSERT INTO recording_step_status_history (
+                    dataset_id,
+                    recording_id,
+                    step_name,
+                    status,
+                    run_name,
+                    method,
+                    coverage_pct,
+                    review_status_json,
+                    details_json,
+                    source,
+                    zarr_mtime_ns,
+                    updated_utc,
+                    recorded_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    payload.get("dataset_id"),
+                    payload.get("recording_id"),
+                    payload.get("step_name"),
+                    payload.get("status"),
+                    payload.get("run_name"),
+                    payload.get("method"),
+                    payload.get("coverage_pct"),
+                    payload.get("review_status_json"),
+                    payload.get("details_json"),
+                    payload.get("source"),
+                    payload.get("zarr_mtime_ns"),
+                    payload.get("updated_utc"),
+                    recorded_utc,
+                ),
+            )
+    return len(history_inserts)
+
+
+def reconcile_recording_step_status_for_dataset(
+    registry: Registry,
+    *,
+    dataset_id: str,
+    zarr_path: Path,
+    root: Optional[object] = None,
+    recording_id: Optional[str] = None,
+    zarr_use: Optional[str] = None,
+) -> Dict[str, int]:
+    """Refresh ``recording_step_status`` for a single dataset from its Zarr root.
+
+    Per-dataset analog of ``_backfill_recording_step_status``, invoked by
+    ``Registry.reconcile_dataset_from_root(..., include_step_status=True)``. Uses
+    the same builder + signature-diffed upsert/append-history semantics: a
+    history row is only appended when a step's status actually changes, so
+    re-running on a converged dataset inserts no new history rows (idempotent).
+    """
+
+    zarr = _import_zarr()
+    resolved_recording_id = recording_id if recording_id is not None else str(dataset_id)
+
+    try:
+        zarr_mtime_ns: Optional[int] = int(Path(zarr_path).stat().st_mtime_ns)
+    except Exception:
+        zarr_mtime_ns = None
+
+    source = "reconcile_recording_step_status"
+    summary: Dict[str, int] = {
+        "rows_evaluated": 0,
+        "rows_inserted": 0,
+        "rows_updated": 0,
+        "rows_skipped": 0,
+        "history_rows_inserted": 0,
+    }
+
+    try:
+        if root is None:
+            try:
+                root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+            except TypeError:
+                try:
+                    root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+                except TypeError:
+                    root = zarr.open_group(str(zarr_path), mode="r")
+        extracted_rows = _build_recording_step_rows_from_root(
+            root=root,
+            dataset_id=str(dataset_id),
+            recording_id=resolved_recording_id,
+            zarr_use=zarr_use,
+            zarr_mtime_ns=zarr_mtime_ns,
+            source=source,
+        )
+    except Exception as exc:
+        extracted_rows = _build_recording_step_error_rows(
+            dataset_id=str(dataset_id),
+            recording_id=resolved_recording_id,
+            zarr_mtime_ns=zarr_mtime_ns,
+            error_detail=str(exc),
+            source=source,
+        )
+
+    existing_rows = registry.conn.execute(
+        "SELECT * FROM recording_step_status WHERE dataset_id = ?;",
+        (str(dataset_id),),
+    ).fetchall()
+    existing_by_step: Dict[str, Dict[str, object]] = {
+        str(existing["step_name"]): {key: existing[key] for key in existing.keys()}
+        for existing in existing_rows
+        if existing["step_name"] is not None
+    }
+
+    current_upserts: List[Dict[str, object]] = []
+    history_inserts: List[Dict[str, object]] = []
+    for extracted in extracted_rows:
+        summary["rows_evaluated"] += 1
+        existing = existing_by_step.get(str(extracted["step_name"]))
+        if existing is None:
+            summary["rows_inserted"] += 1
+            current_upserts.append(extracted)
+            history_inserts.append(extracted)
+            continue
+        if _recording_step_row_signature(existing) == _recording_step_row_signature(extracted):
+            summary["rows_skipped"] += 1
+            continue
+        summary["rows_updated"] += 1
+        current_upserts.append(extracted)
+        history_inserts.append(extracted)
+
+    if current_upserts:
+        summary["history_rows_inserted"] = _apply_recording_step_status_rows(
+            registry,
+            current_upserts=current_upserts,
+            history_inserts=history_inserts,
+        )
+
+    return summary
+
+
 def _backfill_recording_step_status(
     registry: Registry,
     *,
@@ -7167,90 +7380,11 @@ def _backfill_recording_step_status(
                 history_inserts.append(extracted)
 
     if not dry_run and current_upserts:
-        recorded_utc = datetime.now(timezone.utc).isoformat()
-        with registry.conn:
-            for payload in current_upserts:
-                registry.conn.execute(
-                    """
-                    INSERT INTO recording_step_status (
-                        dataset_id,
-                        recording_id,
-                        step_name,
-                        status,
-                        run_name,
-                        method,
-                        coverage_pct,
-                        review_status_json,
-                        details_json,
-                        source,
-                        zarr_mtime_ns,
-                        updated_utc
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(dataset_id, step_name) DO UPDATE SET
-                        recording_id=excluded.recording_id,
-                        status=excluded.status,
-                        run_name=excluded.run_name,
-                        method=excluded.method,
-                        coverage_pct=excluded.coverage_pct,
-                        review_status_json=excluded.review_status_json,
-                        details_json=excluded.details_json,
-                        source=excluded.source,
-                        zarr_mtime_ns=excluded.zarr_mtime_ns,
-                        updated_utc=excluded.updated_utc;
-                    """,
-                    (
-                        payload.get("dataset_id"),
-                        payload.get("recording_id"),
-                        payload.get("step_name"),
-                        payload.get("status"),
-                        payload.get("run_name"),
-                        payload.get("method"),
-                        payload.get("coverage_pct"),
-                        payload.get("review_status_json"),
-                        payload.get("details_json"),
-                        payload.get("source"),
-                        payload.get("zarr_mtime_ns"),
-                        payload.get("updated_utc"),
-                    ),
-                )
-            for payload in history_inserts:
-                registry.conn.execute(
-                    """
-                    INSERT INTO recording_step_status_history (
-                        dataset_id,
-                        recording_id,
-                        step_name,
-                        status,
-                        run_name,
-                        method,
-                        coverage_pct,
-                        review_status_json,
-                        details_json,
-                        source,
-                        zarr_mtime_ns,
-                        updated_utc,
-                        recorded_utc
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                    """,
-                    (
-                        payload.get("dataset_id"),
-                        payload.get("recording_id"),
-                        payload.get("step_name"),
-                        payload.get("status"),
-                        payload.get("run_name"),
-                        payload.get("method"),
-                        payload.get("coverage_pct"),
-                        payload.get("review_status_json"),
-                        payload.get("details_json"),
-                        payload.get("source"),
-                        payload.get("zarr_mtime_ns"),
-                        payload.get("updated_utc"),
-                        recorded_utc,
-                    ),
-                )
-        summary["history_rows_inserted"] = len(history_inserts)
+        summary["history_rows_inserted"] = _apply_recording_step_status_rows(
+            registry,
+            current_upserts=current_upserts,
+            history_inserts=history_inserts,
+        )
 
     return summary
 
@@ -8684,6 +8818,45 @@ def _summarize_reconcile(stats: Dict[str, int]) -> None:
     print(f"Reconcile missing: checked={checked}, marked_missing={marked_missing}")
 
 
+def _run_reconcile_dataset(
+    registry: Registry,
+    *,
+    zarr_path: Path,
+    include_step_status: bool,
+) -> None:
+    if not _is_zarr_root_path(zarr_path):
+        raise SystemExit(f"Not a Zarr root: {zarr_path}")
+    zarr = _import_zarr()
+    try:
+        root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    except TypeError:
+        try:
+            root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+        except TypeError:
+            root = zarr.open_group(str(zarr_path), mode="r")
+    result = registry.reconcile_dataset_from_root(
+        root,
+        zarr_path,
+        include_step_status=include_step_status,
+    )
+    print(
+        "Reconciled dataset "
+        f"{result['dataset_id']}: "
+        f"detection_data_profile rows={result['detection_data_profile_rows']} "
+        f"keypoint_data_profile rows={result['keypoint_data_profile_rows']}"
+    )
+    step = result.get("recording_step_status")
+    if step is not None:
+        print(
+            "  recording_step_status: "
+            f"evaluated={step.get('rows_evaluated', 0)} "
+            f"inserted={step.get('rows_inserted', 0)} "
+            f"updated={step.get('rows_updated', 0)} "
+            f"skipped={step.get('rows_skipped', 0)} "
+            f"history_rows_inserted={step.get('history_rows_inserted', 0)}"
+        )
+
+
 def _run_reconcile_registry(
     registry: Registry,
     *,
@@ -8737,6 +8910,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     args = _parse_args(argv)
     if (
         not args.reconcile_registry
+        and not args.reconcile_dataset
         and not args.prune_invalid
         and not args.prune_missing_datasets
         and not args.prune_failed_runs
@@ -8771,7 +8945,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         and not args.vacuum
     ):
         raise SystemExit(
-            "No action selected. Use --reconcile-registry, --prune-invalid, --prune-missing-datasets, "
+            "No action selected. Use --reconcile-registry, --reconcile-dataset, --prune-invalid, "
+            "--prune-missing-datasets, "
             "--prune-failed-runs, --reconcile-in-progress-runs, --delete-run-id, --delete-set-id, "
             "--prune-empty-sets, --backfill-recording-entities, --backfill-subject-dish-cross, "
             "--backfill-subjects, "
@@ -8795,6 +8970,13 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
     registry = Registry(registry_path)
     try:
+        if args.reconcile_dataset:
+            _run_reconcile_dataset(
+                registry,
+                zarr_path=Path(args.reconcile_dataset).expanduser(),
+                include_step_status=bool(args.reconcile_step_status),
+            )
+
         if args.reconcile_registry:
             _run_reconcile_registry(
                 registry,

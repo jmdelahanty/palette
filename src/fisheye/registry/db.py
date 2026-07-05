@@ -19,7 +19,10 @@ from fisheye.shared.type_conversions import normalize_attr as _shared_decode_att
 from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 from .extractors.acquisition_video_streams import _extract_acquisition_video_stream_rows
 from .extractors.crop import _extract_crop_quality_rows
-from .extractors.detect_performance import _extract_detect_performance_rows
+from .extractors.detect_performance import (
+    _extract_detect_performance_rows,
+    _extract_detection_data_profile_rows,
+)
 from .extractors.keypoint_performance import (
     _extract_keypoint_performance_rows,
     _extract_keypoint_profile_rows,
@@ -5037,7 +5040,7 @@ class Registry(RegistryMigrationMixin):
         write_legacy_recording_context_snapshot, write_legacy_biology_snapshot = (
             self._profile_duplicate_context_write_policy(str(dataset_id))
         )
-        with self.conn:
+        with self._maybe_transaction():
             self.conn.execute("DELETE FROM detection_data_profile WHERE dataset_id = ?;", (str(dataset_id),))
             for record in records:
                 payload = dict(record)
@@ -5099,7 +5102,7 @@ class Registry(RegistryMigrationMixin):
         write_legacy_recording_context_snapshot, write_legacy_biology_snapshot = (
             self._profile_duplicate_context_write_policy(str(dataset_id))
         )
-        with self.conn:
+        with self._maybe_transaction():
             self.conn.execute("DELETE FROM keypoint_data_profile WHERE dataset_id = ?;", (str(dataset_id),))
             for record in records:
                 payload = dict(record)
@@ -6539,6 +6542,105 @@ class Registry(RegistryMigrationMixin):
         )
         self.replace_subject_mask_component_quality(dataset_id, subject_mask_component_quality_rows)
         return dataset_id
+
+    def _profile_context_fallbacks(self, dataset_id: str) -> Dict[str, Any]:
+        """Resolve recording/zarr_use/genotype/dpf fallbacks for profile extractors."""
+
+        row = self.conn.execute(
+            """
+            SELECT
+                d.recording_id AS recording_id,
+                d.zarr_use AS zarr_use,
+                p.genotype AS genotype,
+                p.dpf_at_acquisition AS dpf_at_acquisition
+            FROM datasets d
+            LEFT JOIN provenance p ON p.dataset_id = d.dataset_id
+            WHERE d.dataset_id = ?
+            LIMIT 1;
+            """,
+            (str(dataset_id),),
+        ).fetchone()
+        if row is None:
+            return {"recording_id": None, "zarr_use": None, "genotype": None, "dpf_at_acquisition": None}
+        dpf_raw = row["dpf_at_acquisition"]
+        try:
+            dpf = int(dpf_raw) if dpf_raw is not None else None
+        except (TypeError, ValueError):
+            dpf = None
+        return {
+            "recording_id": _decode_attr(row["recording_id"]),
+            "zarr_use": _decode_attr(row["zarr_use"]),
+            "genotype": _decode_attr(row["genotype"]),
+            "dpf_at_acquisition": dpf,
+        }
+
+    def reconcile_dataset_from_root(
+        self,
+        root: zarr.Group,
+        zarr_path: Path,
+        *,
+        include_step_status: bool = False,
+    ) -> Dict[str, Any]:
+        """Re-derive ALL registry state for one dataset from Zarr truth, idempotently.
+
+        Strict superset of :meth:`register_from_root`: runs every zarr-derived
+        extractor (via ``register_from_root``) plus the detection and keypoint
+        data-profile extractors, composing the existing ``replace_*`` primitives
+        (DELETE-then-INSERT). No new write paths are introduced. Optionally
+        refreshes the ``recording_step_status`` surface for the dataset.
+
+        This is the orchestrator that retires the standalone
+        ``sync_detection_profile_registry`` / ``sync_keypoint_profile_registry``
+        scripts and the per-table profile backfills for a single dataset.
+        """
+
+        with self._transaction_context():
+            dataset_id = self._register_from_root_in_transaction(root, zarr_path)
+            fallbacks = self._profile_context_fallbacks(dataset_id)
+
+            detection_profile_rows = _extract_detection_data_profile_rows(
+                root,
+                zarr_path=zarr_path,
+                dataset_id=dataset_id,
+                recording_id=fallbacks["recording_id"],
+                zarr_use=fallbacks["zarr_use"],
+                genotype=fallbacks["genotype"],
+                dpf_at_acquisition=fallbacks["dpf_at_acquisition"],
+            )
+            self.replace_detection_data_profile(dataset_id, detection_profile_rows)
+
+            keypoint_profile_rows = _extract_keypoint_profile_rows(
+                root,
+                zarr_path=zarr_path,
+                dataset_id=dataset_id,
+                recording_id=fallbacks["recording_id"],
+                zarr_use=fallbacks["zarr_use"],
+                genotype=fallbacks["genotype"],
+                dpf_at_acquisition=fallbacks["dpf_at_acquisition"],
+            )
+            self.replace_keypoint_data_profile(dataset_id, keypoint_profile_rows)
+
+        result: Dict[str, Any] = {
+            "dataset_id": dataset_id,
+            "detection_data_profile_rows": len(detection_profile_rows),
+            "keypoint_data_profile_rows": len(keypoint_profile_rows),
+        }
+
+        if include_step_status:
+            # Step-status refresh carries append-only history semantics and lives
+            # in the maintenance layer; lazy-import to avoid a circular import.
+            from .maintenance import reconcile_recording_step_status_for_dataset
+
+            result["recording_step_status"] = reconcile_recording_step_status_for_dataset(
+                self,
+                dataset_id=dataset_id,
+                zarr_path=zarr_path,
+                root=root,
+                recording_id=fallbacks["recording_id"],
+                zarr_use=fallbacks["zarr_use"],
+            )
+
+        return result
 
     def record_training_run(
         self,

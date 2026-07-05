@@ -62,10 +62,14 @@ Operational refresh policy:
   (`--registry`, `PALETTE_REGISTRY_PATH`, or configured registry path that
   already exists). If the Zarr is not registered, the Zarr profile remains the
   source of truth and the registry sync reports `missing_dataset`.
-- If lineage fields are missing/stale in registry projection rows:
-  `scripts/py -m fisheye.utils.sync_detection_profile_registry --registry <registry.sqlite> --zarr-use any --apply`
+- If lineage fields are missing/stale in registry projection rows, re-derive the
+  dataset from Zarr truth (runs every extractor plus the detection/keypoint
+  profile extractors idempotently):
+  `scripts/py -m fisheye.registry.maintenance --registry <registry.sqlite> --reconcile-dataset <recording_analysis.zarr>`
+  (the standalone `sync_detection_profile_registry` CLI was retired in favor of
+  `Registry.reconcile_dataset_from_root`).
 - If lineage fields are also desired in historical on-disk profile payloads:
-  rerun `backfill_detection_profiles --apply`, then rerun sync.
+  rerun `backfill_detection_profiles --apply`, then reconcile the dataset.
 
 ## Stage Association Policy
 
