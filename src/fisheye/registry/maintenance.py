@@ -199,9 +199,10 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         metavar="ZARR_PATH",
         help=(
             "Re-derive ALL registry state for one dataset from its Zarr root, idempotently: "
-            "runs every zarr extractor (via register_from_root) plus the detection/keypoint "
-            "data-profile extractors. Composes existing replace_* primitives; replaces the "
-            "retired sync_detection_profile_registry / sync_keypoint_profile_registry scripts."
+            "runs every zarr extractor (via register_from_root) plus the detection/keypoint/"
+            "subject-mask data-profile extractors. Composes existing replace_* primitives; "
+            "replaces the retired sync_detection_profile_registry / "
+            "sync_keypoint_profile_registry scripts."
         ),
     )
     parser.add_argument(
@@ -8843,7 +8844,8 @@ def _run_reconcile_dataset(
         "Reconciled dataset "
         f"{result['dataset_id']}: "
         f"detection_data_profile rows={result['detection_data_profile_rows']} "
-        f"keypoint_data_profile rows={result['keypoint_data_profile_rows']}"
+        f"keypoint_data_profile rows={result['keypoint_data_profile_rows']} "
+        f"subject_mask_data_profile rows={result['subject_mask_data_profile_rows']}"
     )
     step = result.get("recording_step_status")
     if step is not None:

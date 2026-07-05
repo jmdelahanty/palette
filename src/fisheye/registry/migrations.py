@@ -73,6 +73,7 @@ MIGRATION_METHODS: tuple[tuple[int, str, str], ...] = (
     (56, "acquisition_video_streams_registry", "_migration_056_acquisition_video_streams_registry"),
     (57, "subject_mask_storage_byte_fields", "_migration_057_subject_mask_storage_byte_fields"),
     (58, "tracking_readiness_guard_views", "_migration_058_tracking_readiness_guard_views"),
+    (59, "subject_mask_data_profile_registry", "_migration_059_subject_mask_data_profile_registry"),
 )
 
 

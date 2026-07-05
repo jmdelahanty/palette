@@ -7314,3 +7314,307 @@ class RegistryMigrationMixin:
             ON model_deployment_artifacts(engine_sha256);
             """
         )
+
+    def _migration_059_subject_mask_data_profile_registry(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS subject_mask_data_profile (
+                dataset_id TEXT NOT NULL,
+                profile_run TEXT NOT NULL,
+                recording_id TEXT,
+                zarr_use TEXT,
+                subject_mask_method TEXT,
+                label_schema_id TEXT,
+                source_keypoints_run TEXT,
+                source_crop_run TEXT,
+                run_semantics TEXT,
+                profile_created_utc TEXT,
+                zarr_mtime_ns INTEGER,
+                updated_utc TEXT,
+                total_rois INTEGER,
+                rows_with_any_mask INTEGER,
+                coverage_percent REAL,
+                available_component_count INTEGER,
+                subject_body_presence_rate REAL,
+                subject_body_area_p10 REAL,
+                subject_body_area_p50 REAL,
+                subject_body_area_p90 REAL,
+                eyes_union_presence_rate REAL,
+                eyes_union_area_p10 REAL,
+                eyes_union_area_p50 REAL,
+                eyes_union_area_p90 REAL,
+                eye_left_presence_rate REAL,
+                eye_left_area_p10 REAL,
+                eye_left_area_p50 REAL,
+                eye_left_area_p90 REAL,
+                eye_right_presence_rate REAL,
+                eye_right_area_p10 REAL,
+                eye_right_area_p50 REAL,
+                eye_right_area_p90 REAL,
+                swim_bladder_presence_rate REAL,
+                swim_bladder_area_p10 REAL,
+                swim_bladder_area_p50 REAL,
+                swim_bladder_area_p90 REAL,
+                rig_id TEXT,
+                camera_id TEXT,
+                arena_id TEXT,
+                dish_design TEXT,
+                canvas_name TEXT,
+                protocol_name TEXT,
+                genotype TEXT,
+                dpf_at_acquisition INTEGER,
+                profile_json TEXT,
+                PRIMARY KEY (dataset_id, profile_run),
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
+            );
+            """
+        )
+        self._ensure_columns(
+            "subject_mask_data_profile",
+            {
+                "recording_id": "TEXT",
+                "zarr_use": "TEXT",
+                "subject_mask_method": "TEXT",
+                "label_schema_id": "TEXT",
+                "source_keypoints_run": "TEXT",
+                "source_crop_run": "TEXT",
+                "run_semantics": "TEXT",
+                "profile_created_utc": "TEXT",
+                "zarr_mtime_ns": "INTEGER",
+                "updated_utc": "TEXT",
+                "total_rois": "INTEGER",
+                "rows_with_any_mask": "INTEGER",
+                "coverage_percent": "REAL",
+                "available_component_count": "INTEGER",
+                "subject_body_presence_rate": "REAL",
+                "subject_body_area_p10": "REAL",
+                "subject_body_area_p50": "REAL",
+                "subject_body_area_p90": "REAL",
+                "eyes_union_presence_rate": "REAL",
+                "eyes_union_area_p10": "REAL",
+                "eyes_union_area_p50": "REAL",
+                "eyes_union_area_p90": "REAL",
+                "eye_left_presence_rate": "REAL",
+                "eye_left_area_p10": "REAL",
+                "eye_left_area_p50": "REAL",
+                "eye_left_area_p90": "REAL",
+                "eye_right_presence_rate": "REAL",
+                "eye_right_area_p10": "REAL",
+                "eye_right_area_p50": "REAL",
+                "eye_right_area_p90": "REAL",
+                "swim_bladder_presence_rate": "REAL",
+                "swim_bladder_area_p10": "REAL",
+                "swim_bladder_area_p50": "REAL",
+                "swim_bladder_area_p90": "REAL",
+                "rig_id": "TEXT",
+                "camera_id": "TEXT",
+                "arena_id": "TEXT",
+                "dish_design": "TEXT",
+                "canvas_name": "TEXT",
+                "protocol_name": "TEXT",
+                "genotype": "TEXT",
+                "dpf_at_acquisition": "INTEGER",
+                "profile_json": "TEXT",
+            },
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_subject_mask_data_profile_dataset "
+            "ON subject_mask_data_profile(dataset_id);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_subject_mask_data_profile_recording_created "
+            "ON subject_mask_data_profile(recording_id, profile_created_utc DESC);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_subject_mask_data_profile_method_scope "
+            "ON subject_mask_data_profile(subject_mask_method, zarr_use);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_subject_mask_data_profile_lineage "
+            "ON subject_mask_data_profile(genotype, dpf_at_acquisition);"
+        )
+        cur.execute("DROP VIEW IF EXISTS subject_mask_data_profile_latest;")
+        cur.execute(
+            """
+            CREATE VIEW subject_mask_data_profile_latest AS
+            WITH ranked AS (
+                SELECT
+                    smdp.dataset_id AS dataset_id,
+                    smdp.profile_run AS profile_run,
+                    COALESCE(dcc.recording_id, smdp.recording_id) AS recording_id,
+                    COALESCE(dcc.zarr_use, smdp.zarr_use) AS zarr_use,
+                    smdp.subject_mask_method AS subject_mask_method,
+                    smdp.label_schema_id AS label_schema_id,
+                    smdp.source_keypoints_run AS source_keypoints_run,
+                    smdp.source_crop_run AS source_crop_run,
+                    smdp.run_semantics AS run_semantics,
+                    smdp.profile_created_utc AS profile_created_utc,
+                    smdp.zarr_mtime_ns AS zarr_mtime_ns,
+                    smdp.updated_utc AS updated_utc,
+                    smdp.total_rois AS total_rois,
+                    smdp.rows_with_any_mask AS rows_with_any_mask,
+                    smdp.coverage_percent AS coverage_percent,
+                    smdp.available_component_count AS available_component_count,
+                    smdp.subject_body_presence_rate AS subject_body_presence_rate,
+                    smdp.subject_body_area_p10 AS subject_body_area_p10,
+                    smdp.subject_body_area_p50 AS subject_body_area_p50,
+                    smdp.subject_body_area_p90 AS subject_body_area_p90,
+                    smdp.eyes_union_presence_rate AS eyes_union_presence_rate,
+                    smdp.eyes_union_area_p10 AS eyes_union_area_p10,
+                    smdp.eyes_union_area_p50 AS eyes_union_area_p50,
+                    smdp.eyes_union_area_p90 AS eyes_union_area_p90,
+                    smdp.eye_left_presence_rate AS eye_left_presence_rate,
+                    smdp.eye_left_area_p10 AS eye_left_area_p10,
+                    smdp.eye_left_area_p50 AS eye_left_area_p50,
+                    smdp.eye_left_area_p90 AS eye_left_area_p90,
+                    smdp.eye_right_presence_rate AS eye_right_presence_rate,
+                    smdp.eye_right_area_p10 AS eye_right_area_p10,
+                    smdp.eye_right_area_p50 AS eye_right_area_p50,
+                    smdp.eye_right_area_p90 AS eye_right_area_p90,
+                    smdp.swim_bladder_presence_rate AS swim_bladder_presence_rate,
+                    smdp.swim_bladder_area_p10 AS swim_bladder_area_p10,
+                    smdp.swim_bladder_area_p50 AS swim_bladder_area_p50,
+                    smdp.swim_bladder_area_p90 AS swim_bladder_area_p90,
+                    COALESCE(dcc.rig_id, smdp.rig_id) AS rig_id,
+                    COALESCE(dcc.camera_id, smdp.camera_id) AS camera_id,
+                    COALESCE(dcc.arena_id, smdp.arena_id) AS arena_id,
+                    COALESCE(dcc.dish_design, smdp.dish_design) AS dish_design,
+                    COALESCE(dcc.canvas_name, smdp.canvas_name) AS canvas_name,
+                    COALESCE(dcc.protocol_name, smdp.protocol_name) AS protocol_name,
+                    dcc.genotype AS genotype,
+                    dcc.dpf_at_acquisition AS dpf_at_acquisition,
+                    smdp.profile_json AS profile_json,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY smdp.dataset_id
+                        ORDER BY
+                            COALESCE(smdp.profile_created_utc, smdp.updated_utc) DESC,
+                            smdp.profile_run DESC
+                    ) AS _rn
+                FROM subject_mask_data_profile smdp
+                LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = smdp.dataset_id
+            )
+            SELECT
+                dataset_id,
+                profile_run,
+                recording_id,
+                zarr_use,
+                subject_mask_method,
+                label_schema_id,
+                source_keypoints_run,
+                source_crop_run,
+                run_semantics,
+                profile_created_utc,
+                zarr_mtime_ns,
+                updated_utc,
+                total_rois,
+                rows_with_any_mask,
+                coverage_percent,
+                available_component_count,
+                subject_body_presence_rate,
+                subject_body_area_p10,
+                subject_body_area_p50,
+                subject_body_area_p90,
+                eyes_union_presence_rate,
+                eyes_union_area_p10,
+                eyes_union_area_p50,
+                eyes_union_area_p90,
+                eye_left_presence_rate,
+                eye_left_area_p10,
+                eye_left_area_p50,
+                eye_left_area_p90,
+                eye_right_presence_rate,
+                eye_right_area_p10,
+                eye_right_area_p50,
+                eye_right_area_p90,
+                swim_bladder_presence_rate,
+                swim_bladder_area_p10,
+                swim_bladder_area_p50,
+                swim_bladder_area_p90,
+                rig_id,
+                camera_id,
+                arena_id,
+                dish_design,
+                canvas_name,
+                protocol_name,
+                genotype,
+                dpf_at_acquisition,
+                profile_json
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+        cur.execute("DROP VIEW IF EXISTS recording_subject_mask_data_profile_latest;")
+        cur.execute(
+            """
+            CREATE VIEW recording_subject_mask_data_profile_latest AS
+            WITH ranked AS (
+                SELECT
+                    smdpl.*,
+                    d.zarr_path AS zarr_path,
+                    d.artifact_kind AS artifact_kind,
+                    d.status AS dataset_status,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY smdpl.recording_id
+                        ORDER BY
+                            COALESCE(smdpl.profile_created_utc, smdpl.updated_utc) DESC,
+                            smdpl.profile_run DESC,
+                            smdpl.dataset_id DESC
+                    ) AS _rn
+                FROM subject_mask_data_profile_latest smdpl
+                LEFT JOIN datasets d ON d.dataset_id = smdpl.dataset_id
+                WHERE smdpl.recording_id IS NOT NULL
+            )
+            SELECT
+                recording_id,
+                dataset_id,
+                profile_run,
+                zarr_use,
+                subject_mask_method,
+                label_schema_id,
+                source_keypoints_run,
+                source_crop_run,
+                run_semantics,
+                profile_created_utc,
+                zarr_mtime_ns,
+                updated_utc,
+                total_rois,
+                rows_with_any_mask,
+                coverage_percent,
+                available_component_count,
+                subject_body_presence_rate,
+                subject_body_area_p10,
+                subject_body_area_p50,
+                subject_body_area_p90,
+                eyes_union_presence_rate,
+                eyes_union_area_p10,
+                eyes_union_area_p50,
+                eyes_union_area_p90,
+                eye_left_presence_rate,
+                eye_left_area_p10,
+                eye_left_area_p50,
+                eye_left_area_p90,
+                eye_right_presence_rate,
+                eye_right_area_p10,
+                eye_right_area_p50,
+                eye_right_area_p90,
+                swim_bladder_presence_rate,
+                swim_bladder_area_p10,
+                swim_bladder_area_p50,
+                swim_bladder_area_p90,
+                rig_id,
+                camera_id,
+                arena_id,
+                dish_design,
+                canvas_name,
+                protocol_name,
+                genotype,
+                dpf_at_acquisition,
+                profile_json,
+                zarr_path,
+                artifact_kind,
+                dataset_status
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )

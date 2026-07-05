@@ -846,6 +846,143 @@ def _extract_subject_mask_component_quality_rows(
     return rows
 
 
+_SUBJECT_MASK_PROFILE_WIDE_LABELS = (
+    "subject_body",
+    "eyes_union",
+    "eye_left",
+    "eye_right",
+    "swim_bladder",
+)
+
+
+def _profile_json_text(value: Mapping[str, Any]) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _component_stat(component: Mapping[str, Any], stats_key: str, percentile: str) -> Optional[float]:
+    stats = _coerce_mapping(component.get(stats_key))
+    if not stats:
+        return None
+    return _as_float(stats.get(percentile))
+
+
+def _extract_subject_mask_data_profile_rows(
+    root: zarr.Group,
+    *,
+    zarr_path: Path,
+    dataset_id: str,
+    recording_id: Optional[str],
+    zarr_use: Optional[str],
+    genotype: Optional[str],
+    dpf_at_acquisition: Optional[int],
+) -> List[Dict[str, Any]]:
+    """Extract ``subject_mask_data_profile`` rows from ``analysis/subject_mask_profile_runs``.
+
+    One row per profile run, mirroring ``_extract_detection_data_profile_rows`` /
+    ``_extract_keypoint_profile_rows``. Rows are inserted via
+    ``Registry.replace_subject_mask_data_profile`` under the reconcile
+    orchestrator; there is deliberately no standalone sync script. Wide
+    ``<label>_area_p*`` columns carry the ROI-fraction (normalized) component
+    areas; the full per-component stats stay in ``profile_json``.
+    """
+
+    analysis = _get_group(root, "analysis")
+    if analysis is None:
+        return []
+    runs_parent = _get_group(analysis, "subject_mask_profile_runs")
+    if runs_parent is None:
+        return []
+
+    try:
+        zarr_mtime_ns = int(zarr_path.stat().st_mtime_ns)
+    except Exception:
+        zarr_mtime_ns = None
+    updated_utc = utc_now()
+
+    rows: List[Dict[str, Any]] = []
+    for profile_run in _run_names(runs_parent):
+        run_group = _get_group(runs_parent, profile_run)
+        if run_group is None:
+            continue
+        summary = _coerce_mapping(run_group.attrs.get("profile_summary"))
+        if not summary:
+            continue
+        run_attrs = dict(run_group.attrs)
+
+        dataset_map = _coerce_mapping(summary.get("dataset")) or {}
+        source_map = _coerce_mapping(summary.get("source")) or {}
+        coverage_map = _coerce_mapping(summary.get("coverage")) or {}
+        components_map = _coerce_mapping(summary.get("components")) or {}
+        composition_map = _coerce_mapping(summary.get("composition")) or {}
+
+        row_dpf = _as_int(composition_map.get("dpf_at_acquisition"))
+        if row_dpf is None:
+            row_dpf = dpf_at_acquisition
+
+        row: Dict[str, Any] = {
+            "dataset_id": str(dataset_id),
+            "profile_run": str(profile_run),
+            "recording_id": (
+                _decode_attr(run_attrs.get("source_recording_id"))
+                or _decode_attr(dataset_map.get("recording_id"))
+                or recording_id
+            ),
+            "zarr_use": (
+                _decode_attr(run_attrs.get("source_zarr_use"))
+                or _decode_attr(dataset_map.get("zarr_use"))
+                or zarr_use
+            ),
+            "subject_mask_method": (
+                _decode_attr(run_attrs.get("source_subject_mask_method"))
+                or _decode_attr(source_map.get("subject_mask_method"))
+            ),
+            "label_schema_id": (
+                _decode_attr(run_attrs.get("source_label_schema_id"))
+                or _decode_attr(source_map.get("label_schema_id"))
+            ),
+            "source_keypoints_run": (
+                _decode_attr(run_attrs.get("source_keypoints_run"))
+                or _decode_attr(source_map.get("source_keypoints_run"))
+            ),
+            "source_crop_run": (
+                _decode_attr(run_attrs.get("source_crop_run"))
+                or _decode_attr(source_map.get("source_crop_run"))
+            ),
+            "run_semantics": (
+                _decode_attr(run_attrs.get("source_run_semantics"))
+                or _decode_attr(source_map.get("run_semantics"))
+            ),
+            "profile_created_utc": (
+                _decode_attr(run_attrs.get("created_at_utc"))
+                or _decode_attr(summary.get("created_at_utc"))
+            ),
+            "total_rois": _as_int(coverage_map.get("total_rois")),
+            "rows_with_any_mask": _as_int(coverage_map.get("rows_with_any_mask")),
+            "coverage_percent": _as_float(coverage_map.get("coverage_percent")),
+            "available_component_count": _as_int(coverage_map.get("available_component_count")),
+            "rig_id": _decode_attr(composition_map.get("rig_id")),
+            "camera_id": _decode_attr(composition_map.get("camera_id")),
+            "arena_id": _decode_attr(composition_map.get("arena_id")),
+            "dish_design": _decode_attr(composition_map.get("dish_design")),
+            "canvas_name": _decode_attr(composition_map.get("canvas_name")),
+            "protocol_name": _decode_attr(composition_map.get("protocol_name")),
+            "genotype": _decode_attr(composition_map.get("genotype")) or genotype,
+            "dpf_at_acquisition": row_dpf,
+            "profile_json": _profile_json_text(summary),
+            "zarr_mtime_ns": zarr_mtime_ns,
+            "updated_utc": updated_utc,
+        }
+        for label in _SUBJECT_MASK_PROFILE_WIDE_LABELS:
+            component = _coerce_mapping(components_map.get(label)) or {}
+            row[f"{label}_presence_rate"] = _as_float(component.get("presence_rate"))
+            row[f"{label}_area_p10"] = _component_stat(component, "area_norm", "p10")
+            row[f"{label}_area_p50"] = _component_stat(component, "area_norm", "p50")
+            row[f"{label}_area_p90"] = _component_stat(component, "area_norm", "p90")
+        rows.append(row)
+
+    return rows
+
+
 def _extract_eye_mask_performance_rows(
     root: zarr.Group,
     *,
@@ -1038,5 +1175,6 @@ __all__ = [
     "_extract_eye_mask_performance_rows",
     "_extract_eye_mask_quality_rows",
     "_extract_subject_mask_component_quality_rows",
+    "_extract_subject_mask_data_profile_rows",
     "_extract_subject_mask_performance_rows",
 ]
