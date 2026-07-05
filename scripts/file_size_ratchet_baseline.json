@@ -1,6 +1,6 @@
 {
   "src/fisheye/cli/palette.py": 2119,
-  "src/fisheye/labeling/web.py": 18284,
+  "src/fisheye/labeling/web.py": 17812,
   "src/fisheye/registry/db.py": 8518,
   "src/fisheye/registry/maintenance.py": 9733
 }
