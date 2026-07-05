@@ -380,6 +380,10 @@ Maintainer approved the design with all five recommended decisions and these ans
 2. **Yes.** Future full imports write the explicit `stored_zarr_frame ->
    acquisition_frame` identity mapping (stamp-going-forward, same philosophy as
    completion-epoch provenance). Historical stores are not backfilled.
+   *Implemented (slice 1, edca55c):* the map is written at
+   `raw_video/frame_domain_maps/stored_zarr_frame_to_acquisition_frame` — a new
+   namespace rather than overloading `original_frame_indices`, so sampled-import
+   detection behavior is untouched. Consumer migrations should read it there.
 3. **Deferred to consumer-migration slices.** No upfront adapter allowlist; each adapter
    is approved one at a time with per-store evidence when a migration slice needs it.
    The first implementation slice ships ZERO legacy adapters.
