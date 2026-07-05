@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import time
 from pathlib import Path
 
@@ -915,7 +916,7 @@ def test_compute_channel_metrics_reports_area_centroid_and_bbox() -> None:
     np.testing.assert_array_equal(metrics["bbox_valid"], np.asarray([True, False], dtype=bool))
 
 
-def test_write_sam_subject_mask_run_records_richer_stage_provenance(monkeypatch) -> None:
+def test_write_sam_subject_mask_run_records_richer_stage_provenance(monkeypatch, tmp_path: Path) -> None:
     root = FakeGroup()
     expected_crop_signature = str({"version": 1, "source": "crop_001"})
     crop_parent = root.create_group("crop_runs")
@@ -957,6 +958,12 @@ def test_write_sam_subject_mask_run_records_richer_stage_provenance(monkeypatch)
     )
     monkeypatch.setattr(mod.sys, "argv", ["scripts/py", "-m", "fisheye.utils.run_sam_subject_masks", "--apply"])
     monkeypatch.setattr(mod, "_utc_now", lambda: "2026-03-01T00:00:00+00:00")
+    sam3_root = tmp_path / "sam3_repo"
+    sam3_model_dir = sam3_root / "sam3" / "model"
+    sam3_model_dir.mkdir(parents=True)
+    (sam3_model_dir / "builder.py").write_text("# tiny runtime file\n", encoding="utf-8")
+    checkpoint_path = tmp_path / "sam3.pt"
+    checkpoint_path.write_bytes(b"sam checkpoint")
 
     inputs = mod.ResolvedSamInputs(
         crop_run="crop_001",
@@ -1020,8 +1027,8 @@ def test_write_sam_subject_mask_run_records_richer_stage_provenance(monkeypatch)
         prompt_selection=prompt_selection,
         output_run="sam_subject_masks_test_001",
         overwrite=False,
-        checkpoint_path="/tmp/sam3.pt",
-        sam3_root="/tmp/sam3",
+        checkpoint_path=str(checkpoint_path),
+        sam3_root=str(sam3_root),
         multimask_output=True,
         use_box_prompt=True,
         box_prompt_source="detect",
@@ -1049,7 +1056,7 @@ def test_write_sam_subject_mask_run_records_richer_stage_provenance(monkeypatch)
         },
     )
 
-    assert summary["checkpoint_path"] == "/tmp/sam3.pt"
+    assert summary["checkpoint_path"] == str(checkpoint_path)
 
     run = root["subject_mask_runs"]["sam_subject_masks_test_001"]
     assert run.attrs["source_crop_signature"] == expected_crop_signature
@@ -1094,6 +1101,33 @@ def test_write_sam_subject_mask_run_records_richer_stage_provenance(monkeypatch)
     assert provenance["inputs"]["source_keypoint_group"] == "refined_keypoints_runs"
     assert provenance["inputs"]["source_video_path"] == "/tmp/source.mp4"
     assert "source_keypoint_run" not in provenance["inputs"]
+
+    run_provenance = run.attrs["run_provenance"]
+    artifacts = run_provenance["input_artifacts"]
+    assert [artifact["role"] for artifact in artifacts] == ["sam3_runtime", "sam3_checkpoint"]
+    assert artifacts[0]["identity_kind"] == "runtime_manifest"
+    assert artifacts[0]["fingerprint_scheme"] == "manifest_v1"
+    assert artifacts[0]["sam3_root"] == str(sam3_root.resolve())
+    assert "sam3_git" in artifacts[0]
+    assert artifacts[1]["identity_kind"] == "checkpoint_content"
+    assert artifacts[1]["fingerprint_scheme"] == "content_v1"
+    assert artifacts[1]["path"] == str(checkpoint_path.resolve())
+    assert artifacts[1]["sha256"] == hashlib.sha256(b"sam checkpoint").hexdigest()
+
+
+def test_sam3_input_artifacts_label_runtime_manifest_when_checkpoint_is_implicit(tmp_path: Path) -> None:
+    sam3_root = tmp_path / "sam3_repo"
+    model_dir = sam3_root / "sam3" / "model"
+    model_dir.mkdir(parents=True)
+    (model_dir / "builder.py").write_text("# tiny runtime file\n", encoding="utf-8")
+
+    artifacts = mod._sam3_input_artifacts(sam3_root=sam3_root, checkpoint_path=None)  # noqa: SLF001
+
+    assert len(artifacts) == 1
+    assert artifacts[0]["role"] == "sam3_runtime"
+    assert artifacts[0]["identity_kind"] == "runtime_manifest"
+    assert artifacts[0]["fingerprint_scheme"] == "manifest_v1"
+    assert artifacts[0]["checkpoint_identity"] == "not_recorded_hf_or_builder_resolved"
 
 
 def test_run_sam_subject_mask_inference_uses_pixel_prompt_normalization(monkeypatch) -> None:

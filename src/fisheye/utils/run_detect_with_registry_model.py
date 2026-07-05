@@ -184,6 +184,7 @@ def build_detect_resolution_payload(
             "run_id": item.run_id,
             "set_id": item.set_id,
             "model_path": item.model_path,
+            "model_sha256": item.model_sha256,
             "score": item.weighted_score,
             "created_utc": item.created_utc,
             "status": item.status,
@@ -487,6 +488,7 @@ def run_detect_with_registry_model(
 
     selected_payload = payload.get("selected") if isinstance(payload.get("selected"), dict) else {}
     selected_model_path = selected_payload.get("model_path") if isinstance(selected_payload.get("model_path"), str) else None
+    selected_model_sha256 = selected_payload.get("model_sha256") if isinstance(selected_payload.get("model_sha256"), str) else None
     selected_run_id = selected_payload.get("run_id") if isinstance(selected_payload.get("run_id"), str) else None
     selected_set_id = selected_payload.get("set_id") if isinstance(selected_payload.get("set_id"), str) else None
     resolved_at_utc = payload.get("resolved_at_utc") if isinstance(payload.get("resolved_at_utc"), str) else None
@@ -532,6 +534,7 @@ def run_detect_with_registry_model(
         run_name = detect_yolo(
             video_path=str(resolved_video_path),
             model_path=best.model_path,
+            model_sha256=selected_model_sha256,
             output_zarr=str(resolved_output_path),
             config_path=config,
             conf_threshold=conf,

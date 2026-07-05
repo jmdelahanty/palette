@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import sys
 
@@ -9,6 +10,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.segmentation import infer_unet_subject_masks as mod
+from fisheye.shared.run_provenance import RUN_PROVENANCE_ATTR
 
 
 class _FakeArray:
@@ -709,7 +711,9 @@ def test_infer_unet_subject_masks_can_resolve_checkpoint_from_registry(
 ) -> None:
     zarr_path = tmp_path / "recording_analysis.zarr"
     checkpoint_path = tmp_path / "registry_selected.pt"
-    checkpoint_path.write_text("", encoding="utf-8")
+    checkpoint_bytes = b"registry checkpoint"
+    checkpoint_path.write_bytes(checkpoint_bytes)
+    checkpoint_sha = hashlib.sha256(checkpoint_bytes).hexdigest()
 
     fake_root = _build_fake_root()
     seen: dict[str, object] = {}
@@ -755,6 +759,7 @@ def test_infer_unet_subject_masks_can_resolve_checkpoint_from_registry(
                 "component_coverage_key": "body+eyes+swim_bladder",
                 "best_metric_name": "best_val_dice",
                 "best_metric_value": 0.947,
+                "model_sha256": checkpoint_sha,
             },
             "candidates": [],
             "parameters": {"coverage_class": args.model_coverage_class},
@@ -879,3 +884,16 @@ def test_infer_unet_subject_masks_can_resolve_checkpoint_from_registry(
     assert provenance["inputs"]["model_resolution"]["selected"]["run_id"] == (
         "subject_masks_union_all_components_v001"
     )
+    run_provenance = run_group.attrs[RUN_PROVENANCE_ATTR]
+    artifacts = run_provenance["input_artifacts"]
+    assert artifacts == [
+        {
+            "role": "subject_mask_unet_checkpoint",
+            "path": str(checkpoint_path),
+            "fingerprint_scheme": "content_v1",
+            "sha256": checkpoint_sha,
+            "size_bytes": len(checkpoint_bytes),
+            "mtime_ns": checkpoint_path.stat().st_mtime_ns,
+            "source": "computed",
+        }
+    ]

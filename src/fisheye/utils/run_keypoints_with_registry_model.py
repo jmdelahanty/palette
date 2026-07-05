@@ -306,6 +306,7 @@ def build_keypoint_resolution_payload(
             "run_id": item.run_id,
             "set_id": item.set_id,
             "model_path": item.model_path,
+            "model_sha256": item.model_sha256,
             "score": item.weighted_score,
             "created_utc": item.created_utc,
             "status": item.status,
@@ -620,6 +621,7 @@ def run_keypoints_with_registry_model(
     )
     selected_payload = payload.get("selected") if isinstance(payload.get("selected"), dict) else {}
     selected_model_path = selected_payload.get("model_path") if isinstance(selected_payload.get("model_path"), str) else None
+    selected_model_sha256 = selected_payload.get("model_sha256") if isinstance(selected_payload.get("model_sha256"), str) else None
     selected_run_id = selected_payload.get("run_id") if isinstance(selected_payload.get("run_id"), str) else None
     selected_set_id = selected_payload.get("set_id") if isinstance(selected_payload.get("set_id"), str) else None
     resolved_at_utc = payload.get("resolved_at_utc") if isinstance(payload.get("resolved_at_utc"), str) else None
@@ -670,6 +672,7 @@ def run_keypoints_with_registry_model(
         keypoint_run = detect_keypoints_yolo(
             zarr_path=str(output_path),
             model_path=best.model_path,
+            model_sha256=selected_model_sha256,
             run_name=run_name,
             crop_run=crop_run,
             pose_schema=pose_schema,

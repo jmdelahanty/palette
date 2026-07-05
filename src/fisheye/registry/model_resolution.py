@@ -71,6 +71,7 @@ class Candidate:
     weighted_score: float
     feature_match_counts: dict[str, int]
     feature_weights_used: float
+    model_sha256: Optional[str] = None
 
 
 def _normalize_task_type(value: Any) -> Optional[str]:
@@ -332,6 +333,7 @@ def load_candidates(
         "  tr.task_type AS run_task_type,",
         "  ts.task_type AS set_task_type,",
         "  COALESCE(tm.model_path, tr.model_path) AS model_path,",
+        "  COALESCE(tm.model_sha256, tr.model_sha256) AS model_sha256,",
         "  COALESCE(tm.status, tr.status) AS status,",
         "  tr.created_utc AS created_utc,",
         "  ts.dataset_ids_json AS dataset_ids_json",
@@ -375,6 +377,7 @@ def load_candidates(
                 run_id=run_id,
                 set_id=set_id,
                 model_path=model_path,
+                model_sha256=_norm_text(row["model_sha256"]),
                 created_utc=_norm_text(row["created_utc"]),
                 status=_norm_text(row["status"]),
                 dataset_count=len(source_rows),

@@ -34,7 +34,13 @@ from ..shared.provenance_attrs import build_source_crop_snapshot_attrs, build_so
 from ..registry.stage_complete import emit_stage_completion
 from ..shared.row_lineage import copy_row_lineage_arrays, write_direct_source_crop_row_ids
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
-from ..shared.run_provenance import CLI_RUN_PROVENANCE_ATTR, RUN_PROVENANCE_ATTR, build_run_provenance
+from ..shared.artifact_fingerprint import fingerprint_artifact
+from ..shared.run_provenance import (
+    CLI_RUN_PROVENANCE_ATTR,
+    RUN_PROVENANCE_ATTR,
+    append_input_artifacts,
+    build_run_provenance,
+)
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
 from ..shared.zarr_run_completion import (
@@ -677,6 +683,7 @@ def detect_keypoints_yolo(
     zarr_path: str,
     model_path: str,
     *,
+    model_sha256: Optional[str] = None,
     run_name: Optional[str] = None,
     crop_run: Optional[str] = None,
     pose_schema: str = DEFAULT_POSE_SCHEMA_NAME,
@@ -721,6 +728,11 @@ def detect_keypoints_yolo(
     model_path = Path(model_path)
     if not model_path.exists():
         raise FileNotFoundError(f"Model path not found: {model_path}")
+    model_artifact = fingerprint_artifact(
+        model_path,
+        role="keypoint_model",
+        registry_hash=model_sha256,
+    )
 
     model = YOLO(str(model_path))
     torch_device = _normalize_torch_device(device)
@@ -1235,6 +1247,7 @@ def detect_keypoints_yolo(
             },
             cwd=Path.cwd(),
         )
+    effective_run_provenance = append_input_artifacts(effective_run_provenance, [model_artifact])
     if effective_run_provenance is not None:
         run_group.attrs[RUN_PROVENANCE_ATTR] = dict(effective_run_provenance)
         run_group.attrs[CLI_RUN_PROVENANCE_ATTR] = dict(effective_run_provenance)

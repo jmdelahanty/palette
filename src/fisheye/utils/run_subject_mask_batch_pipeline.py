@@ -30,7 +30,7 @@ from dataclasses import field
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
 import zarr
 
@@ -39,6 +39,7 @@ from fisheye.shared.mask_store import MaskStoreError, open_mask_store
 from fisheye.shared.run_provenance import (
     CLI_RUN_PROVENANCE_ATTR,
     RUN_PROVENANCE_ATTR,
+    append_input_artifacts,
     build_run_provenance,
 )
 from fisheye.shared.subject_mask_registry_status import (
@@ -732,6 +733,18 @@ def _subject_mask_publish_provenance(
     )
 
 
+def _existing_run_input_artifacts(run_group: Any) -> list[Mapping[str, Any]]:
+    attrs = getattr(run_group, "attrs", {})
+    for attr_name in (RUN_PROVENANCE_ATTR, CLI_RUN_PROVENANCE_ATTR):
+        provenance = attrs.get(attr_name)
+        if not isinstance(provenance, Mapping):
+            continue
+        artifacts = provenance.get("input_artifacts")
+        if isinstance(artifacts, Sequence) and not isinstance(artifacts, (str, bytes, bytearray)):
+            return [item for item in artifacts if isinstance(item, Mapping)]
+    return []
+
+
 def _refresh_subject_mask_registry_views(
     *,
     registry_path: Optional[Path],
@@ -857,6 +870,10 @@ def _publish_staged_outputs(
             publish_payload=publish_payload,
             refined=False,
         )
+        subject_run_provenance = append_input_artifacts(
+            subject_run_provenance,
+            _existing_run_input_artifacts(subject_group),
+        )
         subject_group.attrs[RUN_PROVENANCE_ATTR] = dict(subject_run_provenance)
         subject_group.attrs[CLI_RUN_PROVENANCE_ATTR] = dict(subject_run_provenance)
         mark_run_complete(
@@ -894,6 +911,10 @@ def _publish_staged_outputs(
             plan=plan,
             publish_payload=publish_payload,
             refined=True,
+        )
+        refined_run_provenance = append_input_artifacts(
+            refined_run_provenance,
+            _existing_run_input_artifacts(refined_group),
         )
         refined_group.attrs[RUN_PROVENANCE_ATTR] = dict(refined_run_provenance)
         refined_group.attrs[CLI_RUN_PROVENANCE_ATTR] = dict(refined_run_provenance)
