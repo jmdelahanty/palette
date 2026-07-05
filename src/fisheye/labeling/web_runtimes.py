@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import re
 import sqlite3
@@ -531,6 +532,70 @@ def _browser_runtime_target_token(runtime: object) -> str:
         setattr(runtime, "target_token", token)
         setattr(runtime, "target_token_position", position)
     return token
+
+def _next_browser_nav_position(*, current_position: int, total: int, body: Mapping[str, object]) -> int:
+    total_int = int(total)
+    current = int(current_position)
+    if body.get("position") is not None:
+        requested = int(body.get("position"))  # type: ignore[arg-type]
+        if total_int <= 0:
+            raise ValueError("Absolute navigation position is outside an empty task scope.")
+        if requested < 0 or requested >= total_int:
+            raise ValueError(f"Absolute navigation position {requested} is outside task scope 0..{total_int - 1}.")
+        return requested
+    delta = int(body.get("delta") or 0)
+    if total_int <= 0:
+        return 0
+    return max(0, min(current + delta, total_int - 1))
+
+
+BROWSER_MUTATION_TARGET_SELECTOR_KEYS: tuple[str, ...] = (
+    "position",
+    "roi_idx",
+    "row_idx",
+    "frame_idx",
+    "parent_frame_index",
+    "source_frame_index",
+    "component_idx",
+    "component_name",
+    "target_zarr",
+    "zarr_target",
+    "zarr_path",
+    "training_zarr",
+    "analysis_zarr",
+    "target_csv",
+    "csv_target",
+    "csv_path",
+    "handoff_csv",
+    "intermediate_csv",
+    "output_csv",
+    "write_target",
+    "data_plane_write_target",
+    "label_write_target",
+    "browser_label_write_target",
+    "target_store",
+    "target_uri",
+)
+
+
+def _browser_mutation_target_selector_keys(body: Mapping[str, object]) -> list[str]:
+    return sorted(key for key in BROWSER_MUTATION_TARGET_SELECTOR_KEYS if key in body)
+
+
+def _browser_mutation_target_selector_details(keys: list[str]) -> str:
+    return "Browser mutation target is server-owned; remove client target field(s): " + ", ".join(keys) + "."
+
+
+
+
+def _require_browser_mutation_target_token(runtime: object, body: Mapping[str, object]) -> None:
+    provided = str(body.get("target_token") or "").strip()
+    if not provided:
+        raise ValueError("Missing target_token; reload the current target before saving.")
+    expected = _browser_runtime_target_token(runtime)
+    if not hmac.compare_digest(provided, expected):
+        raise ValueError("Stale or invalid target_token; reload the current target before saving.")
+
 
 def _keypoint_runtime_state(runtime: KeypointRuntimeSession, backend_module: Any) -> dict[str, object]:
     session = runtime.review_session

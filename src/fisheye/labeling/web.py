@@ -297,7 +297,10 @@ from .web_runtimes import (
     KeypointRuntimeSession,
     SubjectMaskRuntimeSession,
     VideoDetectRuntimeSession,
+    BROWSER_MUTATION_TARGET_SELECTOR_KEYS,
     _advance_keypoint,
+    _browser_mutation_target_selector_details,
+    _browser_mutation_target_selector_keys,
     _browser_runtime_target_token,
     _detect_analysis_promotion_from_scope,
     _detect_bbox_size_hint_payload,
@@ -307,6 +310,8 @@ from .web_runtimes import (
     _get_subject_mask_runtime,
     _get_video_detect_parent_frame,
     _get_video_detect_runtime,
+    _next_browser_nav_position,
+    _require_browser_mutation_target_token,
     _keypoint_runtime_state,
     _labeler_safe_error_details,
     _redact_labeler_runtime_payload,
@@ -862,72 +867,6 @@ def _verify_signed_task_link_token(token: str, *, secret: str) -> dict[str, obje
     if not task_id:
         raise ValueError("Signed link token is missing task_id.")
     return payload
-
-
-
-
-def _next_browser_nav_position(*, current_position: int, total: int, body: Mapping[str, object]) -> int:
-    total_int = int(total)
-    current = int(current_position)
-    if body.get("position") is not None:
-        requested = int(body.get("position"))  # type: ignore[arg-type]
-        if total_int <= 0:
-            raise ValueError("Absolute navigation position is outside an empty task scope.")
-        if requested < 0 or requested >= total_int:
-            raise ValueError(f"Absolute navigation position {requested} is outside task scope 0..{total_int - 1}.")
-        return requested
-    delta = int(body.get("delta") or 0)
-    if total_int <= 0:
-        return 0
-    return max(0, min(current + delta, total_int - 1))
-
-
-BROWSER_MUTATION_TARGET_SELECTOR_KEYS: tuple[str, ...] = (
-    "position",
-    "roi_idx",
-    "row_idx",
-    "frame_idx",
-    "parent_frame_index",
-    "source_frame_index",
-    "component_idx",
-    "component_name",
-    "target_zarr",
-    "zarr_target",
-    "zarr_path",
-    "training_zarr",
-    "analysis_zarr",
-    "target_csv",
-    "csv_target",
-    "csv_path",
-    "handoff_csv",
-    "intermediate_csv",
-    "output_csv",
-    "write_target",
-    "data_plane_write_target",
-    "label_write_target",
-    "browser_label_write_target",
-    "target_store",
-    "target_uri",
-)
-
-
-def _browser_mutation_target_selector_keys(body: Mapping[str, object]) -> list[str]:
-    return sorted(key for key in BROWSER_MUTATION_TARGET_SELECTOR_KEYS if key in body)
-
-
-def _browser_mutation_target_selector_details(keys: list[str]) -> str:
-    return "Browser mutation target is server-owned; remove client target field(s): " + ", ".join(keys) + "."
-
-
-
-
-def _require_browser_mutation_target_token(runtime: object, body: Mapping[str, object]) -> None:
-    provided = str(body.get("target_token") or "").strip()
-    if not provided:
-        raise ValueError("Missing target_token; reload the current target before saving.")
-    expected = _browser_runtime_target_token(runtime)
-    if not hmac.compare_digest(provided, expected):
-        raise ValueError("Stale or invalid target_token; reload the current target before saving.")
 
 
 def _parse_clip_index(clip_id: object) -> int:
