@@ -18,6 +18,7 @@ import zarr
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry
+from fisheye.registry import maintenance as maintenance_cli
 
 _VOLATILE_SUFFIXES = ("updated_utc", "seen_utc")
 _VOLATILE_COLUMNS = {"recorded_utc"}
@@ -171,6 +172,32 @@ def test_reconcile_is_idempotent(tmp_path: Path) -> None:
         registry.reconcile_dataset_from_root(root, zarr_path)
         second = _dump(registry)
         assert first == second
+    finally:
+        registry.close()
+
+
+def test_reconcile_dataset_cli(tmp_path: Path, capsys) -> None:
+    zarr_path = tmp_path / "dataset_training.zarr"
+    _build_zarr(zarr_path)
+    registry_path = tmp_path / "registry.sqlite"
+
+    maintenance_cli.main(
+        ["--registry", str(registry_path), "--reconcile-dataset", str(zarr_path)]
+    )
+    out = capsys.readouterr().out
+    assert "Reconciled dataset" in out
+    assert "detection_data_profile rows=1" in out
+
+    registry = Registry(registry_path)
+    try:
+        n = registry.conn.execute(
+            "SELECT COUNT(*) AS n FROM detection_data_profile;"
+        ).fetchone()["n"]
+        assert n == 1
+        n_kpt = registry.conn.execute(
+            "SELECT COUNT(*) AS n FROM keypoint_data_profile;"
+        ).fetchone()["n"]
+        assert n_kpt == 1
     finally:
         registry.close()
 

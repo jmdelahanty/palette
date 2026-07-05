@@ -194,6 +194,22 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help="Prune training_runs rows with failed statuses.",
     )
     parser.add_argument(
+        "--reconcile-dataset",
+        type=Path,
+        metavar="ZARR_PATH",
+        help=(
+            "Re-derive ALL registry state for one dataset from its Zarr root, idempotently: "
+            "runs every zarr extractor (via register_from_root) plus the detection/keypoint "
+            "data-profile extractors. Composes existing replace_* primitives; replaces the "
+            "retired sync_detection_profile_registry / sync_keypoint_profile_registry scripts."
+        ),
+    )
+    parser.add_argument(
+        "--reconcile-step-status",
+        action="store_true",
+        help="With --reconcile-dataset, also refresh recording_step_status for the dataset.",
+    )
+    parser.add_argument(
         "--reconcile-in-progress-runs",
         action="store_true",
         help=(
@@ -8802,6 +8818,45 @@ def _summarize_reconcile(stats: Dict[str, int]) -> None:
     print(f"Reconcile missing: checked={checked}, marked_missing={marked_missing}")
 
 
+def _run_reconcile_dataset(
+    registry: Registry,
+    *,
+    zarr_path: Path,
+    include_step_status: bool,
+) -> None:
+    if not _is_zarr_root_path(zarr_path):
+        raise SystemExit(f"Not a Zarr root: {zarr_path}")
+    zarr = _import_zarr()
+    try:
+        root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    except TypeError:
+        try:
+            root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+        except TypeError:
+            root = zarr.open_group(str(zarr_path), mode="r")
+    result = registry.reconcile_dataset_from_root(
+        root,
+        zarr_path,
+        include_step_status=include_step_status,
+    )
+    print(
+        "Reconciled dataset "
+        f"{result['dataset_id']}: "
+        f"detection_data_profile rows={result['detection_data_profile_rows']} "
+        f"keypoint_data_profile rows={result['keypoint_data_profile_rows']}"
+    )
+    step = result.get("recording_step_status")
+    if step is not None:
+        print(
+            "  recording_step_status: "
+            f"evaluated={step.get('rows_evaluated', 0)} "
+            f"inserted={step.get('rows_inserted', 0)} "
+            f"updated={step.get('rows_updated', 0)} "
+            f"skipped={step.get('rows_skipped', 0)} "
+            f"history_rows_inserted={step.get('history_rows_inserted', 0)}"
+        )
+
+
 def _run_reconcile_registry(
     registry: Registry,
     *,
@@ -8855,6 +8910,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     args = _parse_args(argv)
     if (
         not args.reconcile_registry
+        and not args.reconcile_dataset
         and not args.prune_invalid
         and not args.prune_missing_datasets
         and not args.prune_failed_runs
@@ -8889,7 +8945,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         and not args.vacuum
     ):
         raise SystemExit(
-            "No action selected. Use --reconcile-registry, --prune-invalid, --prune-missing-datasets, "
+            "No action selected. Use --reconcile-registry, --reconcile-dataset, --prune-invalid, "
+            "--prune-missing-datasets, "
             "--prune-failed-runs, --reconcile-in-progress-runs, --delete-run-id, --delete-set-id, "
             "--prune-empty-sets, --backfill-recording-entities, --backfill-subject-dish-cross, "
             "--backfill-subjects, "
@@ -8913,6 +8970,13 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
     registry = Registry(registry_path)
     try:
+        if args.reconcile_dataset:
+            _run_reconcile_dataset(
+                registry,
+                zarr_path=Path(args.reconcile_dataset).expanduser(),
+                include_step_status=bool(args.reconcile_step_status),
+            )
+
         if args.reconcile_registry:
             _run_reconcile_registry(
                 registry,
