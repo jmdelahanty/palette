@@ -17,6 +17,7 @@ import zarr
 
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.frame_domains import FrameDomain, FrameDomainUnmappedError, FrameDomains
 from fisheye.shared.json_safety import json_attr_safe, strict_json_dumps
 from fisheye.shared.run_lineage_fingerprint import build_run_lineage_payload, write_run_lineage_attrs
 from fisheye.utils.detection_profile import (
@@ -327,6 +328,14 @@ def _source_frame_hash(
     return hasher.hexdigest()
 
 
+def _original_frame_index_lookup(root: zarr.Group) -> dict[int, int]:
+    raw_video = root.get("raw_video")
+    if raw_video is None or "original_frame_indices" not in raw_video:
+        return {}
+    original = np.asarray(raw_video["original_frame_indices"][:], dtype=np.int64)
+    return {int(frame): idx for idx, frame in enumerate(original.tolist())}
+
+
 def _map_detection_frames_to_rows(root: zarr.Group, frame_indices: np.ndarray, n_rows: int) -> np.ndarray:
     mapped = np.full(frame_indices.shape, -1, dtype=np.int64)
     direct = (frame_indices >= 0) & (frame_indices < int(n_rows))
@@ -334,15 +343,24 @@ def _map_detection_frames_to_rows(root: zarr.Group, frame_indices: np.ndarray, n
     if np.all(mapped >= 0):
         return mapped
 
-    raw_video = root.get("raw_video")
-    if raw_video is None or "original_frame_indices" not in raw_video:
-        return mapped
-    original = np.asarray(raw_video["original_frame_indices"][:], dtype=np.int64)
-    lookup = {int(frame): idx for idx, frame in enumerate(original.tolist())}
+    domains = FrameDomains(root=root)
+    legacy_lookup: Optional[dict[int, int]] = None
     for idx, frame in enumerate(frame_indices):
         if mapped[idx] >= 0:
             continue
-        mapped[idx] = lookup.get(int(frame), -1)
+        frame_i = int(frame)
+        try:
+            converted = domains.convert(
+                [frame_i],
+                FrameDomain.SOURCE_VIDEO,
+                FrameDomain.STORED_ZARR,
+            )
+        except FrameDomainUnmappedError:
+            if legacy_lookup is None:
+                legacy_lookup = _original_frame_index_lookup(root)
+            mapped[idx] = legacy_lookup.get(frame_i, -1)
+            continue
+        mapped[idx] = int(converted[0])
     return mapped
 
 

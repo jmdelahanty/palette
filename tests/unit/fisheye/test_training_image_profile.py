@@ -170,6 +170,107 @@ def _make_training_root() -> _FakeGroup:
     return root
 
 
+def _legacy_map_detection_frames_to_rows(
+    root: _FakeGroup,
+    frame_indices: np.ndarray,
+    n_rows: int,
+) -> np.ndarray:
+    mapped = np.full(frame_indices.shape, -1, dtype=np.int64)
+    direct = (frame_indices >= 0) & (frame_indices < int(n_rows))
+    mapped[direct] = frame_indices[direct]
+    if np.all(mapped >= 0):
+        return mapped
+
+    raw_video = root.get("raw_video")
+    if raw_video is None or "original_frame_indices" not in raw_video:
+        return mapped
+    original = np.asarray(raw_video["original_frame_indices"][:], dtype=np.int64)
+    lookup = {int(frame): idx for idx, frame in enumerate(original.tolist())}
+    for idx, frame in enumerate(frame_indices):
+        if mapped[idx] >= 0:
+            continue
+        mapped[idx] = lookup.get(int(frame), -1)
+    return mapped
+
+
+def _make_training_root_with_source_frame_labels() -> _FakeGroup:
+    root = _make_training_root()
+    root["raw_video"].create_array(
+        "original_frame_indices",
+        data=np.asarray([10, 0, 20, 30], dtype=np.int64),
+    )
+    detect = root["detect_runs/detect_001"]
+    detect.create_array(
+        "frame_indices",
+        data=np.asarray([0, 20, 99], dtype=np.int64),
+        overwrite=True,
+    )
+    detect.create_array(
+        "bbox_norm_coords",
+        data=np.asarray(
+            [
+                [0.5, 0.5, 0.5, 0.5],
+                [0.5, 0.5, 0.5, 0.5],
+                [0.5, 0.5, 0.5, 0.5],
+            ],
+            dtype=np.float32,
+        ),
+        overwrite=True,
+    )
+    detect.create_array("frame_counts", data=np.asarray([1, 0, 1], dtype=np.int32), overwrite=True)
+    return root
+
+
+def test_map_detection_frames_to_rows_preserves_direct_inverse_and_unmapped_sentinel() -> None:
+    root = _make_training_root_with_source_frame_labels()
+
+    mapped = profile_mod._map_detection_frames_to_rows(
+        root,
+        np.asarray([0, 20, 99], dtype=np.int64),
+        n_rows=4,
+    )
+
+    np.testing.assert_array_equal(mapped, np.asarray([0, 2, -1], dtype=np.int64))
+
+
+def test_map_detection_frames_to_rows_preserves_legacy_duplicate_inverse_lookup() -> None:
+    root = _make_training_root()
+    root["raw_video"].create_array(
+        "original_frame_indices",
+        data=np.asarray([10, 20, 20, 30], dtype=np.int64),
+    )
+
+    mapped = profile_mod._map_detection_frames_to_rows(
+        root,
+        np.asarray([20], dtype=np.int64),
+        n_rows=4,
+    )
+
+    np.testing.assert_array_equal(mapped, np.asarray([2], dtype=np.int64))
+
+
+def test_training_image_profile_frame_domains_matches_legacy_label_summary(monkeypatch) -> None:
+    root = _make_training_root_with_source_frame_labels()
+
+    summary = build_training_image_profile_summary(
+        root,
+        zarr_path=Path("/tmp/rec_img_001_training.zarr"),
+        created_at_utc="2026-05-13T12:00:00+00:00",
+    )
+
+    monkeypatch.setattr(profile_mod, "_map_detection_frames_to_rows", _legacy_map_detection_frames_to_rows)
+    legacy_summary = build_training_image_profile_summary(
+        root,
+        zarr_path=Path("/tmp/rec_img_001_training.zarr"),
+        created_at_utc="2026-05-13T12:00:00+00:00",
+    )
+
+    assert summary == legacy_summary
+    assert summary["label_conditioned"]["source"]["rows_total"] == 3
+    assert summary["label_conditioned"]["source"]["rows_mapped"] == 2
+    assert summary["label_conditioned"]["profiled_detection_count"] == 2
+
+
 def test_build_training_image_profile_summary_computes_image_and_label_stats() -> None:
     root = _make_training_root()
 
