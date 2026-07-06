@@ -12,7 +12,7 @@ import zarr
 
 from fisheye.shared.plot_artifacts import INTERACTIVE_SPEC_SCHEMA_ID, SPEC_MEDIA_TYPE
 from fisheye.utils.view_zarr_visualization import iter_visualization_artifacts
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.visualization.goodcopbadcop_interactive import (
     DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT,
     GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
