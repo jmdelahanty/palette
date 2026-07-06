@@ -14,6 +14,7 @@ from fisheye.visualization.detection_coverage_dashboard import (
     load_raw_detect_coverage_series,
     load_refined_detect_coverage_series,
     render_detection_coverage_png,
+    _resolve_total_frames,
     summarize_detection_coverage,
     write_detection_coverage_dashboard_artifact,
 )
@@ -108,6 +109,17 @@ def test_raw_and_refined_loaders_read_shared_coverage_inputs(tmp_path) -> None:
     assert refined_series.frame_counts.tolist() == [1, 1, 0, 0, 0, 1]
     assert refined_series.attrs is not None
     assert refined_series.attrs["source_detect_run"] == "detect_a"
+
+
+def test_resolve_total_frames_matches_legacy_original_frame_indices_count(tmp_path) -> None:
+    zarr_path = tmp_path / "sampled_training.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    raw = root.create_group("raw_video")
+    original = np.array([0, 2, 4], dtype=np.int64)
+    raw.create_array("original_frame_indices", data=original, overwrite=True)
+    detect = root.create_group("detect_runs").create_group("detect_a")
+
+    assert _resolve_total_frames(root, [detect]) == int(original.shape[0])
 
 
 def test_write_dashboard_artifacts_targets_raw_and_refined_runs(tmp_path) -> None:
