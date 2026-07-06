@@ -117,7 +117,7 @@ Flask route ownership, no change to Zarr write semantics.
 
 ## Checkpoint: 2026-07-05
 
-Current `src/fisheye/labeling/web.py` size on `sun`: 13,284 lines.
+Current `src/fisheye/labeling/web.py` size on `sun`: 13,218 lines.
 
 Recent low-risk extractions completed:
 
@@ -144,6 +144,12 @@ Recent low-risk extractions completed:
 - Browser navigation and mutation-target-token support helpers moved into
   `web_runtimes.py`, including the server-owned mutation target selector field
   list used by handoff/shareability reports.
+- Assignment/package freshness helpers now resolve directly from
+  `web_assignment_freshness.py`; `web.py` no longer keeps trampoline wrappers
+  for handoff dataset-queue state counts, assignment snapshots from work, or
+  handoff assignment freshness inspection.
+- Pure detect-analysis promotion formatting helpers moved into
+  `web_promotion_retry.py`.
 
 Current direction:
 
@@ -154,12 +160,8 @@ Current direction:
 
 Best next code candidates:
 
-- Pure detect-analysis promotion formatting helpers:
-  `_parse_clip_index`, `_jsonish`, and `_compact_promotion_result`.
-- Assignment/package freshness helpers not already isolated:
-  `_inspect_handoff_assignment_freshness`,
-  `_handoff_assignment_snapshot_from_work`,
-  `_handoff_dataset_queue_state_counts`.
+- Assignment snapshot shaping helper:
+  `_assignment_snapshot_from_assignments`.
 - Remaining dashboard/page renderer helpers that can be shared by legacy and
   Flask routes.
 
