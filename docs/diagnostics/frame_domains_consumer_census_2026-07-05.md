@@ -1,7 +1,8 @@
 # FrameDomains Consumer Census - 2026-07-05
 
-Status: Slice C migration census, checkpoint 1 accepted and merged on `sun` as
-`e657742`; continuation cleared in `HANDOFF_2026-07-05.md` at `e37e7ea`.
+Status: COMPLETE for all migratable consumers (2026-07-06). Items 1-6 and 8 are
+merged on `sun`; item 7 is gated on dropped-frame evidence and item 9 is the
+deferred writer-stamping phase — both are maintainer decisions, not open agent work.
 
 Scope: consumers that translate between stored-zarr, source/acquisition, run-frame, and
 crop-video frame domains, or infer frame-domain axis length with local arithmetic.
@@ -29,7 +30,7 @@ Deprecated eye-mask paths are intentionally excluded.
 | 5 done | `src/fisheye/diagnostics/check_training_crop_pynvvc_pixel_parity.py` sibling paths and `src/fisheye/utils/regenerate_training_crops_pynvvc.py` | Stored crop frame rows to source-video frames via direct `original_frame_indices` indexing | Medium | Parity checker in checkpoint 1; `regenerate_training_crops_pynvvc.py` in hotpath stage 1 (checkpoint-1 pattern replay + legacy fallback on resolver error; full-array equivalence test). |
 | 6 done | `src/fisheye/detection/detect_keypoints_yolo.py` | Crop/run frame arrays to output `frame_counts` / `n_rois`; `frame_indices.max()+1`; `np.bincount` | High | Hotpath stage 2 (writer). Domain determination: `crop_source.frame_indices` is the crop run's own RUN_FRAME universe; `count(RUN_FRAME)` slot inserted before the `max()+1` fallback. Commander-verified no-op in every reachable config (count resolves iff `crop_group/frame_counts` exists iff lineage copy bypasses the bincount branch); byte-identity writer test landed. |
 | 7 | `src/fisheye/shared/crop_image_source.py` | Crop-row to `crop_video_frame` via `source_crop_video_frame_indices` | High / gated | Crop-video consumer migration requires real dropped-frame evidence per design approval record. Do not migrate before that gate. |
-| 8 | `src/fisheye/refinement/refine_detect.py`, `src/fisheye/shared/refined_detect_curation.py`, `src/fisheye/tracking/arena_assignment.py`, `src/fisheye/tracking/crop.py` | Run-frame count inference and detection/crop frame count arrays; multiple `np.bincount` and `max()+1` patterns | High / hot path | Writers/curation/tracking paths. UNBLOCKED; item 6's writer pattern is approved — migrate per hotpath brief Stage 3 (count-resolution slots only; bincount and parameters stay). |
+| 8 done | `src/fisheye/refinement/refine_detect.py`, `src/fisheye/shared/refined_detect_curation.py`, `src/fisheye/tracking/arena_assignment.py`, `src/fisheye/tracking/crop.py` | Run-frame count inference and detection/crop frame count arrays; multiple `np.bincount` and `max()+1` patterns | High / hot path | Hotpath stage 3: count-resolution slots migrated with legacy fallbacks in refine_detect/curation/arena_assignment (per-file legacy-oracle tests); `tracking/crop.py` verified no-migration-site (all frame universes metadata-sourced, `shape[0]` uses are row validations). Accepted checkpoint-2-class delta in `_infer_num_frames`: resolver stored count can differ from `images_ds.shape[0]` only on internally inconsistent archives. |
 | 9 | Producer/exporter stampers: `src/fisheye/utils/build_analysis_acquisition_crop_run.py`, `src/fisheye/utils/build_hybrid_acquisition_offline_crop_run.py`, `src/fisheye/utils/export_acquisition_crop_pose_training_zarr.py`, `src/fisheye/utils/append_acquisition_crop_video_training.py` | Producer-side frame-domain arrays and count stamping | Highest | Writer phase. Add explicit semantics/stamps only after read-side patterns are stable. |
 
 ## Notes
@@ -39,6 +40,7 @@ Deprecated eye-mask paths are intentionally excluded.
 - `shared/crop_image_source.py` is deliberately not next despite being design-listed:
   the approved design requires real acquisition crop-video dropped-frame evidence before
   crop-video consumer migration.
-- The vectorized resolver landed 2026-07-06 (`9ee35e9`): items 5-remainder, 6, and 8
-  are unblocked. Item 7's dropped-frame evidence gate and item 9's writer-phase
-  ordering are unchanged.
+- The vectorized resolver landed 2026-07-06 (`9ee35e9`); all unblocked items then
+  migrated the same day. Remaining ad-hoc frame arithmetic is confined to items 7/9
+  above plus the shared `metadata.py::get_total_frames` helper (a possible future
+  consolidation target, deliberately outside this census's file list).
