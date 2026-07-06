@@ -162,6 +162,29 @@ def test_regenerate_training_crops_pynvvc_writes_new_luma_crop_run(
     assert "bbox_norm_coords" in target
 
 
+def test_regenerate_training_crops_pynvvc_frame_domain_mapping_matches_legacy_full_array(
+    tmp_path: Path,
+) -> None:
+    zarr_path, _frames = _make_training_archive(tmp_path)
+    root = zarr.open_group(str(zarr_path), mode="r")
+    crop_frame_indices = np.asarray(root["crop_runs/crop_001/frame_indices"][:], dtype=np.int64)
+
+    mapped, metadata = mod._map_source_frame_indices(
+        root=root,
+        crop_frame_indices=crop_frame_indices,
+        mode="original_frame_indices",
+    )
+
+    original_frame_indices = np.asarray(root["raw_video/original_frame_indices"][:], dtype=np.int64)
+    legacy_mapped = original_frame_indices[crop_frame_indices]
+    np.testing.assert_array_equal(mapped, legacy_mapped)
+    assert metadata == {
+        "mode": "original_frame_indices",
+        "original_frame_indices_available": True,
+        "original_frame_indices_length": 3,
+    }
+
+
 def test_load_clipped_source_frame_mapping_reads_required_parquet_columns(
     tmp_path: Path,
 ) -> None:

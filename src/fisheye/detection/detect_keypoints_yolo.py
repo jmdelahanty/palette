@@ -27,6 +27,7 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRe
 from ..registry.db import RegistryPaths
 from ..registry.inline_refresh import refresh_keypoint_performance_details
 from ..shared.crop_image_source import CropImageSource
+from ..shared.frame_domains import FrameDomain, FrameDomainError, FrameDomains
 from ..shared.inference_timing import InferenceTimingProfiler
 from ..shared.keypoint_summary import build_frame_keypoint_counts
 from ..shared.model_input_transform import MODEL_INPUT_TRANSFORM_CHOICES, ModelInputTransform, resolve_model_input_transform
@@ -506,6 +507,13 @@ def _resolve_full_image_shape(root: zarr.Group, crop_group: zarr.Group) -> Tuple
     return (int(img_h), int(img_w)), total_frames
 
 
+def _resolve_crop_run_frame_count_from_domains(root: zarr.Group, crop_group: zarr.Group) -> Optional[int]:
+    try:
+        return int(FrameDomains(root=root, run_group=crop_group).count(FrameDomain.RUN_FRAME))
+    except FrameDomainError:
+        return None
+
+
 def _tensor_input_blocker(batch: np.ndarray, *, model_input_transform: ModelInputTransform) -> Optional[str]:
     if batch.ndim != 3:
         return f"expected ROI batch shape (N, H, W), got {batch.shape}"
@@ -834,6 +842,9 @@ def detect_keypoints_yolo(
     full_img_shape, total_frames = _resolve_full_image_shape(root, crop_group)
 
     norm_factor = np.array([full_img_shape[1], full_img_shape[0]], dtype="f8")
+
+    if total_frames is None:
+        total_frames = _resolve_crop_run_frame_count_from_domains(root, crop_group)
 
     if total_frames is None:
         total_frames = int(frame_indices.max() + 1) if frame_indices.size > 0 else 0
