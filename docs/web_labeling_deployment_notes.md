@@ -98,6 +98,44 @@ http://127.0.0.1:8875/admin/datasets
 
 Use this mode until IT confirms the preferred campus/VPN deployment pattern.
 
+
+## Temporary per-user fixed-user servers
+
+Until a trusted auth proxy is available, a practical short-term multi-labeler setup is one fixed-user server process per labeler, each on a different local port. All servers can point at the same labeling SQLite store, while the assignment store still enforces that each user only sees and mutates their assigned recordings.
+
+Start one server per labeler on the workstation:
+
+```bash
+scripts/start_labeling_web_for_user.sh alice 8791
+scripts/start_labeling_web_for_user.sh bob 8792
+```
+
+The helper delegates to `scripts/start_labeling_web.sh` and prints the matching tunnel command. It keeps the server bound to `127.0.0.1` by default and uses fixed-user auth for the requested labeler.
+
+Important safety rules:
+
+- Use a different port for each labeler.
+- Give each labeler only their own tunnel/link for their assigned fixed-user server.
+- Assign distinct recordings to each labeler; do not have two users mutate the same training zarr.
+- Keep all servers pointed at the same `PALETTE_LABELING_STORE` if you want one unified admin/progress view.
+- `PALETTE_LABELING_ADMIN_USER` defaults to `delahantyj` in this helper so a fixed labeler is not automatically made an admin.
+
+Example with explicit store and remote host:
+
+```bash
+PALETTE_LABELING_STORE=/home/delahantyj@hhmi.org/.palette/labeling_work.sqlite \
+PALETTE_LABELING_REMOTE_HOST=delahantyj-ws1 \
+scripts/start_labeling_web_for_user.sh alice 8791
+```
+
+Stop a specific per-user server by port and pid file shown by the helper:
+
+```bash
+PALETTE_LABELING_PORT=8791 \
+PALETTE_LABELING_PID=/tmp/palette-labeling-web-alice-8791.pid \
+scripts/stop_labeling_web.sh
+```
+
 ## VPN-only direct access option
 
 If the workstation is reachable only from campus/VPN networks, the server can be bound to a non-loopback interface:
