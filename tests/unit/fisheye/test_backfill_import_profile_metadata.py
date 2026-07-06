@@ -145,8 +145,8 @@ def test_include_existing_colorimetry_fills_missing_video_color_subfields(tmp_pa
     assert attrs["video_color_space"] == "bt709"
 
 
-def test_skip_path_contains_prevents_backfill(tmp_path):
-    zarr_path, _, _ = _make_recording(tmp_path / "sleepyfish")
+def test_skip_path_contains_prevents_backfill_case_insensitively(tmp_path):
+    zarr_path, _, _ = _make_recording(tmp_path / "SleepyFish")
 
     rows = backfill.backfill_zarr_import_profile_metadata(
         zarr_path,

@@ -210,7 +210,8 @@ def backfill_zarr_import_profile_metadata(
     skip_if_path_contains: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
     zarr_path = zarr_path.expanduser()
-    if any(token and token in str(zarr_path) for token in skip_if_path_contains):
+    zarr_path_text = str(zarr_path).lower()
+    if any(token and token.lower() in zarr_path_text for token in skip_if_path_contains):
         return [
             _action_row(
                 zarr_path=zarr_path,
