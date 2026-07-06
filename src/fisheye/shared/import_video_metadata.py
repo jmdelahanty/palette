@@ -13,6 +13,11 @@ import imageio.v3 as iio
 import zarr
 
 from fisheye.shared.encoder_tags import parse_encoder_comment
+from fisheye.shared.import_profile_contract import (
+    IMPORT_PROFILE_SCHEMA_ID,
+    PROFILE_METADATA_ONLY_ANALYSIS,
+)
+from fisheye.shared.import_source_fingerprint import optional_source_stat_fingerprint_attrs
 
 def _probe_video(video_path: Path) -> Dict[str, Any]:
     cap = cv2.VideoCapture(str(video_path))
@@ -137,8 +142,22 @@ def _write_metadata(root: zarr.Group, meta: Dict[str, Any], *, overwrite: bool, 
     now = datetime.now(timezone.utc).isoformat()
     raw_updates: Dict[str, Any] = {}
     root_updates: Dict[str, Any] = {}
+    source_video_fingerprint_attrs = optional_source_stat_fingerprint_attrs(
+        meta.get("source_path"),
+        attr_prefix="source_video",
+        extra={
+            "codec": meta.get("codec"),
+            "pix_fmt": meta.get("pix_fmt"),
+            "width": meta.get("width"),
+            "height": meta.get("height"),
+            "fps": meta.get("fps"),
+            "frame_count": meta.get("total_frames"),
+        },
+    )
 
     raw_payload = {
+        "import_profile_schema_id": IMPORT_PROFILE_SCHEMA_ID,
+        "import_profile": PROFILE_METADATA_ONLY_ANALYSIS,
         "import_method": "metadata_only",
         "import_mode": "metadata_only",
         "import_stage": "metadata_only",
@@ -158,6 +177,7 @@ def _write_metadata(root: zarr.Group, meta: Dict[str, Any], *, overwrite: bool, 
         "has_full_resolution": has_arrays and "images_full" in raw,
         "has_downsampled": has_arrays and ("images_ds" in raw or "images_ds_rgb" in raw),
     }
+    raw_payload.update(source_video_fingerprint_attrs)
     encoder_fields = meta.get("encoder_fields") or {}
     if isinstance(encoder_fields, dict) and encoder_fields:
         raw_payload.update(encoder_fields)
@@ -176,6 +196,8 @@ def _write_metadata(root: zarr.Group, meta: Dict[str, Any], *, overwrite: bool, 
         zarr_purpose = "analysis"
 
     root_payload = {
+        "import_profile_schema_id": IMPORT_PROFILE_SCHEMA_ID,
+        "import_profile": PROFILE_METADATA_ONLY_ANALYSIS,
         "has_raw_video": has_arrays,
         "zarr_purpose": zarr_purpose,
         "source_video": meta.get("source_video"),
@@ -193,6 +215,7 @@ def _write_metadata(root: zarr.Group, meta: Dict[str, Any], *, overwrite: bool, 
         "source_video_format_tags": meta.get("format_tags"),
         "source_video_total_frames": meta.get("total_frames"),
     }
+    root_payload.update(source_video_fingerprint_attrs)
     if isinstance(encoder_fields, dict) and encoder_fields:
         root_payload.update(encoder_fields)
     for key, value in root_payload.items():

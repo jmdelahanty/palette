@@ -30,6 +30,9 @@ class _FakePynvvcReader:
 def test_import_sampled_training_pynvvc_writes_luma_training_zarr(tmp_path: Path) -> None:
     video = tmp_path / "Cam2010093_demo.mp4"
     video.write_bytes(b"placeholder")
+    h5_path = tmp_path / "raw" / "demo.h5"
+    h5_path.parent.mkdir(parents=True)
+    h5_path.write_bytes(b"h5-placeholder")
     (tmp_path / "recording_manifest.json").write_text(
         json.dumps(
             {
@@ -72,7 +75,7 @@ import:
         config_path=config,
         camera_id="2010093",
         recording_dir=tmp_path,
-        h5_path=tmp_path / "raw" / "demo.h5",
+        h5_path=h5_path,
         require_cuda=False,
         reader_factory=_FakePynvvcReader,
     )
@@ -106,6 +109,18 @@ import:
     assert raw.attrs["source_video_height"] == 4
     assert raw.attrs["video_width"] == 5
     assert raw.attrs["video_height"] == 4
+    assert raw.attrs["import_profile"] == "sampled_training_pynvvc_luma"
+    assert raw.attrs["import_profile_schema_id"] == "palette.import_profile_contract.v1"
+    assert raw.attrs["source_video_fingerprint_strategy"] == "stat_v1"
+    assert raw.attrs["source_video_fingerprint"]
+    assert raw.attrs["source_video_fingerprint_payload"]["frame_count"] == 10
+    assert raw.attrs["source_video_size_bytes"] == len(b"placeholder")
+    assert raw.attrs["source_h5"] == "demo.h5"
+    assert raw.attrs["source_h5_path"] == str(h5_path)
+    assert raw.attrs["source_h5_fingerprint_strategy"] == "stat_v1"
+    assert raw.attrs["source_h5_fingerprint"]
+    assert root.attrs["source_video_fingerprint"] == raw.attrs["source_video_fingerprint"]
+    assert root.attrs["source_h5_fingerprint"] == raw.attrs["source_h5_fingerprint"]
     assert raw.attrs["original_resolution"] == [4, 5]
     assert resolve_full_frame_shape(root) == (4, 5)
     assert raw["original_frame_indices"][:].tolist() == [0, 3, 6]

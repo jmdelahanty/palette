@@ -18,6 +18,7 @@ from typing import Callable, List, Optional
 import zarr
 
 from fisheye.shared.acquisition_video_streams import write_acquisition_video_stream_inventory
+from fisheye.shared.import_source_fingerprint import optional_source_stat_fingerprint_attrs
 from fisheye.shared.import_video_metadata import probe_video_metadata, write_video_metadata
 from fisheye.shared.recording_preflight import preflight_gate_reason
 
@@ -166,10 +167,48 @@ def apply_video_metadata(plan: RecordingAnalysisPlan, *, overwrite: bool) -> dic
     root = zarr.open_group(str(plan.zarr_path), mode="r+")
     meta = probe_video_metadata(plan.cam_video)
     updates = write_video_metadata(root, meta, overwrite=overwrite, import_purpose="analysis")
+    h5_updates = _write_source_h5_fingerprint(root, plan.h5_path, overwrite=overwrite)
     return {
-        "root_attrs_updated": len(updates.get("root", {})),
-        "raw_video_attrs_updated": len(updates.get("raw_video", {})),
+        "root_attrs_updated": len(updates.get("root", {})) + h5_updates["root_attrs_updated"],
+        "raw_video_attrs_updated": len(updates.get("raw_video", {})) + h5_updates["raw_video_attrs_updated"],
     }
+
+
+def _set_attr_if_needed(attrs: object, key: str, value: object, *, overwrite: bool) -> bool:
+    if value is None:
+        return False
+    try:
+        current = attrs.get(key)  # type: ignore[attr-defined]
+    except Exception:
+        current = None
+    if overwrite or current in (None, ""):
+        attrs[key] = value  # type: ignore[index]
+        return True
+    return False
+
+
+def _write_source_h5_fingerprint(
+    root: zarr.Group,
+    h5_path: Path | None,
+    *,
+    overwrite: bool,
+) -> dict[str, int]:
+    if h5_path is None:
+        return {"root_attrs_updated": 0, "raw_video_attrs_updated": 0}
+    raw = root.require_group("raw_video")
+    payload = {
+        "source_h5": h5_path.name,
+        "source_h5_path": str(h5_path),
+        **optional_source_stat_fingerprint_attrs(h5_path, attr_prefix="source_h5"),
+    }
+    root_updated = 0
+    raw_updated = 0
+    for key, value in payload.items():
+        if _set_attr_if_needed(root.attrs, key, value, overwrite=overwrite):
+            root_updated += 1
+        if _set_attr_if_needed(raw.attrs, key, value, overwrite=overwrite):
+            raw_updated += 1
+    return {"root_attrs_updated": root_updated, "raw_video_attrs_updated": raw_updated}
 
 
 def _log(logger: Optional[Callable[..., None]], event: str, **fields: object) -> None:

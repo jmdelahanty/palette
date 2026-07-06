@@ -123,6 +123,29 @@ def test_sampled_training_profile_missing_required_fields_is_incomplete() -> Non
     assert "raw_video.attrs.pixel_contract_name" in report.required_missing
 
 
+def test_historical_training_arrays_do_not_imply_active_pynvvc_profile() -> None:
+    root = _root_with_raw(
+        {
+            "import_method": "kvikio_zarr",
+            "import_stage": "complete",
+        },
+        root_attrs={"zarr_purpose": "training"},
+        arrays={
+            "images_full": FakeArray((200, 4512, 4512)),
+            "images_ds": FakeArray((200, 640, 640)),
+            "original_frame_indices": FakeArray((200,)),
+            "timestamps": FakeArray((200,)),
+        },
+    )
+
+    report = classify_import_profile(root)
+
+    assert report.profile == PROFILE_LEGACY_DECORD_TRAINING_OR_FULL
+    assert report.status == "warning"
+    assert report.profile != PROFILE_SAMPLED_TRAINING_PYNVVC_LUMA
+    assert "MISSING_REQUIRED_IMPORT_PROFILE_FIELDS" not in report.reason_codes
+
+
 def test_classifies_historical_decord_profile_but_keeps_it_separate() -> None:
     root = _root_with_raw(
         {

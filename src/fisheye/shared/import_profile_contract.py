@@ -208,19 +208,12 @@ def _classify_profile(
             root_attrs.get("zarr_use"),
         )
     )
-    array_set = set(raw_arrays)
-
     if (
         "pynvvc_luma_sampled_training" in fields
         or "pynvvc_luma" in fields
         or "pynvvc-luma" in fields
         or "canonical_orange_mono_pynvvc_luma" in fields
         or "orange_mono_pynvvc_luma" in fields
-        or (
-            ("training" in fields)
-            and "raw_video/images_full" in array_set
-            and "raw_video/original_frame_indices" in array_set
-        )
     ):
         return PROFILE_SAMPLED_TRAINING_PYNVVC_LUMA
 
@@ -231,7 +224,7 @@ def _classify_profile(
         "fisheye.capture.import_video" in fields
         or "legacy_decord" in fields
         or "decord" in fields
-        or (("complete" in fields or "full" in fields) and bool(array_set))
+        or (("complete" in fields or "full" in fields) and bool(raw_arrays))
     ):
         return PROFILE_LEGACY_DECORD_TRAINING_OR_FULL
 

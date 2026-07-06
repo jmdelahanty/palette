@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import zarr
+
 from fisheye.utils import import_recording_analysis as mod
 
 
@@ -177,6 +179,53 @@ def test_ensure_analysis_archive_copies_recording_manifest_context(monkeypatch, 
     assert fake_root.attrs.get("num_dishes") == "1"
     assert fake_root.attrs.get("fish_per_dish") == "1"
     assert fake_root.attrs.get("session_start_iso8601_utc") == "2026-02-23T21:23:35Z"
+
+
+def test_apply_video_metadata_stamps_source_h5_fingerprint(monkeypatch, tmp_path: Path) -> None:
+    rec = tmp_path / "rec"
+    video = rec / "cams" / "cam.mp4"
+    h5_path = rec / "raw" / "session.h5"
+    zarr_path = rec / "zarr" / "rec_analysis.zarr"
+    video.parent.mkdir(parents=True)
+    h5_path.parent.mkdir(parents=True)
+    zarr_path.parent.mkdir(parents=True)
+    video.write_bytes(b"video")
+    h5_path.write_bytes(b"h5")
+    zarr.open_group(str(zarr_path), mode="w", zarr_format=3)
+
+    def _fake_probe(_path: Path) -> dict[str, object]:
+        return {
+            "source_video": video.name,
+            "source_path": str(video),
+            "width": 4512,
+            "height": 4512,
+            "total_frames": 100,
+            "fps": 100.0,
+            "duration_seconds": 1.0,
+            "codec": "hevc",
+            "pix_fmt": "yuv420p",
+        }
+
+    monkeypatch.setattr(mod, "probe_video_metadata", _fake_probe)
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=rec,
+        h5_path=h5_path,
+        cam_video=video,
+        zarr_path=zarr_path,
+    )
+
+    updates = mod.apply_video_metadata(plan, overwrite=False)
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    raw = root["raw_video"]
+    assert updates["root_attrs_updated"] > 0
+    assert updates["raw_video_attrs_updated"] > 0
+    assert root.attrs["source_h5"] == "session.h5"
+    assert raw.attrs["source_h5"] == "session.h5"
+    assert root.attrs["source_h5_fingerprint_strategy"] == "stat_v1"
+    assert raw.attrs["source_h5_fingerprint_strategy"] == "stat_v1"
+    assert root.attrs["source_h5_fingerprint"] == raw.attrs["source_h5_fingerprint"]
+    assert raw.attrs["source_h5_size_bytes"] == len(b"h5")
 
 
 def test_ensure_analysis_archive_imports_acquisition_video_stream_inventory(

@@ -20,6 +20,11 @@ import yaml
 import zarr
 
 from fisheye.shared.pynvvc_luma_rgb import PynvvcLumaRgbReader
+from fisheye.shared.import_profile_contract import (
+    IMPORT_PROFILE_SCHEMA_ID,
+    PROFILE_SAMPLED_TRAINING_PYNVVC_LUMA,
+)
+from fisheye.shared.import_source_fingerprint import optional_source_stat_fingerprint_attrs
 from fisheye.shared.roi_pixel_contract import (
     APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
     CENTER_ROUNDING_NP_ROUND,
@@ -232,7 +237,25 @@ def _write_attrs(
 ) -> None:
     raw_contract = _raw_video_pixel_contract()
     roi_contract = orange_mono_pynvvc_luma_pixel_contract()
+    source_video_fingerprint_attrs = optional_source_stat_fingerprint_attrs(
+        source_video_path,
+        attr_prefix="source_video",
+        extra={
+            "width": int(original_hw[1]),
+            "height": int(original_hw[0]),
+            "frame_count": int(source_frame_count),
+            "frame_step": int(frame_step),
+            "skip_tail_frames": int(skip_tail_frames),
+            "decode_backend": PYNVVC_LUMA_DECODE_BACKEND,
+        },
+    )
+    source_h5_fingerprint_attrs = optional_source_stat_fingerprint_attrs(
+        h5_path,
+        attr_prefix="source_h5",
+    )
     root_attrs = {
+        "import_profile_schema_id": IMPORT_PROFILE_SCHEMA_ID,
+        "import_profile": PROFILE_SAMPLED_TRAINING_PYNVVC_LUMA,
         "zarr_purpose": "training",
         "zarr_use": "training",
         "created_at_utc": created_at_utc,
@@ -242,9 +265,16 @@ def _write_attrs(
         "video_width": int(original_hw[1]),
         "video_height": int(original_hw[0]),
     }
+    root_attrs.update(source_video_fingerprint_attrs)
     root_attrs.update(_manifest_recording_attrs(recording_dir))
+    if h5_path is not None:
+        root_attrs["source_h5"] = h5_path.name
+        root_attrs["source_h5_path"] = str(h5_path)
+        root_attrs.update(source_h5_fingerprint_attrs)
     root.attrs.update(root_attrs)
     raw_attrs: dict[str, Any] = {
+        "import_profile_schema_id": IMPORT_PROFILE_SCHEMA_ID,
+        "import_profile": PROFILE_SAMPLED_TRAINING_PYNVVC_LUMA,
         "import_method": "pynvvc_luma_sampled_training",
         "import_stage": "complete",
         "import_mode": "sampled",
@@ -291,6 +321,7 @@ def _write_attrs(
         "has_downsampled": downsampled_hw is not None,
         "import_timestamp": created_at_utc,
     }
+    raw_attrs.update(source_video_fingerprint_attrs)
     if downsampled_hw is not None:
         raw_attrs.update(
             {
@@ -307,6 +338,8 @@ def _write_attrs(
         raw_attrs["recording_dir"] = str(recording_dir)
     if h5_path is not None:
         raw_attrs["source_h5_path"] = str(h5_path)
+        raw_attrs["source_h5"] = h5_path.name
+        raw_attrs.update(source_h5_fingerprint_attrs)
     if duration_s is not None:
         raw_attrs["import_duration_seconds"] = float(duration_s)
     raw.attrs.update(raw_attrs)
