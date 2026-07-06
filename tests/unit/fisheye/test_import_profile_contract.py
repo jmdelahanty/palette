@@ -73,6 +73,29 @@ def test_classifies_metadata_only_analysis_profile_ok() -> None:
     assert report.required_missing == ()
 
 
+def test_classifies_video_prefixed_colorimetry_as_present() -> None:
+    root = _root_with_raw(
+        {
+            "import_method": "metadata_only",
+            "import_stage": "metadata_only",
+            "total_frames": 1000,
+            "fps": 100.0,
+            "source_path": "/data/source.mp4",
+            "source_video_fingerprint": "stat_v1:abc",
+            "video_color_space": "bt709",
+            "video_codec": "hevc",
+            "video_pix_fmt": "yuv420p",
+        },
+        root_attrs={"zarr_purpose": "analysis"},
+    )
+
+    report = classify_import_profile(root)
+
+    assert report.profile == PROFILE_METADATA_ONLY_ANALYSIS
+    assert report.status == "ok"
+    assert "MISSING_COLORIMETRY" not in report.reason_codes
+
+
 def test_classifies_sampled_training_pynvvc_profile_ok() -> None:
     root = _root_with_raw(
         {
@@ -199,6 +222,37 @@ def test_check_import_profile_jsonl_cli_uses_classifier_without_real_zarr(
     assert row["zarr_path"] == "/tmp/example.zarr"
     assert row["profile"] == PROFILE_METADATA_ONLY_ANALYSIS
     assert row["status"] == "ok"
+
+
+def test_check_import_profile_compact_summary_cli_uses_classifier_without_real_zarr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = _root_with_raw(
+        {
+            "import_method": "metadata_only",
+            "import_stage": "metadata_only",
+            "total_frames": 10,
+            "fps": 100,
+            "source_path": "/data/source.mp4",
+            "source_video_fingerprint": "stat_v1:abc",
+            "video_color_range": "tv",
+        },
+        root_attrs={"zarr_purpose": "analysis"},
+    )
+    summary_path = tmp_path / "summary.json"
+    monkeypatch.setattr(check_import_profile, "open_zarr_root", lambda path, mode="r": root)
+
+    rc = check_import_profile.main(["--jsonl", "--compact", "--summary", str(summary_path), "/tmp/example.zarr"])
+
+    assert rc == 0
+    row = json.loads(capsys.readouterr().out)
+    assert "attrs_observed" not in row
+    summary = json.loads(summary_path.read_text())
+    assert summary["total"] == 1
+    assert summary["status_counts"] == {"ok": 1}
+    assert summary["profile_counts"] == {PROFILE_METADATA_ONLY_ANALYSIS: 1}
 
 
 def test_check_import_profile_fail_on_incomplete(

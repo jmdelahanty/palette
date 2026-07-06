@@ -62,6 +62,10 @@ COLORIMETRY_ATTRS = (
     "color_primaries",
     "container_color_range_observed",
     "video_color_range",
+    "video_color_space",
+    "video_color_transfer",
+    "video_color_primaries",
+    "source_video_colorimetry_source",
 )
 
 

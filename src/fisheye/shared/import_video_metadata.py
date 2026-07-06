@@ -19,6 +19,38 @@ from fisheye.shared.import_profile_contract import (
 )
 from fisheye.shared.import_source_fingerprint import optional_source_stat_fingerprint_attrs
 
+
+SOURCE_VIDEO_COLORIMETRY_FIELDS = (
+    "color_range",
+    "color_space",
+    "color_transfer",
+    "color_primaries",
+)
+SOURCE_VIDEO_COLORIMETRY_ATTRS = tuple(f"video_{field}" for field in SOURCE_VIDEO_COLORIMETRY_FIELDS)
+
+
+def _stream_colorimetry_attrs(stream: Dict[str, Any]) -> Dict[str, str]:
+    attrs: Dict[str, str] = {}
+    for field in SOURCE_VIDEO_COLORIMETRY_FIELDS:
+        value = stream.get(field)
+        if value in (None, ""):
+            continue
+        text = str(value).strip()
+        if text.lower() in {"", "unknown", "unspecified", "none", "null"}:
+            continue
+        attrs[f"video_{field}"] = text
+    if attrs:
+        attrs["source_video_colorimetry_source"] = "ffprobe_stream"
+    return attrs
+
+
+def _colorimetry_payload(meta: Dict[str, Any]) -> Dict[str, Any]:
+    payload = {attr: meta.get(attr) for attr in SOURCE_VIDEO_COLORIMETRY_ATTRS if meta.get(attr) not in (None, "")}
+    if payload and meta.get("source_video_colorimetry_source"):
+        payload["source_video_colorimetry_source"] = meta.get("source_video_colorimetry_source")
+    return payload
+
+
 def _probe_video(video_path: Path) -> Dict[str, Any]:
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -39,6 +71,7 @@ def _probe_video(video_path: Path) -> Dict[str, Any]:
     format_tags: Dict[str, Any] = {}
     stream_codec: Optional[str] = None
     stream_pix_fmt: Optional[str] = None
+    stream_colorimetry: Dict[str, str] = {}
     try:
         result = subprocess.run(
             [
@@ -48,7 +81,7 @@ def _probe_video(video_path: Path) -> Dict[str, Any]:
                 "-select_streams",
                 "v:0",
                 "-show_entries",
-                "format_tags=title,comment,encoder:stream=codec_name,codec_tag_string,pix_fmt",
+                "format_tags=title,comment,encoder:stream=codec_name,codec_tag_string,pix_fmt,color_range,color_space,color_transfer,color_primaries",
                 "-of",
                 "json",
                 str(video_path),
@@ -68,8 +101,10 @@ def _probe_video(video_path: Path) -> Dict[str, Any]:
                 if isinstance(stream, dict):
                     stream_codec = stream.get("codec_name") or stream.get("codec_tag_string")
                     stream_pix_fmt = stream.get("pix_fmt")
+                    stream_colorimetry = _stream_colorimetry_attrs(stream)
     except Exception:
         format_tags = {}
+        stream_colorimetry = {}
 
     encoder_fields = parse_encoder_comment(format_tags.get("comment") if format_tags else None)
 
@@ -105,6 +140,7 @@ def _probe_video(video_path: Path) -> Dict[str, Any]:
         "imageio_metadata": iio_meta if iio_meta else None,
         "format_tags": format_tags if format_tags else None,
         "encoder_fields": encoder_fields if encoder_fields else None,
+        **stream_colorimetry,
     }
 
 
@@ -177,6 +213,7 @@ def _write_metadata(root: zarr.Group, meta: Dict[str, Any], *, overwrite: bool, 
         "has_full_resolution": has_arrays and "images_full" in raw,
         "has_downsampled": has_arrays and ("images_ds" in raw or "images_ds_rgb" in raw),
     }
+    raw_payload.update(_colorimetry_payload(meta))
     raw_payload.update(source_video_fingerprint_attrs)
     encoder_fields = meta.get("encoder_fields") or {}
     if isinstance(encoder_fields, dict) and encoder_fields:
@@ -215,6 +252,7 @@ def _write_metadata(root: zarr.Group, meta: Dict[str, Any], *, overwrite: bool, 
         "source_video_format_tags": meta.get("format_tags"),
         "source_video_total_frames": meta.get("total_frames"),
     }
+    root_payload.update(_colorimetry_payload(meta))
     root_payload.update(source_video_fingerprint_attrs)
     if isinstance(encoder_fields, dict) and encoder_fields:
         root_payload.update(encoder_fields)
