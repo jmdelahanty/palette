@@ -4652,6 +4652,16 @@ def _link_secret_from_arg(value: str | None) -> str:
 
 
 ZARR_BACKUP_PATH_KEYS = _web_zarr_backup.ZARR_BACKUP_PATH_KEYS
+_zarr_backup_contract_policy = _web_zarr_backup._zarr_backup_contract_policy
+_iter_zarr_path_values = _web_zarr_backup._iter_zarr_path_values
+_zarr_backup_role_for_key = _web_zarr_backup._zarr_backup_role_for_key
+_safe_backup_slug = _web_zarr_backup._safe_backup_slug
+_backup_target_destination = _web_zarr_backup._backup_target_destination
+_copy_backup_source = _web_zarr_backup._copy_backup_source
+_restore_assignment_conflicts = _web_zarr_backup._restore_assignment_conflicts
+_restore_backup_target = _web_zarr_backup._restore_backup_target
+_restore_zarr_backup_manifest = _web_zarr_backup._restore_zarr_backup_manifest
+_record_zarr_backup_evidence = _web_zarr_backup._record_zarr_backup_evidence
 
 
 def _configure_zarr_backup_plan_helpers() -> None:
@@ -4662,20 +4672,7 @@ def _configure_zarr_backup_plan_helpers() -> None:
     )
 
 
-def _zarr_backup_contract_policy(
-    policy: Mapping[str, object],
-    counts: Mapping[str, object],
-    files: Mapping[str, object],
-) -> dict[str, object]:
-    return _web_zarr_backup._zarr_backup_contract_policy(policy, counts, files)
 
-
-def _iter_zarr_path_values(value: object) -> Iterable[tuple[str, str]]:
-    return _web_zarr_backup._iter_zarr_path_values(value)
-
-
-def _zarr_backup_role_for_key(key: str, task: Mapping[str, object]) -> str:
-    return _web_zarr_backup._zarr_backup_role_for_key(key, task)
 
 
 def _zarr_backup_plan(
@@ -4703,16 +4700,7 @@ def _zarr_backup_plan(
 
 
 
-def _safe_backup_slug(value: object, *, fallback: str) -> str:
-    return _web_zarr_backup._safe_backup_slug_impl(value, fallback=fallback)
 
-
-def _backup_target_destination(backup_dir: Path, target: Mapping[str, object], index: int) -> Path:
-    return _web_zarr_backup._backup_target_destination_impl(backup_dir, target, index)
-
-
-def _copy_backup_source(source: Path, destination: Path, *, overwrite: bool) -> None:
-    _web_zarr_backup._copy_backup_source_impl(source, destination, overwrite=overwrite)
 
 
 def _execute_zarr_backup_plan(
@@ -4735,93 +4723,6 @@ def _execute_zarr_backup_plan(
         dry_run=dry_run,
         allow_missing=allow_missing,
     )
-
-
-def _restore_assignment_conflicts(
-    store: LabelingStore,
-    recording_ids: Sequence[object],
-) -> list[dict[str, object]]:
-    return _web_zarr_backup._restore_assignment_conflicts_impl(store, recording_ids)
-
-
-def _restore_backup_target(
-    *,
-    source_backup: Path,
-    restore_path: Path,
-    replace_current: bool,
-    generated_at_utc: str,
-) -> dict[str, object]:
-    return _web_zarr_backup._restore_backup_target_impl(
-        source_backup=source_backup,
-        restore_path=restore_path,
-        replace_current=replace_current,
-        generated_at_utc=generated_at_utc,
-    )
-
-
-def _restore_zarr_backup_manifest(
-    *,
-    store: LabelingStore,
-    manifest_path: Path,
-    operator: str,
-    target_indexes: Sequence[int],
-    restore_all: bool = False,
-    replace_current: bool = False,
-    allow_active_assignment: bool = False,
-) -> dict[str, object]:
-    return _web_zarr_backup._restore_zarr_backup_manifest_impl(
-        store=store,
-        manifest_path=manifest_path,
-        operator=operator,
-        target_indexes=target_indexes,
-        restore_all=restore_all,
-        replace_current=replace_current,
-        allow_active_assignment=allow_active_assignment,
-    )
-
-
-def _record_zarr_backup_evidence(
-    *,
-    evidence_path: Path,
-    execution_manifest_path: Path,
-    operator: str,
-    restore_test_result: str,
-    target_indexes: Sequence[int],
-    record_all: bool = False,
-    output: Path | None = None,
-    overwrite: bool = False,
-    notes: str | None = None,
-) -> dict[str, object]:
-    return _web_zarr_backup._record_zarr_backup_evidence_impl(
-        evidence_path=evidence_path,
-        execution_manifest_path=execution_manifest_path,
-        operator=operator,
-        restore_test_result=restore_test_result,
-        target_indexes=target_indexes,
-        record_all=record_all,
-        output=output,
-        overwrite=overwrite,
-        notes=notes,
-    )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
