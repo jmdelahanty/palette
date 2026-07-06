@@ -58,6 +58,7 @@ from .web_operator_evidence_records import (
     _record_identity_source_evidence,
 )
 from . import web_zarr_backup as _web_zarr_backup
+from .web_assignment_validation import _active_assignee_user_issues
 from .web_assignment_freshness import (
     _assignment_snapshot_from_assignments,
     _assignment_snapshot_rows_impl as _assignment_snapshot_rows,
@@ -672,50 +673,6 @@ def _task_open_preflight_error(
             HTTPStatus.CONFLICT,
         )
     return None
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def _active_assignee_user_issues(
-    store: LabelingStore,
-    rows: Sequence[Mapping[str, object]],
-) -> list[dict[str, object]]:
-    issues: list[dict[str, object]] = []
-    for row in rows:
-        assignee_user = str(row.get("assignee_user") or row.get("user") or "").strip()
-        if not assignee_user:
-            continue
-        status = _known_labeler_status(store, assignee_user)
-        if bool(status.get("is_active_labeling_user")):
-            continue
-        issues.append(
-            {
-                "code": "inactive_or_unknown_assignee_user",
-                "assignee_user": assignee_user,
-                "recording_id": str(row.get("recording_id") or ""),
-                **({"source_line": row["_source_line"]} if row.get("_source_line") is not None else {}),
-                "assignee_user_status": status,
-                "details": (
-                    "Assignments can only be created or updated for users with an active "
-                    "row in the labeling_users SQLite table. Add or activate the user first."
-                ),
-            }
-        )
-    return issues
 
 
 
