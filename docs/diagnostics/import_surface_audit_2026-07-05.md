@@ -1,8 +1,9 @@
 # Import surface audit — 2026-07-05
 
-status: active — diagnostic. Read-only investigation (3-agent parallel sweep) of the
-experiment-import surface: the import structures, registry linkage, and metadata-capture
-reliability. No code changed. Seeds the "bring import inside the perimeter" brief family.
+status: active — diagnostic. Read-only investigation (3-agent parallel sweep, followed by
+a focused correction pass) of the experiment-import surface: the import structures,
+registry linkage, and metadata-capture reliability. No code changed. Seeds the "bring
+import inside the perimeter" brief family.
 
 ## Motivating question
 
@@ -11,49 +12,43 @@ the registry updated on import, and are we reliably capturing metadata at import
 
 ## TLDR
 
-Import is the root of the pipeline DAG and the **least-governed stage in it**. Everything
-from `detect` onward now has fail-closed completion markers, enforced run provenance
-(epoch 2), and — as of `62a8e52` — content-hashed model artifacts. Import has none of
-that: structural completion detection, flag-gated registration, and best-effort-everything
-metadata. This is the 2026-07-01 review's throughline ("disciplined core, silent-wrong-data
-at the boundaries") resurfacing at the one boundary the remediation never reached.
+Import is the root of the pipeline DAG and the **least-governed active boundary**.
+Everything from `detect` onward now has fail-closed completion markers, enforced run
+provenance (epoch 2), and — as of `62a8e52` — content-hashed model artifacts. Import
+does not yet have an equivalent singleton contract: completion is inferred from
+structure/profile-specific artifacts, registration is still flag-gated, and several
+metadata fields degrade to best-effort or `unknown`. This is the 2026-07-01 review's
+throughline ("disciplined core, silent-wrong-data at the boundaries") resurfacing at the
+one boundary the remediation never reached.
 
 Three headline answers:
-1. **Two coexisting import paths** capture different things; the one production runs is the
-   metadata-only path, and the richer provenance block lives on the *legacy* path.
+1. **Several import-like paths** capture different things. The production recording path
+   has two active singleton profiles: metadata-only analysis import, and sampled training
+   pixel import via PyNvVC. The old `capture/import_video.py` Decord pixel importer is
+   legacy compatibility and is not a future support target.
 2. **The registry IS updated at import — but only if `--registry` is passed** (default-on in
    the cluster chain, absent for hand-runs), with no enforcement that stores are registered
    before stages run, and a manual-only reconcile safety net.
 3. **Metadata capture is NOT reliable** — loud on structural failure, silent on metadata
-   absence. A recording can import "successfully" with `unknown` codec, all-NaN timestamps,
-   no source fingerprint, no colorimetry, and zero experiment identity.
+   absence. A recording can import "successfully" with `unknown` codec, no source
+   fingerprint, no colorimetry, and experiment identity that is present only when the
+   manifest/H5 path supplied it and not validated for completeness. Main pixel/schema paths
+   can also expose `raw_video/timestamps` without writing usable values.
+
+Two scope decisions from the correction pass:
+
+- Do **not** invest in the legacy `core/pipeline.py` orchestration path; keep it as
+  compatibility/reference only while active workflows move through the `palette` CLI and
+  batch/cluster wrappers.
+- Keep import as a **singleton** surface, not a timestamped run parent. The target is a
+  mandatory singleton import/profile contract on `raw_video`/root attrs, not a new
+  `raw_import_runs` family.
 
 ---
 
-## 1. The import structures — two coexisting paths
+## 1. The import structures — active singleton profiles plus historical pixel path
 
-### Path A — pixel importer (`capture/import_video.py`, ~1687 lines)
-GPU-decodes frames into a zarr. **Driven by the LEGACY orchestrator** (`core/pipeline.py`,
-which prints `LEGACY_ORCHESTRATOR_NOTICE`). Also used for sampled/training imports via
-pynvvc.
-- **Produces:** `raw_video/images_full` (n,H,W), `images_ds` (downsampled gray), optional
-  `images_ds_rgb`, `timestamps` (see gap #1), BT.601 grayscale via the newly-centralized
-  `shared/grayscale.py`.
-- **Frame-domain identity:** `stamp_stored_zarr_frame_identity_mapping()`
-  (`import_video.py:99`) writes `raw_video/frame_domain_maps/stored_zarr_frame_to_acquisition_frame`
-  = `arange(n)`, `semantics="identity_map_zero_based_full_import"`; sampled imports write
-  `raw_video/original_frame_indices` instead. These feed `FrameDomains._build_raw_edges()`.
-- **Provenance:** writes a rich git/branch/dirty + host/GPU/GDS + LSF/SLURM block to
-  `raw_video.attrs` (`:1255-1405`) — but this is inline attrs, NOT `mark_run_complete` /
-  completion-epoch (see §4).
-- **Process model:** forks a child, `_exit(0)` to skip atexit (avoids CUDA-teardown
-  segfault); parent `waitpid`s.
-- **Dead code:** CPU path raises `NotImplementedError` (`:533`, `:1200`).
-- **Self-labeled legacy pixels:** `_decode_contract_metadata` (`:626`) marks its output
-  `legacy_decord_pending_pynvvc_unification`; canonical target is `pynvvc_luma`
-  (`utils/import_sampled_training_pynvvc.py`).
-
-### Path B — production metadata-only path (what the `raw` verb + cluster run)
+### Path A — production metadata-only analysis path (what the `raw` verb + cluster run)
 No frames decoded. Verb wiring: `cli/palette.py:689` (`stage_id=="raw"`, verb `"import"`) →
 `fisheye.utils.import_organized_recordings_analysis --registry <db> <dir>`.
 - **Batch entry:** `import_organized_recordings_analysis.py::main` (`:338`) — discovers
@@ -72,10 +67,75 @@ No frames decoded. Verb wiring: `cli/palette.py:689` (`stage_id=="raw"`, verb `"
   (attrs-only onto an existing store; NOT a pure shim — it owns a live CLI, per the
   2026-07-05 utils-shim census).
 
+### Path B — production sampled training pixel importer
+This is the active pixel-materialization path for per-recording `_training.zarr` archives.
+It is not the old `capture/import_video.py` path.
+
+- **Batch entry:** `utils/import_recordings_training.py` plans
+  `zarr/<recording>_training.zarr`, resolves frame step from `--target-sampled-frames` or
+  `--frame-step`, and defaults to `--decode-backend pynvvc-luma`.
+- **Pixel engine:** default backend invokes
+  `fisheye.utils.import_sampled_training_pynvvc` (`import_recordings_training.py:409-428`),
+  which sequentially decodes the source MP4 with `PynvvcLumaRgbReader`, writes
+  `raw_video/images_full`, optional `raw_video/images_ds`, and
+  `raw_video/original_frame_indices`, and stamps the
+  `orange_mono_pynvvc_luma_uint8_v1`/PyNvVC luma pixel contract.
+- **Training functionality remains required.** This path is how new sampled full-frame
+  detector-training zarrs are materialized. It should be included in the singleton import
+  profile contract rather than deprecated.
+- **Legacy escape hatch:** the wrapper still exposes
+  `--decode-backend legacy-decord --allow-legacy-decode-contract`, which calls
+  `fisheye.capture.import_video --training-data`; that branch is the legacy path, not the
+  default training workflow.
+
+### Path C — historical Decord pixel importer (`capture/import_video.py`, ~1687 lines)
+GPU-decodes frames into a zarr. It is reachable from the old orchestrator
+(`core/pipeline.py`, which prints `LEGACY_ORCHESTRATOR_NOTICE`) and some compatibility/
+intake paths, but it is not the forward production target. Current sampled training imports use
+`utils/import_sampled_training_pynvvc.py`; `capture/import_video.py` is used only through
+legacy or explicit legacy-decord paths.
+- **Produces:** `raw_video/images_full` (n,H,W), `images_ds` (downsampled gray), optional
+  `images_ds_rgb`, `timestamps` (see gap #1), BT.601 grayscale via the newly-centralized
+  `shared/grayscale.py`.
+- **Frame-domain identity:** `stamp_stored_zarr_frame_identity_mapping()`
+  (`import_video.py:99`) writes `raw_video/frame_domain_maps/stored_zarr_frame_to_acquisition_frame`
+  = `arange(n)`, `semantics="identity_map_zero_based_full_import"`; sampled imports write
+  `raw_video/original_frame_indices` instead. These feed `FrameDomains._build_raw_edges()`.
+- **Provenance:** writes a rich git/branch/dirty + host/GPU/GDS + LSF/SLURM block to
+  `raw_video.attrs` (`:1255-1405`) — but this is inline attrs, NOT `mark_run_complete` /
+  completion-epoch (see §4).
+- **Process model:** forks a child, `_exit(0)` to skip atexit (avoids CUDA-teardown
+  segfault); parent `waitpid`s.
+- **Dead code:** CPU path raises `NotImplementedError` (`:533`, `:1200`).
+- **Self-labeled legacy pixels:** `_decode_contract_metadata` (`:626`) marks its output
+  `legacy_decord_pending_pynvvc_unification`; canonical target is `pynvvc_luma`
+  (`utils/import_sampled_training_pynvvc.py`).
+
 ### Conflict flag
-Both paths write the same `raw_video` group with **conflicting** `import_method` /
-`import_stage` / `import_mode` values (`complete`/`full` vs `metadata_only`). The richer
-provenance block is written only by Path A (legacy); Path B (production) omits it.
+These paths write the same singleton `raw_video` group with **different** `import_method` /
+`import_stage` / `import_mode` values (`metadata_only`, `pynvvc_luma_sampled_training`,
+legacy `complete`/`full`). Metadata-only import does not overwrite existing attrs unless
+explicitly asked, so re-imports can preserve stale values. Since the legacy Decord path is
+not a forward support target, the action is not "make all paths equivalent"; it is to
+define and enforce production singleton import profiles, including a metadata-only
+analysis profile and a sampled/materialized training profile.
+
+### Additional import-like surfaces to keep in scope
+The first audit under-counted import-like writers. A production cleanup should include or
+explicitly classify these surfaces:
+
+- `analysis/create_analysis_zarr.py` — standalone metadata-only analysis shell, optional
+  registry update.
+- `utils/run_recording_analysis_pipeline.py` and `utils/import_recordings_analysis.py` —
+  wrapper/pipeline import paths with optional registry scan.
+- `utils/import_recordings_training.py` / `utils/import_sampled_training_pynvvc.py` —
+  active sampled training pixel import path, listed above as Path B.
+- `utils/intake_video_only_recording.py` — video-only intake that can call the legacy pixel
+  importer, patch metadata, and optionally register.
+- `utils/create_clipped_analysis_zarr.py` and `utils/create_clipped_training_zarr.py` —
+  clipped metadata/pixel import-like creators.
+- `utils/recording_manifest_import_status.py` — import-log manifest backfill that can scan
+  successful imports into the registry.
 
 ### Operational arrival of a new experiment (today)
 Citrus transfer session → `submit_citrus_session_import_bsub.sh` (one LSF job/session,
@@ -89,12 +149,16 @@ submits today.
 ## 2. Registry linkage — is the registry updated on import?
 
 **Yes, synchronously — but conditionally.**
-- `capture/import_video.py` has **zero** registry references. The pixel path never registers.
+- `capture/import_video.py` has **zero** registry references. The historical Decord pixel
+  engine never registers itself. The active sampled-training wrapper
+  (`utils/import_recordings_training.py`) can register created `_training.zarr` archives,
+  but only when `--register` is passed; the cluster submitter defaults that on.
 - The batch wrapper's `_sync_registry` (`import_organized_recordings_analysis.py:246`) calls
   `Registry.scan_zarr(zarr_path)` (`registry/db.py:8198`) → `register_from_root`
-  (`db.py:6609`) → full extractor sweep in one transaction, including
-  `replace_acquisition_video_streams` (`db.py:6670`), datasets, recordings, provenance,
-  quality/performance tables. This is a **direct write at import**, not deferred to reconcile.
+  (`db.py:6609`) → core dataset/recording/provenance/projection refresh in one transaction,
+  including `replace_acquisition_video_streams` (`db.py:6670`). This is a **direct write at
+  import**, not deferred to reconcile. `reconcile_dataset_from_root` (`db.py:6747`) is the
+  broader superset for profile/data-card extractors.
 - **BUT `--registry` is optional** (argparse `:417`, no `required`, no default). A bare
   import writes nothing. The cluster submitter defaults it on; hand-runs and `--no-register`
   do not.
@@ -135,14 +199,18 @@ Capture summary (item → where it lands → status):
 - **System/git/GPU/HPC provenance:** Path A only; whole block in a try/except that only
   prints a warning (`:1409-1412`) — a "successful" import can carry none of it.
 - **Experiment metadata** (genotype, dpf, protocol, dish, rig/arena/camera, session_uuid,
-  subject/fish, cross/line/species/sex): reaches `recording_manifest.json` +
-  registry columns + stimulus snapshots — **only via the H5, only when stimulus import runs.**
-  Never stamped into `raw_video` or zarr root as first-class attrs by either importer.
+  subject/fish, cross/line/species/sex): production organized import stamps many
+  manifest-derived fields onto root attrs via `ensure_analysis_archive`, and the registry
+  also projects normalized context. Gaps remain: the fields are not mirrored into
+  `raw_video`, direct pixel/direct metadata paths are weaker, and content completeness is
+  not validated. H5/protocol source files also lack a fingerprint/hash.
 
 ### Reliability mechanics
-- Preflight (`recording_preflight.py`) checks only media/tooling + H5 presence/readability;
-  gates only on `status=="fail"`, bypassable with `--allow-preflight-failures`. Does NOT
-  validate experiment-metadata *content*.
+- Preflight (`recording_preflight.py`) can include video probe/timing/GOP/decode and H5
+  diagnostics when organize ran them, but import gating only blocks on `status=="fail"` and
+  remains bypassable with `--allow-preflight-failures`. It does NOT validate
+  experiment-metadata *content*, and it does not check freshness against source mtimes or
+  manifest changes.
 - Manifest required fields (`validate_recording_manifest.py:28-33`) are only recording_type/
   subtype/behavior_mode/artifact_schema_id — and auto-defaulted, not hard-required.
 - Post-import checks: `validate_import` checks frame-count + `import_stage` only.
@@ -157,29 +225,42 @@ Capture summary (item → where it lands → status):
 
 Ordered by data-integrity risk. Each is a candidate slice.
 
-1. **`raw_video/timestamps` is created and never written** — all-NaN on every path (only
-   ref `import_video.py:597`). No per-frame acquisition-clock mapping exists anywhere.
-   → Populate from the decode/H5, or delete the array and stop implying it exists.
-2. **No experiment identity in the zarr.** Genotype/protocol/subject/arena/rig/session_uuid
-   survive only in manifest + registry + stimulus snapshots, and only when the H5 exists.
-   Pixel-only stores know nothing about the fish. → Stamp manifest context into zarr root
-   attrs at import (both paths), fail-closed on absence for production imports.
+1. **Unreliable `raw_video/timestamps` contract.** Main pixel/schema import paths create
+   `raw_video/timestamps` but do not populate it with usable acquisition timestamps.
+   Metadata-only imports write no timestamp array. Clipped training creators can write
+   timestamp data, so the problem should be scoped to the main import surfaces rather than
+   described as literally every path.
+   → Populate from the decode/H5/frame metadata where reliable, or delete/rename the array
+   and stop implying a universal timestamp contract.
+2. **Experiment identity is partial and unvalidated.** Production organized import does
+   stamp manifest context onto root attrs when present, but not onto `raw_video`; pixel-only
+   and direct metadata paths remain weaker; and missing genotype/protocol/subject context
+   is not a hard failure.
+   → Define required-vs-optional manifest context for production imports, stamp a canonical
+   singleton context/provenance block, and fail or explicitly mark unknown-provenance when
+   required context is absent.
 3. **No source-video fingerprint at import.** Nothing detects a swapped/re-encoded source
    MP4; `stat_v1` (`audit_zarr_pixel_contracts.py:1198`) is a manual post-hoc backfill.
    Note the irony: model inputs are now content-hashed (`62a8e52`) but the *video* — the
    primary experimental input — is not. → Fingerprint the source at import (cheap; `stat_v1`
    exists, just move it into the import path).
-4. **No colorimetry probed at import** (color range/space/transfer/primaries) — only a
+4. **No H5/protocol/source metadata fingerprint at import.** Root attrs carry paths such as
+   `source_h5_path`, but not a hash/stat fingerprint for the H5/protocol side of the
+   experiment.
+5. **No colorimetry probed at import** (color range/space/transfer/primaries) — only a
    hardcoded "full-range assumed" string; ffprobe backfill only via the audit tool.
-5. **Experiment metadata is never validated.** Nothing fails or warns on missing genotype/
+6. **Experiment metadata is not validated.** Nothing fails or warns on missing genotype/
    protocol/subject. → Extend preflight or add a post-import completeness gate.
-6. **Silent degradation stored as authoritative:** codec/pix_fmt → `"unknown"`; decode
+7. **Silent degradation stored as authoritative:** codec/pix_fmt → `"unknown"`; decode
    contract assumed; system provenance best-effort. → Make these loud or explicitly tag as
    unknown-provenance.
-7. **The one completeness validator is dead code** (`validate_zarr_structure`, warns-only,
+8. **The one completeness validator is dead code** (`validate_zarr_structure`, warns-only,
    never called). → Wire it in as an error gate, or delete it (no `status:active` orphan).
-8. **Path A/B convergence + import outside the completion-epoch perimeter** (§4). → The
-   structural decision that governs the rest.
+9. **Stale attrs on re-import.** Production root identity uses `setdefault`, and video
+   metadata only overwrites with explicit overwrite behavior. A re-import can leave old
+   context or video attrs in place.
+10. **Import outside the completion/provenance perimeter** (§4). → Define the singleton
+    import profile contract and make it the one active completion/provenance rule.
 
 ---
 
@@ -187,25 +268,33 @@ Ordered by data-integrity risk. Each is a candidate slice.
 
 - Import IS cataloged: `registry/stage_catalog.py:38` — `StageSpec(id="raw",
   aliases=("import",), category=CORE_PIPELINE)`, dependency-free root of the DAG.
-- **Completion is STRUCTURAL, not marker-based:** `core/pipeline.py::_is_stage_complete`
-  for `'import'` = `'raw_video' in root and 'images_ds' in root['raw_video']`
-  (`:1127-1128`); launcher mirrors it (`interactive_launcher.py:437`).
+- **Completion is STRUCTURAL and inconsistent, not marker-based:** old surfaces disagree
+  about what "raw/import complete" means (`images_ds`, `images_full`, any `raw_video`,
+  sampled `original_frame_indices`, or metadata-only analysis markers). The legacy
+  pipeline disagreement is not a forward support target, but active status/registry
+  surfaces still need one production rule.
 - **No completion epoch / run provenance on `raw_video`.** The epoch regime
   (`shared/zarr_run_completion.py`, `mark_run_complete`, epoch 2) governs timestamped
-  run-groups under stage parents (detect_runs, crop_runs, keypoints_runs…). `raw_video` is a
-  singleton group, not a run-group container, so no importer stamps an epoch or run-provenance
-  marker. Import's only "provenance" is Path A's inline attr block — which Path B omits.
+  run-groups under stage parents (detect_runs, crop_runs, keypoints_runs…). By decision,
+  `raw_video` remains a singleton group rather than becoming `raw_import_runs`.
+- **Target rule:** bring import inside the perimeter as a singleton, not as a run family.
+  Production import should stamp mandatory singleton attrs/provenance/profile status on
+  `raw_video`/root, and `palette status`, registry step status, validators, and batch
+  submitters should all read the same profile contract.
 - Consequence: the fail-closed guarantees built this session stop one stage short of the
-  root. Bringing import inside the perimeter (gap #8) is the structural counterpart to the
-  content-hash work.
+  root. Bringing import inside the perimeter is the structural counterpart to the
+  content-hash work, but the implementation target is a singleton import profile contract.
 
 ---
 
 ## Method / provenance of this audit
 Three parallel read-only Opus agents (import-flow map, registry-linkage trace, metadata
-reliability audit), 2026-07-05, against `sun` at ~`89b29e7`. All file:line references above
-were reported with evidence; spot-checks by the commander session confirmed the load-bearing
-claims (two-path split, `--registry` optionality, all-NaN timestamps, dead validator). Related
-prior diagnostics: `pixel_contract_audit_2026-06-05.md`, `acquisition_crop_video_integration_2026-06-17.md`,
+reliability audit), 2026-07-05, against `sun` at ~`89b29e7`, followed by a focused
+correction pass after review. Corrections applied here: production import root attrs do
+include manifest-derived experiment context; current sampled training import uses
+`import_sampled_training_pynvvc`; `scan_zarr/register_from_root` is not the full reconcile
+superset; the timestamp problem is scoped to main import surfaces; legacy pipeline support
+is out of scope; and import remains a singleton by design. Related prior diagnostics:
+`pixel_contract_audit_2026-06-05.md`, `acquisition_crop_video_integration_2026-06-17.md`,
 `contract_drift_audit_2026-05-28.md`, `registry_design_assessment_2026-06-18.md`,
 `model_input_shapes_metadata_gaps_2026-06-17.md`.
