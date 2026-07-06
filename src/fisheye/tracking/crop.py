@@ -48,6 +48,7 @@ from ..shared.refined_detect_curation import (
 )
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.crop_signature import build_crop_signature
+from ..shared.grayscale import rgb_to_gray_unweighted_mean_torch
 from ..shared.crop_roi_layout import (
     DEFAULT_CANONICAL_CROP_ROI_CHUNK_LEN,
     DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN,
@@ -958,7 +959,10 @@ def crop_batch_gpu(
     )
     
     # Convert to grayscale on GPU
-    frames_gray = frames_gpu.to(torch.float32).mean(dim=-1).to(torch.uint8)  # [N, H, W]
+    frames_gray = rgb_to_gray_unweighted_mean_torch(
+        frames_gpu,
+        accumulator_dtype=torch.float32,
+    )  # [N, H, W]
     
     # Prepare outputs
     num_crops = len(frame_indices)
@@ -1194,7 +1198,10 @@ def _process_chunk_gpu(
     """Process a contiguous chunk of frames on GPU and return crops/co-ordinates."""
     start = time.perf_counter()
     # Keep conversion in fp16 to reduce transient GPU memory on high-res frames.
-    frames_gray = frames_gpu.to(torch.float16).mean(dim=-1).to(torch.uint8)
+    frames_gray = rgb_to_gray_unweighted_mean_torch(
+        frames_gpu,
+        accumulator_dtype=torch.float16,
+    )
     H, W = video_shape
 
     chunk_det_indices: List[int] = []
@@ -1276,7 +1283,10 @@ def _process_chunk_gpu_from_top_left(
 ) -> Tuple[int, np.ndarray, Any, np.ndarray, float]:
     """Process a contiguous chunk of frames on GPU using stored ROI top-left coordinates."""
     start = time.perf_counter()
-    frames_gray = frames_gpu.to(torch.float16).mean(dim=-1).to(torch.uint8)
+    frames_gray = rgb_to_gray_unweighted_mean_torch(
+        frames_gpu,
+        accumulator_dtype=torch.float16,
+    )
     H, W = video_shape
 
     chunk_roi_indices: List[int] = []

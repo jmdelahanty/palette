@@ -22,6 +22,7 @@ from fisheye.shared.crop_roi_layout import (
     crop_roi_layout_attrs,
 )
 from fisheye.shared.flat_roi_cache import crop_run_name_from_manifest, open_flat_roi_cache
+from fisheye.shared.grayscale import rgb_to_gray_bt601_cv2_uint8
 from fisheye.shared.roi_pixel_contract import (
     ROI_IMAGE_REPRESENTATION,
     crop_image_source_live_pixel_contract,
@@ -338,12 +339,7 @@ def _to_grayscale_uint8(frame: np.ndarray) -> np.ndarray:
     if arr.ndim == 3 and arr.shape[-1] == 1:
         return arr[..., 0].astype(np.uint8, copy=False)
     if arr.ndim == 3 and arr.shape[-1] >= 3:
-        gray = (
-            0.299 * arr[..., 0].astype(np.float32)
-            + 0.587 * arr[..., 1].astype(np.float32)
-            + 0.114 * arr[..., 2].astype(np.float32)
-        )
-        return gray.astype(np.uint8)
+        return rgb_to_gray_bt601_cv2_uint8(arr)
     raise ValueError(f"Unsupported frame shape for grayscale conversion: {arr.shape}")
 
 
