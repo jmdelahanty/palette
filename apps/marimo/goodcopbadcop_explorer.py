@@ -26,7 +26,7 @@ def _():
     import plotly.graph_objects as go
 
     from fisheye.utils.view_zarr_visualization import load_png_artifact_bytes
-    from fisheye.utils.zarr_io import open_zarr_root
+    from fisheye.shared.zarr_io import open_zarr_root
     from fisheye.visualization.goodcopbadcop_interactive import (
         DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT,
         discover_goodcopbadcop_chaser_dashboard_options,

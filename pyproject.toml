@@ -111,19 +111,13 @@ unmatched_ignore_imports_alerting = "error"
 
 [[tool.importlinter.contracts]]
 id = "phase2-utils-shims"
-name = "Phase 2 moved utils shims must not be imported"
+name = "Phase 2 utility wrappers must not be imported"
 type = "forbidden"
 source_modules = ["fisheye.**"]
 forbidden_modules = [
-  "fisheye.utils.calibration",
-  "fisheye.utils.encoder_tags",
   "fisheye.utils.import_video_metadata",
-  "fisheye.utils.recording_preflight",
   "fisheye.utils.resolve_detect_model",
   "fisheye.utils.resolve_subject_mask_model",
-  "fisheye.utils.system",
-  "fisheye.utils.zarr_io",
-  "fisheye.utils.zarr_metadata",
 ]
 as_packages = false
 unmatched_ignore_imports_alerting = "error"

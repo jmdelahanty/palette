@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from fisheye.utils.view_zarr_visualization import load_png_artifact_bytes
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 from .common import join_path, normalize_path, png_bytes_to_markdown_image
 

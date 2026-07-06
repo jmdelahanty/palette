@@ -32,7 +32,7 @@ compatibility mirror. Use `analysis/swim_bout_runs` and
 scripts/py - <<'PY'
 from pathlib import Path
 
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 zarr_path = Path("/path/to/recording_analysis.zarr")
 root = open_zarr_root(zarr_path, mode="r")
@@ -71,7 +71,7 @@ from pathlib import Path
 import polars as pl
 
 from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 zarr_path = Path("/path/to/recording_analysis.zarr")
 track_id = 0
@@ -137,7 +137,7 @@ from pathlib import Path
 import polars as pl
 
 from fisheye.analysis.swim_bout_io import load_swim_bout_tables
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 zarr_path = Path("/path/to/recording_analysis.zarr")
 root = open_zarr_root(zarr_path, mode="r")
@@ -190,7 +190,7 @@ from pathlib import Path
 import polars as pl
 
 from fisheye.analysis.bout_kinematics import resolve_bout_kinematics_tables
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 
 zarr_path = Path("/path/to/recording_analysis.zarr")
 root = open_zarr_root(zarr_path, mode="r")

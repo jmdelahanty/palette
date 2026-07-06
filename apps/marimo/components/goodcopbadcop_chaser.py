@@ -13,7 +13,7 @@ import polars as pl
 from fisheye.analysis.swim_bout_io import load_default_swim_bout_tables
 from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
 from fisheye.utils.view_zarr_visualization import load_png_artifact_bytes
-from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.visualization.goodcopbadcop_interactive import (
     GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
     GoodCopBadCopCRAEndpointData,
