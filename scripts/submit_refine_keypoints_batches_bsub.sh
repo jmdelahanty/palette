@@ -12,6 +12,7 @@ NCORES=4
 MEM_GB=16
 WALLTIME="1:00"
 MAX_ACTIVE=4
+DEPENDENCY_DONE=""
 
 KEYPOINT_RUN=""
 CONFIG="configs/fisheye/default.yaml"
@@ -78,6 +79,9 @@ Resources:
   --mem-gb N                Memory per task in GB (default: 16)
   --walltime H:MM           Wall time per task (default: 1:00)
   --max-active N            Max concurrent array tasks (default: 4)
+  --dependency-done JOBID   Add LSF dependency -w done(JOBID) before starting
+                            the refine array. Useful when keypoint inference
+                            was submitted as a prerequisite array.
   --registry-finalizer-queue NAME
                             Queue for serial registry finalizer (default: short)
   --registry-finalizer-ncores N
@@ -116,6 +120,7 @@ while [[ $# -gt 0 ]]; do
     --mem-gb) MEM_GB="$2"; shift 2;;
     --walltime) WALLTIME="$2"; shift 2;;
     --max-active) MAX_ACTIVE="$2"; shift 2;;
+    --dependency-done) DEPENDENCY_DONE="$2"; shift 2;;
     --keypoint-run) KEYPOINT_RUN="$2"; shift 2;;
     --config) CONFIG="$2"; shift 2;;
     --chunk-size) CHUNK_SIZE="$2"; shift 2;;
@@ -254,7 +259,8 @@ scripts/py - "$RUN_DIR/submission_manifest.json" "$ROOT" "$FILE_LIST" "$PATH_CON
   "$target_count" "$QUEUE" "$NCORES" "$MEM_GB" "$WALLTIME" "$MAX_ACTIVE" "$KEYPOINT_RUN" \
   "$CONFIG" "$AUTO_REVIEW" "$OVERWRITE" "$JOB_SCRIPT" "$TARGETS_FILE" "$REPO_DIR" "$REGISTRY" \
   "$DEFER_REGISTRY" "$SUBMIT_REGISTRY_FINALIZER" "$REGISTRY_FINALIZER_QUEUE" \
-  "$REGISTRY_FINALIZER_NCORES" "$REGISTRY_FINALIZER_MEM_GB" "$REGISTRY_FINALIZER_WALLTIME" <<'PY'
+  "$REGISTRY_FINALIZER_NCORES" "$REGISTRY_FINALIZER_MEM_GB" "$REGISTRY_FINALIZER_WALLTIME" \
+  "$DEPENDENCY_DONE" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -285,6 +291,7 @@ from pathlib import Path
     registry_finalizer_ncores,
     registry_finalizer_mem_gb,
     registry_finalizer_walltime,
+    dependency_done,
 ) = sys.argv[1:]
 
 payload = {
@@ -314,6 +321,7 @@ payload = {
         "mem_gb": int(registry_finalizer_mem_gb),
         "walltime": registry_finalizer_walltime,
     },
+    "dependency_done": dependency_done or None,
 }
 Path(output).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
@@ -327,6 +335,9 @@ BSUB_ARGS=(
   -oo "${RUN_DIR}/%J_%I.out"
   -eo "${RUN_DIR}/%J_%I.err"
 )
+if [[ -n "$DEPENDENCY_DONE" ]]; then
+  BSUB_ARGS+=(-w "done(${DEPENDENCY_DONE})")
+fi
 
 BSUB_CMD="bsub"
 for arg in "${BSUB_ARGS[@]}"; do
@@ -347,6 +358,9 @@ echo "Queue: $QUEUE"
 echo "Resources: ncores=$NCORES mem_gb=$MEM_GB walltime=$WALLTIME"
 echo "Max active: $MAX_ACTIVE"
 echo "Registry write mode: $([[ "$DEFER_REGISTRY" == "1" ]] && echo deferred || echo inline)"
+if [[ -n "$DEPENDENCY_DONE" ]]; then
+  echo "Dependency: done(${DEPENDENCY_DONE})"
+fi
 echo "Per-target command: $REFINE_CMD"
 echo "Submit command: $BSUB_CMD"
 
