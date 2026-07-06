@@ -18,8 +18,6 @@ import zarr
 from fisheye.cli.shared_args import add_apply_dry_run_args
 from fisheye.cli.shared_args import add_log_args
 from fisheye.cli.shared_args import add_registry_discovery_args
-from fisheye.detection.detect_keypoints_traditional import detect_keypoints
-from fisheye.detection.detect_keypoints_yolo import detect_keypoints_yolo
 from fisheye.refinement.refine_keypoints import create_refined_keypoint_run
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
@@ -36,13 +34,11 @@ from fisheye.utils.batch_registry_model_resolution import ResolvedModel
 from fisheye.utils.batch_registry_model_resolution import (
     resolve_registry_models_for_plans as resolve_shared_registry_models_for_plans,
 )
-from fisheye.utils.keypoint_retry import retry_failed_keypoints_yolo
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.utils import refine_keypoints_batch as refine_keypoints_batch_mod
 from fisheye.registry.model_resolution import Candidate
 from fisheye.registry.model_resolution import load_candidates, load_target_profile, resolve_recording_id
 from fisheye.shared.zarr_recording_context import infer_recording_context
-from fisheye.utils.run_keypoints_with_registry_model import write_keypoint_model_resolution_provenance
 
 try:
     from rich.console import Console
@@ -78,6 +74,40 @@ class RegistryZarrEntry:
 
 
 JsonLogger = SharedJsonLogger
+
+
+def detect_keypoints(*args: Any, **kwargs: Any) -> str:
+    """Lazy wrapper so planning/dry-runs do not import inference backends."""
+
+    from fisheye.detection.detect_keypoints_traditional import detect_keypoints as _detect_keypoints
+
+    return _detect_keypoints(*args, **kwargs)
+
+
+def detect_keypoints_yolo(*args: Any, **kwargs: Any) -> str:
+    """Lazy wrapper so registry discovery on login nodes does not import torch."""
+
+    from fisheye.detection.detect_keypoints_yolo import detect_keypoints_yolo as _detect_keypoints_yolo
+
+    return _detect_keypoints_yolo(*args, **kwargs)
+
+
+def retry_failed_keypoints_yolo(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+    """Lazy wrapper for the YOLO retry helper, which imports the YOLO backend."""
+
+    from fisheye.utils.keypoint_retry import retry_failed_keypoints_yolo as _retry_failed_keypoints_yolo
+
+    return _retry_failed_keypoints_yolo(*args, **kwargs)
+
+
+def write_keypoint_model_resolution_provenance(*args: Any, **kwargs: Any) -> None:
+    """Lazy wrapper to avoid importing the registry-model runner during planning."""
+
+    from fisheye.utils.run_keypoints_with_registry_model import (
+        write_keypoint_model_resolution_provenance as _write_keypoint_model_resolution_provenance,
+    )
+
+    _write_keypoint_model_resolution_provenance(*args, **kwargs)
 
 
 def _jsonable(value: Any) -> Any:
