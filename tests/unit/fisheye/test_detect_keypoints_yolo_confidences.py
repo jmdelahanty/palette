@@ -33,9 +33,12 @@ class _FakeCropSource:
     def __init__(self, crop_group: zarr.Group) -> None:
         self.crop_group = crop_group
         self.crop_run_name = "crop_001"
-        self.roi_coordinates_full = np.zeros((3, 2), dtype=np.int32)
-        self.frame_indices = np.array([0, 10, 19], dtype=np.int64)
-        self.total_rois = 3
+        self.frame_indices = np.asarray(crop_group["frame_indices"][:], dtype=np.int64)
+        self.total_rois = int(self.frame_indices.shape[0])
+        if "roi_coordinates_full" in crop_group:
+            self.roi_coordinates_full = np.asarray(crop_group["roi_coordinates_full"][:], dtype=np.int32)
+        else:
+            self.roi_coordinates_full = np.zeros((self.total_rois, 2), dtype=np.int32)
         self.roi_shape = (8, 8)
         self.storage_mode = "zarr"
         self.roi_read_mode = "unit_test"
@@ -52,7 +55,7 @@ class _FakeCropSource:
         self.frame_source_path = None
         self.roi_pixel_contract = None
         self.roi_image_representation = "grayscale_uint8"
-        self._images = np.zeros((3, 8, 8), dtype=np.uint8)
+        self._images = np.zeros((self.total_rois, 8, 8), dtype=np.uint8)
 
     def read_slice(self, start: int, end: int) -> np.ndarray:
         return self._images[start:end]
@@ -227,6 +230,104 @@ def test_detect_keypoints_yolo_sizes_n_keypoints_to_run_frame_counts(monkeypatch
             "source": "computed",
         }
     ]
+
+
+def _make_keypoint_count_fixture(tmp_path, name: str):
+    zarr_path = tmp_path / f"{name}.zarr"
+    root = zarr.open_group(store=str(zarr_path), mode="w")
+    root.attrs["video_width"] = 16
+    root.attrs["video_height"] = 16
+    crop_parent = root.create_group("crop_runs")
+    crop = crop_parent.create_group("crop_001")
+    crop.attrs["source_detect_run"] = "detect_001"
+    crop.create_array("frame_counts", data=np.array([1, 1, 1], dtype=np.int32))
+    crop.create_array("frame_indices", data=np.array([0, 1, 2], dtype=np.int32))
+    crop.create_array("detection_indices", data=np.arange(3, dtype=np.int32))
+    crop.create_array("roi_coordinates_full", data=np.zeros((3, 2), dtype=np.int32))
+    crop_parent.attrs["latest"] = "crop_001"
+    return zarr_path
+
+
+def _patch_keypoint_writer_dependencies(monkeypatch, model_path) -> None:
+    def _fake_open(root_group, **_kwargs):
+        return _FakeCropSource(root_group["crop_runs"]["crop_001"])
+
+    def _fake_copy_row_lineage(dst, src, *, total_rois, **_kwargs):
+        dst.create_array("frame_indices", data=src["frame_indices"][:], overwrite=True)
+        dst.create_array("detection_indices", data=src["detection_indices"][:], overwrite=True)
+        return SimpleNamespace(copied={"frame_indices", "detection_indices"})
+
+    monkeypatch.setattr(yolo_mod, "YOLO", _FakeYOLO)
+    monkeypatch.setattr(yolo_mod.CropImageSource, "open", staticmethod(_fake_open))
+    monkeypatch.setattr(yolo_mod, "copy_row_lineage_arrays", _fake_copy_row_lineage)
+    monkeypatch.setattr(yolo_mod, "_prepare_refined_roi_overrides", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        yolo_mod,
+        "get_git_info",
+        lambda: {
+            "commit_hash": "test",
+            "short_hash": "test",
+            "branch": "test",
+            "is_dirty": False,
+            "remote_url": None,
+        },
+    )
+    monkeypatch.setattr(
+        yolo_mod,
+        "get_environment_info",
+        lambda **_kwargs: {"platform": {"hostname": "unit-test"}, "environment": {}, "gpu": {}},
+    )
+    monkeypatch.setattr(yolo_mod, "_emit_keypoint_step_status", lambda **_kwargs: None)
+    model_path.write_bytes(b"fake")
+
+
+def _run_keypoint_count_writer(monkeypatch, tmp_path, *, name: str, legacy_count: bool):
+    zarr_path = _make_keypoint_count_fixture(tmp_path, name)
+    model_path = tmp_path / f"{name}.pt"
+    with monkeypatch.context() as patch:
+        _patch_keypoint_writer_dependencies(patch, model_path)
+        if legacy_count:
+            patch.setattr(yolo_mod, "_resolve_crop_run_frame_count_from_domains", lambda *_args, **_kwargs: None)
+        run_name = detect_keypoints_yolo(
+            zarr_path,
+            model_path,
+            run_provenance=build_writer_run_provenance(
+                command="unit-keypoint-writer",
+                params={"model_path": model_path},
+            ),
+            run_name="keypoints_001",
+            pose_schema="traditional_v3",
+            batch_size=8,
+            imgsz=8,
+            input_mode="numpy-list",
+            registry=None,
+        )
+    run = zarr.open_group(store=str(zarr_path), mode="r")["keypoints_runs"][run_name]
+    return {
+        "n_rois": np.asarray(run["n_rois"][:]),
+        "frame_counts": np.asarray(run["frame_counts"][:]),
+    }
+
+
+def test_detect_keypoints_yolo_frame_count_writer_matches_legacy_arrays(monkeypatch, tmp_path) -> None:
+    resolved = _run_keypoint_count_writer(
+        monkeypatch,
+        tmp_path,
+        name="resolved",
+        legacy_count=False,
+    )
+    legacy = _run_keypoint_count_writer(
+        monkeypatch,
+        tmp_path,
+        name="legacy",
+        legacy_count=True,
+    )
+
+    for name in ("n_rois", "frame_counts"):
+        assert resolved[name].dtype == np.dtype("int32")
+        assert legacy[name].dtype == np.dtype("int32")
+        assert np.array_equal(resolved[name], legacy[name])
+        assert resolved[name].tobytes() == legacy[name].tobytes()
 
 
 def test_extract_pose_bbox_xyxy_roi_clips_to_roi_bounds() -> None:
