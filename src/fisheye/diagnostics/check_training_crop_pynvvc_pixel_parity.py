@@ -22,6 +22,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 import zarr
 
+from fisheye.shared.frame_domains import FrameDomain, FrameDomains
 from fisheye.shared.flat_roi_cache import _crop_pynvvc_luma_frame
 from fisheye.shared.roi_pixel_contract import (
     crop_run_pixel_contract,
@@ -173,6 +174,18 @@ def _load_original_frame_indices(root: Any) -> np.ndarray | None:
     return np.asarray(raw_video["original_frame_indices"][:], dtype=np.int64)
 
 
+def _map_stored_to_source_frames(
+    root: Any,
+    local_frame_indices: np.ndarray,
+) -> np.ndarray:
+    domains = FrameDomains(root=root)
+    return domains.convert(
+        local_frame_indices,
+        FrameDomain.STORED_ZARR,
+        FrameDomain.SOURCE_VIDEO,
+    )
+
+
 def _should_use_original_frame_indices(
     *,
     root: Any,
@@ -232,7 +245,7 @@ def _map_source_frame_indices(
             f"row={example}, frame_index={int(local[example])}, "
             f"mapping_length={int(original_frame_indices.shape[0])}."
         )
-    mapped = original_frame_indices[local]
+    mapped = _map_stored_to_source_frames(root, local)
     return np.asarray(mapped, dtype=np.int64), {
         "mode": "original_frame_indices",
         "original_frame_indices_available": True,
