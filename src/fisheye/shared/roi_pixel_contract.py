@@ -107,7 +107,8 @@ def orange_mono_pynvvc_luma_pixel_contract() -> dict[str, Any]:
         decode_backend=DECODE_BACKEND_PYNVVC_LUMA,
         applied_range_semantics=APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
         container_color_range_handling=(
-            "ignore_container_tv_range_for_orange_acquisition; source contract is full-range mono8"
+            "read_direct_y_plane_without_decoder_range_remap; source contract is full-range mono8; "
+            "record observed stream VUI/range metadata separately"
         ),
         center_rounding=CENTER_ROUNDING_NP_ROUND,
     )

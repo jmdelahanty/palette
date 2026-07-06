@@ -51,6 +51,46 @@ def _colorimetry_payload(meta: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
+def probe_video_colorimetry_attrs(video_path: Path, *, ffprobe_bin: str = "ffprobe") -> Dict[str, str]:
+    """Return ffprobe stream colorimetry attrs for a source video.
+
+    The returned fields describe the encoded source stream and are deliberately
+    named ``video_color_*`` so they do not collide with Palette's downstream
+    pixel-contract color semantics.
+    """
+
+    try:
+        result = subprocess.run(
+            [
+                str(ffprobe_bin),
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=color_range,color_space,color_transfer,color_primaries",
+                "-of",
+                "json",
+                str(video_path),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0 or not result.stdout:
+            return {}
+        payload = json.loads(result.stdout)
+        streams = payload.get("streams", [])
+        if not isinstance(streams, list) or not streams:
+            return {}
+        stream = streams[0]
+        if not isinstance(stream, dict):
+            return {}
+        return _stream_colorimetry_attrs(stream)
+    except Exception:
+        return {}
+
+
 def _probe_video(video_path: Path) -> Dict[str, Any]:
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():

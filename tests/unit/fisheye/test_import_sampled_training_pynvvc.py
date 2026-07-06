@@ -9,6 +9,7 @@ import zarr
 
 from fisheye.shared.crop_geometry import resolve_full_frame_shape
 from fisheye.shared.roi_pixel_contract import ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
+from fisheye.utils import import_sampled_training_pynvvc as import_mod
 from fisheye.utils.import_sampled_training_pynvvc import import_sampled_training_pynvvc
 
 
@@ -27,7 +28,10 @@ class _FakePynvvcReader:
         self.closed = True
 
 
-def test_import_sampled_training_pynvvc_writes_luma_training_zarr(tmp_path: Path) -> None:
+def test_import_sampled_training_pynvvc_writes_luma_training_zarr(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     video = tmp_path / "Cam2010093_demo.mp4"
     video.write_bytes(b"placeholder")
     h5_path = tmp_path / "raw" / "demo.h5"
@@ -65,6 +69,17 @@ import:
         encoding="utf-8",
     )
     out = tmp_path / "demo_training.zarr"
+    monkeypatch.setattr(
+        import_mod,
+        "probe_video_colorimetry_attrs",
+        lambda path: {
+            "video_color_range": "pc",
+            "video_color_space": "bt709",
+            "video_color_transfer": "bt709",
+            "video_color_primaries": "bt709",
+            "source_video_colorimetry_source": "ffprobe_stream",
+        },
+    )
 
     result = import_sampled_training_pynvvc(
         video_path=video,
@@ -99,9 +114,16 @@ import:
     assert raw.attrs["source_pixel_contract"] == "orange.camera.mono8.full_frame.v1"
     assert raw.attrs["source_pixel_range"] == "0_255"
     assert raw.attrs["applied_range_semantics"] == "orange_mono8_full_range_0_255"
-    assert raw.attrs["container_color_range_observed"] == "tv"
+    assert raw.attrs["container_color_range_observed"] == "pc"
+    assert raw.attrs["video_color_range"] == "pc"
+    assert raw.attrs["video_color_space"] == "bt709"
+    assert raw.attrs["video_color_transfer"] == "bt709"
+    assert raw.attrs["video_color_primaries"] == "bt709"
+    assert raw.attrs["source_video_colorimetry_source"] == "ffprobe_stream"
+    assert root.attrs["video_color_range"] == "pc"
+    assert root.attrs["video_color_space"] == "bt709"
     assert raw.attrs["pixel_contract_name"] == ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
-    assert raw.attrs["color_range"] == "source_full_range_0_255_container_observed_tv"
+    assert raw.attrs["color_range"] == "source_full_range_0_255_container_observed_pc"
     assert raw.attrs["stored_luma_color_range"] == "source_full_range_0_255_y_plane"
     assert raw.attrs["frame_step"] == 3
     assert raw.attrs["source_frame_count"] == 10

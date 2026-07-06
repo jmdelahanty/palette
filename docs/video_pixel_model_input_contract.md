@@ -1,7 +1,7 @@
 # Video Pixel And Model Input Contract
 <!-- contract-meta
 status: current
-last_verified: 2026-06-25
+last_verified: 2026-07-06
 purpose: Clarify the difference between persisted video/crop pixels and model-input tensors, especially PyNvVideoCodec luma versus NV12-to-RGB detection preprocessing.
 -->
 
@@ -41,6 +41,17 @@ source_encoder_boundary: NV12
 mono_semantics: camera intensity copied to NV12 Y plane; UV neutral 128
 color_conversion: raw NV12 Y/luma plane crop; no RGB reconstruction
 ```
+
+Encoded stream metadata has its own contract. Orange prepares NV12 for NVENC
+(`Y` plane plus interleaved neutral `UV`), but FFmpeg/ffprobe may report decoded
+HEVC frames as `yuv420p` (`Y`, `U`, and `V` planes). That is a memory-layout
+difference after decode, not a semantic problem. The important stream VUI/range
+metadata is `color_range`: future Orange encodes should tag these monochrome
+full-range camera samples as `pc`/full range, not `tv`/limited range. Palette
+records observed stream fields separately as `video_color_range`,
+`video_color_space`, `video_color_transfer`, and `video_color_primaries`; model
+input code should continue to rely on the explicit Orange mono8 full-range
+pixel contract rather than letting an RGB decoder reinterpret the Y plane.
 
 Model-specific tensorization happens later:
 

@@ -25,6 +25,7 @@ from fisheye.shared.import_profile_contract import (
     PROFILE_SAMPLED_TRAINING_PYNVVC_LUMA,
 )
 from fisheye.shared.import_source_fingerprint import optional_source_stat_fingerprint_attrs
+from fisheye.shared.import_video_metadata import probe_video_colorimetry_attrs
 from fisheye.shared.roi_pixel_contract import (
     APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
     CENTER_ROUNDING_NP_ROUND,
@@ -207,6 +208,16 @@ def _manifest_recording_attrs(recording_dir: Path | None) -> dict[str, Any]:
     return attrs
 
 
+def _observed_container_color_range(source_video_colorimetry_attrs: dict[str, Any] | None) -> str:
+    if not source_video_colorimetry_attrs:
+        return "unknown"
+    value = source_video_colorimetry_attrs.get("video_color_range")
+    if value in (None, ""):
+        return "unknown"
+    text = str(value).strip().lower()
+    return text or "unknown"
+
+
 def _safe_replace_temp(temp_path: Path, output_path: Path, *, overwrite: bool) -> None:
     if output_path.exists():
         if not overwrite:
@@ -231,12 +242,14 @@ def _write_attrs(
     camera_id: str | None,
     recording_dir: Path | None,
     h5_path: Path | None,
+    source_video_colorimetry_attrs: dict[str, Any] | None,
     gpu_id: int,
     created_at_utc: str,
     duration_s: float | None = None,
 ) -> None:
     raw_contract = _raw_video_pixel_contract()
     roi_contract = orange_mono_pynvvc_luma_pixel_contract()
+    observed_container_color_range = _observed_container_color_range(source_video_colorimetry_attrs)
     source_video_fingerprint_attrs = optional_source_stat_fingerprint_attrs(
         source_video_path,
         attr_prefix="source_video",
@@ -271,6 +284,8 @@ def _write_attrs(
         root_attrs["source_h5"] = h5_path.name
         root_attrs["source_h5_path"] = str(h5_path)
         root_attrs.update(source_h5_fingerprint_attrs)
+    if source_video_colorimetry_attrs:
+        root_attrs.update(source_video_colorimetry_attrs)
     root.attrs.update(root_attrs)
     raw_attrs: dict[str, Any] = {
         "import_profile_schema_id": IMPORT_PROFILE_SCHEMA_ID,
@@ -288,14 +303,14 @@ def _write_attrs(
         "source_pixel_contract": "orange.camera.mono8.full_frame.v1",
         "source_pixel_range": "0_255",
         "applied_range_semantics": APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
-        "container_color_range_observed": "tv",
+        "container_color_range_observed": observed_container_color_range,
         "container_color_range_handling": roi_contract.get("container_color_range_handling"),
         "center_rounding": CENTER_ROUNDING_NP_ROUND,
         "pixel_contract_name": ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
         "pixel_contract": _json_attr(raw_contract),
         "roi_pixel_contract_name": ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
         "roi_pixel_contract": _json_attr(roi_contract),
-        "color_range": "source_full_range_0_255_container_observed_tv",
+        "color_range": f"source_full_range_0_255_container_observed_{observed_container_color_range}",
         "color_space": "bt709_or_source_unspecified_monochrome_luma",
         "color_matrix": "source_encoded_nv12_y_plane",
         "color_transfer": "source_encoded",
@@ -322,6 +337,8 @@ def _write_attrs(
         "import_timestamp": created_at_utc,
     }
     raw_attrs.update(source_video_fingerprint_attrs)
+    if source_video_colorimetry_attrs:
+        raw_attrs.update(source_video_colorimetry_attrs)
     if downsampled_hw is not None:
         raw_attrs.update(
             {
@@ -379,6 +396,7 @@ def import_sampled_training_pynvvc(
             "PyNvVC sampled training import requires CUDA-enabled torch; "
             "current environment reports torch.cuda.is_available() == False."
         )
+    source_video_colorimetry_attrs = probe_video_colorimetry_attrs(video_path)
 
     frame_indices = _compute_frame_indices(
         int(source_frame_count),
@@ -471,6 +489,7 @@ def import_sampled_training_pynvvc(
             camera_id=camera_id,
             recording_dir=recording_dir,
             h5_path=h5_path,
+            source_video_colorimetry_attrs=source_video_colorimetry_attrs,
             gpu_id=int(gpu_id),
             created_at_utc=created_at,
         )
@@ -528,6 +547,7 @@ def import_sampled_training_pynvvc(
             camera_id=camera_id,
             recording_dir=recording_dir,
             h5_path=h5_path,
+            source_video_colorimetry_attrs=source_video_colorimetry_attrs,
             gpu_id=int(gpu_id),
             created_at_utc=created_at,
             duration_s=duration,

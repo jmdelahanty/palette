@@ -14,6 +14,7 @@ from fisheye.shared.import_video_metadata import (
     _preview_updates,
     _probe_video,
     _write_metadata,
+    probe_video_colorimetry_attrs,
     probe_video_metadata,
     write_video_metadata,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "_probe_video",
     "_write_metadata",
     "main",
+    "probe_video_colorimetry_attrs",
     "probe_video_metadata",
     "write_video_metadata",
 ]

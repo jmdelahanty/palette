@@ -270,16 +270,20 @@ Ordered by data-integrity risk. Each is a candidate slice.
    → Define required-vs-optional manifest context for production imports, stamp a canonical
    singleton context/provenance block, and fail or explicitly mark unknown-provenance when
    required context is absent.
-3. **No source-video fingerprint at import.** Nothing detects a swapped/re-encoded source
-   MP4; `stat_v1` (`audit_zarr_pixel_contracts.py:1198`) is a manual post-hoc backfill.
-   Note the irony: model inputs are now content-hashed (`62a8e52`) but the *video* — the
-   primary experimental input — is not. → Fingerprint the source at import (cheap; `stat_v1`
-   exists, just move it into the import path).
-4. **No H5/protocol/source metadata fingerprint at import.** Root attrs carry paths such as
-   `source_h5_path`, but not a hash/stat fingerprint for the H5/protocol side of the
-   experiment.
-5. **No colorimetry probed at import** (color range/space/transfer/primaries) — only a
-   hardcoded "full-range assumed" string; ffprobe backfill only via the audit tool.
+3. **Existing stores lack source-video fingerprints.** Future production metadata-only
+   analysis imports and sampled PyNvVC training imports now stamp cheap `stat_v1`
+   source-video fingerprints, but historical `/groups` stores still need an explicit
+   backfill before this can be enforced. The fingerprint is intentionally stat/metadata
+   based rather than a full-MP4 content hash.
+4. **Existing stores lack H5/protocol/source metadata fingerprints.** Future organized
+   analysis imports and sampled-training imports stamp H5 `stat_v1` fingerprints when the
+   path is known, but historical stores still need backfill. Protocol/sidecar file
+   fingerprint policy remains less complete than the H5/source-video path.
+5. **Existing stores lack source-video stream colorimetry.** Future shared metadata-only
+   imports and sampled PyNvVC training imports probe ffprobe stream
+   color_range/color_space/color_transfer/color_primaries and stamp them as
+   `video_color_*` attrs. Existing stores still require ffprobe backfill; legacy Decord
+   archives may remain historical/off-contract rather than repaired.
 6. **Experiment metadata is not validated.** Nothing fails or warns on missing genotype/
    protocol/subject. → Extend preflight or add a post-import completeness gate.
 7. **Silent degradation stored as authoritative:** codec/pix_fmt → `"unknown"`; decode
