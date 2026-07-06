@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import zarr
 
 import fisheye.shared.refined_detect_curation as refined_detect_curation_module
 from fisheye.shared.detect_reason_codec import write_reason_columns
@@ -153,6 +154,94 @@ class _OpaqueExistingGroup(_FakeGroup):
                 f"A group exists in store LocalStore('file:///tmp/fake.zarr') at path '{full_path}'"
             )
         return super().create_group(name)
+
+
+def _legacy_resolved_total_frames(root, refined_run) -> int:
+    detect_group, _source_detect_run = refined_detect_curation_module._resolve_bound_source_detect_group(
+        root,
+        refined_run,
+    )
+    if detect_group is not None:
+        total_frames = refined_detect_curation_module.as_int(detect_group.attrs.get("total_frames"))
+        if total_frames is None:
+            total_frames = refined_detect_curation_module.as_int(detect_group.attrs.get("n_frames"))
+        if total_frames is not None and total_frames >= 0:
+            return int(total_frames)
+        for name in ("frame_counts", "n_detections"):
+            if name in detect_group:
+                return int(detect_group[name].shape[0])
+
+    total_frames = refined_detect_curation_module.as_int(root.attrs.get("total_frames"))
+    if total_frames is None:
+        total_frames = refined_detect_curation_module.as_int(root.attrs.get("n_frames"))
+    if total_frames is not None and total_frames >= 0:
+        return int(total_frames)
+    total_frames = refined_detect_curation_module.as_int(refined_run.attrs.get("coverage_frames_total"))
+    if total_frames is not None and total_frames >= 0:
+        return int(total_frames)
+    raw = root.get("raw_video")
+    if raw is not None:
+        total_frames = refined_detect_curation_module.as_int(raw.attrs.get("total_frames"))
+        if total_frames is None:
+            total_frames = refined_detect_curation_module.as_int(raw.attrs.get("n_frames"))
+        if total_frames is not None and total_frames >= 0:
+            return int(total_frames)
+    if refined_detect_curation_module.has_sparse_curated_refined_detect_instances_arrays(refined_run):
+        instances = refined_detect_curation_module._get_child_group_if_present(refined_run, "instances")
+        if instances is not None and "frame_counts" in instances:
+            return int(instances["frame_counts"].shape[0])
+        frame_indices_arr = (
+            np.asarray(instances["frame_indices"][:], dtype=np.int32).reshape(-1)
+            if instances is not None
+            else np.empty((0,), dtype=np.int32)
+        )
+        if refined_detect_curation_module.has_curated_refined_source_detections_projection(refined_run):
+            source_detections = refined_detect_curation_module._get_child_group_if_present(
+                refined_run,
+                "source_detections",
+            )
+            if source_detections is not None:
+                source_frames = np.asarray(source_detections["frame_indices"][:], dtype=np.int32).reshape(-1)
+                if source_frames.size:
+                    frame_indices_arr = np.concatenate([frame_indices_arr, source_frames])
+        if frame_indices_arr.size == 0:
+            return 0
+        return int(np.max(frame_indices_arr)) + 1
+    frame_indices_arr = np.asarray(refined_run["frame_indices"][:], dtype=np.int32).reshape(-1)
+    if frame_indices_arr.size == 0:
+        return 0
+    return int(np.max(frame_indices_arr)) + 1
+
+
+def test_resolved_total_frames_matches_legacy_frame_count_slots(tmp_path) -> None:
+    root = zarr.open_group(str(tmp_path / "curation_detect.zarr"), mode="w")
+    detect = root.create_group("detect_runs").create_group("detect_001")
+    detect.create_array("frame_counts", data=np.ones(4, dtype=np.int32), overwrite=True)
+    refined = root.create_group("refined_detect_runs").create_group("refined_001")
+    refined.attrs["source_detect_run"] = "detect_001"
+
+    assert refined_detect_curation_module._resolved_total_frames(root, refined) == _legacy_resolved_total_frames(
+        root,
+        refined,
+    )
+
+    root = zarr.open_group(str(tmp_path / "curation_instances.zarr"), mode="w")
+    refined = root.create_group("refined_detect_runs").create_group("refined_001")
+    instances = refined.create_group("instances")
+    instances.create_array("refined_row_ids", data=np.asarray([0, 1], dtype=np.int32), overwrite=True)
+    instances.create_array("frame_indices", data=np.asarray([0, 1], dtype=np.int32), overwrite=True)
+    instances.create_array("frame_offsets", data=np.asarray([0, 1, 2, 2, 2], dtype=np.int64), overwrite=True)
+    instances.create_array("bbox_img_xyxy", data=np.zeros((2, 4), dtype=np.float64), overwrite=True)
+    instances.create_array("bbox_norm_coords", data=np.zeros((2, 4), dtype=np.float64), overwrite=True)
+    instances.create_array("source_kind_codes", data=np.ones(2, dtype=np.int8), overwrite=True)
+    instances.create_array("manual_edit_flags", data=np.zeros(2, dtype=bool), overwrite=True)
+    instances.create_array("source_detect_row_index", data=np.arange(2, dtype=np.int32), overwrite=True)
+    instances.create_array("frame_counts", data=np.asarray([1, 1, 0, 0], dtype=np.int32), overwrite=True)
+
+    assert refined_detect_curation_module._resolved_total_frames(root, refined) == _legacy_resolved_total_frames(
+        root,
+        refined,
+    )
 
 
 def _write_sparse_group(

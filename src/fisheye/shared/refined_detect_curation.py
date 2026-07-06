@@ -11,6 +11,7 @@ from zarr.core.dtype import VariableLengthUTF8
 
 from .crop_geometry import bbox_img_xyxy_to_norm_cxcywh, bbox_norm_cxcywh_to_img_xyxy
 from .detect_reason_codec import read_reason_labels, update_reason_rows, write_reason_columns
+from .frame_domains import FrameDomain, FrameDomainError, FrameDomains
 from .instance_keys import (
     INSTANCE_KEY_CONTEXT_MANUAL_CURATION,
     INSTANCE_KEY_ORIGIN_ARRAY,
@@ -884,6 +885,11 @@ def _resolved_total_frames(root: zarr.Group, refined_run: zarr.Group) -> int:
             return int(total_frames)
         for name in ("frame_counts", "n_detections"):
             if name in detect_group:
+                if name == "frame_counts":
+                    try:
+                        return int(FrameDomains(root=root, run_group=detect_group).count(FrameDomain.RUN_FRAME))
+                    except FrameDomainError:
+                        pass
                 return int(detect_group[name].shape[0])
 
     total_frames = as_int(root.attrs.get("total_frames"))
@@ -904,6 +910,10 @@ def _resolved_total_frames(root: zarr.Group, refined_run: zarr.Group) -> int:
     if has_sparse_curated_refined_detect_instances_arrays(refined_run):
         instances = _get_child_group_if_present(refined_run, "instances")
         if instances is not None and "frame_counts" in instances:
+            try:
+                return int(FrameDomains(root=root, run_group=instances).count(FrameDomain.RUN_FRAME))
+            except FrameDomainError:
+                pass
             return int(instances["frame_counts"].shape[0])
         frame_indices_arr = (
             np.asarray(instances["frame_indices"][:], dtype=np.int32).reshape(-1)
