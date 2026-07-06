@@ -499,7 +499,9 @@ from .notifications import (
 )
 from .report_io import (
     _csv_export_value,
+    _filter_audit_rows,
     _print_json,
+    _write_jsonl_rows,
     _write_optional_json_report,
     _write_row_export,
 )
@@ -6998,66 +7000,6 @@ def _handoff_status_from_manifest(
     )
 
 
-def _audit_row_timestamp(row: dict[str, object]) -> datetime | None:
-    for key in ("created_at_utc", "timestamp_utc", "event_time_utc", "assigned_at_utc", "updated_at_utc"):
-        parsed = _parse_handoff_utc(row.get(key))
-        if parsed is not None:
-            return parsed
-    return None
-
-
-def _filter_audit_rows(
-    rows: list[dict[str, object]],
-    *,
-    since_utc: str | None,
-    until_utc: str | None,
-    limit: int | None,
-) -> list[dict[str, object]]:
-    since = _parse_handoff_utc(since_utc)
-    until = _parse_handoff_utc(until_utc)
-    filtered: list[dict[str, object]] = []
-    for row in rows:
-        timestamp = _audit_row_timestamp(row)
-        if since is not None and (timestamp is None or timestamp < since):
-            continue
-        if until is not None and (timestamp is None or timestamp > until):
-            continue
-        filtered.append(row)
-    if limit is not None and limit >= 0:
-        return filtered[:limit]
-    return filtered
-
-
-def _write_jsonl_rows(path: Path, rows: list[dict[str, object]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
-        encoding="utf-8",
-    )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 OPERATOR_EVIDENCE_TEMPLATE_FIELDS: dict[str, str] = {
     "identity_probe_verification": "identity_source_evidence_template",
     "browser_response_security_headers": "browser_response_security_evidence_template",
@@ -12466,18 +12408,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     since_utc=args.audit_since_utc,
                     until_utc=args.audit_until_utc,
                     limit=args.audit_limit,
+                    parse_utc=_parse_handoff_utc,
                 )
                 assignment_events = _filter_audit_rows(
                     store.list_assignment_events(),
                     since_utc=args.audit_since_utc,
                     until_utc=args.audit_until_utc,
                     limit=args.audit_limit,
+                    parse_utc=_parse_handoff_utc,
                 )
                 task_definition_events = _filter_audit_rows(
                     store.list_task_definition_events(),
                     since_utc=args.audit_since_utc,
                     until_utc=args.audit_until_utc,
                     limit=args.audit_limit,
+                    parse_utc=_parse_handoff_utc,
                 )
                 audit_paths = {
                     "audit_task_events": audit_dir / "task-events.jsonl",

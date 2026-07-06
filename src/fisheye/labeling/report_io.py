@@ -79,3 +79,42 @@ def _write_row_export(
         return summary
     print(text, end="")
     return summary
+
+
+def _audit_row_timestamp(row: dict[str, object], parse_utc) -> object | None:
+    for key in ("created_at_utc", "timestamp_utc", "event_time_utc", "assigned_at_utc", "updated_at_utc"):
+        parsed = parse_utc(row.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _filter_audit_rows(
+    rows: list[dict[str, object]],
+    *,
+    since_utc: str | None,
+    until_utc: str | None,
+    limit: int | None,
+    parse_utc,
+) -> list[dict[str, object]]:
+    since = parse_utc(since_utc)
+    until = parse_utc(until_utc)
+    filtered: list[dict[str, object]] = []
+    for row in rows:
+        timestamp = _audit_row_timestamp(row, parse_utc)
+        if since is not None and (timestamp is None or timestamp < since):
+            continue
+        if until is not None and (timestamp is None or timestamp > until):
+            continue
+        filtered.append(row)
+    if limit is not None and limit >= 0:
+        return filtered[:limit]
+    return filtered
+
+
+def _write_jsonl_rows(path: Path, rows: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
