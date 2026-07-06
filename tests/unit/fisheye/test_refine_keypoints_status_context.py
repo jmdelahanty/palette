@@ -43,7 +43,7 @@ def test_resolve_status_context_from_root_uses_hashed_dataset_id_for_source_reco
         registry.close()
 
 
-def test_resolve_status_context_from_root_prefers_hashed_dataset_when_legacy_id_exists(
+def test_resolve_status_context_from_root_preserves_matching_existing_dataset_id(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -76,8 +76,7 @@ def test_resolve_status_context_from_root_prefers_hashed_dataset_when_legacy_id_
     root = zarr.open_group(str(zarr_path), mode="a")
     context = mod._resolve_status_context_from_root(root, str(zarr_path))
     assert context is not None
-    assert context.dataset_id.startswith(f"{session_uuid}:z")
-    assert context.dataset_id != session_uuid
+    assert context.dataset_id == session_uuid
 
     registry = Registry(registry_path)
     try:
@@ -86,7 +85,7 @@ def test_resolve_status_context_from_root_prefers_hashed_dataset_when_legacy_id_
             (session_uuid,),
         ).fetchone()
         assert legacy_after is not None
-        assert str(legacy_after["last_seen_utc"]) == legacy_last_seen_before
+        assert str(legacy_after["last_seen_utc"]) != legacy_last_seen_before
 
         canonical = registry.conn.execute(
             "SELECT dataset_id, zarr_path FROM datasets WHERE dataset_id = ?;",

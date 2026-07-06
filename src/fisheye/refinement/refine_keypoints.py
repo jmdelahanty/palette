@@ -206,25 +206,11 @@ def _resolve_status_dataset_id(
     session_uuid: Optional[str],
     zarr_path: Path,
 ) -> str:
-    path_text = str(zarr_path).replace("\\", "/").lower()
-    is_source_recording = bool(session_uuid) and "/recordings/" in path_text
-    if not is_source_recording:
-        return base_dataset_id
-
-    assert session_uuid is not None
-    path_hash = hashlib.sha256(str(zarr_path).encode("utf-8")).hexdigest()
-    candidate = f"{session_uuid}:z{path_hash[:12]}"
-    for extra in ("", path_hash[12:16], path_hash[16:20], path_hash[20:24]):
-        resolved = candidate if not extra else f"{candidate}{extra}"
-        row = registry.conn.execute(
-            "SELECT path_hash FROM datasets WHERE dataset_id = ?;",
-            (resolved,),
-        ).fetchone()
-        if row is None:
-            return resolved
-        if str(row["path_hash"] or "") == path_hash:
-            return resolved
-    return f"{session_uuid}:z{path_hash}"
+    return registry.resolve_effective_dataset_id(
+        base_dataset_id,
+        session_uuid=session_uuid,
+        zarr_path=zarr_path,
+    )
 
 
 def _registry_writes_disabled() -> bool:
