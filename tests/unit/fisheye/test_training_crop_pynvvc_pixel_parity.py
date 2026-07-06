@@ -146,6 +146,28 @@ def test_training_crop_pynvvc_pixel_parity_maps_original_frame_indices(
     assert report["source"]["candidate_pixel_contract"]["name"] == "nv12_luma_plane_uint8"
 
 
+def test_training_crop_pynvvc_pixel_parity_frame_domain_mapping_matches_legacy_indexing(
+    tmp_path: Path,
+) -> None:
+    zarr_path, _frames = _make_training_archive(tmp_path)
+    root = zarr.open_group(str(zarr_path), mode="r")
+    crop_frame_indices = np.asarray([0, 2, 1, 0], dtype=np.int64)
+
+    mapped, metadata = parity_mod._map_source_frame_indices(
+        root=root,
+        crop_frame_indices=crop_frame_indices,
+        mode="original_frame_indices",
+    )
+
+    original_frame_indices = np.asarray(root["raw_video/original_frame_indices"][:], dtype=np.int64)
+    np.testing.assert_array_equal(mapped, original_frame_indices[crop_frame_indices])
+    assert metadata == {
+        "mode": "original_frame_indices",
+        "original_frame_indices_available": True,
+        "original_frame_indices_length": 3,
+    }
+
+
 def test_training_crop_pynvvc_pixel_parity_reports_mismatch(
     monkeypatch,
     tmp_path: Path,
