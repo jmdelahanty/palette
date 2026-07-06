@@ -136,6 +136,14 @@ PALETTE_LABELING_PID=/tmp/palette-labeling-web-alice-8791.pid \
 scripts/stop_labeling_web.sh
 ```
 
+List currently running fixed-user labeling servers:
+
+```bash
+scripts/list_labeling_web_servers.sh
+```
+
+This helper is read-only. It reports matching PID files and live `fisheye.labeling.web` processes for the current workstation user.
+
 ## VPN-only direct access option
 
 If the workstation is reachable only from campus/VPN networks, the server can be bound to a non-loopback interface:
