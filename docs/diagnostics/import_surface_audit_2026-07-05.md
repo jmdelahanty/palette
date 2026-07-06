@@ -144,6 +144,37 @@ registry scan. **The transfer watcher does not exist yet** —
 `docs/interface_and_execution_strategy.md:85-88,124` marks it 🆕 to-build; a human/cron
 submits today.
 
+### NFS-safe audit discovery note
+
+When auditing a production recordings root on `/groups`/PRFS/NFS, do **not** run an
+unbounded recursive scan such as:
+
+```bash
+find /groups/johnson/johnsonlab/jeremy/recordings -path '*/zarr/*.zarr' -type d
+```
+
+That form still walks the entire recording tree, including videos, staging artifacts,
+caches, logs, and other large payload directories before it can decide whether each path
+matches. In the 2026-07-06 follow-up audit it remained inside `find` for multiple minutes
+before any Zarr metadata was opened.
+
+Use Palette recording-layout discovery instead: loose `*.zarr` archives directly under
+the root and one-level `*/zarr/*.zarr` archives under recording directories. The
+import-profile checker now exposes this directly:
+
+```bash
+scripts/py -m fisheye.utils.check_import_profile \
+  --recordings-root /groups/johnson/johnsonlab/jeremy/recordings \
+  --jsonl \
+  --compact \
+  --summary /tmp/import_profiles_summary.json \
+  > /tmp/import_profiles.jsonl
+```
+
+This is intentionally non-recursive. If a future storage layout needs deeper discovery,
+add an explicit bounded policy for that layout rather than defaulting to recursive
+filesystem traversal over the whole recordings tree.
+
 ---
 
 ## 2. Registry linkage — is the registry updated on import?

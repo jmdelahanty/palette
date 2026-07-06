@@ -224,6 +224,46 @@ def test_check_import_profile_jsonl_cli_uses_classifier_without_real_zarr(
     assert row["status"] == "ok"
 
 
+def test_check_import_profile_recordings_root_uses_bounded_recording_layout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    direct = tmp_path / "direct_analysis.zarr"
+    layout = tmp_path / "recording" / "zarr" / "recording_analysis.zarr"
+    nested = tmp_path / "recording" / "nested" / "ignored_analysis.zarr"
+    for path in (direct, layout, nested):
+        path.mkdir(parents=True)
+        (path / "zarr.json").write_text("{}", encoding="utf-8")
+    root = _root_with_raw(
+        {
+            "import_method": "metadata_only",
+            "import_stage": "metadata_only",
+            "total_frames": 10,
+            "fps": 100,
+            "source_path": "/data/source.mp4",
+            "source_video_fingerprint": "stat_v1:abc",
+            "video_color_range": "tv",
+        },
+        root_attrs={"zarr_purpose": "analysis"},
+    )
+
+    opened: list[Path] = []
+
+    def _fake_open(path: Path, mode: str = "r") -> FakeGroup:
+        opened.append(path)
+        return root
+
+    monkeypatch.setattr(check_import_profile, "open_zarr_root", _fake_open)
+
+    rc = check_import_profile.main(["--jsonl", "--compact", "--recordings-root", str(tmp_path)])
+
+    assert rc == 0
+    rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [Path(row["zarr_path"]) for row in rows] == [direct, layout]
+    assert opened == [direct, layout]
+
+
 def test_check_import_profile_compact_summary_cli_uses_classifier_without_real_zarr(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
