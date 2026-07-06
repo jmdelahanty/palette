@@ -1,10 +1,11 @@
 # Brief: mechanical wave — shim deletion, grayscale definition sites, FrameDomains consumers
 
 **From:** commander session, 2026-07-05 (evening)
-**Status: READY.** Three independent slices, one agent each, dispatch in parallel.
-**Do NOT push or merge — the commander verifies and merges.**
-**Merge order (commander-side): A → B → C** (smallest blast radius first; C rebases onto
-`sun` after A/B land — C and B share files, different regions).
+**Status: READY.** Three slices, one agent each.
+**Dispatch plan (pre-flight reviewed 2026-07-05): spawn A and B in parallel NOW; HOLD C
+until B has merged** (C and B share `tracking/crop.py` + `capture/import_video.py`, and
+C carries the wave's only semantic risk — don't stack it on a moving target).
+**Do NOT push or merge — the commander verifies and merges. Merge order: A → B → C.**
 Co-author trailer: `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
 
 **Read first (all agents):** `HANDOFF_2026-07-05.md` operating-notes section only.
@@ -12,9 +13,11 @@ Ground rules: local `sun` is ground truth (origin stale/unreachable); fresh work
 `agent/<slice>` from CURRENT `sun`; env `~/miniconda3/envs/palette-py311/bin/python`
 (conda; never uv, never a `.venv`); sync code only; re-locate cited line numbers by
 content (merge traffic is heavy); if a premise is wrong, report and stop that item.
-Local gates before "done": `lint-imports --config pyproject.toml`,
-`python scripts/check_file_size_ratchet.py`, `git diff --check`, `py_compile`, focused
-tests, then full suite `PYTHONPATH=src ... -m pytest tests -m "not gpu" -q -n 16`.
+Local gates before "done": import-linter via
+`scripts/py -m importlinter.cli --config pyproject.toml` (the reliable invocation under
+AGENTS rules — not bare `lint-imports`), `python scripts/check_file_size_ratchet.py`,
+`git diff --check`, `py_compile`, focused tests, then full suite
+`PYTHONPATH=src ... -m pytest tests -m "not gpu" -q -n 16`.
 Baseline **3,401 passed / 2 skipped** at merge `62a8e52` — recount on your branch first.
 
 **Dropped from this wave (already done — do not "finish" it):** detect-review pointer
@@ -30,29 +33,41 @@ lacking `authoritative_run` and is a separate maintainer decision, not mechanica
 
 ## Slice A — delete the utils re-export shims (`agent/utils-shim-deletion`)
 
-**State (verified):** Phase 2's retargeting was complete — grep finds ZERO importers of
-the moved modules via `fisheye.utils.*` / `..utils` forms anywhere in `src/` or
-`tests/` (outside `utils/` itself). Five shims are 3-line pure re-exports:
-`zarr_io.py`, `zarr_metadata.py`, `calibration.py`, `encoder_tags.py`,
-`recording_preflight.py`. `system.py` is 14 lines (may still hold the old
-monkeypatch-seam wrapper). `import_video_metadata.py` is **125 lines — NOT a pure
-shim**. `metadata.py` also remains (Phase 2 item 3 was a per-symbol decision — check
-the utils-phase2 agent's report/commits for what was decided).
+**State (verified + pre-flight corrected):** Phase 2's retargeting covered `src/` and
+`tests/` — zero importers there. **BUT `fisheye.utils.zarr_io` still has live importers
+OUTSIDE src/** (pre-flight finding, 2026-07-05): `apps/marimo/components/registry.py`,
+`apps/marimo/components/static_artifacts.py`,
+`apps/marimo/components/goodcopbadcop_chaser.py`,
+`apps/marimo/goodcopbadcop_explorer.py`, plus doc examples in
+`docs/kinematics_zarr_access_guide.md`. Grep the FULL repo (apps/, scripts/, docs/,
+notebooks — not just src/tests) before every delete.
+Shim inventory: **six** 3-line pure re-exports — `zarr_io.py`, `zarr_metadata.py`,
+`calibration.py`, `encoder_tags.py`, `recording_preflight.py`, and `metadata.py`
+(pre-flight confirmed metadata.py is also a pure shim with no obvious live importers,
+but it is NOT in the current forbidden-import contract). `system.py` is 14 lines (may
+still hold the old monkeypatch-seam wrapper). `import_video_metadata.py` is **125
+lines — NOT a pure shim; it still owns a live CLI wrapper**: census/report, don't
+delete.
 
 Scope, in order:
-1. **Delete the five 3-line shims.** Before each delete, grep-proof zero references in
-   the FULL tree including string forms: dotted imports, relative imports, AND
-   monkeypatch/string paths (`"fisheye.utils.zarr_io"` etc. — patch targets don't show
-   up as imports). One commit for the batch.
+0. **Retarget the known zarr_io importers first:** the four `apps/marimo/` files →
+   `fisheye.shared.zarr_io`, and the `docs/kinematics_zarr_access_guide.md` examples.
+   Small import/doc fixes; own commit; verify the marimo components still import
+   cleanly (`py_compile` at minimum — they are apps, not under the test suite).
+1. **Delete the six 3-line shims** (including `metadata.py`). Before each delete,
+   grep-proof zero references in the FULL repo including string forms: dotted imports,
+   relative imports, AND monkeypatch/string paths (`"fisheye.utils.zarr_io"` etc. —
+   patch targets don't show up as imports). One commit for the batch. `metadata.py`
+   additionally: add it to the forbidden-import contract alongside the others, or
+   document in the report why it was left out.
 2. **`system.py`:** if it is now a pure re-export with zero importers/patch-targets,
    delete it; if the compatibility wrapper seam is still referenced by tests, retarget
    those tests to `shared/system_metadata` first, then delete. This closes the
    `brief_utils_phase2.md` loose end.
-3. **`import_video_metadata.py` (125 lines) and `metadata.py`:** census, don't assume.
-   If the strategy doc's move was completed and these hold only re-exports plus dead
-   weight, finish per the same rule. If they still hold LIVE logic that was never
-   moved, that is a finding — leave the file, report exactly what remains and why.
-   Do not do a fresh module move inside this slice.
+3. **`import_video_metadata.py` (125 lines):** census, don't delete — pre-flight
+   confirms it still owns a live CLI wrapper. Report exactly what remains (wrapper vs
+   unmigrated logic) and what the follow-up slice would be. Do not do a fresh module
+   move inside this slice.
 4. **Tighten the import-linter contract** (`pyproject.toml [tool.importlinter]`): the
    forbidden-modules list for severed utils modules can now reference deleted modules —
    update the contract to match reality (import-linter errors on forbidding
@@ -62,8 +77,10 @@ Scope, in order:
 Out of scope: any new module move; runner relocations (Phase 5 of the strategy doc);
 anything in `utils/` that is a live runner/tool.
 
-Validation adds: `lint-imports` green with the updated contract; grep-proof table in
-the report (per deleted file: the three grep forms, all zero).
+Validation adds: import-linter green with the updated contract
+(`scripts/py -m importlinter.cli --config pyproject.toml`); grep-proof table in the
+report (per deleted file: the three grep forms across the FULL repo, all zero); marimo
+apps `py_compile` clean after the retarget.
 
 ## Slice B — grayscale definition-site unification (`agent/grayscale-definition-sites`)
 
@@ -127,10 +144,11 @@ Scope:
 3. Migrate the remainder per the approved pattern. Behavior-preserving: each migration
    carries a test pinning old-vs-new equivalence on a fixture store (reuse the
    frame-domains fixture from impl slice 1).
-4. Files you touch WILL overlap Slice B's (`tracking/crop.py`,
-   `capture/import_video.py`) in different regions: rebase onto current `sun` at every
-   checkpoint and before declaring done; do not begin your `crop.py` edits until you've
-   rebased past Slice B's merge if it has landed (commander merges B before C).
+4. **You are dispatched AFTER Slice B has merged** (see dispatch plan). Branch from a
+   `sun` that already contains B; rebase onto current `sun` at every checkpoint and
+   before declaring done. If you were nonetheless started early (census/checkpoint-only
+   mode), do NOT touch `tracking/crop.py` or `capture/import_video.py` until rebased
+   past B's merge.
 
 Out of scope: changing any domain semantics, fixing latent off-by-one bugs you FIND
 (report them loudly as findings — a wrong translation converted faithfully is a
