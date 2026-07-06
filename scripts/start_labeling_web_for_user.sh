@@ -21,6 +21,7 @@ Useful environment overrides:
   PALETTE_LABELING_ADMIN_USER=delahantyj
   PALETTE_LABELING_HOST=127.0.0.1
   PALETTE_LABELING_REMOTE_HOST=delahantyj-ws1
+  PALETTE_LABELING_SSH_TARGET=campus_user@delahantyj-ws1
 EOF
 }
 
@@ -48,6 +49,7 @@ ADMIN_USER="${PALETTE_LABELING_ADMIN_USER:-delahantyj}"
 LOG_PATH="${PALETTE_LABELING_LOG:-/tmp/palette-labeling-web-${USER_ID}-${PORT}.log}"
 PID_PATH="${PALETTE_LABELING_PID:-/tmp/palette-labeling-web-${USER_ID}-${PORT}.pid}"
 REMOTE_HOST="${PALETTE_LABELING_REMOTE_HOST:-<workstation-hostname>}"
+SSH_TARGET="${PALETTE_LABELING_SSH_TARGET:-${USER_ID}@${REMOTE_HOST}}"
 STORE="${PALETTE_LABELING_STORE:-${HOME}/.palette/labeling_work.sqlite}"
 
 PALETTE_LABELING_AUTH_MODE=fixed \
@@ -77,6 +79,9 @@ PALETTE_LABELING_REMOTE_HOST=${REMOTE_HOST} \\
 PALETTE_LABELING_REMOTE_PORT=${PORT} \\
 PALETTE_LABELING_LOCAL_PORT=${LOCAL_TUNNEL_PORT} \\
 scripts/tunnel_labeling_web.sh
+
+Direct SSH tunnel command for the labeler from their laptop:
+ssh -N -L ${LOCAL_TUNNEL_PORT}:127.0.0.1:${PORT} ${SSH_TARGET}
 
 Remote browser URL after tunnel:
 http://127.0.0.1:${LOCAL_TUNNEL_PORT}/my-datasets

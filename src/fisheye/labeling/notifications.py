@@ -13,7 +13,7 @@ from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 from pathlib import Path
 from typing import Mapping
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 
 NOTIFICATION_MODES = ("disabled", "outbox", "smtp")
@@ -21,6 +21,11 @@ NOTIFICATION_MODE_ENV_VAR = "PALETTE_LABELING_NOTIFICATION_MODE"
 NOTIFICATION_FROM_ENV_VAR = "PALETTE_LABELING_NOTIFICATION_FROM"
 NOTIFICATION_BASE_URL_ENV_VAR = "PALETTE_LABELING_BASE_URL"
 NOTIFICATION_OUTBOX_ENV_VAR = "PALETTE_LABELING_NOTIFICATION_OUTBOX"
+NOTIFICATION_TUNNEL_LOCAL_PORT_ENV_VAR = "PALETTE_LABELING_TUNNEL_LOCAL_PORT"
+NOTIFICATION_TUNNEL_REMOTE_PORT_ENV_VAR = "PALETTE_LABELING_TUNNEL_REMOTE_PORT"
+NOTIFICATION_TUNNEL_SSH_TARGET_ENV_VAR = "PALETTE_LABELING_SSH_TARGET"
+NOTIFICATION_TUNNEL_REMOTE_HOST_ENV_VAR = "PALETTE_LABELING_REMOTE_HOST"
+NOTIFICATION_TUNNEL_REMOTE_BIND_HOST_ENV_VAR = "PALETTE_LABELING_REMOTE_BIND_HOST"
 SMTP_HOST_ENV_VAR = "PALETTE_LABELING_SMTP_HOST"
 SMTP_PORT_ENV_VAR = "PALETTE_LABELING_SMTP_PORT"
 SMTP_USERNAME_ENV_VAR = "PALETTE_LABELING_SMTP_USERNAME"
@@ -204,6 +209,7 @@ def _build_labeler_added_notification(
             "",
             "Use this username when opening the labeling website.",
             f"Assigned datasets queue: {queue_url}",
+            *_fixed_user_tunnel_instruction_lines(user_id, base_url=base_url),
             "",
             "If the page says your browser identity does not match, contact the operator and include the username above.",
         ]
@@ -238,6 +244,7 @@ def _build_assignment_available_notification(
         f"Username: {assignee_user}",
         f"Recording: {recording_id}",
         f"Assigned datasets queue: {queue_url}",
+        *_fixed_user_tunnel_instruction_lines(assignee_user, base_url=base_url),
     ]
     if notes:
         lines.extend(["", f"Operator notes: {notes}"])
@@ -434,6 +441,47 @@ def _personal_dataset_queue_url(user_id: str, *, base_url: str | None = None) ->
     path = f"{PERSONAL_DATASET_QUEUE_PATH}?expected_user={quote(str(user_id or '').strip())}"
     base_url = _normalize_base_url(base_url if base_url is not None else os.environ.get(NOTIFICATION_BASE_URL_ENV_VAR))
     return f"{base_url}{path}" if base_url else path
+
+
+def _fixed_user_tunnel_instruction_lines(user_id: str, *, base_url: str | None) -> list[str]:
+    base_url = _normalize_base_url(base_url)
+    if not base_url:
+        return []
+    try:
+        parsed = urlparse(base_url)
+    except Exception:
+        return []
+    if parsed.hostname not in {"127.0.0.1", "localhost"}:
+        return []
+    parsed_port = parsed.port
+    local_port = _normalize_optional_text(os.environ.get(NOTIFICATION_TUNNEL_LOCAL_PORT_ENV_VAR)) or (
+        str(parsed_port) if parsed_port is not None else ""
+    )
+    remote_port = _normalize_optional_text(os.environ.get(NOTIFICATION_TUNNEL_REMOTE_PORT_ENV_VAR)) or local_port
+    if not local_port or not remote_port:
+        return []
+    remote_bind_host = (
+        _normalize_optional_text(os.environ.get(NOTIFICATION_TUNNEL_REMOTE_BIND_HOST_ENV_VAR)) or "127.0.0.1"
+    )
+    ssh_target = _normalize_optional_text(os.environ.get(NOTIFICATION_TUNNEL_SSH_TARGET_ENV_VAR))
+    if not ssh_target:
+        remote_host = _normalize_optional_text(os.environ.get(NOTIFICATION_TUNNEL_REMOTE_HOST_ENV_VAR))
+        if remote_host:
+            ssh_target = f"{str(user_id or '').strip()}@{remote_host}"
+        else:
+            ssh_target = f"{str(user_id or '').strip()}@<workstation-hostname>"
+    return [
+        "",
+        "If you are using the temporary campus SSH-tunnel setup:",
+        "",
+        "1. Connect to the campus VPN if you are off campus.",
+        "2. Open Terminal or PowerShell on your laptop and run:",
+        "",
+        f"   ssh -N -L {local_port}:{remote_bind_host}:{remote_port} {ssh_target}",
+        "",
+        "3. Keep that terminal open while labeling.",
+        f"4. Open {base_url}{PERSONAL_DATASET_QUEUE_PATH} in your browser.",
+    ]
 
 
 def _normalize_base_url(value: object) -> str | None:
