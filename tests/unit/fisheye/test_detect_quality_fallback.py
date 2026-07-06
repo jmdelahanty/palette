@@ -5,17 +5,28 @@ from pathlib import Path
 import numpy as np
 import zarr
 
+from fisheye.refinement import detect_quality as detect_quality_mod
 from fisheye.refinement.detect_quality import analyze_detect_quality, save_quality_report
 
 
-def test_analyze_detect_quality_handles_raw_video_without_images_ds(tmp_path: Path) -> None:
-    zarr_path = tmp_path / "analysis.zarr"
+def _normalize_report(value):
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(key): _normalize_report(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_report(item) for item in value]
+    return value
+
+
+def _write_frame_count_precedence_archive(zarr_path: Path) -> None:
     root = zarr.open_group(store=zarr_path, mode="w")
     root.attrs["width"] = 4512
     root.attrs["height"] = 4512
     root.attrs["total_frames"] = 10
 
-    # Archive has raw_video metadata, but no imported images dataset.
     raw = root.create_group("raw_video")
     raw.attrs["source_video"] = "Cam2010093.mp4"
 
@@ -38,11 +49,69 @@ def test_analyze_detect_quality_handles_raw_video_without_images_ds(tmp_path: Pa
     detect.create_array("bbox_norm_coords", data=bbox_norm, overwrite=True)
     detect.create_array("frame_counts", data=frame_counts, overwrite=True)
 
+
+def test_analyze_detect_quality_handles_raw_video_without_images_ds(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "analysis.zarr"
+    _write_frame_count_precedence_archive(zarr_path)
+
     report = analyze_detect_quality(str(zarr_path), run_name="detect_2026-02-09_12-00-00")
     assert report["source_run"] == "detect_2026-02-09_12-00-00"
     # Uses detect/frame_counts as frame universe when imported frames are absent.
     assert report["coverage"]["total_frames"] == 5
     assert report["bbox_validation"]["total_bboxes"] == 3
+
+
+def test_detect_quality_frame_domains_matches_legacy_report_and_saved_content(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    normal_path = tmp_path / "analysis_domains.zarr"
+    legacy_path = tmp_path / "analysis_legacy.zarr"
+    _write_frame_count_precedence_archive(normal_path)
+    _write_frame_count_precedence_archive(legacy_path)
+
+    normal_report = analyze_detect_quality(
+        str(normal_path),
+        run_name="detect_2026-02-09_12-00-00",
+    )
+    normal_quality_path = save_quality_report(
+        str(normal_path),
+        normal_report,
+        quality_run_name="detect_quality_domains",
+    )
+
+    monkeypatch.setattr(
+        detect_quality_mod,
+        "_run_frame_count_from_domains",
+        lambda _root, _detect_group: None,
+    )
+    legacy_report = analyze_detect_quality(
+        str(legacy_path),
+        run_name="detect_2026-02-09_12-00-00",
+    )
+    legacy_quality_path = save_quality_report(
+        str(legacy_path),
+        legacy_report,
+        quality_run_name="detect_quality_legacy",
+    )
+
+    assert _normalize_report(normal_report) == _normalize_report(legacy_report)
+    assert normal_report["coverage"]["total_frames"] == 5
+
+    normal_quality = zarr.open_group(str(normal_path), mode="r")[normal_quality_path]
+    legacy_quality = zarr.open_group(str(legacy_path), mode="r")[legacy_quality_path]
+    assert normal_quality.attrs["coverage_stats"] == legacy_quality.attrs["coverage_stats"]
+    assert normal_quality.attrs["detection_quality_summary"] == (
+        legacy_quality.attrs["detection_quality_summary"]
+    )
+    np.testing.assert_array_equal(
+        normal_quality["quality_flags"][:],
+        legacy_quality["quality_flags"][:],
+    )
+    np.testing.assert_array_equal(
+        normal_quality["detection_quality_labels"][:],
+        legacy_quality["detection_quality_labels"][:],
+    )
 
 
 def test_analyze_detect_quality_scaled_threshold_is_resolution_invariant(tmp_path: Path) -> None:

@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from .utils import identify_gaps, categorize_gaps, calculate_coverage_stats, Gap
 
 from ..registry.stage_complete import emit_stage_completion
+from ..shared.frame_domains import FrameDomain, FrameDomainError, FrameDomains
 from ..shared.run_provenance import build_writer_run_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr_helpers import open_zarr_group_direct, reconsolidate_zarr_metadata
@@ -181,6 +182,18 @@ def _as_positive_int(value: object) -> Optional[int]:
     return ivalue if ivalue > 0 else None
 
 
+def _run_frame_count_from_domains(
+    root: zarr.Group,
+    detect_group: zarr.Group,
+) -> Optional[int]:
+    try:
+        return int(
+            FrameDomains(root=root, run_group=detect_group).count(FrameDomain.RUN_FRAME)
+        )
+    except FrameDomainError:
+        return None
+
+
 def _resolve_detect_geometry(
     root: zarr.Group,
     detect_group: zarr.Group,
@@ -212,7 +225,9 @@ def _resolve_detect_geometry(
     # Fallback frame universe in order of reliability.
     num_frames = None
     if "frame_counts" in detect_group:
-        num_frames = _as_positive_int(detect_group["frame_counts"].shape[0])
+        num_frames = _as_positive_int(_run_frame_count_from_domains(root, detect_group))
+        if num_frames is None:
+            num_frames = _as_positive_int(detect_group["frame_counts"].shape[0])
     if num_frames is None:
         num_frames = _as_positive_int(detect_group.attrs.get("total_frames"))
     if num_frames is None:
