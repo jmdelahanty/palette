@@ -13,6 +13,7 @@ from matplotlib.colors import ListedColormap
 import numpy as np
 import zarr
 
+from fisheye.shared.frame_domains import FrameDomain, FrameDomainError, FrameDomains
 from fisheye.shared.plot_artifacts import PlotArtifactResult, write_png_visualization_artifact
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.shared.zarr_helpers import resolve_zarr_run
@@ -113,6 +114,13 @@ def _safe_int(value: object) -> Optional[int]:
     return integer if integer >= 0 else None
 
 
+def _stored_zarr_frame_count_from_domains(root: zarr.Group) -> Optional[int]:
+    try:
+        return int(FrameDomains(root=root).count(FrameDomain.STORED_ZARR))
+    except FrameDomainError:
+        return None
+
+
 def _resolve_total_frames(
     root: zarr.Group,
     groups: Sequence[zarr.Group],
@@ -141,12 +149,15 @@ def _resolve_total_frames(
             candidates.append(value)
     raw_video = root.get("raw_video")
     if raw_video is not None:
-        for name in ("images_full", "images_ds", "original_frame_indices"):
+        for name in ("images_full", "images_ds"):
             if name in raw_video:
                 try:
                     candidates.append(int(raw_video[name].shape[0]))
                 except Exception:
                     pass
+        stored_count = _stored_zarr_frame_count_from_domains(root)
+        if stored_count is not None:
+            candidates.append(stored_count)
     return max(candidates)
 
 
