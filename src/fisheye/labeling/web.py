@@ -67,6 +67,7 @@ from .web_operator_evidence_records import (
 )
 from . import web_zarr_backup as _web_zarr_backup
 from .web_assignment_freshness import (
+    _assignment_snapshot_from_assignments,
     _assignment_snapshot_rows_impl as _assignment_snapshot_rows,
     _handoff_assignment_snapshot_from_work_impl as _handoff_assignment_snapshot_from_work,
     _handoff_dataset_queue_state_counts_impl as _handoff_dataset_queue_state_counts,
@@ -6995,37 +6996,6 @@ def _handoff_status_from_manifest(
             '_zarr_backup_policy': _zarr_backup_policy
         },
     )
-
-
-def _assignment_snapshot_from_assignments(
-    assignments: Sequence[Mapping[str, object]],
-    *,
-    user: str | None = None,
-) -> dict[str, object]:
-    rows_by_recording: dict[str, dict[str, object]] = {}
-    for assignment in assignments:
-        recording_id = str(assignment.get("recording_id") or "").strip()
-        if not recording_id:
-            continue
-        rows_by_recording[recording_id] = {
-            "recording_id": recording_id,
-            "assignee_user": str(assignment.get("assignee_user") or "").strip(),
-            "status": str(assignment.get("status") or "active").strip() or "active",
-        }
-    rows = [rows_by_recording[key] for key in sorted(rows_by_recording)]
-    snapshot: dict[str, object] = {
-        "schema": "palette.web_labeling_assignment_snapshot.v1",
-        "recording_count": len(rows),
-        "recording_ids": [str(row["recording_id"]) for row in rows],
-        "assignments": rows,
-    }
-    if user is not None:
-        snapshot["user"] = str(user)
-    return snapshot
-
-
-
-
 
 
 def _audit_row_timestamp(row: dict[str, object]) -> datetime | None:
