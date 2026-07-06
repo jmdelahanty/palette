@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal, Mapping
 
@@ -16,6 +16,7 @@ from fisheye.shared.zarr_helpers import zarr_attrs_dict, zarr_child_group
 FRAME_DOMAIN_MAPS_GROUP = "frame_domain_maps"
 STORED_ZARR_TO_ACQUISITION_MAP = "stored_zarr_frame_to_acquisition_frame"
 RUN_FRAME_TO_ACQUISITION_MAP = "run_frame_to_acquisition_frame"
+_SPARSE_DENSE_LOOKUP_MAX_BYTES = 256 * 1024 * 1024
 
 
 class FrameDomain(str, Enum):
@@ -82,6 +83,65 @@ class FrameDomainUnmappedError(FrameDomainError):
 class _ConversionEdge:
     public: FrameDomainEdge
     mapping: Mapping[int, int]
+    _lookup: "_DenseLookup | _SortedLookup | None" = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+
+    def lookup(self) -> "_DenseLookup | _SortedLookup":
+        lookup = self._lookup
+        if lookup is None:
+            lookup = _build_lookup(self.mapping)
+            object.__setattr__(self, "_lookup", lookup)
+        return lookup
+
+
+@dataclass(frozen=True)
+class _DenseLookup:
+    values: np.ndarray
+    valid: np.ndarray | None = None
+
+
+@dataclass(frozen=True)
+class _SortedLookup:
+    keys: np.ndarray
+    values: np.ndarray
+
+
+def _build_lookup(mapping: Mapping[int, int]) -> _DenseLookup | _SortedLookup:
+    if not mapping:
+        return _DenseLookup(values=np.asarray([], dtype=np.int64))
+
+    keys = np.fromiter(
+        (int(key) for key in mapping.keys()),
+        dtype=np.int64,
+        count=len(mapping),
+    )
+    values = np.fromiter(
+        (int(value) for value in mapping.values()),
+        dtype=np.int64,
+        count=len(mapping),
+    )
+    if keys.size and int(keys.min()) == 0 and int(keys.max()) == keys.size - 1:
+        dense = np.empty(keys.size, dtype=np.int64)
+        dense[keys] = values
+        return _DenseLookup(values=dense)
+    if keys.size and int(keys.min()) >= 0:
+        max_key = int(keys.max())
+        dense_size = max_key + 1
+        estimated_bytes = dense_size * (
+            np.dtype(np.int64).itemsize + np.dtype(bool).itemsize
+        )
+        if max_key <= keys.size * 4 and estimated_bytes <= _SPARSE_DENSE_LOOKUP_MAX_BYTES:
+            dense = np.empty(dense_size, dtype=np.int64)
+            valid = np.zeros(dense_size, dtype=bool)
+            dense[keys] = values
+            valid[keys] = True
+            return _DenseLookup(values=dense, valid=valid)
+
+    order = np.argsort(keys, kind="stable")
+    return _SortedLookup(keys=keys[order], values=values[order])
 
 
 def _normalize_domain(domain: FrameDomain | str) -> FrameDomain:
@@ -253,19 +313,32 @@ class FrameDomains:
                 run_name=self.run_name,
             )
 
-        output = np.empty(flat_values.shape[0], dtype=np.int64)
-        missing: list[int] = []
-        for idx, raw_value in enumerate(flat_values.tolist()):
-            value = int(raw_value)
-            mapped = edge.mapping.get(value)
-            if mapped is None:
-                missing.append(value)
-                continue
-            output[idx] = mapped
-        if missing:
-            sample = tuple(missing[:10])
+        converted = np.asarray(flat_values, dtype=np.int64)
+        output = np.empty(converted.shape[0], dtype=np.int64)
+        lookup = edge.lookup()
+        if isinstance(lookup, _DenseLookup):
+            in_bounds = (converted >= 0) & (converted < lookup.values.shape[0])
+            if lookup.valid is None:
+                hit_mask = in_bounds
+            else:
+                hit_mask = np.zeros(converted.shape[0], dtype=bool)
+                in_bounds_values = converted[in_bounds]
+                hit_mask[in_bounds] = lookup.valid[in_bounds_values]
+            output[hit_mask] = lookup.values[converted[hit_mask]]
+        else:
+            if lookup.keys.shape[0] == 0:
+                hit_mask = np.zeros(converted.shape[0], dtype=bool)
+            else:
+                positions = np.searchsorted(lookup.keys, converted)
+                in_bounds = positions < lookup.keys.shape[0]
+                safe_positions = np.minimum(positions, lookup.keys.shape[0] - 1)
+                hit_mask = in_bounds & (lookup.keys[safe_positions] == converted)
+                output[hit_mask] = lookup.values[safe_positions[hit_mask]]
+        if not np.all(hit_mask):
+            missing = converted[~hit_mask]
+            sample = tuple(int(value) for value in missing[:10].tolist())
             raise FrameDomainUnmappedError(
-                f"{len(missing)} value(s) are unmappable from {source_domain.value} "
+                f"{missing.shape[0]} value(s) are unmappable from {source_domain.value} "
                 f"to {target_domain.value}; first values: {sample}",
                 source=source_domain,
                 target=target_domain,
