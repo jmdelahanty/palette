@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import zarr
 
 import fisheye.tracking.arena_assignment as mod
 from fisheye.tracking.arena_assignment import assign_arenas_spatial
@@ -129,6 +130,59 @@ def _build_root() -> _FakeGroup:
 
     root.create_group("arena_assignment_runs")
     return root
+
+
+def _legacy_infer_num_frames(root, detection_group, frame_indices: np.ndarray) -> int:
+    candidates: list[int] = []
+
+    for key in ("n_frames", "total_frames", "source_total_frames"):
+        value = detection_group.attrs.get(key)
+        if isinstance(value, (int, np.integer)) and value > 0:
+            candidates.append(int(value))
+
+    params = detection_group.attrs.get("parameters")
+    if isinstance(params, dict):
+        for key in ("n_frames", "total_frames"):
+            value = params.get(key)
+            if isinstance(value, (int, np.integer)) and value > 0:
+                candidates.append(int(value))
+
+    for key in ("palette_total_frames", "total_frames", "n_frames"):
+        value = root.attrs.get(key)
+        if isinstance(value, (int, np.integer)) and value > 0:
+            candidates.append(int(value))
+
+    if "raw_video" in root and "images_ds" in root["raw_video"]:
+        candidates.append(int(root["raw_video/images_ds"].shape[0]))
+
+    if candidates:
+        return max(candidates)
+
+    if frame_indices.size:
+        return int(frame_indices.max()) + 1
+
+    raise ValueError(
+        "Unable to infer total frame count; detection metadata missing 'frame_counts' and video attributes."
+    )
+
+
+def test_infer_num_frames_matches_legacy_count_resolution(tmp_path) -> None:
+    root = zarr.open_group(str(tmp_path / "arena_frames.zarr"), mode="w")
+    raw = root.create_group("raw_video")
+    raw.create_array("images_ds", shape=(4, 2, 2), chunks=(4, 2, 2), dtype=np.uint8, overwrite=True)
+    detect = root.create_group("detect_runs").create_group("detect_001")
+    frame_indices = np.asarray([0, 2], dtype=np.int64)
+
+    assert mod._infer_num_frames(root, detect, frame_indices) == _legacy_infer_num_frames(
+        root,
+        detect,
+        frame_indices,
+    )
+
+    detect.create_array("frame_counts", data=np.ones(4, dtype=np.int32), overwrite=True)
+    assert mod._count_from_domains(root, mod.FrameDomain.RUN_FRAME, run_group=detect) == int(
+        detect["frame_counts"].shape[0]
+    )
 
 
 def _stub_assignment_runtime(

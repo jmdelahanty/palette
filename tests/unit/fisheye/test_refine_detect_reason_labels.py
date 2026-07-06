@@ -1,10 +1,12 @@
 import numpy as np
 import pytest
+import zarr
 
 from fisheye.refinement.refine_detect import (
     _apply_dish_mask_quality_gate,
     _build_sparse_refined_inputs_from_filtered,
     _filtered_reason_from_quality_label,
+    _get_sampled_frame_count,
     _reject_deprecated_interpolation_overrides,
     _resolve_detection_quality_labels,
     _select_per_frame_top_k_raw_indices,
@@ -71,6 +73,34 @@ class _FakeGroup:
 
 def _fake_root() -> _FakeGroup:
     return _FakeGroup()
+
+
+def _legacy_get_sampled_frame_count(root, detect_group):
+    raw = root.get("raw_video")
+    if raw is not None:
+        if "original_frame_indices" in raw:
+            return int(raw["original_frame_indices"].shape[0])
+        if "images_ds" in raw:
+            return int(raw["images_ds"].shape[0])
+        if "images_full" in raw:
+            return int(raw["images_full"].shape[0])
+    if detect_group is not None and "frame_counts" in detect_group:
+        return int(detect_group["frame_counts"].shape[0])
+    return None
+
+
+def test_get_sampled_frame_count_matches_legacy_frame_axis_resolution(tmp_path) -> None:
+    zarr_path = tmp_path / "sampled.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    raw = root.create_group("raw_video")
+    raw.create_array("original_frame_indices", data=np.asarray([0, 2, 4], dtype=np.int32), overwrite=True)
+    detect = root.create_group("detect_runs").create_group("detect_001")
+    detect.create_array("frame_counts", data=np.ones(5, dtype=np.int32), overwrite=True)
+
+    assert _get_sampled_frame_count(root, detect) == _legacy_get_sampled_frame_count(root, detect)
+
+    del root["raw_video/original_frame_indices"]
+    assert _get_sampled_frame_count(root, detect) == _legacy_get_sampled_frame_count(root, detect)
 
 
 def test_get_refinement_parameters_defaults_max_gap_to_0() -> None:

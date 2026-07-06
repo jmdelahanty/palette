@@ -19,6 +19,7 @@ from rich.panel import Panel
 from ..shared.experiment_setup import infer_experiment_setup
 from ..registry.stage_complete import emit_stage_completion
 from ..shared.run_provenance import build_run_provenance_from_stage_record
+from ..shared.frame_domains import FrameDomain, FrameDomainError, FrameDomains
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
@@ -31,6 +32,18 @@ from .single_subject_per_arena import (
 from ..shared.system_metadata import get_environment_info
 
 _ARENA_ASSIGN_STATUS_SOURCE = "runtime_arena_assignment"
+
+
+def _count_from_domains(
+    root: zarr.Group,
+    domain: FrameDomain,
+    *,
+    run_group: Optional[zarr.Group] = None,
+) -> Optional[int]:
+    try:
+        return int(FrameDomains(root=root, run_group=run_group).count(domain))
+    except FrameDomainError:
+        return None
 
 
 def _emit_tracking_step_statuses(
@@ -109,7 +122,8 @@ def _infer_num_frames(
             candidates.append(int(value))
 
     if "raw_video" in root and "images_ds" in root["raw_video"]:
-        candidates.append(int(root["raw_video/images_ds"].shape[0]))
+        stored_count = _count_from_domains(root, FrameDomain.STORED_ZARR)
+        candidates.append(stored_count if stored_count is not None else int(root["raw_video/images_ds"].shape[0]))
 
     if candidates:
         return max(candidates)
@@ -653,7 +667,8 @@ def assign_arenas_spatial(
     bbox_coords = detection_group['bbox_norm_coords'][:]
     if 'frame_counts' in detection_group:
         frame_counts = detection_group['frame_counts'][:]
-        num_frames = len(frame_counts)
+        run_frame_count = _count_from_domains(root, FrameDomain.RUN_FRAME, run_group=detection_group)
+        num_frames = run_frame_count if run_frame_count is not None else len(frame_counts)
     else:
         num_frames = _infer_num_frames(root, detection_group, frame_indices)
         frame_counts = np.bincount(frame_indices, minlength=num_frames)

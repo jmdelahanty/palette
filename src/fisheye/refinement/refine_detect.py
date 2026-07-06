@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple, Any
 from rich.console import Console
 
+from ..shared.frame_domains import FrameDomain, FrameDomainError, FrameDomains
 from ..shared.metadata import get_total_frames, get_detection_method
 from ..shared.system_metadata import get_environment_info, get_git_info
 from ..shared.refined_detect_curation import write_curated_refined_detect_surfaces
@@ -158,13 +159,19 @@ def _get_sampled_frame_count(root: zarr.Group, detect_group: Optional[zarr.Group
     raw = root.get("raw_video")
     if raw is not None:
         if "original_frame_indices" in raw:
-            return int(raw["original_frame_indices"].shape[0])
+            try:
+                return int(FrameDomains(root=root).count(FrameDomain.STORED_ZARR))
+            except FrameDomainError:
+                return int(raw["original_frame_indices"].shape[0])
         if "images_ds" in raw:
             return int(raw["images_ds"].shape[0])
         if "images_full" in raw:
             return int(raw["images_full"].shape[0])
     if detect_group is not None and "frame_counts" in detect_group:
-        return int(detect_group["frame_counts"].shape[0])
+        try:
+            return int(FrameDomains(root=root, run_group=detect_group).count(FrameDomain.RUN_FRAME))
+        except FrameDomainError:
+            return int(detect_group["frame_counts"].shape[0])
     return None
 
 
