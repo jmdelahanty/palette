@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="/groups/johnson/johnsonlab/jeremy/recordings"
 BATCH_SIZE=10
-MAX_ACTIVE=2
+MAX_ACTIVE=12
 QUEUE=""
 NCORES=4
 MEM_GB=32
@@ -48,7 +48,7 @@ Usage: submit_keypoints_batches_bsub.sh [options]
 Options:
   --root PATH               Root recordings directory (default: /groups/johnson/johnsonlab/jeremy/recordings)
   --batch-size N            Analysis zarrs per batch job (default: 10)
-  --max-active N            Max concurrent jobs in array (default: 2)
+  --max-active N            Max concurrent jobs in array (default: 12)
   --queue NAME              LSF queue name
   --ncores N                Cores per job (default: 4)
   --mem-gb N                Memory per job in GB (default: 32)

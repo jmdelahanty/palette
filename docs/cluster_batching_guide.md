@@ -754,7 +754,7 @@ scripts/py -m fisheye.utils.run_keypoints_batch /groups/johnson/johnsonlab/jerem
   --root /groups/johnson/johnsonlab/jeremy/recordings \
   --source registry \
   --batch-size 10 \
-  --max-active 2 \
+  --max-active 12 \
   --queue short \
   --mem-gb 32 \
   --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
@@ -768,7 +768,7 @@ scripts/py -m fisheye.utils.run_keypoints_batch /groups/johnson/johnsonlab/jerem
 | `--root`              | `/groups/johnson/johnsonlab/jeremy/recordings` | Root recordings directory        |
 | `--source`            | `filesystem` | Discovery source                        |
 | `--batch-size`        | `10`    | Analysis zarrs per batch job                 |
-| `--max-active`        | `2`     | Max concurrent jobs                          |
+| `--max-active`        | `12`    | Max concurrent jobs                          |
 | `--mem-gb`            | `32`    | Memory per job in GB                         |
 | `--gpus`              | `0`     | GPUs per job; when >0 the submitter requests LSF GPUs and defaults `--device 0` |
 | `--registry`          | `/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite` | Registry path     |
@@ -1045,7 +1045,7 @@ To process all four stages sequentially using registry-backed discovery:
 # 3. Keypoints — requires detect='ok' and crop='ok'
 ./scripts/submit_keypoints_batches_bsub.sh \
   --source registry --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
-  --batch-size 10 --max-active 2
+  --batch-size 10 --max-active 12
 
 # 4. Subject masks — requires crop='ok' and keypoints='ok'
 ./scripts/submit_subject_mask_batches_bsub.sh \
@@ -1252,7 +1252,7 @@ TERM=dumb scripts/py -m fisheye.utils.crop_batch ...
 | Parameter       | Detect | Crop  | Keypoints | Eye Masks |
 |-----------------|--------|-------|-----------|-----------|
 | `--batch-size`  | 10–30  | 10    | 10        | 10        |
-| `--max-active`  | 1–2    | 1–2   | 1–2       | 1–2       |
+| `--max-active`  | 1–2    | 1–2   | 12        | 1–2       |
 | `--mem-gb`      | 16     | 32    | 32        | 32        |
 | `--ncores`      | 4      | 4     | 4         | 4         |
 
