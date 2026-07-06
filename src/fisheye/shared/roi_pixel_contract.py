@@ -6,6 +6,8 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from fisheye.shared.grayscale import UNWEIGHTED_MEAN
+
 ROI_PIXEL_CONTRACT_SCHEMA = "palette_roi_pixel_contract_v1"
 ROI_IMAGE_REPRESENTATION = "uint8_grayscale_roi_v1"
 ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME = "orange_mono_pynvvc_luma_uint8_v1"
@@ -29,6 +31,7 @@ def roi_pixel_contract(
     applied_range_semantics: str | None = None,
     container_color_range_handling: str | None = None,
     center_rounding: str | None = None,
+    grayscale_convention: str | None = None,
 ) -> dict[str, Any]:
     """Build the canonical metadata contract for model-facing ROI pixels."""
 
@@ -57,6 +60,8 @@ def roi_pixel_contract(
         payload["container_color_range_handling"] = str(container_color_range_handling)
     if center_rounding is not None:
         payload["center_rounding"] = str(center_rounding)
+    if grayscale_convention is not None:
+        payload["grayscale_convention"] = str(grayscale_convention)
     return payload
 
 
@@ -142,6 +147,7 @@ def crop_run_pixel_contract(
             applied_range_semantics="decoder_default_yuv_to_rgb",
             container_color_range_handling="decoder_default",
             center_rounding=CENTER_ROUNDING_NP_ROUND,
+            grayscale_convention=UNWEIGHTED_MEAN.name,
         )
 
     if source == "external" and accel == "cpu":
@@ -203,6 +209,7 @@ def crop_image_source_live_pixel_contract(
             applied_range_semantics="decoder_default_yuv_to_rgb",
             container_color_range_handling="decoder_default",
             center_rounding=CENTER_ROUNDING_NP_ROUND,
+            grayscale_convention=UNWEIGHTED_MEAN.name,
         )
     if frame_source == "source_video_path":
         return roi_pixel_contract(

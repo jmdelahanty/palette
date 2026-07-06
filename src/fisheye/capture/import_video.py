@@ -33,6 +33,7 @@ from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, 
 
 from ..shared.encoder_tags import parse_encoder_comment
 from ..shared.frame_domains import FRAME_DOMAIN_MAPS_GROUP, STORED_ZARR_TO_ACQUISITION_MAP
+from ..shared.grayscale import LUMA_BT601_MATLAB, rgb_to_gray_bt601_matlab_torch
 
 # Optional deps
 try:
@@ -377,10 +378,8 @@ def _process_video_gpu_kvikio(
                                                  device='cuda', dtype=torch.uint8)
         console.print(f"[cyan]Downsampled (RGB) buffer: {frames_per_write}×{down_h}×{down_w}×3[/cyan]")
     
-    # Grayscale conversion weights
-    weights = torch.tensor([0.2989, 0.5870, 0.1140], device='cuda',
-                          dtype=torch.float16 if use_fp16 else torch.float32).view(1, 1, 1, 3)
-    
+    grayscale_weights_dtype = torch.float16 if use_fp16 else torch.float32
+
     # Get downsample method if needed
     down_method = config['import'].get('downsampled', {}).get('method', 'area')
     down_preserve_aspect = bool(config['import'].get('downsampled', {}).get('preserve_aspect', False))
@@ -434,7 +433,10 @@ def _process_video_gpu_kvikio(
                     frames = vr.get_batch(batch_frame_indices)
                     frames_f32 = frames.float()
                     work_tensor = frames_f32.half() if use_fp16 else frames_f32
-                    gray = (work_tensor * weights).sum(dim=-1)
+                    gray = rgb_to_gray_bt601_matlab_torch(
+                        work_tensor,
+                        weights_dtype=grayscale_weights_dtype,
+                    )
                     gray_uint8 = gray.clamp(0, 255).to(torch.uint8)
 
                     # Store full resolution if needed
@@ -634,7 +636,8 @@ def _decode_contract_metadata(device: str) -> Dict[str, Any]:
         ),
         "source_decode_surface": "decord_rgb_uint8",
         "stored_luma_transform": "rgb_to_gray_bt601_weights",
-        "stored_luma_weights": [0.2989, 0.5870, 0.1140],
+        "stored_luma_convention": LUMA_BT601_MATLAB.name,
+        "stored_luma_weights": list(LUMA_BT601_MATLAB.weights or ()),
         "stored_luma_color_range": "legacy_decord_rgb_full_range_assumed",
         "canonical_decode_backend_target": "pynvvc_luma",
     }
