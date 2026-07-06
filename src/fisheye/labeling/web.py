@@ -273,6 +273,7 @@ from .web_validation_checklist import (
     _validation_gate,
     _validation_gate_blocks_invitation_semantics_fields,
 )
+from .web_time import _parse_handoff_utc
 from .web_session_renderers import (
     _BROWSER_MUTATION_STATUS_JS,
     _IMAGE_CANVAS_VIEWPORT_JS,
@@ -6930,19 +6931,6 @@ def _check_launch_bundle_overwrite_target(
                 "Refusing to overwrite launch bundle with unexpected audit artifacts: "
                 + ", ".join(str(path) for path in stale_audit_paths)
             )
-
-
-def _parse_handoff_utc(value: object) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
 
 
 def _handoff_status_from_manifest(
