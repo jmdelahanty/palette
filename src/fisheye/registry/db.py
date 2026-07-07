@@ -8504,17 +8504,21 @@ def _path_matches_scope(candidate: Path, scope_roots: List[Path]) -> bool:
 def _find_zarr_roots(root: Path) -> List[Path]:
     roots: List[Path] = []
     seen: set[Path] = set()
-    for candidate in root.rglob("*.zarr"):
-        if not candidate.is_dir():
-            continue
-        if not _is_zarr_root(candidate):
-            continue
-        if _is_empty_zarr_stub(candidate):
-            continue
-        resolved = _normalize_fs_path(candidate)
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        roots.append(candidate)
+    for current, dirnames, _filenames in os.walk(root):
+        current_path = Path(current)
+        for dirname in list(dirnames):
+            if not dirname.endswith(".zarr"):
+                continue
+            candidate = current_path / dirname
+            if not _is_zarr_root(candidate):
+                continue
+            dirnames.remove(dirname)
+            if _is_empty_zarr_stub(candidate):
+                continue
+            resolved = _normalize_fs_path(candidate)
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            roots.append(candidate)
     roots.sort(key=lambda path: str(path))
     return roots

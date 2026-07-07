@@ -164,3 +164,21 @@ Add `reconcile_dataset_from_root(root, zarr_path)` that loops the existing extra
 then re-express the 3 profile syncs as extractors behind it. That alone validates the
 interface and retires the most duplicated scripts, before tackling model-manifest
 reconcile.
+
+## Landed State Addendum - 2026-07-07
+
+The smallest first step has landed. `Registry.reconcile_dataset_from_root(...)` now
+wraps `register_from_root` plus detection, keypoint, and subject-mask data-profile
+extractors in one per-dataset transaction, with optional `recording_step_status`
+refresh. The standalone detection/keypoint profile sync scripts have been removed, and
+subject-mask profile rows now participate in reconcile rather than needing a new
+standalone sync path.
+
+This slice adds the root-sweep composition layer in
+`fisheye.registry.reconcile_sweep`: dry-run by default, read-only against the registry in
+preview mode, and `--apply` gated for maintainers. The sweep enumerates Zarr stores under
+one or more roots, classifies them as new/known/unreadable, composes the existing
+per-dataset reconcile for readable stores in apply mode, and previews or applies
+scoped missing-dataset marking. Model-manifest reconcile remains a separate future
+category, and the legacy eye-mask profile stack remains a deprecation target rather than
+a surface to extend.
