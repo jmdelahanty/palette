@@ -377,6 +377,8 @@ def create_clipped_analysis_zarr(
             "recording_frame_index_path": str(frame_index_path),
             "recording_frame_index_manifest_path": str(frame_manifest_path),
             "recording_frame_index_schema": frame_manifest.get("frame_index_schema_version"),
+            "source_recording_frame_index_path": str(frame_index_path),
+            "source_frame_index_schema": frame_manifest.get("frame_index_schema_version"),
             "recording_frame_index_row_count": frame_summary["row_count"],
             "recording_frame_id_min": frame_summary["recording_frame_id_min"],
             "recording_frame_id_max": frame_summary["recording_frame_id_max"],
