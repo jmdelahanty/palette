@@ -16,6 +16,7 @@ QUEUE="gpu_l4"
 NCORES=8
 MEM_GB=64
 GPUS=1
+GPU_RESOURCE=""
 WALLTIME="4:00"
 ROI_SIZE=()
 LIMIT_ROWS=""
@@ -67,6 +68,9 @@ LSF options:
   --ncores N                        CPU slots (default: 8)
   --mem-gb N                        Memory request in GB (default: 64)
   --gpus N                          GPU count; 0 omits -gpu (default: 1)
+  --gpu-resource STRING             Raw LSF -gpu resource string; overrides --gpus.
+                                    Needed for multi-process children if the
+                                    cluster default is exclusive_process.
   --walltime H:MM                   Wall time (default: 4:00)
 
 Logging:
@@ -102,6 +106,7 @@ while [[ $# -gt 0 ]]; do
     --ncores) NCORES="$2"; shift 2;;
     --mem-gb) MEM_GB="$2"; shift 2;;
     --gpus) GPUS="$2"; shift 2;;
+    --gpu-resource) GPU_RESOURCE="$2"; shift 2;;
     --walltime) WALLTIME="$2"; shift 2;;
     --log-dir) LOG_DIR="$2"; shift 2;;
     --run-id) RUN_ID="$2"; shift 2;;
@@ -211,7 +216,7 @@ fi
 scripts/py - "$RUN_DIR/submission_context.json" \
   "$ZARR_PATH" "$COLLECTION_ID" "$RECORDING_FRAME_INDEX" "$PUBLIC_CACHE_DIR" "$RUN_ID" "$RUN_LABEL" \
   "$SAFE_LABEL" "$QUEUE" "$NCORES" "$MEM_GB" "$GPUS" "$WALLTIME" "$LIMIT_ROWS" "$GPU_CHUNK_FRAMES" \
-  "$MAX_WORKERS" "$SHA256" "$OVERWRITE" \
+  "$MAX_WORKERS" "$SHA256" "$OVERWRITE" "$GPU_RESOURCE" \
   "$(IFS=,; echo "${CLIP_IDS[*]}")" "$(IFS=,; echo "${WORK_UNIT_IDS[*]}")" <<'PY'
 import json
 import sys
@@ -236,6 +241,7 @@ from pathlib import Path
     max_workers,
     sha256,
     overwrite,
+    gpu_resource,
     clip_ids_csv,
     work_unit_ids_csv,
 ) = sys.argv[1:]
@@ -257,6 +263,7 @@ payload = {
     "ncores": int(ncores),
     "mem_gb": int(mem_gb),
     "gpus": int(gpus),
+    "gpu_resource": gpu_resource or None,
     "walltime": walltime,
     "limit_rows": int(limit_rows) if limit_rows else None,
     "gpu_chunk_frames": int(gpu_chunk_frames),
@@ -631,7 +638,11 @@ if [[ -n "$QUEUE" ]]; then
   BSUB_ARGS+=(-q "$QUEUE")
 fi
 if [[ "$GPUS" != "0" ]]; then
-  BSUB_ARGS+=(-gpu "num=${GPUS}")
+  if [[ -n "$GPU_RESOURCE" ]]; then
+    BSUB_ARGS+=(-gpu "$GPU_RESOURCE")
+  else
+    BSUB_ARGS+=(-gpu "num=${GPUS}")
+  fi
 fi
 
 printf -v BSUB_ARGS_SHELL '%q ' "${BSUB_ARGS[@]}"

@@ -330,6 +330,20 @@ the finalized collection at submission time. Use explicit clip IDs for first
 validation runs so the output directory and expected child manifests are easy to
 audit.
 
+On Janelia LSF, the default `-gpu num=1` request has been observed to resolve to
+`mode=exclusive_process:mps=no:j_exclusive=yes`. That mode allows only one child
+process to create a CUDA decoder/context; additional PyNvVideoCodec children can
+fail with `CUDA_ERROR_DEVICE_UNAVAILABLE`. The bundle submitter therefore
+exposes `--gpu-resource` as a raw LSF override for experiments such as:
+
+```bash
+--gpu-resource 'num=1:mode=shared:j_exclusive=no'
+```
+
+Only use multi-worker bundles when the effective GPU resource is non-exclusive.
+If the cluster cannot provide shared CUDA contexts on one L4, use one clip per
+job or a lower-level single-process multi-decoder implementation instead.
+
 ### Phase 2: proxy crop runs
 
 - [ ] Add a tool to create geometry-only proxy crop runs from a clipped
