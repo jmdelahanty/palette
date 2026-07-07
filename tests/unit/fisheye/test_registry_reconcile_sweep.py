@@ -235,3 +235,74 @@ def test_cli_writes_json_and_defaults_to_dry_run(tmp_path: Path) -> None:
     assert report["mode"] == "dry-run"
     assert report["read_only"] is True
     assert report["summary"]["new_store_count"] == 1
+
+
+def _write_empty_stub(path: Path) -> None:
+    path.mkdir(parents=True)
+    (path / "zarr.json").write_text(
+        json.dumps(
+            {
+                "attributes": {},
+                "zarr_format": 3,
+                "consolidated_metadata": None,
+                "node_type": "group",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_empty_stub_is_reported_but_never_reconciled(tmp_path: Path) -> None:
+    root_dir = tmp_path / "recordings"
+    real_path = root_dir / "real.zarr"
+    stub_path = root_dir / "stub.zarr"
+    _build_zarr(real_path, recording_id="rec_real", session_uuid="real_dataset")
+    _write_empty_stub(stub_path)
+    registry_path = tmp_path / "registry.sqlite"
+    Registry(registry_path).close()
+
+    dry = reconcile_roots(registry_path, [root_dir], apply=False)
+    stub_row = next(row for row in dry["stores"] if row["path"] == str(stub_path))
+    assert stub_row["would_reconcile"] is False
+    assert stub_row["skip_reason"] == "empty zarr stub"
+    assert dry["summary"]["empty_stub_skip_count"] == 1
+
+    applied = reconcile_roots(registry_path, [root_dir], apply=True)
+    stub_row = next(row for row in applied["stores"] if row["path"] == str(stub_path))
+    assert stub_row["applied"] is False
+    assert stub_row["would_reconcile"] is False
+    with sqlite3.connect(registry_path) as conn:
+        paths = {row[0] for row in conn.execute("SELECT zarr_path FROM datasets;")}
+    assert str(stub_path) not in {str(Path(p)) for p in paths}
+    assert any(str(real_path) in str(p) for p in paths)
+
+
+def test_exclude_prefix_drops_stores_from_sweep(tmp_path: Path) -> None:
+    root_dir = tmp_path / "recordings"
+    keep_path = root_dir / "keep.zarr"
+    cache_path = root_dir / "tmp" / "roi_cache" / "cache.zarr"
+    _build_zarr(keep_path, recording_id="rec_keep", session_uuid="keep_dataset")
+    _build_zarr(cache_path, recording_id="rec_cache", session_uuid="cache_dataset")
+    registry_path = tmp_path / "registry.sqlite"
+    Registry(registry_path).close()
+
+    report = reconcile_roots(
+        registry_path,
+        [root_dir],
+        apply=False,
+        exclude=[root_dir / "tmp"],
+    )
+    assert report["summary"]["excluded_store_count"] == 1
+    assert report["excluded_stores"] == [str(cache_path)]
+    assert {row["path"] for row in report["stores"]} == {str(keep_path)}
+
+    applied = reconcile_roots(
+        registry_path,
+        [root_dir],
+        apply=True,
+        exclude=[root_dir / "tmp"],
+    )
+    assert applied["summary"]["excluded_store_count"] == 1
+    with sqlite3.connect(registry_path) as conn:
+        paths = {row[0] for row in conn.execute("SELECT zarr_path FROM datasets;")}
+    assert not any("roi_cache" in str(p) for p in paths)

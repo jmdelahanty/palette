@@ -146,14 +146,33 @@ def _store_row(path: Path, known_rows: list[sqlite3.Row]) -> dict[str, Any]:
         dataset_ids = []
         status_values = []
         classification = "new"
-    return {
+    empty_stub = _is_empty_zarr_stub(path)
+    row: dict[str, Any] = {
         "path": str(path),
         "classification": classification,
         "dataset_ids": dataset_ids,
         "registry_statuses": status_values,
-        "is_empty_zarr_stub": _is_empty_zarr_stub(path),
-        "would_reconcile": True,
+        "is_empty_zarr_stub": empty_stub,
+        "would_reconcile": not empty_stub,
     }
+    if empty_stub:
+        row["skip_reason"] = "empty zarr stub"
+    return row
+
+
+def _apply_excludes(zarr_roots: list[Path], exclude: Iterable[Path]) -> tuple[list[Path], list[str]]:
+    exclude_roots = [_normalize_fs_path(path) for path in exclude]
+    if not exclude_roots:
+        return zarr_roots, []
+    kept: list[Path] = []
+    excluded: list[str] = []
+    for zarr_path in zarr_roots:
+        resolved = _normalize_fs_path(zarr_path)
+        if any(resolved == root or resolved.is_relative_to(root) for root in exclude_roots):
+            excluded.append(str(zarr_path))
+        else:
+            kept.append(zarr_path)
+    return kept, excluded
 
 
 def reconcile_roots(
@@ -162,16 +181,20 @@ def reconcile_roots(
     *,
     include_step_status: bool = True,
     apply: bool = False,
+    exclude: Iterable[Path | str] = (),
 ) -> dict[str, Any]:
     """Sweep roots and reconcile every readable Zarr store when ``apply`` is true.
 
     Dry-run mode opens the registry through SQLite ``mode=ro`` with
-    ``PRAGMA query_only`` and never constructs ``Registry``.
+    ``PRAGMA query_only`` and never constructs ``Registry``. Empty zarr stubs are
+    reported but never reconciled; stores under ``exclude`` prefixes are dropped
+    from the sweep entirely and listed in the report.
     """
 
     registry_path = _registry_path(registry)
     normalized_roots = _normalize_roots(roots)
     zarr_roots, root_reports = _enumerate_zarr_roots(normalized_roots)
+    zarr_roots, excluded_stores = _apply_excludes(zarr_roots, [Path(p) for p in exclude])
 
     if apply:
         writable_registry = registry if isinstance(registry, Registry) else Registry(registry_path)
@@ -182,6 +205,10 @@ def reconcile_roots(
             for zarr_path in zarr_roots:
                 normalized_path = _normalize_fs_path(zarr_path)
                 row = _store_row(zarr_path, known.get(normalized_path, []))
+                if row["is_empty_zarr_stub"]:
+                    row["applied"] = False
+                    stores.append(row)
+                    continue
                 try:
                     root = _open_store(zarr_path)
                 except Exception as exc:
@@ -273,9 +300,12 @@ def reconcile_roots(
             "known_store_count": counts["known"],
             "unreadable_store_count": counts["unreadable"],
             "would_reconcile_count": sum(1 for store in stores if store.get("would_reconcile")),
+            "empty_stub_skip_count": sum(1 for store in stores if store.get("is_empty_zarr_stub")),
+            "excluded_store_count": len(excluded_stores),
             "would_mark_missing_count": len(missing_before),
         },
         "stores": stores,
+        "excluded_stores": excluded_stores,
         "registered_but_vanished": {
             "would_mark_missing": missing_before,
             "result": missing_result,
@@ -298,7 +328,9 @@ def _print_report(report: Mapping[str, Any]) -> None:
         f"discovered={summary['discovered_store_count']} "
         f"new={summary['new_store_count']} "
         f"known={summary['known_store_count']} "
-        f"unreadable={summary['unreadable_store_count']}"
+        f"unreadable={summary['unreadable_store_count']} "
+        f"empty_stub_skipped={summary['empty_stub_skip_count']} "
+        f"excluded={summary['excluded_store_count']}"
     )
     print(
         "Missing: "
@@ -319,6 +351,13 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         help="Root path to sweep for Zarr stores. Repeat for multiple roots.",
     )
     parser.add_argument("--apply", action="store_true", help="Apply reconciliation writes.")
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        type=Path,
+        default=[],
+        help="Path prefix to drop from the sweep (e.g. a cache subtree). Repeat for multiple prefixes.",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -343,6 +382,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         args.reconcile_root,
         include_step_status=not args.skip_step_status,
         apply=bool(args.apply),
+        exclude=args.exclude,
     )
     if args.json is not None:
         _write_json(args.json, report)

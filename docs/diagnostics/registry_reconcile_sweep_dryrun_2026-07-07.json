@@ -1,5 +1,6 @@
 {
-  "generated_at_utc": "2026-07-07T08:13:27.965682Z",
+  "excluded_stores": [],
+  "generated_at_utc": "2026-07-07T13:44:29.337163Z",
   "include_step_status": true,
   "mode": "dry-run",
   "read_only": true,
@@ -3093,7 +3094,8 @@
       "is_empty_zarr_stub": true,
       "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010093/zarr/sickyfish_2026_02_23_16_23_35_cam2010094_training.zarr",
       "registry_statuses": [],
-      "would_reconcile": true
+      "skip_reason": "empty zarr stub",
+      "would_reconcile": false
     },
     {
       "classification": "new",
@@ -3101,7 +3103,8 @@
       "is_empty_zarr_stub": true,
       "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010093/zarr/sickyfish_2026_02_23_16_23_35_cam2010095_training.zarr",
       "registry_statuses": [],
-      "would_reconcile": true
+      "skip_reason": "empty zarr stub",
+      "would_reconcile": false
     },
     {
       "classification": "new",
@@ -3109,7 +3112,8 @@
       "is_empty_zarr_stub": true,
       "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010093/zarr/sickyfish_2026_02_23_16_23_35_cam2010096_training.zarr",
       "registry_statuses": [],
-      "would_reconcile": true
+      "skip_reason": "empty zarr stub",
+      "would_reconcile": false
     },
     {
       "classification": "new",
@@ -3117,7 +3121,8 @@
       "is_empty_zarr_stub": true,
       "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010094/zarr/sickyfish_2026_02_23_16_23_35_cam2010093_training.zarr",
       "registry_statuses": [],
-      "would_reconcile": true
+      "skip_reason": "empty zarr stub",
+      "would_reconcile": false
     },
     {
       "classification": "known",
@@ -3149,7 +3154,8 @@
       "is_empty_zarr_stub": true,
       "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010094/zarr/sickyfish_2026_02_23_16_23_35_cam2010095_training.zarr",
       "registry_statuses": [],
-      "would_reconcile": true
+      "skip_reason": "empty zarr stub",
+      "would_reconcile": false
     },
     {
       "classification": "new",
@@ -3157,7 +3163,8 @@
       "is_empty_zarr_stub": true,
       "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010094/zarr/sickyfish_2026_02_23_16_23_35_cam2010096_training.zarr",
       "registry_statuses": [],
-      "would_reconcile": true
+      "skip_reason": "empty zarr stub",
+      "would_reconcile": false
     },
     {
       "classification": "new",
@@ -3165,7 +3172,8 @@
       "is_empty_zarr_stub": true,
       "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010095/zarr/sickyfish_2026_02_23_16_23_35_cam2010093_training.zarr",
       "registry_statuses": [],
-      "would_reconcile": true
+      "skip_reason": "empty zarr stub",
+      "would_reconcile": false
     },
     {
       "classification": "new",
@@ -3173,7 +3181,8 @@
       "is_empty_zarr_stub": true,
       "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010095/zarr/sickyfish_2026_02_23_16_23_35_cam2010094_training.zarr",
       "registry_statuses": [],
-      "would_reconcile": true
+      "skip_reason": "empty zarr stub",
+      "would_reconcile": false
     },
     {
       "classification": "known",
@@ -3205,7 +3214,8 @@
       "is_empty_zarr_stub": true,
       "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010095/zarr/sickyfish_2026_02_23_16_23_35_cam2010096_training.zarr",
       "registry_statuses": [],
-      "would_reconcile": true
+      "skip_reason": "empty zarr stub",
+      "would_reconcile": false
     },
     {
       "classification": "new",
@@ -3213,7 +3223,8 @@
       "is_empty_zarr_stub": true,
       "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010096/zarr/sickyfish_2026_02_23_16_23_35_cam2010093_training.zarr",
       "registry_statuses": [],
-      "would_reconcile": true
+      "skip_reason": "empty zarr stub",
+      "would_reconcile": false
     },
     {
       "classification": "new",
@@ -3221,7 +3232,8 @@
       "is_empty_zarr_stub": true,
       "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010096/zarr/sickyfish_2026_02_23_16_23_35_cam2010094_training.zarr",
       "registry_statuses": [],
-      "would_reconcile": true
+      "skip_reason": "empty zarr stub",
+      "would_reconcile": false
     },
     {
       "classification": "new",
@@ -3229,7 +3241,8 @@
       "is_empty_zarr_stub": true,
       "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010096/zarr/sickyfish_2026_02_23_16_23_35_cam2010095_training.zarr",
       "registry_statuses": [],
-      "would_reconcile": true
+      "skip_reason": "empty zarr stub",
+      "would_reconcile": false
     },
     {
       "classification": "known",
@@ -3270,11 +3283,13 @@
   ],
   "summary": {
     "discovered_store_count": 275,
+    "empty_stub_skip_count": 12,
+    "excluded_store_count": 0,
     "input_root_count": 2,
     "known_store_count": 250,
     "new_store_count": 25,
     "unreadable_store_count": 0,
     "would_mark_missing_count": 0,
-    "would_reconcile_count": 275
+    "would_reconcile_count": 263
   }
 }
