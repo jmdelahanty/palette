@@ -97,7 +97,7 @@ def _detect_review_status_for_zarr(zarr_path: object) -> dict[str, object]:
     refined_parent = Path(str(zarr_path)).expanduser() / "refined_detect_runs"
     parent_attrs = _read_zarr_attrs(refined_parent)
     candidate_names: list[str] = []
-    for key in ("detect_review_status_latest", "latest"):
+    for key in ("latest",):
         value = parent_attrs.get(key)
         if value is not None and str(value).strip():
             candidate_names.append(str(value).strip())
