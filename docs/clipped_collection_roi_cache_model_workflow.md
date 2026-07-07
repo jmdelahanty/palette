@@ -36,6 +36,11 @@ Existing code already supports the most important pixel operation:
 - `scripts/submit_clipped_collection_flat_roi_cache_bsub.sh` submits a single
   LSF job that builds on node-local scratch and publishes payload, row-index
   Parquet, and manifest in manifest-last order.
+- `scripts/submit_clipped_collection_flat_roi_cache_bundle_bsub.sh` submits one
+  LSF job that runs several independent clip-cache builders concurrently on the
+  same GPU allocation. Each child writes its own flat cache, row-index parquet,
+  progress log, status JSON, and manifest; the parent job writes a bundle
+  summary JSON.
 
 The cache row index already carries most required lineage:
 
@@ -278,8 +283,52 @@ into `recording_artifacts`, which is recording-folder-artifact oriented.
 - [x] Include clip/work-unit selection in the cache key and manifest.
 - [x] Add wrapper flags: `--clip-id`, `--work-unit-id`.
 - [ ] Add wrapper flags: `--shard-index`, `--shard-count`.
+- [x] Add a bundle LSF submitter that launches multiple clip-filtered builders
+  in one GPU job.
 - [x] Add tests that clip/work-unit filters select deterministic rowsets and
   fail closed for missing values.
+
+### Bundle Decode Parallelism
+
+NVIDIA L4 has multiple NVDEC engines, but a single clipped-cache build uses one
+sequential PyNvVideoCodec reader. The safe way to expose decoder parallelism is
+not to write a shared flat cache from multiple processes. Instead:
+
+- Request one GPU allocation.
+- Launch up to `--max-workers 4` child builders inside that job.
+- Give each child exactly one `--clip-id` selection.
+- Publish one manifest/bin/rows triplet per child clip.
+- Treat the bundle status JSON as an orchestration artifact, not as a merged
+  cache contract.
+
+Example:
+
+```bash
+scripts/submit_clipped_collection_flat_roi_cache_bundle_bsub.sh \
+  --zarr /groups/johnson/johnsonlab/jeremy/recordings/sleepyfish_2026_05_05_17_45_30_cam2010095/zarr/sleepyfish_2026_05_05_17_45_30_cam2010095_analysis.zarr \
+  --collection-id sleepyfish_cam2010095_allclips_pynvvc_fixed_20260522_01 \
+  --clip-id clip_000000 \
+  --clip-id clip_000001 \
+  --clip-id clip_000002 \
+  --clip-id clip_000003 \
+  --public-cache-dir /nrs/ahrens/palette_staging/clipped_collection_flat_roi_cache/sleepyfish_cam2010095_bundle_0000_0003 \
+  --log-dir /groups/johnson/johnsonlab/jeremy/recordings/logs/clipped_collection_flat_roi_cache_bundle_bsub \
+  --run-id sleepyfish_cam2010095_bundle_0000_0003_20260707 \
+  --run-label sleepyfish_cam2010095_bundle_0000_0003 \
+  --queue gpu_l4 \
+  --ncores 8 \
+  --mem-gb 64 \
+  --gpus 1 \
+  --max-workers 4 \
+  --walltime 4:00 \
+  --progress-interval-s 30 \
+  --overwrite
+```
+
+The bundle submitter also supports `--all-clips`, which resolves clip IDs from
+the finalized collection at submission time. Use explicit clip IDs for first
+validation runs so the output directory and expected child manifests are easy to
+audit.
 
 ### Phase 2: proxy crop runs
 
