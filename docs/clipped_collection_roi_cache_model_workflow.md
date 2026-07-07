@@ -700,6 +700,59 @@ Operational notes:
   Downstream model scheduling should treat those child manifests as independent
   cache shards until a later collection/proxy-crop layer is implemented.
 
+### Model Orchestration DAG
+
+The full clipped keypoint workflow should be submitted as an explicit LSF DAG,
+not as a single long-running monolithic job. Each step should write a status
+artifact and the next step should depend on successful completion of the prior
+required jobs.
+
+Recommended dependency graph:
+
+```text
+cache_build[clip] or cache_already_exists
+  -> proxy_create[clip]
+  -> keypoint_shard[clip]
+  -> merge_proxy_and_finalize_keypoints
+  -> refine_keypoints
+  -> optional_cleanup
+
+keypoint_shard[clip]
+  -> optional shard status audit
+```
+
+LSF dependency policy:
+
+- Use `done(<jobid>)` dependencies for finalization and refinement.
+- Do not use `ended(<jobid>)` for required upstream work, because a failed
+  shard must not trigger a partial collection finalizer.
+- Per-clip keypoint shard jobs should depend only on that clip's cache/proxy
+  readiness, not on all clips. This preserves parallelism and makes retries
+  clip-local.
+- The collection finalizer should run only after every expected shard job has
+  completed successfully and should independently validate that every expected
+  `keypoint_shard_runs/<run>` exists, is complete, and maps to the merged proxy
+  crop run.
+- Refinement should depend on the keypoint collection finalizer, not on the
+  individual shard jobs.
+
+Cleanup policy:
+
+- Do not delete smoke or intermediate shard runs merely because jobs finish.
+- Delete smoke runs only after the full collection `keypoints_runs/<run>` and
+  `refined_keypoints_runs/<run>` exist and pass lineage validation.
+- Production shard groups may remain as provenance/debug artifacts until a
+  deliberate retention policy exists. Temporary node-local scratch must still be
+  cleaned on job exit via shell `trap`, as current keypoint and cache wrappers
+  already do.
+
+Existing Palette precedent:
+
+- `submit_subject_mask_batches_bsub.sh` submits inference and finalization as
+  separate jobs with `bsub -w "done(<inference_job_id>)"`.
+- `submit_crop_flat_roi_cache_batches_bsub.sh` builds a dependency expression
+  for a registry/cache finalizer after per-recording jobs complete.
+
 ### Phase 2: proxy crop runs
 
 - [x] Add a tool to create geometry-only proxy crop runs from a clipped
@@ -738,6 +791,9 @@ Operational notes:
   `keypoints_runs/<run>` only after same-source-crop shards validate.
 - [x] Add a whole-clipped-collection keypoint finalizer path that safely rebases
   shards spanning multiple proxy crop runs onto a merged proxy crop run.
+- [ ] Add a clipped keypoint orchestration wrapper that submits the cache/proxy,
+  per-clip shard, collection finalizer, and refined-keypoint jobs with explicit
+  LSF `done(...)` dependencies.
 
 ### Phase 4: registry
 
