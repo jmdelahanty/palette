@@ -620,7 +620,7 @@ Consumers should prefer the explicit `bbox_*` attrs above.
 
 Parent attrs on `refined_detect_runs/`:
 - `latest`
-- `detect_review_status_latest` (run name containing the most recent review status)
+- `detect_review_status_latest` (historical detect-review lineage pointer written by migration tools; no reader consults it for current run resolution)
 
 `detect_review_status` payload fields (may be extended over time):
 - `state` (e.g., approved/needs_review)

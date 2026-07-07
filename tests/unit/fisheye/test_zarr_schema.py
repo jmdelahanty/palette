@@ -197,6 +197,9 @@ class TestZarrSchema:
 
         parent_attrs = ZARR_SCHEMA["groups"]["refined_detect_runs"]["parent_attributes"]
         assert "detect_review_status_latest" in parent_attrs
+        legacy_description = parent_attrs["detect_review_status_latest"]
+        assert "Historical" in legacy_description
+        assert "no reader consults it" in legacy_description
 
     def test_schema_crop_run_attributes(self):
         """Test crop run attribute schema keys."""
