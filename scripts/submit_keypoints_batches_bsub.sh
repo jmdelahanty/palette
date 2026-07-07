@@ -14,6 +14,7 @@ TOP_K=5
 REQUIRE_UNIQUE=0
 INCLUDE_NON_SUCCESS=0
 CROP_RUN=""
+OUTPUT_PARENT=""
 POSE_SCHEMA=""
 BATCH_SIZE_KP=256
 DEVICE=""
@@ -59,6 +60,7 @@ Options:
   --require-unique          Fail if top model scores tie
   --include-non-success     Include non-success runs in model resolution
   --crop-run NAME           Optional explicit crop run name
+  --output-parent NAME      Optional keypoint output parent: keypoints_runs|keypoint_shard_runs
   --pose-schema NAME        Optional pose schema (for example: traditional_v2 for 5-keypoint models)
   --batch-size-kp N         Keypoint inference batch size (default: 256)
   --device DEVICE           Torch device override
@@ -109,6 +111,7 @@ while [[ $# -gt 0 ]]; do
     --require-unique) REQUIRE_UNIQUE=1; shift;;
     --include-non-success) INCLUDE_NON_SUCCESS=1; shift;;
     --crop-run) CROP_RUN="$2"; shift 2;;
+    --output-parent) OUTPUT_PARENT="$2"; shift 2;;
     --pose-schema) POSE_SCHEMA="$2"; shift 2;;
     --batch-size-kp) BATCH_SIZE_KP="$2"; shift 2;;
     --device) DEVICE="$2"; shift 2;;
@@ -293,6 +296,7 @@ if [[ -n "$SET_ID" ]]; then EXTRA_ARGS+=(--set-id "$SET_ID"); fi
 if [[ "$REQUIRE_UNIQUE" == "1" ]]; then EXTRA_ARGS+=(--require-unique); fi
 if [[ "$INCLUDE_NON_SUCCESS" == "1" ]]; then EXTRA_ARGS+=(--include-non-success); fi
 if [[ -n "$CROP_RUN" ]]; then EXTRA_ARGS+=(--crop-run "$CROP_RUN"); fi
+if [[ -n "$OUTPUT_PARENT" ]]; then EXTRA_ARGS+=(--output-parent "$OUTPUT_PARENT"); fi
 if [[ -n "$POSE_SCHEMA" ]]; then EXTRA_ARGS+=(--pose-schema "$POSE_SCHEMA"); fi
 if [[ -n "$DEVICE" ]]; then EXTRA_ARGS+=(--device "$DEVICE"); fi
 if [[ -n "$IMGSZ" ]]; then EXTRA_ARGS+=(--imgsz "$IMGSZ"); fi

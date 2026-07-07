@@ -16,7 +16,12 @@ from typing import Any, Mapping, Optional
 
 import zarr
 
-from fisheye.detection.detect_keypoints_yolo import DEFAULT_POSE_SCHEMA_NAME, detect_keypoints_yolo
+from fisheye.detection.detect_keypoints_yolo import (
+    DEFAULT_KEYPOINT_OUTPUT_PARENT,
+    DEFAULT_POSE_SCHEMA_NAME,
+    KEYPOINT_OUTPUT_PARENTS,
+    detect_keypoints_yolo,
+)
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.run_provenance import build_run_provenance
 from fisheye.shared.flat_roi_cache import open_flat_roi_cache
@@ -377,11 +382,12 @@ def write_keypoint_model_resolution_provenance(
     zarr_path: Path,
     run_name: str,
     payload: dict[str, Any],
+    output_parent: str = DEFAULT_KEYPOINT_OUTPUT_PARENT,
 ) -> None:
     root = zarr.open_group(str(zarr_path), mode="r+")
-    keypoint_parent = root.get("keypoints_runs")
+    keypoint_parent = root.get(output_parent)
     if keypoint_parent is None or run_name not in keypoint_parent:
-        raise RuntimeError(f"keypoint run not found for provenance annotation: keypoints_runs/{run_name}")
+        raise RuntimeError(f"keypoint run not found for provenance annotation: {output_parent}/{run_name}")
 
     keypoint_group = keypoint_parent[run_name]
     selected = payload.get("selected", {}) if isinstance(payload.get("selected"), dict) else {}
@@ -411,8 +417,14 @@ def _write_model_resolution_provenance(
     zarr_path: Path,
     run_name: str,
     payload: dict[str, Any],
+    output_parent: str = DEFAULT_KEYPOINT_OUTPUT_PARENT,
 ) -> None:
-    write_keypoint_model_resolution_provenance(zarr_path=zarr_path, run_name=run_name, payload=payload)
+    write_keypoint_model_resolution_provenance(
+        zarr_path=zarr_path,
+        run_name=run_name,
+        payload=payload,
+        output_parent=output_parent,
+    )
 
 
 @dataclass(frozen=True)
@@ -429,6 +441,7 @@ class KeypointRegistryResult:
     selected_run_id: Optional[str] = None
     selected_set_id: Optional[str] = None
     keypoint_run: Optional[str] = None
+    keypoint_parent: Optional[str] = None
     resolved_at_utc: Optional[str] = None
     resolution_payload: Optional[dict[str, Any]] = None
 
@@ -446,6 +459,7 @@ class KeypointRegistryResult:
             "selected_run_id": self.selected_run_id,
             "selected_set_id": self.selected_set_id,
             "keypoint_run": self.keypoint_run,
+            "keypoint_parent": self.keypoint_parent,
             "resolved_at_utc": self.resolved_at_utc,
         }
         if self.resolution_payload is not None:
@@ -465,6 +479,7 @@ def _failure_result(
     selected_run_id: Optional[str] = None,
     selected_set_id: Optional[str] = None,
     keypoint_run: Optional[str] = None,
+    keypoint_parent: Optional[str] = None,
     resolved_at_utc: Optional[str] = None,
     resolution_payload: Optional[dict[str, Any]] = None,
 ) -> KeypointRegistryResult:
@@ -481,6 +496,7 @@ def _failure_result(
         selected_run_id=selected_run_id,
         selected_set_id=selected_set_id,
         keypoint_run=keypoint_run,
+        keypoint_parent=keypoint_parent,
         resolved_at_utc=resolved_at_utc,
         resolution_payload=resolution_payload,
     )
@@ -497,6 +513,7 @@ def run_keypoints_with_registry_model(
     include_non_success: bool = False,
     dry_run: bool = False,
     run_name: Optional[str] = None,
+    output_parent: str = DEFAULT_KEYPOINT_OUTPUT_PARENT,
     crop_run: Optional[str] = None,
     pose_schema: str = DEFAULT_POSE_SCHEMA_NAME,
     batch_size: int = 256,
@@ -535,6 +552,7 @@ def run_keypoints_with_registry_model(
         include_non_success=bool(include_non_success),
         dry_run=bool(dry_run),
         run_name=run_name,
+        output_parent=output_parent,
         crop_run=crop_run,
         pose_schema=pose_schema,
         batch_size=int(batch_size),
@@ -567,6 +585,7 @@ def run_keypoints_with_registry_model(
             recording_dir=resolved_recording_dir,
             output_path=output_path,
             registry_path=registry_path,
+            keypoint_parent=output_parent,
         )
 
     try:
@@ -591,6 +610,7 @@ def run_keypoints_with_registry_model(
             recording_dir=resolved_recording_dir,
             output_path=output_path,
             registry_path=registry_path,
+            keypoint_parent=output_parent,
         )
     finally:
         registry_db.close()
@@ -605,6 +625,7 @@ def run_keypoints_with_registry_model(
             recording_dir=resolved_recording_dir,
             output_path=output_path,
             registry_path=registry_path,
+            keypoint_parent=output_parent,
         )
 
     payload = build_keypoint_resolution_payload(
@@ -636,6 +657,7 @@ def run_keypoints_with_registry_model(
             selected_model_path=selected_model_path,
             selected_run_id=selected_run_id,
             selected_set_id=selected_set_id,
+            keypoint_parent=output_parent,
             resolved_at_utc=resolved_at_utc,
             resolution_payload=payload,
         )
@@ -660,6 +682,7 @@ def run_keypoints_with_registry_model(
                     "selected_model_path": selected_model_path,
                     "selected_run_id": selected_run_id,
                     "selected_set_id": selected_set_id,
+                    "output_parent": output_parent,
                     "effective_roi_cache_manifest": effective_roi_cache_manifest,
                 },
                 input_run_ids={
@@ -674,6 +697,7 @@ def run_keypoints_with_registry_model(
             model_path=best.model_path,
             model_sha256=selected_model_sha256,
             run_name=run_name,
+            output_parent=output_parent,
             crop_run=crop_run,
             pose_schema=pose_schema,
             batch_size=batch_size,
@@ -704,6 +728,7 @@ def run_keypoints_with_registry_model(
             zarr_path=output_path,
             run_name=keypoint_run,
             payload=payload,
+            output_parent=output_parent,
         )
     except Exception as exc:
         return _failure_result(
@@ -718,6 +743,7 @@ def run_keypoints_with_registry_model(
             selected_set_id=selected_set_id,
             resolved_at_utc=resolved_at_utc,
             resolution_payload=payload,
+            keypoint_parent=output_parent,
         )
 
     return KeypointRegistryResult(
@@ -730,6 +756,7 @@ def run_keypoints_with_registry_model(
         selected_run_id=selected_run_id,
         selected_set_id=selected_set_id,
         keypoint_run=keypoint_run,
+        keypoint_parent=output_parent,
         resolved_at_utc=resolved_at_utc,
         resolution_payload=payload,
     )
@@ -747,6 +774,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="Resolve model only; do not run keypoints.")
 
     parser.add_argument("--run-name", type=str, default=None, help="Optional explicit keypoints run name.")
+    parser.add_argument(
+        "--output-parent",
+        choices=KEYPOINT_OUTPUT_PARENTS,
+        default=DEFAULT_KEYPOINT_OUTPUT_PARENT,
+        help=(
+            "Parent group for the output run. Use keypoint_shard_runs for clipped-collection "
+            "model shards that will later be finalized into keypoints_runs."
+        ),
+    )
     parser.add_argument("--crop-run", type=str, default=None, help="Optional explicit crop run name.")
     parser.add_argument(
         "--pose-schema",
@@ -831,6 +867,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         include_non_success=bool(args.include_non_success),
         dry_run=bool(args.dry_run),
         run_name=args.run_name,
+        output_parent=args.output_parent,
         crop_run=args.crop_run,
         pose_schema=args.pose_schema,
         batch_size=args.batch_size,
@@ -875,6 +912,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     print("Model resolution provenance written")
     print(f"  output_zarr: {result.output_zarr}")
+    print(f"  keypoint_parent: {result.keypoint_parent}")
     print(f"  keypoint_run: {result.keypoint_run}")
     print(f"  selected_model: {result.selected_model_path}")
     return 0

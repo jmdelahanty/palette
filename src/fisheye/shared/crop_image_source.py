@@ -834,6 +834,14 @@ class CropImageSource:
                 acquisition_crop_reader = _AcquisitionCropVideoFrameReader(Path(frame_source_path))
                 live_acceleration_effective = "pynvvc_luma"
                 live_acceleration_fallback_reason = None
+            elif manifest_path is not None:
+                frame_shape = _resolve_frame_shape(root, crop_group, images_full)
+                frame_source_kind = "flat_roi_cache_manifest"
+                frame_source_path = str(manifest_path)
+                images_full = None
+                external_reader = None
+                live_acceleration_effective = None
+                live_acceleration_fallback_reason = None
             else:
                 frame_shape = _resolve_frame_shape(root, crop_group, images_full)
                 if images_full is not None:
@@ -887,6 +895,8 @@ class CropImageSource:
                             raise _gpu_decode_unavailable(reason)
             if frame_source_kind == "acquisition_crop_video":
                 roi_read_mode = "acquisition_crop_video"
+            elif frame_source_kind == "flat_roi_cache_manifest":
+                roi_read_mode = "flat_roi_cache_manifest"
             else:
                 roi_read_mode = "geometry_only_live"
 

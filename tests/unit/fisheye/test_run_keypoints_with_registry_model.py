@@ -94,6 +94,60 @@ def test_write_model_resolution_provenance_updates_keypoint_run_attrs(
     assert "model_resolution" in provenance
 
 
+def test_write_model_resolution_provenance_can_target_keypoint_shard_parent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class _Attrs(dict):
+        def put(self, mapping: dict[str, object]) -> None:
+            self.clear()
+            self.update(mapping)
+
+    class _Group(dict):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attrs = _Attrs()
+
+        def get(self, key: str, default: object = None) -> object:  # noqa: A003
+            return super().get(key, default)
+
+    root = _Group()
+    shard_parent = _Group()
+    shard_run = _Group()
+    shard_parent["keypoint_shard_001"] = shard_run
+    root["keypoint_shard_runs"] = shard_parent
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: root)
+
+    payload = {
+        "mode": "registry",
+        "task": "pose",
+        "registry_path": "/nvme1/palette_registry.sqlite",
+        "recording_id": "rec_001",
+        "resolved_at_utc": "2026-02-09T09:00:00+00:00",
+        "selected": {
+            "run_id": "pose_run_001",
+            "set_id": "pose_set_001",
+            "model_path": "/nvme1/models/pose/model.pt",
+            "score": 0.88,
+            "created_utc": "2026-02-09T08:59:00+00:00",
+        },
+        "candidates": [{"run_id": "pose_run_001", "score": 0.88}],
+    }
+
+    mod.write_keypoint_model_resolution_provenance(
+        zarr_path=tmp_path / "sample_analysis.zarr",
+        run_name="keypoint_shard_001",
+        payload=payload,
+        output_parent="keypoint_shard_runs",
+    )
+
+    assert shard_run.attrs.get("model_resolution_mode") == "registry"
+    assert shard_run.attrs.get("model_resolution_selected_run_id") == "pose_run_001"
+    provenance = shard_run.attrs.get("provenance")
+    assert isinstance(provenance, dict)
+    assert provenance["model_resolution"] == payload
+
+
 def test_stage_flat_roi_cache_manifest_copies_payload_and_rewrites_manifest(tmp_path: Path) -> None:
     source_dir = tmp_path / "source"
     source_dir.mkdir()
@@ -235,10 +289,17 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(mod, "detect_keypoints_yolo", _fake_detect_keypoints_yolo)
 
-    def _fake_write_model_resolution_provenance(*, zarr_path: Path, run_name: str, payload: dict[str, object]) -> None:
+    def _fake_write_model_resolution_provenance(
+        *,
+        zarr_path: Path,
+        run_name: str,
+        payload: dict[str, object],
+        output_parent: str = "keypoints_runs",
+    ) -> None:
         calls["write_zarr_path"] = zarr_path
         calls["write_run_name"] = run_name
         calls["write_payload"] = payload
+        calls["write_output_parent"] = output_parent
 
     monkeypatch.setattr(mod, "write_keypoint_model_resolution_provenance", _fake_write_model_resolution_provenance)
 
@@ -252,6 +313,8 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
             str(registry_path),
             "--set-id",
             "pose_set_123",
+            "--output-parent",
+            "keypoint_shard_runs",
             "--pose-schema",
             "traditional_v2",
             "--include-non-success",
@@ -277,6 +340,7 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
     assert detect_kwargs.get("zarr_path") == str(output_path.resolve())
     assert detect_kwargs.get("model_path") == "/tmp/pose_model.pt"
     assert detect_kwargs.get("model_sha256") == "e" * 64
+    assert detect_kwargs.get("output_parent") == "keypoint_shard_runs"
     assert detect_kwargs.get("pose_schema") == "traditional_v2"
     assert detect_kwargs.get("device") == "cpu"
     assert detect_kwargs.get("roi_cache_policy") == "always"
@@ -304,6 +368,7 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
 
     assert calls.get("write_zarr_path") == output_path.resolve()
     assert calls.get("write_run_name") == "keypoints_001"
+    assert calls.get("write_output_parent") == "keypoint_shard_runs"
     payload = calls.get("write_payload")
     assert isinstance(payload, dict)
     assert payload.get("task") == "pose"

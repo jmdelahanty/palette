@@ -309,6 +309,47 @@ def _run_keypoint_count_writer(monkeypatch, tmp_path, *, name: str, legacy_count
     }
 
 
+def test_detect_keypoints_yolo_can_write_collection_shard_without_canonical_pointer(monkeypatch, tmp_path) -> None:
+    zarr_path = _make_keypoint_count_fixture(tmp_path, "shard")
+    model_path = tmp_path / "shard.pt"
+    emit_calls: list[dict[str, object]] = []
+    with monkeypatch.context() as patch:
+        _patch_keypoint_writer_dependencies(patch, model_path)
+        patch.setattr(yolo_mod, "_emit_keypoint_step_status", lambda **kwargs: emit_calls.append(kwargs))
+        run_name = detect_keypoints_yolo(
+            zarr_path,
+            model_path,
+            run_provenance=build_writer_run_provenance(
+                command="unit-keypoint-shard-writer",
+                params={"model_path": model_path},
+            ),
+            run_name="keypoint_shard_001",
+            output_parent="keypoint_shard_runs",
+            pose_schema="traditional_v3",
+            batch_size=8,
+            imgsz=8,
+            input_mode="numpy-list",
+            registry=None,
+        )
+
+    assert emit_calls == []
+    root = zarr.open_group(store=str(zarr_path), mode="r")
+    assert run_name == "keypoint_shard_001"
+    assert "current_keypoint_group_path" not in root.attrs
+    assert "keypoints_runs" not in root or "latest" not in root["keypoints_runs"].attrs
+
+    shard_parent = root["keypoint_shard_runs"]
+    assert shard_parent.attrs["latest"] == "keypoint_shard_001"
+    assert shard_parent.attrs["latest_complete"] == "keypoint_shard_001"
+    run = shard_parent[run_name]
+    assert run.attrs["output_parent"] == "keypoint_shard_runs"
+    assert run.attrs["run_group_parent"] == "keypoint_shard_runs"
+    assert run.attrs["is_collection_shard"] is True
+    assert run.attrs["stage_selector_eligible"] is False
+    assert run.attrs["source_crop_run"] == "crop_001"
+    assert np.asarray(run["keypoints_roi"]).shape == (3, 10, 2)
+
+
 def test_detect_keypoints_yolo_frame_count_writer_matches_legacy_arrays(monkeypatch, tmp_path) -> None:
     resolved = _run_keypoint_count_writer(
         monkeypatch,

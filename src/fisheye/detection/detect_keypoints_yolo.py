@@ -64,6 +64,16 @@ _KEYPOINT_STEP_NAME = "keypoints"
 _KEYPOINT_STATUS_SOURCE = "runtime_keypoints_detect"
 _KEYPOINT_INPUT_MODES = ("numpy-list", "tensor", "auto")
 _KEYPOINT_PROGRESS_SCHEMA_ID = "palette.keypoint_inference_progress.v1"
+DEFAULT_KEYPOINT_OUTPUT_PARENT = "keypoints_runs"
+KEYPOINT_OUTPUT_PARENTS = (DEFAULT_KEYPOINT_OUTPUT_PARENT, "keypoint_shard_runs")
+
+
+def _normalize_keypoint_output_parent(output_parent: Optional[str]) -> str:
+    parent = (output_parent or DEFAULT_KEYPOINT_OUTPUT_PARENT).strip()
+    if parent not in KEYPOINT_OUTPUT_PARENTS:
+        allowed = ", ".join(KEYPOINT_OUTPUT_PARENTS)
+        raise ValueError(f"Unsupported keypoint output parent '{parent}'. Expected one of: {allowed}")
+    return parent
 
 
 def _progress_json_ready(value: Any) -> Any:
@@ -173,24 +183,54 @@ def _prepare_run_group(
     root: zarr.Group,
     run_name: Optional[str],
     console: Console,
-) -> Tuple[zarr.Group, str]:
+) -> Tuple[zarr.Group, zarr.Group, str]:
+    return _prepare_run_group_for_parent(
+        root,
+        run_name,
+        console,
+        output_parent=DEFAULT_KEYPOINT_OUTPUT_PARENT,
+    )
+
+
+def _prepare_run_group_for_parent(
+    root: zarr.Group,
+    run_name: Optional[str],
+    console: Console,
+    *,
+    output_parent: str,
+) -> Tuple[zarr.Group, zarr.Group, str]:
+    output_parent = _normalize_keypoint_output_parent(output_parent)
     parent = require_runs_parent(
         root,
-        "keypoints_runs",
+        output_parent,
         completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     )
     if run_name:
         if run_name in parent:
-            raise ValueError(f"keypoints_runs/{run_name} already exists")
+            raise ValueError(f"{output_parent}/{run_name} already exists")
         run_group = parent.create_group(run_name)
         mark_run_started(run_group, run_name=run_name, stage="keypoints")
         note_pending_latest(parent, run_name)
-        console.print(f"Created run group: [cyan]keypoints_runs/{run_name}[/cyan]")
-        return run_group, run_name
-    run_group, resolved_name = get_run_group(root, "keypoints", console=console, create_new=True)
+        console.print(f"Created run group: [cyan]{output_parent}/{run_name}[/cyan]")
+        return parent, run_group, run_name
+    if output_parent == DEFAULT_KEYPOINT_OUTPUT_PARENT:
+        run_group, resolved_name = get_run_group(root, "keypoints", console=console, create_new=True)
+        mark_run_started(run_group, run_name=resolved_name, stage="keypoints")
+        note_pending_latest(parent, resolved_name)
+        return parent, run_group, resolved_name
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+    base_name = f"keypoint_shard_{timestamp}"
+    resolved_name = base_name
+    suffix = 1
+    while resolved_name in parent:
+        resolved_name = f"{base_name}_{suffix:03d}"
+        suffix += 1
+    run_group = parent.create_group(resolved_name)
     mark_run_started(run_group, run_name=resolved_name, stage="keypoints")
     note_pending_latest(parent, resolved_name)
-    return run_group, resolved_name
+    console.print(f"Created run group: [cyan]{output_parent}/{resolved_name}[/cyan]")
+    return parent, run_group, resolved_name
 
 
 def _resolve_registry_path(registry: Optional[Path]) -> Optional[Path]:
@@ -693,6 +733,7 @@ def detect_keypoints_yolo(
     *,
     model_sha256: Optional[str] = None,
     run_name: Optional[str] = None,
+    output_parent: str = DEFAULT_KEYPOINT_OUTPUT_PARENT,
     crop_run: Optional[str] = None,
     pose_schema: str = DEFAULT_POSE_SCHEMA_NAME,
     batch_size: int = 256,
@@ -721,7 +762,7 @@ def detect_keypoints_yolo(
     cli_provenance: Optional[Mapping[str, Any]] = None,
     run_provenance: Optional[Mapping[str, Any]] = None,
 ) -> str:
-    """Run YOLO pose inference and record outputs in ``keypoints_runs``.
+    """Run YOLO pose inference and record outputs in a keypoint run parent.
 
     Returns the name of the created run group.
     """
@@ -811,7 +852,18 @@ def detect_keypoints_yolo(
     )
     resolved_input_mode = _normalize_input_mode(input_mode)
 
-    run_group, resolved_run_name = _prepare_run_group(root, run_name, console)
+    output_parent_name = _normalize_keypoint_output_parent(output_parent)
+    run_parent, run_group, resolved_run_name = _prepare_run_group_for_parent(
+        root,
+        run_name,
+        console,
+        output_parent=output_parent_name,
+    )
+    run_group.attrs["output_parent"] = output_parent_name
+    run_group.attrs["run_group_parent"] = output_parent_name
+    if output_parent_name != DEFAULT_KEYPOINT_OUTPUT_PARENT:
+        run_group.attrs["is_collection_shard"] = True
+        run_group.attrs["stage_selector_eligible"] = False
     run_group.attrs["keypoint_labels"] = list(pose_schema_obj.node_names)
     run_group.attrs["keypoint_confidence_labels"] = list(pose_schema_obj.node_names)
     run_group.attrs["skeleton_id"] = str(pose_schema_attrs["skeleton_id"])
@@ -819,7 +871,8 @@ def detect_keypoints_yolo(
     run_group.attrs["pose_schema"] = dict(pose_schema_attrs)
     if model_kpt_shape is not None:
         run_group.attrs["model_kpt_shape"] = list(model_kpt_shape)
-    root.attrs["current_keypoint_group_path"] = run_group.path
+    if output_parent_name == DEFAULT_KEYPOINT_OUTPUT_PARENT:
+        root.attrs["current_keypoint_group_path"] = run_group.path
 
     arrays = _create_output_arrays(
         run_group,
@@ -1238,6 +1291,7 @@ def detect_keypoints_yolo(
                 "zarr_path": str(zarr_path.resolve()),
                 "model_path": str(model_path_resolved),
                 "run_name": run_name,
+                "output_parent": output_parent_name,
                 "crop_run": crop_run,
                 "pose_schema": pose_schema,
                 "device": device,
@@ -1319,6 +1373,7 @@ def detect_keypoints_yolo(
             "normalized_torch_device": torch_device,
             "initial_model_device": model_device,
             "resolved_model_device": resolved_model_device,
+            "output_parent": output_parent_name,
             "pose_schema": pose_schema_obj.name,
             "skeleton_id": str(pose_schema_attrs["skeleton_id"]),
             "kpt_shape": list(pose_schema_attrs["kpt_shape"]),
@@ -1336,7 +1391,7 @@ def detect_keypoints_yolo(
 
     status_details: Dict[str, object] = {
         "reason": "present",
-        "run_group": "keypoints_runs",
+        "run_group": output_parent_name,
         "source_crop_run": latest_crop,
         **crop_snapshot_attrs,
         **crop_pixel_attrs,
@@ -1386,22 +1441,23 @@ def detect_keypoints_yolo(
 
     mark_run_complete(
         run_group,
-        parent_group=root["keypoints_runs"],
+        parent_group=run_parent,
         run_name=resolved_run_name,
         run_provenance=effective_run_provenance,
     )
 
     try:
-        _emit_keypoint_step_status(
-            root=root,
-            zarr_path=zarr_path.resolve(),
-            run_name=resolved_run_name,
-            method=normalize_attr(run_group.attrs.get("method")) or "yolo_pose",
-            coverage_pct=float(success_rate),
-            details=status_details,
-            console=console,
-            registry=registry,
-        )
+        if output_parent_name == DEFAULT_KEYPOINT_OUTPUT_PARENT:
+            _emit_keypoint_step_status(
+                root=root,
+                zarr_path=zarr_path.resolve(),
+                run_name=resolved_run_name,
+                method=normalize_attr(run_group.attrs.get("method")) or "yolo_pose",
+                coverage_pct=float(success_rate),
+                details=status_details,
+                console=console,
+                registry=registry,
+            )
     finally:
         crop_source.close()
     _write_keypoint_progress_jsonl(
@@ -1422,7 +1478,7 @@ def detect_keypoints_yolo(
     summary_lines = [
         "[green]✓[/green] Pose inference complete",
         "",
-        f"[bold]Run:[/bold] keypoints_runs/{resolved_run_name}",
+        f"[bold]Run:[/bold] {output_parent_name}/{resolved_run_name}",
         f"[bold]Total ROIs:[/bold] {total_rois}",
         f"[bold]Successful:[/bold] {success_total} ({success_rate:.2f}%)",
         f"[bold]Failed:[/bold] {failure_total}",
@@ -1452,7 +1508,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="YOLO-based keypoint inference on Palette Zarr crops")
     parser.add_argument("zarr_path", type=str, help="Path to the Palette Zarr archive")
     parser.add_argument("--model", required=True, help="Path to the trained YOLO pose weights (.pt)")
-    parser.add_argument("--run-name", help="Optional custom run name for keypoints_runs")
+    parser.add_argument("--run-name", help="Optional custom run name for the selected output parent")
+    parser.add_argument(
+        "--output-parent",
+        choices=KEYPOINT_OUTPUT_PARENTS,
+        default=DEFAULT_KEYPOINT_OUTPUT_PARENT,
+        help=(
+            "Parent group for output runs. Use keypoint_shard_runs for clipped-collection "
+            "GPU shards that must not become canonical keypoint_runs."
+        ),
+    )
     parser.add_argument("--crop-run", help="Optional crop run override (defaults to latest)")
     parser.add_argument(
         "--pose-schema",
@@ -1552,6 +1617,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         zarr_path=args.zarr_path,
         model_path=args.model,
         run_name=args.run_name,
+        output_parent=args.output_parent,
         crop_run=args.crop_run,
         pose_schema=args.pose_schema,
         batch_size=args.batch_size,

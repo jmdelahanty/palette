@@ -234,6 +234,250 @@ Benefits:
 - Crimson/registry tooling can reason about a normal crop-run source while
   still seeing clipped collection provenance.
 
+### Proxy crop-run plus manifest-alias bridge
+
+The current keypoint and subject-mask runners cannot consume a clipped
+collection cache manifest by itself. They first resolve a real
+`crop_runs/<run>` and then validate any supplied flat cache against that run.
+The validation checks `source.crop_run_name` in the cache manifest, while the
+output writers copy row lineage from the crop run rather than from the cache
+row-index parquet.
+
+The minimal bridge therefore has two artifacts per cache shard:
+
+1. A geometry-only proxy crop run in the analysis Zarr.
+2. A small manifest alias that points at the existing cache `.bin` payload but
+   stamps `source.crop_run_name = <proxy_run>`.
+
+The alias should not copy the binary payload. It should only rewrite enough
+manifest metadata for the standard `open_flat_roi_cache(...,
+expected_crop_run=<proxy_run>)` path to validate the cache against the proxy
+crop run. The original clipped manifest remains the provenance source; the
+alias exists to adapt it to the standard Palette crop-run contract.
+
+Proxy crop runs should be generated directly from the cache row-index parquet:
+
+```text
+frame_indices                  = parent_frame_index
+source_frame_indices           = parent_frame_index
+source_clip_indices            = clip_index
+source_clip_local_frame_indices= clip_local_frame_index
+source_refined_row_ids         = refined_row_id or refined_instance_row_index
+source_detect_row_index        = source_detect_row_index
+detection_indices              = roi_row_index
+source_crop_row_ids            = arange(n_rois)
+roi_coordinates_full           = [roi_x, roi_y]
+```
+
+Required proxy attrs:
+
+```text
+crop_storage_mode = geometry_only
+source_kind = finalized_clipped_refined_detect_collection_proxy
+source_collection_id = <collection id>
+source_collection_path = experiment_index/finalized_runs/<collection id>
+source_clip_id = <clip id>
+source_clip_index = <clip index>
+source_roi_cache_manifest = <original manifest>
+source_roi_cache_alias_manifest = <alias manifest>
+source_roi_cache_row_index_path = <rows.parquet>
+source_roi_cache_required = true
+crop_policy = centered_refined_bbox
+roi_shape = [512, 512]
+```
+
+The proxy run is intentionally metadata-only. It does not own pixels and should
+be treated as invalid for model inference unless the corresponding cache alias
+is supplied.
+
+Proxy crop runs are written under `crop_runs` for compatibility with existing
+`source_crop_run` attrs and `CropImageSource`, but they are not ordinary crop
+stage outputs. They should set `stage_selector_eligible=false`,
+`proxy_crop_complete=true`, and a non-complete run-completion status such as
+`palette_run_completion_status=auxiliary`. They may set legacy
+`status=completed` so old cleanup scripts do not remove them, but standard
+completion resolvers must not treat them as `latest_complete` crop runs.
+
+### Sharded model runs and latest-pointer safety
+
+Running one model job per clip cache shard is the right compute strategy, but
+those shard outputs are not equivalent to a normal whole-recording
+`keypoints_runs.latest_complete` or `subject_mask_runs.latest_complete`.
+
+Current code publishes normal selectors as soon as a keypoint run starts and
+completes:
+
+- `detect_keypoints_yolo._prepare_run_group()` calls `note_pending_latest(...)`.
+- `detect_keypoints_yolo.detect_keypoints_yolo()` writes
+  `root.attrs["current_keypoint_group_path"]`.
+- `zarr_run_completion.mark_run_complete(..., parent_group=..., run_name=...)`
+  sets both `latest_complete` and `latest` on the parent.
+
+The same pattern exists in subject-mask paths:
+
+- `infer_unet_subject_masks._prepare_run_group()` calls
+  `note_pending_latest(...)`.
+- `subject_segmentation._prepare_run_group()` calls
+  `note_pending_latest(...)`.
+- `run_sam_subject_masks` calls `note_pending_latest(...)` when creating
+  `subject_mask_runs/<run>`.
+- `refined_subject_mask_review` calls `note_pending_latest(...)` when creating
+  `refined_subject_masks_runs/<run>`.
+- These writers complete through `mark_run_complete(..., parent_group=...,
+  run_name=...)`, so normal completion publishes parent selectors.
+
+Therefore, if 22 clipped-cache shards are written as ordinary top-level
+`keypoints_runs/<run>`, `subject_mask_runs/<run>`, or
+`refined_subject_masks_runs/<run>` groups, the last shard to finish becomes the
+apparent latest complete run for the whole analysis Zarr. That is incorrect:
+the run covers only one clip shard, and downstream consumers that resolve
+`latest_complete` would silently see a partial collection.
+
+Preferred rule:
+
+- Shard outputs must be complete runs, but they must not publish global
+  parent selectors.
+- Shard outputs must not be discoverable as ordinary latest-complete stage
+  runs through resolver fallback scans.
+- A collection-level finalizer, not an arbitrary shard, is responsible for
+  publishing the selector that ordinary consumers resolve.
+
+Important resolver caveat:
+
+`resolve_latest_complete_run_name()` first checks `latest` and
+`latest_complete`, then falls back to scanning completed child groups in reverse
+name order. Therefore, simply skipping `note_pending_latest()` and calling
+`mark_run_complete(..., parent_group=None)` is not enough if shard groups live
+directly under `keypoints_runs` or `subject_mask_runs`: a store with no valid
+parent selector could still resolve the newest completed shard as the latest
+run.
+
+Recommended implementation:
+
+1. Prefer writing shard outputs under explicit shard parents such as
+   `keypoint_shard_runs`, `subject_mask_shard_runs`, and
+   `refined_subject_mask_shard_runs`, not under the ordinary stage parents.
+   These shard parents can use the same completion contract internally without
+   interfering with normal stage resolution.
+2. If shards must live under ordinary stage parents, add and enforce a generic
+   selector-eligibility attr such as `stage_selector_eligible=false`, and update
+   all standard run resolvers to skip non-eligible children during fallback.
+   This is broader and riskier than a separate shard parent because custom
+   readers may still scan child groups directly.
+3. In shard mode, create the run and stamp completion status, but do not update
+   root `current_*_group_path` attrs or ordinary stage parent selectors.
+4. Stamp shard attrs:
+   `is_collection_shard=true`, `source_collection_id`, `source_clip_id`,
+   `source_clip_index`, `source_crop_run`, `source_roi_cache_alias_manifest`,
+   and `source_roi_cache_row_index_path`.
+5. Add a collection finalizer that validates all expected shard runs exist,
+   verifies row-lineage coverage, and then writes either:
+   - a collection index run that lists the shard run paths, or
+   - a merged whole-collection run if downstream tools require a single flat
+     row surface.
+6. Only the finalizer may update `latest_complete`, `latest`, and any
+   authoritative pointer for the stage.
+
+Open design decision:
+
+- A collection index run is cheaper and avoids rewriting millions of rows, but
+  consumers must learn to follow shard manifests.
+- A merged whole-collection run is more compatible with existing consumers but
+  duplicates arrays and may be expensive for masks.
+
+For the first implementation, prefer separate shard parents plus a
+collection-level finalizer. For keypoints, a merged whole-collection
+`keypoints_runs/<run>` is likely cheap enough and maximally compatible. For
+subject masks, a collection index or compact merged representation is safer than
+materializing a huge dense whole-collection mask run.
+
+### Keypoint shard mode and finalizer design
+
+Keypoint inference should be split into two responsibilities:
+
+1. GPU shard inference against one proxy crop run plus one cache alias.
+2. CPU finalization that publishes a normal whole-collection keypoint run.
+
+Shard inference output:
+
+```text
+keypoint_shard_runs/<run>/
+  keypoints_roi
+  keypoints_img
+  keypoints_norm
+  keypoint_confidences
+  confidence
+  detection_success
+  heading
+  heading_finite
+  heading_usable
+  pose_bbox_xyxy_roi
+  effective_threshold
+  effective_se2_radius
+  frame_indices
+  source_frame_indices
+  source_clip_indices
+  source_clip_local_frame_indices
+  source_crop_row_ids
+  source_refined_row_ids
+  source_detect_row_index
+  detection_indices
+```
+
+Shard attrs:
+
+```text
+is_collection_shard = true
+stage_selector_eligible = false
+source_collection_id = <collection id>
+source_clip_id = <clip id>
+source_clip_index = <clip index>
+source_crop_run = <proxy crop run>
+source_roi_cache_alias_manifest = <alias manifest>
+source_roi_cache_row_index_path = <rows.parquet>
+```
+
+The shard writer should reuse the existing keypoint inference logic, but it
+must make the output parent explicit. In shard mode it writes to
+`keypoint_shard_runs`, does not call `note_pending_latest()` on
+`keypoints_runs`, and does not update `root.attrs["current_keypoint_group_path"]`.
+The shard parent may have its own `latest`/`latest_complete` attrs if useful for
+debugging, because normal Palette consumers do not resolve that parent. Keypoint
+shard mode also suppresses the canonical keypoint registry/status refresh; a
+shard is a staging artifact until a finalizer publishes a normal
+`keypoints_runs/<collection_run>`.
+
+The finalizer reads a complete expected shard manifest and writes a normal
+`keypoints_runs/<collection_run>`:
+
+1. Resolve all expected shard run paths from the shard manifest.
+2. Verify every shard is complete and has matching `source_collection_id`,
+   `source_clip_id`, `source_clip_index`, `source_crop_run`, and row counts.
+3. Verify no duplicate row identity across shards using
+   `(source_clip_index, source_clip_local_frame_indices, source_refined_row_ids)`
+   when present.
+4. Sort rows deterministically by
+   `(source_clip_index, frame_indices, source_refined_row_ids, source_crop_row_ids)`.
+5. Concatenate all per-ROI arrays and copied row-lineage arrays.
+6. Recompute `n_keypoints` from merged `frame_indices` and `detection_success`.
+7. Stamp collection attrs:
+   `source_collection_id`, `source_keypoint_shard_runs`,
+   `source_proxy_crop_runs`, `source_roi_cache_alias_manifests`, and
+   `collection_finalizer_schema`.
+8. Publish `keypoints_runs.latest_complete` only after the merged run passes
+   validation.
+
+This merged keypoint run is intentionally compatible with existing refinement,
+review, Crimson, registry extractors, and training exporters. Current
+`refine_keypoints.py` hard-codes `root["keypoints_runs"][run]`, so asking it to
+consume `keypoint_shard_runs` directly would spread collection-awareness into
+more code than needed.
+
+Subject masks should not blindly copy this finalizer shape. Merging keypoints is
+cheap; merging dense masks can be enormous. For masks, prefer shard outputs plus
+a collection index or compact merged representation unless a concrete consumer
+requires a dense whole-collection run.
+
 ## Registry Targeting Policy
 
 Clipped recordings should remain singleton recording/dataset entities. Clips are
@@ -409,19 +653,36 @@ Operational notes:
 
 ### Phase 2: proxy crop runs
 
-- [ ] Add a tool to create geometry-only proxy crop runs from a clipped
+- [x] Add a tool to create geometry-only proxy crop runs from a clipped
   collection row index.
-- [ ] Ensure proxy crop runs carry all row-lineage arrays needed by
+- [x] Ensure proxy crop runs carry all row-lineage arrays needed by
   keypoints/masks.
-- [ ] Make cache manifests include `source.crop_run_name` when built for a proxy
-  crop run.
+- [x] Write per-shard manifest aliases that add `source.crop_run_name` for the
+  proxy crop run while reusing the existing cache `.bin` payload.
+- [x] Validate one proxy crop run plus manifest alias with
+  `open_flat_roi_cache(..., expected_crop_run=<proxy_run>)`.
+- [x] Smoke `CropImageSource.open(..., roi_cache_manifest=<alias>)` against one
+  real clipped proxy.
 
 ### Phase 3: model runners
 
-- [ ] Smoke keypoints against one clip proxy + cache manifest.
-- [ ] Smoke subject masks against the same proxy + cache manifest.
+- [x] Add shard-output-parent support or an equivalent shard mode to keypoint
+  runners.
+- [x] Expose keypoint shard output through the LSF batch submitter via
+  `--output-parent keypoint_shard_runs`.
+- [ ] Add shard-output-parent support or an equivalent shard mode to subject-mask
+  runners.
+- [ ] Smoke keypoints against one clip proxy + cache alias manifest.
+- [ ] Smoke subject masks against the same proxy + cache alias manifest.
 - [ ] Verify output arrays contain parent-frame and clip-local lineage.
 - [ ] Verify refined keypoints and refined subject masks preserve lineage.
+- [x] Verify keypoint shard runs do not live under ordinary stage parents or, if they do,
+  are excluded from resolver fallback.
+- [x] Verify keypoint shard runs do not update ordinary stage `latest`,
+  `latest_complete`, root `current_*_group_path` selectors, or canonical
+  keypoint registry/status rows.
+- [ ] Add a collection finalizer that publishes a collection-level selector only
+  after all expected shards validate.
 
 ### Phase 4: registry
 
@@ -439,10 +700,10 @@ Operational notes:
 
 ## Current Recommendation
 
-Do not build full persistent collection caches yet. Start with Phase 0 and
-Phase 1, then run a one-clip smoke. Persisting large caches before proxy crop
-runs and registry lineage are in place would create outputs that are usable only
-by external manifest knowledge, not self-describing Palette stage contracts.
+Do not submit full keypoint or subject-mask inference across the clipped cache
+set until proxy crop runs, manifest aliases, and non-publishing shard semantics
+exist. The caches can be valid pixel sources while still being unsafe stage
+inputs if the output runs publish ordinary whole-recording selectors.
 
 ## Read-Only Audit Smoke
 
@@ -484,3 +745,37 @@ The collection itself is decode-ready for the inspected camera because its
 selected-run source paths point to `/groups`. The archive and registry are not
 yet clipped-workflow-ready because root attrs, registry targeting fields, and
 frame-index path columns still need relocation/backfill cleanup.
+
+## Proxy Crop-Run Smoke
+
+Added:
+
+```bash
+scripts/py -m fisheye.utils.create_clipped_collection_proxy_crop_run \
+  /groups/johnson/johnsonlab/jeremy/recordings/sleepyfish_2026_05_05_17_45_30_cam2010095/zarr/sleepyfish_2026_05_05_17_45_30_cam2010095_analysis.zarr \
+  /nrs/ahrens/palette_staging/clipped_collection_flat_roi_cache/sleepyfish_cam2010095_allclips/sleepyfish_cam2010095_allclips_b0001/sleepyfish_cam2010095_allclips_b0001__clip_000004.flat_roi_cache.json \
+  --proxy-run crop_proxy_sleepyfish_cam2010095_clip_000004_20260707 \
+  --json
+```
+
+Result:
+
+```text
+proxy_crop_run_path = crop_runs/crop_proxy_sleepyfish_cam2010095_clip_000004_20260707
+row_count = 53,293
+cache_shape = [53293, 512, 512]
+source_clip_id = clip_000004
+alias_manifest_path = /nrs/ahrens/palette_staging/clipped_collection_flat_roi_cache/sleepyfish_cam2010095_allclips/sleepyfish_cam2010095_allclips_b0001/sleepyfish_cam2010095_allclips_b0001__clip_000004.flat_roi_cache__crop_proxy_sleepyfish_cam2010095_clip_000004_20260707.alias.json
+```
+
+Read smoke:
+
+```text
+CropImageSource.open(..., crop_run=<proxy>, roi_cache_manifest=<alias>)
+total_rois = 53,293
+roi_shape = (512, 512)
+read_shape = (2, 512, 512)
+read_dtype = uint8
+roi_cache_used = true
+read_mode = flat_bin_roi_cache
+```
