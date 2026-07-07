@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from fisheye.shared.run_resolution import LEGACY_DETECT_REVIEW_AUTHORITY_ATTR
+from fisheye.diagnostics.detect_review_pointer_census import LEGACY_DETECT_REVIEW_AUTHORITY_ATTR
 from fisheye.shared.zarr_run_completion import (
     AUTHORITATIVE_RUN_ATTR,
     COMPLETION_EPOCH_ATTR,
@@ -123,7 +123,7 @@ def test_execute_skips_ambiguous_store_without_mutation(tmp_path: Path) -> None:
     assert AUTHORITATIVE_RUN_ATTR not in _read_attrs(parent)
 
 
-def test_no_reader_retirement_behavior_legacy_attr_and_reader_modules_unchanged(tmp_path: Path) -> None:
+def test_backfill_keeps_legacy_attr_and_owns_historical_literal(tmp_path: Path) -> None:
     zarr_path = _write_store(tmp_path, "backfillable")
     parent = _write_backfillable_parent(zarr_path)
 

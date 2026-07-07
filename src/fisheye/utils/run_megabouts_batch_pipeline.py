@@ -89,7 +89,7 @@ def _child_groups(group_path: Path) -> list[str]:
 
 def _latest_group_name(parent_path: Path) -> Optional[str]:
     attrs = _attrs(parent_path)
-    for key in ("latest", "latest_materialized", "detect_review_status_latest"):
+    for key in ("latest", "latest_materialized"):
         value = attrs.get(key)
         if isinstance(value, str) and value and (parent_path / value).is_dir():
             return value

@@ -17,10 +17,6 @@ from fisheye.shared.zarr_run_completion import (
 )
 
 
-LEGACY_DETECT_REVIEW_AUTHORITY_ATTR = "detect_review_status_latest"
-_REFINED_DETECT_PARENT_NAMES = frozenset({"refined_detect_runs", "refined_runs"})
-
-
 class RunResolution(str, Enum):
     """Named meanings of "current run"."""
 
@@ -81,16 +77,6 @@ def _completed_child(parent_group: Any, run_name: str | None, *, legacy_default:
     if not is_run_complete_in_parent(parent_group, child, legacy_default=legacy_default):
         return None
     return child
-
-
-def _is_refined_detect_parent(parent_group: Any, parent_path: str | None) -> bool:
-    candidates: list[str] = []
-    if parent_path:
-        candidates.extend(str(parent_path).strip("/").split("/"))
-    group_path = getattr(parent_group, "path", None)
-    if group_path:
-        candidates.extend(str(group_path).strip("/").split("/"))
-    return any(candidate in _REFINED_DETECT_PARENT_NAMES for candidate in candidates)
 
 
 def _open_registry_connection(registry: Path | str | sqlite3.Connection) -> tuple[sqlite3.Connection, bool, Path | None]:
@@ -289,21 +275,6 @@ def resolve_run(
                 fallback_used=False,
                 reason=None if child is not None else "authoritative run is missing or incomplete",
             )
-
-        if _is_refined_detect_parent(parent_group, parent_path):
-            legacy = _normalize_text(parent_group.attrs.get(LEGACY_DETECT_REVIEW_AUTHORITY_ATTR))
-            if legacy is not None:
-                child = _completed_child(parent_group, legacy, legacy_default=legacy_default)
-                if child is not None:
-                    return RunResolutionResult(
-                        run_name=legacy,
-                        mode=resolution,
-                        resolution_source=LEGACY_DETECT_REVIEW_AUTHORITY_ATTR,
-                        parent_path=parent_path,
-                        run_group=child,
-                        fallback_used=True,
-                        source_attr=LEGACY_DETECT_REVIEW_AUTHORITY_ATTR,
-                    )
 
         name = resolve_latest_complete_run_name(
             parent_group,

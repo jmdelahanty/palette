@@ -77,7 +77,10 @@ ZARR_SCHEMA = {
             "description": "Refined detect runs with canonical sparse curated instances and source_detections",
             "parent_attributes": {
                 "latest": "Latest refined detect run name",
-                "detect_review_status_latest": "Refined run name with the latest review status (optional)",
+                "detect_review_status_latest": (
+                    "Historical detect-review lineage pointer written by migration tools; "
+                    "no reader consults it for current run resolution"
+                ),
             },
             "run_attributes": {
                 "source_detect_run": "Upstream detect run name",

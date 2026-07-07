@@ -61,17 +61,25 @@ def test_authoritative_resolution_falls_back_to_latest_complete_when_unset() -> 
     assert resolved.fallback_used is True
 
 
-def test_refined_detect_authoritative_resolution_bridges_legacy_review_pointer() -> None:
+def test_refined_detect_authoritative_resolution_ignores_retired_legacy_review_pointer() -> None:
+    """Legacy-only detect-review pointers now fall through to latest_complete.
+
+    The 2026-07-07 re-census found every real fallback candidate agreed with
+    latest, so retiring this reader changes the source metadata without changing
+    the resolved run on real stores.
+    """
+
     parent = FakeGroup()
     _complete(parent, "reviewed")
     parent.attrs["detect_review_status_latest"] = "reviewed"
     _complete(parent, "later")
+    parent.attrs["latest"] = "reviewed"
 
     resolved = resolve_run(parent, RunResolution.AUTHORITATIVE, parent_path="refined_detect_runs")
 
     assert resolved.run_name == "reviewed"
-    assert resolved.resolution_source == "detect_review_status_latest"
-    assert resolved.source_attr == "detect_review_status_latest"
+    assert resolved.resolution_source == "latest_complete"
+    assert resolved.source_attr is None
     assert resolved.fallback_used is True
     assert resolved.run_group is parent["reviewed"]
 
@@ -91,10 +99,11 @@ def test_refined_detect_authoritative_pointer_takes_precedence_over_legacy_revie
     assert resolved.run_group is parent["approved"]
 
 
-def test_legacy_detect_review_pointer_is_scoped_to_refined_detect_parents() -> None:
+def test_legacy_detect_review_pointer_is_ignored_for_authoritative_resolution() -> None:
     parent = FakeGroup()
     _complete(parent, "legacy_reviewed")
     parent.attrs["detect_review_status_latest"] = "legacy_reviewed"
+    parent.attrs["latest"] = "later"
     _complete(parent, "later")
 
     resolved = resolve_run(parent, RunResolution.AUTHORITATIVE, parent_path="detect_runs")

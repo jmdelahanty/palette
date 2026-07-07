@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from fisheye.registry.db import RegistryPaths
-from fisheye.shared.run_resolution import LEGACY_DETECT_REVIEW_AUTHORITY_ATTR
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs
 from fisheye.shared.zarr_run_completion import (
@@ -24,6 +23,7 @@ from fisheye.shared.zarr_run_completion import (
 
 DEFAULT_RECORDINGS_ROOT = Path("/nvme1/recordings")
 REFINED_DETECT_PARENT_NAMES = ("refined_detect_runs", "refined_runs")
+LEGACY_DETECT_REVIEW_AUTHORITY_ATTR = "detect_review_status_latest"
 BATCH_POINTER_ORDER = ("latest", "latest_materialized", LEGACY_DETECT_REVIEW_AUTHORITY_ATTR)
 TASK_GENERATION_POINTER_ORDER = (LEGACY_DETECT_REVIEW_AUTHORITY_ATTR, "latest")
 POINTER_ATTRS = (
