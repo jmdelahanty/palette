@@ -285,8 +285,16 @@ SHA256_Q="$(printf '%q' "$SHA256")"
 OVERWRITE_Q="$(printf '%q' "$OVERWRITE")"
 
 printf -v CLIP_IDS_SHELL '%q ' "${CLIP_IDS[@]}"
-printf -v WORK_UNIT_IDS_SHELL '%q ' "${WORK_UNIT_IDS[@]}"
-printf -v ROI_SIZE_SHELL '%q ' "${ROI_SIZE[@]}"
+if [[ "${#WORK_UNIT_IDS[@]}" -gt 0 ]]; then
+  printf -v WORK_UNIT_IDS_SHELL '%q ' "${WORK_UNIT_IDS[@]}"
+else
+  WORK_UNIT_IDS_SHELL=""
+fi
+if [[ "${#ROI_SIZE[@]}" -gt 0 ]]; then
+  printf -v ROI_SIZE_SHELL '%q ' "${ROI_SIZE[@]}"
+else
+  ROI_SIZE_SHELL=""
+fi
 
 cat > "$JOB_SCRIPT" <<JOBSCRIPT
 #!/usr/bin/env bash
