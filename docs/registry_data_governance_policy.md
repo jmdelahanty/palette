@@ -34,6 +34,15 @@ indexes. Those changes must not silently change the meaning of an already
 materialized analysis export, because exports should point to immutable
 collection manifests with concrete source run IDs and source fingerprints.
 
+### Index hygiene: temporary stores
+
+Durable registry databases must not index Zarr stores under temporary roots.
+Dataset registration refuses a temporary store path when the registry database
+itself is not also under a temporary root. This preserves ordinary test behavior
+where both the registry and store live in a temp directory, while preventing
+ephemeral test/dev stores from becoming durable locators. The explicit emergency
+override is `PALETTE_REGISTRY_ALLOW_TEMP_STORES=1`.
+
 ## Immutable vs Mutable
 
 ### Immutable (must not be updated in normal operations)

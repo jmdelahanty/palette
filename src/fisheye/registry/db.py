@@ -38,6 +38,7 @@ from .extractors.quality import _extract_detect_quality_rows, _extract_keypoint_
 from .migration_bodies import RegistryMigrationMixin
 from .migrations import bind_migrations
 from .stage_catalog import recording_status_stage_ids, recording_tuning_stage_ids
+from .temp_store_guard import assert_temp_store_registration_allowed
 
 
 SQLITE_BUSY_TIMEOUT_MS = 30_000
@@ -2492,6 +2493,7 @@ class Registry(RegistryMigrationMixin):
         source_recording_frame_index_path: Optional[str] = None,
         source_frame_index_schema: Optional[str] = None,
     ) -> None:
+        assert_temp_store_registration_allowed(registry_path=self.path, store_path=zarr_path)
         now = _utc_now()
         resolved_recording_id = recording_id
         if resolved_recording_id is None and session_uuid:
