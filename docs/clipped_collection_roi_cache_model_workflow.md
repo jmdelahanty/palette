@@ -670,6 +670,8 @@ Operational notes:
   runners.
 - [x] Expose keypoint shard output through the LSF batch submitter via
   `--output-parent keypoint_shard_runs`.
+- [x] Ensure keypoint LSF jobs clean staged flat-cache scratch on job exit when
+  `--stage-roi-cache-to-scratch` is enabled.
 - [ ] Add shard-output-parent support or an equivalent shard mode to subject-mask
   runners.
 - [ ] Smoke keypoints against one clip proxy + cache alias manifest.

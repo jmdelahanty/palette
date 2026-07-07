@@ -315,6 +315,7 @@ EXTRA_ARGS+=(--batch-size "$BATCH_SIZE_KP")
 printf -v EXTRA_ARGS_SHELL '%q ' "${EXTRA_ARGS[@]}"
 printf -v PROGRESS_JSONL_DIR_SHELL '%q' "$PROGRESS_JSONL_DIR"
 printf -v PROGRESS_EVERY_BATCHES_SHELL '%q' "$PROGRESS_EVERY_BATCHES"
+printf -v ROI_CACHE_STAGING_DIR_SHELL '%q' "$ROI_CACHE_STAGING_DIR"
 
 JOB_SCRIPT="${RUN_DIR}/run_batch.sh"
 cat > "$JOB_SCRIPT" <<JOBSCRIPT
@@ -323,6 +324,35 @@ set -euo pipefail
 RUN_DIR="\$1"
 PROGRESS_JSONL_DIR=${PROGRESS_JSONL_DIR_SHELL}
 PROGRESS_EVERY_BATCHES=${PROGRESS_EVERY_BATCHES_SHELL}
+STAGE_ROI_CACHE_TO_SCRATCH=${STAGE_ROI_CACHE_TO_SCRATCH}
+ROI_CACHE_STAGING_DIR=${ROI_CACHE_STAGING_DIR_SHELL}
+
+cleanup_staged_roi_cache() {
+  local status=\$?
+  trap - EXIT INT TERM
+  if [[ "\$STAGE_ROI_CACHE_TO_SCRATCH" == "1" ]]; then
+    local user_name="\${USER:-\$(id -un)}"
+    local job_id="\${LSB_JOBID:-}"
+    local cleanup_dir=""
+    if [[ -n "\$ROI_CACHE_STAGING_DIR" ]]; then
+      cleanup_dir="\$ROI_CACHE_STAGING_DIR"
+    elif [[ -n "\$job_id" ]]; then
+      cleanup_dir="/scratch/\${user_name}/\${job_id}/palette_roi_cache_stage"
+    fi
+    local scratch_job_root="/scratch/\${user_name}/\${job_id}"
+    if [[ -n "\$cleanup_dir" && -d "\$cleanup_dir" ]]; then
+      if [[ -n "\$job_id" && "\$cleanup_dir" == "\$scratch_job_root/"* ]]; then
+        echo "Cleaning staged ROI cache: \$cleanup_dir"
+        rm -rf -- "\$cleanup_dir"
+      else
+        echo "Skipping staged ROI cache cleanup outside this LSF job scratch root: \$cleanup_dir" >&2
+      fi
+    fi
+  fi
+  exit "\$status"
+}
+trap cleanup_staged_roi_cache EXIT INT TERM
+
 if [[ -z "\${LSB_JOBINDEX:-}" ]]; then
   echo "LSB_JOBINDEX not set; are you running under bsub array?" >&2
   exit 2
