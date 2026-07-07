@@ -1,0 +1,3280 @@
+{
+  "generated_at_utc": "2026-07-07T08:13:27.965682Z",
+  "include_step_status": true,
+  "mode": "dry-run",
+  "read_only": true,
+  "registered_but_vanished": {
+    "remaining_after_apply": null,
+    "result": {
+      "checked": 270,
+      "marked_missing": 0
+    },
+    "would_mark_missing": []
+  },
+  "registry": "/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite",
+  "roots": [
+    {
+      "discovered_count": 126,
+      "exists": true,
+      "is_zarr_root": false,
+      "path": "/nvme1/recordings"
+    },
+    {
+      "discovered_count": 149,
+      "exists": true,
+      "is_zarr_root": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings"
+    }
+  ],
+  "stores": [
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-05-29T18-11-16Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-05-29T18-11-16Z_arena_1_GoodCopBadCop/zarr/2026-05-29T18-11-16Z_arena_1_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-05-29T18-11-16Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-05-29T18-11-16Z_arena_2_GoodCopBadCop/zarr/2026-05-29T18-11-16Z_arena_2_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-05-29T18-11-16Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-05-29T18-11-16Z_arena_3_GoodCopBadCop/zarr/2026-05-29T18-11-16Z_arena_3_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-05-29T18-11-16Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-05-29T18-11-16Z_arena_4_GoodCopBadCop/zarr/2026-05-29T18-11-16Z_arena_4_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-14T21-12-08Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-14T21-12-08Z_arena_1_GoodCopBadCop/zarr/2026-06-14T21-12-08Z_arena_1_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-14T21-12-08Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-14T21-12-08Z_arena_2_GoodCopBadCop/zarr/2026-06-14T21-12-08Z_arena_2_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-14T21-12-08Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-14T21-12-08Z_arena_3_GoodCopBadCop/zarr/2026-06-14T21-12-08Z_arena_3_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-14T21-12-08Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-14T21-12-08Z_arena_4_GoodCopBadCop/zarr/2026-06-14T21-12-08Z_arena_4_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-14T21-50-10Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-14T21-50-10Z_arena_1_GoodCopBadCop/zarr/2026-06-14T21-50-10Z_arena_1_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-14T21-50-10Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-14T21-50-10Z_arena_2_GoodCopBadCop/zarr/2026-06-14T21-50-10Z_arena_2_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-14T21-50-10Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-14T21-50-10Z_arena_3_GoodCopBadCop/zarr/2026-06-14T21-50-10Z_arena_3_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-14T21-50-10Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-14T21-50-10Z_arena_4_GoodCopBadCop/zarr/2026-06-14T21-50-10Z_arena_4_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-14T22-33-50Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-14T22-33-50Z_arena_1_GoodCopBadCop/zarr/2026-06-14T22-33-50Z_arena_1_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-14T22-33-50Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-14T22-33-50Z_arena_2_GoodCopBadCop/zarr/2026-06-14T22-33-50Z_arena_2_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-14T22-33-50Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-14T22-33-50Z_arena_3_GoodCopBadCop/zarr/2026-06-14T22-33-50Z_arena_3_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-14T22-33-50Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-14T22-33-50Z_arena_4_GoodCopBadCop/zarr/2026-06-14T22-33-50Z_arena_4_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-21T18-18-31Z_arena_1",
+        "2026-06-21T18-18-31Z_arena_1:zccd2ec23f5f3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-21T18-18-31Z_arena_1_GoodCopBadCop/zarr/2026-06-21T18-18-31Z_arena_1_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active",
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-21T18-18-31Z_arena_2",
+        "2026-06-21T18-18-31Z_arena_2:z542b3c2c313a"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-21T18-18-31Z_arena_2_GoodCopBadCop/zarr/2026-06-21T18-18-31Z_arena_2_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active",
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-21T18-18-31Z_arena_3",
+        "2026-06-21T18-18-31Z_arena_3:za3d8cac3fd0f"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-21T18-18-31Z_arena_3_GoodCopBadCop/zarr/2026-06-21T18-18-31Z_arena_3_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active",
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-21T18-18-32Z_arena_4",
+        "2026-06-21T18-18-32Z_arena_4:z07f07d8a8c9a"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-21T18-18-32Z_arena_4_GoodCopBadCop/zarr/2026-06-21T18-18-32Z_arena_4_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active",
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-21T18-56-34Z_arena_1",
+        "2026-06-21T18-56-34Z_arena_1:zecf54b446dfe"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-21T18-56-34Z_arena_1_GoodCopBadCop/zarr/2026-06-21T18-56-34Z_arena_1_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active",
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-21T18-56-34Z_arena_2",
+        "2026-06-21T18-56-34Z_arena_2:z053b90022563"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-21T18-56-34Z_arena_2_GoodCopBadCop/zarr/2026-06-21T18-56-34Z_arena_2_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active",
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-21T18-56-34Z_arena_3",
+        "2026-06-21T18-56-34Z_arena_3:z2718470da732"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-21T18-56-34Z_arena_3_GoodCopBadCop/zarr/2026-06-21T18-56-34Z_arena_3_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active",
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-21T18-56-34Z_arena_4",
+        "2026-06-21T18-56-34Z_arena_4:zc36fc8adc653"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-21T18-56-34Z_arena_4_GoodCopBadCop/zarr/2026-06-21T18-56-34Z_arena_4_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active",
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-21T19-28-57Z_arena_1",
+        "2026-06-21T19-28-57Z_arena_1:zd555fe7be0fd"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-21T19-28-57Z_arena_1_GoodCopBadCop/zarr/2026-06-21T19-28-57Z_arena_1_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active",
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-21T19-28-57Z_arena_2",
+        "2026-06-21T19-28-57Z_arena_2:zc42fd95be2a5"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-21T19-28-57Z_arena_2_GoodCopBadCop/zarr/2026-06-21T19-28-57Z_arena_2_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active",
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-21T19-28-57Z_arena_3",
+        "2026-06-21T19-28-57Z_arena_3:z867defad5f88"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-21T19-28-57Z_arena_3_GoodCopBadCop/zarr/2026-06-21T19-28-57Z_arena_3_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active",
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-21T19-28-57Z_arena_4",
+        "2026-06-21T19-28-57Z_arena_4:ze6c8f0227800"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-21T19-28-57Z_arena_4_GoodCopBadCop/zarr/2026-06-21T19-28-57Z_arena_4_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active",
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-21T21-29-13Z_arena_1",
+        "2026-06-21T21-29-13Z_arena_1:z179246bcc2ae"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-21T21-29-13Z_arena_1_GoodCopBadCop/zarr/2026-06-21T21-29-13Z_arena_1_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active",
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-21T21-29-13Z_arena_2",
+        "2026-06-21T21-29-13Z_arena_2:z1f712992e01f"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-21T21-29-13Z_arena_2_GoodCopBadCop/zarr/2026-06-21T21-29-13Z_arena_2_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active",
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-21T21-29-13Z_arena_3",
+        "2026-06-21T21-29-13Z_arena_3:za3099ac6e0bf"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-21T21-29-13Z_arena_3_GoodCopBadCop/zarr/2026-06-21T21-29-13Z_arena_3_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active",
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-21T21-29-13Z_arena_4",
+        "2026-06-21T21-29-13Z_arena_4:zee02ad8824f7"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-21T21-29-13Z_arena_4_GoodCopBadCop/zarr/2026-06-21T21-29-13Z_arena_4_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active",
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-21T22-03-24Z_arena_1",
+        "2026-06-21T22-03-24Z_arena_1:z7f12b7b0134b"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-21T22-03-24Z_arena_1_GoodCopBadCop/zarr/2026-06-21T22-03-24Z_arena_1_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active",
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-21T22-03-24Z_arena_2",
+        "2026-06-21T22-03-24Z_arena_2:z1fcade4dae30"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-21T22-03-24Z_arena_2_GoodCopBadCop/zarr/2026-06-21T22-03-24Z_arena_2_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active",
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-21T22-03-24Z_arena_3",
+        "2026-06-21T22-03-24Z_arena_3:zd45aa06edf95"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-21T22-03-24Z_arena_3_GoodCopBadCop/zarr/2026-06-21T22-03-24Z_arena_3_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active",
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-21T22-03-24Z_arena_4",
+        "2026-06-21T22-03-24Z_arena_4:z060dce1f99ae"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-21T22-03-24Z_arena_4_GoodCopBadCop/zarr/2026-06-21T22-03-24Z_arena_4_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active",
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T16-01-09Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-01-09Z_arena_1_RedScare/zarr/2026-06-23T16-01-09Z_arena_1_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T16-01-09Z_arena_1:z92f469b75d66"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-01-09Z_arena_1_RedScare/zarr/2026-06-23T16-01-09Z_arena_1_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T16-01-09Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-01-09Z_arena_2_RedScare/zarr/2026-06-23T16-01-09Z_arena_2_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T16-01-09Z_arena_2:zd538265d4b4e"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-01-09Z_arena_2_RedScare/zarr/2026-06-23T16-01-09Z_arena_2_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T16-01-09Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-01-09Z_arena_3_RedScare/zarr/2026-06-23T16-01-09Z_arena_3_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T16-01-09Z_arena_3:zd51986c19042"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-01-09Z_arena_3_RedScare/zarr/2026-06-23T16-01-09Z_arena_3_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T16-01-10Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-01-10Z_arena_4_RedScare/zarr/2026-06-23T16-01-10Z_arena_4_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T16-01-10Z_arena_4:zfd621a14deb0"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-01-10Z_arena_4_RedScare/zarr/2026-06-23T16-01-10Z_arena_4_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T16-43-36Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-43-36Z_arena_1_RedScare/zarr/2026-06-23T16-43-36Z_arena_1_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T16-43-36Z_arena_1:ze322f7126920"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-43-36Z_arena_1_RedScare/zarr/2026-06-23T16-43-36Z_arena_1_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T16-43-36Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-43-36Z_arena_2_RedScare/zarr/2026-06-23T16-43-36Z_arena_2_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T16-43-36Z_arena_2:z389618509690"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-43-36Z_arena_2_RedScare/zarr/2026-06-23T16-43-36Z_arena_2_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T16-43-36Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-43-36Z_arena_3_RedScare/zarr/2026-06-23T16-43-36Z_arena_3_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T16-43-36Z_arena_3:z729a6c424abe"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-43-36Z_arena_3_RedScare/zarr/2026-06-23T16-43-36Z_arena_3_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T16-43-36Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-43-36Z_arena_4_RedScare/zarr/2026-06-23T16-43-36Z_arena_4_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T16-43-36Z_arena_4:za5fe2361bd57"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T16-43-36Z_arena_4_RedScare/zarr/2026-06-23T16-43-36Z_arena_4_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T17-16-51Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-16-51Z_arena_1_RedScare/zarr/2026-06-23T17-16-51Z_arena_1_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T17-16-51Z_arena_1:z6f1a9db7c1fe"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-16-51Z_arena_1_RedScare/zarr/2026-06-23T17-16-51Z_arena_1_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T17-16-51Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-16-51Z_arena_2_RedScare/zarr/2026-06-23T17-16-51Z_arena_2_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T17-16-51Z_arena_2:zf77fd1c3dac7"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-16-51Z_arena_2_RedScare/zarr/2026-06-23T17-16-51Z_arena_2_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T17-16-51Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-16-51Z_arena_3_RedScare/zarr/2026-06-23T17-16-51Z_arena_3_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T17-16-51Z_arena_3:zcb0899750de3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-16-51Z_arena_3_RedScare/zarr/2026-06-23T17-16-51Z_arena_3_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T17-16-51Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-16-51Z_arena_4_RedScare/zarr/2026-06-23T17-16-51Z_arena_4_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T17-16-51Z_arena_4:ze8beeb83a12a"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-16-51Z_arena_4_RedScare/zarr/2026-06-23T17-16-51Z_arena_4_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T17-57-12Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-57-12Z_arena_1_RedScare/zarr/2026-06-23T17-57-12Z_arena_1_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T17-57-12Z_arena_1:z557718a1bed8"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-57-12Z_arena_1_RedScare/zarr/2026-06-23T17-57-12Z_arena_1_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T17-57-12Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-57-12Z_arena_2_RedScare/zarr/2026-06-23T17-57-12Z_arena_2_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T17-57-12Z_arena_2:ze472bcd79dc9"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-57-12Z_arena_2_RedScare/zarr/2026-06-23T17-57-12Z_arena_2_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T17-57-12Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-57-12Z_arena_3_RedScare/zarr/2026-06-23T17-57-12Z_arena_3_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T17-57-12Z_arena_3:zc88814883bdf"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-57-12Z_arena_3_RedScare/zarr/2026-06-23T17-57-12Z_arena_3_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T17-57-12Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-57-12Z_arena_4_RedScare/zarr/2026-06-23T17-57-12Z_arena_4_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T17-57-12Z_arena_4:z8fc21ce574e8"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T17-57-12Z_arena_4_RedScare/zarr/2026-06-23T17-57-12Z_arena_4_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T18-40-24Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T18-40-24Z_arena_1_RedScare/zarr/2026-06-23T18-40-24Z_arena_1_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T18-40-24Z_arena_1:za6aff3e0ac55"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T18-40-24Z_arena_1_RedScare/zarr/2026-06-23T18-40-24Z_arena_1_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T18-40-24Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T18-40-24Z_arena_2_RedScare/zarr/2026-06-23T18-40-24Z_arena_2_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T18-40-24Z_arena_2:z62b434fca011"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T18-40-24Z_arena_2_RedScare/zarr/2026-06-23T18-40-24Z_arena_2_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T18-40-24Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T18-40-24Z_arena_3_RedScare/zarr/2026-06-23T18-40-24Z_arena_3_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T18-40-24Z_arena_3:z4b30e9cd9289"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T18-40-24Z_arena_3_RedScare/zarr/2026-06-23T18-40-24Z_arena_3_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T18-40-24Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T18-40-24Z_arena_4_RedScare/zarr/2026-06-23T18-40-24Z_arena_4_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T18-40-24Z_arena_4:z3d364d7f8ced"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T18-40-24Z_arena_4_RedScare/zarr/2026-06-23T18-40-24Z_arena_4_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T20-56-02Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T20-56-02Z_arena_1_RedScare/zarr/2026-06-23T20-56-02Z_arena_1_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T20-56-02Z_arena_1:zb962d763bd65"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T20-56-02Z_arena_1_RedScare/zarr/2026-06-23T20-56-02Z_arena_1_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T20-56-03Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T20-56-03Z_arena_2_RedScare/zarr/2026-06-23T20-56-03Z_arena_2_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T20-56-03Z_arena_2:z54fef8898f87"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T20-56-03Z_arena_2_RedScare/zarr/2026-06-23T20-56-03Z_arena_2_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T20-56-03Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T20-56-03Z_arena_3_RedScare/zarr/2026-06-23T20-56-03Z_arena_3_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T20-56-03Z_arena_3:z640bfc8c003f"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T20-56-03Z_arena_3_RedScare/zarr/2026-06-23T20-56-03Z_arena_3_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T20-56-03Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T20-56-03Z_arena_4_RedScare/zarr/2026-06-23T20-56-03Z_arena_4_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T20-56-03Z_arena_4:z92dea09a10f9"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T20-56-03Z_arena_4_RedScare/zarr/2026-06-23T20-56-03Z_arena_4_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T21-45-13Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T21-45-13Z_arena_1_RedScare/zarr/2026-06-23T21-45-13Z_arena_1_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T21-45-13Z_arena_1:z3cad00dbf08a"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T21-45-13Z_arena_1_RedScare/zarr/2026-06-23T21-45-13Z_arena_1_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T21-45-13Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T21-45-13Z_arena_2_RedScare/zarr/2026-06-23T21-45-13Z_arena_2_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T21-45-13Z_arena_2:z22f4e15e0da8"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T21-45-13Z_arena_2_RedScare/zarr/2026-06-23T21-45-13Z_arena_2_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T21-45-13Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T21-45-13Z_arena_3_RedScare/zarr/2026-06-23T21-45-13Z_arena_3_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T21-45-13Z_arena_3:z7592c0275767"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T21-45-13Z_arena_3_RedScare/zarr/2026-06-23T21-45-13Z_arena_3_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T21-45-13Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T21-45-13Z_arena_4_RedScare/zarr/2026-06-23T21-45-13Z_arena_4_RedScare_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-06-23T21-45-13Z_arena_4:zcbd97376b99f"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-06-23T21-45-13Z_arena_4_RedScare/zarr/2026-06-23T21-45-13Z_arena_4_RedScare_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-01T14-32-13Z_arena_1:zf3dd46d26108"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T14-32-13Z_arena_1_DefaultScreen/zarr/2026-07-01T14-32-13Z_arena_1_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-01T14-32-13Z_arena_1:ze6fbd9e55f52"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T14-32-13Z_arena_1_DefaultScreen/zarr/2026-07-01T14-32-13Z_arena_1_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-01T14-32-13Z_arena_2:z464fe58cf40d"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T14-32-13Z_arena_2_DefaultScreen/zarr/2026-07-01T14-32-13Z_arena_2_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-01T14-32-13Z_arena_2:z83294b710f2b"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T14-32-13Z_arena_2_DefaultScreen/zarr/2026-07-01T14-32-13Z_arena_2_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-01T14-32-13Z_arena_3:z1d8f120b93be"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T14-32-13Z_arena_3_DefaultScreen/zarr/2026-07-01T14-32-13Z_arena_3_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-01T14-32-13Z_arena_3:z7c4786b9b361"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T14-32-13Z_arena_3_DefaultScreen/zarr/2026-07-01T14-32-13Z_arena_3_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-01T14-32-13Z_arena_4:za6fc1b0e5f4e"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T14-32-13Z_arena_4_DefaultScreen/zarr/2026-07-01T14-32-13Z_arena_4_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-01T14-32-13Z_arena_4:z80ce8be4bca8"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T14-32-13Z_arena_4_DefaultScreen/zarr/2026-07-01T14-32-13Z_arena_4_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-01T15-11-03Z_arena_1:z27f6a03e1313"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T15-11-03Z_arena_1_DefaultScreen/zarr/2026-07-01T15-11-03Z_arena_1_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-01T15-11-03Z_arena_1:z2daf0f10ceed"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T15-11-03Z_arena_1_DefaultScreen/zarr/2026-07-01T15-11-03Z_arena_1_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-01T15-11-03Z_arena_2:z16da57a612ea"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T15-11-03Z_arena_2_DefaultScreen/zarr/2026-07-01T15-11-03Z_arena_2_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-01T15-11-03Z_arena_2:z11049699a60d"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T15-11-03Z_arena_2_DefaultScreen/zarr/2026-07-01T15-11-03Z_arena_2_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-01T15-11-03Z_arena_3:z2445b8f9a45e"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T15-11-03Z_arena_3_DefaultScreen/zarr/2026-07-01T15-11-03Z_arena_3_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-01T15-11-03Z_arena_3:z53f6cb117bce"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T15-11-03Z_arena_3_DefaultScreen/zarr/2026-07-01T15-11-03Z_arena_3_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-01T15-11-03Z_arena_4:ze61afabfb254"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T15-11-03Z_arena_4_DefaultScreen/zarr/2026-07-01T15-11-03Z_arena_4_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-01T15-11-03Z_arena_4:zd63fc8946f97"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-01T15-11-03Z_arena_4_DefaultScreen/zarr/2026-07-01T15-11-03Z_arena_4_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-02T14-56-00Z_arena_1:z0337843876e4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T14-56-00Z_arena_1_DefaultScreen/zarr/2026-07-02T14-56-00Z_arena_1_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-02T14-56-00Z_arena_1:z02c14ecf9f7b"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T14-56-00Z_arena_1_DefaultScreen/zarr/2026-07-02T14-56-00Z_arena_1_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-02T14-56-00Z_arena_2:z7f060b278691"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T14-56-00Z_arena_2_DefaultScreen/zarr/2026-07-02T14-56-00Z_arena_2_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-02T14-56-00Z_arena_2:z84038ca87d7c"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T14-56-00Z_arena_2_DefaultScreen/zarr/2026-07-02T14-56-00Z_arena_2_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-02T14-56-00Z_arena_3:z280d53d18ce0"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T14-56-00Z_arena_3_DefaultScreen/zarr/2026-07-02T14-56-00Z_arena_3_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-02T14-56-00Z_arena_3:z53182130f53e"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T14-56-00Z_arena_3_DefaultScreen/zarr/2026-07-02T14-56-00Z_arena_3_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-02T14-56-00Z_arena_4:z45e1878e3e02"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T14-56-00Z_arena_4_DefaultScreen/zarr/2026-07-02T14-56-00Z_arena_4_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-02T14-56-00Z_arena_4:z175b4c6090d4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T14-56-00Z_arena_4_DefaultScreen/zarr/2026-07-02T14-56-00Z_arena_4_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-02T15-06-50Z_arena_1:zfe43c68300e1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T15-06-50Z_arena_1_GoodCopBadCop/zarr/2026-07-02T15-06-50Z_arena_1_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-02T15-06-50Z_arena_2:zd75dd3adb726"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T15-06-50Z_arena_2_GoodCopBadCop/zarr/2026-07-02T15-06-50Z_arena_2_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-02T15-06-50Z_arena_3:zb1da0e7e6241"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T15-06-50Z_arena_3_GoodCopBadCop/zarr/2026-07-02T15-06-50Z_arena_3_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-02T15-06-50Z_arena_4:zd240c3bb6198"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T15-06-50Z_arena_4_GoodCopBadCop/zarr/2026-07-02T15-06-50Z_arena_4_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-02T15-38-20Z_arena_1:z3bc36f154c12"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T15-38-20Z_arena_1_DefaultScreen/zarr/2026-07-02T15-38-20Z_arena_1_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-02T15-38-20Z_arena_1:z4497513350b7"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T15-38-20Z_arena_1_DefaultScreen/zarr/2026-07-02T15-38-20Z_arena_1_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-02T15-38-20Z_arena_2:z41d587444663"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T15-38-20Z_arena_2_DefaultScreen/zarr/2026-07-02T15-38-20Z_arena_2_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-02T15-38-20Z_arena_2:zb3dc3d395e55"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T15-38-20Z_arena_2_DefaultScreen/zarr/2026-07-02T15-38-20Z_arena_2_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-02T15-38-20Z_arena_3:z95531c7c7d3e"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T15-38-20Z_arena_3_DefaultScreen/zarr/2026-07-02T15-38-20Z_arena_3_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-02T15-38-20Z_arena_3:z722a6a71cd40"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T15-38-20Z_arena_3_DefaultScreen/zarr/2026-07-02T15-38-20Z_arena_3_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-02T15-38-20Z_arena_4:z2c86240eaae4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T15-38-20Z_arena_4_DefaultScreen/zarr/2026-07-02T15-38-20Z_arena_4_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-07-02T15-38-20Z_arena_4:zd6790de6cd8c"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/2026-07-02T15-38-20Z_arena_4_DefaultScreen/zarr/2026-07-02T15-38-20Z_arena_4_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "sleepyfish_2026_05_05_17_45_30_cam2010093:z3fdd176a8abc"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/sleepyfish_2026_05_05_17_45_30_cam2010093/zarr/sleepyfish_2026_05_05_17_45_30_cam2010093_clipped_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "sleepyfish_2026_05_05_17_45_30_cam2010093:z34e43f45bd45"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/sleepyfish_2026_05_05_17_45_30_cam2010093/zarr/sleepyfish_2026_05_05_17_45_30_cam2010093_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "sleepyfish_2026_05_05_17_45_30_cam2010094"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/sleepyfish_2026_05_05_17_45_30_cam2010094/zarr/sleepyfish_2026_05_05_17_45_30_cam2010094_clipped_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "sleepyfish_2026_05_05_17_45_30_cam2010094:z59db2d8e87d1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/sleepyfish_2026_05_05_17_45_30_cam2010094/zarr/sleepyfish_2026_05_05_17_45_30_cam2010094_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "sleepyfish_2026_05_05_17_45_30_cam2010095:z319dee4e27f6"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/sleepyfish_2026_05_05_17_45_30_cam2010095/zarr/sleepyfish_2026_05_05_17_45_30_cam2010095_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "sleepyfish_2026_05_05_17_45_30_cam2010095"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/sleepyfish_2026_05_05_17_45_30_cam2010095/zarr/sleepyfish_2026_05_05_17_45_30_cam2010095_clipped_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "sleepyfish_2026_05_05_17_45_30_cam2010095:z04d4ebc55735"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/sleepyfish_2026_05_05_17_45_30_cam2010095/zarr/sleepyfish_2026_05_05_17_45_30_cam2010095_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "sleepyfish_2026_05_05_17_45_30_cam2010096"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/sleepyfish_2026_05_05_17_45_30_cam2010096/zarr/sleepyfish_2026_05_05_17_45_30_cam2010096_clipped_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "sleepyfish_2026_05_05_17_45_30_cam2010096:z7f543daa9341"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/sleepyfish_2026_05_05_17_45_30_cam2010096/zarr/sleepyfish_2026_05_05_17_45_30_cam2010096_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/tmp/palette_roi_cache/goodcopbadcop_crop_cache_20260617/roi_cache/2026-06-14T21-12-08Z_arena_1_GoodCopBadCop_analysis__crop_2026-06-17_19-37-49__7833287ff385.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/tmp/palette_roi_cache/goodcopbadcop_crop_cache_20260617/roi_cache/2026-06-14T21-12-08Z_arena_2_GoodCopBadCop_analysis__crop_2026-06-17_19-37-50__86f3819a69fc.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/tmp/palette_roi_cache/goodcopbadcop_crop_cache_20260617/roi_cache/2026-06-14T21-12-08Z_arena_3_GoodCopBadCop_analysis__crop_2026-06-17_19-37-50__77285d45626f.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/tmp/palette_roi_cache/goodcopbadcop_crop_cache_20260617/roi_cache/2026-06-14T21-12-08Z_arena_4_GoodCopBadCop_analysis__crop_2026-06-17_19-37-50__b90f6a358f40.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/tmp/palette_roi_cache/goodcopbadcop_crop_cache_20260617/roi_cache/2026-06-14T21-50-10Z_arena_1_GoodCopBadCop_analysis__crop_2026-06-17_19-37-50__925e3a14e2f9.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/tmp/palette_roi_cache/goodcopbadcop_crop_cache_20260617/roi_cache/2026-06-14T21-50-10Z_arena_2_GoodCopBadCop_analysis__crop_2026-06-17_19-37-50__ef3aa6c8dda1.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/tmp/palette_roi_cache/goodcopbadcop_crop_cache_20260617/roi_cache/2026-06-14T21-50-10Z_arena_3_GoodCopBadCop_analysis__crop_2026-06-17_19-37-50__62e16b6f63f5.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/tmp/palette_roi_cache/goodcopbadcop_crop_cache_20260617/roi_cache/2026-06-14T21-50-10Z_arena_4_GoodCopBadCop_analysis__crop_2026-06-17_19-37-49__0a2f0f1bb0bd.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/tmp/palette_roi_cache/goodcopbadcop_crop_cache_20260617/roi_cache/2026-06-14T22-33-50Z_arena_1_GoodCopBadCop_analysis__crop_2026-06-17_19-37-50__484d6330824c.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/tmp/palette_roi_cache/goodcopbadcop_crop_cache_20260617/roi_cache/2026-06-14T22-33-50Z_arena_2_GoodCopBadCop_analysis__crop_2026-06-17_19-37-50__836915128458.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/tmp/palette_roi_cache/goodcopbadcop_crop_cache_20260617/roi_cache/2026-06-14T22-33-50Z_arena_3_GoodCopBadCop_analysis__crop_2026-06-17_19-37-49__7f5717ad8842.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": false,
+      "path": "/groups/johnson/johnsonlab/jeremy/recordings/tmp/palette_roi_cache/goodcopbadcop_crop_cache_20260617/roi_cache/2026-06-14T22-33-50Z_arena_4_GoodCopBadCop_analysis__crop_2026-06-17_19-37-50__33a764d403d6.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T19-22-28Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T19-22-28Z_arena_1_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_1_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T19-22-28Z_arena_1:zc66de17bea1b"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T19-22-28Z_arena_1_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_1_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T19-22-28Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T19-22-28Z_arena_2_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_2_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T19-22-28Z_arena_2:ze41894008350"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T19-22-28Z_arena_2_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_2_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T19-22-28Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T19-22-28Z_arena_3_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_3_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T19-22-28Z_arena_3:ze9b35d662a87"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T19-22-28Z_arena_3_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_3_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T19-22-28Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T19-22-28Z_arena_4_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_4_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T19-22-28Z_arena_4:zd9af96ac53af"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T19-22-28Z_arena_4_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_4_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T19-36-18Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T19-36-18Z_arena_1_Feeding/zarr/2026-01-28T19-36-18Z_arena_1_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T19-36-18Z_arena_1:zfe208d1b989b"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T19-36-18Z_arena_1_Feeding/zarr/2026-01-28T19-36-18Z_arena_1_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T19-36-18Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T19-36-18Z_arena_2_Feeding/zarr/2026-01-28T19-36-18Z_arena_2_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T19-36-18Z_arena_2:z386db9c2a8f6"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T19-36-18Z_arena_2_Feeding/zarr/2026-01-28T19-36-18Z_arena_2_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T19-36-18Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T19-36-18Z_arena_3_Feeding/zarr/2026-01-28T19-36-18Z_arena_3_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T19-36-18Z_arena_3:z87d5cee5f737"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T19-36-18Z_arena_3_Feeding/zarr/2026-01-28T19-36-18Z_arena_3_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T19-36-18Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T19-36-18Z_arena_4_Feeding/zarr/2026-01-28T19-36-18Z_arena_4_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T19-36-18Z_arena_4:zb8e6ba77d834"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T19-36-18Z_arena_4_Feeding/zarr/2026-01-28T19-36-18Z_arena_4_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T20-41-59Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T20-41-59Z_arena_1_DefaultScreen/zarr/2026-01-28T20-41-59Z_arena_1_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T20-41-59Z_arena_1:zd3aa1c19985b"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T20-41-59Z_arena_1_DefaultScreen/zarr/2026-01-28T20-41-59Z_arena_1_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T20-41-59Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T20-41-59Z_arena_2_DefaultScreen/zarr/2026-01-28T20-41-59Z_arena_2_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T20-41-59Z_arena_2:z28d84b75fc9b"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T20-41-59Z_arena_2_DefaultScreen/zarr/2026-01-28T20-41-59Z_arena_2_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T20-41-59Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T20-41-59Z_arena_3_DefaultScreen/zarr/2026-01-28T20-41-59Z_arena_3_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T20-41-59Z_arena_3:z0c3ae418e51a"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T20-41-59Z_arena_3_DefaultScreen/zarr/2026-01-28T20-41-59Z_arena_3_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T20-41-59Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T20-41-59Z_arena_4_DefaultScreen/zarr/2026-01-28T20-41-59Z_arena_4_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T20-41-59Z_arena_4:z1bc30a125d74"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T20-41-59Z_arena_4_DefaultScreen/zarr/2026-01-28T20-41-59Z_arena_4_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T20-51-00Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T20-51-00Z_arena_1_Feeding/zarr/2026-01-28T20-51-00Z_arena_1_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T20-51-00Z_arena_1:z529662d10605"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T20-51-00Z_arena_1_Feeding/zarr/2026-01-28T20-51-00Z_arena_1_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T20-51-00Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T20-51-00Z_arena_2_Feeding/zarr/2026-01-28T20-51-00Z_arena_2_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T20-51-00Z_arena_2:z5b0accf196a0"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T20-51-00Z_arena_2_Feeding/zarr/2026-01-28T20-51-00Z_arena_2_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T20-51-00Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T20-51-00Z_arena_3_Feeding/zarr/2026-01-28T20-51-00Z_arena_3_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T20-51-00Z_arena_3:zd682a53e63f3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T20-51-00Z_arena_3_Feeding/zarr/2026-01-28T20-51-00Z_arena_3_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T20-51-00Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T20-51-00Z_arena_4_Feeding/zarr/2026-01-28T20-51-00Z_arena_4_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T20-51-00Z_arena_4:z8f14a8de0d1b"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T20-51-00Z_arena_4_Feeding/zarr/2026-01-28T20-51-00Z_arena_4_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-18-51Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-18-51Z_arena_1_DefaultScreen/zarr/2026-01-28T21-18-51Z_arena_1_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-18-51Z_arena_1:za048ee62747b"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-18-51Z_arena_1_DefaultScreen/zarr/2026-01-28T21-18-51Z_arena_1_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-18-51Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-18-51Z_arena_2_DefaultScreen/zarr/2026-01-28T21-18-51Z_arena_2_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-18-51Z_arena_2:z3df209582329"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-18-51Z_arena_2_DefaultScreen/zarr/2026-01-28T21-18-51Z_arena_2_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-18-51Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-18-51Z_arena_4_DefaultScreen/zarr/2026-01-28T21-18-51Z_arena_4_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-18-51Z_arena_4:zb7c04a40d97b"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-18-51Z_arena_4_DefaultScreen/zarr/2026-01-28T21-18-51Z_arena_4_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-27-20Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-27-20Z_arena_1_Feeding/zarr/2026-01-28T21-27-20Z_arena_1_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-27-20Z_arena_1:z63f2ce27f5a6"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-27-20Z_arena_1_Feeding/zarr/2026-01-28T21-27-20Z_arena_1_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-27-20Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-27-20Z_arena_2_Feeding/zarr/2026-01-28T21-27-20Z_arena_2_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-27-20Z_arena_2:z8bfc50682db2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-27-20Z_arena_2_Feeding/zarr/2026-01-28T21-27-20Z_arena_2_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-27-20Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-27-20Z_arena_4_Feeding/zarr/2026-01-28T21-27-20Z_arena_4_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-27-20Z_arena_4:ze9175336c2d0"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-27-20Z_arena_4_Feeding/zarr/2026-01-28T21-27-20Z_arena_4_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-47-47Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-47-47Z_arena_1_DefaultScreen/zarr/2026-01-28T21-47-47Z_arena_1_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-47-47Z_arena_1:z36ae7c3bf7e1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-47-47Z_arena_1_DefaultScreen/zarr/2026-01-28T21-47-47Z_arena_1_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-47-47Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-47-47Z_arena_2_DefaultScreen/zarr/2026-01-28T21-47-47Z_arena_2_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-47-47Z_arena_2:z4e5ca982387e"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-47-47Z_arena_2_DefaultScreen/zarr/2026-01-28T21-47-47Z_arena_2_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-47-47Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-47-47Z_arena_3_DefaultScreen/zarr/2026-01-28T21-47-47Z_arena_3_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-47-47Z_arena_3:zd155d78626cd"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-47-47Z_arena_3_DefaultScreen/zarr/2026-01-28T21-47-47Z_arena_3_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-47-47Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-47-47Z_arena_4_DefaultScreen/zarr/2026-01-28T21-47-47Z_arena_4_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-47-47Z_arena_4:z24994b002e39"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-47-47Z_arena_4_DefaultScreen/zarr/2026-01-28T21-47-47Z_arena_4_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-56-23Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-56-23Z_arena_1_Feeding/zarr/2026-01-28T21-56-23Z_arena_1_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-56-23Z_arena_1:ze5b9b3bd4150"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-56-23Z_arena_1_Feeding/zarr/2026-01-28T21-56-23Z_arena_1_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-56-23Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-56-23Z_arena_2_Feeding/zarr/2026-01-28T21-56-23Z_arena_2_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-56-23Z_arena_2:zaafad399a098"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-56-23Z_arena_2_Feeding/zarr/2026-01-28T21-56-23Z_arena_2_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-56-23Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-56-23Z_arena_3_Feeding/zarr/2026-01-28T21-56-23Z_arena_3_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-56-23Z_arena_3:z8b4897188ebd"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-56-23Z_arena_3_Feeding/zarr/2026-01-28T21-56-23Z_arena_3_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-56-23Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-56-23Z_arena_4_Feeding/zarr/2026-01-28T21-56-23Z_arena_4_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T21-56-23Z_arena_4:z750697cddc03"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T21-56-23Z_arena_4_Feeding/zarr/2026-01-28T21-56-23Z_arena_4_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-15-03Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-15-03Z_arena_1_DefaultScreen/zarr/2026-01-28T22-15-03Z_arena_1_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-15-03Z_arena_1:zd69339d8d0e5"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-15-03Z_arena_1_DefaultScreen/zarr/2026-01-28T22-15-03Z_arena_1_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-15-03Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-15-03Z_arena_2_DefaultScreen/zarr/2026-01-28T22-15-03Z_arena_2_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-15-03Z_arena_2:z87f2843620f0"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-15-03Z_arena_2_DefaultScreen/zarr/2026-01-28T22-15-03Z_arena_2_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-15-04Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-15-04Z_arena_3_DefaultScreen/zarr/2026-01-28T22-15-04Z_arena_3_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-15-04Z_arena_3:z3cfcf3829278"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-15-04Z_arena_3_DefaultScreen/zarr/2026-01-28T22-15-04Z_arena_3_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-15-04Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-15-04Z_arena_4_DefaultScreen/zarr/2026-01-28T22-15-04Z_arena_4_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-15-04Z_arena_4:zcd3cb2f2498d"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-15-04Z_arena_4_DefaultScreen/zarr/2026-01-28T22-15-04Z_arena_4_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-22-57Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-22-57Z_arena_1_Feeding/zarr/2026-01-28T22-22-57Z_arena_1_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-22-57Z_arena_1:zab664f68e1f7"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-22-57Z_arena_1_Feeding/zarr/2026-01-28T22-22-57Z_arena_1_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-22-57Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-22-57Z_arena_2_Feeding/zarr/2026-01-28T22-22-57Z_arena_2_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-22-57Z_arena_2:zccd15e12cefd"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-22-57Z_arena_2_Feeding/zarr/2026-01-28T22-22-57Z_arena_2_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-22-57Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-22-57Z_arena_3_Feeding/zarr/2026-01-28T22-22-57Z_arena_3_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-22-57Z_arena_3:z2484b89ac386"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-22-57Z_arena_3_Feeding/zarr/2026-01-28T22-22-57Z_arena_3_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-22-57Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-22-57Z_arena_4_Feeding/zarr/2026-01-28T22-22-57Z_arena_4_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-22-57Z_arena_4:z857fd8fe737c"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-22-57Z_arena_4_Feeding/zarr/2026-01-28T22-22-57Z_arena_4_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-42-59Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-42-59Z_arena_1_DefaultScreen/zarr/2026-01-28T22-42-59Z_arena_1_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-42-59Z_arena_1:zd24b5941af12"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-42-59Z_arena_1_DefaultScreen/zarr/2026-01-28T22-42-59Z_arena_1_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-42-59Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-42-59Z_arena_2_DefaultScreen/zarr/2026-01-28T22-42-59Z_arena_2_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-42-59Z_arena_2:zc2c29e634201"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-42-59Z_arena_2_DefaultScreen/zarr/2026-01-28T22-42-59Z_arena_2_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-42-59Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-42-59Z_arena_3_DefaultScreen/zarr/2026-01-28T22-42-59Z_arena_3_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-42-59Z_arena_3:z05a0f8cd9f5d"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-42-59Z_arena_3_DefaultScreen/zarr/2026-01-28T22-42-59Z_arena_3_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-42-59Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-42-59Z_arena_4_DefaultScreen/zarr/2026-01-28T22-42-59Z_arena_4_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-42-59Z_arena_4:z7063ef4d9e72"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-42-59Z_arena_4_DefaultScreen/zarr/2026-01-28T22-42-59Z_arena_4_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-50-39Z_arena_1"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-50-39Z_arena_1_Feeding/zarr/2026-01-28T22-50-39Z_arena_1_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-50-39Z_arena_1:z95dbde59aaff"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-50-39Z_arena_1_Feeding/zarr/2026-01-28T22-50-39Z_arena_1_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-50-39Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-50-39Z_arena_2_Feeding/zarr/2026-01-28T22-50-39Z_arena_2_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-50-39Z_arena_2:z8d154621d65b"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-50-39Z_arena_2_Feeding/zarr/2026-01-28T22-50-39Z_arena_2_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-50-39Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-50-39Z_arena_3_Feeding/zarr/2026-01-28T22-50-39Z_arena_3_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-50-39Z_arena_3:z8763c63de197"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-50-39Z_arena_3_Feeding/zarr/2026-01-28T22-50-39Z_arena_3_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-50-39Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-50-39Z_arena_4_Feeding/zarr/2026-01-28T22-50-39Z_arena_4_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T22-50-39Z_arena_4:z1f7fe556da59"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T22-50-39Z_arena_4_Feeding/zarr/2026-01-28T22-50-39Z_arena_4_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T23-07-24Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T23-07-24Z_arena_2_DefaultScreen/zarr/2026-01-28T23-07-24Z_arena_2_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T23-07-24Z_arena_2:zb438a3d9194a"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T23-07-24Z_arena_2_DefaultScreen/zarr/2026-01-28T23-07-24Z_arena_2_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T23-07-24Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T23-07-24Z_arena_3_DefaultScreen/zarr/2026-01-28T23-07-24Z_arena_3_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T23-07-24Z_arena_3:z619ff1d52502"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T23-07-24Z_arena_3_DefaultScreen/zarr/2026-01-28T23-07-24Z_arena_3_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T23-07-24Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T23-07-24Z_arena_4_DefaultScreen/zarr/2026-01-28T23-07-24Z_arena_4_DefaultScreen_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T23-07-24Z_arena_4:z77daad5336a4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T23-07-24Z_arena_4_DefaultScreen/zarr/2026-01-28T23-07-24Z_arena_4_DefaultScreen_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T23-15-10Z_arena_2"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T23-15-10Z_arena_2_Feeding/zarr/2026-01-28T23-15-10Z_arena_2_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T23-15-10Z_arena_2:zd4dc9e3d7f85"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T23-15-10Z_arena_2_Feeding/zarr/2026-01-28T23-15-10Z_arena_2_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T23-15-10Z_arena_3"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T23-15-10Z_arena_3_Feeding/zarr/2026-01-28T23-15-10Z_arena_3_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T23-15-10Z_arena_3:z713b658550fa"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T23-15-10Z_arena_3_Feeding/zarr/2026-01-28T23-15-10Z_arena_3_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T23-15-10Z_arena_4"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T23-15-10Z_arena_4_Feeding/zarr/2026-01-28T23-15-10Z_arena_4_Feeding_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T23-15-10Z_arena_4:z730ba5b8b697"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/2026-01-28T23-15-10Z_arena_4_Feeding/zarr/2026-01-28T23-15-10Z_arena_4_Feeding_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/chunking_canary_2026-06-24_heartrate/zarr/2026-06-14T21-12-08Z_arena_4_GoodCopBadCop_analysis.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "sickyfish_2026_02_23_16_23_35_cam2010093:zb974a13cdf11"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010093/zarr/sickyfish_2026_02_23_16_23_35_cam2010093_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "sickyfish_2026_02_23_16_23_35_cam2010093"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010093/zarr/sickyfish_2026_02_23_16_23_35_cam2010093_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": true,
+      "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010093/zarr/sickyfish_2026_02_23_16_23_35_cam2010094_training.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": true,
+      "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010093/zarr/sickyfish_2026_02_23_16_23_35_cam2010095_training.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": true,
+      "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010093/zarr/sickyfish_2026_02_23_16_23_35_cam2010096_training.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": true,
+      "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010094/zarr/sickyfish_2026_02_23_16_23_35_cam2010093_training.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "sickyfish_2026_02_23_16_23_35_cam2010094:z0d597ba02182"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010094/zarr/sickyfish_2026_02_23_16_23_35_cam2010094_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "sickyfish_2026_02_23_16_23_35_cam2010094"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010094/zarr/sickyfish_2026_02_23_16_23_35_cam2010094_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": true,
+      "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010094/zarr/sickyfish_2026_02_23_16_23_35_cam2010095_training.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": true,
+      "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010094/zarr/sickyfish_2026_02_23_16_23_35_cam2010096_training.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": true,
+      "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010095/zarr/sickyfish_2026_02_23_16_23_35_cam2010093_training.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": true,
+      "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010095/zarr/sickyfish_2026_02_23_16_23_35_cam2010094_training.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "sickyfish_2026_02_23_16_23_35_cam2010095:z14ed4ea8ee99"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010095/zarr/sickyfish_2026_02_23_16_23_35_cam2010095_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "sickyfish_2026_02_23_16_23_35_cam2010095"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010095/zarr/sickyfish_2026_02_23_16_23_35_cam2010095_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": true,
+      "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010095/zarr/sickyfish_2026_02_23_16_23_35_cam2010096_training.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": true,
+      "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010096/zarr/sickyfish_2026_02_23_16_23_35_cam2010093_training.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": true,
+      "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010096/zarr/sickyfish_2026_02_23_16_23_35_cam2010094_training.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "new",
+      "dataset_ids": [],
+      "is_empty_zarr_stub": true,
+      "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010096/zarr/sickyfish_2026_02_23_16_23_35_cam2010095_training.zarr",
+      "registry_statuses": [],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "sickyfish_2026_02_23_16_23_35_cam2010096:zb5ddc14fd1ba"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010096/zarr/sickyfish_2026_02_23_16_23_35_cam2010096_analysis.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "sickyfish_2026_02_23_16_23_35_cam2010096"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010096/zarr/sickyfish_2026_02_23_16_23_35_cam2010096_training.zarr",
+      "registry_statuses": [
+        "active"
+      ],
+      "would_reconcile": true
+    },
+    {
+      "classification": "known",
+      "dataset_ids": [
+        "2026-01-28T19-22-28Z_arena_1:za40d85eb352f"
+      ],
+      "is_empty_zarr_stub": false,
+      "path": "/nvme1/recordings/smoke/2026-01-28T19-22-28Z_arena_1_DefaultScreen_geometry_smoke_analysis.zarr",
+      "registry_statuses": [
+        "inactive_smoke"
+      ],
+      "would_reconcile": true
+    }
+  ],
+  "summary": {
+    "discovered_store_count": 275,
+    "input_root_count": 2,
+    "known_store_count": 250,
+    "new_store_count": 25,
+    "unreadable_store_count": 0,
+    "would_mark_missing_count": 0,
+    "would_reconcile_count": 275
+  }
+}
