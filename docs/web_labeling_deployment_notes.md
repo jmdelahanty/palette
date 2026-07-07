@@ -144,6 +144,36 @@ scripts/list_labeling_web_servers.sh
 
 This helper is read-only. It reports matching PID files and live `fisheye.labeling.web` processes for the current workstation user.
 
+For repeated multi-user sessions, keep the per-user port mapping in the local
+operator roster instead of remembering ports by hand:
+
+```bash
+scripts/labeling_web_fixed_roster.sh set alice 8791 8791 alice@delahantyj-ws1.hhmi.org
+scripts/labeling_web_fixed_roster.sh set bob 8792 8792 bob@delahantyj-ws1.hhmi.org
+scripts/labeling_web_fixed_roster.sh list
+scripts/labeling_web_fixed_roster.sh start --all
+```
+
+The roster defaults to `~/.palette/labeling_fixed_servers.tsv`. It is local
+operator state and should not be committed. Each row stores:
+
+```text
+user_id<TAB>server_port<TAB>local_tunnel_port<TAB>ssh_target
+```
+
+Useful commands:
+
+```bash
+scripts/labeling_web_fixed_roster.sh start alice
+scripts/labeling_web_fixed_roster.sh restart --all
+scripts/labeling_web_fixed_roster.sh stop bob
+scripts/labeling_web_fixed_roster.sh message --all
+```
+
+`message` prints the copy/paste SSH tunnel instructions using the stable port
+from the roster. This is the preferred short-term workflow until a trusted auth
+proxy replaces fixed-user per-port servers.
+
 ## VPN-only direct access option
 
 If the workstation is reachable only from campus/VPN networks, the server can be bound to a non-loopback interface:
