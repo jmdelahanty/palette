@@ -1,0 +1,377 @@
+{
+  "classes": {
+    "dev-shm": {
+      "dataset_count": 0,
+      "datasets": [],
+      "dependent_row_counts": {
+        "acquisition_video_streams": 0,
+        "crop_quality": 0,
+        "dataset_lineage": 0,
+        "detect_performance": 0,
+        "detect_quality": 0,
+        "detection_data_profile": 0,
+        "detection_sources": 0,
+        "eye_mask_data_profile": 0,
+        "eye_mask_performance": 0,
+        "eye_mask_quality": 0,
+        "keypoint_data_profile": 0,
+        "keypoint_performance": 0,
+        "keypoint_quality": 0,
+        "provenance": 0,
+        "recording_step_status": 0,
+        "recording_step_status_history": 0,
+        "recording_subjects": 0,
+        "subject_mask_component_quality": 0,
+        "subject_mask_data_profile": 0,
+        "subject_mask_performance": 0,
+        "training_image_profile": 0
+      },
+      "recordings_that_would_be_deleted": 0
+    },
+    "pytest-tmp": {
+      "dataset_count": 0,
+      "datasets": [],
+      "dependent_row_counts": {
+        "acquisition_video_streams": 0,
+        "crop_quality": 0,
+        "dataset_lineage": 0,
+        "detect_performance": 0,
+        "detect_quality": 0,
+        "detection_data_profile": 0,
+        "detection_sources": 0,
+        "eye_mask_data_profile": 0,
+        "eye_mask_performance": 0,
+        "eye_mask_quality": 0,
+        "keypoint_data_profile": 0,
+        "keypoint_performance": 0,
+        "keypoint_quality": 0,
+        "provenance": 0,
+        "recording_step_status": 0,
+        "recording_step_status_history": 0,
+        "recording_subjects": 0,
+        "subject_mask_component_quality": 0,
+        "subject_mask_data_profile": 0,
+        "subject_mask_performance": 0,
+        "training_image_profile": 0
+      },
+      "recordings_that_would_be_deleted": 0
+    },
+    "tmp": {
+      "dataset_count": 0,
+      "datasets": [],
+      "dependent_row_counts": {
+        "acquisition_video_streams": 0,
+        "crop_quality": 0,
+        "dataset_lineage": 0,
+        "detect_performance": 0,
+        "detect_quality": 0,
+        "detection_data_profile": 0,
+        "detection_sources": 0,
+        "eye_mask_data_profile": 0,
+        "eye_mask_performance": 0,
+        "eye_mask_quality": 0,
+        "keypoint_data_profile": 0,
+        "keypoint_performance": 0,
+        "keypoint_quality": 0,
+        "provenance": 0,
+        "recording_step_status": 0,
+        "recording_step_status_history": 0,
+        "recording_subjects": 0,
+        "subject_mask_component_quality": 0,
+        "subject_mask_data_profile": 0,
+        "subject_mask_performance": 0,
+        "training_image_profile": 0
+      },
+      "recordings_that_would_be_deleted": 0
+    },
+    "var-tmp": {
+      "dataset_count": 0,
+      "datasets": [],
+      "dependent_row_counts": {
+        "acquisition_video_streams": 0,
+        "crop_quality": 0,
+        "dataset_lineage": 0,
+        "detect_performance": 0,
+        "detect_quality": 0,
+        "detection_data_profile": 0,
+        "detection_sources": 0,
+        "eye_mask_data_profile": 0,
+        "eye_mask_performance": 0,
+        "eye_mask_quality": 0,
+        "keypoint_data_profile": 0,
+        "keypoint_performance": 0,
+        "keypoint_quality": 0,
+        "provenance": 0,
+        "recording_step_status": 0,
+        "recording_step_status_history": 0,
+        "recording_subjects": 0,
+        "subject_mask_component_quality": 0,
+        "subject_mask_data_profile": 0,
+        "subject_mask_performance": 0,
+        "training_image_profile": 0
+      },
+      "recordings_that_would_be_deleted": 0
+    }
+  },
+  "dependent_table_map": [
+    {
+      "columns": [
+        "dataset_id"
+      ],
+      "table": "acquisition_video_streams"
+    },
+    {
+      "columns": [
+        "dataset_id"
+      ],
+      "table": "crop_quality"
+    },
+    {
+      "columns": [
+        "child_dataset_id",
+        "parent_dataset_id"
+      ],
+      "table": "dataset_lineage"
+    },
+    {
+      "columns": [
+        "dataset_id"
+      ],
+      "table": "detect_performance"
+    },
+    {
+      "columns": [
+        "dataset_id"
+      ],
+      "table": "detect_quality"
+    },
+    {
+      "columns": [
+        "dataset_id"
+      ],
+      "table": "detection_data_profile"
+    },
+    {
+      "columns": [
+        "dataset_id"
+      ],
+      "table": "detection_sources"
+    },
+    {
+      "columns": [
+        "dataset_id"
+      ],
+      "table": "eye_mask_data_profile"
+    },
+    {
+      "columns": [
+        "dataset_id"
+      ],
+      "table": "eye_mask_performance"
+    },
+    {
+      "columns": [
+        "dataset_id"
+      ],
+      "table": "eye_mask_quality"
+    },
+    {
+      "columns": [
+        "dataset_id"
+      ],
+      "table": "keypoint_data_profile"
+    },
+    {
+      "columns": [
+        "dataset_id"
+      ],
+      "table": "keypoint_performance"
+    },
+    {
+      "columns": [
+        "dataset_id"
+      ],
+      "table": "keypoint_quality"
+    },
+    {
+      "columns": [
+        "dataset_id"
+      ],
+      "table": "provenance"
+    },
+    {
+      "columns": [
+        "dataset_id"
+      ],
+      "table": "recording_step_status"
+    },
+    {
+      "columns": [
+        "dataset_id"
+      ],
+      "table": "recording_step_status_history"
+    },
+    {
+      "columns": [
+        "dataset_id"
+      ],
+      "table": "recording_subjects"
+    },
+    {
+      "columns": [
+        "dataset_id"
+      ],
+      "table": "subject_mask_component_quality"
+    },
+    {
+      "columns": [
+        "dataset_id"
+      ],
+      "table": "subject_mask_data_profile"
+    },
+    {
+      "columns": [
+        "dataset_id"
+      ],
+      "table": "subject_mask_performance"
+    },
+    {
+      "columns": [
+        "dataset_id"
+      ],
+      "table": "training_image_profile"
+    }
+  ],
+  "generated_at_utc": "2026-07-07T07:46:39.537521Z",
+  "mode": "dry-run",
+  "needs_maintainer_review": {
+    "dataset_count": 10,
+    "datasets": [
+      {
+        "dataset_id": "path-0857608ee692",
+        "path_class": "home-review",
+        "path_exists": false,
+        "recording_id": null,
+        "zarr_path": "/home/delahantyj@hhmi.org/gitrepos/palette/.claude/worktrees/agent-acdc49cb0a7396173/in-memory.zarr"
+      },
+      {
+        "dataset_id": "path-2dbc12c39d06",
+        "path_class": "home-review",
+        "path_exists": false,
+        "recording_id": null,
+        "zarr_path": "/home/delahantyj@hhmi.org/gitrepos/palette/.claude/worktrees/agent-a4c617f805049f79d/in-memory.zarr"
+      },
+      {
+        "dataset_id": "path-6813aa906583",
+        "path_class": "home-review",
+        "path_exists": false,
+        "recording_id": null,
+        "zarr_path": "/home/delahantyj@hhmi.org/gitrepos/palette-silent-wrong-data/in-memory.zarr"
+      },
+      {
+        "dataset_id": "path-6a430a89eb3c",
+        "path_class": "home-review",
+        "path_exists": false,
+        "recording_id": null,
+        "zarr_path": "/home/delahantyj@hhmi.org/gitrepos/palette/.claude/worktrees/agent-a2a72c923036bf28e/in-memory.zarr"
+      },
+      {
+        "dataset_id": "path-7d4ff333f891",
+        "path_class": "home-review",
+        "path_exists": false,
+        "recording_id": null,
+        "zarr_path": "/home/delahantyj@hhmi.org/gitrepos/palette/.claude/worktrees/agent-aa293f3dbf042c0ad/in-memory.zarr"
+      },
+      {
+        "dataset_id": "path-7e4067ad5783",
+        "path_class": "home-review",
+        "path_exists": false,
+        "recording_id": null,
+        "zarr_path": "/home/delahantyj@hhmi.org/gitrepos/palette/.claude/worktrees/agent-abe7d3c46139aa190/in-memory.zarr"
+      },
+      {
+        "dataset_id": "path-bd9964a7df66",
+        "path_class": "home-review",
+        "path_exists": false,
+        "recording_id": null,
+        "zarr_path": "/home/delahantyj@hhmi.org/gitrepos/palette/.claude/worktrees/agent-a4eaf116cfe7ea828/in-memory.zarr"
+      },
+      {
+        "dataset_id": "path-bdf2eab11e99",
+        "path_class": "home-review",
+        "path_exists": false,
+        "recording_id": null,
+        "zarr_path": "/home/delahantyj@hhmi.org/gitrepos/palette-authoritative-run/in-memory.zarr"
+      },
+      {
+        "dataset_id": "path-c8c2bab3e54c",
+        "path_class": "home-review",
+        "path_exists": false,
+        "recording_id": null,
+        "zarr_path": "/home/delahantyj@hhmi.org/gitrepos/palette/.claude/worktrees/agent-a3c4f4859aab4fc1c/in-memory.zarr"
+      },
+      {
+        "dataset_id": "path-f3e39e9b6fcf",
+        "path_class": "home-review",
+        "path_exists": false,
+        "recording_id": null,
+        "zarr_path": "/home/delahantyj@hhmi.org/gitrepos/palette/in-memory.zarr"
+      }
+    ],
+    "included_dataset_count": 0,
+    "path_class": "home-review"
+  },
+  "read_only": true,
+  "registry": "/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite",
+  "selected": {
+    "dataset_ids": [],
+    "dependent_row_counts": {
+      "acquisition_video_streams": 0,
+      "crop_quality": 0,
+      "dataset_lineage": 0,
+      "detect_performance": 0,
+      "detect_quality": 0,
+      "detection_data_profile": 0,
+      "detection_sources": 0,
+      "eye_mask_data_profile": 0,
+      "eye_mask_performance": 0,
+      "eye_mask_quality": 0,
+      "keypoint_data_profile": 0,
+      "keypoint_performance": 0,
+      "keypoint_quality": 0,
+      "provenance": 0,
+      "recording_step_status": 0,
+      "recording_step_status_history": 0,
+      "recording_subjects": 0,
+      "subject_mask_component_quality": 0,
+      "subject_mask_data_profile": 0,
+      "subject_mask_performance": 0,
+      "training_image_profile": 0
+    },
+    "recordings_that_would_be_deleted": 0
+  },
+  "selection": {
+    "include_dataset_id": [],
+    "include_temp_root": [
+      "all-temp"
+    ],
+    "selected_dataset_count": 0
+  },
+  "summary": {
+    "home_review_dataset_count": 10,
+    "selected_dataset_count": 0,
+    "selected_recording_count": 0,
+    "temp_root_dataset_count": 0
+  },
+  "temp_roots": {
+    "dev-shm": [
+      "/dev/shm"
+    ],
+    "tmp": [
+      "/tmp"
+    ],
+    "var-tmp": [
+      "/var/tmp"
+    ]
+  }
+}
