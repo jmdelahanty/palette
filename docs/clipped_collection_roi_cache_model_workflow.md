@@ -344,6 +344,22 @@ Only use multi-worker bundles when the effective GPU resource is non-exclusive.
 If the cluster cannot provide shared CUDA contexts on one L4, use one clip per
 job or a lower-level single-process multi-decoder implementation instead.
 
+Measured validation on 2026-07-07:
+
+- Default `-gpu num=1` resolved to
+  `mode=exclusive_process:mps=no:j_exclusive=yes`; one child completed and the
+  other three failed in PyNvVideoCodec with `CUDA_ERROR_DEVICE_UNAVAILABLE`.
+- Shared request `--gpu-resource 'num=1:mode=shared:j_exclusive=no'` allowed
+  four child decoder processes to run concurrently on one L4.
+- Four full sleepyfish clip caches (`clip_000000`..`clip_000003`) completed as
+  job `152007051` with `215,357` total ROI rows and `56,454,545,408` payload
+  bytes.
+- Each child built at roughly `132-133 ROI/s` over `~404.5 s`; aggregate build
+  throughput was roughly `532 ROI/s`.
+- End-to-end job runtime was `460 s`, including publication of four payloads to
+  NRS, for roughly `468 ROI/s` overall.
+- Per-child payload publish took `~17-18 s` at roughly `746-779 MiB/s`.
+
 ### Phase 2: proxy crop runs
 
 - [ ] Add a tool to create geometry-only proxy crop runs from a clipped
