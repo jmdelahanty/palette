@@ -350,6 +350,9 @@ Remaining:
   generation. The bundle wrapper launches multiple clip-filtered cache builders
   inside one GPU job so an L4 can run several independent PyNvVideoCodec decoder
   sessions concurrently while each child publishes its own cache artifact.
+- [x] Add a multi-bundle LSF submit wrapper for whole clipped collections. The
+  planner resolves clip IDs, groups them with `--clips-per-job`, and submits one
+  bundle job per group.
 - [ ] Rerun the legacy crop-run + flat ROI cache cluster smoke after repairing
   copied smoke archive `source_video_path` attrs to point at the PRFS MP4.
 - [ ] Verify crop source resolution prefers the refined canonical surface.
@@ -447,10 +450,14 @@ Implementation checklist:
   `sleepyfish_cam2010093_allclips_20260517_01`.
 - [x] Add `scripts/submit_clipped_collection_flat_roi_cache_bsub.sh`.
 - [x] Add `scripts/submit_clipped_collection_flat_roi_cache_bundle_bsub.sh`.
+- [x] Add `scripts/submit_clipped_collection_flat_roi_cache_bundles_bsub.sh`.
 - [x] Make the LSF wrapper write a job script, stdout/stderr, status JSON,
   progress JSONL, submission context, and final manifest path.
 - [x] Make the bundle wrapper write child stdout/stderr, child status JSONs,
   child progress JSONLs, per-child manifests, and a parent bundle summary JSON.
+- [x] Make the multi-bundle planner support `--all-clips`,
+  `--start-bundle-index`, `--limit-bundles`, `--clips-per-job`, and
+  `--max-workers` for canaries, retries, and full-recording scheduling.
 - [x] Make the wrapper build under `$PALETTE_JOB_CACHE`/node scratch and publish
   payload, row-index parquet, and manifest to
   `/misc/public/palette_cache/<workflow_id>/roi_cache` in manifest-last order.

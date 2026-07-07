@@ -41,6 +41,9 @@ Existing code already supports the most important pixel operation:
   same GPU allocation. Each child writes its own flat cache, row-index parquet,
   progress log, status JSON, and manifest; the parent job writes a bundle
   summary JSON.
+- `scripts/submit_clipped_collection_flat_roi_cache_bundles_bsub.sh` resolves a
+  clip set, splits it into multiple bundle jobs, and submits the whole set to
+  LSF. This is the scheduler-facing wrapper for an entire clipped recording.
 
 The cache row index already carries most required lineage:
 
@@ -359,6 +362,50 @@ Measured validation on 2026-07-07:
 - End-to-end job runtime was `460 s`, including publication of four payloads to
   NRS, for roughly `468 ROI/s` overall.
 - Per-child payload publish took `~17-18 s` at roughly `746-779 MiB/s`.
+
+### Whole Collection Scheduling
+
+Use `submit_clipped_collection_flat_roi_cache_bundles_bsub.sh` when the goal is
+to schedule every clip in a finalized collection. It discovers clip IDs from
+`experiment_index/finalized_runs/<collection_id>/selected_runs`, groups them
+with `--clips-per-job`, and submits one bundle job per group.
+
+Recommended L4 starting point:
+
+```bash
+scripts/submit_clipped_collection_flat_roi_cache_bundles_bsub.sh \
+  --zarr /groups/johnson/johnsonlab/jeremy/recordings/sleepyfish_2026_05_05_17_45_30_cam2010095/zarr/sleepyfish_2026_05_05_17_45_30_cam2010095_analysis.zarr \
+  --collection-id sleepyfish_cam2010095_allclips_pynvvc_fixed_20260522_01 \
+  --all-clips \
+  --public-cache-dir-root /nrs/ahrens/palette_staging/clipped_collection_flat_roi_cache/sleepyfish_cam2010095_allclips \
+  --log-dir /groups/johnson/johnsonlab/jeremy/recordings/logs/clipped_collection_flat_roi_cache_bundle_bsub \
+  --run-id-prefix sleepyfish_cam2010095_allclips_20260707 \
+  --run-label-prefix sleepyfish_cam2010095_allclips \
+  --queue gpu_l4 \
+  --ncores 8 \
+  --mem-gb 64 \
+  --gpus 1 \
+  --gpu-resource 'num=1:mode=shared:j_exclusive=no' \
+  --clips-per-job 4 \
+  --max-workers 4 \
+  --walltime 1:00 \
+  --progress-interval-s 60
+```
+
+Operational notes:
+
+- `--clips-per-job` controls how many clip caches a bundle job owns.
+- `--max-workers` controls how many child builders run concurrently inside one
+  bundle job.
+- For L4 shared-mode decode, keep `--clips-per-job` and `--max-workers` aligned
+  at `4` unless benchmarking suggests otherwise.
+- Use `--start-bundle-index` and `--limit-bundles` for retries, canaries, or
+  partial scheduling.
+- Use `--dry-run` first; it prints every child bundle submission and output
+  directory without submitting to LSF.
+- Each bundle publishes into its own directory under `--public-cache-dir-root`.
+  Downstream model scheduling should treat those child manifests as independent
+  cache shards until a later collection/proxy-crop layer is implemented.
 
 ### Phase 2: proxy crop runs
 
