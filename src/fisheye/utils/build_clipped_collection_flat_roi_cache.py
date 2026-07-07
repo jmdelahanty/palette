@@ -25,6 +25,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override recording_frame_index.parquet path.",
     )
+    parser.add_argument(
+        "--clip-id",
+        action="append",
+        default=None,
+        help="Restrict cache generation to one finalized collection clip id. Repeatable.",
+    )
+    parser.add_argument(
+        "--work-unit-id",
+        action="append",
+        default=None,
+        help="Restrict cache generation to one finalized collection work_unit_id. Repeatable.",
+    )
     parser.add_argument("--output-dir", type=Path, default=None, help="Directory for manifest/bin/rows outputs.")
     parser.add_argument(
         "--manifest-path",
@@ -95,6 +107,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             zarr_path=args.zarr_path,
             collection_id=args.collection_id,
             recording_frame_index=args.recording_frame_index,
+            clip_ids=args.clip_id,
+            work_unit_ids=args.work_unit_id,
             output_dir=args.output_dir,
             manifest_path=args.manifest_path,
             roi_size=args.roi_size,

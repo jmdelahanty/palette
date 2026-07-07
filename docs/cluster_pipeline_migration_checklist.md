@@ -337,9 +337,12 @@ Remaining:
 
 - [x] Run the clipped-collection flat-cache builder on the all-clips sleepyfish
   finalized collection with a small local `--limit-rows` smoke.
-- [ ] Run the clipped-collection flat-cache LSF wrapper on the all-clips
-  sleepyfish finalized collection with `--limit-rows 1024`, then without the
-  limit if the row-index and payload validation pass.
+- [x] Run the clipped-collection flat-cache LSF wrapper on the all-clips
+  sleepyfish finalized collection with `--limit-rows 1024`. The 2026-07-07
+  smoke published a validated `(1024, 512, 512)` cache to NRS and showed
+  100.7 ROI/s overall with 190.8 frames/s decode/read timing.
+- [ ] Run the clipped-collection flat-cache LSF wrapper with `--clip-id
+  clip_000000` and no row limit as the first full per-clip cache test.
 - [x] Add an LSF submit wrapper for clipped-collection flat-cache generation
   that builds on node-local scratch, publishes `.bin`, `.rows.parquet`, then
   `.json` manifest to PRFS workflow cache storage.
