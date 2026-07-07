@@ -791,9 +791,12 @@ Existing Palette precedent:
   `keypoints_runs/<run>` only after same-source-crop shards validate.
 - [x] Add a whole-clipped-collection keypoint finalizer path that safely rebases
   shards spanning multiple proxy crop runs onto a merged proxy crop run.
-- [ ] Add a clipped keypoint orchestration wrapper that submits the cache/proxy,
-  per-clip shard, collection finalizer, and refined-keypoint jobs with explicit
-  LSF `done(...)` dependencies.
+- [x] Add a clipped keypoint orchestration dry-run planner that resolves cache
+  manifests, proxy runs, shard runs, finalizer/refinement runs, and LSF
+  dependency templates.
+- [ ] Add clipped keypoint orchestration apply mode that creates proxy runs,
+  submits per-clip shard jobs, parses LSF job ids, and submits collection
+  finalizer/refinement jobs with explicit `done(<jobid>)` dependencies.
 
 ### Phase 4: registry
 
