@@ -794,9 +794,10 @@ Existing Palette precedent:
 - [x] Add a clipped keypoint orchestration dry-run planner that resolves cache
   manifests, proxy runs, shard runs, finalizer/refinement runs, and LSF
   dependency templates.
-- [ ] Add clipped keypoint orchestration apply mode that creates proxy runs,
+- [x] Add clipped keypoint orchestration apply mode that creates proxy runs,
   submits per-clip shard jobs, parses LSF job ids, and submits collection
   finalizer/refinement jobs with explicit `done(<jobid>)` dependencies.
+- [ ] Smoke clipped keypoint orchestration apply mode on two clips.
 
 ### Phase 4: registry
 

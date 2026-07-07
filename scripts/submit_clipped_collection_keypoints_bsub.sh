@@ -3,16 +3,18 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: submit_clipped_collection_keypoints_bsub.sh --zarr PATH --collection-id ID --cache-dir-root PATH (--all-clips | --clip-id ID...) --dry-run [options]
+Usage: submit_clipped_collection_keypoints_bsub.sh --zarr PATH --collection-id ID --cache-dir-root PATH (--all-clips | --clip-id ID...) (--dry-run | --apply) [options]
 
 Plan the clipped-collection keypoint DAG:
   cache/proxy readiness -> per-clip keypoint shards -> merged proxy crop run
   -> finalized keypoints -> refined keypoints.
 
-This first implementation is dry-run only. It resolves existing clipped flat
-ROI cache manifests, deterministic proxy crop run names, deterministic keypoint
-shard run names, finalizer/refinement run names, and prints the LSF commands
-with done(...) dependencies. It does not submit jobs yet.
+Dry-run mode resolves existing clipped flat ROI cache manifests, deterministic
+proxy crop run names, deterministic keypoint shard run names,
+finalizer/refinement run names, and prints the LSF command templates. Apply
+mode creates proxy crop runs on the submit host, submits keypoint shard jobs,
+parses LSF job IDs, then submits finalizer/refinement jobs with real
+done(<jobid>) dependencies.
 
 Common options:
   --zarr PATH                       Analysis Zarr archive
@@ -33,7 +35,8 @@ Common options:
   --log-dir PATH                    LSF/progress log directory
   --plan-json PATH                  Also write the plan as JSON
   --json                            Print JSON instead of text
-  --dry-run                         Required; no jobs are submitted
+  --dry-run                         Plan only; no jobs are submitted
+  --apply                           Create proxies and submit LSF jobs
   -h, --help                        Show this message
 
 All additional options are forwarded to

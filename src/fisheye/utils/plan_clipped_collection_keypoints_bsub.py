@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 import zarr
 
@@ -206,6 +208,7 @@ class WorkflowPlan:
     collection_id: str
     run_id: str
     run_label: str
+    repo: Path
     recording_dir: Path
     cache_dir_root: Path
     log_dir: Path
@@ -226,6 +229,7 @@ class WorkflowPlan:
             "collection_id": self.collection_id,
             "run_id": self.run_id,
             "run_label": self.run_label,
+            "repo": str(self.repo),
             "recording_dir": str(self.recording_dir),
             "cache_dir_root": str(self.cache_dir_root),
             "log_dir": str(self.log_dir),
@@ -476,6 +480,7 @@ def build_plan(
         collection_id=collection_id,
         run_id=resolved_run_id,
         run_label=resolved_run_label,
+        repo=repo,
         recording_dir=recording_dir,
         cache_dir_root=cache_dir_root,
         log_dir=resolved_log_dir,
@@ -530,6 +535,149 @@ def _print_plan(plan: WorkflowPlan) -> None:
     print(f"  {_shell_join(plan.refine_bsub_command)}")
 
 
+class CompletedProcessLike(Protocol):
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+Runner = Callable[..., CompletedProcessLike]
+
+
+def _parse_bsub_job_id(stdout: str) -> str:
+    match = re.search(r"Job <([0-9]+)>", stdout)
+    if not match:
+        raise ValueError(f"Could not parse bsub job id from output: {stdout!r}")
+    return match.group(1)
+
+
+def _replace_job_placeholders(argv: Sequence[str], job_ids_by_name: Mapping[str, str]) -> list[str]:
+    out: list[str] = []
+    for arg in argv:
+        text = str(arg)
+        for job_name, job_id in job_ids_by_name.items():
+            text = text.replace(f"<jobid:{job_name}>", str(job_id))
+        if "<jobid:" in text:
+            raise ValueError(f"Unresolved job id placeholder in command argument: {text}")
+        out.append(text)
+    return out
+
+
+def _run_command(argv: Sequence[str], *, cwd: Path, runner: Runner = subprocess.run) -> dict[str, Any]:
+    result = runner(
+        [str(item) for item in argv],
+        cwd=str(cwd),
+        text=True,
+        capture_output=True,
+    )
+    payload = {
+        "command": [str(item) for item in argv],
+        "cwd": str(cwd),
+        "returncode": int(result.returncode),
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Command failed with exit code {result.returncode}: {_shell_join(argv)}\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+    return payload
+
+
+def apply_plan(plan: WorkflowPlan, *, runner: Runner = subprocess.run) -> dict[str, Any]:
+    """Create proxy runs and submit the planned clipped keypoint LSF DAG."""
+
+    missing = [clip.clip_id for clip in plan.clips if clip.cache_manifest is None]
+    if missing:
+        raise ValueError(f"Cannot apply plan; missing cache manifests for clips: {missing}")
+    unavailable = [clip.clip_id for clip in plan.clips if clip.proxy_command is None or clip.keypoint_bsub_command is None]
+    if unavailable:
+        raise ValueError(f"Cannot apply plan; clips are missing proxy or keypoint commands: {unavailable}")
+
+    plan.log_dir.mkdir(parents=True, exist_ok=True)
+    (plan.log_dir / "progress_jsonl").mkdir(parents=True, exist_ok=True)
+    plan_payload = json_ready(plan.to_json())
+    plan_path = plan.log_dir / "submission_plan.json"
+    submission_path = plan.log_dir / "submission.json"
+    plan_path.write_text(json.dumps(plan_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    proxy_results: list[dict[str, Any]] = []
+    shard_results: list[dict[str, Any]] = []
+    job_ids_by_name: dict[str, str] = {}
+
+    for clip in plan.clips:
+        assert clip.proxy_command is not None
+        proxy_result = _run_command(clip.proxy_command, cwd=plan.repo, runner=runner)
+        proxy_results.append(
+            {
+                "clip_id": clip.clip_id,
+                "proxy_crop_run": clip.proxy_crop_run,
+                "alias_manifest": str(clip.alias_manifest) if clip.alias_manifest else None,
+                "command_result": proxy_result,
+            }
+        )
+
+    for clip in plan.clips:
+        assert clip.keypoint_bsub_command is not None
+        submit_result = _run_command(clip.keypoint_bsub_command, cwd=plan.repo, runner=runner)
+        job_id = _parse_bsub_job_id(str(submit_result["stdout"]))
+        job_ids_by_name[clip.keypoint_job_name] = job_id
+        shard_results.append(
+            {
+                "clip_id": clip.clip_id,
+                "keypoint_job_name": clip.keypoint_job_name,
+                "keypoint_job_id": job_id,
+                "keypoint_shard_run": clip.keypoint_shard_run,
+                "command_result": submit_result,
+            }
+        )
+
+    finalizer_command = _replace_job_placeholders(plan.finalizer_bsub_command, job_ids_by_name)
+    finalizer_result = _run_command(finalizer_command, cwd=plan.repo, runner=runner)
+    finalizer_job_id = _parse_bsub_job_id(str(finalizer_result["stdout"]))
+    finalizer_job_name = f"kp_finalize_{plan.run_label}"
+    job_ids_by_name[finalizer_job_name] = finalizer_job_id
+
+    refine_command = _replace_job_placeholders(plan.refine_bsub_command, job_ids_by_name)
+    refine_result = _run_command(refine_command, cwd=plan.repo, runner=runner)
+    refine_job_id = _parse_bsub_job_id(str(refine_result["stdout"]))
+
+    submission = {
+        "schema": "palette.clipped_collection_keypoint_bsub_submission.v1",
+        "status": "submitted",
+        "submitted_at_utc": datetime.now(timezone.utc).isoformat(),
+        "plan_path": str(plan_path),
+        "zarr_path": str(plan.zarr_path),
+        "collection_id": plan.collection_id,
+        "run_id": plan.run_id,
+        "run_label": plan.run_label,
+        "log_dir": str(plan.log_dir),
+        "proxy_results": proxy_results,
+        "keypoint_shard_results": shard_results,
+        "finalizer": {
+            "job_name": finalizer_job_name,
+            "job_id": finalizer_job_id,
+            "command": finalizer_command,
+            "command_result": finalizer_result,
+            "output_run": plan.keypoint_collection_run,
+            "merged_proxy_crop_run": plan.merged_proxy_crop_run,
+        },
+        "refine": {
+            "job_name": f"kp_refine_{plan.run_label}",
+            "job_id": refine_job_id,
+            "command": refine_command,
+            "command_result": refine_result,
+            "output_run": plan.refined_keypoints_run,
+        },
+        "job_ids_by_name": job_ids_by_name,
+    }
+    submission_path.write_text(json.dumps(json_ready(submission), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    submission["submission_path"] = str(submission_path)
+    return json_ready(submission)
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--zarr", required=True, type=Path, help="Analysis Zarr archive.")
@@ -565,7 +713,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overwrite-final-outputs", action="store_true")
     parser.add_argument("--plan-json", type=Path, help="Optional path to write JSON plan.")
     parser.add_argument("--json", action="store_true", help="Print JSON plan instead of text.")
-    parser.add_argument("--dry-run", action="store_true", help="Plan only. Required in this first implementation.")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true", help="Plan only; no jobs are submitted.")
+    mode.add_argument("--apply", action="store_true", help="Create proxy runs and submit the LSF DAG.")
     return parser
 
 
@@ -575,8 +725,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("Use either --all-clips or --clip-id, not both.")
     if not args.all_clips and not args.clip_id:
         raise SystemExit("Provide --all-clips or at least one --clip-id.")
-    if not args.dry_run:
-        raise SystemExit("Only --dry-run is implemented for this wrapper slice; refusing to submit jobs.")
     plan = build_plan(
         zarr_path=args.zarr,
         collection_id=args.collection_id,
@@ -612,7 +760,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     payload = json_ready(plan.to_json())
     if args.plan_json:
+        args.plan_json.expanduser().parent.mkdir(parents=True, exist_ok=True)
         args.plan_json.expanduser().write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if args.apply:
+        submission = apply_plan(plan)
+        if args.json:
+            print(json.dumps(submission, indent=2, sort_keys=True))
+        else:
+            print("Submitted clipped collection keypoint workflow")
+            print(f"  plan: {submission['plan_path']}")
+            print(f"  submission: {submission['submission_path']}")
+            print(f"  keypoint shards: {len(submission['keypoint_shard_results'])}")
+            print(f"  finalizer job: {submission['finalizer']['job_id']}")
+            print(f"  refine job: {submission['refine']['job_id']}")
+        return 0
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
