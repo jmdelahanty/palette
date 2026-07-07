@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""Merge per-clip proxy crop runs into one collection-level proxy crop run."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Sequence
+
+import numpy as np
+import zarr
+
+from fisheye.shared.row_lineage import direct_source_crop_row_ids
+from fisheye.shared.run_provenance import json_ready
+from fisheye.shared.type_conversions import normalize_attr
+from fisheye.shared.zarr.chunk_profiles import create_geometry_preload_array
+from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.shared.zarr_run_completion import RUN_COMPLETION_CONTRACT, RUN_COMPLETION_CONTRACT_ATTR, RUN_COMPLETION_STATUS_ATTR
+from fisheye.utils.create_clipped_collection_proxy_crop_run import PROXY_CROP_RUN_SCHEMA
+
+MERGED_PROXY_CROP_RUN_SCHEMA = "palette_clipped_collection_merged_proxy_crop_run_v1"
+
+REQUIRED_PROXY_ARRAYS: tuple[str, ...] = (
+    "frame_indices",
+    "source_frame_indices",
+    "source_clip_indices",
+    "source_clip_local_frame_indices",
+    "source_refined_row_ids",
+    "source_detect_row_index",
+    "detection_indices",
+    "source_crop_row_ids",
+    "roi_coordinates_full",
+)
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _as_array(group: zarr.Group, name: str) -> np.ndarray:
+    return np.asarray(group[name][:])
+
+
+def _load_run_names(path: Path) -> list[str]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(payload, list):
+        return [str(item) for item in payload]
+    if isinstance(payload, dict):
+        for key in ("source_crop_runs", "proxy_crop_runs", "crop_runs", "runs"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [str(item) for item in value]
+    raise ValueError(f"Could not read crop-run list from {path}; expected list or mapping.")
+
+
+def _resolve_source_runs(root: zarr.Group, names: Sequence[str]) -> list[tuple[str, zarr.Group]]:
+    if not names:
+        raise ValueError("At least one --source-crop-run is required.")
+    if len(set(names)) != len(names):
+        raise ValueError("Duplicate source crop run names were supplied.")
+    parent = root.get("crop_runs")
+    if parent is None:
+        raise ValueError("Missing crop_runs group.")
+    runs: list[tuple[str, zarr.Group]] = []
+    for name in names:
+        if name not in parent:
+            raise ValueError(f"crop_runs/{name} not found.")
+        group = parent[name]
+        missing = [array_name for array_name in REQUIRED_PROXY_ARRAYS if array_name not in group]
+        if missing:
+            raise ValueError(f"crop_runs/{name} missing required arrays: {missing}")
+        total_rows = int(group["frame_indices"].shape[0])
+        for array_name in REQUIRED_PROXY_ARRAYS:
+            rows = int(group[array_name].shape[0])
+            if rows != total_rows:
+                raise ValueError(f"crop_runs/{name}/{array_name} has {rows} rows; expected {total_rows}.")
+        runs.append((str(name), group))
+
+    def sort_key(item: tuple[str, zarr.Group]) -> tuple[int, str]:
+        value = item[1].attrs.get("source_clip_index")
+        try:
+            return int(value), item[0]
+        except (TypeError, ValueError):
+            return 10**12, item[0]
+
+    return sorted(runs, key=sort_key)
+
+
+def merge_clipped_proxy_crop_runs(
+    *,
+    zarr_path: str | Path,
+    source_crop_runs: Sequence[str],
+    output_run: str,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Merge geometry-only per-clip proxy crop runs into one proxy crop run."""
+
+    archive = Path(zarr_path).expanduser().resolve()
+    root = open_zarr_root(archive, mode="a")
+    sources = _resolve_source_runs(root, [str(name) for name in source_crop_runs])
+    if "/" in output_run or not str(output_run).strip():
+        raise ValueError("output_run must be a single non-empty Zarr group name.")
+
+    parent = root.require_group("crop_runs")
+    if output_run in parent:
+        if not overwrite:
+            raise ValueError(f"crop_runs/{output_run} already exists. Pass --overwrite to replace it.")
+        del parent[output_run]
+    target = parent.create_group(output_run)
+
+    row_counts = [int(group["frame_indices"].shape[0]) for _name, group in sources]
+    total_rows = int(sum(row_counts))
+    concatenated: dict[str, np.ndarray] = {
+        name: np.concatenate([_as_array(group, name) for _run_name, group in sources], axis=0)
+        for name in REQUIRED_PROXY_ARRAYS
+    }
+    concatenated["source_crop_row_ids"] = direct_source_crop_row_ids(total_rows)
+    concatenated["detection_indices"] = direct_source_crop_row_ids(total_rows)
+
+    source_proxy_crop_run_index = np.concatenate(
+        [np.full(count, idx, dtype=np.int32) for idx, count in enumerate(row_counts)],
+        axis=0,
+    )
+    source_proxy_crop_row_ids = np.concatenate(
+        [direct_source_crop_row_ids(count) for count in row_counts],
+        axis=0,
+    )
+
+    for name, data in concatenated.items():
+        create_geometry_preload_array(target, name, data=data, overwrite=True)
+    create_geometry_preload_array(target, "source_proxy_crop_run_index", data=source_proxy_crop_run_index, overwrite=True)
+    create_geometry_preload_array(target, "source_proxy_crop_row_ids", data=source_proxy_crop_row_ids, overwrite=True)
+
+    first_attrs = sources[0][1].attrs
+    source_run_names = [name for name, _group in sources]
+    source_clip_ids = [normalize_attr(group.attrs.get("source_clip_id")) for _name, group in sources]
+    source_clip_indices = [group.attrs.get("source_clip_index") for _name, group in sources]
+    source_manifests = [normalize_attr(group.attrs.get("source_roi_cache_manifest")) for _name, group in sources]
+    source_alias_manifests = [normalize_attr(group.attrs.get("source_roi_cache_alias_manifest")) for _name, group in sources]
+    created_at = _utc_now()
+    target.attrs.update(
+        json_ready(
+            {
+                "schema": MERGED_PROXY_CROP_RUN_SCHEMA,
+                "crop_proxy_schema": MERGED_PROXY_CROP_RUN_SCHEMA,
+                "proxy_crop_complete": True,
+                "stage_selector_eligible": False,
+                RUN_COMPLETION_CONTRACT_ATTR: RUN_COMPLETION_CONTRACT,
+                RUN_COMPLETION_STATUS_ATTR: "auxiliary",
+                "status": "completed",
+                "run_name": output_run,
+                "stage": "crop_proxy",
+                "crop_storage_mode": "geometry_only",
+                "source_kind": "merged_clipped_collection_proxy_crop_run",
+                "source_collection_id": first_attrs.get("source_collection_id"),
+                "source_collection_path": first_attrs.get("source_collection_path"),
+                "source_proxy_crop_runs": source_run_names,
+                "source_proxy_crop_run_count": len(source_run_names),
+                "source_clip_ids": source_clip_ids,
+                "source_clip_indices": source_clip_indices,
+                "source_roi_cache_manifests": source_manifests,
+                "source_roi_cache_alias_manifests": source_alias_manifests,
+                "source_roi_cache_required": True,
+                "crop_policy": first_attrs.get("crop_policy") or "centered_refined_bbox",
+                "roi_size": first_attrs.get("roi_size"),
+                "roi_shape": first_attrs.get("roi_shape"),
+                "height": first_attrs.get("height") if first_attrs.get("height") is not None else root.attrs.get("height"),
+                "width": first_attrs.get("width") if first_attrs.get("width") is not None else root.attrs.get("width"),
+                "created_at_utc": created_at,
+                "row_count": total_rows,
+            }
+        )
+    )
+    return {
+        "ok": True,
+        "zarr_path": str(archive),
+        "merged_proxy_crop_run": output_run,
+        "merged_proxy_crop_run_path": f"crop_runs/{output_run}",
+        "source_proxy_crop_runs": source_run_names,
+        "source_proxy_crop_run_count": len(source_run_names),
+        "row_count": total_rows,
+        "source_row_counts": row_counts,
+    }
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("zarr_path", type=Path, help="Analysis Zarr path.")
+    parser.add_argument("--source-crop-run", action="append", default=[], help="Per-clip proxy crop run to merge. Repeatable.")
+    parser.add_argument("--source-crop-runs-file", type=Path, help="JSON list or mapping containing source crop runs.")
+    parser.add_argument("--output-run", required=True, help="Output crop_runs/<name>.")
+    parser.add_argument("--overwrite", action="store_true", help="Replace an existing output run.")
+    parser.add_argument("--json", action="store_true", help="Print JSON output.")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_arg_parser().parse_args(argv)
+    source_runs = list(args.source_crop_run or [])
+    if args.source_crop_runs_file is not None:
+        source_runs.extend(_load_run_names(args.source_crop_runs_file.expanduser()))
+    result = merge_clipped_proxy_crop_runs(
+        zarr_path=args.zarr_path,
+        source_crop_runs=source_runs,
+        output_run=args.output_run,
+        overwrite=bool(args.overwrite),
+    )
+    if args.json:
+        print(json.dumps(json_ready(result), indent=2, sort_keys=True))
+    else:
+        print(f"created {result['merged_proxy_crop_run_path']} rows={result['row_count']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

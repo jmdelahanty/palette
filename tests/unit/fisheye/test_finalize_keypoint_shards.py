@@ -8,6 +8,7 @@ import zarr
 
 from fisheye.shared.zarr_run_completion import RUN_COMPLETION_STATUS_ATTR
 from fisheye.utils.finalize_keypoint_shards import finalize_keypoint_shards
+from fisheye.utils.merge_clipped_proxy_crop_runs import merge_clipped_proxy_crop_runs
 
 
 def _counts(frames: np.ndarray, *, frame_axis_len: int) -> np.ndarray:
@@ -27,6 +28,43 @@ def _make_archive(path: Path) -> zarr.Group:
     return root
 
 
+def _write_proxy_crop(
+    root: zarr.Group,
+    name: str,
+    *,
+    frames: list[int],
+    clip_index: int,
+    refined_offset: int,
+) -> None:
+    crop = root.require_group("crop_runs").create_group(name)
+    frames_np = np.asarray(frames, dtype=np.int64)
+    n_rows = int(frames_np.shape[0])
+    local = np.arange(n_rows, dtype=np.int64)
+    crop.create_array("frame_indices", data=frames_np, chunks=(max(1, n_rows),))
+    crop.create_array("source_frame_indices", data=frames_np, chunks=(max(1, n_rows),))
+    crop.create_array("source_clip_indices", data=np.full(n_rows, clip_index, dtype=np.int64), chunks=(max(1, n_rows),))
+    crop.create_array("source_clip_local_frame_indices", data=local, chunks=(max(1, n_rows),))
+    crop.create_array("source_refined_row_ids", data=local + refined_offset, chunks=(max(1, n_rows),))
+    crop.create_array("source_detect_row_index", data=local + refined_offset + 1000, chunks=(max(1, n_rows),))
+    crop.create_array("detection_indices", data=local, chunks=(max(1, n_rows),))
+    crop.create_array("source_crop_row_ids", data=local, chunks=(max(1, n_rows),))
+    crop.create_array(
+        "roi_coordinates_full",
+        data=np.stack((local + clip_index * 10, local + clip_index * 20), axis=1).astype(np.int32),
+        chunks=(max(1, n_rows), 2),
+    )
+    crop.attrs.update(
+        {
+            "source_clip_id": f"clip_{clip_index:06d}",
+            "source_clip_index": clip_index,
+            "source_collection_id": "collection_test",
+            "crop_policy": "centered_refined_bbox",
+            "roi_shape": [512, 512],
+            "roi_size": [512, 512],
+        }
+    )
+
+
 def _write_shard(
     root: zarr.Group,
     name: str,
@@ -38,24 +76,51 @@ def _write_shard(
     parent = root.require_group("keypoint_shard_runs")
     shard = parent.create_group(name)
     crop_rows_np = np.asarray(crop_rows, dtype=np.int64)
-    frames = crop_rows_np.copy()
     n_rows = int(crop_rows_np.shape[0])
+    crop = root["crop_runs"][source_crop_run]
+    frames = np.asarray(crop["frame_indices"][:], dtype=np.int64)[crop_rows_np]
+    source_frame_indices = (
+        np.asarray(crop["source_frame_indices"][:], dtype=np.int64)[crop_rows_np]
+        if "source_frame_indices" in crop
+        else frames
+    )
+    source_clip_indices = (
+        np.asarray(crop["source_clip_indices"][:], dtype=np.int64)[crop_rows_np]
+        if "source_clip_indices" in crop
+        else np.zeros(n_rows, dtype=np.int64)
+    )
+    source_clip_local_frame_indices = (
+        np.asarray(crop["source_clip_local_frame_indices"][:], dtype=np.int64)[crop_rows_np]
+        if "source_clip_local_frame_indices" in crop
+        else frames
+    )
+    source_refined_row_ids = (
+        np.asarray(crop["source_refined_row_ids"][:], dtype=np.int64)[crop_rows_np]
+        if "source_refined_row_ids" in crop
+        else crop_rows_np + 100
+    )
+    source_detect_row_index = (
+        np.asarray(crop["source_detect_row_index"][:], dtype=np.int64)[crop_rows_np]
+        if "source_detect_row_index" in crop
+        else crop_rows_np + 200
+    )
     n_kpts = 3
     success_np = np.ones(n_rows, dtype=bool) if success is None else np.asarray(success, dtype=bool)
     base = np.arange(n_rows * n_kpts * 2, dtype=np.float64).reshape(n_rows, n_kpts, 2)
-    frame_counts = _counts(frames, frame_axis_len=5)
-    n_keypoints = np.zeros(5, dtype=np.int32)
+    frame_axis_len = max(5, int(frames.max(initial=0)) + 1)
+    frame_counts = _counts(frames, frame_axis_len=frame_axis_len)
+    n_keypoints = np.zeros(frame_axis_len, dtype=np.int32)
     if n_rows:
         n_keypoints[frames[success_np]] = n_kpts
 
     shard.create_array("frame_indices", data=frames, chunks=(max(1, n_rows),))
     shard.create_array("source_crop_row_ids", data=crop_rows_np, chunks=(max(1, n_rows),))
     shard.create_array("detection_indices", data=crop_rows_np, chunks=(max(1, n_rows),))
-    shard.create_array("source_frame_indices", data=frames, chunks=(max(1, n_rows),))
-    shard.create_array("source_clip_indices", data=np.zeros(n_rows, dtype=np.int64), chunks=(max(1, n_rows),))
-    shard.create_array("source_clip_local_frame_indices", data=frames, chunks=(max(1, n_rows),))
-    shard.create_array("source_refined_row_ids", data=crop_rows_np + 100, chunks=(max(1, n_rows),))
-    shard.create_array("source_detect_row_index", data=crop_rows_np + 200, chunks=(max(1, n_rows),))
+    shard.create_array("source_frame_indices", data=source_frame_indices, chunks=(max(1, n_rows),))
+    shard.create_array("source_clip_indices", data=source_clip_indices, chunks=(max(1, n_rows),))
+    shard.create_array("source_clip_local_frame_indices", data=source_clip_local_frame_indices, chunks=(max(1, n_rows),))
+    shard.create_array("source_refined_row_ids", data=source_refined_row_ids, chunks=(max(1, n_rows),))
+    shard.create_array("source_detect_row_index", data=source_detect_row_index, chunks=(max(1, n_rows),))
     shard.create_array("keypoints_roi", data=base + crop_rows_np[:, None, None], chunks=(max(1, n_rows), n_kpts, 2))
     shard.create_array("keypoints_img", data=base + 10 + crop_rows_np[:, None, None], chunks=(max(1, n_rows), n_kpts, 2))
     shard.create_array("keypoints_norm", data=(base + 10 + crop_rows_np[:, None, None]) / 100.0, chunks=(max(1, n_rows), n_kpts, 2))
@@ -155,3 +220,42 @@ def test_finalize_keypoint_shards_rejects_mixed_source_crop_runs(tmp_path: Path)
             shard_runs=["shard_a", "shard_b"],
             output_run="keypoints_collection_test",
         )
+
+
+def test_finalize_keypoint_shards_rebases_mixed_proxy_crop_runs_to_target(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "sample_analysis.zarr"
+    root = zarr.open_group(store=zarr_path, mode="w")
+    root.create_group("crop_runs")
+    _write_proxy_crop(root, "crop_proxy_a", frames=[10, 11], clip_index=0, refined_offset=100)
+    _write_proxy_crop(root, "crop_proxy_b", frames=[20, 21], clip_index=1, refined_offset=200)
+
+    merge_result = merge_clipped_proxy_crop_runs(
+        zarr_path=zarr_path,
+        source_crop_runs=["crop_proxy_b", "crop_proxy_a"],
+        output_run="crop_proxy_collection",
+    )
+    assert merge_result["row_count"] == 4
+
+    reopened = zarr.open_group(store=zarr_path, mode="a")
+    _write_shard(reopened, "shard_a", crop_rows=[0, 1], source_crop_run="crop_proxy_a")
+    _write_shard(reopened, "shard_b", crop_rows=[0, 1], source_crop_run="crop_proxy_b")
+
+    result = finalize_keypoint_shards(
+        zarr_path=zarr_path,
+        shard_runs=["shard_b", "shard_a"],
+        output_run="keypoints_collection_test",
+        target_crop_run="crop_proxy_collection",
+    )
+
+    assert result["ok"] is True
+    assert result["source_crop_run"] == "crop_proxy_collection"
+    assert result["source_keypoint_shard_crop_runs"] == ["crop_proxy_a", "crop_proxy_b"]
+    assert result["sort_changed_order"] is True
+
+    root_after = zarr.open_group(store=zarr_path, mode="r")
+    run = root_after["keypoints_runs/keypoints_collection_test"]
+    assert run.attrs["source_crop_run"] == "crop_proxy_collection"
+    assert run.attrs["source_crop_rebased_from_shards"] is True
+    np.testing.assert_array_equal(run["source_crop_row_ids"][:], np.array([0, 1, 2, 3], dtype=np.int64))
+    np.testing.assert_array_equal(run["frame_indices"][:], np.array([10, 11, 20, 21], dtype=np.int64))
+    np.testing.assert_array_equal(run["detection_indices"][:], np.array([0, 1, 2, 3], dtype=np.int64))

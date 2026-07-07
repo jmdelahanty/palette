@@ -457,13 +457,38 @@ scripts/py -m fisheye.utils.finalize_keypoint_shards \
   --json
 ```
 
-This first finalizer writes a normal `keypoints_runs/<collection_run>` from one
-or more completed `keypoint_shard_runs`. It intentionally requires all shards
-to reference the same `source_crop_run`, because current
-`refine_keypoints.py` resolves crop geometry from one
-`keypoints_runs/<run>.attrs["source_crop_run"]`. If whole clipped collections
-continue to use one proxy crop run per clip, they need either a merged proxy
-crop run first or a later multi-source-crop-aware refinement path.
+For whole-collection output, first merge per-clip proxy crop runs into one
+collection-level proxy crop run:
+
+```bash
+scripts/py -m fisheye.utils.merge_clipped_proxy_crop_runs \
+  /path/to/recording_analysis.zarr \
+  --source-crop-run crop_proxy_clip_000000 \
+  --source-crop-run crop_proxy_clip_000001 \
+  --output-run crop_proxy_collection_... \
+  --json
+```
+
+Then finalize keypoint shards against that merged proxy:
+
+```bash
+scripts/py -m fisheye.utils.finalize_keypoint_shards \
+  /path/to/recording_analysis.zarr \
+  --shard-run keypoint_shard_clip_000000 \
+  --shard-run keypoint_shard_clip_000001 \
+  --target-crop-run crop_proxy_collection_... \
+  --output-run keypoints_collection_... \
+  --json
+```
+
+The finalizer writes a normal `keypoints_runs/<collection_run>` from completed
+`keypoint_shard_runs`. Without `--target-crop-run`, it still requires all
+shards to reference the same `source_crop_run`. With `--target-crop-run`, it
+allows mixed per-clip proxy crop runs by mapping each shard row onto the merged
+proxy crop run using clip/refined/frame row identity. The published keypoint run
+then carries one downstream-compatible `source_crop_run`, which keeps current
+`refine_keypoints.py`, Crimson, registry extractors, and review/export tools on
+the ordinary single-crop-run contract.
 
 The implemented v1 finalizer:
 
@@ -472,23 +497,24 @@ The implemented v1 finalizer:
 3. Requires core model-output arrays, `frame_counts`, `n_rois`, `n_keypoints`,
    `source_crop_run`, and `source_crop_row_ids`.
 4. Requires schema/model compatibility attrs to match across shards.
-5. Fails on mixed `source_crop_run` values.
-6. Fails on duplicate `source_crop_row_ids` for the shared source crop run.
-7. Sorts rows by `source_crop_row_ids` for deterministic crop-row order.
-8. Concatenates all per-ROI arrays and copied row-lineage arrays.
-9. Sums frame-domain `frame_counts` and `n_rois`, then recomputes
+5. Fails on mixed `source_crop_run` values unless `--target-crop-run` is set.
+6. When rebasing, verifies each source proxy crop row maps to exactly one row in
+   the target merged proxy crop run.
+7. Fails on duplicate rebased `source_crop_row_ids`.
+8. Sorts rows by target `source_crop_row_ids` for deterministic crop-row order.
+9. Concatenates all per-ROI arrays and copied row-lineage arrays.
+10. Sums frame-domain `frame_counts` and `n_rois`, then recomputes
    `n_keypoints` from merged `frame_indices` and `detection_success`.
-10. Stamps `source_keypoint_shard_runs`, `source_keypoint_shard_run_paths`,
-    `source_crop_run`, `source_crop_runs`, and `collection_finalizer_schema`.
-11. Publishes `keypoints_runs.latest_complete`, `keypoints_runs.latest`, and
+11. Stamps `source_keypoint_shard_runs`, `source_keypoint_shard_run_paths`,
+    `source_crop_run`, `source_keypoint_shard_crop_runs`, and
+    `collection_finalizer_schema`.
+12. Publishes `keypoints_runs.latest_complete`, `keypoints_runs.latest`, and
     `root.attrs["current_keypoint_group_path"]` only after validation passes.
 
-A later whole-collection finalizer should remove the single-source-crop
-limitation by publishing a merged collection proxy crop run or by teaching
-downstream refinement/review consumers to resolve `(source_crop_run,
-source_crop_row_ids)` per row. Until that exists, mixing per-clip proxy crop
-runs into one canonical keypoint run would create a normal-looking output that
-cannot be placed safely by current consumers.
+This preserves the existing downstream contract while retaining clip-local
+lineage in arrays such as `source_clip_indices`,
+`source_clip_local_frame_indices`, `source_refined_row_ids`, and
+`source_detect_row_index`.
 
 This merged keypoint run is intentionally compatible with existing refinement,
 review, Crimson, registry extractors, and training exporters. Current
@@ -686,6 +712,8 @@ Operational notes:
   `open_flat_roi_cache(..., expected_crop_run=<proxy_run>)`.
 - [x] Smoke `CropImageSource.open(..., roi_cache_manifest=<alias>)` against one
   real clipped proxy.
+- [x] Add a tool to merge per-clip proxy crop runs into one collection-level
+  proxy crop run for downstream finalization/refinement.
 
 ### Phase 3: model runners
 
@@ -708,8 +736,8 @@ Operational notes:
   keypoint registry/status rows.
 - [x] Add a v1 keypoint shard finalizer that publishes a canonical
   `keypoints_runs/<run>` only after same-source-crop shards validate.
-- [ ] Add a whole-clipped-collection keypoint finalizer that can safely merge
-  shards spanning multiple proxy crop runs.
+- [x] Add a whole-clipped-collection keypoint finalizer path that safely rebases
+  shards spanning multiple proxy crop runs onto a merged proxy crop run.
 
 ### Phase 4: registry
 
@@ -806,3 +834,84 @@ read_dtype = uint8
 roi_cache_used = true
 read_mode = flat_bin_roi_cache
 ```
+
+## Two-Clip Keypoint Finalizer Smoke
+
+Date: 2026-07-07
+
+Validated a true multi-proxy path against Sleepyfish cam2010095 clips
+`000004` and `000005`.
+
+Inputs:
+
+```text
+crop_proxy_sleepyfish_cam2010095_clip_000004_20260707
+crop_proxy_sleepyfish_cam2010095_clip_000005_20260707
+keypoint_shard_2026-07-07_17-53-56
+keypoint_shard_2026-07-07_22-00-16
+```
+
+The clip `000005` shard ran on LSF `gpu_l4` job `152016505` with
+node-local scratch staging:
+
+```text
+total_rois = 50,344
+successful = 50,328
+failed = 16
+duration = 248.4 s
+rate = 202.6 poses/s
+scratch_cleanup = /scratch/delahantyj/152016505/palette_roi_cache_stage
+```
+
+Merged proxy crop run:
+
+```text
+crop_runs/crop_proxy_sleepyfish_cam2010095_clips_000004_000005_collection_proxy_smoke_20260707
+source_proxy_crop_run_count = 2
+row_count = 103,637
+source_row_counts = [53,293, 50,344]
+```
+
+Finalized keypoint run:
+
+```text
+keypoints_runs/keypoints_sleepyfish_cam2010095_clips_000004_000005_target_proxy_smoke_20260707
+source_crop_run = crop_proxy_sleepyfish_cam2010095_clips_000004_000005_collection_proxy_smoke_20260707
+source_crop_rebased_from_shards = true
+total_rois = 103,637
+successful_detections = 103,582
+failed_detections = 55
+success_rate_percent = 99.95
+finalization_duration_seconds = 5.34
+```
+
+Refined keypoint run:
+
+```text
+refined_keypoints_runs/refined_keypoints_sleepyfish_cam2010095_clips_000004_000005_target_proxy_smoke_20260707
+source_keypoints_run = keypoints_sleepyfish_cam2010095_clips_000004_000005_target_proxy_smoke_20260707
+source_crop_run = crop_proxy_sleepyfish_cam2010095_clips_000004_000005_collection_proxy_smoke_20260707
+refined_success = 103,582
+source_failures = 55
+geometry_issues = 13
+usable_keypoints = 103,569
+pass_rate_percent = 99.95
+duration_seconds = 33.05
+```
+
+Readback validation:
+
+```text
+clip_indices_unique = [4, 5]
+source_crop_row_ids = 0..103636
+frame_indices matched merged proxy crop = true
+source_frame_indices matched merged proxy crop = true
+source_clip_indices matched merged proxy crop = true
+source_clip_local_frame_indices matched merged proxy crop = true
+source_refined_row_ids matched merged proxy crop = true
+source_detect_row_index matched merged proxy crop = true
+detection_indices matched merged proxy crop = true
+```
+
+This proves the current merged-proxy design preserves the ordinary downstream
+single-`source_crop_run` contract while retaining per-clip lineage arrays.

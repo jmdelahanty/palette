@@ -58,6 +58,25 @@ REQUIRED_ROW_ARRAYS: tuple[str, ...] = (
 
 COUNT_ARRAYS: tuple[str, ...] = ("frame_counts", "n_rois", "n_keypoints")
 
+CROP_REBASE_IDENTITY_ARRAYS: tuple[str, ...] = (
+    "source_clip_indices",
+    "source_clip_local_frame_indices",
+    "source_refined_row_ids",
+    "source_detect_row_index",
+    "frame_indices",
+    "roi_coordinates_full",
+)
+
+CROP_REBASE_COPY_ARRAYS: tuple[str, ...] = (
+    "frame_indices",
+    "source_frame_indices",
+    "source_clip_indices",
+    "source_clip_local_frame_indices",
+    "source_refined_row_ids",
+    "source_detect_row_index",
+    "detection_indices",
+)
+
 OPTIONAL_ROW_ARRAYS: tuple[str, ...] = tuple(
     dict.fromkeys(
         name
@@ -131,6 +150,14 @@ class Shard:
     total_rows: int
     source_crop_run: str
     frame_axis_len: int
+
+
+@dataclass(frozen=True)
+class CropRebase:
+    target_crop_run: str
+    target_crop_group: zarr.Group
+    target_row_ids: np.ndarray
+    source_crop_runs: tuple[str, ...]
 
 
 def _utc_now() -> str:
@@ -238,7 +265,7 @@ def _resolve_shard(root: zarr.Group, shard_name: str) -> Shard:
     )
 
 
-def _load_shards(root: zarr.Group, shard_names: Sequence[str]) -> list[Shard]:
+def _load_shards(root: zarr.Group, shard_names: Sequence[str], *, target_crop_run: str | None = None) -> list[Shard]:
     if not shard_names:
         raise ValueError("At least one --shard-run is required.")
     if len(set(shard_names)) != len(shard_names):
@@ -246,11 +273,14 @@ def _load_shards(root: zarr.Group, shard_names: Sequence[str]) -> list[Shard]:
     shards = [_resolve_shard(root, name) for name in shard_names]
 
     source_crop_runs = {shard.source_crop_run for shard in shards}
-    if len(source_crop_runs) != 1:
+    if len(source_crop_runs) != 1 and not target_crop_run:
         raise ValueError(
             "Mixed source_crop_run shard finalization is not supported in v1; "
-            f"found {sorted(source_crop_runs)!r}."
+            f"found {sorted(source_crop_runs)!r}. Pass --target-crop-run to rebase shards "
+            "onto a merged collection proxy crop run."
         )
+    if target_crop_run and root.get(f"crop_runs/{target_crop_run}") is None:
+        raise ValueError(f"target crop run not found: crop_runs/{target_crop_run}")
 
     first = shards[0].group
     for attr in COMPAT_ATTRS:
@@ -270,21 +300,117 @@ def _load_shards(root: zarr.Group, shard_names: Sequence[str]) -> list[Shard]:
     return shards
 
 
-def _merged_row_arrays(shards: Sequence[Shard]) -> tuple[dict[str, np.ndarray], np.ndarray]:
+def _merged_row_arrays(shards: Sequence[Shard]) -> dict[str, np.ndarray]:
     names = list(REQUIRED_ROW_ARRAYS)
     for name in OPTIONAL_ROW_ARRAYS:
         if name in shards[0].group and name not in names:
             names.append(name)
 
-    merged = {name: np.concatenate([_as_array(shard.group, name) for shard in shards], axis=0) for name in names}
-    crop_row_ids = np.asarray(merged[SOURCE_CROP_ROW_IDS_ARRAY], dtype=np.int64).reshape(-1)
+    return {name: np.concatenate([_as_array(shard.group, name) for shard in shards], axis=0) for name in names}
+
+
+def _sort_and_validate_row_arrays(row_arrays: Mapping[str, np.ndarray]) -> tuple[dict[str, np.ndarray], np.ndarray]:
+    crop_row_ids = np.asarray(row_arrays[SOURCE_CROP_ROW_IDS_ARRAY], dtype=np.int64).reshape(-1)
     unique_crop_rows = np.unique(crop_row_ids)
     if unique_crop_rows.size != crop_row_ids.size:
-        raise ValueError("Duplicate source_crop_row_ids found across keypoint shards for the same source_crop_run.")
+        raise ValueError("Duplicate source_crop_row_ids found across keypoint shards for the target source_crop_run.")
 
     order = np.argsort(crop_row_ids, kind="stable")
-    sorted_rows = {name: values[order] for name, values in merged.items()}
+    sorted_rows = {name: values[order] for name, values in row_arrays.items()}
     return sorted_rows, order
+
+
+def _row_identity_from_group(group: zarr.Group, row_ids: np.ndarray, names: Sequence[str]) -> list[tuple[Any, ...]]:
+    identities: list[tuple[Any, ...]] = []
+    arrays = {name: _as_array(group, name) for name in names}
+    row_ids = np.asarray(row_ids, dtype=np.int64).reshape(-1)
+    for row_id in row_ids:
+        parts: list[Any] = []
+        for name in names:
+            value = arrays[name][int(row_id)]
+            if np.ndim(value) == 0:
+                parts.append(np.asarray(value).item())
+            else:
+                parts.append(tuple(np.asarray(value).reshape(-1).tolist()))
+        identities.append(tuple(parts))
+    return identities
+
+
+def _resolve_crop_rebase(root: zarr.Group, shards: Sequence[Shard], target_crop_run: str | None) -> CropRebase | None:
+    if not target_crop_run:
+        return None
+    crop_parent = root.get("crop_runs")
+    if crop_parent is None or target_crop_run not in crop_parent:
+        raise ValueError(f"target crop run not found: crop_runs/{target_crop_run}")
+    target_group = crop_parent[target_crop_run]
+    missing_target = [name for name in CROP_REBASE_IDENTITY_ARRAYS if name not in target_group]
+    if missing_target:
+        raise ValueError(f"target crop run crop_runs/{target_crop_run} missing identity arrays: {missing_target}")
+
+    target_total = int(target_group["frame_indices"].shape[0])
+    target_row_ids = np.arange(target_total, dtype=np.int64)
+    target_identities = _row_identity_from_group(target_group, target_row_ids, CROP_REBASE_IDENTITY_ARRAYS)
+    target_map: dict[tuple[Any, ...], int] = {}
+    duplicate_count = 0
+    for idx, identity in enumerate(target_identities):
+        if identity in target_map:
+            duplicate_count += 1
+            continue
+        target_map[identity] = int(idx)
+    if duplicate_count:
+        raise ValueError(
+            f"target crop run crop_runs/{target_crop_run} has {duplicate_count} duplicate crop row identities."
+        )
+
+    rebased_chunks: list[np.ndarray] = []
+    source_crop_runs: list[str] = []
+    for shard in shards:
+        source_crop_runs.append(shard.source_crop_run)
+        source_group = crop_parent.get(shard.source_crop_run)
+        if source_group is None:
+            raise ValueError(f"source crop run not found: crop_runs/{shard.source_crop_run}")
+        missing_source = [name for name in CROP_REBASE_IDENTITY_ARRAYS if name not in source_group]
+        if missing_source:
+            raise ValueError(f"source crop run crop_runs/{shard.source_crop_run} missing identity arrays: {missing_source}")
+        source_rows = _as_array(shard.group, SOURCE_CROP_ROW_IDS_ARRAY).astype(np.int64, copy=False).reshape(-1)
+        source_identities = _row_identity_from_group(source_group, source_rows, CROP_REBASE_IDENTITY_ARRAYS)
+        mapped = np.full(source_rows.shape[0], -1, dtype=np.int64)
+        for row_idx, identity in enumerate(source_identities):
+            target_row = target_map.get(identity)
+            if target_row is None:
+                raise ValueError(
+                    f"Could not map {KEYPOINT_SHARD_PARENT}/{shard.name} row {row_idx} "
+                    f"from crop_runs/{shard.source_crop_run} into crop_runs/{target_crop_run}."
+                )
+            mapped[row_idx] = int(target_row)
+        rebased_chunks.append(mapped)
+    target_rows = np.concatenate(rebased_chunks, axis=0) if rebased_chunks else np.zeros(0, dtype=np.int64)
+    return CropRebase(
+        target_crop_run=str(target_crop_run),
+        target_crop_group=target_group,
+        target_row_ids=target_rows,
+        source_crop_runs=tuple(source_crop_runs),
+    )
+
+
+def _apply_crop_rebase(row_arrays: dict[str, np.ndarray], rebase: CropRebase | None) -> dict[str, np.ndarray]:
+    if rebase is None:
+        return row_arrays
+    target_rows = np.asarray(rebase.target_row_ids, dtype=np.int64).reshape(-1)
+    if target_rows.shape[0] != row_arrays[SOURCE_CROP_ROW_IDS_ARRAY].shape[0]:
+        raise ValueError("Target crop-row mapping length does not match merged keypoint row count.")
+    out = dict(row_arrays)
+    out[SOURCE_CROP_ROW_IDS_ARRAY] = target_rows
+    for name in CROP_REBASE_COPY_ARRAYS:
+        if name in out and name in rebase.target_crop_group:
+            target_values = _as_array(rebase.target_crop_group, name)[target_rows]
+            if name != "detection_indices" and not np.array_equal(out[name], target_values):
+                raise ValueError(
+                    f"Merged keypoint shard row array {name!r} disagrees with target crop run "
+                    f"crop_runs/{rebase.target_crop_run}."
+                )
+            out[name] = target_values
+    return out
 
 
 def _merge_count_arrays(shards: Sequence[Shard], name: str) -> np.ndarray:
@@ -342,6 +468,7 @@ def finalize_keypoint_shards(
     zarr_path: str | Path,
     shard_runs: Sequence[str],
     output_run: str | None = None,
+    target_crop_run: str | None = None,
     overwrite: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
@@ -349,9 +476,12 @@ def finalize_keypoint_shards(
 
     archive = Path(zarr_path).expanduser().resolve()
     root = open_zarr_root(archive, mode="r" if dry_run else "a")
-    shards = _load_shards(root, [str(name) for name in shard_runs])
-    row_arrays, sort_order = _merged_row_arrays(shards)
-    source_crop_run = shards[0].source_crop_run
+    shards = _load_shards(root, [str(name) for name in shard_runs], target_crop_run=target_crop_run)
+    row_arrays = _merged_row_arrays(shards)
+    rebase = _resolve_crop_rebase(root, shards, target_crop_run)
+    row_arrays = _apply_crop_rebase(row_arrays, rebase)
+    row_arrays, sort_order = _sort_and_validate_row_arrays(row_arrays)
+    source_crop_run = rebase.target_crop_run if rebase is not None else shards[0].source_crop_run
     total_rows = int(row_arrays["frame_indices"].shape[0])
     keypoint_count = int(row_arrays["keypoints_roi"].shape[1])
     count_arrays = {name: _merge_count_arrays(shards, name) for name in COUNT_ARRAYS}
@@ -368,7 +498,8 @@ def finalize_keypoint_shards(
     created_at = _utc_now()
     resolved_output_run = output_run or f"keypoints_collection_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     source_shard_paths = [f"{KEYPOINT_SHARD_PARENT}/{shard.name}" for shard in shards]
-    source_crop_runs = sorted({shard.source_crop_run for shard in shards})
+    source_shard_crop_runs = sorted({shard.source_crop_run for shard in shards})
+    source_crop_runs = [source_crop_run]
     summary_stats = _summary_statistics(row_arrays, keypoint_count)
     result = {
         "ok": True,
@@ -380,6 +511,8 @@ def finalize_keypoint_shards(
         "source_keypoint_shard_run_paths": source_shard_paths,
         "source_crop_run": source_crop_run,
         "source_crop_runs": source_crop_runs,
+        "source_keypoint_shard_crop_runs": source_shard_crop_runs,
+        "target_crop_run": target_crop_run,
         "total_rois": total_rows,
         "sort_policy": "source_crop_row_ids_stable_ascending",
         "sort_changed_order": bool(not np.array_equal(sort_order, np.arange(sort_order.shape[0]))),
@@ -427,6 +560,9 @@ def finalize_keypoint_shards(
                 "source_keypoint_shard_run_paths": source_shard_paths,
                 "source_crop_run": source_crop_run,
                 "source_crop_runs": source_crop_runs,
+                "source_keypoint_shard_crop_runs": source_shard_crop_runs,
+                "source_crop_rebase_target_run": rebase.target_crop_run if rebase is not None else None,
+                "source_crop_rebased_from_shards": rebase is not None,
                 "source_kind": "keypoint_shard_collection_finalizer",
                 "finalized_from_keypoint_shards": True,
                 "stage_selector_eligible": True,
@@ -441,6 +577,7 @@ def finalize_keypoint_shards(
                 "parameters": {
                     "shard_runs": [shard.name for shard in shards],
                     "output_run": resolved_output_run,
+                    "target_crop_run": target_crop_run,
                     "overwrite": bool(overwrite),
                 },
             }
@@ -452,11 +589,13 @@ def finalize_keypoint_shards(
                 "zarr_path": str(archive),
                 "shard_runs": [shard.name for shard in shards],
                 "output_run": resolved_output_run,
+                "target_crop_run": target_crop_run,
                 "sort_policy": "source_crop_row_ids_stable_ascending",
             },
             input_run_ids={
                 "keypoint_shards": source_shard_paths,
                 "crop": source_crop_run,
+                "keypoint_shard_crops": source_shard_crop_runs,
             },
             cwd=Path.cwd(),
         )
@@ -483,6 +622,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--shard-run", action="append", default=[], help="keypoint_shard_runs child to merge. Repeatable.")
     parser.add_argument("--shard-runs-file", type=Path, help="JSON list or mapping containing shard_runs.")
     parser.add_argument("--output-run", help="Destination keypoints_runs child name.")
+    parser.add_argument(
+        "--target-crop-run",
+        help=(
+            "Optional merged crop_runs/<name> to rebase per-shard source_crop_row_ids onto. "
+            "Required when merging shards from multiple proxy crop runs."
+        ),
+    )
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing output run.")
     parser.add_argument("--dry-run", action="store_true", help="Validate and summarize without writing.")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
@@ -499,6 +645,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             zarr_path=args.zarr_path,
             shard_runs=shard_runs,
             output_run=args.output_run,
+            target_crop_run=args.target_crop_run,
             overwrite=bool(args.overwrite),
             dry_run=bool(args.dry_run),
         )
