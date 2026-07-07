@@ -4,6 +4,8 @@ set -euo pipefail
 ZARR_PATH=""
 COLLECTION_ID=""
 RECORDING_FRAME_INDEX=""
+CLIP_IDS=()
+WORK_UNIT_IDS=()
 PUBLIC_CACHE_ROOT="/misc/public/palette_cache"
 PUBLIC_CACHE_DIR=""
 LOG_DIR=""
@@ -37,6 +39,8 @@ Required:
 
 Cache options:
   --recording-frame-index PATH      Override recording_frame_index.parquet path
+  --clip-id ID                      Restrict to one finalized collection clip id; repeatable
+  --work-unit-id ID                 Restrict to one finalized collection work_unit_id; repeatable
   --public-cache-root PATH          Shared cache root (default: /misc/public/palette_cache)
   --public-cache-dir PATH           Explicit publish dir; overrides root/collection_id/roi_cache
   --roi-size H W                    ROI size in Palette order; default from archive policy
@@ -70,6 +74,8 @@ while [[ $# -gt 0 ]]; do
     --zarr) ZARR_PATH="$2"; shift 2;;
     --collection-id) COLLECTION_ID="$2"; shift 2;;
     --recording-frame-index) RECORDING_FRAME_INDEX="$2"; shift 2;;
+    --clip-id) CLIP_IDS+=("$2"); shift 2;;
+    --work-unit-id) WORK_UNIT_IDS+=("$2"); shift 2;;
     --public-cache-root) PUBLIC_CACHE_ROOT="$2"; shift 2;;
     --public-cache-dir) PUBLIC_CACHE_DIR="$2"; shift 2;;
     --roi-size) ROI_SIZE=("$2" "$3"); shift 3;;
@@ -138,6 +144,8 @@ BUILDER_ARGS=(
   --gpu-chunk-frames "$GPU_CHUNK_FRAMES"
 )
 if [[ -n "$RECORDING_FRAME_INDEX" ]]; then BUILDER_ARGS+=(--recording-frame-index "$RECORDING_FRAME_INDEX"); fi
+for clip_id in "${CLIP_IDS[@]}"; do BUILDER_ARGS+=(--clip-id "$clip_id"); done
+for work_unit_id in "${WORK_UNIT_IDS[@]}"; do BUILDER_ARGS+=(--work-unit-id "$work_unit_id"); done
 if [[ "${#ROI_SIZE[@]}" -gt 0 ]]; then BUILDER_ARGS+=(--roi-size "${ROI_SIZE[@]}"); fi
 if [[ -n "$LIMIT_ROWS" ]]; then BUILDER_ARGS+=(--limit-rows "$LIMIT_ROWS"); fi
 if [[ "$SHA256" == "1" ]]; then BUILDER_ARGS+=(--sha256); fi
@@ -146,7 +154,8 @@ printf -v BUILDER_ARGS_SHELL '%q ' "${BUILDER_ARGS[@]}"
 
 scripts/py - "$RUN_DIR/submission_context.json" \
   "$ZARR_PATH" "$COLLECTION_ID" "$RECORDING_FRAME_INDEX" "$PUBLIC_CACHE_DIR" "$RUN_ID" "$RUN_LABEL" \
-  "$SAFE_LABEL" "$QUEUE" "$NCORES" "$MEM_GB" "$GPUS" "$WALLTIME" "$LIMIT_ROWS" "$GPU_CHUNK_FRAMES" <<'PY'
+  "$SAFE_LABEL" "$QUEUE" "$NCORES" "$MEM_GB" "$GPUS" "$WALLTIME" "$LIMIT_ROWS" "$GPU_CHUNK_FRAMES" \
+  "$(IFS=,; echo "${CLIP_IDS[*]}")" "$(IFS=,; echo "${WORK_UNIT_IDS[*]}")" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -167,7 +176,12 @@ from pathlib import Path
     walltime,
     limit_rows,
     gpu_chunk_frames,
+    clip_ids_csv,
+    work_unit_ids_csv,
 ) = sys.argv[1:]
+
+def split_csv(value):
+    return [item for item in value.split(",") if item]
 
 payload = {
     "schema_version": 1,
@@ -186,6 +200,8 @@ payload = {
     "walltime": walltime,
     "limit_rows": int(limit_rows) if limit_rows else None,
     "gpu_chunk_frames": int(gpu_chunk_frames),
+    "clip_ids": split_csv(clip_ids_csv),
+    "work_unit_ids": split_csv(work_unit_ids_csv),
 }
 Path(output_path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY

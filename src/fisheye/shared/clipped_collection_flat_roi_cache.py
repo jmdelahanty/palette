@@ -36,6 +36,8 @@ def build_clipped_collection_flat_roi_cache(
     zarr_path: str | Path,
     collection_id: str | None = None,
     recording_frame_index: str | Path | None = None,
+    clip_ids: Sequence[str] | None = None,
+    work_unit_ids: Sequence[str] | None = None,
     output_dir: str | Path | None = None,
     manifest_path: str | Path | None = None,
     roi_size: Sequence[int] | None = None,
@@ -69,6 +71,8 @@ def build_clipped_collection_flat_roi_cache(
         collection_id=collection_id,
         recording_frame_index=recording_frame_index,
     )
+    selection = _build_selection(clip_ids=clip_ids, work_unit_ids=work_unit_ids)
+    collection_summary = _collection_summary_for_selection(collection_summary, selection)
     row_index = _build_row_index(
         root=root,
         frame_map=frame_map,
@@ -181,6 +185,7 @@ def build_clipped_collection_flat_roi_cache(
         duration_seconds=duration_seconds,
         timing_summary=timing_summary,
         limit_rows=limit_rows,
+        selection=selection,
     )
     manifest_tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(manifest_tmp, resolved_manifest_path)
@@ -228,6 +233,82 @@ def _resolve_video_shape(root: zarr.Group) -> tuple[int, int] | None:
     if height_i <= 0 or width_i <= 0:
         raise ValueError(f"Invalid root video dimensions: width={width_i}, height={height_i}")
     return height_i, width_i
+
+
+def _normalize_selection_values(values: Sequence[str] | None) -> tuple[str, ...]:
+    if not values:
+        return ()
+    normalized: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if text and text not in normalized:
+            normalized.append(text)
+    return tuple(normalized)
+
+
+def _build_selection(
+    *,
+    clip_ids: Sequence[str] | None,
+    work_unit_ids: Sequence[str] | None,
+) -> dict[str, tuple[str, ...]]:
+    return {
+        "clip_ids": _normalize_selection_values(clip_ids),
+        "work_unit_ids": _normalize_selection_values(work_unit_ids),
+    }
+
+
+def _filter_selected_runs(
+    selected_runs: Sequence[Mapping[str, Any]],
+    *,
+    clip_ids: Sequence[str] | None = None,
+    work_unit_ids: Sequence[str] | None = None,
+) -> list[Mapping[str, Any]]:
+    clip_filter = set(_normalize_selection_values(clip_ids))
+    work_unit_filter = set(_normalize_selection_values(work_unit_ids))
+    if not clip_filter and not work_unit_filter:
+        return list(selected_runs)
+
+    filtered: list[Mapping[str, Any]] = []
+    for selected in selected_runs:
+        clip_id = str(selected.get("clip_id") or "").strip()
+        work_unit_id = str(selected.get("work_unit_id") or "").strip()
+        if clip_filter and clip_id not in clip_filter:
+            continue
+        if work_unit_filter and work_unit_id not in work_unit_filter:
+            continue
+        filtered.append(selected)
+
+    if not filtered:
+        details = {
+            "clip_ids": sorted(clip_filter),
+            "work_unit_ids": sorted(work_unit_filter),
+            "available_clip_ids": sorted({str(row.get("clip_id") or "") for row in selected_runs if row.get("clip_id")}),
+            "available_work_unit_ids": sorted(
+                {str(row.get("work_unit_id") or "") for row in selected_runs if row.get("work_unit_id")}
+            ),
+        }
+        raise ValueError(f"Selected clipped collection filter matched no runs: {details}")
+    return filtered
+
+
+def _collection_summary_for_selection(
+    collection_summary: Mapping[str, Any],
+    selection: Mapping[str, Sequence[str]],
+) -> dict[str, Any]:
+    selected_runs = _filter_selected_runs(
+        collection_summary.get("selected_runs", []),
+        clip_ids=selection.get("clip_ids"),
+        work_unit_ids=selection.get("work_unit_ids"),
+    )
+    summary = dict(collection_summary)
+    summary["selected_runs"] = selected_runs
+    summary["selected_run_count"] = len(selected_runs)
+    summary["selection"] = {
+        "clip_ids": list(selection.get("clip_ids") or ()),
+        "work_unit_ids": list(selection.get("work_unit_ids") or ()),
+        "filtered": bool(selection.get("clip_ids") or selection.get("work_unit_ids")),
+    }
+    return summary
 
 
 def _build_row_index(
@@ -568,6 +649,7 @@ def _build_collection_cache_key(
         "collection_path": collection_summary.get("collection_path"),
         "recording_frame_index": collection_summary.get("recording_frame_index"),
         "selected_run_count": collection_summary.get("selected_run_count"),
+        "selection": collection_summary.get("selection"),
         "roi_size": list(roi_size),
         "row_count": int(row_index.num_rows),
         "row_index_preview": row_index.slice(0, min(10, row_index.num_rows)).to_pylist(),
@@ -609,6 +691,7 @@ def _build_manifest(
     duration_seconds: float,
     timing_summary: Mapping[str, Any],
     limit_rows: int | None,
+    selection: Mapping[str, Sequence[str]],
 ) -> dict[str, Any]:
     roi_h, roi_w = int(roi_size[0]), int(roi_size[1])
     pixel_contract = orange_mono_pynvvc_luma_pixel_contract()
@@ -638,6 +721,11 @@ def _build_manifest(
             "recording_frame_index": collection_summary.get("recording_frame_index"),
             "selected_run_count": collection_summary.get("selected_run_count"),
             "clip_count": len({row.get("clip_id") for row in collection_summary.get("selected_runs", [])}),
+            "selection": {
+                "clip_ids": list(selection.get("clip_ids") or ()),
+                "work_unit_ids": list(selection.get("work_unit_ids") or ()),
+                "filtered": bool(selection.get("clip_ids") or selection.get("work_unit_ids")),
+            },
             "crop_policy": DEFAULT_PREFERRED_CROP_POLICY_NAME,
             "crop_storage_mode": "geometry_only_collection_derived",
             "frame_source_kind": "clip_source_video_path",

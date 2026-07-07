@@ -65,6 +65,8 @@ The flat cache manifest records:
 - `source.recording_frame_index`
 - `source.selected_run_count`
 - `source.clip_count`
+- `source.selection.clip_ids`
+- `source.selection.work_unit_ids`
 - `source.crop_storage_mode = geometry_only_collection_derived`
 - `source.frame_source_kind = clip_source_video_path`
 - `row_index.path`
@@ -72,16 +74,33 @@ The flat cache manifest records:
 
 ## Gaps Found
 
-### 1. No clip-shard filter yet
+### 1. Clip-shard filter is partial
 
-The builder accepts `--collection-id` and `--limit-rows`, but not `--clip-id`,
-`--work-unit-id`, `--shard-index`, or `--shard-count`. Today it can build one
-collection cache or a row-limited smoke cache, but not deterministic per-clip
-production shards.
+The builder accepts `--collection-id`, `--clip-id`, `--work-unit-id`, and
+`--limit-rows`. It can build an exact per-clip or per-work-unit cache and
+records the selection in the cache key and manifest. It still does not support
+generic modulo sharding through `--shard-index` / `--shard-count`.
 
 This matters because a full Sleepyfish-sized collection can be hundreds of GiB
 as raw `512x512 uint8` ROI rows. Clip-sharded caches are the right unit for
 parallel execution, failure recovery, and cleanup.
+
+### 1a. Small smoke throughput is not steady-state throughput
+
+The 2026-07-07 Sleepyfish clipped-cache cluster smokes showed why tiny
+`--limit-rows` runs should not be interpreted as steady-state performance:
+
+| Rows | Payload | Overall builder rate | Decode/read rate | Note |
+| ---: | ---: | ---: | ---: | --- |
+| 256 | 64 MiB | 24.1 ROI/s | 176.8 frames/s | dominated by startup and per-batch progress logging |
+| 1024 | 256 MiB | 100.7 ROI/s | 190.8 frames/s | startup amortized; closer to steady state |
+
+Earlier full-recording GoodCopBadCop flat-cache builds were about
+175-180 ROI/s, with `decode_seconds_total` as the dominant timing bucket. The
+Sleepyfish 1024-row smoke is consistent with that once fixed startup/Torch/NVDEC
+initialization is separated from per-frame decode. Downstream keypoint numbers
+such as 212-276 poses/s are not cache-build rates; they measure model inference
+after a flat cache already exists.
 
 ### 2. Downstream consumers still require a crop run
 
@@ -254,13 +273,13 @@ into `recording_artifacts`, which is recording-folder-artifact oriented.
 
 ### Phase 1: clip-sharded cache build
 
-- [ ] Add builder filters: `clip_ids`, `work_unit_ids`, `shard_index`,
-  `shard_count`.
-- [ ] Include shard identity in the cache key and manifest.
-- [ ] Add wrapper flags: `--clip-id`, `--work-unit-id`, `--shard-index`,
-  `--shard-count`.
-- [ ] Add tests that shard filters produce deterministic non-overlapping row
-  indexes.
+- [x] Add builder filters: `clip_ids`, `work_unit_ids`.
+- [ ] Add generic modulo filters: `shard_index`, `shard_count`.
+- [x] Include clip/work-unit selection in the cache key and manifest.
+- [x] Add wrapper flags: `--clip-id`, `--work-unit-id`.
+- [ ] Add wrapper flags: `--shard-index`, `--shard-count`.
+- [x] Add tests that clip/work-unit filters select deterministic rowsets and
+  fail closed for missing values.
 
 ### Phase 2: proxy crop runs
 
