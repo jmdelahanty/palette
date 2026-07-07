@@ -308,6 +308,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     stores = _collect_store_paths(args)
+    if args.execute and args.dry_run:
+        parser.error("--dry-run and --execute are mutually exclusive")
     if args.execute and not stores:
         parser.error("--execute requires at least one explicit store path or --store-list entry")
 
