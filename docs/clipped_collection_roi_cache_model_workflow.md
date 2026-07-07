@@ -447,25 +447,48 @@ shard mode also suppresses the canonical keypoint registry/status refresh; a
 shard is a staging artifact until a finalizer publishes a normal
 `keypoints_runs/<collection_run>`.
 
-The finalizer reads a complete expected shard manifest and writes a normal
-`keypoints_runs/<collection_run>`:
+Implemented v1 utility:
 
-1. Resolve all expected shard run paths from the shard manifest.
-2. Verify every shard is complete and has matching `source_collection_id`,
-   `source_clip_id`, `source_clip_index`, `source_crop_run`, and row counts.
-3. Verify no duplicate row identity across shards using
-   `(source_clip_index, source_clip_local_frame_indices, source_refined_row_ids)`
-   when present.
-4. Sort rows deterministically by
-   `(source_clip_index, frame_indices, source_refined_row_ids, source_crop_row_ids)`.
-5. Concatenate all per-ROI arrays and copied row-lineage arrays.
-6. Recompute `n_keypoints` from merged `frame_indices` and `detection_success`.
-7. Stamp collection attrs:
-   `source_collection_id`, `source_keypoint_shard_runs`,
-   `source_proxy_crop_runs`, `source_roi_cache_alias_manifests`, and
-   `collection_finalizer_schema`.
-8. Publish `keypoints_runs.latest_complete` only after the merged run passes
-   validation.
+```bash
+scripts/py -m fisheye.utils.finalize_keypoint_shards \
+  /path/to/recording_analysis.zarr \
+  --shard-run keypoint_shard_... \
+  --output-run keypoints_collection_... \
+  --json
+```
+
+This first finalizer writes a normal `keypoints_runs/<collection_run>` from one
+or more completed `keypoint_shard_runs`. It intentionally requires all shards
+to reference the same `source_crop_run`, because current
+`refine_keypoints.py` resolves crop geometry from one
+`keypoints_runs/<run>.attrs["source_crop_run"]`. If whole clipped collections
+continue to use one proxy crop run per clip, they need either a merged proxy
+crop run first or a later multi-source-crop-aware refinement path.
+
+The implemented v1 finalizer:
+
+1. Resolves explicit `--shard-run` names or a JSON `--shard-runs-file`.
+2. Verifies every shard is complete when completion attrs are present.
+3. Requires core model-output arrays, `frame_counts`, `n_rois`, `n_keypoints`,
+   `source_crop_run`, and `source_crop_row_ids`.
+4. Requires schema/model compatibility attrs to match across shards.
+5. Fails on mixed `source_crop_run` values.
+6. Fails on duplicate `source_crop_row_ids` for the shared source crop run.
+7. Sorts rows by `source_crop_row_ids` for deterministic crop-row order.
+8. Concatenates all per-ROI arrays and copied row-lineage arrays.
+9. Sums frame-domain `frame_counts` and `n_rois`, then recomputes
+   `n_keypoints` from merged `frame_indices` and `detection_success`.
+10. Stamps `source_keypoint_shard_runs`, `source_keypoint_shard_run_paths`,
+    `source_crop_run`, `source_crop_runs`, and `collection_finalizer_schema`.
+11. Publishes `keypoints_runs.latest_complete`, `keypoints_runs.latest`, and
+    `root.attrs["current_keypoint_group_path"]` only after validation passes.
+
+A later whole-collection finalizer should remove the single-source-crop
+limitation by publishing a merged collection proxy crop run or by teaching
+downstream refinement/review consumers to resolve `(source_crop_run,
+source_crop_row_ids)` per row. Until that exists, mixing per-clip proxy crop
+runs into one canonical keypoint run would create a normal-looking output that
+cannot be placed safely by current consumers.
 
 This merged keypoint run is intentionally compatible with existing refinement,
 review, Crimson, registry extractors, and training exporters. Current
@@ -674,17 +697,19 @@ Operational notes:
   `--stage-roi-cache-to-scratch` is enabled.
 - [ ] Add shard-output-parent support or an equivalent shard mode to subject-mask
   runners.
-- [ ] Smoke keypoints against one clip proxy + cache alias manifest.
+- [x] Smoke keypoints against one clip proxy + cache alias manifest.
 - [ ] Smoke subject masks against the same proxy + cache alias manifest.
-- [ ] Verify output arrays contain parent-frame and clip-local lineage.
+- [x] Verify output arrays contain parent-frame and clip-local lineage.
 - [ ] Verify refined keypoints and refined subject masks preserve lineage.
 - [x] Verify keypoint shard runs do not live under ordinary stage parents or, if they do,
   are excluded from resolver fallback.
 - [x] Verify keypoint shard runs do not update ordinary stage `latest`,
   `latest_complete`, root `current_*_group_path` selectors, or canonical
   keypoint registry/status rows.
-- [ ] Add a collection finalizer that publishes a collection-level selector only
-  after all expected shards validate.
+- [x] Add a v1 keypoint shard finalizer that publishes a canonical
+  `keypoints_runs/<run>` only after same-source-crop shards validate.
+- [ ] Add a whole-clipped-collection keypoint finalizer that can safely merge
+  shards spanning multiple proxy crop runs.
 
 ### Phase 4: registry
 
