@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -34,6 +35,7 @@ from fisheye.utils.finalize_subject_mask_clip_package import PACKAGE_SCHEMA_ID a
 
 IMPORT_SCHEMA_ID = "palette_refined_subject_mask_clip_package_import_v1"
 SKIPPED_DERIVED_GROUPS = {"mask_bitpacked", "mask_rle"}
+SKIPPED_REGENERATED_ARRAY_NAMES = {"reason_bytes"}
 
 
 @dataclass(frozen=True)
@@ -130,6 +132,8 @@ def _iter_array_paths(group: zarr.Group, prefix: str = "") -> list[str]:
     for key in sorted(group.keys()):
         path = f"{prefix}/{key}" if prefix else str(key)
         if path.split("/", 1)[0] in SKIPPED_DERIVED_GROUPS:
+            continue
+        if PurePosixPath(path).name in SKIPPED_REGENERATED_ARRAY_NAMES:
             continue
         child = group[key]
         if _is_group(child):
@@ -228,6 +232,109 @@ def _write_runs_by_mapping(
         dst_stop = int(dest_rows[stop - 1]) + 1
         dest[dst_start:dst_stop] = source[src_start:src_stop]
         start = stop
+
+
+def _contiguous_runs(local_rows: np.ndarray, dest_rows: np.ndarray) -> list[tuple[int, int, int, int]]:
+    if int(local_rows.shape[0]) == 0:
+        return []
+    runs: list[tuple[int, int, int, int]] = []
+    start = 0
+    count = int(local_rows.shape[0])
+    while start < count:
+        stop = start + 1
+        while (
+            stop < count
+            and int(local_rows[stop]) == int(local_rows[stop - 1]) + 1
+            and int(dest_rows[stop]) == int(dest_rows[stop - 1]) + 1
+        ):
+            stop += 1
+        runs.append(
+            (
+                int(local_rows[start]),
+                int(local_rows[stop - 1]) + 1,
+                int(dest_rows[start]),
+                int(dest_rows[stop - 1]) + 1,
+            )
+        )
+        start = stop
+    return runs
+
+
+def _numpy_block_dtype(dtype: Any) -> Any:
+    try:
+        return np.dtype(dtype)
+    except TypeError:
+        return object
+
+
+def _empty_chunk_block(shape: tuple[int, ...], dtype: Any, fill_value: Any) -> np.ndarray:
+    block_dtype = _numpy_block_dtype(dtype)
+    block = np.empty(shape, dtype=block_dtype)
+    if fill_value is None:
+        if block_dtype == object:
+            block.fill("")
+        else:
+            block.fill(0)
+    else:
+        block[...] = fill_value
+    return block
+
+
+def _copy_row_aligned_array_by_chunk(
+    dest: Any,
+    packages: Sequence[ClipPackage],
+    *,
+    array_path: str,
+    row_maps: Mapping[Path, tuple[np.ndarray, np.ndarray]],
+    total_rows: int,
+    array_copy_workers: int,
+) -> None:
+    """Copy one row-aligned array with one writer per physical row chunk.
+
+    Multiple clip packages can contribute rows to the same destination chunk at
+    clip boundaries. Building each destination chunk in memory and writing it
+    once avoids Zarr chunk-level read-modify-write races.
+    """
+
+    row_chunk = int(getattr(dest, "chunks", (0,))[0] or total_rows or 1)
+    row_chunk = max(1, row_chunk)
+    fill_value = getattr(dest, "fill_value", None)
+    dtype = getattr(dest, "dtype", None)
+
+    def write_dest_chunk(dst_start: int, dst_stop: int) -> None:
+        block_shape = (int(dst_stop) - int(dst_start), *tuple(int(value) for value in dest.shape[1:]))
+        block = _empty_chunk_block(block_shape, dtype, fill_value)
+        wrote_any = False
+        for package in packages:
+            local_rows, dest_rows = row_maps[package.package_path]
+            mask = (dest_rows >= dst_start) & (dest_rows < dst_stop)
+            if not bool(np.any(mask)):
+                continue
+            package_array = _get_node(package.group, array_path)
+            selected_local_rows = local_rows[mask]
+            selected_dest_rows = dest_rows[mask]
+            for src_start, src_stop, run_dst_start, run_dst_stop in _contiguous_runs(
+                selected_local_rows,
+                selected_dest_rows,
+            ):
+                rel_start = int(run_dst_start) - int(dst_start)
+                rel_stop = int(run_dst_stop) - int(dst_start)
+                block[rel_start:rel_stop] = package_array[src_start:src_stop]
+                wrote_any = True
+        if not wrote_any:
+            return
+        dest[dst_start:dst_stop] = block
+
+    chunks = [(start, min(start + row_chunk, total_rows)) for start in range(0, int(total_rows), row_chunk)]
+    workers = max(1, int(array_copy_workers))
+    if workers == 1 or len(chunks) <= 1:
+        for start, stop in chunks:
+            write_dest_chunk(start, stop)
+        return
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(write_dest_chunk, start, stop) for start, stop in chunks]
+        for future in futures:
+            future.result()
 
 
 def _is_contour_array_path(path: str) -> bool:
@@ -403,6 +510,7 @@ def import_refined_subject_mask_clip_packages(
     output_run: str,
     overwrite: bool = False,
     expected_target_crop_run: str | None = None,
+    array_copy_workers: int = 1,
 ) -> dict[str, Any]:
     zarr_path = zarr_path.expanduser().resolve()
     started = time.perf_counter()
@@ -419,54 +527,66 @@ def import_refined_subject_mask_clip_packages(
                 raise ValueError(f"refined_subject_masks_runs/{output_run} already exists. Pass --overwrite.")
             del parent[output_run]
         dest_run = parent.create_group(output_run)
-        reference = packages[0].group
-        _copy_group_tree_attrs(reference, dest_run)
+        try:
+            reference = packages[0].group
+            _copy_group_tree_attrs(reference, dest_run)
+            dest_run.attrs["palette_run_completion_status"] = "running"
 
-        total_rows = int(sorted_crop_rows.shape[0])
-        target_crop_runs = sorted({str(package.group.attrs.get("source_crop_run") or "") for package in packages})
-        if expected_target_crop_run and target_crop_runs != [str(expected_target_crop_run)]:
-            raise ValueError(
-                f"Package source_crop_run values {target_crop_runs!r} do not match expected "
-                f"{expected_target_crop_run!r}."
-            )
-
-        for array_path in _iter_array_paths(reference):
-            if _is_contour_array_path(array_path):
-                continue
-            source_array = _get_node(reference, array_path)
-            parent_path = str(PurePosixPath(array_path).parent)
-            if parent_path == ".":
-                parent_path = ""
-            array_name = PurePosixPath(array_path).name
-            dest_parent = _require_group(dest_run, parent_path)
-            source_shape = tuple(int(value) for value in source_array.shape)
-            if source_shape and source_shape[0] == packages[0].row_count:
-                dest_shape = (total_rows, *source_shape[1:])
-                dest_array = _create_array_like(
-                    dest_parent,
-                    array_name,
-                    source_array,
-                    shape=dest_shape,
-                    chunks=_dense_masks_roi_chunks(array_path, dest_shape),
+            total_rows = int(sorted_crop_rows.shape[0])
+            target_crop_runs = sorted({str(package.group.attrs.get("source_crop_run") or "") for package in packages})
+            if expected_target_crop_run and target_crop_runs != [str(expected_target_crop_run)]:
+                raise ValueError(
+                    f"Package source_crop_run values {target_crop_runs!r} do not match expected "
+                    f"{expected_target_crop_run!r}."
                 )
-                for package in packages:
-                    package_array = _get_node(package.group, array_path)
-                    local_rows, dest_rows = row_maps[package.package_path]
-                    if int(package_array.shape[0]) != package.row_count:
-                        raise ValueError(
-                            f"{package.package_path}:{array_path} has first dimension "
-                            f"{int(package_array.shape[0])}, expected {package.row_count}."
-                        )
-                    _write_runs_by_mapping(dest_array, package_array, local_rows=local_rows, dest_rows=dest_rows)
-            else:
-                data = np.asarray(source_array[:])
-                kwargs: dict[str, Any] = {"data": data, "overwrite": True}
-                chunks = _array_chunks(source_array, tuple(int(value) for value in data.shape))
-                if chunks is not None:
-                    kwargs["chunks"] = chunks
-                dest_parent.create_array(array_name, **kwargs)
 
-        dest_run["source_crop_row_ids"][:] = sorted_crop_rows
+            for array_path in _iter_array_paths(reference):
+                if _is_contour_array_path(array_path):
+                    continue
+                source_array = _get_node(reference, array_path)
+                parent_path = str(PurePosixPath(array_path).parent)
+                if parent_path == ".":
+                    parent_path = ""
+                array_name = PurePosixPath(array_path).name
+                dest_parent = _require_group(dest_run, parent_path)
+                source_shape = tuple(int(value) for value in source_array.shape)
+                if source_shape and source_shape[0] == packages[0].row_count:
+                    dest_shape = (total_rows, *source_shape[1:])
+                    dest_array = _create_array_like(
+                        dest_parent,
+                        array_name,
+                        source_array,
+                        shape=dest_shape,
+                        chunks=_dense_masks_roi_chunks(array_path, dest_shape),
+                    )
+                    for package in packages:
+                        package_array = _get_node(package.group, array_path)
+                        if int(package_array.shape[0]) != package.row_count:
+                            raise ValueError(
+                                f"{package.package_path}:{array_path} has first dimension "
+                                f"{int(package_array.shape[0])}, expected {package.row_count}."
+                            )
+                    _copy_row_aligned_array_by_chunk(
+                        dest_array,
+                        packages,
+                        array_path=array_path,
+                        row_maps=row_maps,
+                        total_rows=total_rows,
+                        array_copy_workers=array_copy_workers,
+                    )
+                else:
+                    data = np.asarray(source_array[:])
+                    kwargs: dict[str, Any] = {"data": data, "overwrite": True}
+                    chunks = _array_chunks(source_array, tuple(int(value) for value in data.shape))
+                    if chunks is not None:
+                        kwargs["chunks"] = chunks
+                    dest_parent.create_array(array_name, **kwargs)
+
+            dest_run["source_crop_row_ids"][:] = sorted_crop_rows
+        except Exception:
+            if output_run in parent:
+                del parent[output_run]
+            raise
 
         contour_components = sorted(set.intersection(*[set(_contour_components(package.group)) for package in packages]))
         contour_summaries = [
@@ -493,6 +613,8 @@ def import_refined_subject_mask_clip_packages(
         dest_run.attrs["source_crop_run_values"] = target_crop_runs
         dest_run.attrs["row_merge_key"] = "source_crop_row_ids"
         dest_run.attrs["row_merge_order"] = "ascending_source_crop_row_ids"
+        dest_run.attrs["array_copy_workers"] = int(max(1, array_copy_workers))
+        dest_run.attrs["array_copy_strategy"] = "chunk_owned_parallel" if int(array_copy_workers) > 1 else "chunk_owned_serial"
         dest_run.attrs["import_schema_id"] = IMPORT_SCHEMA_ID
         dest_run.attrs["created_at_utc"] = _utc_now()
         dest_run.attrs["created_utc"] = dest_run.attrs["created_at_utc"]
@@ -532,6 +654,7 @@ def import_refined_subject_mask_clip_packages(
                 "package_count": int(len(packages)),
                 "expected_target_crop_run": expected_target_crop_run,
                 "row_merge_key": "source_crop_row_ids",
+                "array_copy_workers": int(max(1, array_copy_workers)),
             },
             input_run_ids={
                 "refined_subject_mask_clip_packages": [package.run_name for package in packages],
@@ -567,6 +690,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-run", required=True)
     parser.add_argument("--expected-target-crop-run")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--array-copy-workers",
+        type=int,
+        default=1,
+        help=(
+            "Number of chunk-owned row-copy workers for row-aligned arrays. "
+            "Each task writes a whole destination row chunk to avoid Zarr RMW races."
+        ),
+    )
     parser.add_argument("--json", action="store_true")
     return parser
 
@@ -579,6 +711,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_run=args.output_run,
         overwrite=bool(args.overwrite),
         expected_target_crop_run=args.expected_target_crop_run,
+        array_copy_workers=max(1, int(args.array_copy_workers)),
     )
     if args.json:
         print(json.dumps(json_ready(result), indent=2, sort_keys=True))

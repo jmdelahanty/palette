@@ -192,6 +192,8 @@ def test_build_plan_can_emit_per_clip_finalizer_package_jobs(tmp_path: Path) -> 
     assert "fisheye.utils.import_refined_subject_mask_clip_packages" in plan.collection_import_command
     assert "--expected-target-crop-run" in plan.collection_import_command
     assert "crop_proxy_test_masks_collection" in plan.collection_import_command
+    assert "--array-copy-workers" in plan.collection_import_command
+    assert "1" in plan.collection_import_command
     assert "--output-run" in plan.collection_import_command
     assert "refined_subject_masks_test_masks" in plan.collection_import_command
     assert plan.collection_import_command.count("--package") == 2
@@ -378,6 +380,7 @@ def test_apply_plan_submits_per_clip_finalizer_package_jobs(tmp_path: Path) -> N
     assert second_finalizer_call[second_finalizer_call.index("-w") + 1] == "done(102)"
     assert import_call[import_call.index("-w") + 1] == "done(301) && done(302)"
     assert "fisheye.utils.import_refined_subject_mask_clip_packages" in import_call[-1]
+    assert "--array-copy-workers 1" in import_call[-1]
     assert len(submission["clip_finalizers"]) == 2
     assert submission["finalizer"]["job_id"] == "401"
     assert submission["finalizer"]["source_package_count"] == 2

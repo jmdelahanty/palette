@@ -143,6 +143,7 @@ class SubjectMaskWorkflowPlan:
     clips: tuple[SubjectMaskClipPlan, ...]
     finalization_mode: str
     clip_finalizer_package_dir: Path | None
+    import_array_copy_workers: int
     merged_proxy_crop_run: str
     refined_subject_masks_run: str
     components: tuple[str, ...]
@@ -169,6 +170,7 @@ class SubjectMaskWorkflowPlan:
             "clip_finalizer_package_dir": (
                 str(self.clip_finalizer_package_dir) if self.clip_finalizer_package_dir else None
             ),
+            "import_array_copy_workers": int(self.import_array_copy_workers),
             "merged_proxy_crop_run": self.merged_proxy_crop_run,
             "refined_subject_masks_run": self.refined_subject_masks_run,
             "components": list(self.components),
@@ -240,6 +242,7 @@ def build_plan(
     defer_registry_status: bool,
     finalization_mode: str = "collection_direct",
     clip_finalizer_package_dir: Path | None = None,
+    import_array_copy_workers: int = 1,
 ) -> SubjectMaskWorkflowPlan:
     zarr_path = zarr_path.expanduser().resolve()
     cache_dir_root = cache_dir_root.expanduser().resolve()
@@ -264,6 +267,7 @@ def build_plan(
         raise ValueError(
             f"Unsupported finalization mode {finalization_mode!r}; expected one of {FINALIZATION_MODES}."
         )
+    resolved_import_array_copy_workers = max(1, int(import_array_copy_workers))
     resolved_clip_package_dir = (
         (clip_finalizer_package_dir or DEFAULT_CLIP_FINALIZER_PACKAGE_DIR)
         .expanduser()
@@ -633,6 +637,8 @@ def build_plan(
                 refined_subject_masks_run,
                 "--expected-target-crop-run",
                 merged_proxy_crop_run,
+                "--array-copy-workers",
+                str(resolved_import_array_copy_workers),
                 "--json",
             ]
             for package_path in package_paths:
@@ -677,6 +683,7 @@ def build_plan(
         clips=tuple(clip_plans),
         finalization_mode=resolved_finalization_mode,
         clip_finalizer_package_dir=resolved_clip_package_dir if resolved_finalization_mode == "per_clip_packages" else None,
+        import_array_copy_workers=resolved_import_array_copy_workers,
         merged_proxy_crop_run=merged_proxy_crop_run,
         refined_subject_masks_run=refined_subject_masks_run,
         components=resolved_components,
@@ -1093,6 +1100,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_CLIP_FINALIZER_PACKAGE_DIR,
         help="Base directory for per-clip refined subject-mask finalizer packages.",
     )
+    parser.add_argument(
+        "--import-array-copy-workers",
+        type=int,
+        default=1,
+        help=(
+            "For per_clip_packages collection import, number of chunk-owned row-copy workers "
+            "used to write row-aligned arrays into the merged refined-mask run."
+        ),
+    )
     parser.add_argument("--plan-json", type=Path, help="Optional path to write JSON plan.")
     parser.add_argument("--json", action="store_true", help="Print JSON plan instead of text.")
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -1165,6 +1181,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         defer_registry_status=bool(args.defer_registry_status),
         finalization_mode=args.finalization_mode,
         clip_finalizer_package_dir=args.clip_finalizer_package_dir,
+        import_array_copy_workers=max(1, int(args.import_array_copy_workers)),
     )
     payload = json_ready(plan.to_json())
     if args.plan_json:

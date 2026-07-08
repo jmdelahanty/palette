@@ -11,6 +11,7 @@ import pytest
 import zarr
 
 from fisheye.shared.subject_mask_chunks import refined_subject_mask_storage_chunks
+from fisheye.shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from fisheye.shared.zarr_run_completion import RUN_COMPLETION_STATUS_ATTR
 from fisheye.utils.finalize_subject_mask_clip_package import PACKAGE_SCHEMA_ID
 from fisheye.utils.import_refined_subject_mask_clip_packages import (
@@ -26,6 +27,7 @@ def _write_package(
     crop_row_ids: list[int],
     source_crop_run: str = "crop_proxy_collection",
     labels: list[str] | None = None,
+    body_reason_labels: list[str] | None = None,
 ) -> Path:
     labels = labels or ["subject_body", "eye_left"]
     package_root = tmp_path / f"{package_name}_src"
@@ -58,6 +60,14 @@ def _write_package(
     components = run.require_group("components")
     body = components.require_group("subject_body")
     body.create_array("manual_override", data=np.zeros((row_count,), dtype=bool), chunks=(max(1, row_count),))
+    if body_reason_labels is not None:
+        write_reason_columns(
+            body,
+            np.asarray(body_reason_labels, dtype=object),
+            chunk_size=max(1, row_count),
+            include_reason_text=True,
+            overwrite=True,
+        )
     contours = body.require_group("contours")
     ptr = np.arange(row_count, dtype=np.int64)
     length = np.ones((row_count,), dtype=np.int32)
@@ -189,3 +199,38 @@ def test_import_refined_subject_mask_clip_packages_rejects_mask_label_mismatch(t
             package_paths=[package_a, package_b],
             output_run="refined_collection",
         )
+
+
+def test_import_refined_subject_mask_clip_packages_regenerates_reason_bytes(tmp_path: Path) -> None:
+    target_zarr = tmp_path / "target.zarr"
+    zarr.open_group(str(target_zarr), mode="w")
+    package_a = _write_package(
+        tmp_path,
+        package_name="clip_a",
+        run_name="refined_clip_a",
+        crop_row_ids=[10],
+        body_reason_labels=["short"],
+    )
+    package_b = _write_package(
+        tmp_path,
+        package_name="clip_b",
+        run_name="refined_clip_b",
+        crop_row_ids=[11],
+        body_reason_labels=["different_reason_label_that_requires_a_wider_reason_bytes_matrix"],
+    )
+
+    import_refined_subject_mask_clip_packages(
+        zarr_path=target_zarr,
+        package_paths=[package_a, package_b],
+        output_run="refined_collection",
+        array_copy_workers=2,
+    )
+
+    root = zarr.open_group(str(target_zarr), mode="r", use_consolidated=False)
+    body = root["refined_subject_masks_runs"]["refined_collection"]["components"]["subject_body"]
+    assert body["reason_bytes"].shape[0] == 2
+    assert body["reason_bytes"].shape[1] > 64
+    assert read_reason_labels(body).tolist() == [
+        "short",
+        "different_reason_label_that_requires_a_wider_reason_bytes_matrix",
+    ]
