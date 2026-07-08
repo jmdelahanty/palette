@@ -4,6 +4,8 @@ import numpy as np
 import pytest
 
 from fisheye.diagnostics.plot_sampled_component_contours import (
+    RoiImageSource,
+    _normalize_image,
     component_k,
     parse_component_k,
     resample_closed_polyline,
@@ -53,3 +55,33 @@ def test_parse_component_k_rejects_invalid_specs() -> None:
         parse_component_k(["subject_body"])
     with pytest.raises(Exception, match="K must be positive"):
         parse_component_k(["subject_body=0"])
+
+
+def test_roi_image_source_maps_refined_rows_to_crop_rows() -> None:
+    roi_images = np.stack(
+        [
+            np.full((4, 4), 10, dtype=np.uint8),
+            np.full((4, 4), 90, dtype=np.uint8),
+        ],
+        axis=0,
+    )
+    source = RoiImageSource(
+        crop_run_name="crop_test",
+        roi_images=roi_images,
+        source_crop_row_ids=np.asarray([1, 0], dtype=np.int64),
+    )
+
+    np.testing.assert_array_equal(source.image_for_refined_row(0), roi_images[1])
+    np.testing.assert_array_equal(source.image_for_refined_row(1), roi_images[0])
+    assert source.image_for_refined_row(-1) is None
+    assert source.image_for_refined_row(2) is None
+
+
+def test_normalize_image_uses_robust_display_range() -> None:
+    image = np.asarray([[0, 10, 20], [30, 40, 255]], dtype=np.uint8)
+
+    normalized = _normalize_image(image)
+
+    assert normalized.shape == image.shape
+    assert float(normalized.min()) >= 0.0
+    assert float(normalized.max()) <= 1.0

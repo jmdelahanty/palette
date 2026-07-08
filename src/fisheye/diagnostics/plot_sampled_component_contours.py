@@ -29,6 +29,23 @@ class ContourSample:
     valid: bool
 
 
+@dataclass(frozen=True)
+class RoiImageSource:
+    crop_run_name: str
+    roi_images: object
+    source_crop_row_ids: np.ndarray
+    row_position_fallback: bool = False
+
+    def image_for_refined_row(self, row_index: int) -> np.ndarray | None:
+        row = int(row_index)
+        if row < 0 or row >= int(self.source_crop_row_ids.shape[0]):
+            return None
+        crop_row = int(self.source_crop_row_ids[row])
+        if crop_row < 0 or crop_row >= int(self.roi_images.shape[0]):
+            return None
+        return np.asarray(self.roi_images[crop_row])
+
+
 def resample_closed_polyline(points_xy: np.ndarray, k: int) -> np.ndarray:
     """Arc-length resample a closed contour to exactly ``k`` points.
 
@@ -120,6 +137,73 @@ def _resolve_run(root: zarr.Group, run_name: str | None) -> tuple[str, zarr.Grou
     return latest, parent[latest]
 
 
+def _normalize_image(image: np.ndarray) -> np.ndarray:
+    arr = np.asarray(image, dtype=np.float32)
+    if arr.ndim == 3:
+        arr = arr[..., 0]
+    finite = np.isfinite(arr)
+    if not np.any(finite):
+        return np.zeros(arr.shape, dtype=np.float32)
+    lo = float(np.nanpercentile(arr[finite], 1.0))
+    hi = float(np.nanpercentile(arr[finite], 99.0))
+    if hi <= lo:
+        lo = float(np.nanmin(arr[finite]))
+        hi = float(np.nanmax(arr[finite]))
+    if hi <= lo:
+        return np.zeros(arr.shape, dtype=np.float32)
+    return np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
+
+
+def resolve_roi_image_source(
+    root: zarr.Group,
+    run: zarr.Group,
+    *,
+    crop_run: str | None = None,
+    image_array: str = "roi_images",
+    image_source: str = "auto",
+    allow_row_position_fallback: bool = False,
+) -> RoiImageSource | None:
+    if image_source == "none":
+        return None
+    if image_source not in {"auto", "crop"}:
+        raise ValueError(f"Unsupported image_source: {image_source!r}.")
+
+    resolved_crop_run = crop_run or run.attrs.get("source_crop_run") or run.attrs.get("crop_run")
+    if not resolved_crop_run:
+        if image_source == "crop":
+            raise ValueError("No crop run supplied and refined run has no source_crop_run attr.")
+        return None
+    resolved_crop_run = str(resolved_crop_run)
+    crop_parent = root.get("crop_runs")
+    crop_group = crop_parent.get(resolved_crop_run) if isinstance(crop_parent, zarr.Group) else None
+    if not isinstance(crop_group, zarr.Group) or image_array not in crop_group:
+        if image_source == "crop":
+            raise ValueError(f"crop_runs/{resolved_crop_run} missing {image_array}.")
+        return None
+
+    roi_images = crop_group[image_array]
+    if "source_crop_row_ids" in run:
+        source_crop_row_ids = np.asarray(run["source_crop_row_ids"][:], dtype=np.int64)
+        return RoiImageSource(
+            crop_run_name=resolved_crop_run,
+            roi_images=roi_images,
+            source_crop_row_ids=source_crop_row_ids,
+            row_position_fallback=False,
+        )
+    if allow_row_position_fallback:
+        row_count = int(run["masks_roi"].shape[0]) if "masks_roi" in run else int(roi_images.shape[0])
+        source_crop_row_ids = np.arange(row_count, dtype=np.int64)
+        return RoiImageSource(
+            crop_run_name=resolved_crop_run,
+            roi_images=roi_images,
+            source_crop_row_ids=source_crop_row_ids,
+            row_position_fallback=True,
+        )
+    if image_source == "crop":
+        raise ValueError("Refined run has no source_crop_row_ids; refusing row-position crop image fallback.")
+    return None
+
+
 def _contour_points_for_rows(run: zarr.Group, component: str, rows: np.ndarray) -> list[np.ndarray]:
     contours = run["components"][component]["contours"]
     ptr = np.asarray(contours["ptr"][rows], dtype=np.int64)
@@ -203,7 +287,9 @@ def plot_samples(
     rows: Sequence[int],
     components: Sequence[str],
     output: Path,
+    roi_image_source: RoiImageSource | None = None,
     overlay_mask: bool = True,
+    mask_alpha: float = 0.25,
     dpi: int = 160,
 ) -> None:
     import matplotlib
@@ -224,23 +310,51 @@ def plot_samples(
         constrained_layout=True,
     )
     for row_pos, row_index in enumerate(row_values):
+        base_image = roi_image_source.image_for_refined_row(row_index) if roi_image_source is not None else None
+        base_source = (
+            f"crop:{roi_image_source.crop_run_name}"
+            if roi_image_source is not None and base_image is not None
+            else "mask"
+        )
         for col_pos, component in enumerate(component_values):
             ax = axes[row_pos][col_pos]
             sample = sample_by_key[(row_index, component)]
+            raster_shape: tuple[int, int] | None = None
+            if base_image is not None:
+                base = _normalize_image(base_image)
+                if base.ndim >= 2:
+                    raster_shape = (int(base.shape[0]), int(base.shape[1]))
+                ax.imshow(base, cmap="gray", interpolation="nearest", origin="upper")
             if overlay_mask and "masks_roi" in run and component in mask_labels:
                 component_index = int(mask_labels.index(component))
                 mask = np.asarray(run["masks_roi"][row_index, component_index], dtype=np.uint8)
-                ax.imshow(mask, cmap="gray", alpha=0.35, origin="upper")
+                if raster_shape is None:
+                    raster_shape = (int(mask.shape[0]), int(mask.shape[1]))
+                    ax.imshow(mask, cmap="gray", alpha=0.45, interpolation="nearest", origin="upper")
+                else:
+                    visible_mask = np.ma.masked_where(mask <= 0, mask)
+                    ax.imshow(
+                        visible_mask,
+                        cmap="autumn",
+                        alpha=float(mask_alpha),
+                        interpolation="nearest",
+                        origin="upper",
+                    )
             raw = sample.raw_points
             if raw.shape[0] > 0:
                 closed = np.concatenate([raw, raw[:1]], axis=0) if raw.shape[0] > 1 else raw
-                ax.plot(closed[:, 0], closed[:, 1], color="0.6", linewidth=0.8, label="raw")
+                ax.plot(closed[:, 0], closed[:, 1], color="white", linewidth=0.9, alpha=0.9, label="raw")
             sampled = sample.sampled_points
             if np.any(np.isfinite(sampled)):
                 ax.plot(sampled[:, 0], sampled[:, 1], "-o", color="#d95f02", linewidth=1.0, markersize=2.0)
-            ax.set_title(f"row {row_index} / {component} / K={sampled.shape[0]}")
+            ax.set_title(f"row {row_index} / {component} / K={sampled.shape[0]} / {base_source}")
             ax.set_aspect("equal")
-            ax.invert_yaxis()
+            if raster_shape is not None:
+                height, width = raster_shape
+                ax.set_xlim(-0.5, float(width) - 0.5)
+                ax.set_ylim(float(height) - 0.5, -0.5)
+            else:
+                ax.invert_yaxis()
             ax.set_xticks([])
             ax.set_yticks([])
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -266,7 +380,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample-count", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--image-source", choices=("auto", "crop", "none"), default="auto")
+    parser.add_argument("--crop-run", help="Override crop_runs/<run> used for ROI image underlays.")
+    parser.add_argument("--image-array", default="roi_images", help="Crop-run array used for ROI image underlays.")
+    parser.add_argument(
+        "--allow-row-position-image-fallback",
+        action="store_true",
+        help="Allow refined row N to use crop image row N when source_crop_row_ids is missing.",
+    )
     parser.add_argument("--no-overlay-mask", action="store_true")
+    parser.add_argument("--mask-alpha", type=float, default=0.25)
     parser.add_argument("--dpi", type=int, default=160)
     parser.add_argument("--json", action="store_true")
     return parser
@@ -294,13 +417,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         component_k_overrides=overrides,
         default_k=int(args.default_k),
     )
+    roi_image_source = resolve_roi_image_source(
+        root,
+        run,
+        crop_run=args.crop_run,
+        image_array=str(args.image_array),
+        image_source=str(args.image_source),
+        allow_row_position_fallback=bool(args.allow_row_position_image_fallback),
+    )
     plot_samples(
         run,
         samples,
         rows=rows.tolist(),
         components=components,
         output=args.output,
+        roi_image_source=roi_image_source,
         overlay_mask=not bool(args.no_overlay_mask),
+        mask_alpha=float(args.mask_alpha),
         dpi=int(args.dpi),
     )
     if args.json:
@@ -317,6 +450,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                         component: component_k(component, overrides, int(args.default_k))
                         for component in components
                     },
+                    "image_source": (
+                        None
+                        if roi_image_source is None
+                        else {
+                            "crop_run": roi_image_source.crop_run_name,
+                            "row_position_fallback": bool(roi_image_source.row_position_fallback),
+                        }
+                    ),
                     "output": str(args.output),
                 },
                 indent=2,
