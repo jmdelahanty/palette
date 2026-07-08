@@ -196,122 +196,65 @@ docs/realtime_sparse_row_index_contract.md          (6 open / 0 done)
 
 ---
 
-## Part 2 — src/fisheye/utils/ (274 modules, ~150k LOC)
+## Part 2 — src/fisheye/utils/ — DEFER to the existing strategy
 
-Age profile: 2025-10: 2, 2025-11: 1, 2026-02: 20, 03: 12, 04: 14, 05: 33,
-06: 30, **07: 163**. The graveyard framing is wrong: utils is a
-*fast-churning workshop* — 59% of files touched in the last 8 days, only 49
-files (~11.5k LOC) pre-May. The problem is placement and growth rate, not an
-ancient stale tail.
+**Do not run a separate utils deletion plan from this doc.** An authoritative,
+deeper plan already exists: **`docs/utils_reorganization_strategy.md`**
+(2026-07-04, synthesis of four opus agents). This section is demoted to a
+pointer plus the small set of facts this session independently verified.
 
-### Census by referrer class
+Why the deferral: the reorg strategy reframes the problem correctly and this
+session's census confirmed the reframe the hard way.
 
-| Class | Files | LOC | pre-May files | pre-May LOC |
-|---|---|---|---|---|
-| 1. Imported by library code (src outside utils) | 14 | 9,838 | 1 | 455 |
-| 2. Referenced only by other utils modules | 60 | 52,321 | 8 | 5,055 |
-| 3. Referenced only by its own tests | 130 | 61,358 | 9 | 2,433 |
-| 4. Referenced only by a scripts/*.sh wrapper | 26 | 12,910 | 7 | 1,500 |
-| 5. Referenced only by living docs | 27 | 10,541 | 13 | 5,006 |
-| 6. Unreferenced anywhere | 17 | 3,421 | 11 | 2,553 |
+- **The dead tail is small and is not the prize.** Strategy sizes confirmed-dead
+  at ~1–1.5k LOC; the real win is Layer 2 — ~120 copy-pasted helpers with **3
+  live correctness drifts** (`_iter_zarr` recording-discovery divergence,
+  `_utc_now` 4-format provenance timestamps, `_write_json` non-atomic writers).
+  That is Phase 1 of the strategy and the highest-value next work — a careful
+  per-call-site consolidation, **not** a blind sed, and worth its own focused
+  effort, not a tail-of-session cleanup.
+- **"Orphan-in-code ≠ dead" — verified twice this session.** The strategy's
+  central guardrail held: my census's reference detection had false negatives.
+  `setup_experiment_metadata.py` (census said unreferenced) is invoked as a
+  subprocess script by `cli/interactive_launcher.py` — a near-miss deletion of
+  live code. `patch_legacy_h5.py` (strategy said zero-ref) is referenced by
+  `visualization/visualize_experiment_timeline_combined_h5.py`. **Gate deletion
+  on code+test+script greps of the bare module name, not import-graph class.**
+- **H5 is not fully legacy.** `analysis/create_analysis_zarr.py`,
+  `analysis/import_stimulus_to_zarr.py`, `analysis/calibration_manager.py` still
+  ingest H5.
 
-Full per-file classification: regenerate via the method above (census script
-pattern preserved there; original JSON was session-scratch).
+### What this session actually executed: ZERO utils deletions — and why
 
-### Structural findings (bigger than the stale tail)
+The strategy's "7 high-confidence deletes (read-and-confirmed, zero refs)" list
+did **not** survive per-file inspection. Under operator review (Jeremy flagged
+the `check_h5_*` scripts as import-adjacent), all 7 turned out to be the **live
+H5→zarr stimulus-import toolkit**, not spent debris:
 
-1. **Class 1 is mislabeled library code.** 14 modules in `utils/` are imported
-   by real `src/` packages. They should graduate out of utils into the module
-   that imports them (or `shared/`), enforced by an import-linter contract
-   forbidding `!utils -> utils` imports.
-2. **Class 2 is a 52k-LOC shadow library.** 60 modules alive only via other
-   utils modules. Needs a reachability pass: build the intra-utils import
-   graph, roots = classes 1/3/4/5 keepers; unreachable subgraphs are dead in
-   clusters, not single files.
-3. **Class 3 (61k LOC, 130 files) is scripts kept alive by their own tests.**
-   Mostly recent/active, but the pattern means deleting a script must delete
-   its test file too, or the suite pins the corpse in place.
+| File | Reality |
+|---|---|
+| `backfill_h5_metadata.py` | imports `analysis.import_stimulus_to_zarr` — wired into the live import module |
+| `fix_stimulus_mode_mappings.py` | mutates `/enums/stimulus_modes` in Citrus H5 — stimulus repair tool |
+| `inspect_zarr_events.py` | verifies `import_stimulus_to_zarr` captured the event stream |
+| `read_h5_data.py`, `check_h5_tracking_data.py`, `check_h5_subject_metadata.py` | operator eyeball scanners for the same H5 import path |
+| `patch_legacy_h5.py` | referenced by `visualization/visualize_experiment_timeline_combined_h5.py` |
 
-### Tranche U1 — pre-May deletion candidates (~40 files, ~11.5k LOC)
+**Lesson (reinforces the strategy's own guardrail, harder than it stated it):**
+"H5 + old" read as "dead" to both my census *and* four opus agents; it was
+actually the operator's import toolkit. The confirmed-dead surface is smaller
+than the strategy's ~1–1.5k LOC estimate — possibly near zero without live
+operator sign-off per file. Deletion of utils must be **operator-gated per
+file**, full stop; static analysis (import graph *or* read-and-confirm by an
+agent) is insufficient. This makes Phase 1 (drift consolidation) even more
+clearly the only high-value utils work available without the operator in the
+loop.
 
-For code, **delete, don't archive** — git history is the archive; archived
-code still greps, still imports, still rots. This doc records the list for
-recoverability.
+### Everything else about utils
 
-- [ ] Mark keepers below (ad-hoc tools invisible to the census), then delete
-      the rest + their tests + their scripts/*.sh wrappers in one commit.
-
-Class 6, unreferenced (11):
-
-```
-src/fisheye/utils/fix_stimulus_mode_mappings.py     (2025-10-30, 281)
-src/fisheye/utils/inspect_zarr_events.py            (2025-11-02, 239)
-src/fisheye/utils/check_h5_subject_metadata.py      (2026-02-04, 132)
-src/fisheye/utils/check_h5_tracking_data.py         (2026-02-04, 144)
-src/fisheye/utils/clear_detection_flags.py          (2026-02-06, 328)
-src/fisheye/utils/inspect_keypoint_review_linkage.py (2026-02-08, 301)
-src/fisheye/utils/audit_registry_dataset_paths.py   (2026-02-09, 251)
-src/fisheye/utils/compare_analysis_training_zarr.py (2026-02-09, 192)
-src/fisheye/utils/setup_experiment_metadata.py      (2026-03-29, 279)
-src/fisheye/utils/set_crop_review_status.py         (2026-04-14, 100)
-src/fisheye/utils/export_protocol_mermaid.py        (2026-04-28, 306)
-```
-
-Class 5, docs-only (13) — archive the referring doc first or together:
-
-```
-src/fisheye/utils/list_training_versions.py         (2026-02-04, 151)
-src/fisheye/utils/read_h5_data.py                   (2026-02-04, 475)
-src/fisheye/utils/report_zarr_storage.py            (2026-02-04, 309)
-src/fisheye/utils/backfill_pose_onnx_registry_metadata.py (2026-02-08, 138)
-src/fisheye/utils/check_training_sample_accounting.py (2026-02-08, 217)
-src/fisheye/utils/run_pose_training_pipeline.py     (2026-02-08, 10)
-src/fisheye/utils/rename_recording_zarrs_to_training.py (2026-02-09, 177)
-src/fisheye/utils/repair_keypoint_offset_corruption.py (2026-03-05, 447)
-src/fisheye/utils/compute_backgrounds_batch.py      (2026-03-29, 637)
-src/fisheye/utils/repair_keypoint_training_refined_run_ties.py (2026-03-30, 156)
-src/fisheye/utils/zarr_inspector.py                 (2026-04-12, 1778)  # likely KEEPER: interactive tool?
-src/fisheye/utils/view_merged_pose_training_zarr.py (2026-04-24, 398)
-src/fisheye/utils/backfill_refined_subject_mask_metrics.py (2026-04-29, 113)
-```
-
-Class 4, shell-wrapper-only (7) — delete script + wrapper as a pair:
-
-```
-src/fisheye/utils/validate_detect_training_zarr.py  (2026-02-06, 42)
-src/fisheye/utils/prepare_pose_training_from_registry.py (2026-02-08, 10)
-src/fisheye/utils/validate_keypoint_training_zarr.py (2026-02-08, 42)
-src/fisheye/utils/index_source_recording_profiles.py (2026-03-05, 867)
-src/fisheye/utils/index_training_data_cards.py      (2026-03-05, 338)
-src/fisheye/utils/sync_refined_subject_mask_metadata.py (2026-04-15, 95)
-src/fisheye/utils/write_refined_subject_mask_edit.py (2026-04-29, 106)  # KEEPER? exposed as pyproject console script palette-write-refined-subject-mask-edit
-```
-
-Class 3, tests-only (9) — delete test file with the script:
-
-```
-src/fisheye/utils/check_detect_training_config.py   (2026-02-06, 132)
-src/fisheye/utils/validate_recording_manifest.py    (2026-02-09, 397)
-src/fisheye/utils/list_detect_group_fallbacks.py    (2026-02-10, 133)
-src/fisheye/utils/serve_recording_status_page.py    (2026-03-28, 96)   # verify vs live status_page/ tooling before deleting
-src/fisheye/utils/inspect_roi_cache.py              (2026-04-04, 375)
-src/fisheye/utils/backfill_hevc_keyframe_flags.py   (2026-04-17, 257)
-src/fisheye/utils/inspect_refined_detect_run.py     (2026-04-23, 331)
-src/fisheye/utils/patch_crops_from_refined.py       (2026-04-24, 663)
-src/fisheye/utils/validate_subject_mask_training_zarr.py (2026-04-24, 49)
-```
-
-Standing exclusion: anything on the TensorRT export path is load-bearing for
-realtime acquisition — never delete via this process.
-
-### Tranche U2 — structural follow-ups
-
-- [ ] Graduate the 14 class-1 modules out of utils; add import-linter contract.
-- [ ] Intra-utils reachability pass over the 60 class-2 modules; delete dead
-      clusters.
-- [ ] Growth rule going forward: a new utils script is born with an expiry —
-      either it gains a shell wrapper / doc runbook (operational) or it is
-      deleted when its investigation lands. Monthly census sweep enforces.
+Lives in `docs/utils_reorganization_strategy.md`. Do not duplicate its tranches
+here. The census table this session produced (referrer-class breakdown) is a
+weaker view of the same ground the strategy's four-axis analysis already covers;
+regenerate on demand rather than maintaining a second copy.
 
 ---
 
@@ -319,4 +262,10 @@ realtime acquisition — never delete via this process.
 
 - 2026-07-08: inventory created.
 - 2026-07-08: docs tranche 1 executed — 35 docs moved to `docs/archive/`
-  (top-level docs/ 273 → 238). Tranches 2/3 and utils U1/U2 still open.
+  (top-level docs/ 273 → 238). Tranches 2/3 still open.
+- 2026-07-08: utils section demoted to a pointer at
+  `utils_reorganization_strategy.md` (2026-07-04) after discovering it as the
+  authoritative plan. Attempted the strategy's 7-file "high-confidence delete";
+  reverted all of it — operator review found the H5 cluster is the live
+  stimulus-import toolkit. **Net utils deletions: 0.** No competing utils plan
+  is maintained in this doc.
