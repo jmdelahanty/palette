@@ -79,6 +79,13 @@ KEYPOINT_USABILITY_DATASET_CANDIDATES = (
     "source_success",
 )
 
+DEFAULT_SMOOTH_SECONDS = 0.05
+DEFAULT_HYSTERESIS_HIGH_PX = 4.0
+DEFAULT_HYSTERESIS_LOW_PX = 2.0
+DEFAULT_HYSTERESIS_MIN_FRAMES = 3
+DEFAULT_HYSTERESIS_BAND_POLICY = "latch"
+DEFAULT_SMOOTHING_ALIGNMENT = "causal"
+
 SPEED_DERIVATIVE_LEVELS = (
     "speed_raw",
     "speed_filtered",
@@ -884,9 +891,9 @@ def build_track_datasets(
     hysteresis_high_px: Optional[float] = None,
     hysteresis_low_px: Optional[float] = None,
     hysteresis_min_frames: Optional[int] = None,
-    hysteresis_band_policy: str = "reset",
+    hysteresis_band_policy: str = DEFAULT_HYSTERESIS_BAND_POLICY,
     smoothing_method: str = "moving_average",
-    smoothing_alignment: str = "centered",
+    smoothing_alignment: str = DEFAULT_SMOOTHING_ALIGNMENT,
     savgol_polyorder: int = 3,
 ) -> Tuple[Dict[int, Dict[str, Any]], List[Dict[str, float]]]:
     """Assemble per-track data arrays and summary statistics.
@@ -2149,7 +2156,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser.add_argument(
         "--run-name", help="Optional name for the output track kinematics run."
     )
-    parser.add_argument("--smooth-seconds", type=float, default=1.0, help="Smoothing window in seconds (default: 1.0).")
+    parser.add_argument(
+        "--smooth-seconds",
+        type=float,
+        default=DEFAULT_SMOOTH_SECONDS,
+        help=f"Smoothing window in seconds (default: {DEFAULT_SMOOTH_SECONDS}).",
+    )
     parser.add_argument(
         "--distance-interpolation-seconds",
         type=float,
@@ -2206,30 +2218,39 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser.add_argument(
         "--hysteresis-high-px",
         type=float,
-        default=2.0,
-        help="High threshold in pixels for hysteresis filter in offline analysis (enter 'moving' state, default: 2.0).",
+        default=DEFAULT_HYSTERESIS_HIGH_PX,
+        help=(
+            "High threshold in pixels for hysteresis filter in offline analysis "
+            f"(enter 'moving' state, default: {DEFAULT_HYSTERESIS_HIGH_PX})."
+        ),
     )
     parser.add_argument(
         "--hysteresis-low-px",
         type=float,
-        default=1.0,
-        help="Low threshold in pixels for hysteresis filter in offline analysis (exit 'moving' state, default: 1.0).",
+        default=DEFAULT_HYSTERESIS_LOW_PX,
+        help=(
+            "Low threshold in pixels for hysteresis filter in offline analysis "
+            f"(exit 'moving' state, default: {DEFAULT_HYSTERESIS_LOW_PX})."
+        ),
     )
     parser.add_argument(
         "--hysteresis-min-frames",
         type=int,
-        default=3,
-        help="Minimum consecutive frames below low threshold to exit 'moving' state in offline analysis (default: 3).",
+        default=DEFAULT_HYSTERESIS_MIN_FRAMES,
+        help=(
+            "Minimum consecutive frames below low threshold to exit 'moving' state "
+            f"in offline analysis (default: {DEFAULT_HYSTERESIS_MIN_FRAMES})."
+        ),
     )
     parser.add_argument(
         "--hysteresis-band-policy",
         choices=HYSTERESIS_BAND_POLICIES,
-        default="reset",
+        default=DEFAULT_HYSTERESIS_BAND_POLICY,
         help=(
             "How in-band displacements between low and high affect exit debounce "
             "in offline analysis: 'reset' preserves historical Palette behavior; "
             "'latch' keeps the counter unchanged, matching Schmitt-style hysteresis "
-            "(default: reset)."
+            f"(default: {DEFAULT_HYSTERESIS_BAND_POLICY})."
         ),
     )
     parser.add_argument(
@@ -2248,8 +2269,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         "--smoothing-alignment",
         type=str,
         choices=SMOOTHING_ALIGNMENTS,
-        default="centered",
-        help="Temporal smoothing alignment: 'centered' uses past and future samples; 'causal' uses only current/past samples and is supported for moving_average (default: centered).",
+        default=DEFAULT_SMOOTHING_ALIGNMENT,
+        help=(
+            "Temporal smoothing alignment: 'centered' uses past and future samples; "
+            "'causal' uses only current/past samples and is supported for moving_average "
+            f"(default: {DEFAULT_SMOOTHING_ALIGNMENT})."
+        ),
     )
     parser.add_argument(
         "--savgol-polyorder",

@@ -8,6 +8,7 @@ import pytest
 import zarr
 
 from fisheye.analysis.detect_bouts_multi_level import (
+    DEFAULT_EXPONENTIAL_TAU_S,
     _causal_exponential_speed_response,
     _detect_bouts_from_peak_events,
     _detect_bouts_from_speed,
@@ -209,6 +210,7 @@ def test_detect_and_save_bouts_records_filtered_default_level(tmp_path: Path) ->
         run_name="bouts_filtered_default",
         track_kinematics_run="tk_1",
         track_id=0,
+        method="threshold",
         threshold_mm=2.0,
         min_bout_duration_s=0.01,
         min_gap_duration_s=0.01,
@@ -237,7 +239,7 @@ def test_detect_and_save_bouts_records_filtered_default_level(tmp_path: Path) ->
     assert provenance["parameters"]["gap_merge_policy_active"] is True
     assert provenance["parameters"]["gap_merge_min_gap_duration_s"] == 0.01
     assert provenance["parameters"]["gap_merge_min_gap_source"] == "seconds"
-    assert provenance["parameters"]["exponential_tau_s"] == 0.05
+    assert provenance["parameters"]["exponential_tau_s"] == DEFAULT_EXPONENTIAL_TAU_S
     assert provenance["parameters"]["exponential_source_level"] == "speed_filtered"
     assert provenance["inputs"]["source_track_kinematics_run"] == "tk_1"
     assert provenance["inputs"]["source_track_path"].endswith("/tk_1/tracks/id_0")
@@ -523,6 +525,7 @@ def test_detect_and_save_bouts_requires_overwrite_for_existing_run(tmp_path: Pat
         run_name="candidate",
         track_kinematics_run="tk_1",
         track_id=0,
+        method="threshold",
         threshold_mm=2.0,
         min_bout_duration_s=0.01,
         min_gap_duration_s=0.01,
@@ -535,6 +538,7 @@ def test_detect_and_save_bouts_requires_overwrite_for_existing_run(tmp_path: Pat
             run_name="candidate",
             track_kinematics_run="tk_1",
             track_id=0,
+            method="threshold",
             threshold_mm=4.0,
             min_bout_duration_s=0.01,
             min_gap_duration_s=0.01,
@@ -546,6 +550,7 @@ def test_detect_and_save_bouts_requires_overwrite_for_existing_run(tmp_path: Pat
         run_name="candidate",
         track_kinematics_run="tk_1",
         track_id=0,
+        method="threshold",
         threshold_mm=4.0,
         min_bout_duration_s=0.01,
         min_gap_duration_s=0.01,

@@ -226,6 +226,7 @@ def test_plot_track_kinematics_writes_png_and_interactive_spec_artifacts(tmp_pat
     assert png.attrs["track_id"] == 0
     assert png.attrs["source_paths"]["time_seconds"].endswith("/tracks/id_0/time_seconds")
     assert png.attrs["parameters"]["bins"] == 8
+    assert png.attrs["parameters"]["speed_level"] == mod.DEFAULT_SWIM_BOUT_OVERLAY_SPEED_LEVEL
     png_provenance = png.attrs["provenance"]
     assert png_provenance["contract"]["name"] == "palette_stage_provenance"
     assert png_provenance["stage"] == "track_kinematics_visualization"
@@ -273,3 +274,39 @@ def test_plot_track_kinematics_writes_png_and_interactive_spec_artifacts(tmp_pat
         manifest["track_kinematics_summary_track_0_interactive"]["artifact_schema_id"]
         == INTERACTIVE_SPEC_SCHEMA_ID
     )
+
+
+def test_plot_track_kinematics_accepts_exponential_swim_bout_overlay(tmp_path: Path) -> None:
+    zarr_path = _make_track_kinematics_archive(tmp_path)
+    _add_swim_bout_run(
+        zarr_path,
+        run_name="peak_event_bouts",
+        default_level="speed_exponential",
+        levels=("speed_filtered", "speed_exponential"),
+    )
+
+    mod.main(
+        [
+            str(zarr_path),
+            "--offline-only",
+            "--track-id",
+            "0",
+            "--swim-bout-run",
+            "peak_event_bouts",
+            "--speed-level",
+            "exponential",
+            "--write-zarr-artifacts",
+        ]
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    run = root["analysis"]["track_kinematics_runs"]["offline"]["track_kinematics_1"]
+    spec_group = run["visualizations"]["track_kinematics_summary_track_0_interactive"]
+    spec_bytes = np.asarray(spec_group["spec_json"][:], dtype=np.uint8).tobytes()
+    spec = json.loads(spec_bytes.decode("utf-8"))
+
+    assert spec["overlays"]["swim_bouts"]["speed_level"] == "exponential"
+    assert spec["overlays"]["swim_bouts"]["resolved_label"] == (
+        "peak_event_bouts (speed_exponential) (threshold)"
+    )
+    assert spec_group.attrs["parameters"]["speed_level"] == "exponential"

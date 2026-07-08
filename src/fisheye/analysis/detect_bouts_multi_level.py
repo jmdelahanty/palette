@@ -32,7 +32,7 @@ Compatibility storage structure (`--layout hierarchical_v1`):
     │   ├── bouts
     │   ├── detection_signal_mm_s
     │   └── metadata
-    ├── default_level = "speed_smoothed" or "speed_filtered" (attr)
+    ├── default_level = "speed_exponential" or another stored speed level (attr)
     └── run_metadata (attrs: threshold, source_track_kinematics_run, etc.)
 
 Usage (basic):
@@ -44,9 +44,12 @@ Usage (with options):
     scripts/py -m fisheye.analysis.detect_bouts_multi_level /path/to/archive.zarr \\
         --run-name custom_run \\
         --track-kinematics-run latest \\
-        --threshold-mm 0.01 \\
-        --default-level filtered \\
-        --boundary-mode local_minimum \\
+        --method peak_event \\
+        --default-level exponential \\
+        --exponential-tau-s 0.025 \\
+        --min-peak-prominence-mm-s 4.0 \\
+        --min-peak-distance-s 0.10 \\
+        --peak-width-rel-height 0.98 \\
         --overwrite
 """
 
@@ -102,6 +105,13 @@ SPEED_LEVEL_ALIASES = {
     "exponential": "speed_exponential",
 }
 SPEED_LEVEL_CHOICES = tuple(SPEED_LEVEL_ALIASES) + SPEED_LEVELS
+DEFAULT_DETECTION_METHOD = "peak_event"
+DEFAULT_SWIM_BOUT_LEVEL = "speed_exponential"
+DEFAULT_EXPONENTIAL_TAU_S = 0.025
+DEFAULT_EXPONENTIAL_SOURCE_LEVEL = "filtered"
+DEFAULT_MIN_PEAK_PROMINENCE_MM_S = 4.0
+DEFAULT_MIN_PEAK_DISTANCE_S = 0.10
+DEFAULT_PEAK_WIDTH_REL_HEIGHT = 0.98
 BOUNDARY_MODES = ("threshold", "local_minimum")
 GAP_MERGE_POLICIES = ("sampled_frame_gap", "interpolated_core_gap")
 PEAK_EVENT_BOUNDARY_MODES = ("relative_prominence_width",)
@@ -2118,7 +2128,7 @@ def detect_and_save_bouts(
     run_name: Optional[str],
     track_kinematics_run: str = "latest",
     track_id: int = 0,
-    method: str = "threshold",
+    method: str = DEFAULT_DETECTION_METHOD,
     threshold_mm: float = 0.01,
     prominence: float = 1.0,
     min_peak_height: Optional[float] = None,
@@ -2128,17 +2138,17 @@ def detect_and_save_bouts(
     min_gap_frames: Optional[int] = None,
     gap_merge_policy: str = "sampled_frame_gap",
     min_peak_height_mm_s: Optional[float] = None,
-    min_peak_prominence_mm_s: Optional[float] = 1.0,
-    min_peak_distance_s: float = 0.05,
-    peak_width_rel_height: float = 0.9,
+    min_peak_prominence_mm_s: Optional[float] = DEFAULT_MIN_PEAK_PROMINENCE_MM_S,
+    min_peak_distance_s: float = DEFAULT_MIN_PEAK_DISTANCE_S,
+    peak_width_rel_height: float = DEFAULT_PEAK_WIDTH_REL_HEIGHT,
     peak_event_boundary_mode: str = "relative_prominence_width",
     shape_split_policy: str = "none",
-    default_level: str = "speed_smoothed",
+    default_level: str = DEFAULT_SWIM_BOUT_LEVEL,
     overwrite: bool = False,
     boundary_mode: str = "threshold",
     boundary_window_s: float = 0.25,
-    exponential_tau_s: float = 0.05,
-    exponential_source_level: str = "filtered",
+    exponential_tau_s: float = DEFAULT_EXPONENTIAL_TAU_S,
+    exponential_source_level: str = DEFAULT_EXPONENTIAL_SOURCE_LEVEL,
     layout: str = SWIM_BOUT_LAYOUT_DEFAULT,
     command: Optional[str] = None,
 ) -> str:
@@ -2815,8 +2825,11 @@ def main():
         '--method',
         type=str,
         choices=['threshold', 'peak', 'peak_event'],
-        default='threshold',
-        help='Detection method: "threshold", "peak", or "peak_event" (default: threshold)',
+        default=DEFAULT_DETECTION_METHOD,
+        help=(
+            'Detection method: "threshold", "peak", or "peak_event" '
+            f'(default: {DEFAULT_DETECTION_METHOD})'
+        ),
     )
 
     # Threshold method parameters
@@ -2831,11 +2844,11 @@ def main():
         '--default-level',
         type=str,
         choices=SPEED_LEVEL_CHOICES,
-        default='speed_smoothed',
+        default=DEFAULT_SWIM_BOUT_LEVEL,
         help=(
             'Speed level downstream consumers should use by default. '
             'Accepts raw/filtered/smoothed/averaged/exponential aliases or stored subgroup '
-            'names. Default: speed_smoothed.'
+            f'names. Default: {DEFAULT_SWIM_BOUT_LEVEL}.'
         ),
     )
 
@@ -2862,16 +2875,22 @@ def main():
     parser.add_argument(
         '--exponential-tau-s',
         type=float,
-        default=0.05,
-        help='Time constant in seconds for the causal exponential speed candidate (default: 0.05).',
+        default=DEFAULT_EXPONENTIAL_TAU_S,
+        help=(
+            'Time constant in seconds for the causal exponential speed candidate '
+            f'(default: {DEFAULT_EXPONENTIAL_TAU_S}).'
+        ),
     )
 
     parser.add_argument(
         '--exponential-source-level',
         type=str,
         choices=tuple(choice for choice in SPEED_LEVEL_CHOICES if normalize_speed_level(choice) != "speed_exponential"),
-        default='filtered',
-        help='Source speed level for the exponential response candidate (default: filtered).',
+        default=DEFAULT_EXPONENTIAL_SOURCE_LEVEL,
+        help=(
+            'Source speed level for the exponential response candidate '
+            f'(default: {DEFAULT_EXPONENTIAL_SOURCE_LEVEL}).'
+        ),
     )
 
     # Peak method parameters
@@ -2907,22 +2926,31 @@ def main():
     parser.add_argument(
         '--min-peak-prominence-mm-s',
         type=float,
-        default=1.0,
-        help='Minimum peak prominence in mm/s for peak_event method (default: 1.0).',
+        default=DEFAULT_MIN_PEAK_PROMINENCE_MM_S,
+        help=(
+            'Minimum peak prominence in mm/s for peak_event method '
+            f'(default: {DEFAULT_MIN_PEAK_PROMINENCE_MM_S}).'
+        ),
     )
 
     parser.add_argument(
         '--min-peak-distance-s',
         type=float,
-        default=0.05,
-        help='Minimum time between accepted peak_event peaks in seconds (default: 0.05).',
+        default=DEFAULT_MIN_PEAK_DISTANCE_S,
+        help=(
+            'Minimum time between accepted peak_event peaks in seconds '
+            f'(default: {DEFAULT_MIN_PEAK_DISTANCE_S}).'
+        ),
     )
 
     parser.add_argument(
         '--peak-width-rel-height',
         type=float,
-        default=0.9,
-        help='Relative height passed to scipy.signal.peak_widths for peak_event boundaries (default: 0.9).',
+        default=DEFAULT_PEAK_WIDTH_REL_HEIGHT,
+        help=(
+            'Relative height passed to scipy.signal.peak_widths for peak_event boundaries '
+            f'(default: {DEFAULT_PEAK_WIDTH_REL_HEIGHT}).'
+        ),
     )
 
     parser.add_argument(

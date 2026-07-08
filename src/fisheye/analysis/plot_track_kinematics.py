@@ -37,6 +37,7 @@ from .chaser_metrics_loader import load_chaser_metrics
 TRACK_KINEMATICS_PLOT_SPEC_SCHEMA_ID = "palette.plot_spec.track_kinematics_summary.v1"
 TRACK_KINEMATICS_PLOT_RENDERER = "palette-track-kinematics-summary-v1"
 TRACK_KINEMATICS_PNG_PREFIX = "track_kinematics_summary"
+DEFAULT_SWIM_BOUT_OVERLAY_SPEED_LEVEL = "exponential"
 
 
 @dataclass
@@ -1347,9 +1348,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     )
     parser.add_argument(
         "--speed-level",
-        choices=["raw", "filtered", "smoothed", "averaged"],
-        default="smoothed",
-        help="Speed level to use for swim bout overlay in hierarchical runs (default: smoothed).",
+        choices=["raw", "filtered", "smoothed", "averaged", "exponential"],
+        default=DEFAULT_SWIM_BOUT_OVERLAY_SPEED_LEVEL,
+        help=(
+            "Speed level to use for swim bout overlay in hierarchical runs "
+            f"(default: {DEFAULT_SWIM_BOUT_OVERLAY_SPEED_LEVEL})."
+        ),
     )
     parser.add_argument(
         "--write-zarr-artifacts",
