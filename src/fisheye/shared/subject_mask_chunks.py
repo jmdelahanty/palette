@@ -8,6 +8,9 @@ incremental writes remain practical while file counts stay bounded.
 from __future__ import annotations
 
 SUBJECT_MASK_STORAGE_ROW_CHUNK = 16
+REFINED_SUBJECT_MASK_STORAGE_ROW_CHUNK = 128
+REFINED_SUBJECT_MASK_BITPACKED_ROW_CHUNK = 512
+REFINED_SUBJECT_MASK_BITPACKED_COMPONENT_CHUNK = 4
 SUBJECT_MASK_METRIC_ROW_CHUNK = 256
 REFINED_SUBJECT_MASK_DASK_CHUNK_ALIGNMENT = "refined_subject_mask_metric_row_chunk"
 
@@ -32,7 +35,7 @@ def subject_mask_storage_chunks(total_rows: int, height: int, width: int) -> tup
 
 def refined_subject_mask_storage_row_chunk(total_rows: int, row_chunk: int | None = None) -> int:
     """Return the row chunk depth for dense refined-subject-mask ROI arrays."""
-    preferred = SUBJECT_MASK_STORAGE_ROW_CHUNK if row_chunk is None else int(row_chunk)
+    preferred = REFINED_SUBJECT_MASK_STORAGE_ROW_CHUNK if row_chunk is None else int(row_chunk)
     return _clamp_positive_chunk(preferred, total_rows)
 
 
@@ -49,15 +52,40 @@ def refined_subject_mask_storage_chunks(
 ) -> tuple[int, int, int, int]:
     """Return canonical chunks for dense refined-subject-mask ROI arrays.
 
-    Refined runs currently share the same full-ROI storage policy as raw
-    subject-mask runs, but keep a distinct helper so the refined contract can
-    evolve independently if review/edit access patterns diverge later.
+    Refined runs use a component-separated, full-spatial dense layout. The
+    default row chunk is larger than raw probability-stage masks because modern
+    refined masks are the editable authority surface and are commonly read by
+    whole component/row blocks.
     """
     return (
         refined_subject_mask_storage_row_chunk(total_rows, row_chunk),
         1,
         max(1, int(height)),
         max(1, int(width)),
+    )
+
+
+def refined_subject_mask_bitpacked_chunks(
+    total_rows: int,
+    channel_count: int,
+    height: int,
+    width: int,
+    *,
+    row_chunk: int | None = None,
+    channel_chunk: int | None = None,
+) -> tuple[int, int, int, int]:
+    """Return canonical chunks for the derived bitpacked refined-mask cache."""
+
+    preferred_rows = REFINED_SUBJECT_MASK_BITPACKED_ROW_CHUNK if row_chunk is None else int(row_chunk)
+    preferred_channels = (
+        REFINED_SUBJECT_MASK_BITPACKED_COMPONENT_CHUNK if channel_chunk is None else int(channel_chunk)
+    )
+    packed_width = (max(1, int(width)) + 7) // 8
+    return (
+        _clamp_positive_chunk(preferred_rows, total_rows),
+        _clamp_positive_chunk(preferred_channels, channel_count),
+        max(1, int(height)),
+        max(1, int(packed_width)),
     )
 
 

@@ -930,12 +930,12 @@ scripts/py -m fisheye.utils.run_subject_mask_batch_pipeline \
 | `--allow-missing-roi-cache` | off    | Allow fallback when no flat cache manifest is found |
 | `--batch-size-sm`          | `128`   | Subject-mask inference batch size        |
 | `--finalize-num-workers`   | `auto`  | Refined finalizer workers; `auto` resolves to finalization CPU slots |
-| `--finalize-dense-mask-row-chunk` | `256` | Physical row chunk for dense refined `masks_roi`; `256` is the current cluster production candidate |
+| `--finalize-dense-mask-row-chunk` | `128` | Physical row chunk for dense refined `masks_roi`; modern dense chunks are component-separated `[128, 1, H, W]` |
 | `--finalize-postcompute-backend` | `process_shards` | Expensive finalizer postcompute backend for eye geometry/body-swim contours; use `serial` only for historical in-process debugging |
 | `--finalize-postcompute-chunk-size` | *(finalizer default)* | Rows per postcompute shard; defaults inside the finalizer to `--finalize-chunk-size` |
 | `--finalize-postcompute-num-workers` | `auto` | Postcompute workers; `auto` lets the finalizer reuse `--finalize-num-workers` |
 | `--retain-source-seeds`   | off     | Retain dense `source_seed_masks_roi` debug arrays in refined runs |
-| `--mask-storage`          | `dense_uint8` | Refined mask storage mode: `dense_uint8`, `dense_and_bitpacked`, `bitpacked_v1`, `dense_and_rle`, `rle_v1`, or `dense_bitpacked_and_rle` |
+| `--mask-storage`          | `dense_uint8` | Refined mask storage mode: `dense_uint8`, `dense_and_bitpacked`, `dense_and_rle`, or `dense_bitpacked_and_rle`; compact-only modes are legacy/display-only and rejected for editable outputs |
 | `--mask-rle-validation-mode` | `invariants` | Compact RLE validation mode: `invariants` for production structural checks, `full` for dense round-trip audits, or `none` for deliberate low-level debugging |
 | `--device`                 | `0` when `--gpus > 0` | Torch device override       |
 | `--overwrite`              | off     | Pass overwrite through to child stages   |
@@ -990,16 +990,13 @@ By default, refined subject-mask finalization omits dense
 Use `--retain-source-seeds` only for diagnostic runs where seed-vs-final mask
 comparison is needed.
 
-Refined-mask storage is selectable with `--mask-storage`. Use
-`dense_and_bitpacked` for compact-storage cluster smokes where review/painting
-may still happen: it preserves the historical dense `masks_roi` compatibility
-cache while also writing fixed-size `mask_bitpacked`. Use `bitpacked_v1` only
-after that smoke validates; it writes the compact bitpacked surface without
-retaining dense `masks_roi`, so consumers must read through the logical
-mask-store contract or explicitly materialize a dense cache. `dense_and_rle` and
-`rle_v1` remain available for final/read-mostly products where smallest storage
-footprint matters more than edit locality. `dense_bitpacked_and_rle` is an audit
-mode for comparing all three surfaces in one logical run.
+Refined-mask storage is selectable with `--mask-storage`. Production/editable
+analysis and training outputs must preserve dense `masks_roi` as the authority.
+Use `dense_and_bitpacked` when a compact playback/publication cache is useful
+alongside editable dense masks, or `dense_and_rle` for an archive/fallback cache.
+Compact-only `bitpacked_v1` and `rle_v1` are rejected for modern editable runs.
+`dense_bitpacked_and_rle` is an audit mode for comparing all three physical
+surfaces in one logical run.
 
 The batch default `--mask-rle-validation-mode invariants` is also used for
 bitpacked compact validation. For RLE it checks compact-store schema,

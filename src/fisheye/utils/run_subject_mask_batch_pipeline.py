@@ -62,7 +62,7 @@ SUBJECT_MASK_SHARD_OUTPUT_PARENT = "subject_mask_shard_runs"
 SUBJECT_MASK_OUTPUT_PARENTS = (SUBJECT_MASK_CANONICAL_OUTPUT_PARENT, SUBJECT_MASK_SHARD_OUTPUT_PARENT)
 OUTPUT_RUN_PARENTS = (*SUBJECT_MASK_OUTPUT_PARENTS, "refined_subject_masks_runs")
 MAX_ARTIFACT_FILENAME_CHARS = 220
-DEFAULT_FINALIZE_DENSE_MASK_ROW_CHUNK = 256
+DEFAULT_FINALIZE_DENSE_MASK_ROW_CHUNK = 128
 _EXPECTED_NON_ZARR_SIDECAR_WARNING_RE = (
     r"Object at (logs|\.failed|\.imports|\.incoming) is not recognized as a component "
     r"of a Zarr hierarchy\."
@@ -1208,17 +1208,15 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=(
             "dense_uint8",
             "dense_and_bitpacked",
-            "bitpacked_v1",
             "dense_and_rle",
-            "rle_v1",
             "dense_bitpacked_and_rle",
         ),
         default="dense_uint8",
         help=(
             "Refined subject-mask physical storage passed to finalize_subject_masks. "
             "dense_uint8 preserves the historical dense masks_roi surface; dense_and_bitpacked "
-            "writes dense plus editable compact bitpacked masks; bitpacked_v1 writes bitpacked only; "
-            "dense_and_rle writes dense plus compact component RLE; rle_v1 writes compact RLE only; "
+            "writes dense plus derived compact bitpacked masks; "
+            "dense_and_rle writes dense plus derived compact component RLE; "
             "dense_bitpacked_and_rle writes all three surfaces for validation/audit runs."
         ),
     )

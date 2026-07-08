@@ -888,14 +888,11 @@ def test_save_refined_subject_roi_updates_edit_applied_metrics_and_reasons() -> 
     assert swim_reasons is not None
     assert body_reasons[0] == "manual_correction"
     assert swim_reasons[0] == "manual_correction"
-    body_contours = body_group["contours"]
-    swim_contours = swim_group["contours"]
-    assert body_contours.attrs["cache_coverage"] == "partial_row_updates"
-    assert swim_contours.attrs["cache_coverage"] == "partial_row_updates"
-    assert int(body_contours["ptr"][0]) == -1
-    assert int(body_contours["len"][0]) == 0
-    assert int(swim_contours["ptr"][0]) == 0
-    assert int(swim_contours["len"][0]) > 0
+    assert bool(run.attrs["derived_mask_caches_stale"]) is True
+    assert bool(run.attrs["metrics_stale"]) is True
+    assert bool(run.attrs["contours_stale"]) is True
+    assert run.attrs["derived_mask_caches_stale_component_names"] == ["subject_body", "swim_bladder"]
+    assert run.attrs["derived_mask_caches_stale_row_count"] == 1
     assert int(body_group["row_revision"][0]) == 1
     assert int(swim_group["row_revision"][0]) == 1
     assert int(body_group["row_revision"][1]) == 0
@@ -980,7 +977,7 @@ def test_save_refined_subject_roi_marks_compact_rle_stale_after_materialized_edi
     assert run.attrs["mask_store_encodings"] == ["dense_uint8", "component_rle_v1"]
 
 
-def test_save_refined_subject_roi_refreshes_scoped_bitpacked_after_dense_edit() -> None:
+def test_save_refined_subject_roi_marks_derived_caches_stale_after_dense_edit() -> None:
     root = _build_subject_review_root()
     source, refined = mod.prepare_refined_subject_run(
         root,
@@ -1013,11 +1010,15 @@ def test_save_refined_subject_roi_refreshes_scoped_bitpacked_after_dense_edit() 
 
     run = refined.group
     bitpacked_after = open_mask_store(run, prefer="bitpacked").read_dense()
-    np.testing.assert_array_equal(bitpacked_after[0, 0], np.asarray(run["masks_roi"][0, 0], dtype=np.uint8))
+    np.testing.assert_array_equal(bitpacked_after[0, 0], bitpacked_before[0, 0])
     np.testing.assert_array_equal(bitpacked_after[0, 1], bitpacked_before[0, 1])
     np.testing.assert_array_equal(bitpacked_after[1], bitpacked_before[1])
-    assert run.attrs["mask_bitpacked_refreshed_component_names"] == ["subject_body"]
-    assert run.attrs["mask_bitpacked_refresh_row_count"] == 1
+    assert bool(run.attrs["derived_mask_caches_stale"]) is True
+    assert bool(run.attrs["mask_bitpacked_stale"]) is True
+    assert run.attrs["mask_bitpacked_stale_component_names"] == ["subject_body"]
+    assert run.attrs["mask_bitpacked_stale_row_count"] == 1
+    assert bool(run.attrs["metrics_stale"]) is True
+    assert bool(run.attrs["contours_stale"]) is True
     assert bool(run.attrs["mask_rle_stale"]) is True
     assert run.attrs["mask_rle_stale_component_names"] == ["subject_body"]
 

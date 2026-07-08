@@ -220,6 +220,114 @@ components as future-only.
 subject-mask review, but browser paint/lasso interactions should not require a
 canonical Zarr rewrite for every small UI action.
 
+## Mask Storage Authority And Chunking
+
+Dense `masks_roi` is the authoritative pixel surface for modern editable
+refined subject masks. Compact stores are derived caches:
+
+- `masks_roi` is the only live review/edit/writeback target.
+- `mask_bitpacked` is an optional fixed-size compact display/publication cache.
+- `mask_rle` is an optional compact archive/fallback display cache.
+- component contours, component metrics, relations, bitpacked masks, and RLE
+  are derived from dense masks and can be regenerated.
+
+Training artifacts must also use dense `masks_roi` as the label source of
+truth. Compact mask stores may be read from analysis sources through
+`MaskStore` during export, but the training zarr output must materialize dense
+`subject_mask_runs/<run>/masks_roi` and must not store compact label surfaces
+as training targets.
+
+Use an explicit dense encoding name for new provenance:
+
+- canonical encoding name: `dense_uint8_v1`
+- storage surface: `masks_roi`
+- logical shape: `(N, C, H, W)`
+- dtype: `uint8`
+- value semantics: binary `0/1`
+- row axis: refined subject-mask row, not frame and not crop row
+- channel axis: semantic component labels declared by `mask_labels`
+- spatial axes: ROI-local mask pixels with the same `H,W` as the source crop
+  image surface
+
+Existing `dense_uint8` attrs and CLI values are the compatibility spelling for
+this v1 dense encoding. New writers should prefer recording both the stable
+contract fields (`mask_storage_authority = "masks_roi"`,
+`editable_mask_surface = "masks_roi"`, `training_mask_surface = "masks_roi"`)
+and the explicit encoding (`dense_uint8_v1`) while continuing to accept
+historical `dense_uint8` on read.
+
+Do not hard-code `512x512` as a semantic invariant. Refined mask size follows
+the source crop geometry:
+
+```text
+masks_roi.shape == (N, C, roi_height, roi_width)
+```
+
+The default modern dense chunk policy is component-separated and full-spatial:
+
+```text
+masks_roi.chunks == (min(128, N), 1, roi_height, roi_width)
+```
+
+For the common modern `512x512` four-component refined run, this gives:
+
+```text
+masks_roi chunks = [128, 1, 512, 512]
+```
+
+For smaller or larger crop-video surfaces, only the spatial chunk dimensions
+change. For example, a `348x348` crop-video-backed run should use
+`[128, 1, 348, 348]` rather than padding the mask store to `512x512` unless the
+source crop image itself was explicitly padded to that size.
+
+The default modern bitpacked cache policy is playback/publication-oriented, not
+the edit authority:
+
+```text
+mask_bitpacked/masks_packed.shape == (N, C, roi_height, ceil(roi_width / 8))
+mask_bitpacked/masks_packed.chunks == (
+  min(512, N),
+  min(4, C),
+  roi_height,
+  ceil(roi_width / 8),
+)
+```
+
+For a common `512x512`, four-component refined run, this gives:
+
+```text
+mask_bitpacked/masks_packed chunks = [512, 4, 512, 64]
+```
+
+Freshly generated runs should make cache state explicit:
+
+- `masks_roi_materialized = true`
+- `mask_storage_authority = "masks_roi"`
+- `editable_mask_surface = "masks_roi"`
+- `training_mask_surface = "masks_roi"` when the zarr is a training artifact
+- `mask_store_encodings` includes `dense_uint8_v1` and any derived caches
+- `mask_bitpacked_materialized = true/false`
+- `mask_rle_materialized = true/false`
+- `derived_mask_caches_stale = false`
+- `mask_bitpacked_stale = false` when bitpacked exists
+- `mask_rle_stale = false` when RLE exists
+- `metrics_stale = false`
+- `contours_stale = false`
+
+After a dense mask writeback, writers must update the touched dense
+row/component and mark derived products stale instead of treating derived arrays
+as authoritative:
+
+- `derived_mask_caches_stale = true`
+- `contours_stale = true` when contours exist
+- `metrics_stale = true` when derived metrics exist
+- `mask_bitpacked_stale = true` when bitpacked exists
+- `mask_rle_stale = true` when RLE exists
+
+Regeneration/validation/promotion jobs may clear these stale flags only after
+successfully refreshing the affected derived arrays from current dense
+`masks_roi`.
+
 Recommended browser model:
 
 - checkpoint frequent UI edits into the labeling/session store so the browser
@@ -477,8 +585,8 @@ refined_subject_masks_runs/
     detection_indices                       (N,) int32           # recommended
     source_crop_row_ids                     (N,) int64
     detection_source                        (N,) int8
-    masks_roi                               (N, C, H, W) uint8 optional dense cache/edit surface
-    mask_bitpacked/                         # optional compact editable mirror or authoritative compact store
+    masks_roi                               (N, C, H, W) uint8 required dense authority/edit surface for modern runs
+    mask_bitpacked/                         # optional derived compact display/publication cache
       attrs:
         schema_id                           "palette_mask_bitpacked_binary_v1"
         mask_encoding                       "bitpacked_binary_v1"
@@ -486,7 +594,7 @@ refined_subject_masks_runs/
         logical_shape                       [N, C, H, W]
         encoded_shape                       [N, C, H, ceil(W / 8)]
       masks_packed                          (N, C, H, ceil(W / 8)) uint8
-    mask_rle/                               # optional compact final/read-mostly mirror or authoritative compact store
+    mask_rle/                               # optional derived archive/fallback cache
       attrs:
         schema_id                           "palette_mask_rle_binary_v1"
         mask_encoding                       "coco_rle_fortran_v1"
@@ -539,22 +647,19 @@ Required arrays:
   - shape: `(N,)`
   - expected to align with the source crop run
 - physical mask store
-  - at least one of dense `masks_roi`, compact editable `mask_bitpacked`, or
-    compact final `mask_rle` must be present
+  - modern editable runs must include dense `masks_roi`
+  - optional compact `mask_bitpacked` and `mask_rle` stores are derived caches
   - consumers should use `fisheye.shared.mask_store.open_mask_store(...)`
-    when they can tolerate either physical encoding
+    when they need to tolerate historical compact-only archives
 - `masks_roi`
   - shape: `(N, C, H, W)`
   - dense refined binary masks
   - default compatibility surface for historical readers
-  - live review/edit authority surface when present; current Palette review/edit
-    tooling materializes this dense cache before editing compact-only runs
-  - omitted when `mask_storage_encoding` is compact-only and
-    `masks_roi_materialized == false`
+  - live review/edit authority surface for modern editable runs
+  - required for new editable analysis outputs and training artifacts
   - can be materialized/refreshed from compact `mask_bitpacked` or `mask_rle` with
     `scripts/py -m fisheye.utils.materialize_refined_subject_mask_store --apply`
-  - can be removed again with the same utility's `--delete-dense --apply`
-    option when compact `mask_bitpacked` or `mask_rle` remains present
+  - should not be removed from editable analysis or training outputs
 - `mask_bitpacked`
   - compact fixed-size exact binary masks
   - schema: `palette_mask_bitpacked_binary_v1`
@@ -569,28 +674,23 @@ Required arrays:
     and `packed_width_bytes`
   - written as an additive mirror by
     `finalize_subject_masks --mask-storage dense_and_bitpacked`
-  - written as the only physical mask store by
-    `finalize_subject_masks --mask-storage bitpacked_v1`
-  - preferred compact surface for analysis runs that may still need review or
-    painting, because row/channel edits rewrite fixed-size packed chunks rather
-    than shifting variable-length offsets for later rows
+  - not a live edit/writeback authority for modern runs
+  - preferred compact display/publication cache because it is fixed-size and
+    row/channel addressable
   - if dense `masks_roi` is materialized and edited while `mask_bitpacked`
-    exists, Palette-owned refined-subject edit paths must refresh the affected
-    bitpacked row/channel cells immediately from dense
+    exists, Palette-owned refined-subject edit paths must mark bitpacked stale
+    until a validation, promotion, or maintenance job refreshes it from dense
   - explicit refresh is available with
     `scripts/py -m fisheye.utils.materialize_refined_subject_mask_store --refresh-bitpacked --components eye_left --rows 42 --apply`
     for repair workflows or non-interactive dense edits
-  - compact-only review/edit workflow is intentionally:
-    materialize dense `masks_roi` from `mask_bitpacked`, edit dense, then
-    refresh the touched `mask_bitpacked` rows/components from dense
+  - compact-only historical archives should be materialized to dense before any
+    review/edit workflow
 - `mask_rle`
   - compact component-separated exact binary masks
   - written as an additive mirror by
     `finalize_subject_masks --mask-storage dense_and_rle`
-  - written as the only physical mask store by
-    `finalize_subject_masks --mask-storage rle_v1`
   - consumers that need dense masks should use `fisheye.shared.mask_store.open_mask_store(...)`
-    rather than assuming a single physical encoding
+    rather than assuming a single physical encoding for historical archives
   - not yet the direct edit/writeback surface; if dense `masks_roi` was
     materialized and edited, compact `mask_rle` should be considered stale until
     regenerated with
@@ -746,11 +846,11 @@ against a GoodCopBadCop dense refined run using explicit
 placement. That path no longer relies on refined-mask row position matching crop
 row position.
 
-Crimson compact `mask_rle` decode remains pending. Compact-only `rle_v1` runs
-are valid Palette analysis stores when they pass this contract, but external
-viewers should either implement the compact RLE materialization contract or use
-`scripts/py -m fisheye.utils.materialize_refined_subject_mask_store --apply` to
-create a dense `masks_roi` compatibility cache before display/editing.
+Crimson compact `mask_rle` decode remains pending. Modern editable Palette runs
+must carry dense `masks_roi`; compact-only historical runs are display/archive
+surfaces and should be materialized to dense with
+`scripts/py -m fisheye.utils.materialize_refined_subject_mask_store --apply`
+before review/editing.
 
 ## Strict Contract Validation
 

@@ -27,10 +27,9 @@ from ..shared.detect_reason_codec import encode_reason_bytes, read_reason_labels
 from ..shared.mask_store import (
     MaskStore,
     MaskStoreError,
-    mark_mask_rle_stale_attrs,
+    mark_derived_mask_caches_stale_attrs,
     materialize_dense_masks_roi_from_store,
     open_mask_store,
-    refresh_bitpacked_mask_store_from_dense,
 )
 from ..shared.mask_geometry import batch_mask_spatial_metrics
 from ..shared.mask_probability_encoding import (
@@ -45,7 +44,7 @@ from ..shared.provenance_attrs import (
     resolve_assignment_keypoints_run,
     resolve_source_keypoints_run,
 )
-from ..shared.refined_subject_component_contours import refresh_component_contour_rows_from_masks
+from ..shared.refined_subject_component_contours import mark_component_rows_updated
 from ..shared.row_lineage import copy_row_lineage_arrays_from_sources, resolve_source_crop_row_ids
 from ..shared.subject_mask_chunks import (
     refined_subject_mask_metric_row_chunk,
@@ -2453,6 +2452,7 @@ def _write_refined_subject_component_apply_rows(
     roi_indices: Sequence[int],
     edited_masks_batch: np.ndarray,
     component_updates: Mapping[str, np.ndarray],
+    row_update_reason: str,
 ) -> None:
     run_group = refined.group
     comp_idx = int(refined.component_to_index[component_name])
@@ -2513,6 +2513,13 @@ def _write_refined_subject_component_apply_rows(
             pending_rows.remove(int(roi_idx))
 
     component_group.attrs["source_update_pending_rows"] = pending_rows
+    mark_component_rows_updated(
+        component_group,
+        roi_indices,
+        component=component_name,
+        roi_count=int(masks_arr.shape[0]),
+        reason=str(row_update_reason),
+    )
     sync_source_subject_mask_stale_payload(run_group)
 
 
@@ -2526,20 +2533,7 @@ def _finalize_refined_subject_apply(
     updated_at_utc = _utc_now()
     refined.group.attrs["updated_at_utc"] = updated_at_utc
     refined.parent.attrs["latest"] = refined.run_name
-    if {"eye_left", "eye_right"}.issubset(set(refined.component_names)):
-        from ..shared.refined_subject_eye_geometry import write_refined_subject_eye_geometry
-
-        write_refined_subject_eye_geometry(refined.group, updated_components=updated_components)
-    if "mask_bitpacked" in refined.group:
-        refresh_bitpacked_mask_store_from_dense(
-            refined.group,
-            component_names=refined.component_names,
-            refresh_components=updated_components,
-            refresh_rows=updated_rows,
-            source_path=f"refined_subject_masks_runs/{refined.run_name}",
-            validation_mode="invariants",
-        )
-    mark_mask_rle_stale_attrs(
+    mark_derived_mask_caches_stale_attrs(
         refined.group,
         updated_at_utc=updated_at_utc,
         updated_components=updated_components,
@@ -2597,12 +2591,7 @@ def _apply_refined_subject_roi_rows(
             roi_indices=normalized_rows,
             edited_masks_batch=edited_batch,
             component_updates=component_updates,
-        )
-        refresh_component_contour_rows_from_masks(
-            run_group,
-            component_name,
-            normalized_rows,
-            reason=str(update_reason or f"{update_mode}_refined_subject_mask_edit"),
+            row_update_reason=str(update_reason or f"{update_mode}_refined_subject_mask_edit"),
         )
 
     updated_at_utc = _finalize_refined_subject_apply(
@@ -2950,6 +2939,7 @@ def write_refined_subject_mask_edit(
 
     row_revision_after = _read_component_row_revision(context.component_group, roi_idx)
     edit_applied = bool(np.asarray(run_group["edit_applied"][roi_idx, context.comp_idx], dtype=bool))
+    attrs = run_group.attrs
     return {
         "ok": True,
         "status": "updated" if mask_changed else "noop",
@@ -2963,6 +2953,11 @@ def write_refined_subject_mask_edit(
         "edit_applied": edit_applied,
         "mask_changed": bool(mask_changed),
         "contour_points": int(_read_component_contour_len(context.component_group, roi_idx)),
+        "derived_mask_caches_stale": bool(attrs.get("derived_mask_caches_stale", False)),
+        "metrics_stale": bool(attrs.get("metrics_stale", False)),
+        "contours_stale": bool(attrs.get("contours_stale", False)),
+        "mask_bitpacked_stale": bool(attrs.get("mask_bitpacked_stale", False)),
+        "mask_rle_stale": bool(attrs.get("mask_rle_stale", False)),
         "updated_at_utc": str(run_group.attrs.get("updated_at_utc") or ""),
         "reason": str(reason or DEFAULT_REFINED_SUBJECT_WRITEBACK_REASON),
         "validated": bool(validate),

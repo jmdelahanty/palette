@@ -46,7 +46,7 @@ Options:
   --max-active N                   Max concurrent benchmark variants (default: 1).
   --chunk-size N                   Finalizer row chunk size (default: 256).
   --metric-level LEVEL             cheap|full (default: cheap).
-  --mask-storage MODE              dense_uint8|dense_and_bitpacked|bitpacked_v1|dense_and_rle|rle_v1|dense_bitpacked_and_rle
+  --mask-storage MODE              dense_uint8|dense_and_bitpacked|dense_and_rle|dense_bitpacked_and_rle
                                    (default: dense_uint8).
   --no-write-eye-geometry          Disable eye geometry output.
   --no-write-component-contours    Disable component contour output.
@@ -99,8 +99,8 @@ if [[ "$METRIC_LEVEL" != "cheap" && "$METRIC_LEVEL" != "full" ]]; then
   echo "--metric-level must be cheap or full." >&2
   exit 2
 fi
-if [[ "$MASK_STORAGE" != "dense_uint8" && "$MASK_STORAGE" != "dense_and_bitpacked" && "$MASK_STORAGE" != "bitpacked_v1" && "$MASK_STORAGE" != "dense_and_rle" && "$MASK_STORAGE" != "rle_v1" && "$MASK_STORAGE" != "dense_bitpacked_and_rle" ]]; then
-  echo "--mask-storage must be dense_uint8, dense_and_bitpacked, bitpacked_v1, dense_and_rle, rle_v1, or dense_bitpacked_and_rle." >&2
+if [[ "$MASK_STORAGE" != "dense_uint8" && "$MASK_STORAGE" != "dense_and_bitpacked" && "$MASK_STORAGE" != "dense_and_rle" && "$MASK_STORAGE" != "dense_bitpacked_and_rle" ]]; then
+  echo "--mask-storage must be dense_uint8, dense_and_bitpacked, dense_and_rle, or dense_bitpacked_and_rle." >&2
   exit 2
 fi
 

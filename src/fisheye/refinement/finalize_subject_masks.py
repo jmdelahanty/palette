@@ -56,6 +56,7 @@ from ..shared.row_lineage import copy_row_lineage_arrays_from_sources
 from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.mask_store import (
+    DENSE_MASK_ENCODING_V1,
     MASK_RLE_VALIDATION_MODES,
     MaskStoreError,
     open_mask_store,
@@ -66,6 +67,7 @@ from ..shared.mask_store import (
 )
 from ..shared.subject_mask_chunks import (
     REFINED_SUBJECT_MASK_DASK_CHUNK_ALIGNMENT,
+    refined_subject_mask_bitpacked_chunks,
     refined_subject_mask_dask_worker_row_chunk,
     refined_subject_mask_metric_row_chunk,
     refined_subject_mask_storage_row_chunk,
@@ -160,10 +162,11 @@ _MASK_STORAGE_CHOICES = (
     "rle_v1",
     "dense_bitpacked_and_rle",
 )
-_MASK_STORAGES_WITH_BITPACKED = {"dense_and_bitpacked", "bitpacked_v1", "dense_bitpacked_and_rle"}
-_MASK_STORAGES_WITH_RLE = {"dense_and_rle", "rle_v1", "dense_bitpacked_and_rle"}
-_MASK_STORAGES_REMOVE_DENSE = {"bitpacked_v1", "rle_v1"}
-_MASK_STORAGES_DIRECT_BITPACKED = {"bitpacked_v1"}
+_MASK_STORAGE_COMPACT_ONLY = {"bitpacked_v1", "rle_v1"}
+_MASK_STORAGES_WITH_BITPACKED = {"dense_and_bitpacked", "dense_bitpacked_and_rle"}
+_MASK_STORAGES_WITH_RLE = {"dense_and_rle", "dense_bitpacked_and_rle"}
+_MASK_STORAGES_REMOVE_DENSE: set[str] = set()
+_MASK_STORAGES_DIRECT_BITPACKED: set[str] = set()
 _MASK_RLE_VALIDATION_MODES = MASK_RLE_VALIDATION_MODES
 _COMPONENT_METRICS_SCHEMA_ID = "refined_subject_component_mask_metrics_v1"
 _COMPONENT_METRIC_QC_SCHEMA_ID = "refined_subject_component_metric_qc_reasons_v1"
@@ -1817,7 +1820,13 @@ def _create_bitpacked_mask_store_shell(
     group.create_array(
         "masks_packed",
         shape=(n_rows, n_channels, mask_height, int(packed_width)),
-        chunks=(min(max(1, n_rows), max(1, int(row_chunk))), 1, mask_height, int(packed_width)),
+        chunks=refined_subject_mask_bitpacked_chunks(
+            n_rows,
+            n_channels,
+            mask_height,
+            mask_width,
+            row_chunk=max(1, int(row_chunk)),
+        ),
         dtype="uint8",
         fill_value=0,
         overwrite=True,
@@ -3870,6 +3879,12 @@ def finalize_subject_mask_run(
     mask_storage = str(mask_storage)
     if mask_storage not in _MASK_STORAGE_CHOICES:
         raise ValueError(f"mask_storage must be one of {_MASK_STORAGE_CHOICES}; got {mask_storage!r}.")
+    if mask_storage in _MASK_STORAGE_COMPACT_ONLY:
+        raise ValueError(
+            f"mask_storage={mask_storage!r} is compact-only and is no longer valid for editable refined "
+            "subject-mask outputs. Use dense_uint8, dense_and_bitpacked, dense_and_rle, or "
+            "dense_bitpacked_and_rle so masks_roi remains the authoritative edit surface."
+        )
     direct_bitpacked_output = mask_storage in _MASK_STORAGES_DIRECT_BITPACKED
     mask_rle_validation_mode = str(mask_rle_validation_mode).strip().lower()
     if mask_rle_validation_mode not in _MASK_RLE_VALIDATION_MODES:
@@ -4621,7 +4636,7 @@ def finalize_subject_mask_run(
                     validation_mode=mask_rle_validation_mode,
                     extra_attrs={
                         "source_array": "masks_roi",
-                        "source_encoding": "dense_uint8",
+                        "source_encoding": DENSE_MASK_ENCODING_V1,
                         "source_run": str(target_run),
                     },
                     progress_callback=_emit_bitpacked_progress,
@@ -4657,7 +4672,7 @@ def finalize_subject_mask_run(
                     validation_mode=mask_rle_validation_mode,
                     extra_attrs={
                         "source_array": "masks_roi",
-                        "source_encoding": "dense_uint8",
+                        "source_encoding": DENSE_MASK_ENCODING_V1,
                         "source_run": str(target_run),
                     },
                     progress_callback=_emit_rle_progress,
@@ -4948,10 +4963,10 @@ def _build_parser() -> argparse.ArgumentParser:
         default="dense_uint8",
         help=(
             "Physical mask storage to materialize. dense_uint8 preserves the historical masks_roi-only "
-            "surface; dense_and_bitpacked additionally writes mask_bitpacked for editable compact "
-            "publication; bitpacked_v1 writes mask_bitpacked and removes the dense masks_roi cache; "
+            "surface; dense_and_bitpacked additionally writes derived mask_bitpacked for compact "
+            "publication/display; compact-only bitpacked_v1 is rejected for editable analysis; "
             "dense_and_rle additionally writes mask_rle/components for compact final products and "
-            "selective reads; rle_v1 writes mask_rle/components and removes the dense masks_roi cache; "
+            "selective reads; compact-only rle_v1 is rejected for editable analysis; "
             "dense_bitpacked_and_rle writes all three physical surfaces for validation/audit runs."
         ),
     )

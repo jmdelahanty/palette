@@ -1061,21 +1061,30 @@ temporal context, or cross-component relationship belongs in
 | `source_refined_row_ids` *(recommended)* | `(n_rois,)` | `int64` | Copied from the upstream subject-mask/crop lineage when available |
 | `source_detect_row_index` *(recommended)* | `(n_rois,)` | `int32` | Copied from the upstream subject-mask/crop lineage when available |
 | `detection_source` | `(n_rois,)` | `int8` | Expected to align with the source crop run |
-| `masks_roi` *(optional when compact-only)* | `(n_rois, C, H, W)` | `uint8` | Dense refined binary masks |
-| `mask_bitpacked/` *(optional)* | `(n_rois, C, H, ceil(W/8))` | `uint8` | Fixed-size width-bitpacked exact binary masks; may mirror `masks_roi` or be the authoritative editable compact physical store |
-| `mask_rle/` *(optional)* | component groups | typed arrays | Compact component-separated exact binary masks; may mirror `masks_roi` or be the authoritative final/read-mostly physical mask store |
+| `masks_roi` | `(n_rois, C, H, W)` | `uint8` | Dense refined binary masks; authoritative editable pixel surface for modern runs |
+| `mask_bitpacked/` *(optional)* | `(n_rois, C, H, ceil(W/8))` | `uint8` | Fixed-size width-bitpacked exact binary masks; derived display/publication cache mirrored from `masks_roi` |
+| `mask_rle/` *(optional)* | component groups | typed arrays | Compact component-separated exact binary masks; derived archive/fallback display cache mirrored from `masks_roi` |
 | `available_channels` | `(C,)` | `bool` | Declares which refined components are intentionally present |
 | `edit_applied` | `(n_rois, C)` | `bool` | True when the refined channel differs from the source subject-mask run |
 | `reason_bytes` *(optional)* | `(n_rois, width)` | `uint8` | Null-terminated UTF-8 reason labels |
 | `reason` *(optional)* | `(n_rois,)` | `string` | Human-readable reason tags |
 
-Refined subject-mask runs may use `mask_storage_encoding="dense_uint8"`,
-`"dense_uint8+bitpacked_binary_v1"`, `"bitpacked_binary_v1"`,
-`"dense_uint8+component_rle_v1"`, `"component_rle_v1"`, or
-`"dense_uint8+bitpacked_binary_v1+component_rle_v1"`. Dense `masks_roi` remains
-the default compatibility surface. Compact-only readers should materialize masks
-through `fisheye.shared.mask_store.open_mask_store(...)`; see
+Modern editable refined subject-mask runs use dense `masks_roi` as the storage
+authority. New provenance should record the explicit dense encoding name
+`dense_uint8_v1`; existing `dense_uint8` attrs and CLI values are compatibility
+spellings for the same v1 dense binary contract. Compact encodings such as
+`bitpacked_binary_v1` and `component_rle_v1` are derived caches for display,
+publication, or archive fallback, not training or edit authority. Legacy
+compact-only readers should materialize masks through
+`fisheye.shared.mask_store.open_mask_store(...)`; see
 `docs/mask_rle_storage_design_and_benchmark_plan.md`.
+
+Dense masks are ROI-local and adapt to the crop image shape. The default modern
+chunk policy is `(min(128, n_rois), 1, H, W)`, so the common 512x512 refined
+layout uses chunks `[128, 1, 512, 512]`; a 348x348 crop-video-backed run should
+use `[128, 1, 348, 348]`. The default modern bitpacked cache policy is
+`(min(512, n_rois), min(4, C), H, ceil(W/8))`, so a 512x512 four-component cache
+uses chunks `[512, 4, 512, 64]`.
 Use `scripts/py -m fisheye.utils.materialize_refined_subject_mask_store` to
 dry-run, recreate, refresh, or delete the dense `masks_roi` compatibility cache
 for compact refined-subject runs. The same utility refreshes compact mirrors

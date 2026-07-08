@@ -243,6 +243,19 @@ def test_export_merged_subject_mask_training_zarr_then_validate(tmp_path: Path) 
 
     latest = str(root["subject_mask_runs"].attrs["latest"])
     run = root[f"subject_mask_runs/{latest}"]
+    assert tuple(int(value) for value in run["masks_roi"].chunks) == (4, 1, 16, 16)
+    assert "mask_bitpacked" not in run
+    assert "mask_rle" not in run
+    assert run.attrs["mask_storage_format"] == "dense_uint8"
+    assert run.attrs["mask_storage_surface"] == "masks_roi"
+    assert run.attrs["mask_store_contract_encoding"] == "dense_uint8_v1"
+    assert run.attrs["mask_storage_authority"] == "masks_roi"
+    assert run.attrs["editable_mask_surface"] == "masks_roi"
+    assert run.attrs["training_mask_surface"] == "masks_roi"
+    assert run.attrs["masks_roi_materialized"] is True
+    assert run.attrs["mask_bitpacked_materialized"] is False
+    assert run.attrs["mask_rle_materialized"] is False
+    assert run.attrs["derived_mask_caches_stale"] is False
     crop_latest = str(root["crop_runs"].attrs["latest"])
     crop_run = root[f"crop_runs/{crop_latest}"]
     assert crop_run.attrs["source_crop_run"] == "crop_001"
@@ -400,9 +413,16 @@ def test_validate_subject_mask_training_rejects_compact_training_mask_surface(tm
 
     root = zarr.open_group(str(out_path), mode="a")
     latest = str(root["subject_mask_runs"].attrs["latest"])
-    root[f"subject_mask_runs/{latest}"].create_group("mask_rle")
+    run = root[f"subject_mask_runs/{latest}"]
+    run.create_group("mask_rle")
 
     with pytest.raises(ValueError, match="compact mask_rle is analysis-only"):
+        validate_merged_subject_mask_training_zarr(out_path)
+
+    del run["mask_rle"]
+    run.create_group("mask_bitpacked")
+
+    with pytest.raises(ValueError, match="compact mask_bitpacked is analysis-only"):
         validate_merged_subject_mask_training_zarr(out_path)
 
 

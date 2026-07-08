@@ -522,6 +522,7 @@ def refine_subject_masks(
                 roi_indices=chunk_rows,
                 edited_masks_batch=edited_masks_batch,
                 component_updates=component_updates[str(component_name)],
+                row_update_reason="batch_refined_subject_mask_edit",
             )
 
     updated_at_utc = _finalize_refined_subject_apply(

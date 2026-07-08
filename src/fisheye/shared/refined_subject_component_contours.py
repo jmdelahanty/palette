@@ -281,6 +281,49 @@ def ensure_component_row_update_tracking(
     return revision, updated_at, reason
 
 
+def mark_component_rows_updated(
+    component_group: zarr.Group,
+    row_indices: Sequence[int],
+    *,
+    component: str,
+    roi_count: int,
+    reason: str,
+) -> list[ComponentContourRowUpdateSummary]:
+    """Bump row-local component revisions without refreshing derived payloads.
+
+    Dense mask edits make contours/derived caches stale, but consumers still need
+    a cheap per-row revision signal to invalidate cached component views.
+    """
+
+    revision_arr, updated_at_arr, reason_arr = ensure_component_row_update_tracking(
+        component_group,
+        roi_count=int(roi_count),
+    )
+    now = _utc_now()
+    summaries: list[ComponentContourRowUpdateSummary] = []
+    for raw_row in row_indices:
+        row_idx = int(raw_row)
+        previous_revision = int(np.asarray(revision_arr[row_idx], dtype=np.int64))
+        row_revision = previous_revision + 1
+        revision_arr[row_idx] = np.int64(row_revision)
+        _write_ascii_row(updated_at_arr, row_idx, now, width=ROW_UPDATE_TIMESTAMP_WIDTH)
+        _write_ascii_row(reason_arr, row_idx, reason, width=ROW_UPDATE_REASON_WIDTH)
+        summaries.append(
+            ComponentContourRowUpdateSummary(
+                component=str(component),
+                row_index=row_idx,
+                status="marked_stale",
+                row_revision=row_revision,
+                reason=str(reason),
+            )
+        )
+
+    component_group.attrs["last_row_update_at_utc"] = now
+    component_group.attrs["last_row_update_reason"] = str(reason)
+    component_group.attrs["last_row_update_row_count"] = len(summaries)
+    return summaries
+
+
 def _ensure_component_contour_arrays(
     component_group: zarr.Group,
     *,

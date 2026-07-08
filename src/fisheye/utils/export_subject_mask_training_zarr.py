@@ -15,7 +15,8 @@ import zarr
 from fisheye.registry.db import Registry
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.frame_flags import resolve_row_identity_arrays
-from fisheye.shared.mask_store import MaskStore, open_mask_store
+from fisheye.shared.mask_store import DENSE_MASK_ENCODING_V1, MaskStore, open_mask_store
+from fisheye.shared.subject_mask_chunks import refined_subject_mask_storage_chunks
 from fisheye.shared.training_zarr_helpers import (
     json_dict as _json_dict,
     json_list as _json_list,
@@ -851,7 +852,7 @@ def export_merged_subject_mask_training_zarr_from_sources(
         "masks_roi",
         shape=(total_samples, len(target_labels), *mask_shape),
         dtype=mask_dtype,
-        chunks=(max(1, min(256, total_samples)), len(target_labels), *mask_shape),
+        chunks=refined_subject_mask_storage_chunks(total_samples, int(mask_shape[0]), int(mask_shape[1])),
         overwrite=True,
     )
     target_valid_dest = subject_group.create_array(
@@ -1029,6 +1030,17 @@ def export_merged_subject_mask_training_zarr_from_sources(
             "mask_storage_format": TRAINING_MASK_STORAGE_FORMAT,
             "mask_storage_surface": TRAINING_MASK_STORAGE_SURFACE,
             "mask_store_encoding": TRAINING_MASK_STORAGE_FORMAT,
+            "mask_store_contract_encoding": DENSE_MASK_ENCODING_V1,
+            "mask_store_contract_encodings": [DENSE_MASK_ENCODING_V1],
+            "mask_storage_authority": TRAINING_MASK_STORAGE_SURFACE,
+            "editable_mask_surface": TRAINING_MASK_STORAGE_SURFACE,
+            "training_mask_surface": TRAINING_MASK_STORAGE_SURFACE,
+            "masks_roi_materialized": True,
+            "mask_bitpacked_materialized": False,
+            "mask_rle_materialized": False,
+            "derived_mask_caches_stale": False,
+            "metrics_stale": False,
+            "contours_stale": False,
             "allow_partial_supervision": True,
             "source_mask_stage": source_stage_groups[0] if len(set(source_stage_groups)) == 1 else "mixed",
             "source_subject_mask_run": source_subject_mask_run,
@@ -1064,6 +1076,8 @@ def export_merged_subject_mask_training_zarr_from_sources(
         "mask_labels": target_labels,
         "mask_storage_format": TRAINING_MASK_STORAGE_FORMAT,
         "mask_storage_surface": TRAINING_MASK_STORAGE_SURFACE,
+        "mask_store_contract_encoding": DENSE_MASK_ENCODING_V1,
+        "mask_storage_authority": TRAINING_MASK_STORAGE_SURFACE,
         "allow_partial_supervision": True,
         "source_stage": source_stage_groups[0] if len(set(source_stage_groups)) == 1 else "mixed",
         "source_count": int(len(resolved_sources)),
@@ -1238,6 +1252,8 @@ def validate_merged_subject_mask_training_zarr(
     for name in required_mask_arrays:
         if name not in masks:
             errors.append(f"missing required array subject_mask_runs/{mask_latest}/{name}.")
+    if "mask_bitpacked" in masks:
+        errors.append("training subject_mask_runs must store dense masks_roi only; compact mask_bitpacked is analysis-only.")
     if "mask_rle" in masks:
         errors.append("training subject_mask_runs must store dense masks_roi only; compact mask_rle is analysis-only.")
     if _as_text(masks.attrs.get("mask_storage_format")) != TRAINING_MASK_STORAGE_FORMAT:

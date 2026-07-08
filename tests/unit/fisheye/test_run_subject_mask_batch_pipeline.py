@@ -31,16 +31,18 @@ def test_parser_accepts_subject_mask_shard_output_parent() -> None:
     assert args.subject_output_parent == mod.SUBJECT_MASK_SHARD_OUTPUT_PARENT
 
 
-def test_parser_accepts_compact_mask_storage_mode() -> None:
-    args = mod._build_parser().parse_args(["/recordings", "--mask-storage", "rle_v1"])
+def test_parser_accepts_dense_plus_compact_mask_storage_mode() -> None:
+    args = mod._build_parser().parse_args(["/recordings", "--mask-storage", "dense_and_rle"])
 
-    assert args.mask_storage == "rle_v1"
+    assert args.mask_storage == "dense_and_rle"
 
 
-def test_parser_accepts_bitpacked_mask_storage_mode() -> None:
-    args = mod._build_parser().parse_args(["/recordings", "--mask-storage", "bitpacked_v1"])
+def test_parser_rejects_compact_only_mask_storage_mode() -> None:
+    with pytest.raises(SystemExit):
+        mod._build_parser().parse_args(["/recordings", "--mask-storage", "bitpacked_v1"])
 
-    assert args.mask_storage == "bitpacked_v1"
+    with pytest.raises(SystemExit):
+        mod._build_parser().parse_args(["/recordings", "--mask-storage", "rle_v1"])
 
 
 def test_safe_artifact_filename_hashes_long_names() -> None:

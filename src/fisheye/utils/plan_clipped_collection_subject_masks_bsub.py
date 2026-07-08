@@ -734,7 +734,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--finalizer-mem-gb", type=int, default=32)
     parser.add_argument("--finalizer-num-workers", type=int, default=8)
     parser.add_argument("--finalizer-chunk-size", type=int, default=256)
-    parser.add_argument("--finalizer-dense-mask-row-chunk", type=int, default=256)
+    parser.add_argument("--finalizer-dense-mask-row-chunk", type=int, default=128)
     parser.add_argument("--finalizer-execution-backend", default="process_shards")
     parser.add_argument("--finalizer-scheduler", default="processes")
     parser.add_argument("--finalizer-postcompute-backend", default="process_shards")

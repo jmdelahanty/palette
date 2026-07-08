@@ -473,7 +473,9 @@ def test_write_refined_subject_mask_edit_owns_pixels_and_metadata(tmp_path: Path
     assert summary["row_revision_after"] == 1
     assert summary["edit_applied"] is True
     assert summary["mask_changed"] is True
-    assert summary["contour_points"] > 0
+    assert summary["derived_mask_caches_stale"] is True
+    assert summary["metrics_stale"] is True
+    assert summary["contours_stale"] is True
     assert summary["updated_at_utc"]
 
     run = root["refined_subject_masks_runs"]["refined_subject_masks_001"]
@@ -482,7 +484,8 @@ def test_write_refined_subject_mask_edit_owns_pixels_and_metadata(tmp_path: Path
     assert bool(np.asarray(run["metrics/mask_present"][0, 0], dtype=bool)) is True
     body_group = run["components"]["subject_body"]
     assert body_group.attrs["last_row_update_reason"] == "crimson_refined_subject_mask_edit"
-    assert body_group["contours"]["len"][0] == summary["contour_points"]
+    assert bool(run.attrs["contours_stale"]) is True
+    assert summary["contour_points"] == 0
     assert body_group["provenance"].attrs["last_update_method"] == review_mod.REFINED_SUBJECT_WRITEBACK_METHOD
 
 

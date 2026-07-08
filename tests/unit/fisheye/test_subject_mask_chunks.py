@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fisheye.shared.subject_mask_chunks import (
+    refined_subject_mask_bitpacked_chunks,
     refined_subject_mask_metric_row_chunk,
     refined_subject_mask_storage_row_chunk,
     refined_subject_mask_storage_chunks,
@@ -21,8 +22,17 @@ def test_subject_mask_metric_row_chunk_uses_large_row_groups() -> None:
     assert subject_mask_metric_row_chunk(227) == 227
 
 
-def test_refined_subject_mask_storage_chunks_match_current_full_roi_policy() -> None:
-    assert refined_subject_mask_storage_chunks(227, 512, 512) == (16, 1, 512, 512)
+def test_refined_subject_mask_storage_chunks_use_editable_dense_policy() -> None:
+    assert refined_subject_mask_storage_chunks(227, 512, 512) == (128, 1, 512, 512)
+
+
+def test_refined_subject_mask_storage_chunks_adapt_to_crop_shape() -> None:
+    assert refined_subject_mask_storage_chunks(227, 348, 348) == (128, 1, 348, 348)
+
+
+def test_refined_subject_mask_bitpacked_chunks_use_cache_policy() -> None:
+    assert refined_subject_mask_bitpacked_chunks(1000, 4, 512, 512) == (512, 4, 512, 64)
+    assert refined_subject_mask_bitpacked_chunks(1000, 3, 348, 348) == (512, 3, 348, 44)
 
 
 def test_refined_subject_mask_storage_chunks_accept_explicit_row_chunk() -> None:

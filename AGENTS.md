@@ -51,12 +51,16 @@
 
 - Treat eye-mask-specific stages as legacy compatibility surfaces.
 - For new mask work, prefer `subject_mask_runs` and `refined_subject_masks_runs`.
-- For refined subject-mask pixels, treat the logical store as `MaskStore` over
-  dense `masks_roi`, compact editable `mask_bitpacked`, or compact final/read-mostly
-  `mask_rle`; do not assume `masks_roi` is always physically present.
-- Review/edit paths should materialize or mutate dense `masks_roi`, refresh
-  touched `mask_bitpacked` rows/components when present, and mark compact RLE
-  stale until explicitly refreshed.
+- For modern editable refined subject-mask outputs, dense `masks_roi` is the
+  authoritative pixel surface and must be physically present. Compact
+  `mask_bitpacked` and `mask_rle` stores are derived display/archive caches, not
+  edit or training authorities.
+- Review/edit paths should mutate dense `masks_roi` only. After accepted dense
+  edits, mark derived bitpacked/RLE/metrics/contours stale and refresh them only
+  during explicit validation, promotion, or maintenance steps.
+- Historical compact-only refined subject-mask runs may be read through
+  `MaskStore` for compatibility, but must be materialized to dense `masks_roi`
+  before review/editing or training export.
 - Do not add new workflows, docs, or model paths that make `eye_masks_runs` or `refined_eye_masks_runs` the primary source of truth.
 - It is acceptable to read, migrate, validate, or materialize eye-mask compatibility data when supporting historical archives or legacy consumers.
 - Canonical manual review/editing for body, swim bladder, and eye components should route through unified refined subject-mask tooling and component review state.

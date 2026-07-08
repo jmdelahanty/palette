@@ -66,7 +66,7 @@ def bootstrap_training_review_surfaces(
     subject_model_input_size: int = 512,
     mask_probs_chunk_rois: int = 64,
     mask_probs_dtype: str = "uint8",
-    dense_mask_row_chunk: int = 64,
+    dense_mask_row_chunk: int = 128,
     progress_jsonl: Optional[Path] = None,
     overwrite_subject_masks: bool = True,
     overwrite_refined_subject_masks: bool = True,
@@ -223,7 +223,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--subject-model-input-size", type=int, default=512)
     parser.add_argument("--mask-probs-chunk-rois", type=int, default=64)
     parser.add_argument("--mask-probs-dtype", default="uint8", choices=("float16", "uint8"))
-    parser.add_argument("--dense-mask-row-chunk", type=int, default=64)
+    parser.add_argument("--dense-mask-row-chunk", type=int, default=128)
     parser.add_argument("--progress-jsonl", type=Path)
     parser.add_argument("--no-overwrite-subject-masks", action="store_true")
     parser.add_argument("--no-overwrite-refined-subject-masks", action="store_true")
