@@ -15,7 +15,7 @@ from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
 from fisheye.utils.view_zarr_visualization import load_png_artifact_bytes
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.visualization.goodcopbadcop_interactive import (
-    GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
+    CHASER_DASHBOARD_RENDERERS,
     GoodCopBadCopCRAEndpointData,
     GoodCopBadCopCRANearFieldData,
     GoodCopBadCopEscapeFreezeData,
@@ -25,7 +25,7 @@ from fisheye.visualization.goodcopbadcop_interactive import (
     load_goodcopbadcop_epoch_behavior_data,
     load_goodcopbadcop_cra_near_field_data,
     load_goodcopbadcop_cra_primary_endpoint_data,
-    load_goodcopbadcop_interactive_data,
+    load_chaser_dashboard_data,
     to_chaser_position_dataframe,
     to_distance_timeseries_dataframe,
     to_egocentric_bearing_dataframe,
@@ -59,6 +59,11 @@ CHASER_ZONE_PATTERN_KEY = (
     ("chaser 1 zone", "|"),
     ("multiple chasers", "x"),
 )
+CHASER_PROTOCOL_COMPANION_RENDERERS = (
+    "palette-goodcopbadcop-cra-primary-endpoint-v1",
+    "palette-goodcopbadcop-cra-near-field-v1",
+)
+CHASER_PROTOCOL_RENDERERS = tuple(CHASER_DASHBOARD_RENDERERS) + CHASER_PROTOCOL_COMPANION_RENDERERS
 
 
 @dataclass(frozen=True)
@@ -111,7 +116,21 @@ class GoodCopBadCopTimeWindow:
 
 
 def is_goodcopbadcop_option(option: InteractiveSpecOption) -> bool:
-    return option.renderer == GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER
+    return option.renderer in CHASER_PROTOCOL_RENDERERS
+
+
+def _owning_chaser_distance_run_path(option: InteractiveSpecOption) -> str:
+    parts = [part for part in str(option.run_path).strip("/").split("/") if part]
+    for index in range(len(parts) - 2):
+        if parts[index] == "analysis" and parts[index + 1] == "chaser_distance_runs":
+            return "/".join(parts[: index + 3])
+    return option.run_path
+
+
+def _dashboard_artifact_name_for_option(option: InteractiveSpecOption) -> Optional[str]:
+    if option.renderer in CHASER_DASHBOARD_RENDERERS:
+        return option.artifact_name
+    return None
 
 
 def _load_egocentric_pre_post_polar_png(
@@ -457,26 +476,27 @@ def load_goodcopbadcop_view(
     timer: Any,
 ) -> GoodCopBadCopLoadedView:
     load_t0 = timer.perf_counter()
-    data = load_goodcopbadcop_interactive_data(
+    run_path = _owning_chaser_distance_run_path(option)
+    data = load_chaser_dashboard_data(
         zarr_path,
-        run_path=option.run_path,
-        artifact_name=option.artifact_name,
+        run_path=run_path,
+        artifact_name=_dashboard_artifact_name_for_option(option),
     )
     cra_endpoint = load_goodcopbadcop_cra_primary_endpoint_data(
         zarr_path,
-        run_path=option.run_path,
+        run_path=run_path,
     )
     cra_near_field = load_goodcopbadcop_cra_near_field_data(
         zarr_path,
-        run_path=option.run_path,
+        run_path=run_path,
     )
     escape_freeze = load_goodcopbadcop_escape_freeze_data(
         zarr_path,
-        run_path=option.run_path,
+        run_path=run_path,
     )
     epoch_behavior = load_goodcopbadcop_epoch_behavior_data(
         zarr_path,
-        run_path=option.run_path,
+        run_path=run_path,
     )
     distance_df = to_distance_timeseries_dataframe(data)
     position_df = to_position_dataframe(data)

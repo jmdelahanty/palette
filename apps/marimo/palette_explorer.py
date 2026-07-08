@@ -55,11 +55,11 @@ def _():
         supported_renderer_ids,
     )
     from apps.marimo.components.static_artifacts import build_static_artifacts_panel
-    from fisheye.visualization.goodcopbadcop_interactive import GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER
+    from fisheye.visualization.goodcopbadcop_interactive import CHASER_DASHBOARD_RENDERERS
 
     return (
         Path,
-        GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
+        CHASER_DASHBOARD_RENDERERS,
         build_arena_heatmap,
         build_detection_occupancy_output,
         build_distance_figure,
@@ -97,7 +97,7 @@ def _():
 
 
 @app.cell
-def _(GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER, Path, discover_protocol_recording_options, mo):
+def _(Path, discover_protocol_recording_options, mo):
     cli_args = mo.cli_args()
     zarr_path_raw = cli_args.get("zarr-path")
     recordings_root_raw = cli_args.get("recordings-root")
@@ -112,13 +112,11 @@ def _(GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER, Path, discover_protocol_recording
             "--zarr-path <archive.zarr>"
         )
     seed_zarr_path = Path(str(zarr_path_raw))
-    recording_selector_renderer = (
-        str(initial_renderer) if initial_renderer else GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER
-    )
+    recording_selector_renderer = str(initial_renderer) if initial_renderer else ""
     recording_options = discover_protocol_recording_options(
         seed_zarr_path,
         recordings_root=Path(str(recordings_root_raw)) if recordings_root_raw else None,
-        renderer_filter=recording_selector_renderer,
+        renderer_filter=recording_selector_renderer or None,
         run_path_filter=str(initial_run_path) if initial_run_path else None,
         artifact_filter=str(initial_artifact) if initial_artifact else None,
         name_contains=str(recording_name_contains) if recording_name_contains else None,
@@ -213,7 +211,15 @@ def _(
 
 
 @app.cell
-def _(group_options_by_renderer, mo, renderer_registration_for, spec_options, supported_renderer_ids, zarr_path):
+def _(
+    CHASER_DASHBOARD_RENDERERS,
+    group_options_by_renderer,
+    mo,
+    renderer_registration_for,
+    spec_options,
+    supported_renderer_ids,
+    zarr_path,
+):
     renderer_groups = group_options_by_renderer(spec_options)
     supported_ids = set(supported_renderer_ids())
     summary = {
@@ -228,9 +234,18 @@ def _(group_options_by_renderer, mo, renderer_registration_for, spec_options, su
         for index, option in enumerate(spec_options)
     }
     default_label = next(
-        (label for label, option in spec_label_to_option.items() if option.is_supported),
-        next(iter(spec_label_to_option)),
+        (
+            label
+            for label, option in spec_label_to_option.items()
+            if option.renderer in CHASER_DASHBOARD_RENDERERS
+        ),
+        None,
     )
+    if default_label is None:
+        default_label = next(
+            (label for label, option in spec_label_to_option.items() if option.is_supported),
+            next(iter(spec_label_to_option)),
+        )
     spec_picker = mo.ui.dropdown(
         options=list(spec_label_to_option),
         value=default_label,
@@ -301,7 +316,7 @@ def _(load_goodcopbadcop_view, selected_is_goodcopbadcop, selected_spec_option, 
 @app.cell
 def _(build_goodcopbadcop_summary, gcb_load_error, gcb_loaded, mo, selected_spec_option):
     if gcb_load_error:
-        gcb_summary_output = mo.md(f"GoodCopBadCop view failed to load: `{gcb_load_error}`")
+        gcb_summary_output = mo.md(f"Chaser protocol view failed to load: `{gcb_load_error}`")
     elif gcb_loaded is not None:
         gcb_summary_output = build_goodcopbadcop_summary(
             mo,

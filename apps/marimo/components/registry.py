@@ -14,8 +14,10 @@ from fisheye.shared.plot_artifacts import INTERACTIVE_SPEC_SCHEMA_ID, SPEC_MEDIA
 from fisheye.utils.view_zarr_visualization import iter_visualization_artifacts
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.visualization.goodcopbadcop_interactive import (
-    DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT,
-    GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
+    CHASER_DASHBOARD_INTERACTIVE_ARTIFACTS,
+    CHASER_DASHBOARD_RENDERER,
+    CHASER_DASHBOARD_RENDERERS,
+    LEGACY_GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
 )
 
 from .common import join_path, normalize_path
@@ -56,12 +58,30 @@ class RecordingSpecOption:
 
 
 DEFAULT_RENDERER_REGISTRY: dict[str, RendererRegistration] = {
-    GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER: RendererRegistration(
-        renderer=GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
-        label="GoodCopBadCop chaser dashboard",
+    CHASER_DASHBOARD_RENDERER: RendererRegistration(
+        renderer=CHASER_DASHBOARD_RENDERER,
+        label="Chaser dashboard",
         component_key="goodcopbadcop_chaser",
         description="Distance traces, selected-window occupancy, and persisted chaser protocol snapshots.",
-    )
+    ),
+    LEGACY_GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER: RendererRegistration(
+        renderer=LEGACY_GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
+        label="Chaser dashboard",
+        component_key="goodcopbadcop_chaser",
+        description="Legacy GoodCopBadCop renderer ID for chaser dashboard artifacts.",
+    ),
+    "palette-goodcopbadcop-cra-primary-endpoint-v1": RendererRegistration(
+        renderer="palette-goodcopbadcop-cra-primary-endpoint-v1",
+        label="CRA primary endpoint",
+        component_key="goodcopbadcop_chaser",
+        description="Object-relative CRA endpoint view within a chaser protocol run.",
+    ),
+    "palette-goodcopbadcop-cra-near-field-v1": RendererRegistration(
+        renderer="palette-goodcopbadcop-cra-near-field-v1",
+        label="CRA near-field",
+        component_key="goodcopbadcop_chaser",
+        description="Near-field avoidance view within a chaser protocol run.",
+    ),
 }
 
 
@@ -200,24 +220,25 @@ def _discover_goodcopbadcop_chaser_specs_fast(
 ) -> list[InteractiveSpecOption]:
     run_path_wanted = normalize_path(str(run_path_filter)) if run_path_filter else None
     artifact_wanted = normalize_path(str(artifact_filter)) if artifact_filter else None
-    default_artifact = DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT
+    default_artifact = CHASER_DASHBOARD_INTERACTIVE_ARTIFACTS[0]
 
-    if artifact_wanted and "/" not in artifact_wanted and artifact_wanted != default_artifact:
+    if artifact_wanted and "/" not in artifact_wanted and artifact_wanted not in CHASER_DASHBOARD_INTERACTIVE_ARTIFACTS:
         return []
 
     candidate_paths: list[str]
     if artifact_wanted and "/" in artifact_wanted:
         candidate_paths = [artifact_wanted]
     elif run_path_wanted:
-        candidate_paths = [artifact_path_for(run_path_wanted, default_artifact)]
+        candidate_paths = [artifact_path_for(run_path_wanted, artifact) for artifact in CHASER_DASHBOARD_INTERACTIVE_ARTIFACTS]
     else:
         try:
             parent = root["analysis/chaser_distance_runs"]
         except Exception:
             return []
         candidate_paths = [
-            artifact_path_for(f"analysis/chaser_distance_runs/{run_name}", default_artifact)
+            artifact_path_for(f"analysis/chaser_distance_runs/{run_name}", artifact)
             for run_name in _group_names(parent)
+            for artifact in CHASER_DASHBOARD_INTERACTIVE_ARTIFACTS
         ]
 
     options: list[InteractiveSpecOption] = []
@@ -230,7 +251,7 @@ def _discover_goodcopbadcop_chaser_specs_fast(
         option = _read_option(root, archive, normalized_path)
         if option is None:
             continue
-        if option.renderer != GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER:
+        if option.renderer not in CHASER_DASHBOARD_RENDERERS:
             continue
         if run_path_wanted and option.run_path != run_path_wanted:
             continue
@@ -254,7 +275,7 @@ def discover_interactive_spec_options(
     renderer_wanted = str(renderer_filter).strip() if renderer_filter else None
     run_path_wanted = normalize_path(str(run_path_filter)) if run_path_filter else None
     artifact_wanted = normalize_path(str(artifact_filter)) if artifact_filter else None
-    if renderer_wanted == GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER:
+    if renderer_wanted in CHASER_DASHBOARD_RENDERERS:
         return _discover_goodcopbadcop_chaser_specs_fast(
             root,
             archive,

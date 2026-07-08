@@ -13,9 +13,12 @@ from fisheye.analysis.chaser_distance_runs import (
 )
 from fisheye.shared.plot_artifacts import INTERACTIVE_SPEC_SCHEMA_ID
 from fisheye.visualization.goodcopbadcop_interactive import (
-    DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT,
-    GOODCOPBADCOP_CHASER_DASHBOARD_SPEC_SCHEMA_ID,
+    CHASER_DASHBOARD_RENDERER,
+    CHASER_DASHBOARD_SPEC_SCHEMA_ID,
+    DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT,
     discover_goodcopbadcop_chaser_dashboard_options,
+    discover_chaser_dashboard_options,
+    load_chaser_dashboard_data,
     load_goodcopbadcop_interactive_data,
     to_distance_timeseries_dataframe,
     to_position_dataframe,
@@ -235,7 +238,7 @@ def _make_chaser_result(zarr_path: Path) -> ChaserDistanceResult:
     )
 
 
-def test_chaser_distance_writer_adds_goodcopbadcop_interactive_spec(tmp_path: Path) -> None:
+def test_chaser_distance_writer_adds_chaser_protocol_interactive_spec(tmp_path: Path) -> None:
     zarr_path = _make_archive_with_detection_occupancy(tmp_path)
     result = _make_chaser_result(zarr_path)
 
@@ -253,14 +256,16 @@ def test_chaser_distance_writer_adds_goodcopbadcop_interactive_spec(tmp_path: Pa
     assert run["positions"].attrs["y_axis_direction"] == "down"
     assert run["positions"].attrs["fish_centroid_arena_xy_coordinate_origin"] == "top_left_of_active_arena"
     visualizations = run["visualizations"]
-    spec_group = visualizations[DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT]
+    spec_group = visualizations[DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT]
     assert spec_group.attrs["artifact_schema_id"] == INTERACTIVE_SPEC_SCHEMA_ID
     assert spec_group.attrs["snapshot_artifact"] == "chaser_distance_timeseries_png"
-    assert spec_group.attrs["renderer"] == "palette-goodcopbadcop-chaser-dashboard-v1"
+    assert spec_group.attrs["renderer"] == CHASER_DASHBOARD_RENDERER
 
     spec_bytes = np.asarray(spec_group["spec_json"][:], dtype=np.uint8).tobytes()
     spec = json.loads(spec_bytes.decode("utf-8"))
-    assert spec["schema_id"] == GOODCOPBADCOP_CHASER_DASHBOARD_SPEC_SCHEMA_ID
+    assert spec["schema_id"] == CHASER_DASHBOARD_SPEC_SCHEMA_ID
+    assert spec["artifact_family"] == "chaser_protocol_dashboard"
+    assert spec["protocol_family"] == "chaser"
     assert spec["source_paths"]["fish_centroid_arena_xy"].endswith("/positions/fish_centroid_arena_xy")
     assert spec["source_paths"]["distance_mm"].endswith("/distances/distance_mm")
     assert spec["source_paths"]["detection_occupancy_heatmap_normalized"].endswith(
@@ -275,18 +280,18 @@ def test_chaser_distance_writer_adds_goodcopbadcop_interactive_spec(tmp_path: Pa
     )
 
     manifest = run.attrs["visualizations"]
-    assert manifest[DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT]["artifact_schema_id"] == INTERACTIVE_SPEC_SCHEMA_ID
+    assert manifest[DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT]["artifact_schema_id"] == INTERACTIVE_SPEC_SCHEMA_ID
 
 
-def test_goodcopbadcop_interactive_loader_builds_plot_dataframes(tmp_path: Path) -> None:
+def test_chaser_protocol_interactive_loader_builds_plot_dataframes(tmp_path: Path) -> None:
     zarr_path = _make_archive_with_detection_occupancy(tmp_path)
     result = _make_chaser_result(zarr_path)
     write_chaser_distance_run(zarr_path, result, overwrite=True)
 
-    options = discover_goodcopbadcop_chaser_dashboard_options(zarr_path)
+    options = discover_chaser_dashboard_options(zarr_path)
     assert [option.run_name for option in options] == ["chaser_distance_1"]
 
-    data = load_goodcopbadcop_interactive_data(zarr_path, run_path=options[0].run_path)
+    data = load_chaser_dashboard_data(zarr_path, run_path=options[0].run_path)
     assert data.fps == 10.0
     assert data.distance_mm.shape == (9, 2)
     assert data.occupancy_normalized is not None
@@ -308,6 +313,11 @@ def test_goodcopbadcop_interactive_loader_builds_plot_dataframes(tmp_path: Path)
     assert "distance_mm_chaser_0" in distance_df.columns
     assert "distance_mm_chaser_1" in distance_df.columns
     assert distance_df["time_s"].tolist() == [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+
+    legacy_options = discover_goodcopbadcop_chaser_dashboard_options(zarr_path)
+    assert [option.run_name for option in legacy_options] == ["chaser_distance_1"]
+    legacy_data = load_goodcopbadcop_interactive_data(zarr_path, run_path=legacy_options[0].run_path)
+    assert legacy_data.run_name == data.run_name
 
     position_df = to_position_dataframe(data)
     assert position_df["fish_valid"].tolist() == [True, True, True, True, False, True, True, True, True]

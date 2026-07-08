@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Marimo app for GoodCopBadCop chaser dashboard specs.
+"""Marimo app for chaser-protocol dashboard specs.
 
 Run with:
 
@@ -28,9 +28,9 @@ def _():
     from fisheye.utils.view_zarr_visualization import load_png_artifact_bytes
     from fisheye.shared.zarr_io import open_zarr_root
     from fisheye.visualization.goodcopbadcop_interactive import (
-        DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT,
-        discover_goodcopbadcop_chaser_dashboard_options,
-        load_goodcopbadcop_interactive_data,
+        DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT,
+        discover_chaser_dashboard_options,
+        load_chaser_dashboard_data,
         to_chaser_position_dataframe,
         to_distance_timeseries_dataframe,
         to_position_dataframe,
@@ -59,12 +59,12 @@ def _():
             )
 
     return (
-        DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT,
+        DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT,
         Path,
         add_epoch_overlays,
-        discover_goodcopbadcop_chaser_dashboard_options,
+        discover_chaser_dashboard_options,
         go,
-        load_goodcopbadcop_interactive_data,
+        load_chaser_dashboard_data,
         load_png_artifact_bytes,
         mo,
         np,
@@ -81,10 +81,10 @@ def _():
 
 
 @app.cell
-def _(DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT, Path, discover_goodcopbadcop_chaser_dashboard_options, mo):
+def _(DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT, Path, discover_chaser_dashboard_options, mo):
     cli_args = mo.cli_args()
     zarr_path_raw = cli_args.get("zarr-path")
-    artifact = str(cli_args.get("artifact", DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT))
+    artifact = str(cli_args.get("artifact", DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT))
     initial_run_path = cli_args.get("run-path")
     if not zarr_path_raw:
         raise ValueError(
@@ -93,11 +93,11 @@ def _(DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT, Path, discover_goodcopbadcop_c
             "--zarr-path <archive.zarr>"
         )
     zarr_path = Path(str(zarr_path_raw))
-    options = discover_goodcopbadcop_chaser_dashboard_options(zarr_path, artifact_name=artifact)
+    options = discover_chaser_dashboard_options(zarr_path, artifact_name=artifact)
     if not options:
         raise ValueError(
-            "No GoodCopBadCop interactive artifacts were found. "
-            "Refresh chaser-distance runs so they write goodcopbadcop_chaser_dashboard_interactive."
+            "No chaser-protocol dashboard interactive artifacts were found. "
+            "Refresh chaser-distance runs so they write chaser_protocol_dashboard_interactive."
         )
     return artifact, initial_run_path, options, zarr_path
 
@@ -128,7 +128,7 @@ def _(initial_run_path, mo, options):
 def _(
     artifact,
     label_to_option,
-    load_goodcopbadcop_interactive_data,
+    load_chaser_dashboard_data,
     run_picker,
     time,
     to_chaser_position_dataframe,
@@ -139,7 +139,7 @@ def _(
 ):
     selected_run = label_to_option[run_picker.value]
     _load_t0 = time.perf_counter()
-    data = load_goodcopbadcop_interactive_data(
+    data = load_chaser_dashboard_data(
         zarr_path,
         run_path=selected_run.run_path,
         artifact_name=artifact,
@@ -156,7 +156,7 @@ def _(
 def _(data, distance_df, load_duration_ms, mo, position_df, selected_run, windows_df):
     mo.vstack(
         [
-            mo.md(f"# GoodCopBadCop Chaser Dashboard\n\n`{data.zarr_path}`"),
+            mo.md(f"# Chaser Protocol Dashboard\n\n`{data.zarr_path}`"),
             mo.hstack(
                 [
                     mo.stat(label="Run", value=selected_run.run_name),

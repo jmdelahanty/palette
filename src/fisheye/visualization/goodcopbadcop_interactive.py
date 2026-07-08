@@ -1,4 +1,9 @@
-"""Interactive visualization adapters for GoodCopBadCop chaser analyses."""
+"""Interactive visualization adapters for chaser-protocol analyses.
+
+The first persisted dashboard artifacts used GoodCopBadCop-specific schema,
+renderer, and artifact names. New writers use protocol-neutral names below; the
+legacy constants remain as read aliases so existing zarrs stay viewable.
+"""
 
 from __future__ import annotations
 
@@ -19,9 +24,43 @@ from fisheye.utils.view_zarr_visualization import load_png_artifact_bytes
 from fisheye.shared.zarr_io import open_zarr_root
 
 
-GOODCOPBADCOP_CHASER_DASHBOARD_SPEC_SCHEMA_ID = "palette.plot_spec.goodcopbadcop_chaser_dashboard.v1"
-GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER = "palette-goodcopbadcop-chaser-dashboard-v1"
-DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT = "goodcopbadcop_chaser_dashboard_interactive"
+CHASER_PROTOCOL_DASHBOARD_SPEC_SCHEMA_ID = "palette.plot_spec.chaser_protocol_dashboard.v1"
+CHASER_PROTOCOL_DASHBOARD_RENDERER = "palette-chaser-protocol-dashboard-v1"
+DEFAULT_CHASER_PROTOCOL_DASHBOARD_INTERACTIVE_ARTIFACT = "chaser_protocol_dashboard_interactive"
+LEGACY_CHASER_DASHBOARD_SPEC_SCHEMA_ID = "palette.plot_spec.chaser_dashboard.v1"
+LEGACY_CHASER_DASHBOARD_RENDERER = "palette-chaser-dashboard-v1"
+LEGACY_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT = "chaser_dashboard_interactive"
+LEGACY_GOODCOPBADCOP_CHASER_DASHBOARD_SPEC_SCHEMA_ID = "palette.plot_spec.goodcopbadcop_chaser_dashboard.v1"
+LEGACY_GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER = "palette-goodcopbadcop-chaser-dashboard-v1"
+LEGACY_GOODCOPBADCOP_INTERACTIVE_ARTIFACT = "goodcopbadcop_chaser_dashboard_interactive"
+CHASER_PROTOCOL_DASHBOARD_SPEC_SCHEMA_IDS = (
+    CHASER_PROTOCOL_DASHBOARD_SPEC_SCHEMA_ID,
+    LEGACY_CHASER_DASHBOARD_SPEC_SCHEMA_ID,
+    LEGACY_GOODCOPBADCOP_CHASER_DASHBOARD_SPEC_SCHEMA_ID,
+)
+CHASER_PROTOCOL_DASHBOARD_RENDERERS = (
+    CHASER_PROTOCOL_DASHBOARD_RENDERER,
+    LEGACY_CHASER_DASHBOARD_RENDERER,
+    LEGACY_GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
+)
+CHASER_PROTOCOL_DASHBOARD_INTERACTIVE_ARTIFACTS = (
+    DEFAULT_CHASER_PROTOCOL_DASHBOARD_INTERACTIVE_ARTIFACT,
+    LEGACY_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT,
+    LEGACY_GOODCOPBADCOP_INTERACTIVE_ARTIFACT,
+)
+
+# Shorter protocol-neutral aliases retained for code readability.
+CHASER_DASHBOARD_SPEC_SCHEMA_ID = CHASER_PROTOCOL_DASHBOARD_SPEC_SCHEMA_ID
+CHASER_DASHBOARD_RENDERER = CHASER_PROTOCOL_DASHBOARD_RENDERER
+DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT = DEFAULT_CHASER_PROTOCOL_DASHBOARD_INTERACTIVE_ARTIFACT
+CHASER_DASHBOARD_SPEC_SCHEMA_IDS = CHASER_PROTOCOL_DASHBOARD_SPEC_SCHEMA_IDS
+CHASER_DASHBOARD_RENDERERS = CHASER_PROTOCOL_DASHBOARD_RENDERERS
+CHASER_DASHBOARD_INTERACTIVE_ARTIFACTS = CHASER_PROTOCOL_DASHBOARD_INTERACTIVE_ARTIFACTS
+
+# Backward-compatible public aliases for existing callers and tests.
+GOODCOPBADCOP_CHASER_DASHBOARD_SPEC_SCHEMA_ID = LEGACY_GOODCOPBADCOP_CHASER_DASHBOARD_SPEC_SCHEMA_ID
+GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER = LEGACY_GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER
+DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT = LEGACY_GOODCOPBADCOP_INTERACTIVE_ARTIFACT
 GOODCOPBADCOP_CRA_COMPONENT_PARENT = "cra_primary_endpoint"
 GOODCOPBADCOP_CRA_SCHEMA_ID = "palette.goodcopbadcop.cra_primary_endpoint.v1"
 GOODCOPBADCOP_CRA_NEAR_FIELD_COMPONENT_PARENT = "cra_near_field"
@@ -2126,7 +2165,13 @@ def _source_paths_for_chaser_dashboard(
     return source_paths
 
 
-def build_goodcopbadcop_chaser_dashboard_spec(
+def _dashboard_artifact_candidates(artifact_name: str | None) -> tuple[str, ...]:
+    if artifact_name is None or str(artifact_name) == DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT:
+        return CHASER_DASHBOARD_INTERACTIVE_ARTIFACTS
+    return (str(artifact_name),)
+
+
+def build_chaser_protocol_dashboard_spec(
     root: zarr.Group,
     *,
     run_name: str,
@@ -2134,7 +2179,7 @@ def build_goodcopbadcop_chaser_dashboard_spec(
     run_group: zarr.Group,
     detection_occupancy_run_path: Optional[str] = None,
 ) -> Mapping[str, Any]:
-    """Build a renderer-neutral GoodCopBadCop chaser dashboard spec."""
+    """Build a renderer-neutral chaser-protocol dashboard spec."""
 
     attrs = dict(getattr(run_group, "attrs", {}))
     resolved_occupancy_path = detection_occupancy_run_path or resolve_related_detection_occupancy_run_path(
@@ -2172,10 +2217,11 @@ def build_goodcopbadcop_chaser_dashboard_spec(
     }
 
     return {
-        "schema_id": GOODCOPBADCOP_CHASER_DASHBOARD_SPEC_SCHEMA_ID,
-        "renderer": GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
-        "artifact_family": "goodcopbadcop_chaser_dashboard",
-        "title": f"GoodCopBadCop chaser dashboard - {attrs.get('recording_id', run_name)}",
+        "schema_id": CHASER_DASHBOARD_SPEC_SCHEMA_ID,
+        "renderer": CHASER_DASHBOARD_RENDERER,
+        "artifact_family": "chaser_protocol_dashboard",
+        "protocol_family": "chaser",
+        "title": f"Chaser protocol dashboard - {attrs.get('recording_id', run_name)}",
         "run_name": run_name,
         "run_path": _normalize_path(run_path),
         "recording_id": attrs.get("recording_id"),
@@ -2289,26 +2335,45 @@ def build_goodcopbadcop_chaser_dashboard_spec(
     }
 
 
-def discover_goodcopbadcop_chaser_dashboard_options(
+def build_chaser_dashboard_spec(*args: Any, **kwargs: Any) -> Mapping[str, Any]:
+    """Compatibility wrapper for the shorter pre-protocol-neutral builder name."""
+
+    return build_chaser_protocol_dashboard_spec(*args, **kwargs)
+
+
+def build_goodcopbadcop_chaser_dashboard_spec(*args: Any, **kwargs: Any) -> Mapping[str, Any]:
+    """Compatibility wrapper for the original GoodCopBadCop-specific builder name."""
+
+    return build_chaser_protocol_dashboard_spec(*args, **kwargs)
+
+
+def discover_chaser_dashboard_options(
     zarr_path: Path | str,
     *,
-    artifact_name: str = DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT,
+    artifact_name: str | None = DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT,
 ) -> list[GoodCopBadCopRunOption]:
-    """Return chaser-distance runs with a GoodCopBadCop interactive spec."""
+    """Return chaser-distance runs with a persisted chaser dashboard spec."""
 
     root = open_zarr_root(Path(zarr_path), mode="r")
     parent = root.get("analysis/chaser_distance_runs")
     if parent is None:
         return []
     latest = str(parent.attrs.get("latest_complete") or parent.attrs.get("latest") or "").strip()
+    artifact_candidates = _dashboard_artifact_candidates(artifact_name)
     options: list[GoodCopBadCopRunOption] = []
     for run_name in _group_keys(parent):
         run_path = _join_path("analysis/chaser_distance_runs", run_name)
-        artifact = _try_resolve_interactive_artifact(root, run_path=run_path, artifact_name=artifact_name)
+        resolved_artifact_name = None
+        artifact = None
+        for candidate in artifact_candidates:
+            artifact = _try_resolve_interactive_artifact(root, run_path=run_path, artifact_name=candidate)
+            if artifact is not None:
+                resolved_artifact_name = candidate
+                break
         if artifact is None:
             continue
         spec = _json_from_uint8_array(artifact["spec_json"])
-        if spec.get("schema_id") != GOODCOPBADCOP_CHASER_DASHBOARD_SPEC_SCHEMA_ID:
+        if spec.get("schema_id") not in CHASER_DASHBOARD_SPEC_SCHEMA_IDS:
             continue
         run_group = parent[run_name]
         attrs = dict(getattr(run_group, "attrs", {}))
@@ -2321,7 +2386,7 @@ def discover_goodcopbadcop_chaser_dashboard_options(
             GoodCopBadCopRunOption(
                 run_name=run_name,
                 run_path=run_path,
-                artifact_name=artifact_name,
+                artifact_name=str(resolved_artifact_name or artifact_name or ""),
                 label=f"{run_name} | {frame_count:,} frames | {chaser_count} chasers{suffix}",
                 is_latest=is_latest,
                 attrs=attrs,
@@ -2373,23 +2438,40 @@ def _load_windows(root: zarr.Group, source_paths: Mapping[str, str], fps: float)
     )
 
 
-def load_goodcopbadcop_interactive_data(
+def discover_goodcopbadcop_chaser_dashboard_options(
+    zarr_path: Path | str,
+    *,
+    artifact_name: str | None = DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT,
+) -> list[GoodCopBadCopRunOption]:
+    """Compatibility wrapper for the original GoodCopBadCop-specific discovery name."""
+
+    return discover_chaser_dashboard_options(zarr_path, artifact_name=artifact_name)
+
+
+def load_chaser_dashboard_data(
     zarr_path: Path | str,
     *,
     run_path: str,
-    artifact_name: str = DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT,
+    artifact_name: str | None = DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT,
 ) -> GoodCopBadCopInteractiveData:
-    """Load a persisted GoodCopBadCop chaser dashboard spec and source arrays."""
+    """Load a persisted chaser dashboard spec and source arrays."""
 
     archive = Path(zarr_path)
     root = open_zarr_root(archive, mode="r")
-    artifact = _resolve_interactive_artifact(root, run_path=run_path, artifact_name=artifact_name)
+    artifact = None
+    for candidate in _dashboard_artifact_candidates(artifact_name):
+        artifact = _try_resolve_interactive_artifact(root, run_path=run_path, artifact_name=candidate)
+        if artifact is not None:
+            break
+    if artifact is None:
+        wanted = ", ".join(_dashboard_artifact_candidates(artifact_name))
+        raise KeyError(f"No chaser dashboard artifact found under {run_path!r}; tried {wanted}")
     spec = _json_from_uint8_array(artifact["spec_json"])
     schema_id = spec.get("schema_id")
-    if schema_id != GOODCOPBADCOP_CHASER_DASHBOARD_SPEC_SCHEMA_ID:
+    if schema_id not in CHASER_DASHBOARD_SPEC_SCHEMA_IDS:
         raise ValueError(
             f"Unsupported interactive spec schema: {schema_id!r}; "
-            f"expected {GOODCOPBADCOP_CHASER_DASHBOARD_SPEC_SCHEMA_ID!r}"
+            f"expected one of {CHASER_DASHBOARD_SPEC_SCHEMA_IDS!r}"
         )
     source_paths = _as_str_mapping(spec.get("source_paths"))
     fps = _safe_float(spec.get("fps"), default=1.0)
@@ -2538,6 +2620,12 @@ def load_goodcopbadcop_interactive_data(
         egocentric_hist_counts=egocentric_hist_counts,
         egocentric_hist_probability=egocentric_hist_probability,
     )
+
+
+def load_goodcopbadcop_interactive_data(*args: Any, **kwargs: Any) -> GoodCopBadCopInteractiveData:
+    """Compatibility wrapper for the original GoodCopBadCop-specific loader name."""
+
+    return load_chaser_dashboard_data(*args, **kwargs)
 
 
 def to_window_dataframe(data: GoodCopBadCopInteractiveData) -> pd.DataFrame:
