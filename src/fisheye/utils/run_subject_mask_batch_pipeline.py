@@ -57,7 +57,10 @@ from fisheye.shared.zarr_discovery import discover_registry_zarr_entries
 
 RAW_COMPONENTS = ("subject_body", "eyes_union", "swim_bladder")
 REFINED_COMPONENTS = ("subject_body", "eye_left", "eye_right", "swim_bladder")
-OUTPUT_RUN_PARENTS = ("subject_mask_runs", "refined_subject_masks_runs")
+SUBJECT_MASK_CANONICAL_OUTPUT_PARENT = "subject_mask_runs"
+SUBJECT_MASK_SHARD_OUTPUT_PARENT = "subject_mask_shard_runs"
+SUBJECT_MASK_OUTPUT_PARENTS = (SUBJECT_MASK_CANONICAL_OUTPUT_PARENT, SUBJECT_MASK_SHARD_OUTPUT_PARENT)
+OUTPUT_RUN_PARENTS = (*SUBJECT_MASK_OUTPUT_PARENTS, "refined_subject_masks_runs")
 MAX_ARTIFACT_FILENAME_CHARS = 220
 DEFAULT_FINALIZE_DENSE_MASK_ROW_CHUNK = 256
 _EXPECTED_NON_ZARR_SIDECAR_WARNING_RE = (
@@ -82,6 +85,7 @@ class ArchivePlan:
     run_inference: bool
     run_finalization: bool
     skip_reason: str = ""
+    subject_output_parent: str = SUBJECT_MASK_CANONICAL_OUTPUT_PARENT
 
 
 @dataclass
@@ -258,10 +262,15 @@ def build_archive_plan(
     force_inference: bool,
     force_finalization: bool,
     workflow_stage: str = "all",
+    subject_output_parent: str = SUBJECT_MASK_CANONICAL_OUTPUT_PARENT,
 ) -> ArchivePlan:
     if workflow_stage not in {"all", "inference", "finalization"}:
         raise ValueError(f"workflow_stage must be all, inference, or finalization; got {workflow_stage!r}.")
-    subject_parent = zarr_path / "subject_mask_runs"
+    if subject_output_parent not in SUBJECT_MASK_OUTPUT_PARENTS:
+        raise ValueError(
+            f"subject_output_parent must be one of {SUBJECT_MASK_OUTPUT_PARENTS}; got {subject_output_parent!r}."
+        )
+    subject_parent = zarr_path / subject_output_parent
     refined_parent = zarr_path / "refined_subject_masks_runs"
     subject_children = _child_groups(subject_parent)
     refined_children = _child_groups(refined_parent)
@@ -292,9 +301,9 @@ def build_archive_plan(
         run_finalization = False
         skip_reasons.append("missing_keypoint_assignment_source")
     if workflow_stage == "inference" and target_subject_run_exists and not force_inference:
-        skip_reasons.append("target_subject_mask_run_present")
+        skip_reasons.append(f"target_{subject_output_parent}_run_present")
     elif workflow_stage == "all" and has_subject_runs and not force_inference:
-        skip_reasons.append("subject_mask_runs_present")
+        skip_reasons.append(f"{subject_output_parent}_present")
     if workflow_stage == "finalization" and target_refined_run_exists and not force_finalization:
         skip_reasons.append("target_refined_subject_masks_run_present")
     elif workflow_stage == "all" and has_refined_subject_runs and not force_finalization:
@@ -310,6 +319,7 @@ def build_archive_plan(
         zarr_path=str(zarr_path),
         subject_run=subject_run_name,
         refined_run=refined_run_name,
+        subject_output_parent=subject_output_parent,
         crop_run=crop_run,
         assignment_keypoint_group=keypoint_group,
         assignment_keypoint_run=keypoint_run,
@@ -323,6 +333,11 @@ def build_archive_plan(
 
 def _selected_subject_run_for_finalization(plan: ArchivePlan) -> str:
     zarr_path = Path(plan.zarr_path)
+    if plan.subject_output_parent != SUBJECT_MASK_CANONICAL_OUTPUT_PARENT:
+        raise RuntimeError(
+            "Refined subject-mask finalization requires canonical subject_mask_runs input; "
+            f"got {plan.subject_output_parent!r}."
+        )
     if plan.run_inference or (zarr_path / "subject_mask_runs" / plan.subject_run).is_dir():
         return plan.subject_run
     latest = _latest_group_name(zarr_path / "subject_mask_runs")
@@ -338,6 +353,7 @@ def _inference_command(
     defer_registry_status: bool = False,
     roi_cache_expected_archive_path: str | Path | None = None,
 ) -> list[str]:
+    subject_output_parent = getattr(args, "subject_output_parent", SUBJECT_MASK_CANONICAL_OUTPUT_PARENT)
     cmd = [
         sys.executable,
         "-m",
@@ -356,6 +372,8 @@ def _inference_command(
         str(args.model_top_k),
         "--run-name",
         plan.subject_run,
+        "--output-parent",
+        subject_output_parent,
         "--crop-run",
         str(plan.crop_run),
         "--assignment-keypoint-group",
@@ -392,6 +410,29 @@ def _inference_command(
         cmd.extend(["--roi-cache-manifest", str(args.roi_cache_manifest)])
     if roi_cache_expected_archive_path is not None:
         cmd.extend(["--roi-cache-expected-archive-path", str(roi_cache_expected_archive_path)])
+    source_roi_cache_alias_manifest = getattr(args, "source_roi_cache_alias_manifest", None)
+    if (
+        source_roi_cache_alias_manifest is None
+        and subject_output_parent == SUBJECT_MASK_SHARD_OUTPUT_PARENT
+        and args.roi_cache_manifest is not None
+    ):
+        source_roi_cache_alias_manifest = args.roi_cache_manifest
+    if source_roi_cache_alias_manifest is not None:
+        cmd.extend(["--source-roi-cache-alias-manifest", str(source_roi_cache_alias_manifest)])
+    source_roi_cache_row_index_path = getattr(args, "source_roi_cache_row_index_path", None)
+    if source_roi_cache_row_index_path is not None:
+        cmd.extend(["--source-roi-cache-row-index-path", str(source_roi_cache_row_index_path)])
+    for attr_name, flag in (
+        ("source_collection_id", "--source-collection-id"),
+        ("source_collection_path", "--source-collection-path"),
+        ("source_clip_id", "--source-clip-id"),
+        ("source_clip_index", "--source-clip-index"),
+        ("source_work_unit_id", "--source-work-unit-id"),
+        ("source_shard_id", "--source-shard-id"),
+    ):
+        value = getattr(args, attr_name, None)
+        if value is not None:
+            cmd.extend([flag, str(value)])
     if args.profile_timings:
         cmd.append("--profile-timings")
     if defer_registry_status:
@@ -722,11 +763,12 @@ def _subject_mask_publish_provenance(
             "assignment_keypoint_run": plan.assignment_keypoint_run,
             "run_inference": plan.run_inference,
             "run_finalization": plan.run_finalization,
+            "subject_output_parent": plan.subject_output_parent,
             "source_zarr_path": str(ctx.source_zarr_path),
             "staged_zarr_path": str(ctx.staged_zarr_path),
             "staging_root": str(ctx.staging_root),
             "publish": publish_payload,
-            "run_family": "refined_subject_masks_runs" if refined else "subject_mask_runs",
+            "run_family": "refined_subject_masks_runs" if refined else plan.subject_output_parent,
         },
         input_run_ids=input_run_ids,
         cwd=Path.cwd(),
@@ -817,7 +859,7 @@ def _publish_staged_outputs(
     if plan.run_inference:
         require_runs_parent(
             root,
-            "subject_mask_runs",
+            plan.subject_output_parent,
             completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
         )
     if plan.run_finalization:
@@ -830,8 +872,8 @@ def _publish_staged_outputs(
     publish_plans: list[RunGroupPublishPlan] = []
     if plan.run_inference:
         publish_plans.append(_prepare_run_group_publish(
-            staged_parent=ctx.staged_zarr_path / "subject_mask_runs",
-            target_parent=ctx.source_zarr_path / "subject_mask_runs",
+            staged_parent=ctx.staged_zarr_path / plan.subject_output_parent,
+            target_parent=ctx.source_zarr_path / plan.subject_output_parent,
             run_name=plan.subject_run,
             overwrite=overwrite,
         ))
@@ -859,7 +901,7 @@ def _publish_staged_outputs(
     if plan.run_inference:
         subject_parent = require_runs_parent(
             root,
-            "subject_mask_runs",
+            plan.subject_output_parent,
             completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
         )
         subject_group = subject_parent[plan.subject_run]
@@ -882,22 +924,23 @@ def _publish_staged_outputs(
             run_name=plan.subject_run,
             run_provenance=subject_run_provenance,
         )
-        if handoff_package_dir is not None:
+        if handoff_package_dir is not None and plan.subject_output_parent == SUBJECT_MASK_CANONICAL_OUTPUT_PARENT:
             package_payload = _create_run_group_tar_package(
                 ctx.source_zarr_path / "subject_mask_runs" / plan.subject_run,
                 _subject_mask_package_path(handoff_package_dir, ctx.source_zarr_path, plan.subject_run),
             )
             subject_group.attrs["cluster_run_package"] = dict(package_payload)
             handoff_packages.append(dict(package_payload))
-        if not emit_subject_mask_stage_completion(
-            root,
-            ctx.source_zarr_path,
-            run_group=subject_group,
-            run_name=plan.subject_run,
-            source="runtime_subject_mask_write_local_publish",
-            invalidate_on_ok=True,
-        ):
-            raise RuntimeError(f"Failed to emit registry status for subject_mask_runs/{plan.subject_run}")
+        if plan.subject_output_parent == SUBJECT_MASK_CANONICAL_OUTPUT_PARENT:
+            if not emit_subject_mask_stage_completion(
+                root,
+                ctx.source_zarr_path,
+                run_group=subject_group,
+                run_name=plan.subject_run,
+                source="runtime_subject_mask_write_local_publish",
+                invalidate_on_ok=True,
+            ):
+                raise RuntimeError(f"Failed to emit registry status for subject_mask_runs/{plan.subject_run}")
     if plan.run_finalization:
         refined_parent = require_runs_parent(
             root,
@@ -936,10 +979,17 @@ def _publish_staged_outputs(
             raise RuntimeError(
                 f"Failed to emit registry status for refined_subject_masks_runs/{plan.refined_run}"
             )
-    registry_refresh = _refresh_subject_mask_registry_views(
-        registry_path=registry_path,
-        zarr_path=ctx.source_zarr_path,
-    )
+    if plan.subject_output_parent == SUBJECT_MASK_CANONICAL_OUTPUT_PARENT:
+        registry_refresh = _refresh_subject_mask_registry_views(
+            registry_path=registry_path,
+            zarr_path=ctx.source_zarr_path,
+        )
+    else:
+        registry_refresh = {
+            "registry_refresh_status": "skipped",
+            "reason": "noncanonical_subject_output_parent",
+            "subject_output_parent": plan.subject_output_parent,
+        }
     return {
         "published_run_groups": published_run_groups,
         "published_run_group_count": int(len(published_run_groups)),
@@ -987,22 +1037,23 @@ def validate_outputs(
     *,
     subject_run: str,
     refined_run: str,
+    subject_output_parent: str = SUBJECT_MASK_CANONICAL_OUTPUT_PARENT,
     require_subject: bool = True,
     require_refined: bool = True,
 ) -> tuple[str, str]:
     root = _open_group(zarr_path)
     details: list[str] = []
-    subject_parent = root.get("subject_mask_runs")
+    subject_parent = root.get(subject_output_parent)
     if subject_parent is None or subject_run not in subject_parent:
         if require_subject:
-            return "failed", f"missing subject_mask_runs/{subject_run}"
+            return "failed", f"missing {subject_output_parent}/{subject_run}"
     else:
         subject = subject_parent[subject_run]
         raw_labels = tuple(str(label) for label in subject.attrs.get("mask_labels", ()))
         if any(label not in raw_labels for label in RAW_COMPONENTS):
             return "failed", f"subject mask labels {raw_labels!r} missing {RAW_COMPONENTS!r}"
         if "mask_probs_roi" not in subject:
-            return "failed", f"subject_mask_runs/{subject_run} missing mask_probs_roi"
+            return "failed", f"{subject_output_parent}/{subject_run} missing mask_probs_roi"
         details.append(f"subject_mask_labels={raw_labels}")
 
     refined_parent = root.get("refined_subject_masks_runs")
@@ -1103,9 +1154,38 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--registry", type=Path, default=None, help="Registry SQLite path. Defaults to PALETTE_REGISTRY_PATH/config.")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument(
+        "--subject-output-parent",
+        choices=SUBJECT_MASK_OUTPUT_PARENTS,
+        default=SUBJECT_MASK_CANONICAL_OUTPUT_PARENT,
+        help=(
+            "Parent group for raw subject-mask inference output. "
+            "Use subject_mask_shard_runs only for inference-only collection shards; "
+            "refined finalization currently requires canonical subject_mask_runs."
+        ),
+    )
     parser.add_argument("--roi-cache-policy", choices=("never", "auto", "always"), default="auto")
     parser.add_argument("--roi-cache-dir", type=Path)
     parser.add_argument("--roi-cache-manifest", type=Path)
+    parser.add_argument(
+        "--source-roi-cache-alias-manifest",
+        type=Path,
+        help=(
+            "Durable source flat-cache alias manifest to record in shard provenance. "
+            "Defaults to --roi-cache-manifest for subject_mask_shard_runs."
+        ),
+    )
+    parser.add_argument(
+        "--source-roi-cache-row-index-path",
+        type=Path,
+        help="Optional durable flat-cache row-index path to record in shard provenance.",
+    )
+    parser.add_argument("--source-collection-id", help="Collection id for shard provenance.")
+    parser.add_argument("--source-collection-path", help="Collection path for shard provenance.")
+    parser.add_argument("--source-clip-id", help="Clip id for shard provenance.")
+    parser.add_argument("--source-clip-index", type=int, help="Clip index for shard provenance.")
+    parser.add_argument("--source-work-unit-id", help="Scheduler/work-unit id for shard provenance.")
+    parser.add_argument("--source-shard-id", help="Stable shard id for shard provenance.")
     parser.add_argument("--roi-live-acceleration", choices=("auto", "cpu", "gpu"), default="auto")
     parser.add_argument("--roi-live-gpu-chunk-frames", type=int, default=32)
     parser.add_argument("--mask-probs-dtype", choices=("uint8", "float16"), default="uint8")
@@ -1265,6 +1345,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
     args.registry = (args.registry or RegistryPaths.from_env(Path.cwd()).path).expanduser().resolve()
     dry_run = not bool(args.apply)
+    if args.subject_output_parent != SUBJECT_MASK_CANONICAL_OUTPUT_PARENT and args.workflow_stage != "inference":
+        print(
+            "--subject-output-parent subject_mask_shard_runs is inference-only; "
+            "run canonical finalization after collection merge.",
+            file=sys.stderr,
+        )
+        return 2
 
     subject_run = f"subject_masks_unet_registry_{args.run_label}"
     refined_run = f"refined_subject_masks_smart_finalizer_{args.run_label}"
@@ -1292,6 +1379,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             force_inference=bool(args.force_inference),
             force_finalization=bool(args.force_finalization),
             workflow_stage=str(args.workflow_stage),
+            subject_output_parent=str(args.subject_output_parent),
         )
         for zarr_path in discovered_zarrs
     ]
@@ -1313,6 +1401,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"archives_selected: {len(plans)}")
     print(f"mode: {'apply' if args.apply else 'dry-run'}")
     print(f"workflow_stage: {args.workflow_stage}")
+    print(f"subject_output_parent: {args.subject_output_parent}")
     print(f"subject_run: {subject_run}")
     print(f"refined_run: {refined_run}")
     print(f"stage_output_to_scratch: {bool(args.stage_output_to_scratch)}")
@@ -1427,6 +1516,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         validation_path,
                         subject_run=validation_subject_run,
                         refined_run=plan.refined_run,
+                        subject_output_parent=plan.subject_output_parent,
                         require_subject=bool(plan.run_inference or plan.run_finalization),
                         require_refined=bool(plan.run_finalization),
                     )
@@ -1467,6 +1557,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             Path(plan.zarr_path),
                             subject_run=validation_subject_run,
                             refined_run=plan.refined_run,
+                            subject_output_parent=plan.subject_output_parent,
                             require_subject=bool(plan.run_inference or plan.run_finalization),
                             require_refined=bool(plan.run_finalization),
                         )

@@ -132,6 +132,9 @@ from .subject_mask_finalization import (
 )
 
 SMART_FINALIZE_SUBJECT_MASKS_METHOD = "smart_finalize_subject_masks_v1"
+SUBJECT_MASK_SHARD_COLLECTION_FINALIZER_SCHEMA = "palette_subject_mask_shard_collection_finalizer_v1"
+SUBJECT_MASK_CANONICAL_PARENT = "subject_mask_runs"
+SUBJECT_MASK_SHARD_PARENT = "subject_mask_shard_runs"
 _REFINED_SUBJECT_MASKS_STATUS_SOURCE = "runtime_smart_finalize_subject_masks"
 _RAW_EYE_UNION_COMPONENT = "eyes_union"
 _EYE_COMPONENTS = ("eye_left", "eye_right")
@@ -203,6 +206,32 @@ _COMPONENT_METRIC_FINALIZATION_SOURCES = {
     "hole_count": ("hole_count_after", np.int32),
     "hole_area_fraction": ("hole_area_fraction_after", np.float32),
 }
+_CROP_REBASE_IDENTITY_ARRAYS = (
+    "source_clip_indices",
+    "source_clip_local_frame_indices",
+    "source_refined_row_ids",
+    "source_detect_row_index",
+    "frame_indices",
+    "roi_coordinates_full",
+)
+_CROP_REBASE_COPY_ARRAYS = (
+    "frame_indices",
+    "source_frame_indices",
+    "source_clip_indices",
+    "source_clip_local_frame_indices",
+    "source_refined_row_ids",
+    "source_detect_row_index",
+    "detection_indices",
+)
+_SUBJECT_MASK_SHARD_COMPAT_ATTRS = (
+    "mask_labels",
+    "label_schema_id",
+    "probabilities_encoding",
+    "mask_probability_threshold",
+    "thresholds_by_label",
+    "threshold_by_component",
+    "threshold_by_label",
+)
 
 
 @dataclass(frozen=True)
@@ -220,6 +249,114 @@ class _FinalizedComponentBatch:
     source_surface_kind: str
     source_probability_encoding: Optional[str]
     source_probability_threshold: float
+
+
+@dataclass(frozen=True)
+class _SubjectMaskShardSource:
+    name: str
+    source: SourceSubjectMaskRun
+    source_crop_run: str
+    row_count: int
+
+
+@dataclass(frozen=True)
+class _SubjectMaskShardCollection:
+    shard_runs: tuple[str, ...]
+    shard_run_paths: tuple[str, ...]
+    shard_crop_runs: tuple[str, ...]
+    source_crop_run: str
+    source_crop_rebased_from_shards: bool
+    row_source_indices: np.ndarray
+    row_local_indices: np.ndarray
+    source_crop_row_ids: np.ndarray
+
+
+class _SubjectMaskParentAliasRoot:
+    """Root proxy exposing shard runs as ``subject_mask_runs`` for the legacy loader."""
+
+    def __init__(self, root: zarr.Group, source_parent: str) -> None:
+        self._root = root
+        self._source_parent = str(source_parent)
+
+    def get(self, path: str, default: object | None = None) -> object | None:
+        path = str(path)
+        if path == SUBJECT_MASK_CANONICAL_PARENT:
+            return self._root.get(self._source_parent, default)
+        prefix = f"{SUBJECT_MASK_CANONICAL_PARENT}/"
+        if path.startswith(prefix):
+            return self._root.get(f"{self._source_parent}/{path[len(prefix):]}", default)
+        return self._root.get(path, default)
+
+
+class _IndexedCollectionArray:
+    """Array-like row view over shard arrays in finalized collection order."""
+
+    def __init__(
+        self,
+        arrays: Sequence[object],
+        *,
+        source_indices: np.ndarray,
+        local_indices: np.ndarray,
+    ) -> None:
+        if not arrays:
+            raise ValueError("Indexed collection array requires at least one source array.")
+        self._arrays = tuple(arrays)
+        self._source_indices = np.asarray(source_indices, dtype=np.int64).reshape(-1)
+        self._local_indices = np.asarray(local_indices, dtype=np.int64).reshape(-1)
+        if self._source_indices.shape != self._local_indices.shape:
+            raise ValueError("source_indices and local_indices must have the same shape.")
+        first = arrays[0]
+        first_shape = tuple(int(value) for value in getattr(first, "shape"))
+        self.shape = (int(self._source_indices.shape[0]), *first_shape[1:])
+        self.dtype = np.dtype(getattr(first, "dtype"))
+        self.ndim = len(self.shape)
+        chunks = getattr(first, "chunks", None)
+        self.chunks = None
+        if chunks:
+            chunks_tuple = tuple(int(value) for value in chunks)
+            self.chunks = (min(max(1, self.shape[0]), chunks_tuple[0]), *chunks_tuple[1:])
+
+    def __getitem__(self, key: object) -> np.ndarray:
+        if isinstance(key, tuple):
+            row_key = key[0]
+            rest = key[1:]
+        else:
+            row_key = key
+            rest = ()
+        scalar_row = isinstance(row_key, (int, np.integer))
+        positions = np.arange(self.shape[0], dtype=np.int64)[row_key]
+        positions = (
+            np.asarray([positions], dtype=np.int64)
+            if np.ndim(positions) == 0
+            else np.asarray(positions, dtype=np.int64)
+        )
+        rows: list[np.ndarray] = []
+        for position in positions.reshape(-1):
+            source_idx = int(self._source_indices[int(position)])
+            local_idx = int(self._local_indices[int(position)])
+            rows.append(np.asarray(self._arrays[source_idx][(local_idx, *rest)]))
+        if not rows:
+            return np.empty((0, *self.shape[1 + len(rest):]), dtype=self.dtype)
+        result = np.stack(rows, axis=0)
+        return result[0] if scalar_row else result
+
+
+class _SubjectMaskCollectionGroup:
+    """Minimal group-like object satisfying the finalizer's source-run contract."""
+
+    def __init__(self, attrs: Mapping[str, object], arrays: Mapping[str, object], *, path: str) -> None:
+        self.attrs = dict(attrs)
+        self._arrays = dict(arrays)
+        self.path = str(path)
+
+    def get(self, name: str, default: object | None = None) -> object | None:
+        return self._arrays.get(str(name), default)
+
+    def __getitem__(self, name: str) -> object:
+        return self._arrays[str(name)]
+
+    def __contains__(self, name: str) -> bool:
+        return str(name) in self._arrays
 
 
 @dataclass(frozen=True)
@@ -292,6 +429,348 @@ def _normalize_postcompute_backend(postcompute_backend: object) -> str:
             f"{', '.join(_POSTCOMPUTE_BACKENDS)}."
         )
     return backend
+
+
+def _stable_json_equal(left: object, right: object) -> bool:
+    return json.dumps(json_attr_safe(left), sort_keys=True, separators=(",", ":")) == json.dumps(
+        json_attr_safe(right),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _array_data(array: object) -> np.ndarray:
+    return np.asarray(array[:])  # type: ignore[index]
+
+
+def _load_shard_names_from_file(path: Path) -> list[str]:
+    payload = json.loads(path.expanduser().read_text(encoding="utf-8"))
+    if isinstance(payload, list):
+        return [str(item) for item in payload]
+    if isinstance(payload, Mapping):
+        for key in ("shard_runs", "subject_mask_shard_runs", "runs"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                names: list[str] = []
+                for item in value:
+                    if isinstance(item, Mapping):
+                        raw_name = item.get("run_name") or item.get("run") or item.get("name")
+                        if raw_name is None:
+                            raise ValueError(f"Shard-run entry in {path} is missing run_name/run/name: {item!r}")
+                        names.append(str(raw_name))
+                    else:
+                        names.append(str(item))
+                return names
+    raise ValueError(f"Could not read shard run list from {path}; expected list or mapping with shard_runs.")
+
+
+def _row_identity_from_group(group: zarr.Group, row_ids: np.ndarray, names: Sequence[str]) -> list[tuple[object, ...]]:
+    arrays = {name: _array_data(group[name]) for name in names}
+    identities: list[tuple[object, ...]] = []
+    for row_id in np.asarray(row_ids, dtype=np.int64).reshape(-1):
+        parts: list[object] = []
+        for name in names:
+            value = np.asarray(arrays[name][int(row_id)])
+            parts.append(value.item() if value.ndim == 0 else tuple(value.reshape(-1).tolist()))
+        identities.append(tuple(parts))
+    return identities
+
+
+def _load_subject_mask_shard_sources(
+    root: zarr.Group,
+    shard_runs: Sequence[str],
+) -> list[_SubjectMaskShardSource]:
+    names = tuple(str(name) for name in shard_runs)
+    if not names:
+        raise ValueError("At least one subject-mask shard run is required.")
+    if len(set(names)) != len(names):
+        raise ValueError("Duplicate subject-mask shard run names were supplied.")
+    parent = root.get(SUBJECT_MASK_SHARD_PARENT)
+    if parent is None:
+        raise ValueError(f"Missing {SUBJECT_MASK_SHARD_PARENT} group.")
+    alias_root = _SubjectMaskParentAliasRoot(root, SUBJECT_MASK_SHARD_PARENT)
+    sources: list[_SubjectMaskShardSource] = []
+    for name in names:
+        if name not in parent:
+            raise ValueError(f"{SUBJECT_MASK_SHARD_PARENT}/{name} not found.")
+        group = parent[name]
+        status = str(group.attrs.get("palette_run_completion_status") or "")
+        if status and status != "complete":
+            raise ValueError(f"{SUBJECT_MASK_SHARD_PARENT}/{name} is not complete (status={status!r}).")
+        source = _load_source_subject_mask_run(alias_root, name)  # type: ignore[arg-type]
+        if source.source_crop_row_ids is None:
+            raise ValueError(f"{SUBJECT_MASK_SHARD_PARENT}/{name} missing source_crop_row_ids.")
+        sources.append(
+            _SubjectMaskShardSource(
+                name=name,
+                source=source,
+                source_crop_run=str(source.crop_run),
+                row_count=int(source.masks_roi.shape[0]),
+            )
+        )
+    return sources
+
+
+def _validate_subject_mask_shard_compatibility(shards: Sequence[_SubjectMaskShardSource]) -> None:
+    first = shards[0].source
+    for shard in shards[1:]:
+        source = shard.source
+        if tuple(source.mask_labels) != tuple(first.mask_labels):
+            raise ValueError(f"Shard mask_labels differ between {shards[0].name} and {shard.name}.")
+        if not np.array_equal(np.asarray(source.available_channels, dtype=bool), np.asarray(first.available_channels, dtype=bool)):
+            raise ValueError(f"Shard available_channels differ between {shards[0].name} and {shard.name}.")
+        if tuple(source.masks_roi.shape[1:]) != tuple(first.masks_roi.shape[1:]):
+            raise ValueError(f"Shard ROI/probability shape differs between {shards[0].name} and {shard.name}.")
+        if tuple(source.probability_thresholds) != tuple(first.probability_thresholds):
+            raise ValueError(f"Shard probability thresholds differ between {shards[0].name} and {shard.name}.")
+        if source.probability_encoding != first.probability_encoding:
+            raise ValueError(f"Shard probability encoding differs between {shards[0].name} and {shard.name}.")
+        for attr_name in _SUBJECT_MASK_SHARD_COMPAT_ATTRS:
+            left = first.group.attrs.get(attr_name)
+            right = source.group.attrs.get(attr_name)
+            if left is not None or right is not None:
+                if not _stable_json_equal(left, right):
+                    raise ValueError(f"Shard attr {attr_name!r} differs between {shards[0].name} and {shard.name}.")
+
+
+def _resolve_subject_mask_crop_rebase(
+    root: zarr.Group,
+    shards: Sequence[_SubjectMaskShardSource],
+    *,
+    target_crop_run: str | None,
+) -> tuple[str, np.ndarray, tuple[str, ...], bool]:
+    source_crop_runs = tuple(shard.source_crop_run for shard in shards)
+    unique_crop_runs = tuple(sorted(set(source_crop_runs)))
+    if not target_crop_run:
+        if len(unique_crop_runs) != 1:
+            raise ValueError(
+                "Mixed source_crop_run subject-mask shard finalization requires --target-crop-run; "
+                f"found {list(unique_crop_runs)!r}."
+            )
+        row_ids = np.concatenate(
+            [np.asarray(shard.source.source_crop_row_ids[:], dtype=np.int64).reshape(-1) for shard in shards],
+            axis=0,
+        )
+        return unique_crop_runs[0], row_ids, unique_crop_runs, False
+
+    crop_parent = root.get("crop_runs")
+    if crop_parent is None or target_crop_run not in crop_parent:
+        raise ValueError(f"target crop run not found: crop_runs/{target_crop_run}")
+    target_group = crop_parent[target_crop_run]
+    missing_target = [name for name in _CROP_REBASE_IDENTITY_ARRAYS if name not in target_group]
+    if missing_target:
+        raise ValueError(f"target crop run crop_runs/{target_crop_run} missing identity arrays: {missing_target}")
+    target_rows = np.arange(int(target_group["frame_indices"].shape[0]), dtype=np.int64)
+    target_identities = _row_identity_from_group(target_group, target_rows, _CROP_REBASE_IDENTITY_ARRAYS)
+    target_map: dict[tuple[object, ...], int] = {}
+    for row_idx, identity in enumerate(target_identities):
+        if identity in target_map:
+            raise ValueError(f"target crop run crop_runs/{target_crop_run} has duplicate crop row identities.")
+        target_map[identity] = int(row_idx)
+
+    mapped_chunks: list[np.ndarray] = []
+    for shard in shards:
+        source_group = crop_parent.get(shard.source_crop_run)
+        if source_group is None:
+            raise ValueError(f"source crop run not found: crop_runs/{shard.source_crop_run}")
+        missing_source = [name for name in _CROP_REBASE_IDENTITY_ARRAYS if name not in source_group]
+        if missing_source:
+            raise ValueError(f"source crop run crop_runs/{shard.source_crop_run} missing identity arrays: {missing_source}")
+        source_rows = np.asarray(shard.source.source_crop_row_ids[:], dtype=np.int64).reshape(-1)
+        source_identities = _row_identity_from_group(source_group, source_rows, _CROP_REBASE_IDENTITY_ARRAYS)
+        mapped = np.full(source_rows.shape[0], -1, dtype=np.int64)
+        for local_idx, identity in enumerate(source_identities):
+            target_row = target_map.get(identity)
+            if target_row is None:
+                raise ValueError(
+                    f"Could not map {SUBJECT_MASK_SHARD_PARENT}/{shard.name} row {local_idx} "
+                    f"from crop_runs/{shard.source_crop_run} into crop_runs/{target_crop_run}."
+                )
+            mapped[local_idx] = int(target_row)
+        mapped_chunks.append(mapped)
+    return str(target_crop_run), np.concatenate(mapped_chunks, axis=0), unique_crop_runs, True
+
+
+def _target_crop_lineage_array(
+    root: zarr.Group,
+    *,
+    crop_run: str,
+    target_rows: np.ndarray,
+    name: str,
+) -> np.ndarray | None:
+    crop_group = root.get(f"crop_runs/{crop_run}")
+    if crop_group is None or name not in crop_group:
+        return None
+    return _array_data(crop_group[name])[np.asarray(target_rows, dtype=np.int64).reshape(-1)]
+
+
+def _load_subject_mask_source(
+    root: zarr.Group,
+    *,
+    subject_run: Optional[str],
+    subject_shard_runs: Sequence[str] | None = None,
+    target_crop_run: str | None = None,
+) -> tuple[SourceSubjectMaskRun, _SubjectMaskShardCollection | None]:
+    if subject_shard_runs:
+        if subject_run:
+            raise ValueError("Pass either --subject-run or --subject-shard-run, not both.")
+        shards = _load_subject_mask_shard_sources(root, subject_shard_runs)
+        _validate_subject_mask_shard_compatibility(shards)
+        source_crop_run, source_crop_row_ids, shard_crop_runs, rebased = _resolve_subject_mask_crop_rebase(
+            root,
+            shards,
+            target_crop_run=target_crop_run,
+        )
+        source_indices = np.concatenate(
+            [np.full(shard.row_count, shard_idx, dtype=np.int64) for shard_idx, shard in enumerate(shards)],
+            axis=0,
+        )
+        local_indices = np.concatenate(
+            [np.arange(shard.row_count, dtype=np.int64) for shard in shards],
+            axis=0,
+        )
+        order = np.argsort(np.asarray(source_crop_row_ids, dtype=np.int64), kind="stable")
+        sorted_crop_rows = np.asarray(source_crop_row_ids, dtype=np.int64)[order]
+        if np.unique(sorted_crop_rows).shape[0] != sorted_crop_rows.shape[0]:
+            raise ValueError("Duplicate source_crop_row_ids found across subject-mask shards for the target source_crop_run.")
+        source_indices = source_indices[order]
+        local_indices = local_indices[order]
+
+        first_source = shards[0].source
+        arrays: dict[str, object] = {}
+        array_names = (
+            "mask_probs_roi",
+            "masks_roi",
+            "detection_source",
+            "frame_indices",
+            "detection_indices",
+            "source_frame_indices",
+            "source_clip_indices",
+            "source_clip_local_frame_indices",
+            "source_refined_row_ids",
+            "source_detect_row_index",
+            "instance_key",
+        )
+        for name in array_names:
+            source_arrays = [shard.source.group.get(name) for shard in shards]
+            if all(array is not None for array in source_arrays):
+                arrays[name] = _IndexedCollectionArray(
+                    [array for array in source_arrays if array is not None],
+                    source_indices=source_indices,
+                    local_indices=local_indices,
+                )
+        arrays["source_crop_row_ids"] = sorted_crop_rows
+        if target_crop_run:
+            for name in _CROP_REBASE_COPY_ARRAYS:
+                target_values = _target_crop_lineage_array(root, crop_run=source_crop_run, target_rows=sorted_crop_rows, name=name)
+                if target_values is not None:
+                    arrays[name] = np.asarray(target_values)
+        frame_counts = None
+        if target_crop_run:
+            crop_group = root.get(f"crop_runs/{source_crop_run}")
+            if crop_group is not None and "frame_counts" in crop_group:
+                frame_counts = np.asarray(crop_group["frame_counts"][:], dtype=np.int32)
+        if frame_counts is None:
+            frames = (
+                np.asarray(arrays["frame_indices"][:], dtype=np.int64).reshape(-1)
+                if "frame_indices" in arrays
+                else np.arange(sorted_crop_rows.shape[0], dtype=np.int64)
+            )
+            frame_axis_len = int(frames.max()) + 1 if frames.size else 0
+            frame_counts = np.bincount(frames, minlength=frame_axis_len).astype(np.int32)
+        arrays["frame_counts"] = np.asarray(frame_counts, dtype=np.int32)
+
+        attrs = dict(first_source.group.attrs)
+        attrs.update(
+            {
+                "source_crop_run": source_crop_run,
+                "source_subject_mask_shard_runs": [shard.name for shard in shards],
+                "source_subject_mask_shard_run_paths": [f"{SUBJECT_MASK_SHARD_PARENT}/{shard.name}" for shard in shards],
+                "source_subject_mask_shard_crop_runs": list(shard_crop_runs),
+                "source_crop_rebased_from_shards": bool(rebased),
+                "collection_finalizer_schema": SUBJECT_MASK_SHARD_COLLECTION_FINALIZER_SCHEMA,
+            }
+        )
+        source_crop_snapshot = dict(first_source.source_crop_snapshot)
+        crop_group = root.get(f"crop_runs/{source_crop_run}")
+        if crop_group is not None:
+            for key, target_key in (
+                ("crop_storage_mode", "source_crop_storage_mode"),
+                ("crop_signature", "source_crop_signature"),
+                ("crop_revision", "source_crop_revision"),
+                ("detect_review_status_ref", "source_detect_review_status_ref"),
+                ("source_roi_pixel_contract", "source_roi_pixel_contract"),
+                ("source_roi_pixel_contract_name", "source_roi_pixel_contract_name"),
+                ("source_roi_image_representation", "source_roi_image_representation"),
+            ):
+                value = crop_group.attrs.get(key)
+                if value is not None:
+                    source_crop_snapshot[target_key] = value
+
+        virtual_group = _SubjectMaskCollectionGroup(
+            attrs,
+            arrays,
+            path=f"{SUBJECT_MASK_SHARD_PARENT}/<collection>",
+        )
+        if first_source.mask_surface_path == "mask_probs_roi" and "mask_probs_roi" in arrays:
+            masks_roi = first_source.masks_roi.__class__(  # type: ignore[misc]
+                arrays["mask_probs_roi"],
+                thresholds=first_source.probability_thresholds,
+                encoding=first_source.probability_encoding,
+                source_path=f"{SUBJECT_MASK_SHARD_PARENT}/<collection>/mask_probs_roi",
+            )
+        elif "masks_roi" in arrays:
+            masks_roi = arrays["masks_roi"]
+        elif "mask_probs_roi" in arrays:
+            masks_roi = first_source.masks_roi.__class__(  # type: ignore[misc]
+                arrays["mask_probs_roi"],
+                thresholds=first_source.probability_thresholds,
+                encoding=first_source.probability_encoding,
+                source_path=f"{SUBJECT_MASK_SHARD_PARENT}/<collection>/mask_probs_roi",
+            )
+        else:
+            raise ValueError("Subject-mask shards must provide mask_probs_roi or masks_roi.")
+
+        collection = _SubjectMaskShardCollection(
+            shard_runs=tuple(shard.name for shard in shards),
+            shard_run_paths=tuple(f"{SUBJECT_MASK_SHARD_PARENT}/{shard.name}" for shard in shards),
+            shard_crop_runs=tuple(shard_crop_runs),
+            source_crop_run=str(source_crop_run),
+            source_crop_rebased_from_shards=bool(rebased),
+            row_source_indices=source_indices,
+            row_local_indices=local_indices,
+            source_crop_row_ids=sorted_crop_rows,
+        )
+        source = SourceSubjectMaskRun(
+            run_name="subject_mask_shard_collection",
+            group=virtual_group,  # type: ignore[arg-type]
+            crop_run=str(source_crop_run),
+            source_crop_snapshot=source_crop_snapshot,
+            masks_roi=masks_roi,
+            detection_source=arrays["detection_source"],
+            mask_labels=tuple(first_source.mask_labels),
+            available_channels=np.asarray(first_source.available_channels, dtype=bool),
+            frame_indices=arrays.get("frame_indices"),
+            frame_counts=arrays.get("frame_counts"),
+            detection_indices=arrays.get("detection_indices"),
+            source_method=first_source.source_method,
+            source_keypoints_run=first_source.source_keypoints_run,
+            source_keypoint_group=first_source.source_keypoint_group,
+            assignment_keypoints_run=first_source.assignment_keypoints_run,
+            assignment_keypoint_group=first_source.assignment_keypoint_group,
+            source_crop_row_ids=arrays["source_crop_row_ids"],
+            source_refined_row_ids=arrays.get("source_refined_row_ids"),
+            source_detect_row_index=arrays.get("source_detect_row_index"),
+            instance_key=arrays.get("instance_key"),
+            mask_surface_kind=first_source.mask_surface_kind,
+            mask_surface_path=first_source.mask_surface_path,
+            probability_thresholds=tuple(first_source.probability_thresholds),
+            probability_encoding=first_source.probability_encoding,
+        )
+        return source, collection
+    if target_crop_run:
+        raise ValueError("--target-crop-run is only valid with subject-mask shard finalization.")
+    return _load_source_subject_mask_run(root, subject_run), None
 
 
 def _component_contour_targets(component_names: Sequence[str]) -> list[str]:
@@ -755,15 +1234,21 @@ def _source_payload_for_finalized_component(
     batch: _FinalizedComponentBatch,
 ) -> dict[str, object]:
     payload = _source_component_provenance_payload(source, batch.component_name)
+    source_parent = (
+        SUBJECT_MASK_SHARD_PARENT
+        if source.group.attrs.get("collection_finalizer_schema") == SUBJECT_MASK_SHARD_COLLECTION_FINALIZER_SCHEMA
+        else SUBJECT_MASK_CANONICAL_PARENT
+    )
     payload["finalization_method"] = SMART_FINALIZE_SUBJECT_MASKS_METHOD
     payload["finalization_policy"] = _policy_payload(batch.policy)
+    payload["source_stage"] = source_parent
     payload["source_surface_path"] = (
-        f"subject_mask_runs/{source.run_name}/{batch.source_surface_path}"
+        f"{source_parent}/{source.run_name}/{batch.source_surface_path}"
     )
     payload["source_surface_kind"] = batch.source_surface_kind
     if batch.source_surface_kind == "probability":
         payload["source_probability_path"] = (
-            f"subject_mask_runs/{source.run_name}/{batch.source_surface_path}"
+            f"{source_parent}/{source.run_name}/{batch.source_surface_path}"
         )
         payload["source_probability_encoding"] = str(batch.source_probability_encoding or "")
         payload["source_probability_threshold"] = float(batch.source_probability_threshold)
@@ -784,8 +1269,13 @@ def _source_payload_for_assigned_eye_component(
     keypoint_success_dataset: str,
     keypoint_source_kind: str,
 ) -> dict[str, object]:
+    source_parent = (
+        SUBJECT_MASK_SHARD_PARENT
+        if source.group.attrs.get("collection_finalizer_schema") == SUBJECT_MASK_SHARD_COLLECTION_FINALIZER_SCHEMA
+        else SUBJECT_MASK_CANONICAL_PARENT
+    )
     payload: dict[str, object] = {
-        "source_stage": "subject_mask_runs",
+        "source_stage": source_parent,
         "source_run": source.run_name,
         "source_method": source.source_method or source.group.attrs.get("method") or "unknown",
         "source_channels": [_RAW_EYE_UNION_COMPONENT],
@@ -800,7 +1290,7 @@ def _source_payload_for_assigned_eye_component(
         "assignment_keypoint_source_kind": str(keypoint_source_kind),
         "finalization_method": SMART_FINALIZE_SUBJECT_MASKS_METHOD,
         "finalization_policy": _policy_payload(union_batch.policy),
-        "source_surface_path": f"subject_mask_runs/{source.run_name}/{union_batch.source_surface_path}",
+        "source_surface_path": f"{source_parent}/{source.run_name}/{union_batch.source_surface_path}",
         "source_surface_kind": union_batch.source_surface_kind,
         **source.source_crop_snapshot,
     }
@@ -812,7 +1302,7 @@ def _source_payload_for_assigned_eye_component(
         payload["source_created_at_utc"] = str(created_at)
     if union_batch.source_surface_kind == "probability":
         payload["source_probability_path"] = (
-            f"subject_mask_runs/{source.run_name}/{union_batch.source_surface_path}"
+            f"{source_parent}/{source.run_name}/{union_batch.source_surface_path}"
         )
         payload["source_probability_encoding"] = str(union_batch.source_probability_encoding or "")
         payload["source_probability_threshold"] = float(union_batch.source_probability_threshold)
@@ -1120,7 +1610,7 @@ def _metric_chunks_lastdim(total_rows: int, width: int) -> tuple[int, int, int]:
 
 
 def _source_lineage_map(source: SourceSubjectMaskRun) -> dict[str, object | None]:
-    return {
+    lineage = {
         "frame_indices": source.frame_indices,
         "frame_counts": source.frame_counts,
         "detection_indices": source.detection_indices,
@@ -1129,6 +1619,10 @@ def _source_lineage_map(source: SourceSubjectMaskRun) -> dict[str, object | None
         "source_detect_row_index": source.source_detect_row_index,
         "instance_key": source.instance_key,
     }
+    for name in ("source_frame_indices", "source_clip_indices", "source_clip_local_frame_indices"):
+        if name not in lineage:
+            lineage[name] = source.group.get(name)
+    return lineage
 
 
 def _create_component_shell(
@@ -3065,6 +3559,8 @@ def _process_and_write_finalizer_chunk(
     zarr_path: str,
     *,
     subject_run: str,
+    subject_shard_runs: Sequence[str] | None = None,
+    target_crop_run: Optional[str] = None,
     refined_run: str,
     component_names: Sequence[str],
     required_raw_components: Sequence[str],
@@ -3078,7 +3574,12 @@ def _process_and_write_finalizer_chunk(
     retain_source_seeds: bool,
 ) -> dict[str, object]:
     root = open_zarr_root(zarr_path, mode="a")
-    source = _load_source_subject_mask_run(root, subject_run)
+    source, _collection = _load_subject_mask_source(
+        root,
+        subject_run=subject_run,
+        subject_shard_runs=subject_shard_runs,
+        target_crop_run=target_crop_run,
+    )
     run_group = root["refined_subject_masks_runs"][refined_run]
     component_names = tuple(str(name) for name in component_names)
     eye_assignment_context: _EyeAssignmentContext | None = None
@@ -3145,6 +3646,8 @@ def _process_and_write_finalizer_shard(
     zarr_path: str,
     *,
     subject_run: str,
+    subject_shard_runs: Sequence[str] | None = None,
+    target_crop_run: Optional[str] = None,
     refined_run: str,
     component_names: Sequence[str],
     required_raw_components: Sequence[str],
@@ -3160,7 +3663,12 @@ def _process_and_write_finalizer_shard(
     progress_start_time: Optional[float],
 ) -> list[dict[str, object]]:
     root = open_zarr_root(zarr_path, mode="a")
-    source = _load_source_subject_mask_run(root, subject_run)
+    source, _collection = _load_subject_mask_source(
+        root,
+        subject_run=subject_run,
+        subject_shard_runs=subject_shard_runs,
+        target_crop_run=target_crop_run,
+    )
     run_group = root["refined_subject_masks_runs"][refined_run]
     component_names = tuple(str(name) for name in component_names)
     progress = _ProgressJsonlReporter(
@@ -3240,6 +3748,8 @@ def _compute_finalizer_process_shards(
     zarr_path: str,
     *,
     subject_run: str,
+    subject_shard_runs: Sequence[str] | None = None,
+    target_crop_run: Optional[str] = None,
     refined_run: str,
     component_names: Sequence[str],
     required_raw_components: Sequence[str],
@@ -3281,6 +3791,8 @@ def _compute_finalizer_process_shards(
                 _process_and_write_finalizer_shard,
                 str(zarr_path),
                 subject_run=subject_run,
+                subject_shard_runs=tuple(subject_shard_runs or ()),
+                target_crop_run=target_crop_run,
                 refined_run=refined_run,
                 component_names=tuple(component_names),
                 required_raw_components=tuple(required_raw_components),
@@ -3324,6 +3836,8 @@ def finalize_subject_mask_run(
     *,
     zarr_path: str | Path | None = None,
     subject_run: Optional[str] = None,
+    subject_shard_runs: Sequence[str] | None = None,
+    target_crop_run: str | None = None,
     refined_run: Optional[str] = None,
     components: Optional[Sequence[str]] = None,
     chunk_size: int = 256,
@@ -3385,13 +3899,19 @@ def finalize_subject_mask_run(
         and zarr_path is None
     ):
         raise ValueError("postcompute_backend='process_shards' requires a filesystem zarr_path.")
-    source = _load_source_subject_mask_run(root, subject_run)
+    source, shard_collection = _load_subject_mask_source(
+        root,
+        subject_run=subject_run,
+        subject_shard_runs=subject_shard_runs,
+        target_crop_run=target_crop_run,
+    )
     total_rows = int(source.masks_roi.shape[0])
     height = int(source.masks_roi.shape[2])
     width = int(source.masks_roi.shape[3])
     if source.source_crop_row_ids is None:
+        source_parent = SUBJECT_MASK_SHARD_PARENT if shard_collection is not None else SUBJECT_MASK_CANONICAL_PARENT
         raise ValueError(
-            f"subject_mask_runs/{source.run_name} cannot be finalized without source_crop_row_ids; "
+            f"{source_parent}/{source.run_name} cannot be finalized without source_crop_row_ids; "
             "write or backfill explicit crop-row lineage first."
         )
     effective_dense_mask_row_chunk = refined_subject_mask_storage_row_chunk(total_rows, dense_mask_row_chunk)
@@ -3473,6 +3993,18 @@ def finalize_subject_mask_run(
         **dask_metadata,
         "source_surface_kind": source.mask_surface_kind,
     }
+    if shard_collection is not None:
+        summary.update(
+            {
+                "collection_finalizer_schema": SUBJECT_MASK_SHARD_COLLECTION_FINALIZER_SCHEMA,
+                "finalized_from_subject_mask_shards": True,
+                "source_subject_mask_shard_runs": list(shard_collection.shard_runs),
+                "source_subject_mask_shard_run_paths": list(shard_collection.shard_run_paths),
+                "source_subject_mask_shard_crop_runs": list(shard_collection.shard_crop_runs),
+                "source_crop_rebased_from_shards": bool(shard_collection.source_crop_rebased_from_shards),
+                "source_crop_rebase_target_run": str(target_crop_run or ""),
+            }
+        )
     if dry_run:
         return summary
 
@@ -3500,6 +4032,9 @@ def finalize_subject_mask_run(
         postcompute_backend=str(postcompute_backend),
         postcompute_chunk_size=int(normalized_postcompute_chunk_size),
         postcompute_num_workers=normalized_postcompute_num_workers,
+        finalized_from_subject_mask_shards=bool(shard_collection is not None),
+        source_subject_mask_shard_runs=list(shard_collection.shard_runs) if shard_collection is not None else [],
+        source_crop_rebase_target_run=str(target_crop_run or ""),
     )
 
     refined_parent = require_runs_parent(root, "refined_subject_masks_runs")
@@ -3565,12 +4100,24 @@ def finalize_subject_mask_run(
         },
         "source_component_sources": {
             component_name: {
-                "source_stage": "subject_mask_runs",
+                "source_stage": SUBJECT_MASK_SHARD_PARENT if shard_collection is not None else SUBJECT_MASK_CANONICAL_PARENT,
                 "source_run": source.run_name,
             }
             for component_name in component_names
         },
     }
+    if shard_collection is not None:
+        extra_attrs.update(
+            {
+                "collection_finalizer_schema": SUBJECT_MASK_SHARD_COLLECTION_FINALIZER_SCHEMA,
+                "finalized_from_subject_mask_shards": True,
+                "source_subject_mask_shard_runs": list(shard_collection.shard_runs),
+                "source_subject_mask_shard_run_paths": list(shard_collection.shard_run_paths),
+                "source_subject_mask_shard_crop_runs": list(shard_collection.shard_crop_runs),
+                "source_crop_rebased_from_shards": bool(shard_collection.source_crop_rebased_from_shards),
+                "source_crop_rebase_target_run": str(target_crop_run or ""),
+            }
+        )
     if eye_assignment_context is not None:
         extra_attrs.update(assignment_keypoint_attrs)
 
@@ -3597,6 +4144,18 @@ def finalize_subject_mask_run(
         "postcompute_num_workers": normalized_postcompute_num_workers,
         **dask_metadata,
     }
+    if shard_collection is not None:
+        provenance_inputs.update(
+            {
+                "collection_finalizer_schema": SUBJECT_MASK_SHARD_COLLECTION_FINALIZER_SCHEMA,
+                "finalized_from_subject_mask_shards": True,
+                "source_subject_mask_shard_runs": list(shard_collection.shard_runs),
+                "source_subject_mask_shard_run_paths": list(shard_collection.shard_run_paths),
+                "source_subject_mask_shard_crop_runs": list(shard_collection.shard_crop_runs),
+                "source_crop_rebased_from_shards": bool(shard_collection.source_crop_rebased_from_shards),
+                "source_crop_rebase_target_run": str(target_crop_run or ""),
+            }
+        )
     if eye_assignment_context is not None:
         provenance_inputs.update(assignment_keypoint_attrs)
 
@@ -3618,6 +4177,7 @@ def finalize_subject_mask_run(
 
     if execution_backend in {_DASK_WORKER_EXECUTION_BACKEND, _PROCESS_SHARD_EXECUTION_BACKEND}:
         assert zarr_path is not None
+        worker_subject_run = "" if shard_collection is not None else str(source.run_name)
         with progress.phase("parallel_prepare_shells"):
             with timing.phase("parallel_prepare_shells"):
                 for raw_component in required_raw_components:
@@ -3646,7 +4206,9 @@ def finalize_subject_mask_run(
             tasks = [
                 delayed(_process_and_write_finalizer_chunk)(
                     str(zarr_path),
-                    subject_run=source.run_name,
+                    subject_run=worker_subject_run,
+                    subject_shard_runs=tuple(subject_shard_runs or ()),
+                    target_crop_run=target_crop_run,
                     refined_run=target_run,
                     component_names=component_names,
                     required_raw_components=tuple(required_raw_components),
@@ -3673,7 +4235,9 @@ def finalize_subject_mask_run(
                 with timing.phase("process_shard_compute"):
                     parallel_results = _compute_finalizer_process_shards(
                         str(zarr_path),
-                        subject_run=source.run_name,
+                        subject_run=worker_subject_run,
+                        subject_shard_runs=tuple(subject_shard_runs or ()),
+                        target_crop_run=target_crop_run,
                         refined_run=target_run,
                         component_names=component_names,
                         required_raw_components=tuple(required_raw_components),
@@ -4221,6 +4785,8 @@ def finalize_subject_masks(
     zarr_path: str | Path,
     *,
     subject_run: Optional[str] = None,
+    subject_shard_runs: Sequence[str] | None = None,
+    target_crop_run: str | None = None,
     refined_run: Optional[str] = None,
     components: Optional[Sequence[str]] = None,
     chunk_size: int = 256,
@@ -4251,6 +4817,8 @@ def finalize_subject_masks(
         root,
         zarr_path=zarr_path,
         subject_run=subject_run,
+        subject_shard_runs=subject_shard_runs,
+        target_crop_run=target_crop_run,
         refined_run=refined_run,
         components=components,
         chunk_size=chunk_size,
@@ -4306,6 +4874,30 @@ def _build_parser() -> argparse.ArgumentParser:
         "--source-run",
         dest="subject_run",
         help="Source subject_mask_runs/<run> to finalize. Defaults to latest subject-mask run.",
+    )
+    parser.add_argument(
+        "--subject-shard-run",
+        action="append",
+        default=[],
+        help=(
+            "Source subject_mask_shard_runs/<run> shard to include in a collection finalizer. "
+            "Repeat for multiple clip/video shards. Mutually exclusive with --subject-run."
+        ),
+    )
+    parser.add_argument(
+        "--subject-shard-runs-file",
+        type=Path,
+        help=(
+            "JSON file containing shard run names, either as a list or as an object with "
+            "subject_shard_runs/shard_runs/runs. Mutually exclusive with --subject-run."
+        ),
+    )
+    parser.add_argument(
+        "--target-crop-run",
+        help=(
+            "Merged/proxy crop_runs/<run> used to rebase per-shard source_crop_row_ids into "
+            "collection row order when finalizing subject_mask_shard_runs."
+        ),
     )
     parser.add_argument(
         "--refined-run",
@@ -4469,9 +5061,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     components = _parse_components(args.components, args.component_values)
+    subject_shard_runs = list(args.subject_shard_run or [])
+    if args.subject_shard_runs_file is not None:
+        subject_shard_runs.extend(_load_shard_names_from_file(args.subject_shard_runs_file))
     summary = finalize_subject_masks(
         args.zarr_path,
         subject_run=args.subject_run,
+        subject_shard_runs=subject_shard_runs or None,
+        target_crop_run=args.target_crop_run,
         refined_run=args.refined_run,
         components=components,
         chunk_size=int(args.chunk_size),

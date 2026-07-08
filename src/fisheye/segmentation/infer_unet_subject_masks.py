@@ -66,6 +66,9 @@ KEYPOINT_SUCCESS_DATASET_CANDIDATES = (
     "source_success",
 )
 EYE_KEYPOINT_LABELS = ("eye_left", "eye_right")
+SUBJECT_MASK_OUTPUT_PARENTS = ("subject_mask_runs", "subject_mask_shard_runs")
+SUBJECT_MASK_CANONICAL_OUTPUT_PARENT = "subject_mask_runs"
+SUBJECT_MASK_SHARD_OUTPUT_PARENT = "subject_mask_shard_runs"
 
 
 @dataclass(frozen=True)
@@ -424,8 +427,11 @@ def _prepare_run_group(
     *,
     run_name: Optional[str],
     overwrite: bool,
+    output_parent: str = SUBJECT_MASK_CANONICAL_OUTPUT_PARENT,
 ) -> Tuple[zarr.Group, str]:
-    parent = require_runs_parent(root, "subject_mask_runs")
+    if output_parent not in SUBJECT_MASK_OUTPUT_PARENTS:
+        raise ValueError(f"output_parent must be one of {SUBJECT_MASK_OUTPUT_PARENTS}; got {output_parent!r}.")
+    parent = require_runs_parent(root, output_parent)
     resolved_name = run_name
     if resolved_name is None:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
@@ -438,13 +444,60 @@ def _prepare_run_group(
     if resolved_name in parent:
         if not overwrite:
             raise ValueError(
-                f"subject_mask_runs/{resolved_name} already exists. Pass --overwrite to replace it."
+                f"{output_parent}/{resolved_name} already exists. Pass --overwrite to replace it."
             )
         del parent[resolved_name]
     run_group = parent.create_group(resolved_name)
     mark_run_started(run_group, run_name=str(resolved_name), stage="subject_masks")
     note_pending_latest(parent, str(resolved_name))
     return run_group, str(resolved_name)
+
+
+def _output_parent_from_args(args: argparse.Namespace) -> str:
+    output_parent = str(getattr(args, "output_parent", SUBJECT_MASK_CANONICAL_OUTPUT_PARENT))
+    if output_parent not in SUBJECT_MASK_OUTPUT_PARENTS:
+        raise ValueError(f"--output-parent must be one of {SUBJECT_MASK_OUTPUT_PARENTS}; got {output_parent!r}.")
+    return output_parent
+
+
+def _is_shard_output_parent(output_parent: str) -> bool:
+    return str(output_parent) == SUBJECT_MASK_SHARD_OUTPUT_PARENT
+
+
+def _subject_mask_stage_path(output_parent: str, run_name: str, artifact: str = "mask_probs_roi") -> str:
+    return f"{output_parent}/{run_name}/{artifact}"
+
+
+def _shard_attrs_from_args(args: argparse.Namespace, *, output_parent: str) -> dict[str, object]:
+    if not _is_shard_output_parent(output_parent):
+        return {}
+    alias_manifest = args.source_roi_cache_alias_manifest or args.roi_cache_manifest
+    attrs: dict[str, object] = {
+        "is_collection_shard": True,
+        "stage_selector_eligible": False,
+        "subject_mask_output_parent": output_parent,
+        "canonical_stage_parent": SUBJECT_MASK_CANONICAL_OUTPUT_PARENT,
+        "canonical_selector_publication": "suppressed_for_collection_shard",
+        "registry_status_publication": "suppressed_for_collection_shard",
+    }
+    optional_values = {
+        "source_collection_id": args.source_collection_id,
+        "source_collection_path": args.source_collection_path,
+        "source_clip_id": args.source_clip_id,
+        "source_clip_index": args.source_clip_index,
+        "source_work_unit_id": args.source_work_unit_id,
+        "source_roi_cache_alias_manifest": alias_manifest,
+        "source_roi_cache_row_index_path": args.source_roi_cache_row_index_path,
+        "source_shard_id": args.source_shard_id,
+    }
+    for key, value in optional_values.items():
+        if value is None:
+            continue
+        if isinstance(value, Path):
+            attrs[key] = str(value)
+        else:
+            attrs[key] = int(value) if key == "source_clip_index" else str(value)
+    return attrs
 
 
 def _copy_detection_source_array(run_group: zarr.Group, crop_group: zarr.Group) -> None:
@@ -789,6 +842,34 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--crop-run", help="Explicit crop run providing ROI images (default: latest/auto).")
     parser.add_argument("--run-name", help="Optional name for the output run.")
+    parser.add_argument(
+        "--output-parent",
+        choices=SUBJECT_MASK_OUTPUT_PARENTS,
+        default=SUBJECT_MASK_CANONICAL_OUTPUT_PARENT,
+        help=(
+            "Output parent group. Use subject_mask_shard_runs for clipped-collection "
+            "shards that must not publish ordinary subject_mask_runs selectors."
+        ),
+    )
+    parser.add_argument("--source-collection-id", help="Optional clipped collection id for shard outputs.")
+    parser.add_argument("--source-collection-path", help="Optional clipped collection path for shard outputs.")
+    parser.add_argument("--source-clip-id", help="Optional clip id for shard outputs.")
+    parser.add_argument("--source-clip-index", type=int, help="Optional clip index for shard outputs.")
+    parser.add_argument("--source-work-unit-id", help="Optional work-unit id for shard outputs.")
+    parser.add_argument("--source-shard-id", help="Optional shard id for non-clip collection shards.")
+    parser.add_argument(
+        "--source-roi-cache-alias-manifest",
+        type=Path,
+        help=(
+            "Optional cache alias manifest used for this shard. Defaults to "
+            "--roi-cache-manifest when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--source-roi-cache-row-index-path",
+        type=Path,
+        help="Optional row-index parquet path for the clipped collection flat ROI cache shard.",
+    )
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size used during inference (default: 256).")
     parser.add_argument("--device", help="Torch device to use (e.g. 'cuda:0', 'cpu').")
     parser.add_argument(
@@ -1015,7 +1096,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         capture_env_vars=False,
     )
     git_info = get_git_info()
-    run_group, resolved_run_name = _prepare_run_group(root, run_name=args.run_name, overwrite=bool(args.overwrite))
+    output_parent = _output_parent_from_args(args)
+    shard_output = _is_shard_output_parent(output_parent)
+    run_group, resolved_run_name = _prepare_run_group(
+        root,
+        run_name=args.run_name,
+        overwrite=bool(args.overwrite),
+        output_parent=output_parent,
+    )
+    shard_attrs = _shard_attrs_from_args(args, output_parent=output_parent)
     timing_profiler = InferenceTimingProfiler(enabled=bool(args.profile_timings))
 
     try:
@@ -1059,6 +1148,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         {
             "method": "unet_subject_mask_segmenter",
             "run_semantics": "unet_subject_mask_inference",
+            "subject_mask_output_parent": output_parent,
             "source_crop_run": crop_run_name,
             **crop_snapshot_attrs,
             **crop_pixel_attrs,
@@ -1104,6 +1194,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "inference_duration_seconds": float(duration),
             "profile_timings_enabled": bool(args.profile_timings),
             "created_at_utc": created_at,
+            **shard_attrs,
         }
     )
     if assignment_keypoint_attrs:
@@ -1161,7 +1252,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         write_subject_mask_component_provenance(
             run_group,
             component_name=label,
-            source_stage="subject_mask_runs",
+            source_stage=output_parent,
             source_run=resolved_run_name,
             source_method=str(run_group.attrs["method"]),
             source_channels=[label],
@@ -1187,6 +1278,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     platform_info = env_info.get("platform", {})
     provenance_inputs = {
+        "output_parent": output_parent,
         "source_crop_run": str(crop_run_name),
         **crop_snapshot_attrs,
         **crop_pixel_attrs,
@@ -1204,6 +1296,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         "frame_source": crop_source.frame_source_kind,
         "source_video_path": crop_source.frame_source_path or crop_group.attrs.get("video_source_path"),
     }
+    provenance_inputs.update(shard_attrs)
     provenance_inputs.update(assignment_keypoint_attrs)
     if model_resolution_payload is not None:
         provenance_inputs["model_resolution"] = model_resolution_payload
@@ -1234,6 +1327,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         parameters={
             "batch_size": int(args.batch_size),
             "device": str(device),
+            "output_parent": output_parent,
             "model_input_size": int(model_input_size),
             "model_input_transform": model_input_transform.to_attrs(),
             "label_schema_id": label_schema_id,
@@ -1246,6 +1340,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "progress": bool(args.progress),
             "roi_cache_policy": crop_source.roi_cache_policy,
             "roi_cache_manifest": str(args.roi_cache_manifest) if args.roi_cache_manifest else None,
+            "source_roi_cache_alias_manifest": (
+                str(args.source_roi_cache_alias_manifest)
+                if args.source_roi_cache_alias_manifest
+                else None
+            ),
+            "source_roi_cache_row_index_path": (
+                str(args.source_roi_cache_row_index_path)
+                if args.source_roi_cache_row_index_path
+                else None
+            ),
             "roi_live_acceleration": crop_source.roi_live_acceleration_requested,
             "roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
         },
@@ -1272,11 +1376,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     )
     mark_run_complete(
         run_group,
-        parent_group=root["subject_mask_runs"],
+        parent_group=root[output_parent],
         run_name=resolved_run_name,
         run_provenance=run_provenance,
     )
-    if not args.defer_registry_status:
+    if shard_output:
+        run_group.attrs["registry_status_deferred_reason"] = "collection_shard_not_canonical_stage_output"
+    if not args.defer_registry_status and not shard_output:
         emit_subject_mask_stage_completion(
             root,
             zarr_path,
@@ -1289,7 +1395,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     console.print(
         f"\n[green]✓[/green] U-Net subject masks written to "
-        f"[cyan]subject_mask_runs/{resolved_run_name}/mask_probs_roi[/cyan] "
+        f"[cyan]{_subject_mask_stage_path(output_parent, resolved_run_name)}[/cyan] "
         f"({total_rois:,} ROIs processed in {duration:.1f}s)."
     )
     if timing_profiler.enabled:

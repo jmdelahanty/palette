@@ -164,6 +164,158 @@ def _build_probability_root(
     return root
 
 
+def _build_sharded_subject_mask_root() -> zarr.Group:
+    root = zarr.group()
+    crop_parent = root.create_group("crop_runs")
+
+    crop_specs = {
+        "crop_clip_a": {
+            "frame_indices": np.asarray([10], dtype=np.int32),
+            "source_frame_indices": np.asarray([10], dtype=np.int32),
+            "source_clip_indices": np.asarray([0], dtype=np.int32),
+            "source_clip_local_frame_indices": np.asarray([0], dtype=np.int32),
+            "source_refined_row_ids": np.asarray([100], dtype=np.int64),
+            "source_detect_row_index": np.asarray([1000], dtype=np.int64),
+            "detection_indices": np.asarray([0], dtype=np.int32),
+            "roi_coordinates_full": np.asarray([[4, 5]], dtype=np.int32),
+        },
+        "crop_clip_b": {
+            "frame_indices": np.asarray([11], dtype=np.int32),
+            "source_frame_indices": np.asarray([11], dtype=np.int32),
+            "source_clip_indices": np.asarray([1], dtype=np.int32),
+            "source_clip_local_frame_indices": np.asarray([0], dtype=np.int32),
+            "source_refined_row_ids": np.asarray([101], dtype=np.int64),
+            "source_detect_row_index": np.asarray([1001], dtype=np.int64),
+            "detection_indices": np.asarray([1], dtype=np.int32),
+            "roi_coordinates_full": np.asarray([[14, 15]], dtype=np.int32),
+        },
+    }
+    merged = {
+        key: np.concatenate([crop_specs["crop_clip_a"][key], crop_specs["crop_clip_b"][key]], axis=0)
+        for key in crop_specs["crop_clip_a"]
+    }
+    for crop_name, arrays in {**crop_specs, "crop_collection": merged}.items():
+        crop = crop_parent.create_group(crop_name)
+        crop.attrs["crop_storage_mode"] = "geometry_only"
+        crop.attrs["crop_signature"] = {"signature_version": 2, "crop_revision": 9}
+        crop.attrs["crop_revision"] = 9
+        crop.attrs["detect_review_status_ref"] = "refined_detect_runs/refined_detect_collection/review_status"
+        for name, data in arrays.items():
+            crop.create_array(name, data=data, overwrite=True)
+        crop.create_array("frame_counts", data=np.ones((int(arrays["frame_indices"].shape[0]),), dtype=np.int32), overwrite=True)
+
+    parent = root.create_group("subject_mask_shard_runs")
+    parent.attrs["latest"] = "subject_masks_clip_b"
+    shard_specs = {
+        "subject_masks_clip_a": ("crop_clip_a", 0),
+        "subject_masks_clip_b": ("crop_clip_b", 1),
+    }
+    for shard_name, (crop_name, output_row) in shard_specs.items():
+        run = parent.create_group(shard_name)
+        run.attrs.update(
+            {
+                "palette_run_completion_status": "complete",
+                "source_crop_run": crop_name,
+                "source_crop_storage_mode": "geometry_only",
+                "source_crop_signature": {"signature_version": 2, "crop_revision": 9},
+                "source_crop_revision": 9,
+                "source_detect_review_status_ref": "refined_detect_runs/refined_detect_collection/review_status",
+                "method": "unet_subject_masks_v1",
+                "mask_labels": ["subject_body", "eyes_union", "swim_bladder"],
+                "label_schema_id": "subject_v1_union_eyes",
+                "created_at_utc": "2026-04-01T00:00:00+00:00",
+                "probabilities_encoding": "linear_uint8_0_255",
+                "mask_probability_threshold": 0.5,
+            }
+        )
+        crop = crop_parent[crop_name]
+        run.create_array("detection_source", data=np.asarray([0], dtype=np.int8), overwrite=True)
+        run.create_array("frame_indices", data=np.asarray(crop["frame_indices"][:], dtype=np.int32), overwrite=True)
+        run.create_array("source_frame_indices", data=np.asarray(crop["source_frame_indices"][:], dtype=np.int32), overwrite=True)
+        run.create_array("detection_indices", data=np.asarray(crop["detection_indices"][:], dtype=np.int32), overwrite=True)
+        run.create_array("frame_counts", data=np.ones((1,), dtype=np.int32), overwrite=True)
+        run.create_array("available_channels", data=np.asarray([True, True, True], dtype=bool), overwrite=True)
+        run.create_array("source_crop_row_ids", data=np.asarray([0], dtype=np.int64), overwrite=True)
+        run.create_array("source_clip_indices", data=np.asarray(crop["source_clip_indices"][:], dtype=np.int32), overwrite=True)
+        run.create_array(
+            "source_clip_local_frame_indices",
+            data=np.asarray(crop["source_clip_local_frame_indices"][:], dtype=np.int32),
+            overwrite=True,
+        )
+        run.create_array("source_refined_row_ids", data=np.asarray(crop["source_refined_row_ids"][:], dtype=np.int64), overwrite=True)
+        run.create_array("source_detect_row_index", data=np.asarray(crop["source_detect_row_index"][:], dtype=np.int64), overwrite=True)
+
+        probs = np.zeros((1, 3, 10, 10), dtype=np.uint8)
+        if output_row == 0:
+            probs[0, 0, 2:6, 2:6] = 255
+            probs[0, 2, 5:7, 4:6] = 255
+        else:
+            probs[0, 0, 4:9, 4:9] = 255
+            probs[0, 2, 6:9, 6:8] = 255
+        run.create_array("mask_probs_roi", data=probs, overwrite=True)
+    return root
+
+
+def test_finalize_subject_mask_run_from_shard_collection_rebases_to_target_crop(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_sharded_subject_mask_root()
+
+    summary = mod.finalize_subject_mask_run(
+        root,
+        subject_shard_runs=["subject_masks_clip_b", "subject_masks_clip_a"],
+        target_crop_run="crop_collection",
+        refined_run="refined_subject_masks_collection",
+        components=["subject_body", "swim_bladder"],
+        chunk_size=1,
+    )
+
+    assert summary["status"] == "updated"
+    assert summary["finalized_from_subject_mask_shards"] is True
+    assert summary["source_crop_rebased_from_shards"] is True
+    assert summary["source_crop_run"] == "crop_collection"
+    assert summary["source_subject_mask_shard_runs"] == ["subject_masks_clip_b", "subject_masks_clip_a"]
+
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_collection"]
+    assert run.attrs["collection_finalizer_schema"] == mod.SUBJECT_MASK_SHARD_COLLECTION_FINALIZER_SCHEMA
+    assert run.attrs["finalized_from_subject_mask_shards"] is True
+    assert run.attrs["source_crop_run"] == "crop_collection"
+    assert run.attrs["source_crop_rebase_target_run"] == "crop_collection"
+    assert run.attrs["source_component_sources"]["subject_body"]["source_stage"] == "subject_mask_shard_runs"
+    np.testing.assert_array_equal(run["source_crop_row_ids"][:], np.asarray([0, 1], dtype=np.int64))
+    np.testing.assert_array_equal(run["frame_indices"][:], np.asarray([10, 11], dtype=np.int32))
+    np.testing.assert_array_equal(run["source_clip_indices"][:], np.asarray([0, 1], dtype=np.int32))
+    np.testing.assert_array_equal(run["source_refined_row_ids"][:], np.asarray([100, 101], dtype=np.int64))
+
+    labels = list(run.attrs["mask_labels"])
+    body_idx = labels.index("subject_body")
+    swim_idx = labels.index("swim_bladder")
+    masks = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    assert masks.shape == (2, 2, 10, 10)
+    assert masks[0, body_idx, 2, 2] == 1
+    assert masks[1, body_idx, 8, 8] == 1
+    assert masks[0, swim_idx, 5, 4] == 1
+    assert masks[1, swim_idx, 8, 7] == 1
+    provenance = run["components/subject_body/provenance"].attrs
+    assert provenance["source_stage"] == "subject_mask_shard_runs"
+    assert provenance["source_probability_path"] == (
+        "subject_mask_shard_runs/subject_mask_shard_collection/mask_probs_roi"
+    )
+
+
+def test_finalize_subject_mask_run_from_mixed_shards_requires_target_crop(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_sharded_subject_mask_root()
+
+    with pytest.raises(ValueError, match="requires --target-crop-run"):
+        mod.finalize_subject_mask_run(
+            root,
+            subject_shard_runs=["subject_masks_clip_a", "subject_masks_clip_b"],
+            refined_run="refined_subject_masks_collection_missing_target",
+            components=["subject_body", "swim_bladder"],
+            chunk_size=1,
+        )
+
+
 def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities(monkeypatch) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     root = _build_probability_root()

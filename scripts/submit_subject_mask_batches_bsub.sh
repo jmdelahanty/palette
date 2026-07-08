@@ -24,6 +24,7 @@ CAMERA_ID_FILTER=""
 PATH_CONTAINS=""
 DEVICE=""
 BATCH_SIZE_SM=128
+SUBJECT_OUTPUT_PARENT="subject_mask_runs"
 MASK_PROBS_DTYPE="uint8"
 MASK_PROBS_CHUNK_ROIS=32
 OUTPUT_QUEUE_SIZE=2
@@ -64,6 +65,14 @@ OUTPUT_STAGING_DIR=""
 KEEP_STAGED_OUTPUT=0
 STAGE_FINALIZATION_INPUT_TO_SCRATCH=1
 HANDOFF_PACKAGE_DIR="${PALETTE_SUBJECT_MASK_HANDOFF_DIR:-/nrs/ahrens/palette_staging/subject_mask_run_packages}"
+SOURCE_COLLECTION_ID=""
+SOURCE_COLLECTION_PATH=""
+SOURCE_CLIP_ID=""
+SOURCE_CLIP_INDEX=""
+SOURCE_WORK_UNIT_ID=""
+SOURCE_SHARD_ID=""
+SOURCE_ROI_CACHE_ALIAS_MANIFEST=""
+SOURCE_ROI_CACHE_ROW_INDEX_PATH=""
 
 usage() {
   cat <<'USAGE'
@@ -112,6 +121,9 @@ Options:
                             (default: $PALETTE_SUBJECT_MASK_HANDOFF_DIR or /nrs/ahrens/palette_staging/subject_mask_run_packages)
   --device DEVICE           Torch device override (default: 0 when --gpus > 0, else cuda:0)
   --batch-size-sm N         Subject-mask inference batch size (default: 128)
+  --subject-output-parent P subject_mask_runs|subject_mask_shard_runs
+                            Raw subject-mask output parent. subject_mask_shard_runs
+                            schedules inference only and records collection-shard provenance.
   --mask-probs-dtype DTYPE  uint8|float16 (default: uint8)
   --mask-probs-chunk-rois N Chunk length for mask_probs_roi (default: 32)
   --output-queue-size N     Async output queue size (default: 2)
@@ -124,6 +136,17 @@ Options:
   --model-require-unique    Fail if model resolution top score ties
   --model-include-non-success
                             Include non-success registry model rows
+  --source-collection-id ID Shard provenance collection id
+  --source-collection-path PATH
+                            Shard provenance collection path
+  --source-clip-id ID       Shard provenance clip id
+  --source-clip-index N     Shard provenance clip index
+  --source-work-unit-id ID  Shard provenance work-unit id
+  --source-shard-id ID      Shard provenance shard id
+  --source-roi-cache-alias-manifest PATH
+                            Durable source alias manifest to record in shard provenance
+  --source-roi-cache-row-index-path PATH
+                            Durable source row-index path to record in shard provenance
   --finalize-chunk-size N   Refined finalizer chunk size (default: 256)
   --finalize-dense-mask-row-chunk N
                             Physical dense masks_roi row chunk for refined outputs
@@ -193,6 +216,7 @@ while [[ $# -gt 0 ]]; do
     --handoff-package-dir) HANDOFF_PACKAGE_DIR="$2"; shift 2;;
     --device) DEVICE="$2"; shift 2;;
     --batch-size-sm) BATCH_SIZE_SM="$2"; shift 2;;
+    --subject-output-parent) SUBJECT_OUTPUT_PARENT="$2"; shift 2;;
     --mask-probs-dtype) MASK_PROBS_DTYPE="$2"; shift 2;;
     --mask-probs-chunk-rois) MASK_PROBS_CHUNK_ROIS="$2"; shift 2;;
     --output-queue-size) OUTPUT_QUEUE_SIZE="$2"; shift 2;;
@@ -203,6 +227,14 @@ while [[ $# -gt 0 ]]; do
     --model-top-k) MODEL_TOP_K="$2"; shift 2;;
     --model-require-unique) MODEL_REQUIRE_UNIQUE=1; shift;;
     --model-include-non-success) MODEL_INCLUDE_NON_SUCCESS=1; shift;;
+    --source-collection-id) SOURCE_COLLECTION_ID="$2"; shift 2;;
+    --source-collection-path) SOURCE_COLLECTION_PATH="$2"; shift 2;;
+    --source-clip-id) SOURCE_CLIP_ID="$2"; shift 2;;
+    --source-clip-index) SOURCE_CLIP_INDEX="$2"; shift 2;;
+    --source-work-unit-id) SOURCE_WORK_UNIT_ID="$2"; shift 2;;
+    --source-shard-id) SOURCE_SHARD_ID="$2"; shift 2;;
+    --source-roi-cache-alias-manifest) SOURCE_ROI_CACHE_ALIAS_MANIFEST="$2"; shift 2;;
+    --source-roi-cache-row-index-path) SOURCE_ROI_CACHE_ROW_INDEX_PATH="$2"; shift 2;;
     --finalize-chunk-size) FINALIZE_CHUNK_SIZE="$2"; shift 2;;
     --finalize-dense-mask-row-chunk) FINALIZE_DENSE_MASK_ROW_CHUNK="$2"; shift 2;;
     --finalize-execution-backend) FINALIZE_EXECUTION_BACKEND="$2"; shift 2;;
@@ -258,6 +290,16 @@ fi
 if [[ "$MASK_RLE_VALIDATION_MODE" != "full" && "$MASK_RLE_VALIDATION_MODE" != "invariants" && "$MASK_RLE_VALIDATION_MODE" != "none" ]]; then
   echo "--mask-rle-validation-mode must be full, invariants, or none." >&2
   exit 2
+fi
+if [[ "$SUBJECT_OUTPUT_PARENT" != "subject_mask_runs" && "$SUBJECT_OUTPUT_PARENT" != "subject_mask_shard_runs" ]]; then
+  echo "--subject-output-parent must be subject_mask_runs or subject_mask_shard_runs." >&2
+  exit 2
+fi
+if [[ -n "$SOURCE_CLIP_INDEX" ]]; then
+  if ! [[ "$SOURCE_CLIP_INDEX" =~ ^[0-9]+$ ]]; then
+    echo "--source-clip-index must be a non-negative integer." >&2
+    exit 2
+  fi
 fi
 if [[ "$STAGE_ROI_CACHE_TO_SCRATCH" == "1" && "$REQUIRE_ROI_CACHE" != "1" ]]; then
   echo "--no-stage-roi-cache-to-scratch is required when --allow-missing-roi-cache is used." >&2
@@ -328,6 +370,11 @@ if [[ -n "$RUN_LABEL_OVERRIDE" ]]; then
 else
   RUN_LABEL="subject_masks_${RUN_ID}"
 fi
+RUN_FINALIZATION=1
+if [[ "$SUBJECT_OUTPUT_PARENT" == "subject_mask_shard_runs" ]]; then
+  SPLIT_FINALIZATION_JOB=1
+  RUN_FINALIZATION=0
+fi
 RUN_DIR="${LOG_DIR}/sm_${RUN_ID}"
 
 if [[ -e "$RUN_DIR" ]]; then
@@ -357,7 +404,7 @@ if [[ "$SPLIT_FINALIZATION_JOB" == "1" ]]; then
 else
   DISCOVER_WORKFLOW_STAGE="all"
 fi
-DISCOVER_ARGS=(--source "$SOURCE" --emit-paths --registry "$REGISTRY" --workflow-stage "$DISCOVER_WORKFLOW_STAGE")
+DISCOVER_ARGS=(--source "$SOURCE" --emit-paths --registry "$REGISTRY" --workflow-stage "$DISCOVER_WORKFLOW_STAGE" --subject-output-parent "$SUBJECT_OUTPUT_PARENT")
 if [[ "$FORCE_INFERENCE" == "1" ]]; then DISCOVER_ARGS+=(--force-inference); fi
 if [[ "$FORCE_FINALIZATION" == "1" ]]; then DISCOVER_ARGS+=(--force-finalization); fi
 if [[ "$OVERWRITE" == "1" ]]; then DISCOVER_ARGS+=(--overwrite); fi
@@ -491,12 +538,14 @@ SUBJECT_ARGS=(
   --run-label "$RUN_LABEL"
   --device "$DEVICE"
   --batch-size "$BATCH_SIZE_SM"
+  --subject-output-parent "$SUBJECT_OUTPUT_PARENT"
   --mask-probs-dtype "$MASK_PROBS_DTYPE"
   --mask-probs-chunk-rois "$MASK_PROBS_CHUNK_ROIS"
   --output-queue-size "$OUTPUT_QUEUE_SIZE"
   --model-coverage-class "$MODEL_COVERAGE_CLASS"
   --model-component-coverage-key "$MODEL_COMPONENT_COVERAGE_KEY"
   --model-label-schema-id "$MODEL_LABEL_SCHEMA_ID"
+  --model-top-k "$MODEL_TOP_K"
   --metric-level "$METRIC_LEVEL"
   --mask-storage "$MASK_STORAGE"
   --mask-rle-validation-mode "$MASK_RLE_VALIDATION_MODE"
@@ -515,6 +564,14 @@ if [[ -n "$FINALIZE_POSTCOMPUTE_CHUNK_SIZE" ]]; then SUBJECT_ARGS+=(--finalize-p
 if [[ "$FINALIZE_POSTCOMPUTE_NUM_WORKERS" != "auto" && -n "$FINALIZE_POSTCOMPUTE_NUM_WORKERS" ]]; then SUBJECT_ARGS+=(--finalize-postcompute-num-workers "$FINALIZE_POSTCOMPUTE_NUM_WORKERS"); fi
 if [[ "$MODEL_REQUIRE_UNIQUE" == "1" ]]; then SUBJECT_ARGS+=(--model-require-unique); fi
 if [[ "$MODEL_INCLUDE_NON_SUCCESS" == "1" ]]; then SUBJECT_ARGS+=(--model-include-non-success); fi
+if [[ -n "$SOURCE_COLLECTION_ID" ]]; then SUBJECT_ARGS+=(--source-collection-id "$SOURCE_COLLECTION_ID"); fi
+if [[ -n "$SOURCE_COLLECTION_PATH" ]]; then SUBJECT_ARGS+=(--source-collection-path "$SOURCE_COLLECTION_PATH"); fi
+if [[ -n "$SOURCE_CLIP_ID" ]]; then SUBJECT_ARGS+=(--source-clip-id "$SOURCE_CLIP_ID"); fi
+if [[ -n "$SOURCE_CLIP_INDEX" ]]; then SUBJECT_ARGS+=(--source-clip-index "$SOURCE_CLIP_INDEX"); fi
+if [[ -n "$SOURCE_WORK_UNIT_ID" ]]; then SUBJECT_ARGS+=(--source-work-unit-id "$SOURCE_WORK_UNIT_ID"); fi
+if [[ -n "$SOURCE_SHARD_ID" ]]; then SUBJECT_ARGS+=(--source-shard-id "$SOURCE_SHARD_ID"); fi
+if [[ -n "$SOURCE_ROI_CACHE_ALIAS_MANIFEST" ]]; then SUBJECT_ARGS+=(--source-roi-cache-alias-manifest "$SOURCE_ROI_CACHE_ALIAS_MANIFEST"); fi
+if [[ -n "$SOURCE_ROI_CACHE_ROW_INDEX_PATH" ]]; then SUBJECT_ARGS+=(--source-roi-cache-row-index-path "$SOURCE_ROI_CACHE_ROW_INDEX_PATH"); fi
 if [[ "$PROFILE_TIMINGS" == "1" ]]; then SUBJECT_ARGS+=(--profile-timings); fi
 if [[ "$WRITE_EYE_GEOMETRY" == "1" ]]; then SUBJECT_ARGS+=(--write-eye-geometry); else SUBJECT_ARGS+=(--no-write-eye-geometry); fi
 if [[ "$WRITE_COMPONENT_CONTOURS" == "1" ]]; then SUBJECT_ARGS+=(--write-component-contours); else SUBJECT_ARGS+=(--no-write-component-contours); fi
@@ -533,6 +590,8 @@ if [[ "$OVERWRITE" == "1" ]]; then SUBJECT_ARGS+=(--overwrite); fi
   printf '  %q\n' "${SUBJECT_ARGS[@]}"
   echo ")"
   printf 'RUN_LABEL=%q\n' "$RUN_LABEL"
+  printf 'SUBJECT_OUTPUT_PARENT=%q\n' "$SUBJECT_OUTPUT_PARENT"
+  printf 'SOURCE_ROI_CACHE_ALIAS_MANIFEST=%q\n' "$SOURCE_ROI_CACHE_ALIAS_MANIFEST"
   printf 'STAGE_ROI_CACHE_TO_SCRATCH=%q\n' "$STAGE_ROI_CACHE_TO_SCRATCH"
   printf 'ROI_CACHE_STAGING_DIR=%q\n' "$ROI_CACHE_STAGING_DIR"
 } > "${RUN_DIR}/subject_args.sh"
@@ -711,6 +770,9 @@ cmd=(scripts/py -m fisheye.utils.run_subject_mask_batch_pipeline "$zarr_path" "$
 if [[ -n "$effective_manifest" ]]; then
   cmd+=(--roi-cache-manifest "$effective_manifest")
 fi
+if [[ "$SUBJECT_OUTPUT_PARENT" == "subject_mask_shard_runs" && -z "$SOURCE_ROI_CACHE_ALIAS_MANIFEST" && -n "$manifest_path" ]]; then
+  cmd+=(--source-roi-cache-alias-manifest "$manifest_path")
+fi
 
 echo "host=$(hostname)"
 echo "job_id=${LSB_JOBID:-}"
@@ -772,7 +834,9 @@ echo "Jobs: $job_count (one recording per job)"
 echo "Max active: $MAX_ACTIVE"
 echo "Queue: ${QUEUE:-<default>}"
 echo "Resources: ncores=$NCORES mem_gb=$MEM_GB gpus=$GPUS device=$DEVICE"
+echo "Subject output parent: $SUBJECT_OUTPUT_PARENT"
 echo "Split finalization job: $SPLIT_FINALIZATION_JOB"
+echo "Run finalization: $RUN_FINALIZATION"
 echo "Finalizer: chunk_size=$FINALIZE_CHUNK_SIZE workers=$FINALIZE_NUM_WORKERS backend=$FINALIZE_EXECUTION_BACKEND scheduler=$FINALIZE_SCHEDULER"
 echo "Finalizer dense mask row chunk: ${FINALIZE_DENSE_MASK_ROW_CHUNK:-<finalizer default>}"
 echo "Refined mask storage: $MASK_STORAGE"
@@ -785,7 +849,11 @@ echo "Handoff package dir: ${HANDOFF_PACKAGE_DIR:-<none>}"
 echo "Manifest file: $RUN_DIR/targets.tsv"
 if [[ "$SPLIT_FINALIZATION_JOB" == "1" ]]; then
   echo "Inference submit command: $INFERENCE_BSUB_CMD"
-  echo "Finalization submit command template: $FINALIZE_BSUB_CMD_TEMPLATE"
+  if [[ "$RUN_FINALIZATION" == "1" ]]; then
+    echo "Finalization submit command template: $FINALIZE_BSUB_CMD_TEMPLATE"
+  else
+    echo "Finalization submit command template: <disabled>"
+  fi
 else
   echo "Submit command: $FULL_BSUB_CMD"
 fi
@@ -808,9 +876,11 @@ if [[ "$SPLIT_FINALIZATION_JOB" == "1" ]]; then
     echo "Could not parse inference job id from bsub output." >&2
     exit 2
   fi
-  finalization_dependency="done(${inference_job_id})"
-  finalization_submit_output="$(bsub "${FINALIZE_BSUB_ARGS[@]}" -w "$finalization_dependency" bash "$JOB_SCRIPT" "$RUN_DIR" finalization)"
-  echo "$finalization_submit_output"
+  if [[ "$RUN_FINALIZATION" == "1" ]]; then
+    finalization_dependency="done(${inference_job_id})"
+    finalization_submit_output="$(bsub "${FINALIZE_BSUB_ARGS[@]}" -w "$finalization_dependency" bash "$JOB_SCRIPT" "$RUN_DIR" finalization)"
+    echo "$finalization_submit_output"
+  fi
 else
   bsub "${FULL_BSUB_ARGS[@]}" bash "$JOB_SCRIPT" "$RUN_DIR" all
 fi

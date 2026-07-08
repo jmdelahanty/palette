@@ -527,6 +527,257 @@ cheap; merging dense masks can be enormous. For masks, prefer shard outputs plus
 a collection index or compact merged representation unless a concrete consumer
 requires a dense whole-collection run.
 
+### Subject-mask clipped collection readiness
+
+Read-only audit on 2026-07-08 found that the ordinary subject-mask pipeline is
+production-capable for standard recording-level crop runs, but not yet safe for
+clipped collection shards.
+
+What works today:
+
+- `infer_unet_subject_masks.py` can read normal `crop_runs/<run>` inputs and
+  optional flat ROI cache manifests.
+- Raw U-Net output is probability-first: `subject_mask_runs/<run>/mask_probs_roi`
+  is canonical, and dense binary `masks_roi` is optional compatibility output.
+- The raw writer copies row lineage from the crop run, including
+  `frame_indices`, `source_frame_indices`, `source_clip_indices`,
+  `source_clip_local_frame_indices`, `source_crop_row_ids`,
+  `source_refined_row_ids`, `source_detect_row_index`, and `instance_key` when
+  present in the source crop run.
+- The raw writer records ROI cache provenance, crop pixel/source snapshot attrs,
+  model resolution attrs, assignment-keypoint attrs, timing profile attrs, and
+  summary statistics.
+- `submit_subject_mask_batches_bsub.sh` already supports the normal
+  one-recording-per-job cluster workflow with ROI cache staging, local output
+  staging, split GPU inference and CPU finalization jobs, progress artifacts,
+  and scratch cleanup through shell `trap`.
+- `finalize_subject_masks.py` requires modern `source_crop_row_ids`, preserves
+  source crop lineage, supports `process_shards`, emits progress JSONL, writes
+  eye geometry and component contours, and can publish dense, bitpacked, RLE, or
+  combined refined mask stores.
+
+What this slice fixed:
+
+- `infer_unet_subject_masks.py` now accepts `--output-parent` with
+  `subject_mask_runs` as the default and `subject_mask_shard_runs` as the
+  shard-safe parent.
+- Shard outputs are completed under `subject_mask_shard_runs`, stamp
+  `is_collection_shard=true` and `stage_selector_eligible=false`, and do not
+  mutate ordinary `subject_mask_runs.latest` / `latest_complete` selectors.
+- Shard outputs suppress canonical registry/status refresh and record
+  collection/clip/cache alias metadata when supplied.
+- `run_subject_mask_batch_pipeline.py` and
+  `submit_subject_mask_batches_bsub.sh` now expose shard output mode for raw
+  inference. Selecting `subject_mask_shard_runs` is inference-only and disables
+  the dependent refined-finalization submission in the bsub wrapper.
+- Focused tests pin that a subject-mask shard does not change canonical
+  `subject_mask_runs` selectors or a root current-pointer attr.
+- `finalize_subject_masks.py` now supports a low-level collection-finalizer
+  mode. It accepts repeated `--subject-shard-run` values or a
+  `--subject-shard-runs-file`, validates compatible completed
+  `subject_mask_shard_runs`, optionally rebases shard-local crop rows into a
+  merged proxy crop run via `--target-crop-run`, and writes one canonical
+  `refined_subject_masks_runs/<collection_run>` without materializing a merged
+  raw `subject_mask_runs` probability surface.
+
+What is still not safe yet:
+
+- The collection finalizer has now been smoked against two real clipped proxy
+  crop runs plus two real subject-mask shard outputs for `subject_body` and
+  `swim_bladder`. Eye-component collection finalization is still pending
+  because it requires a refined-keypoint run aligned to the same collection
+  proxy crop surface.
+- The existing subject-mask bsub wrapper can submit a shard-mode inference job,
+  but it is still one target list / one shared shard metadata set. A full
+  collection-aware wrapper that enumerates clips and passes per-clip metadata is
+  still pending.
+- A merged whole-collection raw `subject_mask_runs` would duplicate dense
+  probability surfaces. For Sleepyfish-scale collections this can be much larger
+  than keypoint merging and should not be the default design.
+
+Preferred direction:
+
+1. Add a shard-safe raw subject-mask parent, for example
+   `subject_mask_shard_runs/<run>`.
+2. Make shard mode explicit in the inference CLI and cluster wrapper. Shard
+   mode must not update `subject_mask_runs.latest`, `latest_complete`, root
+   `current_*` attrs, or canonical registry/status rows.
+3. Keep per-clip raw probability outputs as staging artifacts. They may remain
+   useful for debugging and recomputation, but ordinary consumers should not
+   resolve them as recording-level mask runs.
+4. Add a collection subject-mask finalizer that validates every expected shard,
+   verifies row lineage, and writes one canonical
+   `refined_subject_masks_runs/<collection_run>`.
+5. Prefer compact refined storage for collection outputs:
+   `bitpacked_v1` when edit/review is expected, `dense_and_bitpacked` for
+   validation or compatibility canaries, and `rle_v1` only for final/read-mostly
+   products whose readers support compact stores.
+6. Avoid a monolithic raw `subject_mask_runs/<collection_run>` unless a concrete
+   downstream consumer requires a single raw probability surface.
+
+Implementation checklist for subject-mask clipped collections:
+
+- [x] Add `--output-parent` or `--shard-mode` to
+  `infer_unet_subject_masks.py`.
+- [x] In shard mode, write to `subject_mask_shard_runs` and stamp
+  `is_collection_shard=true`, `stage_selector_eligible=false`,
+  `source_collection_id`, `source_clip_id`, `source_clip_index`,
+  `source_crop_run`, `source_roi_cache_alias_manifest`, and
+  `source_roi_cache_row_index_path`.
+- [x] Ensure shard mode still calls `mark_run_started` /
+  `mark_run_complete` for the shard run itself, but never mutates ordinary
+  `subject_mask_runs` parent selectors.
+- [x] Suppress canonical subject-mask registry/status refresh for shard runs.
+- [x] Expose shard-mode raw inference through
+  `run_subject_mask_batch_pipeline.py` and
+  `submit_subject_mask_batches_bsub.sh`.
+- [x] Add focused tests proving a subject-mask shard does not change
+  `subject_mask_runs.latest`, `subject_mask_runs.latest_complete`, or root
+  current-pointer attrs.
+- [x] Add a single-clip smoke using the existing clipped proxy crop run plus
+  cache alias path that keypoints already validated.
+- [x] Validate raw shard output row lineage against the proxy crop run.
+- [x] Add a collection finalizer that reads explicit
+  `subject_mask_shard_runs/<run>` names or a shard-runs JSON file.
+- [x] Finalizer validation must require every expected shard to be complete,
+  model/schema-compatible, and row-lineage compatible with the target merged
+  proxy crop run.
+- [x] Decide whether the collection finalizer writes directly to
+  `refined_subject_masks_runs/<collection_run>` or creates an intermediate
+  collection index. Default should be direct refined output unless a consumer
+  proves it needs merged raw probabilities.
+- [ ] Preserve assignment-keypoint lineage by pointing finalization at the
+  canonical clipped collection refined-keypoint run.
+- [x] Write refined collection masks with explicit `source_crop_run` pointing to
+  the merged proxy crop run and required `source_crop_row_ids`.
+- [x] Validate refined mask lineage against crop and raw mask shards.
+- [ ] Validate refined mask lineage against canonical clipped collection
+  refined keypoints in an eye-component collection smoke.
+- [x] Smoke compact refined storage on two clips with `dense_and_bitpacked`.
+- [ ] Smoke a production candidate with `bitpacked_v1`.
+- [ ] Add a collection-aware subject-mask orchestration wrapper that enumerates
+  clipped work units, passes per-clip shard provenance, and depends on the
+  collection finalizer after shard inference completes.
+
+Low-level collection finalizer command shape:
+
+```bash
+scripts/py -m fisheye.refinement.finalize_subject_masks \
+  /path/to/collection_analysis.zarr \
+  --subject-shard-runs-file /path/to/subject_mask_shards.json \
+  --target-crop-run crop_proxy_<collection_or_workflow_id> \
+  --run-name refined_subject_masks_<collection_or_workflow_id> \
+  --components subject_body eyes_union swim_bladder \
+  --assignment-keypoint-group refined_keypoints_runs \
+  --assignment-keypoints-run <collection_refined_keypoint_run> \
+  --mask-storage dense_and_bitpacked \
+  --execution-backend process_shards \
+  --num-workers 8 \
+  --write-eye-geometry \
+  --write-component-contours \
+  --overwrite \
+  --json
+```
+
+The shard-runs JSON may be either a list of run names or an object with
+`subject_mask_shard_runs`, `shard_runs`, or `runs`. Mixed per-clip crop runs
+must pass `--target-crop-run`; the finalizer maps shard-local
+`source_crop_row_ids` onto that merged proxy crop run using
+`source_clip_indices`, `source_clip_local_frame_indices`,
+`source_refined_row_ids`, `source_detect_row_index`, `frame_indices`, and
+`roi_coordinates_full`.
+
+Subject-mask shard smoke on 2026-07-08:
+
+- Source collection:
+  `sleepyfish_cam2010095_allclips_pynvvc_fixed_20260522_01`
+- Clip: `clip_000004`
+- A 256-row derived smoke cache was created from the already-built full
+  `clip_000004` flat cache to avoid re-decoding video with a CPU-only local
+  Torch install.
+- Smoke cache:
+  `/nrs/ahrens/palette_staging/clipped_collection_flat_roi_cache_smoke/subject_mask_shard_smoke_20260708_clip_000004_limit256/subject_mask_shard_smoke_clip_000004_limit256.flat_roi_cache.json`
+- Proxy crop run:
+  `crop_proxy_subject_mask_shard_smoke_20260708_clip_000004_limit256`
+- Raw subject-mask shard run:
+  `subject_mask_shard_runs/subject_masks_unet_shard_smoke_20260708_clip_000004_limit256`
+- Model:
+  `subject_masks_union_all_components_v001`
+- Execution: CPU smoke, `batch_size=8`, `mask_probs_dtype=uint8`,
+  `masks_roi_materialized=false`
+- Duration: `54.5 s` for `256` ROIs; timing profile was dominated by CPU
+  `model_forward` (`52.1 s`).
+- Output shape: `mask_probs_roi = (256, 3, 512, 512)`.
+- Summary: `rows_with_nonempty_masks = 256/256`.
+- Validation: `frame_indices`, `source_frame_indices`, `source_clip_indices`,
+  `source_clip_local_frame_indices`, `source_crop_row_ids`,
+  `source_refined_row_ids`, `source_detect_row_index`, and
+  `detection_indices` all matched the proxy crop run.
+- Selector safety: `subject_mask_shard_runs.latest` and
+  `latest_complete` point at the smoke shard; canonical
+  `subject_mask_runs.latest` and `latest_complete` remained unset.
+- Shard attrs stamped `is_collection_shard=true`,
+  `stage_selector_eligible=false`, and
+  `registry_status_deferred_reason=collection_shard_not_canonical_stage_output`.
+- Model-resolution provenance is present under the current attr contract:
+  `model_resolution_selected_model_path`, `model_resolution_registry_path`,
+  `model_resolution_selected_run_id`,
+  `model_resolution_selected_component_coverage_key`,
+  `model_resolution_selected_metric_name`,
+  `model_resolution_selected_metric_value`, and
+  `model_resolution_candidates_json`. The legacy-looking names
+  `checkpoint_path` and `model_registry_resolution` are not the contract.
+
+Subject-mask collection-finalizer smoke on 2026-07-08:
+
+- Source collection:
+  `sleepyfish_cam2010095_allclips_pynvvc_fixed_20260522_01`
+- Clips: `clip_000004` and `clip_000005`
+- Per-clip proxy crop runs:
+  - `crop_proxy_subject_mask_shard_smoke_20260708_clip_000004_limit256`
+  - `crop_proxy_subject_mask_shard_smoke_20260708_clip_000005_limit256`
+- Per-clip raw subject-mask shard runs:
+  - `subject_mask_shard_runs/subject_masks_unet_shard_smoke_20260708_clip_000004_limit256`
+  - `subject_mask_shard_runs/subject_masks_unet_shard_smoke_20260708_clip_000005_limit256`
+- The `clip_000005` shard used the same model and settings as the `clip_000004`
+  shard: `subject_masks_union_all_components_v001`, CPU, `batch_size=8`,
+  `mask_probs_dtype=uint8`, `mask_probs_chunk_rois=16`, and
+  `masks_roi_materialized=false`.
+- The `clip_000005` raw shard processed `256` ROIs in `52.8 s`; timing was
+  dominated by CPU `model_forward` (`52.0 s`).
+- Merged proxy crop run:
+  `crop_proxy_subject_mask_shard_smoke_20260708_clips_000004_000005_limit256_collection`
+  with `512` rows and source row counts `[256, 256]`.
+- Refined collection run:
+  `refined_subject_masks_runs/refined_subject_masks_shard_collection_smoke_20260708_clips_000004_000005_limit256_body_swim`
+- Finalized components: `subject_body` and `swim_bladder`. Eye-left/right
+  assignment was intentionally not part of this smoke because no refined
+  keypoint run was aligned to the limited 512-row merged proxy crop surface.
+- Finalizer execution: `process_shards`, `num_workers=2`, `chunk_size=256`,
+  `postcompute_backend=process_shards`, `mask_storage=dense_and_bitpacked`,
+  `write_component_contours=true`.
+- Duration: `20.0 s` for `512` ROIs (`25.6 rows/s` end-to-end). The
+  postcompute contour phase processed `512` ROIs at `254 rows/s`.
+- Persisted refined dense shape:
+  `masks_roi = (512, 2, 512, 512)`.
+- Persisted compact editable shape:
+  `mask_bitpacked/masks_packed = (512, 2, 512, 64)`.
+- Bitpacked validation passed in full round-trip mode for both row chunks and
+  both channels.
+- Component contours were written for both components:
+  `subject_body` (`239,426` points) and `swim_bladder` (`26,507` points).
+- Refined run attrs stamp
+  `collection_finalizer_schema=palette_subject_mask_shard_collection_finalizer_v1`,
+  `finalized_from_subject_mask_shards=true`,
+  `source_crop_rebased_from_shards=true`, and
+  `source_crop_rebase_target_run=<merged proxy crop run>`.
+- Validation confirmed that the refined run's `frame_indices`,
+  `source_frame_indices`, `source_clip_indices`,
+  `source_clip_local_frame_indices`, `source_refined_row_ids`,
+  `source_detect_row_index`, and `source_crop_row_ids` exactly match the merged
+  target proxy crop run. Clip row counts were `256` rows from clip index `4`
+  and `256` rows from clip index `5`.
+
 ## Registry Targeting Policy
 
 Clipped recordings should remain singleton recording/dataset entities. Clips are
@@ -780,12 +1031,16 @@ Existing Palette precedent:
   `--output-parent keypoint_shard_runs`.
 - [x] Ensure keypoint LSF jobs clean staged flat-cache scratch on job exit when
   `--stage-roi-cache-to-scratch` is enabled.
-- [ ] Add shard-output-parent support or an equivalent shard mode to subject-mask
+- [x] Add shard-output-parent support or an equivalent shard mode to subject-mask
   runners.
 - [x] Smoke keypoints against one clip proxy + cache alias manifest.
-- [ ] Smoke subject masks against the same proxy + cache alias manifest.
+- [x] Smoke subject masks against the same proxy + cache alias manifest.
 - [x] Verify output arrays contain parent-frame and clip-local lineage.
-- [ ] Verify refined keypoints and refined subject masks preserve lineage.
+- [x] Verify refined keypoints preserve lineage.
+- [x] Verify refined subject masks preserve crop/shard lineage for a two-clip
+  `subject_body`/`swim_bladder` collection smoke.
+- [ ] Verify refined subject masks preserve assignment-keypoint lineage in an
+  eye-component collection smoke.
 - [x] Verify keypoint shard runs do not live under ordinary stage parents or, if they do,
   are excluded from resolver fallback.
 - [x] Verify keypoint shard runs do not update ordinary stage `latest`,
@@ -802,6 +1057,15 @@ Existing Palette precedent:
   submits per-clip shard jobs, parses LSF job ids, and submits collection
   finalizer/refinement jobs with explicit `done(<jobid>)` dependencies.
 - [x] Smoke clipped keypoint orchestration apply mode on two clips.
+- [x] Add a clipped subject-mask orchestration dry-run planner that resolves
+  cache manifests, proxy runs, raw subject-mask shard runs, finalizer run names,
+  and LSF dependency templates.
+- [x] Add clipped subject-mask orchestration apply mode that creates proxy runs,
+  submits per-clip raw shard jobs, parses LSF job ids, and submits the
+  collection finalizer with explicit `done(<jobid>)` dependencies.
+- [ ] Add node-local flat-cache staging and cleanup to clipped subject-mask
+  shard jobs.
+- [ ] Smoke clipped subject-mask orchestration apply mode on two clips.
 
 Two-clip apply smoke on 2026-07-07:
 
@@ -867,6 +1131,43 @@ Full-collection apply smoke on 2026-07-07:
   `source_refined_row_ids`, `source_detect_row_index`, and
   `detection_indices` matched across crop -> keypoints -> refined keypoints.
 
+Two-clip subject-mask finalizer smoke on 2026-07-08:
+
+- Source collection:
+  `sleepyfish_cam2010095_allclips_pynvvc_fixed_20260522_01`
+- Clips: `clip_000004`, `clip_000005`
+- Per-clip proxy crop runs:
+  - `crop_proxy_subject_mask_shard_smoke_20260708_clip_000004_limit256`
+  - `crop_proxy_subject_mask_shard_smoke_20260708_clip_000005_limit256`
+- Per-clip raw subject-mask shard runs:
+  - `subject_mask_shard_runs/subject_masks_unet_shard_smoke_20260708_clip_000004_limit256`
+  - `subject_mask_shard_runs/subject_masks_unet_shard_smoke_20260708_clip_000005_limit256`
+- Merged proxy crop run:
+  `crop_proxy_subject_mask_shard_smoke_20260708_clips_000004_000005_limit256_collection`
+- Refined subject-mask run:
+  `refined_subject_masks_shard_collection_smoke_20260708_clips_000004_000005_limit256_body_swim`
+- Row count: `512` (`256` rows from clip index `4`, `256` from clip index `5`)
+- Components finalized: `subject_body`, `swim_bladder`
+- Storage: `dense_and_bitpacked`
+- Dense shape: `masks_roi = (512, 2, 512, 512)`
+- Bitpacked shape: `mask_bitpacked/masks_packed = (512, 2, 512, 64)`
+- Finalizer duration: `20.0 s`; end-to-end finalization rate
+  `25.6 rows/s`; postcompute contour phase `254 rows/s`
+- Component contours written:
+  `subject_body` (`239,426` points) and `swim_bladder` (`26,507` points)
+- Validation: the refined run's `frame_indices`, `source_frame_indices`,
+  `source_clip_indices`, `source_clip_local_frame_indices`,
+  `source_refined_row_ids`, `source_detect_row_index`, and
+  `source_crop_row_ids` exactly matched the merged target proxy crop run.
+- Model-resolution provenance for raw shards is under the current
+  `model_resolution_*` attr contract, including
+  `model_resolution_selected_model_path`, `model_resolution_registry_path`,
+  `model_resolution_selected_run_id`,
+  `model_resolution_selected_component_coverage_key`,
+  `model_resolution_selected_metric_name`,
+  `model_resolution_selected_metric_value`, and
+  `model_resolution_candidates_json`.
+
 ### Phase 4: registry
 
 - [ ] Add stage-row fields for collection/cache source targeting.
@@ -889,10 +1190,41 @@ explicit orchestration DAG: per-clip proxy crop runs, non-publishing
 `refined_keypoints_runs/<run>` output. Use the dry-run planner first, then
 submit with `--apply` once all clip cache manifests resolve.
 
-Do not submit full subject-mask inference across clipped caches yet. The
-subject-mask runner still needs equivalent shard-output semantics before it can
-consume per-clip proxy crop/cache inputs without publishing unsafe ordinary
-whole-recording selectors.
+Subject masks now have equivalent shard-output semantics and a collection-aware
+planner. Use the dry-run planner first, and run a two-clip apply smoke before a
+full collection apply. If finalization includes `eyes_union`, pass the
+collection refined-keypoint run explicitly with `--assignment-keypoints-run`.
+The v1 subject-mask planner reads published cache alias manifests directly from
+shared storage; node-local flat-cache staging is still a pending performance
+hardening step.
+
+Example subject-mask dry run:
+
+```bash
+scripts/submit_clipped_collection_subject_masks_bsub.sh \
+  --zarr /path/to/collection_analysis.zarr \
+  --collection-id <finalized_collection_id> \
+  --cache-dir-root /nrs/ahrens/palette_staging/clipped_collection_flat_roi_cache/<cache_root> \
+  --all-clips \
+  --run-label <workflow_label> \
+  --assignment-keypoints-run <collection_refined_keypoint_run> \
+  --components subject_body eyes_union swim_bladder \
+  --queue gpu_l4 \
+  --ncores 8 \
+  --mem-gb 32 \
+  --finalizer-queue short \
+  --finalizer-ncores 8 \
+  --finalizer-mem-gb 32 \
+  --mask-storage dense_and_bitpacked \
+  --dry-run
+```
+
+For a body/swim-only smoke that does not require keypoint-based eye assignment,
+use:
+
+```bash
+--components subject_body swim_bladder
+```
 
 ## Read-Only Audit Smoke
 

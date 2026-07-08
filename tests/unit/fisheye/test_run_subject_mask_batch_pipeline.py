@@ -22,6 +22,13 @@ def test_parser_defaults_to_sharded_postcompute_for_batch_workflow() -> None:
     assert args.finalize_dense_mask_row_chunk == mod.DEFAULT_FINALIZE_DENSE_MASK_ROW_CHUNK
     assert args.mask_storage == "dense_uint8"
     assert args.mask_rle_validation_mode == "invariants"
+    assert args.subject_output_parent == mod.SUBJECT_MASK_CANONICAL_OUTPUT_PARENT
+
+
+def test_parser_accepts_subject_mask_shard_output_parent() -> None:
+    args = mod._build_parser().parse_args(["/recordings", "--subject-output-parent", "subject_mask_shard_runs"])
+
+    assert args.subject_output_parent == mod.SUBJECT_MASK_SHARD_OUTPUT_PARENT
 
 
 def test_parser_accepts_compact_mask_storage_mode() -> None:
@@ -536,6 +543,92 @@ def test_inference_command_can_validate_cache_against_canonical_archive(tmp_path
     assert cmd[cmd.index("--roi-cache-expected-archive-path") + 1] == str(canonical_zarr)
     assert "--profile-timings" in cmd
     assert "--defer-registry-status" in cmd
+
+
+def test_inference_command_passes_shard_output_parent_and_lineage(tmp_path: Path) -> None:
+    manifest = tmp_path / "clip_000004.alias.json"
+    row_index = tmp_path / "clip_000004.rows.json"
+    args = SimpleNamespace(
+        registry=tmp_path / "registry.sqlite",
+        model_coverage_class="dense_all_components",
+        model_component_coverage_key="body+eyes+swim_bladder",
+        model_label_schema_id="subject_v1_union",
+        model_top_k=5,
+        model_require_unique=False,
+        model_include_non_success=False,
+        device="0",
+        batch_size=128,
+        subject_output_parent=mod.SUBJECT_MASK_SHARD_OUTPUT_PARENT,
+        mask_probs_dtype="uint8",
+        mask_probs_chunk_rois=32,
+        output_queue_size=2,
+        profile_timings=False,
+        roi_cache_policy="never",
+        roi_live_acceleration="auto",
+        roi_live_gpu_chunk_frames=32,
+        roi_cache_dir=None,
+        roi_cache_manifest=manifest,
+        source_roi_cache_alias_manifest=None,
+        source_roi_cache_row_index_path=row_index,
+        source_collection_id="sleepyfish_collection",
+        source_collection_path="/groups/example_collection.zarr",
+        source_clip_id="clip_000004",
+        source_clip_index=4,
+        source_work_unit_id="clip_000004_subject_masks",
+        source_shard_id="clip_000004",
+        overwrite=False,
+    )
+    plan = mod.ArchivePlan(
+        zarr_path=str(tmp_path / "collection.zarr"),
+        subject_run="subject_run",
+        refined_run="refined_run",
+        crop_run="crop_proxy",
+        assignment_keypoint_group="keypoints_runs",
+        assignment_keypoint_run="keypoints_clip_000004",
+        has_subject_runs=False,
+        has_refined_subject_runs=False,
+        run_inference=True,
+        run_finalization=False,
+        subject_output_parent=mod.SUBJECT_MASK_SHARD_OUTPUT_PARENT,
+    )
+
+    cmd = mod._inference_command(args, plan)
+
+    assert cmd[cmd.index("--output-parent") + 1] == "subject_mask_shard_runs"
+    assert cmd[cmd.index("--source-roi-cache-alias-manifest") + 1] == str(manifest)
+    assert cmd[cmd.index("--source-roi-cache-row-index-path") + 1] == str(row_index)
+    assert cmd[cmd.index("--source-collection-id") + 1] == "sleepyfish_collection"
+    assert cmd[cmd.index("--source-collection-path") + 1] == "/groups/example_collection.zarr"
+    assert cmd[cmd.index("--source-clip-id") + 1] == "clip_000004"
+    assert cmd[cmd.index("--source-clip-index") + 1] == "4"
+    assert cmd[cmd.index("--source-work-unit-id") + 1] == "clip_000004_subject_masks"
+    assert cmd[cmd.index("--source-shard-id") + 1] == "clip_000004"
+
+
+def test_validate_outputs_can_target_subject_mask_shard_parent(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "collection.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    run = root.require_group("subject_mask_shard_runs").create_group("subject_run")
+    run.attrs["mask_labels"] = list(mod.RAW_COMPONENTS)
+    run.create_array("mask_probs_roi", shape=(2, 3, 4, 4), dtype="u1")
+
+    status, detail = mod.validate_outputs(
+        zarr_path,
+        subject_run="subject_run",
+        refined_run="refined_run",
+        subject_output_parent=mod.SUBJECT_MASK_SHARD_OUTPUT_PARENT,
+        require_subject=True,
+        require_refined=False,
+    )
+
+    assert status == "ok"
+    assert "subject_mask_labels" in detail
+
+
+def test_main_rejects_shard_output_parent_with_finalization() -> None:
+    rc = mod.main(["/recordings", "--subject-output-parent", "subject_mask_shard_runs", "--workflow-stage", "all"])
+
+    assert rc == 2
 
 
 def test_finalization_command_passes_postcompute_options(tmp_path: Path) -> None:
