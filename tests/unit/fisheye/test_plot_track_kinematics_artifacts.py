@@ -212,7 +212,6 @@ def test_plot_track_kinematics_writes_png_and_interactive_spec_artifacts(tmp_pat
             "none",
             "--bins",
             "8",
-            "--write-zarr-artifacts",
         ]
     )
 
@@ -274,6 +273,30 @@ def test_plot_track_kinematics_writes_png_and_interactive_spec_artifacts(tmp_pat
         manifest["track_kinematics_summary_track_0_interactive"]["artifact_schema_id"]
         == INTERACTIVE_SPEC_SCHEMA_ID
     )
+
+
+def test_plot_track_kinematics_can_skip_default_zarr_artifacts(tmp_path: Path) -> None:
+    zarr_path = _make_track_kinematics_archive(tmp_path)
+    save_path = tmp_path / "track_plot.png"
+
+    mod.main(
+        [
+            str(zarr_path),
+            "--offline-only",
+            "--track-id",
+            "0",
+            "--swim-bout-run",
+            "none",
+            "--save",
+            str(save_path),
+            "--no-write-zarr-artifacts",
+        ]
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    run = root["analysis"]["track_kinematics_runs"]["offline"]["track_kinematics_1"]
+    assert "visualizations" not in run
+    assert save_path.with_name("track_plot_offline_track_kinematics_1.png").exists()
 
 
 def test_plot_track_kinematics_accepts_exponential_swim_bout_overlay(tmp_path: Path) -> None:

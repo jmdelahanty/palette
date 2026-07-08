@@ -2390,11 +2390,19 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     )
     parser.add_argument(
         "--write-zarr-artifacts",
+        dest="write_zarr_artifacts",
         action="store_true",
+        default=True,
         help=(
             "Persist review visualization artifacts under the stimulus_response "
-            "run's visualizations group."
+            "run's visualizations group (default)."
         ),
+    )
+    parser.add_argument(
+        "--no-write-zarr-artifacts",
+        dest="write_zarr_artifacts",
+        action="store_false",
+        help="Do not persist review visualization artifacts to the stimulus_response run.",
     )
     parser.add_argument(
         "--artifact-dpi",

@@ -1357,11 +1357,19 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     )
     parser.add_argument(
         "--write-zarr-artifacts",
+        dest="write_zarr_artifacts",
         action="store_true",
+        default=True,
         help=(
             "Persist a PNG snapshot and interactive plot spec under the selected "
-            "track_kinematics run's visualizations group."
+            "track_kinematics run's visualizations group (default)."
         ),
+    )
+    parser.add_argument(
+        "--no-write-zarr-artifacts",
+        dest="write_zarr_artifacts",
+        action="store_false",
+        help="Do not persist plot artifacts to the track_kinematics run.",
     )
     parser.add_argument(
         "--artifact-dpi",

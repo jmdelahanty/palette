@@ -1481,10 +1481,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--write-zarr-artifacts",
         dest="write_zarr_artifact",
         action="store_true",
+        default=True,
         help=(
             "Persist the rendered PNG under "
-            "analysis/eye_angle_runs/<run>/visualizations in addition to filesystem output."
+            "analysis/eye_angle_runs/<run>/visualizations in addition to filesystem output (default)."
         ),
+    )
+    parser.add_argument(
+        "--no-write-zarr-artifact",
+        "--no-write-zarr-artifacts",
+        dest="write_zarr_artifact",
+        action="store_false",
+        help="Do not persist the rendered PNG under analysis/eye_angle_runs/<run>/visualizations.",
     )
     parser.add_argument(
         "--artifact-dpi",

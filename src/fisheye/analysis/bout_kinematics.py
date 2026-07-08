@@ -3393,8 +3393,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument(
         "--write-zarr-artifacts",
+        dest="write_zarr_artifacts",
         action="store_true",
-        help="Write PNG and interactive visualization artifacts under the bout-kinematics run.",
+        default=True,
+        help="Write PNG and interactive visualization artifacts under the bout-kinematics run (default).",
+    )
+    parser.add_argument(
+        "--no-write-zarr-artifacts",
+        dest="write_zarr_artifacts",
+        action="store_false",
+        help="Do not write visualization artifacts under the bout-kinematics run.",
     )
     parser.add_argument(
         "--layout",
