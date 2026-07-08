@@ -468,6 +468,92 @@ def test_finalize_subject_mask_run_rejects_eye_union_keypoint_row_identity_misma
     assert refined_parent is None or "refined_subject_masks_bad_eye_identity_001" not in refined_parent
 
 
+def test_finalize_subject_mask_run_subsets_collection_keypoints_by_source_crop_row_ids(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root()
+    kp = root["refined_keypoints_runs"]["refined_kp_001"]
+    del kp["keypoints_roi"]
+    del kp["detection_success"]
+    del kp["source_crop_row_ids"]
+    kp.create_array(
+        "source_crop_row_ids",
+        data=np.asarray([2, 0, 3, 1], dtype=np.int64),
+        overwrite=True,
+    )
+    kp.create_array(
+        "keypoints_roi",
+        data=np.asarray(
+            [
+                [[50.0, 50.0], [50.0, 50.0], [50.0, 50.0]],
+                [[5.0, 6.0], [2.0, 2.0], [7.0, 2.0]],
+                [[60.0, 60.0], [60.0, 60.0], [60.0, 60.0]],
+                [[5.0, 6.0], [2.0, 4.0], [7.0, 4.0]],
+            ],
+            dtype=np.float32,
+        ),
+        overwrite=True,
+    )
+    kp.create_array(
+        "detection_success",
+        data=np.asarray([False, True, False, True], dtype=bool),
+        overwrite=True,
+    )
+
+    summary = mod.finalize_subject_mask_run(
+        root,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_subset_keypoints_001",
+        chunk_size=1,
+    )
+
+    identity = summary["eyes_union_assignment_summary"]["keypoint_mask_row_identity"]
+    assert identity["row_identity_check"] == "source_crop_row_ids_subset"
+    assert identity["keypoint_rows_available"] == 4
+    assert identity["keypoint_rows_selected"] == 2
+    assert summary["eyes_union_assignment_summary"]["keypoint_mask_row_identity_check"] == "source_crop_row_ids_subset"
+
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_subset_keypoints_001"]
+    assert run.attrs["assignment_keypoint_row_identity_check"] == "source_crop_row_ids_subset"
+    labels = list(run.attrs["mask_labels"])
+    eye_left_idx = labels.index("eye_left")
+    eye_right_idx = labels.index("eye_right")
+    masks = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    assert np.count_nonzero(masks[:, eye_left_idx]) > 0
+    assert np.count_nonzero(masks[:, eye_right_idx]) > 0
+
+
+def test_finalize_subject_mask_run_rejects_missing_subset_keypoint_source_crop_row(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root()
+    kp = root["refined_keypoints_runs"]["refined_kp_001"]
+    del kp["keypoints_roi"]
+    del kp["detection_success"]
+    del kp["source_crop_row_ids"]
+    kp.create_array(
+        "source_crop_row_ids",
+        data=np.asarray([0, 2, 3], dtype=np.int64),
+        overwrite=True,
+    )
+    kp.create_array(
+        "keypoints_roi",
+        data=np.zeros((3, 3, 2), dtype=np.float32),
+        overwrite=True,
+    )
+    kp.create_array(
+        "detection_success",
+        data=np.asarray([True, True, True], dtype=bool),
+        overwrite=True,
+    )
+
+    with pytest.raises(ValueError, match="missing 1 source_crop_row_ids.*1"):
+        mod.finalize_subject_mask_run(
+            root,
+            subject_run="subject_probs_001",
+            refined_run="refined_subject_masks_missing_subset_keypoint_001",
+            chunk_size=1,
+        )
+
+
 def test_finalize_subject_mask_run_requires_probabilities_encoding(monkeypatch) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     root = _build_probability_root()

@@ -387,6 +387,7 @@ class _EyeAssignmentContext:
     keypoint_group_name: str
     keypoint_success_dataset: str
     keypoint_source_kind: str
+    row_identity_summary: Mapping[str, object]
 
 
 @dataclass(frozen=True)
@@ -1315,6 +1316,124 @@ def _source_payload_for_assigned_eye_component(
     return payload
 
 
+def _read_optional_source_crop_row_ids(value: object | None) -> np.ndarray | None:
+    if value is None:
+        return None
+    try:
+        data = np.asarray(value[:], dtype=np.int64)  # type: ignore[index]
+    except Exception:
+        data = np.asarray(value, dtype=np.int64)
+    return data.reshape(-1)
+
+
+def _resolve_assignment_keypoint_rows(
+    *,
+    keypoints_roi: Any,
+    keypoint_success: np.ndarray,
+    keypoint_source_crop_row_ids: object | None,
+    mask_source_crop_row_ids: object | None,
+    expected_rows: int,
+    keypoint_run_name: str,
+    keypoint_group_name: str,
+    mask_run_name: str,
+) -> tuple[Any, np.ndarray, dict[str, object]]:
+    """Return keypoints aligned to mask rows, subsetting collection runs when needed."""
+
+    keypoint_ids = _read_optional_source_crop_row_ids(keypoint_source_crop_row_ids)
+    mask_ids = _read_optional_source_crop_row_ids(mask_source_crop_row_ids)
+    expected = int(expected_rows)
+
+    if keypoint_ids is None or mask_ids is None:
+        summary = reconcile_keypoint_mask_row_identity(
+            keypoint_source_crop_row_ids=keypoint_source_crop_row_ids,
+            mask_source_crop_row_ids=mask_source_crop_row_ids,
+            expected_rows=expected,
+            keypoint_run_name=keypoint_run_name,
+            keypoint_group_name=keypoint_group_name,
+            mask_run_name=mask_run_name,
+            mask_group_name="subject_mask_runs",
+        )
+        return keypoints_roi, np.asarray(keypoint_success, dtype=bool), dict(summary)
+
+    keypoint_path = f"{keypoint_group_name}/{keypoint_run_name}"
+    mask_path = f"subject_mask_runs/{mask_run_name}"
+    if int(mask_ids.shape[0]) != expected:
+        raise ValueError(
+            f"Cannot assign eyes_union from {mask_path}: mask source_crop_row_ids has "
+            f"{int(mask_ids.shape[0])} rows, expected {expected}."
+        )
+    if int(keypoints_roi.shape[0]) != int(keypoint_ids.shape[0]):
+        raise ValueError(
+            f"Cannot assign eyes_union with {keypoint_path}: keypoints_roi has "
+            f"{int(keypoints_roi.shape[0])} rows but source_crop_row_ids has "
+            f"{int(keypoint_ids.shape[0])} rows."
+        )
+    success = np.asarray(keypoint_success, dtype=bool)
+    if int(success.shape[0]) != int(keypoint_ids.shape[0]):
+        raise ValueError(
+            f"Cannot assign eyes_union with {keypoint_path}: {success.shape[0]} keypoint success rows "
+            f"but source_crop_row_ids has {int(keypoint_ids.shape[0])} rows."
+        )
+
+    if int(keypoint_ids.shape[0]) == expected:
+        summary = reconcile_keypoint_mask_row_identity(
+            keypoint_source_crop_row_ids=keypoint_source_crop_row_ids,
+            mask_source_crop_row_ids=mask_source_crop_row_ids,
+            expected_rows=expected,
+            keypoint_run_name=keypoint_run_name,
+            keypoint_group_name=keypoint_group_name,
+            mask_run_name=mask_run_name,
+            mask_group_name="subject_mask_runs",
+        )
+        return keypoints_roi, success, dict(summary)
+
+    unique_ids, counts = np.unique(keypoint_ids, return_counts=True)
+    if unique_ids.shape[0] != keypoint_ids.shape[0]:
+        duplicate = int(unique_ids[np.flatnonzero(counts > 1)[0]])
+        raise ValueError(
+            f"Cannot subset {keypoint_path} for eyes_union assignment: duplicate "
+            f"source_crop_row_ids value {duplicate}."
+        )
+    keypoint_row_by_crop_row = {
+        int(crop_row_id): int(row_idx)
+        for row_idx, crop_row_id in enumerate(keypoint_ids.tolist())
+    }
+    missing = [
+        int(crop_row_id)
+        for crop_row_id in mask_ids.tolist()
+        if int(crop_row_id) not in keypoint_row_by_crop_row
+    ]
+    if missing:
+        preview = ", ".join(str(value) for value in missing[:5])
+        if len(missing) > 5:
+            preview += ", ..."
+        raise ValueError(
+            f"Cannot subset {keypoint_path} for eyes_union assignment: missing "
+            f"{len(missing)} source_crop_row_ids required by {mask_path}: {preview}."
+        )
+
+    selected_rows = np.asarray(
+        [keypoint_row_by_crop_row[int(crop_row_id)] for crop_row_id in mask_ids.tolist()],
+        dtype=np.int64,
+    )
+    keypoints_subset = np.asarray(keypoints_roi[:], dtype=np.float32)[selected_rows]
+    success_subset = success[selected_rows]
+    return (
+        keypoints_subset,
+        success_subset,
+        {
+            "row_identity_check": "source_crop_row_ids_subset",
+            "rows_checked": expected,
+            "keypoint_has_source_crop_row_ids": True,
+            "mask_has_source_crop_row_ids": True,
+            "keypoint_rows_available": int(keypoint_ids.shape[0]),
+            "keypoint_rows_selected": int(selected_rows.shape[0]),
+            "keypoint_selection_min_row": int(selected_rows.min()) if selected_rows.size else None,
+            "keypoint_selection_max_row": int(selected_rows.max()) if selected_rows.size else None,
+        },
+    )
+
+
 def _resolve_eye_assignment_context(
     root: zarr.Group,
     source: SourceSubjectMaskRun,
@@ -1333,14 +1452,15 @@ def _resolve_eye_assignment_context(
         raise ValueError(f"Keypoint run {keypoint_run_name!r} missing keypoints_roi; cannot assign eyes_union.")
     keypoint_success, success_dataset = _resolve_keypoint_success_array(kp_group, keypoint_run_name)
     eye_keypoint_indices = _resolve_eye_keypoint_indices(kp_group, keypoint_run_name)
-    reconcile_keypoint_mask_row_identity(
+    keypoints_roi, keypoint_success, row_identity_summary = _resolve_assignment_keypoint_rows(
+        keypoints_roi=keypoints_roi,
+        keypoint_success=keypoint_success,
         keypoint_source_crop_row_ids=kp_group.get("source_crop_row_ids"),
         mask_source_crop_row_ids=source.group.get("source_crop_row_ids"),
         expected_rows=int(source.masks_roi.shape[0]),
         keypoint_run_name=keypoint_run_name,
         keypoint_group_name=keypoint_group_name,
         mask_run_name=source.run_name,
-        mask_group_name="subject_mask_runs",
     )
     return _EyeAssignmentContext(
         keypoints_roi=keypoints_roi,
@@ -1350,6 +1470,7 @@ def _resolve_eye_assignment_context(
         keypoint_group_name=str(keypoint_group_name),
         keypoint_success_dataset=str(success_dataset),
         keypoint_source_kind=str(keypoint_source_kind),
+        row_identity_summary=dict(row_identity_summary),
     )
 
 
@@ -1372,6 +1493,10 @@ def _assign_finalized_eyes_union_rows(
     summary["keypoint_group"] = context.keypoint_group_name
     summary["keypoint_success_dataset"] = context.keypoint_success_dataset
     summary["keypoint_source_kind"] = context.keypoint_source_kind
+    summary["keypoint_mask_row_identity"] = dict(context.row_identity_summary)
+    summary["keypoint_mask_row_identity_check"] = str(
+        context.row_identity_summary.get("row_identity_check", "unknown")
+    )
     summary["assignment_keypoint_contract"] = ASSIGNMENT_KEYPOINT_CONTRACT_VALUE
 
     reason_labels_by_component: dict[str, np.ndarray] = {}
@@ -1414,6 +1539,8 @@ def _merge_assignment_summary(target: dict[str, object], chunk_summary: Mapping[
                 "keypoint_group": chunk_summary.get("keypoint_group"),
                 "keypoint_success_dataset": chunk_summary.get("keypoint_success_dataset"),
                 "keypoint_source_kind": chunk_summary.get("keypoint_source_kind"),
+                "keypoint_mask_row_identity": dict(chunk_summary.get("keypoint_mask_row_identity") or {}),
+                "keypoint_mask_row_identity_check": chunk_summary.get("keypoint_mask_row_identity_check"),
                 "assignment_keypoint_contract": ASSIGNMENT_KEYPOINT_CONTRACT_VALUE,
             }
         )
@@ -4090,6 +4217,12 @@ def finalize_subject_mask_run(
         )
         assignment_keypoint_attrs["assignment_keypoint_success_dataset"] = str(
             eye_assignment_context.keypoint_success_dataset
+        )
+        assignment_keypoint_attrs["assignment_keypoint_row_identity"] = dict(
+            eye_assignment_context.row_identity_summary
+        )
+        assignment_keypoint_attrs["assignment_keypoint_row_identity_check"] = str(
+            eye_assignment_context.row_identity_summary.get("row_identity_check", "unknown")
         )
 
     extra_attrs: dict[str, object] = {

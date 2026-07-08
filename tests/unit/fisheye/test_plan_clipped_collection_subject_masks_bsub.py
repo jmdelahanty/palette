@@ -54,6 +54,7 @@ def _build_subject_mask_plan(
     *,
     components: list[str] | None = None,
     assignment_keypoints_run: str | None = "refined_keypoints_collection",
+    finalization_mode: str = "collection_direct",
 ) -> SubjectMaskWorkflowPlan:
     zarr_path = tmp_path / "recording" / "zarr" / "sample_analysis.zarr"
     collection_id = "collection_test"
@@ -124,6 +125,8 @@ def _build_subject_mask_plan(
         overwrite_shards=False,
         overwrite_final_outputs=False,
         defer_registry_status=False,
+        finalization_mode=finalization_mode,
+        clip_finalizer_package_dir=tmp_path / "nrs_packages",
     )
 
 
@@ -160,6 +163,44 @@ def test_build_plan_resolves_subject_mask_shard_commands(tmp_path: Path) -> None
     assert "--assignment-keypoints-run" in plan.finalize_command
     assert "refined_keypoints_collection" in plan.finalize_command
     assert "--registry" in plan.finalize_command
+
+
+def test_build_plan_can_emit_per_clip_finalizer_package_jobs(tmp_path: Path) -> None:
+    plan = _build_subject_mask_plan(tmp_path, finalization_mode="per_clip_packages")
+
+    assert plan.finalization_mode == "per_clip_packages"
+    assert plan.finalizer_bsub_command == []
+    assert plan.clip_finalizer_package_dir == (tmp_path / "nrs_packages" / "test_masks").resolve()
+    first = plan.clips[0]
+    assert first.refined_subject_mask_clip_run == "refined_subject_masks_test_masks_clip_000001"
+    assert first.refined_subject_mask_package_path == (
+        plan.clip_finalizer_package_dir / "refined_subject_masks_test_masks_clip_000001.tar.gz"
+    )
+    assert first.finalizer_command is not None
+    assert "fisheye.utils.finalize_subject_mask_clip_package" in first.finalizer_command
+    assert "--source-zarr" in first.finalizer_command
+    assert "--subject-shard-run" in first.finalizer_command
+    assert "subject_masks_test_masks_clip_000001" in first.finalizer_command
+    assert "--target-crop-run" in first.finalizer_command
+    assert "crop_proxy_test_masks_collection" in first.finalizer_command
+    assert "--assignment-keypoints-run" in first.finalizer_command
+    assert "refined_keypoints_collection" in first.finalizer_command
+    assert first.finalizer_bsub_command is not None
+    dependency = first.finalizer_bsub_command[first.finalizer_bsub_command.index("-w") + 1]
+    assert dependency == "done(<jobid:sm_test_masks_clip_000001>)"
+    assert plan.collection_import_job_name == "sm_import_test_masks"
+    assert "fisheye.utils.import_refined_subject_mask_clip_packages" in plan.collection_import_command
+    assert "--expected-target-crop-run" in plan.collection_import_command
+    assert "crop_proxy_test_masks_collection" in plan.collection_import_command
+    assert "--output-run" in plan.collection_import_command
+    assert "refined_subject_masks_test_masks" in plan.collection_import_command
+    assert plan.collection_import_command.count("--package") == 2
+    assert plan.collection_import_bsub_command
+    import_dependency = plan.collection_import_bsub_command[plan.collection_import_bsub_command.index("-w") + 1]
+    assert import_dependency == (
+        "done(<jobid:sm_finalize_test_masks_clip_000001>) "
+        "&& done(<jobid:sm_finalize_test_masks_clip_000002>)"
+    )
 
 
 def test_build_plan_requires_assignment_keypoints_for_eyes_union(tmp_path: Path) -> None:
@@ -281,3 +322,69 @@ def test_apply_plan_creates_proxies_and_submits_dependency_dag(tmp_path: Path) -
     assert saved["schema"] == "palette.clipped_collection_subject_mask_bsub_submission.v1"
     assert saved["status"] == "submitted"
     assert saved["finalizer"]["job_id"] == "201"
+
+
+def test_apply_plan_submits_per_clip_finalizer_package_jobs(tmp_path: Path) -> None:
+    plan = _build_subject_mask_plan(
+        tmp_path,
+        components=["subject_body", "swim_bladder"],
+        assignment_keypoints_run=None,
+        finalization_mode="per_clip_packages",
+    )
+    calls: list[list[str]] = []
+    bsub_outputs = iter(
+        [
+            "Job <101> is submitted to queue <gpu_l4>.",
+            "Job <102> is submitted to queue <gpu_l4>.",
+            "Job <301> is submitted to queue <normal>.",
+            "Job <302> is submitted to queue <normal>.",
+            "Job <401> is submitted to queue <normal>.",
+        ]
+    )
+
+    def fake_runner(argv, **kwargs):
+        del kwargs
+        command = [str(item) for item in argv]
+        calls.append(command)
+        if command[0] == "bsub":
+            return SimpleNamespace(returncode=0, stdout="", stderr=next(bsub_outputs))
+        return SimpleNamespace(returncode=0, stdout='{"ok": true}', stderr="")
+
+    submission = apply_plan(plan, runner=fake_runner)
+
+    assert [call[0] for call in calls] == [
+        "scripts/py",
+        "scripts/py",
+        "scripts/py",
+        "bsub",
+        "bsub",
+        "bsub",
+        "bsub",
+        "bsub",
+    ]
+    assert "fisheye.utils.merge_clipped_proxy_crop_runs" in calls[2]
+    assert submission["finalization_mode"] == "per_clip_packages"
+    assert submission["job_ids_by_name"] == {
+        "sm_test_masks_clip_000001": "101",
+        "sm_test_masks_clip_000002": "102",
+        "sm_finalize_test_masks_clip_000001": "301",
+        "sm_finalize_test_masks_clip_000002": "302",
+        "sm_import_test_masks": "401",
+    }
+    first_finalizer_call = calls[5]
+    second_finalizer_call = calls[6]
+    import_call = calls[7]
+    assert first_finalizer_call[first_finalizer_call.index("-w") + 1] == "done(101)"
+    assert second_finalizer_call[second_finalizer_call.index("-w") + 1] == "done(102)"
+    assert import_call[import_call.index("-w") + 1] == "done(301) && done(302)"
+    assert "fisheye.utils.import_refined_subject_mask_clip_packages" in import_call[-1]
+    assert len(submission["clip_finalizers"]) == 2
+    assert submission["finalizer"]["job_id"] == "401"
+    assert submission["finalizer"]["source_package_count"] == 2
+    assert submission["clip_finalizers"][0]["package_path"].endswith(
+        "refined_subject_masks_test_masks_clip_000001.tar.gz"
+    )
+
+    saved = json.loads((tmp_path / "logs" / "submission.json").read_text(encoding="utf-8"))
+    assert saved["merge_proxy"]["merged_proxy_crop_run"] == "crop_proxy_test_masks_collection"
+    assert len(saved["clip_finalizers"]) == 2

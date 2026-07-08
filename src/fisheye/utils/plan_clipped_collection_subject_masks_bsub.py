@@ -7,7 +7,7 @@ import argparse
 import json
 import subprocess
 from collections.abc import Sequence as AbcSequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
@@ -34,6 +34,8 @@ from fisheye.utils.plan_clipped_collection_keypoints_bsub import (
 
 DEFAULT_COMPONENTS = ("subject_body", "eyes_union", "swim_bladder")
 DEFAULT_ASSIGNMENT_KEYPOINT_GROUP = "refined_keypoints_runs"
+DEFAULT_CLIP_FINALIZER_PACKAGE_DIR = Path("/nrs/ahrens/palette_staging/refined_subject_mask_clip_packages")
+FINALIZATION_MODES = ("collection_direct", "per_clip_packages")
 
 
 def _row_index_path_from_manifest(manifest_path: Path, payload: Mapping[str, Any]) -> Path | None:
@@ -99,6 +101,11 @@ class SubjectMaskClipPlan:
     proxy_command: list[str] | None
     subject_mask_command: list[str] | None
     subject_mask_bsub_command: list[str] | None
+    refined_subject_mask_clip_run: str | None = None
+    refined_subject_mask_package_path: Path | None = None
+    finalizer_job_name: str | None = None
+    finalizer_command: list[str] | None = None
+    finalizer_bsub_command: list[str] | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -113,6 +120,13 @@ class SubjectMaskClipPlan:
             "proxy_command": self.proxy_command,
             "subject_mask_command": self.subject_mask_command,
             "subject_mask_bsub_command": self.subject_mask_bsub_command,
+            "refined_subject_mask_clip_run": self.refined_subject_mask_clip_run,
+            "refined_subject_mask_package_path": (
+                str(self.refined_subject_mask_package_path) if self.refined_subject_mask_package_path else None
+            ),
+            "finalizer_job_name": self.finalizer_job_name,
+            "finalizer_command": self.finalizer_command,
+            "finalizer_bsub_command": self.finalizer_bsub_command,
         }
 
 
@@ -127,12 +141,17 @@ class SubjectMaskWorkflowPlan:
     cache_dir_root: Path
     log_dir: Path
     clips: tuple[SubjectMaskClipPlan, ...]
+    finalization_mode: str
+    clip_finalizer_package_dir: Path | None
     merged_proxy_crop_run: str
     refined_subject_masks_run: str
     components: tuple[str, ...]
     merge_proxy_command: list[str]
     finalize_command: list[str]
     finalizer_bsub_command: list[str]
+    collection_import_job_name: str | None
+    collection_import_command: list[str]
+    collection_import_bsub_command: list[str]
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -146,12 +165,19 @@ class SubjectMaskWorkflowPlan:
             "cache_dir_root": str(self.cache_dir_root),
             "log_dir": str(self.log_dir),
             "clips": [clip.to_json() for clip in self.clips],
+            "finalization_mode": self.finalization_mode,
+            "clip_finalizer_package_dir": (
+                str(self.clip_finalizer_package_dir) if self.clip_finalizer_package_dir else None
+            ),
             "merged_proxy_crop_run": self.merged_proxy_crop_run,
             "refined_subject_masks_run": self.refined_subject_masks_run,
             "components": list(self.components),
             "merge_proxy_command": self.merge_proxy_command,
             "finalize_command": self.finalize_command,
             "finalizer_bsub_command": self.finalizer_bsub_command,
+            "collection_import_job_name": self.collection_import_job_name,
+            "collection_import_command": self.collection_import_command,
+            "collection_import_bsub_command": self.collection_import_bsub_command,
             "missing_cache_clip_ids": [
                 clip.clip_id for clip in self.clips if clip.cache_manifest is None
             ],
@@ -212,6 +238,8 @@ def build_plan(
     overwrite_shards: bool,
     overwrite_final_outputs: bool,
     defer_registry_status: bool,
+    finalization_mode: str = "collection_direct",
+    clip_finalizer_package_dir: Path | None = None,
 ) -> SubjectMaskWorkflowPlan:
     zarr_path = zarr_path.expanduser().resolve()
     cache_dir_root = cache_dir_root.expanduser().resolve()
@@ -226,6 +254,22 @@ def build_plan(
     resolved_clip_ids = sorted(resolved_clip_ids)
 
     resolved_components = _normalize_components(components)
+    resolved_run_id = _sanitize_component(run_id or _utc_run_id(), default="run")
+    resolved_run_label = _sanitize_component(
+        run_label or f"clipped_subject_masks_{resolved_run_id}",
+        default="clipped_subject_masks",
+    )
+    resolved_finalization_mode = str(finalization_mode or "collection_direct").strip()
+    if resolved_finalization_mode not in FINALIZATION_MODES:
+        raise ValueError(
+            f"Unsupported finalization mode {finalization_mode!r}; expected one of {FINALIZATION_MODES}."
+        )
+    resolved_clip_package_dir = (
+        (clip_finalizer_package_dir or DEFAULT_CLIP_FINALIZER_PACKAGE_DIR)
+        .expanduser()
+        .resolve()
+        / resolved_run_label
+    )
     needs_eye_assignment = "eyes_union" in resolved_components
     if needs_eye_assignment and not assignment_keypoints_run:
         raise ValueError(
@@ -233,11 +277,6 @@ def build_plan(
             "Pass a collection refined-keypoint run, or choose components without eyes_union."
         )
 
-    resolved_run_id = _sanitize_component(run_id or _utc_run_id(), default="run")
-    resolved_run_label = _sanitize_component(
-        run_label or f"clipped_subject_masks_{resolved_run_id}",
-        default="clipped_subject_masks",
-    )
     recording_dir = _recording_dir_from_zarr(zarr_path)
     resolved_log_dir = (
         log_dir or (recording_dir / "logs" / "clipped_collection_subject_masks_bsub" / resolved_run_label)
@@ -478,6 +517,153 @@ def build_plan(
         "-lc",
         finalizer_shell,
     ]
+    collection_import_job_name: str | None = None
+    collection_import_command: list[str] = []
+    collection_import_bsub_command: list[str] = []
+    if resolved_finalization_mode == "per_clip_packages":
+        packaged_clips: list[SubjectMaskClipPlan] = []
+        for clip in clip_plans:
+            if clip.subject_mask_bsub_command is None:
+                packaged_clips.append(clip)
+                continue
+            safe_clip = _sanitize_component(clip.clip_id, default="clip")
+            refined_clip_run = f"{refined_subject_masks_run}_{safe_clip}"
+            package_path = resolved_clip_package_dir / f"{refined_clip_run}.tar.gz"
+            clip_finalizer_job_name = f"sm_finalize_{resolved_run_label}_{safe_clip}"
+            clip_finalize_command = [
+                "scripts/py",
+                "-m",
+                "fisheye.utils.finalize_subject_mask_clip_package",
+                "--source-zarr",
+                str(zarr_path),
+                "--subject-shard-run",
+                clip.subject_mask_shard_run,
+                "--target-crop-run",
+                merged_proxy_crop_run,
+                "--refined-run",
+                refined_clip_run,
+                "--package-path",
+                str(package_path),
+                "--chunk-size",
+                str(finalizer_chunk_size),
+                "--metric-level",
+                metric_level,
+                "--mask-storage",
+                mask_storage,
+                "--mask-rle-validation-mode",
+                mask_rle_validation_mode,
+                "--execution-backend",
+                finalizer_execution_backend,
+                "--scheduler",
+                finalizer_scheduler,
+                "--num-workers",
+                str(finalizer_num_workers),
+                "--postcompute-backend",
+                finalizer_postcompute_backend,
+                "--json",
+            ]
+            for component in resolved_components:
+                clip_finalize_command.extend(["--component", component])
+            if finalizer_dense_mask_row_chunk is not None:
+                clip_finalize_command.extend(["--dense-mask-row-chunk", str(finalizer_dense_mask_row_chunk)])
+            if finalizer_postcompute_num_workers is not None:
+                clip_finalize_command.extend(["--postcompute-num-workers", str(finalizer_postcompute_num_workers)])
+            if finalizer_postcompute_chunk_size is not None:
+                clip_finalize_command.extend(["--postcompute-chunk-size", str(finalizer_postcompute_chunk_size)])
+            if assignment_keypoints_run:
+                clip_finalize_command.extend(
+                    [
+                        "--assignment-keypoint-group",
+                        assignment_keypoint_group or DEFAULT_ASSIGNMENT_KEYPOINT_GROUP,
+                        "--assignment-keypoints-run",
+                        assignment_keypoints_run,
+                    ]
+                )
+            if not write_eye_geometry:
+                clip_finalize_command.append("--no-write-eye-geometry")
+            if not write_component_contours:
+                clip_finalize_command.append("--no-write-component-contours")
+            if retain_source_seeds:
+                clip_finalize_command.append("--retain-source-seeds")
+            if overwrite_final_outputs:
+                clip_finalize_command.append("--overwrite")
+
+            dependency = f"done(<jobid:{clip.subject_mask_job_name}>)"
+            clip_finalizer_shell = f"cd {_shell_join([repo])} && {_shell_join(clip_finalize_command)}"
+            clip_finalizer_bsub_command = [
+                *_bsub_prefix(
+                    job_name=clip_finalizer_job_name,
+                    queue=finalizer_queue,
+                    ncores=finalizer_ncores,
+                    mem_gb=finalizer_mem_gb,
+                    gpus=0,
+                    log_dir=resolved_log_dir,
+                    dependency=dependency,
+                ),
+                "bash",
+                "-lc",
+                clip_finalizer_shell,
+            ]
+            packaged_clips.append(
+                replace(
+                    clip,
+                    refined_subject_mask_clip_run=refined_clip_run,
+                    refined_subject_mask_package_path=package_path,
+                    finalizer_job_name=clip_finalizer_job_name,
+                    finalizer_command=clip_finalize_command,
+                    finalizer_bsub_command=clip_finalizer_bsub_command,
+                )
+            )
+        clip_plans = packaged_clips
+        finalizer_bsub_command = []
+        package_paths = [
+            clip.refined_subject_mask_package_path
+            for clip in clip_plans
+            if clip.refined_subject_mask_package_path is not None
+        ]
+        if package_paths:
+            collection_import_job_name = f"sm_import_{resolved_run_label}"
+            collection_import_command = [
+                "scripts/py",
+                "-m",
+                "fisheye.utils.import_refined_subject_mask_clip_packages",
+                "--zarr",
+                str(zarr_path),
+                "--output-run",
+                refined_subject_masks_run,
+                "--expected-target-crop-run",
+                merged_proxy_crop_run,
+                "--json",
+            ]
+            for package_path in package_paths:
+                collection_import_command.extend(["--package", str(package_path)])
+            if overwrite_final_outputs:
+                collection_import_command.append("--overwrite")
+            import_dependency_refs = [
+                f"<jobid:{clip.finalizer_job_name}>"
+                for clip in clip_plans
+                if clip.finalizer_job_name is not None
+            ]
+            import_dependency = (
+                " && ".join(f"done({name})" for name in import_dependency_refs)
+                if import_dependency_refs
+                else None
+            )
+            collection_import_shell = f"cd {_shell_join([repo])} && {_shell_join(collection_import_command)}"
+            collection_import_bsub_command = [
+                *_bsub_prefix(
+                    job_name=collection_import_job_name,
+                    queue=finalizer_queue,
+                    ncores=finalizer_ncores,
+                    mem_gb=finalizer_mem_gb,
+                    gpus=0,
+                    log_dir=resolved_log_dir,
+                    dependency=import_dependency,
+                ),
+                "bash",
+                "-lc",
+                collection_import_shell,
+            ]
 
     return SubjectMaskWorkflowPlan(
         zarr_path=zarr_path,
@@ -489,12 +675,17 @@ def build_plan(
         cache_dir_root=cache_dir_root,
         log_dir=resolved_log_dir,
         clips=tuple(clip_plans),
+        finalization_mode=resolved_finalization_mode,
+        clip_finalizer_package_dir=resolved_clip_package_dir if resolved_finalization_mode == "per_clip_packages" else None,
         merged_proxy_crop_run=merged_proxy_crop_run,
         refined_subject_masks_run=refined_subject_masks_run,
         components=resolved_components,
         merge_proxy_command=merge_proxy_command,
         finalize_command=finalize_command,
         finalizer_bsub_command=finalizer_bsub_command,
+        collection_import_job_name=collection_import_job_name,
+        collection_import_command=collection_import_command,
+        collection_import_bsub_command=collection_import_bsub_command,
     )
 
 
@@ -505,7 +696,10 @@ def _print_plan(plan: SubjectMaskWorkflowPlan) -> None:
     print(f"  run_label: {plan.run_label}")
     print(f"  clips: {len(plan.clips)}")
     print(f"  components: {', '.join(plan.components)}")
+    print(f"  finalization_mode: {plan.finalization_mode}")
     print(f"  log_dir: {plan.log_dir}")
+    if plan.clip_finalizer_package_dir is not None:
+        print(f"  clip_finalizer_package_dir: {plan.clip_finalizer_package_dir}")
     missing = [clip.clip_id for clip in plan.clips if clip.cache_manifest is None]
     if missing:
         print(f"  missing_cache_manifests: {', '.join(missing)}")
@@ -519,8 +713,19 @@ def _print_plan(plan: SubjectMaskWorkflowPlan) -> None:
             f"-> subject_mask_shard[{clip.subject_mask_shard_run}]"
         )
     shard_refs = ", ".join(clip.subject_mask_shard_run for clip in plan.clips)
-    print(f"  shards[{shard_refs}] -> merge_proxy[{plan.merged_proxy_crop_run}]")
-    print(f"  merge_proxy[{plan.merged_proxy_crop_run}] -> refined_subject_masks[{plan.refined_subject_masks_run}]")
+    if plan.finalization_mode == "per_clip_packages":
+        package_refs = ", ".join(
+            str(clip.refined_subject_mask_package_path)
+            for clip in plan.clips
+            if clip.refined_subject_mask_package_path is not None
+        )
+        print(f"  shards[{shard_refs}] -> merge_proxy[{plan.merged_proxy_crop_run}]")
+        print(f"  shards[{shard_refs}] -> clip_packages[{package_refs}]")
+        print(f"  merge_proxy[{plan.merged_proxy_crop_run}] -> import_refined_subject_masks[{plan.refined_subject_masks_run}]")
+        print(f"  clip_packages -> import_refined_subject_masks[{plan.refined_subject_masks_run}]")
+    else:
+        print(f"  shards[{shard_refs}] -> merge_proxy[{plan.merged_proxy_crop_run}]")
+        print(f"  merge_proxy[{plan.merged_proxy_crop_run}] -> refined_subject_masks[{plan.refined_subject_masks_run}]")
     print()
     print("Submit-side proxy commands")
     for clip in plan.clips:
@@ -536,8 +741,19 @@ def _print_plan(plan: SubjectMaskWorkflowPlan) -> None:
             continue
         print(f"  {_shell_join(clip.subject_mask_bsub_command)}")
     print()
-    print("Finalizer bsub command template")
-    print(f"  {_shell_join(plan.finalizer_bsub_command)}")
+    if plan.finalization_mode == "per_clip_packages":
+        print("Clip finalizer/package bsub command templates")
+        for clip in plan.clips:
+            if clip.finalizer_bsub_command is None:
+                print(f"  # {clip.clip_id}: finalizer package job not available")
+                continue
+            print(f"  {_shell_join(clip.finalizer_bsub_command)}")
+        print()
+        print("Collection import bsub command template")
+        print(f"  {_shell_join(plan.collection_import_bsub_command)}")
+    else:
+        print("Finalizer bsub command template")
+        print(f"  {_shell_join(plan.finalizer_bsub_command)}")
 
 
 class CompletedProcessLike(Protocol):
@@ -558,6 +774,8 @@ def _write_submission_snapshot(
     shard_results: Sequence[Mapping[str, Any]],
     job_ids_by_name: Mapping[str, str],
     finalizer: Mapping[str, Any] | None = None,
+    merge_proxy: Mapping[str, Any] | None = None,
+    clip_finalizers: Sequence[Mapping[str, Any]] | None = None,
     error: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
@@ -570,12 +788,17 @@ def _write_submission_snapshot(
         "run_id": plan.run_id,
         "run_label": plan.run_label,
         "log_dir": str(plan.log_dir),
+        "finalization_mode": plan.finalization_mode,
         "proxy_results": list(proxy_results),
         "subject_mask_shard_results": list(shard_results),
         "job_ids_by_name": dict(job_ids_by_name),
     }
+    if merge_proxy is not None:
+        payload["merge_proxy"] = dict(merge_proxy)
     if finalizer is not None:
         payload["finalizer"] = dict(finalizer)
+    if clip_finalizers is not None:
+        payload["clip_finalizers"] = list(clip_finalizers)
     if error is not None:
         payload["error"] = dict(error)
     path.write_text(json.dumps(json_ready(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -595,6 +818,18 @@ def apply_plan(plan: SubjectMaskWorkflowPlan, *, runner: Runner = subprocess.run
     ]
     if unavailable:
         raise ValueError(f"Cannot apply plan; clips are missing proxy or subject-mask commands: {unavailable}")
+    if plan.finalization_mode == "per_clip_packages":
+        unavailable_finalizers = [
+            clip.clip_id
+            for clip in plan.clips
+            if clip.finalizer_bsub_command is None or clip.finalizer_job_name is None
+        ]
+        if unavailable_finalizers:
+            raise ValueError(
+                f"Cannot apply plan; clips are missing finalizer package commands: {unavailable_finalizers}"
+            )
+        if not plan.collection_import_bsub_command or plan.collection_import_job_name is None:
+            raise ValueError("Cannot apply per_clip_packages plan; collection import command is missing.")
 
     plan.log_dir.mkdir(parents=True, exist_ok=True)
     plan_payload = json_ready(plan.to_json())
@@ -606,6 +841,8 @@ def apply_plan(plan: SubjectMaskWorkflowPlan, *, runner: Runner = subprocess.run
     shard_results: list[dict[str, Any]] = []
     job_ids_by_name: dict[str, str] = {}
     finalizer_payload: dict[str, Any] | None = None
+    merge_proxy_payload: dict[str, Any] | None = None
+    clip_finalizer_results: list[dict[str, Any]] = []
 
     _write_submission_snapshot(
         submission_path,
@@ -637,6 +874,24 @@ def apply_plan(plan: SubjectMaskWorkflowPlan, *, runner: Runner = subprocess.run
                 job_ids_by_name=job_ids_by_name,
             )
 
+        if plan.finalization_mode == "per_clip_packages":
+            merge_result = _run_command(plan.merge_proxy_command, cwd=plan.repo, runner=runner)
+            merge_proxy_payload = {
+                "merged_proxy_crop_run": plan.merged_proxy_crop_run,
+                "command": plan.merge_proxy_command,
+                "command_result": merge_result,
+            }
+            _write_submission_snapshot(
+                submission_path,
+                plan=plan,
+                status="submitting",
+                proxy_results=proxy_results,
+                shard_results=shard_results,
+                job_ids_by_name=job_ids_by_name,
+                merge_proxy=merge_proxy_payload,
+                clip_finalizers=clip_finalizer_results,
+            )
+
         for clip in plan.clips:
             assert clip.subject_mask_bsub_command is not None
             submit_result = _run_command(clip.subject_mask_bsub_command, cwd=plan.repo, runner=runner)
@@ -658,21 +913,80 @@ def apply_plan(plan: SubjectMaskWorkflowPlan, *, runner: Runner = subprocess.run
                 proxy_results=proxy_results,
                 shard_results=shard_results,
                 job_ids_by_name=job_ids_by_name,
+                merge_proxy=merge_proxy_payload,
+                clip_finalizers=clip_finalizer_results,
             )
 
-        finalizer_command = _replace_job_placeholders(plan.finalizer_bsub_command, job_ids_by_name)
-        finalizer_result = _run_command(finalizer_command, cwd=plan.repo, runner=runner)
-        finalizer_job_id = _parse_bsub_job_id(finalizer_result["stdout"], finalizer_result["stderr"])
-        finalizer_job_name = f"sm_finalize_{plan.run_label}"
-        job_ids_by_name[finalizer_job_name] = finalizer_job_id
-        finalizer_payload = {
-            "job_name": finalizer_job_name,
-            "job_id": finalizer_job_id,
-            "command": finalizer_command,
-            "command_result": finalizer_result,
-            "output_run": plan.refined_subject_masks_run,
-            "merged_proxy_crop_run": plan.merged_proxy_crop_run,
-        }
+        if plan.finalization_mode == "per_clip_packages":
+            for clip in plan.clips:
+                if clip.finalizer_bsub_command is None or clip.finalizer_job_name is None:
+                    raise ValueError(f"Clip {clip.clip_id} is missing a finalizer package command.")
+                finalizer_command = _replace_job_placeholders(clip.finalizer_bsub_command, job_ids_by_name)
+                finalizer_result = _run_command(finalizer_command, cwd=plan.repo, runner=runner)
+                finalizer_job_id = _parse_bsub_job_id(finalizer_result["stdout"], finalizer_result["stderr"])
+                job_ids_by_name[clip.finalizer_job_name] = finalizer_job_id
+                clip_finalizer_results.append(
+                    {
+                        "clip_id": clip.clip_id,
+                        "job_name": clip.finalizer_job_name,
+                        "job_id": finalizer_job_id,
+                        "command": finalizer_command,
+                        "command_result": finalizer_result,
+                        "output_run": clip.refined_subject_mask_clip_run,
+                        "package_path": (
+                            str(clip.refined_subject_mask_package_path)
+                            if clip.refined_subject_mask_package_path
+                            else None
+                        ),
+                        "merged_proxy_crop_run": plan.merged_proxy_crop_run,
+                    }
+                )
+                _write_submission_snapshot(
+                    submission_path,
+                    plan=plan,
+                    status="submitting",
+                    proxy_results=proxy_results,
+                    shard_results=shard_results,
+                    job_ids_by_name=job_ids_by_name,
+                    merge_proxy=merge_proxy_payload,
+                    clip_finalizers=clip_finalizer_results,
+                )
+            assert plan.collection_import_job_name is not None
+            collection_import_command = _replace_job_placeholders(plan.collection_import_bsub_command, job_ids_by_name)
+            collection_import_result = _run_command(collection_import_command, cwd=plan.repo, runner=runner)
+            collection_import_job_id = _parse_bsub_job_id(
+                collection_import_result["stdout"],
+                collection_import_result["stderr"],
+            )
+            job_ids_by_name[plan.collection_import_job_name] = collection_import_job_id
+            finalizer_payload = {
+                "job_name": plan.collection_import_job_name,
+                "job_id": collection_import_job_id,
+                "command": collection_import_command,
+                "command_result": collection_import_result,
+                "output_run": plan.refined_subject_masks_run,
+                "merged_proxy_crop_run": plan.merged_proxy_crop_run,
+                "source_package_count": len(clip_finalizer_results),
+                "source_packages": [
+                    item.get("package_path")
+                    for item in clip_finalizer_results
+                    if item.get("package_path") is not None
+                ],
+            }
+        else:
+            finalizer_command = _replace_job_placeholders(plan.finalizer_bsub_command, job_ids_by_name)
+            finalizer_result = _run_command(finalizer_command, cwd=plan.repo, runner=runner)
+            finalizer_job_id = _parse_bsub_job_id(finalizer_result["stdout"], finalizer_result["stderr"])
+            finalizer_job_name = f"sm_finalize_{plan.run_label}"
+            job_ids_by_name[finalizer_job_name] = finalizer_job_id
+            finalizer_payload = {
+                "job_name": finalizer_job_name,
+                "job_id": finalizer_job_id,
+                "command": finalizer_command,
+                "command_result": finalizer_result,
+                "output_run": plan.refined_subject_masks_run,
+                "merged_proxy_crop_run": plan.merged_proxy_crop_run,
+            }
     except Exception as exc:
         _write_submission_snapshot(
             submission_path,
@@ -682,6 +996,8 @@ def apply_plan(plan: SubjectMaskWorkflowPlan, *, runner: Runner = subprocess.run
             shard_results=shard_results,
             job_ids_by_name=job_ids_by_name,
             finalizer=finalizer_payload,
+            merge_proxy=merge_proxy_payload,
+            clip_finalizers=clip_finalizer_results,
             error={"type": type(exc).__name__, "message": str(exc)},
         )
         raise
@@ -694,6 +1010,8 @@ def apply_plan(plan: SubjectMaskWorkflowPlan, *, runner: Runner = subprocess.run
         shard_results=shard_results,
         job_ids_by_name=job_ids_by_name,
         finalizer=finalizer_payload,
+        merge_proxy=merge_proxy_payload,
+        clip_finalizers=clip_finalizer_results,
     )
     submission["submitted_at_utc"] = submission["updated_at_utc"]
     submission_path.write_text(json.dumps(json_ready(submission), indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -760,6 +1078,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overwrite-shards", action="store_true")
     parser.add_argument("--overwrite-final-outputs", action="store_true")
     parser.add_argument("--defer-registry-status", action="store_true")
+    parser.add_argument(
+        "--finalization-mode",
+        choices=FINALIZATION_MODES,
+        default="collection_direct",
+        help=(
+            "collection_direct submits one collection finalizer that writes to the analysis Zarr. "
+            "per_clip_packages submits one CPU finalizer/package job per clip and writes NRS tarballs."
+        ),
+    )
+    parser.add_argument(
+        "--clip-finalizer-package-dir",
+        type=Path,
+        default=DEFAULT_CLIP_FINALIZER_PACKAGE_DIR,
+        help="Base directory for per-clip refined subject-mask finalizer packages.",
+    )
     parser.add_argument("--plan-json", type=Path, help="Optional path to write JSON plan.")
     parser.add_argument("--json", action="store_true", help="Print JSON plan instead of text.")
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -830,6 +1163,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         overwrite_shards=bool(args.overwrite_shards),
         overwrite_final_outputs=bool(args.overwrite_final_outputs),
         defer_registry_status=bool(args.defer_registry_status),
+        finalization_mode=args.finalization_mode,
+        clip_finalizer_package_dir=args.clip_finalizer_package_dir,
     )
     payload = json_ready(plan.to_json())
     if args.plan_json:
@@ -844,7 +1179,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"  plan: {submission['plan_path']}")
             print(f"  submission: {submission['submission_path']}")
             print(f"  subject-mask shards: {len(submission['subject_mask_shard_results'])}")
-            print(f"  finalizer job: {submission['finalizer']['job_id']}")
+            if submission.get("clip_finalizers"):
+                print(f"  clip finalizer jobs: {len(submission.get('clip_finalizers') or [])}")
+            if submission.get("finalizer"):
+                print(f"  finalizer job: {submission['finalizer']['job_id']}")
         return 0
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
