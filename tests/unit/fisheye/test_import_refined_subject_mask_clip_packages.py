@@ -37,6 +37,15 @@ def _write_package(
     run.attrs["label_schema_id"] = "subject_v1_lr"
     run.attrs["source_crop_run"] = source_crop_run
     run.attrs["summary_statistics"] = {"rows_total": len(crop_row_ids)}
+    run.attrs["clip_package_host"] = f"{package_name}_host"
+    run.attrs["clip_package_lsb_jobid"] = f"{package_name}_job"
+    run.attrs["source_roi_cache_used"] = True
+    run.attrs["source_roi_cache_path"] = f"/tmp/{package_name}.flat_roi_cache.json"
+    run.attrs["source_roi_cache_canonical_path"] = f"/nrs/{package_name}.flat_roi_cache.json"
+    run.attrs["source_roi_cache_key"] = f"{package_name}_cache_key"
+    run.attrs["source_subject_mask_shard_runs"] = [f"subject_masks_{run_name}"]
+    run.attrs["source_subject_mask_shard_run_paths"] = [f"subject_mask_shard_runs/subject_masks_{run_name}"]
+    run.attrs["source_subject_mask_shard_crop_runs"] = [f"crop_{run_name}"]
 
     row_count = len(crop_row_ids)
     masks = np.zeros((row_count, len(labels), 2, 3), dtype=np.uint8)
@@ -150,6 +159,24 @@ def test_import_refined_subject_mask_clip_packages_merges_rows_and_contours(tmp_
     )
     assert run.attrs["component_contours_status"] == "computed"
     assert run.attrs["component_contours_components"] == ["subject_body"]
+    assert "clip_package_host" not in run.attrs
+    assert "clip_package_lsb_jobid" not in run.attrs
+    assert "source_roi_cache_path" not in run.attrs
+    assert "source_roi_cache_canonical_path" not in run.attrs
+    assert "source_roi_cache_key" not in run.attrs
+    assert run.attrs["clip_package_hosts"] == ["clip_a_host", "clip_b_host"]
+    assert run.attrs["clip_package_lsb_jobids"] == ["clip_a_job", "clip_b_job"]
+    assert run.attrs["source_roi_cache_used"] is True
+    assert run.attrs["source_roi_cache_package_count"] == 2
+    assert run.attrs["source_roi_cache_paths"] == [
+        "/tmp/clip_a.flat_roi_cache.json",
+        "/tmp/clip_b.flat_roi_cache.json",
+    ]
+    assert run.attrs["source_roi_cache_keys"] == ["clip_a_cache_key", "clip_b_cache_key"]
+    assert run.attrs["source_subject_mask_shard_runs"] == [
+        "subject_masks_refined_clip_a",
+        "subject_masks_refined_clip_b",
+    ]
 
 
 def test_import_refined_subject_mask_clip_packages_rejects_duplicate_source_crop_rows(tmp_path: Path) -> None:

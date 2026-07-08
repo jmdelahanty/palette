@@ -36,6 +36,27 @@ from fisheye.utils.finalize_subject_mask_clip_package import PACKAGE_SCHEMA_ID a
 IMPORT_SCHEMA_ID = "palette_refined_subject_mask_clip_package_import_v1"
 SKIPPED_DERIVED_GROUPS = {"mask_bitpacked", "mask_rle"}
 SKIPPED_REGENERATED_ARRAY_NAMES = {"reason_bytes"}
+COLLECTION_INHERITED_ATTR_DROP_EXACT = {
+    "clip_package_host",
+    "clip_package_lsb_jobid",
+    "clip_package_source_zarr_path",
+    "clip_package_staged_zarr_path",
+    "clip_package_subject_shard_run",
+    "clip_package_target_crop_run",
+    "source_roi_cache_canonical_path",
+    "source_roi_cache_key",
+    "source_roi_cache_path",
+}
+COLLECTION_LIST_ATTRS = {
+    "clip_package_host": "clip_package_hosts",
+    "clip_package_lsb_jobid": "clip_package_lsb_jobids",
+    "source_roi_cache_canonical_path": "source_roi_cache_canonical_paths",
+    "source_roi_cache_key": "source_roi_cache_keys",
+    "source_roi_cache_path": "source_roi_cache_paths",
+    "source_subject_mask_shard_crop_runs": "source_subject_mask_shard_crop_runs",
+    "source_subject_mask_shard_run_paths": "source_subject_mask_shard_run_paths",
+    "source_subject_mask_shard_runs": "source_subject_mask_shard_runs",
+}
 
 
 @dataclass(frozen=True)
@@ -175,6 +196,60 @@ def _require_group(root: zarr.Group, path: str) -> zarr.Group:
 
 def _copy_group_attrs(source: zarr.Group, target: zarr.Group) -> None:
     target.attrs.update(dict(json_ready(dict(source.attrs))))
+
+
+def _is_collection_inherited_attr(key: str) -> bool:
+    return key in COLLECTION_INHERITED_ATTR_DROP_EXACT
+
+
+def _as_string_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", errors="replace")
+        return [text] if text else []
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        out: list[str] = []
+        for item in value:
+            out.extend(_as_string_list(item))
+        return out
+    text = str(value)
+    return [text] if text else []
+
+
+def _dedupe_preserving_order(values: Sequence[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        text = str(value)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def sanitize_collection_run_attrs(dest_run: zarr.Group, packages: Sequence[ClipPackage]) -> None:
+    """Remove singleton shard attrs and replace useful ones with collection lists."""
+
+    for key in list(dest_run.attrs.keys()):
+        if _is_collection_inherited_attr(str(key)):
+            del dest_run.attrs[key]
+
+    for package_attr, collection_attr in COLLECTION_LIST_ATTRS.items():
+        values: list[str] = []
+        for package in packages:
+            values.extend(_as_string_list(package.group.attrs.get(package_attr)))
+        values = _dedupe_preserving_order(values)
+        if values:
+            dest_run.attrs[collection_attr] = values
+
+    roi_cache_used = [bool(package.group.attrs.get("source_roi_cache_used")) for package in packages]
+    if any(roi_cache_used):
+        dest_run.attrs["source_roi_cache_used"] = bool(all(roi_cache_used))
+        dest_run.attrs["source_roi_cache_package_count"] = int(sum(1 for value in roi_cache_used if value))
 
 
 def _array_chunks(array: Any, shape: tuple[int, ...]) -> tuple[int, ...] | None:
@@ -530,6 +605,7 @@ def import_refined_subject_mask_clip_packages(
         try:
             reference = packages[0].group
             _copy_group_tree_attrs(reference, dest_run)
+            sanitize_collection_run_attrs(dest_run, packages)
             dest_run.attrs["palette_run_completion_status"] = "running"
 
             total_rows = int(sorted_crop_rows.shape[0])
