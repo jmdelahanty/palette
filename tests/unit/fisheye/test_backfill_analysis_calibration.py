@@ -68,6 +68,22 @@ def _seed_analysis_zarr(zarr_path: Path, *, source_h5: Path | None, zarr_purpose
     runs_parent.attrs["latest"] = "stimulus_001"
 
 
+def _seed_donor_calibration(zarr_path: Path, *, with_scale: bool = True) -> None:
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.attrs["zarr_purpose"] = "analysis"
+    root.attrs["recording_id"] = "donor_recording"
+    calib = root.require_group("analysis").require_group("calibration")
+    calib.attrs["schema_version"] = 1
+    calib.attrs["source"] = "h5_calibration_snapshot"
+    calib.attrs["source_h5"] = "/example/donor.h5"
+    calib.attrs["source_stimulus_run"] = "stimulus_donor"
+    calib.attrs["primary_camera_id"] = "2010095"
+    if with_scale:
+        calib.attrs["pixels_per_mm_camera"] = 53.4031982421875
+        calib.attrs["pixel_to_mm"] = 0.018725470251143482
+    calib.create_array("homography_matrix", data=HOMOGRAPHY, chunks=(3, 3), overwrite=True)
+
+
 def test_plan_or_backfill_one_writes_analysis_calibration_from_stimulus_source_h5(tmp_path: Path) -> None:
     h5_path = tmp_path / "session.h5"
     zarr_path = tmp_path / "sample_analysis.zarr"
@@ -108,6 +124,59 @@ def test_plan_or_backfill_one_skips_complete_calibration_without_overwrite(tmp_p
     assert mod.plan_or_backfill_one(zarr_path, apply=True, overwrite_existing=False).status == "backfilled"
     assert mod.plan_or_backfill_one(zarr_path, apply=False, overwrite_existing=False).status == "skipped_existing"
     assert mod.plan_or_backfill_one(zarr_path, apply=False, overwrite_existing=True).status == "would_overwrite"
+
+
+def test_plan_or_backfill_one_copies_calibration_from_donor_zarr(tmp_path: Path) -> None:
+    donor_zarr = tmp_path / "donor_analysis.zarr"
+    target_zarr = tmp_path / "target_analysis.zarr"
+    _seed_donor_calibration(donor_zarr)
+    _seed_analysis_zarr(target_zarr, source_h5=None)
+
+    dry = mod.plan_or_backfill_one(
+        target_zarr,
+        apply=False,
+        overwrite_existing=False,
+        donor_zarr_path=donor_zarr,
+        donor_note="same camera/rig configuration verified",
+    )
+    assert dry.status == "would_copy_donor"
+    assert dry.donor_zarr_path == donor_zarr
+    assert "source_h5=/example/donor.h5" in dry.message
+
+    result = mod.plan_or_backfill_one(
+        target_zarr,
+        apply=True,
+        overwrite_existing=False,
+        donor_zarr_path=donor_zarr,
+        donor_note="same camera/rig configuration verified",
+    )
+    assert result.status == "copied_donor"
+
+    root = zarr.open_group(str(target_zarr), mode="r", use_consolidated=False)
+    calib = root["analysis"]["calibration"]
+    assert calib.attrs["source"] == "donor_zarr_calibration"
+    assert calib.attrs["donor_zarr"] == str(donor_zarr.resolve())
+    assert calib.attrs["donor_calibration_path"] == "analysis/calibration"
+    assert calib.attrs["donor_configuration_verified_by_operator"] is True
+    assert calib.attrs["donor_backfill_note"] == "same camera/rig configuration verified"
+    assert calib.attrs["primary_camera_id"] == "2010095"
+    assert calib.attrs["pixel_to_mm"] == 0.018725470251143482
+    np.testing.assert_allclose(calib["homography_matrix"][:], HOMOGRAPHY)
+
+
+def test_plan_or_backfill_one_rejects_donor_without_usable_scale(tmp_path: Path) -> None:
+    donor_zarr = tmp_path / "donor_analysis.zarr"
+    target_zarr = tmp_path / "target_analysis.zarr"
+    _seed_donor_calibration(donor_zarr, with_scale=False)
+    _seed_analysis_zarr(target_zarr, source_h5=None)
+
+    result = mod.plan_or_backfill_one(
+        target_zarr,
+        apply=False,
+        overwrite_existing=False,
+        donor_zarr_path=donor_zarr,
+    )
+    assert result.status == "donor_calibration_missing_scale"
 
 
 def test_source_h5_falls_back_to_recording_raw_directory(tmp_path: Path) -> None:

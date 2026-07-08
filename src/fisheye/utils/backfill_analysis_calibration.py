@@ -5,6 +5,11 @@ Default mode is dry-run. Use ``--apply`` to write updates. The intended batch
 target is ``/nvme1/recordings``; each analysis archive is matched to its
 stimulus H5 via ``analysis/stimulus_runs/<run>.attrs["source_h5"]`` when
 available, then by the affiliated ``raw/*.h5`` file under the recording folder.
+
+When an archive has no H5 source but was acquired with a known-matching rig
+configuration, ``--donor-zarr`` can copy an existing calibration group from a
+reference archive. Donor-derived backfills are explicitly stamped in attrs and
+should be used only when the operator has verified the physical configuration.
 """
 
 from __future__ import annotations
@@ -13,10 +18,12 @@ from fisheye.shared.zarr_helpers import infer_zarr_use as _infer_zarr_use
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
 import h5py
+import numpy as np
 import zarr
 
 from fisheye.analysis.import_stimulus_to_zarr import _materialize_analysis_calibration
@@ -36,6 +43,7 @@ class BackfillPlan:
     zarr_path: Path
     status: str
     h5_path: Optional[Path] = None
+    donor_zarr_path: Optional[Path] = None
     run_name: Optional[str] = None
     message: str = ""
 
@@ -71,6 +79,14 @@ def _get_analysis_calibration(root: zarr.Group) -> Optional[zarr.Group]:
     return calibration if isinstance(calibration, zarr.Group) else None
 
 
+def _get_calibration_group(root: zarr.Group) -> Optional[zarr.Group]:
+    calibration = _get_analysis_calibration(root)
+    if calibration is not None:
+        return calibration
+    legacy = root.get("calibration")
+    return legacy if isinstance(legacy, zarr.Group) else None
+
+
 def _analysis_calibration_complete(root: zarr.Group) -> bool:
     calibration = _get_analysis_calibration(root)
     if calibration is None:
@@ -81,6 +97,130 @@ def _analysis_calibration_complete(root: zarr.Group) -> bool:
     has_scale = attrs.get("pixel_to_mm") is not None or attrs.get("pixels_per_mm_camera") is not None
     has_homography = "homography_matrix" in calibration or attrs.get("homography_status") not in (None, "")
     return bool(has_source and has_run and has_scale and has_homography)
+
+
+def _calibration_has_usable_scale(calibration: zarr.Group) -> bool:
+    attrs = calibration.attrs
+    return any(
+        attrs.get(key) is not None
+        for key in ("pixel_to_mm", "pixels_per_mm_camera", "pixels_per_mm")
+    )
+
+
+def _copy_attrs(source: Any, target: Any) -> None:
+    target.attrs.update({str(key): value for key, value in source.attrs.items()})
+
+
+def _copy_array(source: zarr.Array, target_group: zarr.Group, name: str) -> None:
+    data = np.asarray(source[:])
+    chunks = getattr(source, "chunks", None)
+    kwargs: dict[str, Any] = {
+        "data": data,
+        "overwrite": True,
+    }
+    if chunks is not None:
+        kwargs["chunks"] = chunks
+    target_group.create_array(name, **kwargs)
+
+
+def _copy_calibration_group_recursive(source: zarr.Group, target: zarr.Group) -> None:
+    _copy_attrs(source, target)
+
+    array_names = sorted(str(name) for name in source.array_keys())
+    for name in array_names:
+        _copy_array(source[name], target, name)
+
+    group_names = sorted(str(name) for name in source.group_keys())
+    for name in group_names:
+        if name in target:
+            del target[name]
+        child = target.create_group(name)
+        _copy_calibration_group_recursive(source[name], child)
+
+
+def _source_label_for_calibration(root: zarr.Group, calibration: zarr.Group) -> str:
+    source = calibration.attrs.get("source")
+    source_h5 = calibration.attrs.get("source_h5")
+    source_run = calibration.attrs.get("source_stimulus_run")
+    zarr_id = root.attrs.get("recording_id") or root.attrs.get("recording_name")
+    parts = []
+    if zarr_id not in (None, ""):
+        parts.append(f"recording={zarr_id}")
+    if source not in (None, ""):
+        parts.append(f"source={source}")
+    if source_h5 not in (None, ""):
+        parts.append(f"source_h5={source_h5}")
+    if source_run not in (None, ""):
+        parts.append(f"source_stimulus_run={source_run}")
+    return "; ".join(parts)
+
+
+def _donor_calibration_plan(
+    zarr_path: Path,
+    *,
+    root: zarr.Group,
+    donor_zarr_path: Path,
+    apply: bool,
+    overwrite_existing: bool,
+    operator_note: Optional[str],
+    consolidate_metadata: bool,
+) -> BackfillPlan:
+    existing_complete = _analysis_calibration_complete(root)
+    if existing_complete and not overwrite_existing:
+        return BackfillPlan(zarr_path=zarr_path, status="skipped_existing", donor_zarr_path=donor_zarr_path)
+
+    donor_root = _open_zarr(donor_zarr_path.expanduser(), mode="r")
+    donor_calibration = _get_calibration_group(donor_root)
+    if donor_calibration is None:
+        return BackfillPlan(
+            zarr_path=zarr_path,
+            status="missing_donor_calibration",
+            donor_zarr_path=donor_zarr_path,
+        )
+    if not _calibration_has_usable_scale(donor_calibration):
+        return BackfillPlan(
+            zarr_path=zarr_path,
+            status="donor_calibration_missing_scale",
+            donor_zarr_path=donor_zarr_path,
+        )
+
+    planned_status = "would_copy_donor_overwrite" if existing_complete else "would_copy_donor"
+    written_status = "copied_donor_overwrite" if existing_complete else "copied_donor"
+    if not apply:
+        return BackfillPlan(
+            zarr_path=zarr_path,
+            status=planned_status,
+            donor_zarr_path=donor_zarr_path,
+            message=_source_label_for_calibration(donor_root, donor_calibration),
+        )
+
+    analysis = root.require_group("analysis")
+    if "calibration" in analysis:
+        del analysis["calibration"]
+    target_calibration = analysis.create_group("calibration")
+    _copy_calibration_group_recursive(donor_calibration, target_calibration)
+    target_calibration.attrs["source"] = "donor_zarr_calibration"
+    target_calibration.attrs["donor_zarr"] = str(donor_zarr_path.expanduser().resolve())
+    target_calibration.attrs["donor_calibration_path"] = (
+        "analysis/calibration" if _get_analysis_calibration(donor_root) is not None else "calibration"
+    )
+    target_calibration.attrs["donor_calibration_source"] = _source_label_for_calibration(
+        donor_root,
+        donor_calibration,
+    )
+    target_calibration.attrs["donor_configuration_verified_by_operator"] = True
+    target_calibration.attrs["donor_backfill_timestamp_utc"] = datetime.now(timezone.utc).isoformat()
+    if operator_note:
+        target_calibration.attrs["donor_backfill_note"] = str(operator_note)
+    if consolidate_metadata:
+        zarr.consolidate_metadata(str(zarr_path))
+
+    return BackfillPlan(
+        zarr_path=zarr_path,
+        status=written_status,
+        donor_zarr_path=donor_zarr_path,
+        message=_source_label_for_calibration(donor_root, donor_calibration),
+    )
 
 
 def _select_stimulus_run(
@@ -231,6 +371,8 @@ def plan_or_backfill_one(
     overwrite_existing: bool,
     requested_run: Optional[str] = None,
     explicit_h5_path: Optional[Path] = None,
+    donor_zarr_path: Optional[Path] = None,
+    donor_note: Optional[str] = None,
     zarr_use: str = "analysis",
     consolidate_metadata: bool = False,
 ) -> BackfillPlan:
@@ -240,6 +382,17 @@ def plan_or_backfill_one(
     observed_use = _infer_zarr_use(root, zarr_path)
     if zarr_use in {"analysis", "training"} and observed_use != zarr_use:
         return BackfillPlan(zarr_path=zarr_path, status="filtered_zarr_use", message=str(observed_use))
+
+    if donor_zarr_path is not None:
+        return _donor_calibration_plan(
+            zarr_path,
+            root=root,
+            donor_zarr_path=donor_zarr_path,
+            apply=apply,
+            overwrite_existing=overwrite_existing,
+            operator_note=donor_note,
+            consolidate_metadata=consolidate_metadata,
+        )
 
     existing_complete = _analysis_calibration_complete(root)
     if existing_complete and not overwrite_existing:
@@ -312,11 +465,17 @@ def _print_result(result: BackfillPlan, *, verbose: bool) -> None:
     noisy_statuses = {
         "would_backfill",
         "would_overwrite",
+        "would_copy_donor",
+        "would_copy_donor_overwrite",
         "backfilled",
         "overwritten",
+        "copied_donor",
+        "copied_donor_overwrite",
         "ambiguous_h5",
         "missing_h5",
         "missing_calibration_snapshot",
+        "missing_donor_calibration",
+        "donor_calibration_missing_scale",
         "h5_error",
         "missing_stimulus_run",
     }
@@ -326,6 +485,8 @@ def _print_result(result: BackfillPlan, *, verbose: bool) -> None:
     parts = [result.status, str(result.zarr_path)]
     if result.h5_path is not None:
         parts.append(f"h5={result.h5_path}")
+    if result.donor_zarr_path is not None:
+        parts.append(f"donor_zarr={result.donor_zarr_path}")
     if result.run_name:
         parts.append(f"run={result.run_name}")
     if result.message:
@@ -345,6 +506,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument("--run-name", help="Use a specific analysis/stimulus_runs/<run> for provenance.")
     parser.add_argument("--h5-path", type=Path, help="Explicit H5 path. Intended for single-archive repairs.")
+    parser.add_argument(
+        "--donor-zarr",
+        type=Path,
+        help=(
+            "Copy calibration from a known-matching donor Zarr. Operator is responsible "
+            "for verifying physical rig/camera configuration."
+        ),
+    )
+    parser.add_argument(
+        "--donor-note",
+        help="Provenance note recorded when --donor-zarr is applied.",
+    )
     parser.add_argument("--overwrite-existing", action="store_true", help="Rewrite complete analysis/calibration groups.")
     parser.add_argument("--apply", action="store_true", help="Write updates (default: dry-run).")
     parser.add_argument(
@@ -359,6 +532,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         parser.error("--consolidate-metadata requires --apply")
     if args.h5_path is not None and len(args.paths) != 1:
         parser.error("--h5-path requires exactly one zarr path")
+    if args.h5_path is not None and args.donor_zarr is not None:
+        parser.error("--h5-path and --donor-zarr are mutually exclusive")
+    if args.donor_note and args.donor_zarr is None:
+        parser.error("--donor-note requires --donor-zarr")
 
     roots = _resolve_roots(args.paths)
     counts: dict[str, int] = {
@@ -377,6 +554,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 overwrite_existing=bool(args.overwrite_existing),
                 requested_run=args.run_name,
                 explicit_h5_path=args.h5_path,
+                donor_zarr_path=args.donor_zarr,
+                donor_note=args.donor_note,
                 zarr_use=str(args.zarr_use),
                 consolidate_metadata=bool(args.consolidate_metadata),
             )
@@ -399,14 +578,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         "zarr_scanned",
         "would_backfill",
         "would_overwrite",
+        "would_copy_donor",
+        "would_copy_donor_overwrite",
         "backfilled",
         "overwritten",
+        "copied_donor",
+        "copied_donor_overwrite",
         "skipped_existing",
         "filtered_zarr_use",
         "missing_h5",
         "ambiguous_h5",
         "missing_stimulus_run",
         "missing_calibration_snapshot",
+        "missing_donor_calibration",
+        "donor_calibration_missing_scale",
         "h5_error",
         "errors",
     ]
