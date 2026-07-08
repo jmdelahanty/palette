@@ -17,7 +17,12 @@ from fisheye.shared.run_provenance import json_ready
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.shared.zarr.chunk_profiles import create_geometry_preload_array
 from fisheye.shared.zarr_io import open_zarr_root
-from fisheye.shared.zarr_run_completion import RUN_COMPLETION_CONTRACT, RUN_COMPLETION_CONTRACT_ATTR, RUN_COMPLETION_STATUS_ATTR
+from fisheye.shared.zarr_run_completion import (
+    RUN_COMPLETION_CONTRACT,
+    RUN_COMPLETION_CONTRACT_ATTR,
+    RUN_COMPLETION_STATUS_ATTR,
+    require_runs_parent,
+)
 from fisheye.utils.create_clipped_collection_proxy_crop_run import PROXY_CROP_RUN_SCHEMA
 
 MERGED_PROXY_CROP_RUN_SCHEMA = "palette_clipped_collection_merged_proxy_crop_run_v1"
@@ -103,7 +108,7 @@ def merge_clipped_proxy_crop_runs(
     if "/" in output_run or not str(output_run).strip():
         raise ValueError("output_run must be a single non-empty Zarr group name.")
 
-    parent = root.require_group("crop_runs")
+    parent = require_runs_parent(root, "crop_runs")
     if output_run in parent:
         if not overwrite:
             raise ValueError(f"crop_runs/{output_run} already exists. Pass --overwrite to replace it.")

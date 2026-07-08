@@ -22,6 +22,7 @@ from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_CONTRACT,
     RUN_COMPLETION_CONTRACT_ATTR,
     RUN_COMPLETION_STATUS_ATTR,
+    require_runs_parent,
 )
 
 
@@ -213,7 +214,7 @@ def create_clipped_collection_proxy_crop_run(
         alias_manifest = Path(alias_manifest_path).expanduser().resolve()
 
     root = zarr.open_group(str(archive_path), mode="a", use_consolidated=False)
-    crop_parent = root.require_group("crop_runs")
+    crop_parent = require_runs_parent(root, "crop_runs")
     if resolved_proxy_run in crop_parent:
         if not overwrite:
             raise ValueError(f"crop_runs/{resolved_proxy_run} already exists. Pass --overwrite to replace it.")
