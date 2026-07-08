@@ -725,8 +725,10 @@ def apply_plan(plan: WorkflowPlan, *, runner: Runner = subprocess.run) -> dict[s
         refine_command = _replace_job_placeholders(plan.refine_bsub_command, job_ids_by_name)
         refine_result = _run_command(refine_command, cwd=plan.repo, runner=runner)
         refine_job_id = _parse_bsub_job_id(refine_result["stdout"], refine_result["stderr"])
+        refine_job_name = f"kp_refine_{plan.run_label}"
+        job_ids_by_name[refine_job_name] = refine_job_id
         refine_payload = {
-            "job_name": f"kp_refine_{plan.run_label}",
+            "job_name": refine_job_name,
             "job_id": refine_job_id,
             "command": refine_command,
             "command_result": refine_result,

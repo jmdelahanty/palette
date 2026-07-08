@@ -236,6 +236,7 @@ def test_apply_plan_creates_proxies_and_submits_dependency_dag(tmp_path: Path) -
         "kp_test_run_clip_000001": "101",
         "kp_test_run_clip_000002": "102",
         "kp_finalize_test_run": "201",
+        "kp_refine_test_run": "301",
     }
     finalizer_call = calls[4]
     assert finalizer_call[finalizer_call.index("-w") + 1] == "done(101) && done(102)"
