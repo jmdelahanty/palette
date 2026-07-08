@@ -16,7 +16,7 @@ import math
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import numpy as np
 import zarr
@@ -71,6 +71,8 @@ SAMPLE_REASON_CODES = {
     str(SAMPLE_REASON_POSITION_NAN): "position_nan",
     str(SAMPLE_REASON_MANUAL_REJECT): "manual_reject",
 }
+
+_UNKNOWN_SOURCE_VALUES = {"", "unknown", "none", "null"}
 
 KEYPOINT_USABILITY_DATASET_CANDIDATES = (
     "heading_usable",
@@ -319,6 +321,35 @@ def resolve_detection_from_path(root: zarr.Group, path: str) -> DetectionResolut
     )
 
 
+def _clean_source_text(value: Any) -> Optional[str]:
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "ignore")
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text.lower() in _UNKNOWN_SOURCE_VALUES:
+        return None
+    return text
+
+
+def _crop_row_source_label(attrs: Mapping[str, Any]) -> Optional[str]:
+    """Return the source label used by tracking for row-aligned crop metadata."""
+
+    direct = _clean_source_text(attrs.get("source_detect_run"))
+    if direct:
+        return direct
+
+    source_type = _clean_source_text(
+        attrs.get("detection_source_type") or attrs.get("source_type")
+    )
+    if source_type and (
+        source_type.startswith("external_crop_recorder")
+        or source_type.startswith("finalized_clipped_refined_detect_collection")
+    ):
+        return source_type
+    return None
+
+
 def _sorted_group_keys(group: Optional[zarr.Group]) -> List[str]:
     if group is None:
         return []
@@ -376,7 +407,7 @@ def load_offline_position_source(
     crop_group: zarr.Group,
     *,
     crop_run_name: str,
-    detection: DetectionResolution,
+    detection: Optional[DetectionResolution],
 ) -> OfflinePositionSource:
     """Load the row-aligned bbox/frame source for offline keypoint motion.
 
@@ -386,9 +417,22 @@ def load_offline_position_source(
     """
 
     if "bbox_norm_coords" in crop_group and "frame_indices" in crop_group:
+        bbox_norm_coords = np.asarray(crop_group["bbox_norm_coords"][:])
+        frame_indices = np.asarray(crop_group["frame_indices"][:], dtype=np.int64)
+        if bbox_norm_coords.ndim != 2 or int(bbox_norm_coords.shape[1]) != 4:
+            raise ValueError(
+                f"crop_runs/{crop_run_name}/bbox_norm_coords must have shape (N, 4); "
+                f"got {tuple(int(v) for v in bbox_norm_coords.shape)}."
+            )
+        if int(frame_indices.shape[0]) != int(bbox_norm_coords.shape[0]):
+            raise ValueError(
+                f"crop_runs/{crop_run_name} row count mismatch: frame_indices has "
+                f"{int(frame_indices.shape[0])} rows but bbox_norm_coords has "
+                f"{int(bbox_norm_coords.shape[0])} rows."
+            )
         return OfflinePositionSource(
-            bbox_norm_coords=crop_group["bbox_norm_coords"][:],
-            frame_indices=crop_group["frame_indices"][:].astype(np.int64, copy=False),
+            bbox_norm_coords=bbox_norm_coords,
+            frame_indices=frame_indices,
             detection_source=(
                 crop_group["detection_source"][:]
                 if "detection_source" in crop_group
@@ -396,6 +440,12 @@ def load_offline_position_source(
             ),
             path=f"crop_runs/{crop_run_name}",
             kind="crop_rows",
+        )
+
+    if detection is None:
+        raise ValueError(
+            f"Crop run '{crop_run_name}' missing row-aligned bbox_norm_coords/frame_indices "
+            "and no source_coords_path was available."
         )
 
     detection_group = detection.group
@@ -2577,14 +2627,34 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
         crop_group_offline = root[f"crop_runs/{keypoints_offline.crop_run}"]
         detection_path_offline = crop_group_offline.attrs.get("source_coords_path")
-        if not detection_path_offline:
-            raise ValueError(
-                f"Crop run '{keypoints_offline.crop_run}' missing 'source_coords_path'; cannot determine detection source."
+        crop_row_source_label = _crop_row_source_label(crop_group_offline.attrs)
+        if detection_path_offline:
+            detection_offline: Optional[DetectionResolution] = resolve_detection_from_path(
+                root,
+                detection_path_offline,
             )
-
-        detection_offline = resolve_detection_from_path(root, detection_path_offline)
-        preferred_detection_offline = prefer_refined_detection(root, detection_offline, console)
-        detection_offline = preferred_detection_offline
+            preferred_detection_offline = prefer_refined_detection(
+                root,
+                detection_offline,
+                console,
+            )
+            detection_offline = preferred_detection_offline
+        else:
+            if "bbox_norm_coords" not in crop_group_offline or "frame_indices" not in crop_group_offline:
+                raise ValueError(
+                    f"Crop run '{keypoints_offline.crop_run}' missing 'source_coords_path'; cannot determine detection source."
+                )
+            if not crop_row_source_label:
+                raise ValueError(
+                    f"Crop run '{keypoints_offline.crop_run}' missing 'source_coords_path' "
+                    "and source_detect_run/detection_source_type; cannot determine tracking lineage."
+                )
+            console.print(
+                "[cyan]Using row-aligned crop metadata as offline position source:[/cyan] "
+                f"crop_runs/{keypoints_offline.crop_run} "
+                f"(source={crop_row_source_label})"
+            )
+            detection_offline = None
 
         position_source_offline = load_offline_position_source(
             crop_group_offline,
@@ -2623,14 +2693,25 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         positions_offline[:, 0] = bbox_norm_offline[:, 0] * width_offline
         positions_offline[:, 1] = bbox_norm_offline[:, 1] * height_offline
 
-        expected_detect_run = (
-            detection_offline.source_detect_run if detection_offline.source_detect_run else detection_offline.run_name
-        )
+        if detection_offline is not None:
+            expected_detect_run = (
+                detection_offline.source_detect_run or detection_offline.run_name
+            )
+        else:
+            expected_detect_run = crop_row_source_label
+        if not expected_detect_run:
+            raise ValueError(
+                "Offline: unable to determine source_detect_run for tracking lookup."
+            )
         track_ids_offline, tracking_metadata = load_tracking_ids(
             root,
             frame_indices_offline.shape[0],
             expected_detect_run=expected_detect_run,
-            expected_refined_run=detection_offline.run_name if detection_offline.is_refined else None,
+            expected_refined_run=(
+                detection_offline.run_name
+                if detection_offline is not None and detection_offline.is_refined
+                else None
+            ),
             expected_source_rowset_path=position_source_offline.path,
             return_metadata=True,
         )
@@ -2785,10 +2866,26 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         env_info = get_environment_info()
 
                         offline_inputs = {
-                            "detection_path": detection_offline.path,
-                            "detection_run": detection_offline.run_name,
-                            "detection_variant": detection_offline.variant,
-                            "source_detect_run": detection_offline.source_detect_run,
+                            "detection_path": (
+                                detection_offline.path
+                                if detection_offline is not None
+                                else None
+                            ),
+                            "detection_run": (
+                                detection_offline.run_name
+                                if detection_offline is not None
+                                else crop_row_source_label
+                            ),
+                            "detection_variant": (
+                                detection_offline.variant
+                                if detection_offline is not None
+                                else "crop_rows"
+                            ),
+                            "source_detect_run": (
+                                detection_offline.source_detect_run
+                                if detection_offline is not None
+                                else crop_row_source_label
+                            ),
                             "position_source_path": position_source_offline.path,
                             "position_source_kind": position_source_offline.kind,
                             "keypoint_run": keypoints_offline.run_name,

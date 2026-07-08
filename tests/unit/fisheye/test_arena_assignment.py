@@ -418,6 +418,110 @@ def test_assign_arenas_spatial_can_track_explicit_crop_rowset(
     assert result["assigned_detections"] == 3
 
 
+def test_assign_arenas_spatial_accepts_external_crop_recorder_rowset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _build_root()
+    crop_run = root["crop_runs"]["crop_001"]
+    crop_run.attrs.pop("source_detect_run")
+    crop_run.attrs.pop("source_refined_run")
+    crop_run.attrs["detection_source_type"] = "external_crop_recorder_crop_meta_selected_live_detection"
+    captured: dict[str, object] = {}
+
+    def fake_get_single_dish_roi_from_mask(_root, _console):
+        return [
+            {
+                "id": 3,
+                "roi_pixels": [0, 0, 100, 100],
+                "source": "mask",
+                "image_shape": [100, 100],
+            }
+        ]
+
+    def fake_write_tracking_run(**kwargs):
+        captured.update(kwargs)
+        track_parent = root["arena_assignment_runs"]["arena_assignment_001"].create_group("tracks")
+        return "tracks_001", track_parent, {"ok": True}
+
+    _stub_assignment_runtime(monkeypatch, root)
+    monkeypatch.setattr(
+        mod,
+        "infer_experiment_setup",
+        lambda _attrs: SimpleNamespace(setup_type="single_dish", num_dishes=1, source="experiment_setup"),
+    )
+    monkeypatch.setattr(mod, "get_single_dish_roi_from_mask", fake_get_single_dish_roi_from_mask)
+    monkeypatch.setattr(mod, "write_single_subject_per_arena_tracking_run", fake_write_tracking_run)
+
+    result = assign_arenas_spatial(
+        "/tmp/fake.zarr",
+        config={},
+        console=None,
+        source_rowset_path="crop_runs/crop_001",
+    )
+
+    source_label = "external_crop_recorder_crop_meta_selected_live_detection"
+    assert captured["source_rowset_path"] == "crop_runs/crop_001"
+    assert captured["source_refined_run"] is None
+    assert captured["source_detect_run"] == source_label
+    assign_group = root["arena_assignment_runs"]["arena_assignment_001"]
+    assert assign_group.attrs["assignment_source"] == "explicit_crop_rows"
+    assert assign_group.attrs["source_detect_run"] == source_label
+    assert result["total_detections"] == 3
+    assert result["assigned_detections"] == 3
+
+
+def test_assign_arenas_spatial_accepts_clipped_collection_proxy_rowset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _build_root()
+    crop_run = root["crop_runs"]["crop_001"]
+    crop_run.attrs.pop("source_detect_run")
+    crop_run.attrs.pop("source_refined_run")
+    crop_run.attrs["detection_source_type"] = "finalized_clipped_refined_detect_collection_proxy"
+    captured: dict[str, object] = {}
+
+    def fake_get_single_dish_roi_from_mask(_root, _console):
+        return [
+            {
+                "id": 3,
+                "roi_pixels": [0, 0, 100, 100],
+                "source": "mask",
+                "image_shape": [100, 100],
+            }
+        ]
+
+    def fake_write_tracking_run(**kwargs):
+        captured.update(kwargs)
+        track_parent = root["arena_assignment_runs"]["arena_assignment_001"].create_group("tracks")
+        return "tracks_001", track_parent, {"ok": True}
+
+    _stub_assignment_runtime(monkeypatch, root)
+    monkeypatch.setattr(
+        mod,
+        "infer_experiment_setup",
+        lambda _attrs: SimpleNamespace(setup_type="single_dish", num_dishes=1, source="experiment_setup"),
+    )
+    monkeypatch.setattr(mod, "get_single_dish_roi_from_mask", fake_get_single_dish_roi_from_mask)
+    monkeypatch.setattr(mod, "write_single_subject_per_arena_tracking_run", fake_write_tracking_run)
+
+    result = assign_arenas_spatial(
+        "/tmp/fake.zarr",
+        config={},
+        console=None,
+        source_rowset_path="crop_runs/crop_001",
+    )
+
+    source_label = "finalized_clipped_refined_detect_collection_proxy"
+    assert captured["source_rowset_path"] == "crop_runs/crop_001"
+    assert captured["source_refined_run"] is None
+    assert captured["source_detect_run"] == source_label
+    assign_group = root["arena_assignment_runs"]["arena_assignment_001"]
+    assert assign_group.attrs["assignment_source"] == "explicit_crop_rows"
+    assert assign_group.attrs["source_detect_run"] == source_label
+    assert result["total_detections"] == 3
+    assert result["assigned_detections"] == 3
+
+
 def test_assign_arenas_spatial_tracks_four_subjects_in_four_subarenas(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

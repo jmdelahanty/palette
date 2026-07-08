@@ -3,6 +3,7 @@ import zarr
 
 from fisheye.analysis.track_kinematics import (
     DetectionResolution,
+    _crop_row_source_label,
     _filter_public_track_rows,
     _ordered_track_arena_ids,
     load_offline_position_source,
@@ -121,3 +122,77 @@ def test_load_offline_position_source_prefers_crop_rows() -> None:
     assert source.frame_indices.tolist() == [10, 11, 12]
     assert source.detection_source is not None
     assert source.detection_source.tolist() == [1, 1, 0]
+
+
+def test_load_offline_position_source_accepts_external_crop_rows_without_detection() -> None:
+    root = zarr.group()
+    crop_group = root.create_group("crop")
+    crop_group.attrs["detection_source_type"] = (
+        "external_crop_recorder_crop_meta_selected_live_detection"
+    )
+    crop_group.create_array(
+        "bbox_norm_coords",
+        data=np.ones((2, 4), dtype=np.float32),
+        chunks=(2, 4),
+        overwrite=True,
+    )
+    crop_group.create_array(
+        "frame_indices",
+        data=np.array([20, 21], dtype=np.int64),
+        chunks=(2,),
+        overwrite=True,
+    )
+
+    source = load_offline_position_source(
+        crop_group,
+        crop_run_name="crop_external",
+        detection=None,
+    )
+
+    assert _crop_row_source_label(crop_group.attrs) == (
+        "external_crop_recorder_crop_meta_selected_live_detection"
+    )
+    assert source.kind == "crop_rows"
+    assert source.path == "crop_runs/crop_external"
+    assert source.bbox_norm_coords.shape == (2, 4)
+    assert source.frame_indices.tolist() == [20, 21]
+    assert source.detection_source is None
+
+
+def test_crop_row_source_label_accepts_clipped_collection_proxy() -> None:
+    assert (
+        _crop_row_source_label(
+            {
+                "detection_source_type": "finalized_clipped_refined_detect_collection_proxy",
+            }
+        )
+        == "finalized_clipped_refined_detect_collection_proxy"
+    )
+
+
+def test_load_offline_position_source_rejects_crop_row_count_mismatch() -> None:
+    root = zarr.group()
+    crop_group = root.create_group("crop")
+    crop_group.create_array(
+        "bbox_norm_coords",
+        data=np.ones((2, 4), dtype=np.float32),
+        chunks=(2, 4),
+        overwrite=True,
+    )
+    crop_group.create_array(
+        "frame_indices",
+        data=np.array([20, 21, 22], dtype=np.int64),
+        chunks=(3,),
+        overwrite=True,
+    )
+
+    try:
+        load_offline_position_source(
+            crop_group,
+            crop_run_name="crop_bad",
+            detection=None,
+        )
+    except ValueError as exc:
+        assert "row count mismatch" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("Expected row count mismatch to fail")

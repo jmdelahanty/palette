@@ -131,6 +131,8 @@ def test_build_clipped_collection_flat_roi_cache_writes_pixels_and_row_index(
     assert manifest["source"]["source_kind"] == "finalized_clipped_refined_detect_collection"
     assert manifest["source"]["collection_id"] == "workflow_001"
     assert manifest["row_index"]["schema"] == CLIPPED_COLLECTION_ROW_INDEX_SCHEMA
+    assert "bbox_norm_cx" in manifest["row_index"]["columns"]
+    assert "source_detect_row_index" in manifest["row_index"]["columns"]
     assert manifest["array"]["shape"] == [2, 2, 2]
     assert manifest["builder"]["decode_backend_effective"] == "pynvvc_luma"
     assert manifest["builder"]["pixel_contract"]["name"] == "orange_mono_pynvvc_luma_uint8_v1"

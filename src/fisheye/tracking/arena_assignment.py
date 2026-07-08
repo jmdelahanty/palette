@@ -10,7 +10,7 @@ import numpy as np
 import zarr
 import time
 import sys
-from typing import Dict, Optional, Any, List, Tuple, Sequence
+from typing import Dict, Optional, Any, List, Tuple, Sequence, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from rich.console import Console
@@ -32,6 +32,65 @@ from .single_subject_per_arena import (
 from ..shared.system_metadata import get_environment_info
 
 _ARENA_ASSIGN_STATUS_SOURCE = "runtime_arena_assignment"
+_UNKNOWN_SOURCE_VALUES = {"", "unknown", "none", "null"}
+
+
+def _clean_source_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text.lower() in _UNKNOWN_SOURCE_VALUES:
+        return None
+    return text
+
+
+def _source_detect_run_from_attrs(attrs: Mapping[str, Any]) -> Optional[str]:
+    """Resolve the best available source-detection label for a rowset.
+
+    Most Palette rowsets have a concrete ``detect_runs/<run>`` ancestor. Some
+    acquisition-crop rowsets instead come directly from the external crop
+    recorder's selected live detections; those have no Palette detect run, so
+    the detection source type is the honest lineage label.
+    """
+
+    direct = _clean_source_text(attrs.get("source_detect_run"))
+    if direct:
+        return direct
+
+    for container_name in ("inputs", "source_refs"):
+        container = attrs.get(container_name)
+        if isinstance(container, Mapping):
+            for key in ("source_detect_run", "detect_run"):
+                value = _clean_source_text(container.get(key))
+                if value:
+                    return value
+            path = _clean_source_text(container.get("source_detect_path") or container.get("detect_path"))
+            if path and path.startswith("detect_runs/"):
+                parts = path.split("/")
+                if len(parts) >= 2:
+                    return parts[1]
+
+    provenance = attrs.get("provenance")
+    if isinstance(provenance, Mapping):
+        inputs = provenance.get("inputs")
+        if isinstance(inputs, Mapping):
+            for key in ("source_detect_run", "detect_run"):
+                value = _clean_source_text(inputs.get(key))
+                if value:
+                    return value
+            path = _clean_source_text(inputs.get("source_detect_path") or inputs.get("detect_path"))
+            if path and path.startswith("detect_runs/"):
+                parts = path.split("/")
+                if len(parts) >= 2:
+                    return parts[1]
+
+    source_type = _clean_source_text(attrs.get("detection_source_type") or attrs.get("source_type"))
+    if source_type and (
+        source_type.startswith("external_crop_recorder")
+        or source_type.startswith("finalized_clipped_refined_detect_collection")
+    ):
+        return source_type
+    return None
 
 
 def _count_from_domains(
@@ -576,15 +635,15 @@ def assign_arenas_spatial(
         parts = source_rowset_path.split("/")
         head = parts[0] if parts else ""
         if head == "crop_runs":
-            refined_run_name = detection_group.attrs.get("source_refined_run")
-            source_detect_run = detection_group.attrs.get("source_detect_run")
+            refined_run_name = _clean_source_text(detection_group.attrs.get("source_refined_run"))
+            source_detect_run = _source_detect_run_from_attrs(detection_group.attrs)
             assignment_source = "explicit_crop_rows"
         elif head == "refined_detect_runs":
             if len(parts) < 2:
                 raise ValueError(f"Malformed refined source rowset path: {source_rowset_path}")
             refined_run_name = parts[1]
             refined_parent_group = _get_group_by_path(root, "/".join(parts[:2]))
-            source_detect_run = refined_parent_group.attrs.get("source_detect_run")
+            source_detect_run = _source_detect_run_from_attrs(refined_parent_group.attrs)
             assignment_source = "explicit_refined_rows"
         elif head == "detect_runs":
             if len(parts) < 2:
@@ -612,7 +671,7 @@ def assign_arenas_spatial(
             if 'instances' in candidate_group:
                 refined_run_name = candidate_run
                 detection_group = candidate_group['instances']
-                source_detect_run = candidate_group.attrs.get('source_detect_run')
+                source_detect_run = _source_detect_run_from_attrs(candidate_group.attrs)
                 assignment_source = 'refined_instances'
                 selected_source_rowset_path = f"refined_detect_runs/{refined_run_name}/instances"
                 console.print(f"[cyan]Using refined detections:[/cyan] refined_detect_runs/{refined_run_name} (instances)")

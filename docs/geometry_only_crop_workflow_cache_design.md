@@ -50,12 +50,20 @@ analysis.zarr/
       detection_source
       attrs:
         crop_storage_mode = "geometry_only"
+        bbox_norm_coords_semantics = "bbox_xywh_normalized_to_full_frame"
         roi_size
         crop_signature
+        source_detect_run
         detection_source_path
         source_video_path
         source_video_fingerprint
 ```
+
+`bbox_norm_coords` is always Palette's canonical full-frame-normalized
+`[cx, cy, w, h]` geometry, regardless of whether ROI pixels come from full-frame
+decode, acquisition crop video, or a clipped-collection flat cache. Local
+crop-frame or ROI-frame boxes need explicit local names; do not overload
+`bbox_norm_coords`.
 
 The canonical training crop run should stay self-contained:
 
@@ -360,7 +368,7 @@ For multi-recording LSF batches, use the fan-out wrapper:
 scripts/submit_crop_flat_roi_cache_batches_bsub.sh \
   --file-list /path/to/analysis_zarrs.txt \
   --workflow-id <workflow_id> \
-  --public-cache-root /groups/johnson/johnsonlab/jeremy/recordings/tmp/palette_roi_cache \
+  --public-cache-root /misc/public/palette_cache \
   --cache-queue gpu_l4 \
   --cache-gpus 1
 ```

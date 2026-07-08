@@ -47,6 +47,18 @@ def _write_proxy_crop(
     crop.create_array("source_refined_row_ids", data=local + refined_offset, chunks=(max(1, n_rows),))
     crop.create_array("source_detect_row_index", data=local + refined_offset + 1000, chunks=(max(1, n_rows),))
     crop.create_array("detection_indices", data=local, chunks=(max(1, n_rows),))
+    crop.create_array(
+        "bbox_norm_coords",
+        data=np.column_stack(
+            (
+                np.full(n_rows, 0.25 + clip_index * 0.25, dtype=np.float32),
+                np.linspace(0.2, 0.4, n_rows, dtype=np.float32),
+                np.full(n_rows, 0.1, dtype=np.float32),
+                np.full(n_rows, 0.1, dtype=np.float32),
+            )
+        ),
+        chunks=(max(1, n_rows), 4),
+    )
     crop.create_array("source_crop_row_ids", data=local, chunks=(max(1, n_rows),))
     crop.create_array(
         "roi_coordinates_full",
@@ -58,7 +70,10 @@ def _write_proxy_crop(
             "source_clip_id": f"clip_{clip_index:06d}",
             "source_clip_index": clip_index,
             "source_collection_id": "collection_test",
+            "source_detect_run": "finalized_clipped_refined_detect_collection_proxy:collection_test",
+            "detection_source_type": "finalized_clipped_refined_detect_collection_proxy",
             "crop_policy": "centered_refined_bbox",
+            "bbox_norm_coords_semantics": "bbox_xywh_normalized_to_full_frame",
             "roi_shape": [512, 512],
             "roi_size": [512, 512],
         }

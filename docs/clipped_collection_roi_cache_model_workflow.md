@@ -207,6 +207,7 @@ crop_runs/<proxy_run>/
   source_clip_local_frame_indices
   source_refined_row_ids
   source_detect_row_index
+  bbox_norm_coords
 ```
 
 Suggested attrs:
@@ -214,6 +215,9 @@ Suggested attrs:
 ```text
 crop_storage_mode = geometry_only
 source_kind = finalized_clipped_refined_detect_collection
+detection_source_type = finalized_clipped_refined_detect_collection_proxy
+source_detect_run = finalized_clipped_refined_detect_collection_proxy:<collection id>
+source_detect_run_semantics = synthetic_collection_rowset_label_not_detect_runs_child
 source_collection_id = <collection id>
 source_collection_path = experiment_index/finalized_runs/<collection id>
 source_clip_id = <clip id or shard label>
@@ -224,7 +228,16 @@ source_roi_cache_required = true
 source_roi_cache_manifest = <published flat cache manifest, optional after build>
 source_roi_cache_row_index_path = <published rows.parquet, optional after build>
 crop_policy = centered_refined_bbox
+bbox_norm_coords_semantics = bbox_xywh_normalized_to_full_frame
+bbox_norm_coords_source = clipped_collection_row_index.bbox_norm_cxcywh
 ```
+
+`bbox_norm_coords` uses Palette's canonical full-frame-normalized
+`[cx, cy, w, h]` convention. The proxy source label is intentionally synthetic:
+it identifies the finalized clipped collection rowset, not a child under
+`detect_runs/`. This lets arena assignment and tracking key lineage against
+`source_detect_run` plus the exact `source_rowset_path` without pretending the
+collection is a normal raw detect run.
 
 Benefits:
 
@@ -468,6 +481,28 @@ scripts/py -m fisheye.utils.merge_clipped_proxy_crop_runs \
   --output-run crop_proxy_collection_... \
   --json
 ```
+
+Modern per-clip proxies already store `bbox_norm_coords`. If older per-clip
+proxies predate that array, the merge utility can repair the merged output from
+each proxy's `source_roi_cache_row_index_path`, provided the row-index parquet
+contains `bbox_norm_cx`, `bbox_norm_cy`, `bbox_norm_w`, and `bbox_norm_h`.
+The merged run records `legacy_bbox_norm_coords_repair_count` so operators can
+see whether the output was built entirely from modern proxy arrays or repaired
+legacy inputs.
+
+Existing proxy crop runs can also be repaired in place before rerunning
+downstream tracking/kinematics:
+
+```bash
+scripts/py -m fisheye.utils.repair_clipped_proxy_crop_contract \
+  /path/to/recording_analysis.zarr \
+  --crop-run crop_proxy_collection_... \
+  --apply
+```
+
+Without `--apply`, the command is a dry-run and reports the arrays/attrs it
+would write. The repair only targets clipped proxy crop runs and leaves ordinary
+crop runs untouched.
 
 Then finalize keypoint shards against that merged proxy:
 

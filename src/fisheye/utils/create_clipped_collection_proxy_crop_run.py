@@ -27,6 +27,8 @@ from fisheye.shared.zarr_run_completion import (
 
 
 PROXY_CROP_RUN_SCHEMA = "palette_clipped_collection_proxy_crop_run_v1"
+CLIPPED_COLLECTION_PROXY_DETECTION_SOURCE_TYPE = "finalized_clipped_refined_detect_collection_proxy"
+CLIPPED_COLLECTION_BBOX_COLUMNS = ("bbox_norm_cx", "bbox_norm_cy", "bbox_norm_w", "bbox_norm_h")
 
 
 def _utc_now() -> str:
@@ -82,6 +84,27 @@ def _single_unique(values: Sequence[Any], *, name: str) -> str:
     if len(unique) != 1:
         raise ValueError(f"Expected exactly one unique {name}; found {unique!r}.")
     return unique[0]
+
+
+def clipped_collection_proxy_source_detect_label(collection_id: object) -> str:
+    collection_id = str(collection_id or "").strip()
+    if collection_id:
+        return f"{CLIPPED_COLLECTION_PROXY_DETECTION_SOURCE_TYPE}:{collection_id}"
+    return CLIPPED_COLLECTION_PROXY_DETECTION_SOURCE_TYPE
+
+
+def _source_detect_label(source: Mapping[str, Any]) -> str:
+    return clipped_collection_proxy_source_detect_label(source.get("collection_id"))
+
+
+def bbox_norm_from_clipped_collection_row_index(table: Any) -> np.ndarray:
+    missing = [name for name in CLIPPED_COLLECTION_BBOX_COLUMNS if name not in table.column_names]
+    if missing:
+        raise ValueError(f"Row-index parquet is missing bbox columns required for proxy crop rows: {missing}")
+    return np.stack(
+        [_column_np(table, name, np.float32) for name in CLIPPED_COLLECTION_BBOX_COLUMNS],
+        axis=1,
+    ).astype(np.float32, copy=False)
 
 
 def _default_proxy_run_name(manifest: Mapping[str, Any], table: Any) -> str:
@@ -197,6 +220,7 @@ def create_clipped_collection_proxy_crop_run(
         else _column_np(table, "refined_instance_row_index", np.int64)
     )
     source_detect_row_index = _column_np(table, "source_detect_row_index", np.int64)
+    bbox_norm_coords = bbox_norm_from_clipped_collection_row_index(table)
     roi_row_index = _column_np(table, "roi_row_index", np.int64)
     clip_id = _single_unique(_column_pylist(table, "clip_id"), name="clip_id")
     video_path = _single_unique(_column_pylist(table, "video_path"), name="video_path")
@@ -228,10 +252,14 @@ def create_clipped_collection_proxy_crop_run(
     _write_array(crop_group, "source_refined_row_ids", refined_row_ids)
     _write_array(crop_group, "source_detect_row_index", source_detect_row_index)
     _write_array(crop_group, "detection_indices", roi_row_index)
+    _write_array(crop_group, "bbox_norm_coords", bbox_norm_coords)
     _write_array(crop_group, "source_crop_row_ids", direct_source_crop_row_ids(int(table.num_rows)))
     _write_array(crop_group, "roi_coordinates_full", roi_coordinates_full)
 
     source = manifest.get("source") if isinstance(manifest.get("source"), Mapping) else {}
+    source_detect_label = _source_detect_label(source)
+    source_refined_runs = _unique_nonempty(_column_pylist(table, "refined_detect_run"))
+    source_refined_paths = _unique_nonempty(_column_pylist(table, "refined_group_path"))
     source_archive = str(source.get("archive_path") or "")
     if source_archive and Path(source_archive).expanduser().resolve() != archive_path:
         raise ValueError(f"Manifest archive_path {source_archive!r} does not match zarr_path {str(archive_path)!r}.")
@@ -249,6 +277,11 @@ def create_clipped_collection_proxy_crop_run(
             "stage": "crop_proxy",
             "crop_storage_mode": "geometry_only",
             "source_kind": "finalized_clipped_refined_detect_collection_proxy",
+            "detection_source_type": CLIPPED_COLLECTION_PROXY_DETECTION_SOURCE_TYPE,
+            "source_detect_run": source_detect_label,
+            "source_detect_run_semantics": "synthetic_collection_rowset_label_not_detect_runs_child",
+            "source_refined_runs": source_refined_runs,
+            "source_refined_run_paths": source_refined_paths,
             "source_collection_id": source.get("collection_id"),
             "source_collection_path": source.get("collection_path"),
             "source_clip_id": clip_id,
@@ -259,6 +292,8 @@ def create_clipped_collection_proxy_crop_run(
             "source_roi_cache_row_index_path": str(row_index_path),
             "source_roi_cache_required": True,
             "crop_policy": "centered_refined_bbox",
+            "bbox_norm_coords_semantics": "bbox_xywh_normalized_to_full_frame",
+            "bbox_norm_coords_source": "clipped_collection_row_index.bbox_norm_cxcywh",
             "roi_size": [int(shape[1]), int(shape[2])],
             "roi_shape": [int(shape[1]), int(shape[2])],
             "height": int(root.attrs["height"]) if root.attrs.get("height") is not None else None,

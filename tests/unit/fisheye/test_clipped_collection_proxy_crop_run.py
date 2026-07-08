@@ -9,6 +9,7 @@ from fisheye.shared import flat_roi_cache as flat_cache_mod
 from fisheye.shared.crop_image_source import CropImageSource
 from fisheye.shared.flat_roi_cache import open_flat_roi_cache
 from fisheye.utils.create_clipped_collection_proxy_crop_run import (
+    CLIPPED_COLLECTION_PROXY_DETECTION_SOURCE_TYPE,
     PROXY_CROP_RUN_SCHEMA,
     create_clipped_collection_proxy_crop_run,
 )
@@ -66,6 +67,12 @@ def test_create_clipped_collection_proxy_crop_run_writes_lineage_and_alias(
     assert crop.attrs["palette_run_completion_status"] == "auxiliary"
     assert crop.attrs["status"] == "completed"
     assert crop.attrs["crop_storage_mode"] == "geometry_only"
+    assert crop.attrs["detection_source_type"] == CLIPPED_COLLECTION_PROXY_DETECTION_SOURCE_TYPE
+    assert crop.attrs["source_detect_run"] == f"{CLIPPED_COLLECTION_PROXY_DETECTION_SOURCE_TYPE}:workflow_001"
+    assert crop.attrs["source_detect_run_semantics"] == "synthetic_collection_rowset_label_not_detect_runs_child"
+    assert crop.attrs["bbox_norm_coords_semantics"] == "bbox_xywh_normalized_to_full_frame"
+    assert crop.attrs["bbox_norm_coords_source"] == "clipped_collection_row_index.bbox_norm_cxcywh"
+    assert crop.attrs["source_refined_runs"] == ["refined_workflow_001_clip_000000_cam2010093"]
     assert crop.attrs["source_roi_cache_required"] is True
     assert crop.attrs["source_roi_cache_manifest"] == manifest["manifest_path"]
     assert crop.attrs["source_roi_cache_alias_manifest"] == result["alias_manifest_path"]
@@ -77,6 +84,16 @@ def test_create_clipped_collection_proxy_crop_run_writes_lineage_and_alias(
     np.testing.assert_array_equal(crop["source_refined_row_ids"][:], np.array([20, 10], dtype=np.int64))
     np.testing.assert_array_equal(crop["source_detect_row_index"][:], np.array([7, 3], dtype=np.int64))
     np.testing.assert_array_equal(crop["detection_indices"][:], np.array([0, 1], dtype=np.int64))
+    np.testing.assert_allclose(
+        crop["bbox_norm_coords"][:],
+        np.array(
+            [
+                [4 / 5, 3 / 4, 1 / 5, 1 / 4],
+                [1 / 5, 1 / 4, 1 / 5, 1 / 4],
+            ],
+            dtype=np.float32,
+        ),
+    )
     np.testing.assert_array_equal(crop["source_crop_row_ids"][:], np.array([0, 1], dtype=np.int64))
     np.testing.assert_array_equal(crop["roi_coordinates_full"][:], np.array([[3, 2], [0, 0]], dtype=np.int32))
 

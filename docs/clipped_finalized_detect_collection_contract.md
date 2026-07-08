@@ -27,6 +27,15 @@ The authoritative collection lives in the analysis Zarr:
 experiment_index/finalized_runs/<collection_id>
 ```
 
+This does not make flat `refined_detect_runs/<run>/instances` obsolete in
+general. Flat top-level refined-detection runs remain the current canonical
+surface for non-clipped recordings and materialized training Zarrs. In clipped
+analysis archives, the source-preserving authority is the finalized collection
+plus the selected clip-local refined runs. If a clipped archive also carries a
+top-level flat refined-detection table, consumers should treat it as a derived
+projection or compatibility/convenience view unless its provenance explicitly
+declares otherwise.
+
 Collection discovery order:
 
 1. Use an explicit caller-provided `collection_id`.
@@ -129,13 +138,16 @@ top-level `refined_detect_runs/<run>` arrays.
 Canonical review payloads expose normalized boxes:
 
 ```text
-bbox_norm_coords = [x, y, width, height]
+bbox_norm_coords = [cx, cy, width, height]
 ```
 
 The normalized coordinates are the storage-independent edit surface used for
 manual saves and promotion. Consumers should derive display coordinates from
 normalized boxes using the source-video dimensions recorded on the session or
-run metadata.
+run metadata. This follows Palette's canonical full-frame-normalized
+`bbox_norm_coords` convention: center coordinates plus box size, all normalized
+to the source full-frame image. ROI-local or crop-video-local boxes must use a
+more specific name such as `bbox_crop_norm_coords` or `bbox_roi_xyxy`.
 
 When pixel boxes are present, `bbox_img_xyxy` must be interpreted only with its
 declared coordinate metadata. For current fixed clipped detect/refine outputs,
@@ -195,4 +207,3 @@ Before treating a clipped finalized collection as reviewable:
   inspection, editing, issue navigation, and optional training promotion.
 - Crimson should use this resolver contract rather than directory scans or
   top-level detect-run assumptions.
-

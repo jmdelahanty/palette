@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
+import pyarrow.parquet as pq
 import zarr
 
 from fisheye.shared.row_lineage import direct_source_crop_row_ids
@@ -23,7 +24,12 @@ from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_STATUS_ATTR,
     require_runs_parent,
 )
-from fisheye.utils.create_clipped_collection_proxy_crop_run import PROXY_CROP_RUN_SCHEMA
+from fisheye.utils.create_clipped_collection_proxy_crop_run import (
+    CLIPPED_COLLECTION_PROXY_DETECTION_SOURCE_TYPE,
+    PROXY_CROP_RUN_SCHEMA,
+    bbox_norm_from_clipped_collection_row_index,
+    clipped_collection_proxy_source_detect_label,
+)
 
 MERGED_PROXY_CROP_RUN_SCHEMA = "palette_clipped_collection_merged_proxy_crop_run_v1"
 
@@ -48,6 +54,16 @@ def _as_array(group: zarr.Group, name: str) -> np.ndarray:
     return np.asarray(group[name][:])
 
 
+def _resolve_existing_path(value: Any, *, relative_to: Path) -> Path:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("Expected non-empty path.")
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        path = relative_to / path
+    return path.resolve()
+
+
 def _load_run_names(path: Path) -> list[str]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(payload, list):
@@ -58,6 +74,76 @@ def _load_run_names(path: Path) -> list[str]:
             if isinstance(value, list):
                 return [str(item) for item in value]
     raise ValueError(f"Could not read crop-run list from {path}; expected list or mapping.")
+
+
+def _unique_attr_values(groups: Sequence[tuple[str, zarr.Group]], name: str) -> list[Any]:
+    values: list[Any] = []
+    for _run_name, group in groups:
+        value = group.attrs.get(name)
+        if value is None:
+            continue
+        if isinstance(value, list):
+            candidates = value
+        else:
+            candidates = [value]
+        for candidate in candidates:
+            if candidate is None or candidate in values:
+                continue
+            values.append(candidate)
+    return values
+
+
+def _single_common_attr(groups: Sequence[tuple[str, zarr.Group]], name: str) -> Any:
+    values = _unique_attr_values(groups, name)
+    if len(values) > 1:
+        raise ValueError(f"Source proxy crop runs disagree on {name}: {values!r}")
+    return values[0] if values else None
+
+
+def _bbox_norm_coords_for_source(
+    run_name: str,
+    group: zarr.Group,
+    *,
+    total_rows: int,
+    zarr_path: Path,
+) -> tuple[np.ndarray, bool]:
+    if "bbox_norm_coords" in group:
+        bbox = _as_array(group, "bbox_norm_coords")
+        if bbox.ndim != 2 or int(bbox.shape[1]) != 4:
+            raise ValueError(
+                f"crop_runs/{run_name}/bbox_norm_coords must have shape (N, 4); got {tuple(bbox.shape)}."
+            )
+        if int(bbox.shape[0]) != int(total_rows):
+            raise ValueError(
+                f"crop_runs/{run_name}/bbox_norm_coords has {int(bbox.shape[0])} rows; expected {total_rows}."
+            )
+        return bbox.astype(np.float32, copy=False), False
+
+    row_index_attr = group.attrs.get("source_roi_cache_row_index_path")
+    if row_index_attr is None:
+        raise ValueError(
+            f"crop_runs/{run_name} missing bbox_norm_coords and source_roi_cache_row_index_path; "
+            "cannot repair legacy proxy crop geometry."
+        )
+    row_index_path = _resolve_existing_path(row_index_attr, relative_to=zarr_path.parent)
+    if not row_index_path.exists():
+        raise FileNotFoundError(
+            f"crop_runs/{run_name} references missing source_roi_cache_row_index_path: {row_index_path}"
+        )
+    table = pq.read_table(row_index_path)
+    if int(table.num_rows) != int(total_rows):
+        raise ValueError(
+            f"crop_runs/{run_name} row-index parquet has {int(table.num_rows)} rows; expected {total_rows}."
+        )
+    return bbox_norm_from_clipped_collection_row_index(table), True
+
+
+def _source_detect_run_for_merge(sources: Sequence[tuple[str, zarr.Group]]) -> str:
+    source_detect_run = _single_common_attr(sources, "source_detect_run")
+    if source_detect_run:
+        return str(source_detect_run)
+    collection_id = _single_common_attr(sources, "source_collection_id")
+    return clipped_collection_proxy_source_detect_label(collection_id)
 
 
 def _resolve_source_runs(root: zarr.Group, names: Sequence[str]) -> list[tuple[str, zarr.Group]]:
@@ -121,6 +207,17 @@ def merge_clipped_proxy_crop_runs(
         name: np.concatenate([_as_array(group, name) for _run_name, group in sources], axis=0)
         for name in REQUIRED_PROXY_ARRAYS
     }
+    bbox_payloads = [
+        _bbox_norm_coords_for_source(
+            run_name,
+            group,
+            total_rows=int(group["frame_indices"].shape[0]),
+            zarr_path=archive,
+        )
+        for run_name, group in sources
+    ]
+    concatenated["bbox_norm_coords"] = np.concatenate([payload[0] for payload in bbox_payloads], axis=0)
+    repaired_bbox_source_count = int(sum(1 for _bbox, repaired in bbox_payloads if repaired))
     concatenated["source_crop_row_ids"] = direct_source_crop_row_ids(total_rows)
     concatenated["detection_indices"] = direct_source_crop_row_ids(total_rows)
 
@@ -139,6 +236,11 @@ def merge_clipped_proxy_crop_runs(
     create_geometry_preload_array(target, "source_proxy_crop_row_ids", data=source_proxy_crop_row_ids, overwrite=True)
 
     first_attrs = sources[0][1].attrs
+    source_detect_run = _source_detect_run_for_merge(sources)
+    detection_source_type = (
+        _single_common_attr(sources, "detection_source_type")
+        or CLIPPED_COLLECTION_PROXY_DETECTION_SOURCE_TYPE
+    )
     source_run_names = [name for name, _group in sources]
     source_clip_ids = [normalize_attr(group.attrs.get("source_clip_id")) for _name, group in sources]
     source_clip_indices = [group.attrs.get("source_clip_index") for _name, group in sources]
@@ -159,6 +261,11 @@ def merge_clipped_proxy_crop_runs(
                 "stage": "crop_proxy",
                 "crop_storage_mode": "geometry_only",
                 "source_kind": "merged_clipped_collection_proxy_crop_run",
+                "detection_source_type": detection_source_type,
+                "source_detect_run": source_detect_run,
+                "source_detect_run_semantics": "synthetic_collection_rowset_label_not_detect_runs_child",
+                "source_refined_runs": _unique_attr_values(sources, "source_refined_runs"),
+                "source_refined_run_paths": _unique_attr_values(sources, "source_refined_run_paths"),
                 "source_collection_id": first_attrs.get("source_collection_id"),
                 "source_collection_path": first_attrs.get("source_collection_path"),
                 "source_proxy_crop_runs": source_run_names,
@@ -169,6 +276,12 @@ def merge_clipped_proxy_crop_runs(
                 "source_roi_cache_alias_manifests": source_alias_manifests,
                 "source_roi_cache_required": True,
                 "crop_policy": first_attrs.get("crop_policy") or "centered_refined_bbox",
+                "bbox_norm_coords_semantics": first_attrs.get("bbox_norm_coords_semantics")
+                or "bbox_xywh_normalized_to_full_frame",
+                "bbox_norm_coords_source": (
+                    "source_proxy_crop_runs.bbox_norm_coords_or_repaired_from_source_roi_cache_row_index_path"
+                ),
+                "legacy_bbox_norm_coords_repair_count": repaired_bbox_source_count,
                 "roi_size": first_attrs.get("roi_size"),
                 "roi_shape": first_attrs.get("roi_shape"),
                 "height": first_attrs.get("height") if first_attrs.get("height") is not None else root.attrs.get("height"),
