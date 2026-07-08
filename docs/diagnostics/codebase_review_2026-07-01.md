@@ -19,6 +19,12 @@ fourth in the series — it builds on and measures the trajectory since
 | Registry & provenance | mixed — strong static design, exposed operational guarantees |
 | Testing & verification | mixed — real behavioral core, non-functional test *system* |
 | Repo hygiene & shareability | weak — accreting faster than it's cleaned |
+| Measurement validity (analytics axis) † | mixed — rigorous downstream statistics, but CV-layer QC measures self-consistency, not correctness (no ground-truth anchor; see #8) |
+
+† *Row added 2026-07-08, after the original 07-01 snapshot, on the analytics axis (does the
+pipeline measure the right quantity, and are the numbers trustworthy as science?). Graded from
+the five-domain analytics survey in the [methodology addendum](#addendum-2026-07-08-analytics-methodology-assessment--self-consistency-vs-correctness);
+"mixed" splits a strong downstream/group-statistics layer against an unanchored CV-layer QC.*
 
 ## Verdict
 
@@ -197,6 +203,13 @@ server. The dispatch methods that matter are untouched, and `_datasets_html` (~1
 inline) and other admin blobs remain.
 *Fix:* go depth-first on one route family with a public `(state, request) -> response`
 interface and delete its branch from `do_GET`; copy the `group_analytics_viewer/` shape.
+
+### 8. HIGH measurement-validity — the CV-layer QC has no ground-truth anchor
+*(Added 2026-07-08 on the analytics axis, not part of the original 07-01 verified set. Full
+statement, evidence, and fix in the [analytics methodology addendum](#addendum-2026-07-08-analytics-methodology-assessment--self-consistency-vs-correctness)
+below.)* The detection/keypoint/default-mask quality gates measure self-consistency, never
+correctness — no OKS/PCK/RMSE, no IoU/Dice against labels — so a systematically-wrong model
+passes every gate. Orthogonal to #1–7: a run can close all of them and still be blind to this.
 
 ---
 
@@ -456,3 +469,186 @@ move is not more code but the two forcing functions from `utils_reorganization_s
 (import-linter `forbidden_modules = fisheye.utils` + the `__main__`-only-in-`apps/`
 predicate) — they make the sprawl deletable and stop re-accretion. See
 [[user-context-solo-lm]] for the advisory framing.
+
+## Addendum (2026-07-08): analytics methodology assessment — self-consistency vs. correctness
+
+Prior reviews graded the *engineering* of the analytics (contracts, provenance, coupling,
+suite state). This addendum grades the *measurement science* — do the analytics measure the
+right things, and are the numbers they emit trustworthy as science, not just as reproducible
+byte-streams? Five parallel survey agents, one per analytic domain (keypoints/pose,
+crop/detection/ROI, subject-mask/segmentation, downstream/behavioral, provenance/QC), each
+grounded in code read in full for the core modules. This is an orthogonal axis to findings
+#1–7: a run can be perfectly provenanced, CI-green, and contract-clean while measuring the
+wrong quantity.
+
+### Finding #8 (analytics axis, added 2026-07-08) — HIGH measurement-validity: the CV-layer QC has no ground-truth anchor
+
+*Promoted from the addendum's throughline prose to a discrete finding at the maintainer's
+request, so it tracks alongside #1–7. Distinct axis from those: #1–7 grade whether the
+pipeline is engineered correctly; #8 grades whether it measures the right quantity. A run can
+close every one of #1–7 and still be blind to this.*
+
+**Nearly every quality signal in the CV layer asks "does this output agree with my own
+geometric/statistical assumptions?" and almost none asks "does this match reality?"** There
+is no ground-truth anchor anywhere in detection, keypoints, or the default mask path — no
+OKS/PCK/RMSE for pose, no IoU/Dice for the traditional mask path, no labeled hold-out any
+produced surface is scored against. **Failure mode: a model that is confidently, systematically
+wrong passes every gate** — coverage is high, geometry is "valid," confidence clears
+threshold, review is approved — because every check is internal. The evidence, by producer:
+
+- **Keypoints.** `registry/extractors/keypoint_performance.py` records success rate, mean
+  confidence, and timing — no `map50`/OKS field. Ultralytics *already computes* pose
+  mAP/OKS in `.val()` during training and it is discarded rather than persisted. The
+  traditional path's "confidence" is `min(1.0, blob_area/100)`
+  (`detection/detect_keypoints_traditional.py::calculate_confidence`) — blob size, not a
+  probability — and it feeds the `confidence_valid` gate.
+- **Masks.** The default background-subtraction path
+  (`tune/subject_mask_tuner.py`) has zero accuracy metric; its "metrics" (`area_px`,
+  `prob_max`, component counts) are self-referential descriptors. The U-Net path is the one
+  producer with a real held-out metric (validation Dice, `_compute_masked_dice`).
+- **Detection.** `refinement/detect_quality.py` emits a 0–100 letter grade from coverage +
+  temporal-artifact + bbox-validity sub-scores — all internal consistency, none compared to
+  a labeled box.
+
+This is a coherent, defensible engineering choice — self-consistency checks need no labels,
+so they scale to the whole fleet for free — and it catches *breakage* (a stage crashed,
+geometry malformed, coverage dropped) well. But it is structurally blind to *systematic
+error* (a biased detector, anatomically-off masks, a silently inverted eye-flip convention).
+The pipeline is instrumented for the first failure class and not the second. This is the
+measurement-science analogue of finding #6's "silent-wrong-data at the boundaries": #6 is
+about pixels changing under you; this is about *never having measured whether the pixels were
+right in the first place.*
+
+Two structural circularities make it worse, because they mean the QC cannot catch error it
+helped create:
+
+- **Keypoints.** The traditional detector's geometric heuristics
+  (`detection/detect_keypoints_traditional.py::identify_keypoints_by_geometry` — bladder =
+  smallest interior angle, L/R eyes heading-relative) generate the labels that train YOLO
+  (`red_to_yolo`/pose export). The `geometry_valid` gate in
+  `refinement/refine_keypoints.py` then validates YOLO output against *those same
+  assumptions*. Nothing in the loop is independent of the heuristic.
+- **Masks.** The U-Net (`segmentation/train_unet_subject_masks.py`) is the one place with a
+  real held-out metric (per-channel validation Dice, `_compute_masked_dice`) — but its
+  training labels are the traditional background-subtraction seeder + operator edits. High
+  Dice means "the net reproduces the classical pipeline," not "the masks are anatomically
+  correct." The metric is real; its referent is not ground truth.
+
+*Fix (detailed as leverage moves 1–3 below; ordered by correctness-per-effort, none needing
+large-scale annotation): (a) persist the accuracy metrics already computed and thrown away —
+Ultralytics pose mAP/OKS and U-Net validation Dice — into the registry next to the
+self-consistency rates (zero new labeling); (b) wire the existing `utils/detection_profile.py`
+distributions into a per-rig baseline as a label-free anomaly floor (zero new labeling); (c)
+break one circularity with a small independent hand-labeled frame set scored by a metric not
+derived from the traditional heuristic (a few dozen frames, one-time). Until at least one
+lands, every accept/reject decision rests on self-consistency plus human review — no
+independent signal that the pipeline is right, only that it did not visibly break.*
+
+### Second throughline: a precision chassis around uncalibrated constants
+
+The engineering discipline is exceptional and the measurement rigor sitting inside it is
+thin — the gap is wide and consistent across every domain. Provenance, lineage fingerprints,
+coordinate-space tracking, pixel contracts, completion gates: exceptional. The numbers those
+frames carry: uncalibrated magic constants with no derivation study on record —
+
+- Detect quality score weights `0.5*coverage + 0.3*artifact + 0.2*bbox` (and sampled
+  `0.6/0.3/0.1`), grade cutoffs 90/80/70/60, jump=100px@640, blip-gap=10, size-outlier=3σ
+  (`refinement/detect_quality.py`).
+- Keypoint temporal-outlier = 120°/3-frame, min_angle=10°, min_area=100px², confidence=0.3,
+  and the traditional-path "confidence" = `min(1.0, blob_area/100)` — blob *size*, not a
+  probability, feeding the `confidence_valid` gate (`detection/detect_keypoints_traditional.py::calculate_confidence`,
+  `shared/keypoint_temporal_heading.py`).
+- Mask QC min_solidity=0.15/0.20, max_thin_spur_score=8.0, min_largest_component_fraction=0.90–0.95
+  (`refinement/subject_body_mask_qc.py`, `finalize_subject_masks.py`).
+
+None has a calibration study or a measured false-positive rate against posture edge cases.
+
+### Per-domain, in one line each
+
+- **Keypoints** — strongest engineering, weakest science: no accuracy metric at all;
+  Ultralytics already computes pose mAP/OKS in `.val()` and it is discarded rather than
+  persisted (`registry/extractors/keypoint_performance.py` records success rate + mean
+  confidence + timing, no `map50`/`fitness`). The stub `drift: {enabled: false}` in
+  `utils/auto_keypoint_review.py` is scaffolding for the regression detector that was never
+  computed.
+- **Masks** — U-Net path has a real objective; the *default* (background-subtraction) path
+  has zero accuracy metric, stores `diff/255` as `mask_probs_roi` with the same `prob_max`
+  machinery as the U-Net's true sigmoid outputs (a downstream reader cannot distinguish a
+  calibrated confidence from a brightness delta), and computes Otsu only to discard it in
+  favor of a hand-tuned fixed threshold (`tune/subject_mask_tuner.py`).
+- **Crop/detection** — the best latent asset in the repo: `utils/detection_profile.py`
+  builds genuinely distributional profiles (percentiles, histograms, spatial heatmaps,
+  content-hash fingerprint) — the correct shape for drift detection — and **nothing gates on
+  them.** Size outliers are computed at 3σ (`detect_quality.py::validate_bboxes`) and then
+  not penalized in the score. The drift alarm's sensor already exists; only the alarm is
+  missing. (This is the same `subject_mask_data_profile` asymmetry noted in finding #3, seen
+  from the analytics side: profiles built, never used to decide anything.)
+- **Downstream/behavioral** — **overturns the "data factory that does no science" worry.**
+  `analysis/` is ~50 modules of real behavioral quantification (kinematics, bout detection,
+  Megabouts integration *with* a `megabouts_convention_audit.py`, stimulus-response assays, a
+  pre/post avoidance-learning paradigm with declared primary endpoints) backed by
+  hand-rolled non-parametric group statistics (Wilcoxon signed-rank, sign-flip permutation,
+  bootstrap CIs, rank-biserial, BH-FDR in `group_statistics/paired.py`, scipy-free for
+  determinism). Statistically the instincts are correct (non-parametric for small-n
+  behavior; effect sizes + CIs + multiplicity control). This is the most scientifically
+  ambitious part of the repo and it is a genuine strength.
+- **Provenance/QC** — mature fingerprinting + fail-closed completion gate, but the gates
+  record metrics without thresholding any of them: quality "gating" is entirely
+  run-completion existence + human review state, with no automated "coverage < X ⇒ block."
+  Watch the `tracks` (catalog) vs `tracking` (`_ENFORCE_STAGE_ARRAY_VALIDATION_FOR`
+  allowlist) name mismatch — a gate keyed on a non-canonical stage id can silently no-op.
+
+### On results in the repo — a retracted inference (corrected 2026-07-08)
+
+An earlier draft of this addendum flagged "instrument finished, findings absent," reasoning
+from the fact that the survey found extensive analysis code and tests on synthetic fixtures
+but **zero committed real results, figures, or notebooks** (zero `.ipynb` in the tree). The
+maintainer corrected this the same day: **results and analyses are deliberately kept out of
+this repository.** `palette` is shared infrastructure that other people install and run, and
+one researcher's analysis outputs, figures, and per-experiment notebooks do not belong in a
+reusable library — they live in a separate analysis/paper context. That is correct practice
+(it keeps the shared tool clean and its dependency surface honest), and it fully explains the
+in-repo absence. The inference was wrong: I read "not in this repo" as "does not exist," and
+the former is a deliberate, sound boundary, not deferral.
+
+The residual, stated honestly and without overreach: this means the code-review instrument
+**cannot speak to whether an end-to-end scientific result has shipped** — that question is
+out of its scope by the maintainer's own (correct) design, not answered either way by
+anything in the tree. So this is not a finding; it is a scope boundary. The one durable point
+that survives is downstream and independent of where results live: the CV-layer QC proves the
+pipeline did not *break*, but nothing in it proves the pipeline is *right* (no ground-truth
+anchor — the throughline above). That gap is about measurement validity feeding whatever
+analysis happens, wherever it happens, and it stands on its own without the results-in-repo
+claim. See also the proportion finding (2026-07-05): the science-core is a minority of the
+codebase — a real observation about *this repo's* shape, which is exactly the shape you'd
+expect if results are correctly kept elsewhere.
+
+### Highest-leverage moves (analytics axis, ordered)
+
+1. **Wire the profiles you already built into an automated per-rig baseline.** One
+   comparison ("this run's w/h/area distribution is Nσ off the last 20 runs of this rig ⇒
+   flag") converts `detection_profile.py` from built-and-unused into the automated quality
+   floor the pipeline currently lacks — and it needs no ground-truth labels. Biggest
+   correctness-per-effort win available.
+2. **Persist the accuracy metrics that already get computed and thrown away.** Surface
+   Ultralytics pose mAP/OKS and U-Net validation Dice into the registry next to the
+   self-consistency rates. Cheapest possible correctness signal; the numbers exist, they are
+   just discarded at the boundary.
+3. **Break one circularity with a small independent ground-truth set.** A few dozen
+   hand-labeled frames scored with a metric *not* derived from the traditional heuristic is
+   the only thing that can detect systematic error the geometry gate helped create. Small,
+   one-time, and it is the difference between "self-consistent" and "correct."
+4. **Stop calling `diff/255` a probability, or mark it uncalibrated at the type level.** A
+   read-time assertion or distinct attr so a downstream consumer cannot silently treat a
+   brightness delta as a confidence — the mask-domain analogue of finding #6's
+   `probabilities_encoding` hazard.
+5. **Either calibrate the letter-grade/threshold constants against a downstream outcome
+   (pose success, review rejection) or delete them.** An uncalibrated grade that predicts
+   nothing measured is worse than no grade — it reads as rigor it does not have.
+
+*Bottom line for this axis: an unusually good engineer of a scientific pipeline whose weakest
+link is measurement validity. The CV-layer QC proves the pipeline did not break; it does not
+yet prove the pipeline is right — no ground-truth anchor closes that gap. The
+downstream/behavioral + group-statistics layer is a genuine strength and is where results are
+produced (correctly, outside this repo); the highest-leverage work is on the validity of the
+CV measurements feeding it, not on the analysis machinery, which is already strong.*
