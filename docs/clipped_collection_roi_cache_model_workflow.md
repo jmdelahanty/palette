@@ -833,6 +833,40 @@ parses job IDs from stdout or stderr, persists partial `submission.json`
 snapshots during submission, and defaults CPU finalizer/refinement jobs to
 `short`.
 
+Full-collection apply smoke on 2026-07-07:
+
+- Source collection:
+  `sleepyfish_cam2010095_allclips_pynvvc_fixed_20260522_01`
+- Clips: `clip_000000` through `clip_000021`
+- Run label: `sleepyfish_kp_allclips_20260708_01`
+- Shard jobs: `152019167` through `152019188` on `gpu_l4`
+- Finalizer/refine jobs: `152019189`, `152019190` on `short`
+- First-bundle cache note: clips `000000` through `000003` were available from
+  the earlier shared-mode cache smoke under
+  `/nrs/ahrens/palette_staging/clipped_collection_flat_roi_cache_smoke/`;
+  symlink aliases were added under the all-clips cache root
+  `sleepyfish_cam2010095_allclips_b0000` so the production planner can resolve
+  all 22 manifests from one root.
+- Merged proxy crop run:
+  `crop_proxy_sleepyfish_kp_allclips_20260708_01_collection`
+- Canonical keypoint run:
+  `keypoints_sleepyfish_kp_allclips_20260708_01`
+- Refined keypoint run:
+  `refined_keypoints_sleepyfish_kp_allclips_20260708_01`
+- Row count: `1,169,010`
+- Keypoint success: `1,168,869/1,169,010` (`99.99%`)
+- Refined usable keypoints: `1,168,798/1,169,010`
+- Geometry issues: `71`
+- Finalizer LSF runtime: `108 s`; stage finalization duration was reported in
+  the keypoint finalizer output.
+- Refine stage duration: `385.55 s`; LSF runtime was `1,050 s`, including
+  startup, Zarr write/flush, and LSF accounting overhead.
+- Validation: crop, keypoint, and refined-keypoint row counts matched, and
+  `frame_indices`, `source_frame_indices`, `source_clip_indices`,
+  `source_clip_local_frame_indices`, `source_crop_row_ids`,
+  `source_refined_row_ids`, `source_detect_row_index`, and
+  `detection_indices` matched across crop -> keypoints -> refined keypoints.
+
 ### Phase 4: registry
 
 - [ ] Add stage-row fields for collection/cache source targeting.
@@ -849,10 +883,16 @@ snapshots during submission, and defaults CPU finalizer/refinement jobs to
 
 ## Current Recommendation
 
-Do not submit full keypoint or subject-mask inference across the clipped cache
-set until proxy crop runs, manifest aliases, and non-publishing shard semantics
-exist. The caches can be valid pixel sources while still being unsafe stage
-inputs if the output runs publish ordinary whole-recording selectors.
+Keypoints are now safe to run across clipped flat-cache collections using the
+explicit orchestration DAG: per-clip proxy crop runs, non-publishing
+`keypoint_shard_runs`, collection-level proxy merge/finalization, and a normal
+`refined_keypoints_runs/<run>` output. Use the dry-run planner first, then
+submit with `--apply` once all clip cache manifests resolve.
+
+Do not submit full subject-mask inference across clipped caches yet. The
+subject-mask runner still needs equivalent shard-output semantics before it can
+consume per-clip proxy crop/cache inputs without publishing unsafe ordinary
+whole-recording selectors.
 
 ## Read-Only Audit Smoke
 
