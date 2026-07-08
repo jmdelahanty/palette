@@ -105,7 +105,7 @@ original_only = chaser_states[mask]  # True = original H5 data
 ---
 
 ### `plot_chaser_alignment.py`
-**Location**: `src/fisheye/diagnostics/plot_chaser_alignment.py`
+**Location**: `src/fisheye/analysis/plot_chaser_alignment.py`
 
 **Purpose**: Visual diagnostic showing:
 1. Raw stimulus timeline
@@ -218,7 +218,7 @@ Use these scripts to identify if your dataset has the issue:
 
 3. **`diagnose_camera_chaser_mapping.py`** - Diagnose mapping failures
    ```bash
-   scripts/py -m fisheye.diagnostics.diagnose_camera_chaser_mapping /path/to/archive.zarr
+   scripts/py -m fisheye.analysis.diagnose_camera_chaser_mapping /path/to/archive.zarr
    ```
    Look for: ~50% failed mappings with reason "stimulus frame not in chaser_states"
 
@@ -266,13 +266,13 @@ This creates a new timestamped run with corrected frame mappings.
 
 **Check mapping success rate**:
 ```bash
-scripts/py -m fisheye.diagnostics.diagnose_camera_chaser_mapping /path/to/archive.zarr
+scripts/py -m fisheye.analysis.diagnose_camera_chaser_mapping /path/to/archive.zarr
 ```
 Should show: ~100% successful mappings (down from ~50%)
 
 **Visualize alignment**:
 ```bash
-scripts/py -m fisheye.diagnostics.plot_chaser_alignment /path/to/archive.zarr
+scripts/py -m fisheye.analysis.plot_chaser_alignment /path/to/archive.zarr
 ```
 Should show: Significant reduction in red dots (missing samples)
 

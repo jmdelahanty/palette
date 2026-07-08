@@ -650,6 +650,29 @@ def _trajectory_dtype() -> np.dtype:
     )
 
 
+def _assert_chaser_trace_moves(
+    chaser_xy: np.ndarray, chaser_valid: np.ndarray, run_name: str
+) -> None:
+    """Raise if the chaser never moves over its valid samples.
+
+    A constant chaser trace (e.g. a stuck/degenerate stimulus import) would pass
+    silently through the escape/freeze pipeline and yield meaningless metrics, so
+    refuse to score it. Traces with fewer than two valid samples are left to the
+    downstream validity handling.
+    """
+    valid_xy = np.asarray(chaser_xy)[np.asarray(chaser_valid, dtype=bool)]
+    if valid_xy.shape[0] < 2:
+        return
+    span_px = np.nanmax(valid_xy, axis=0) - np.nanmin(valid_xy, axis=0)
+    if not np.any(span_px > 1e-3):
+        raise ValueError(
+            f"Chaser trace in run {run_name!r} is constant "
+            f"(x/y span {span_px.tolist()} px over {int(np.count_nonzero(chaser_valid))} "
+            "valid samples); escape/freeze metrics would be meaningless. "
+            "Check stimulus import/alignment."
+        )
+
+
 def build_escape_freeze_canary_result(
     zarr_path: Path,
     *,
@@ -688,6 +711,7 @@ def build_escape_freeze_canary_result(
     chaser_col = _chaser_column(run_group, int(chaser_index))
     chaser_xy = np.asarray(run_group["positions/chaser_arena_xy"][:, chaser_col, :], dtype=np.float32)
     chaser_valid = np.asarray(run_group["positions/chaser_valid"][:, chaser_col], dtype=bool)
+    _assert_chaser_trace_moves(chaser_xy, chaser_valid, run_name)
     distance_mm = np.asarray(run_group["distances/distance_mm"][:, chaser_col], dtype=np.float32)
     camera_frame_ids = np.asarray(run_group["frames/camera_frame_id"][:], dtype=np.int64)
     stimulus_frame_nums = np.asarray(run_group["frames/stimulus_frame_num"][:], dtype=np.int64)

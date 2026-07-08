@@ -15,6 +15,7 @@ from fisheye.analysis.chaser_escape_freeze import (
     DEFAULT_LOW_SPEED_THRESHOLD_MM_S,
     DEFAULT_RESPONSE_WINDOW_S,
     EscapeFreezeCanaryResult,
+    _assert_chaser_trace_moves,
     _classify_escape_attempt_by_path,
     _contiguous_true_segments,
     _metric_dtype,
@@ -222,3 +223,39 @@ def test_escape_freeze_writer_distinguishes_trajectory_coordinate_frames(tmp_pat
     assert attrs["fish_centered_coordinate_frame"] == "fish_centered_world_mm"
     assert attrs["fish_centered_y_axis_direction"] == "up"
     assert attrs["column_coordinate_frames"]["chaser_x_fish_centered_mm"] == "fish_centered_world_mm"
+
+
+def test_assert_chaser_trace_moves_passes_for_moving_trace() -> None:
+    chaser_xy = np.column_stack([np.arange(10.0), np.arange(10.0) * 2.0])
+    chaser_valid = np.ones(10, dtype=bool)
+    _assert_chaser_trace_moves(chaser_xy, chaser_valid, "chaser_distance_1")
+
+
+def test_assert_chaser_trace_moves_passes_when_only_one_axis_moves() -> None:
+    chaser_xy = np.column_stack([np.arange(10.0), np.full(10, 5.0)])
+    chaser_valid = np.ones(10, dtype=bool)
+    _assert_chaser_trace_moves(chaser_xy, chaser_valid, "chaser_distance_1")
+
+
+def test_assert_chaser_trace_moves_raises_for_constant_trace() -> None:
+    chaser_xy = np.full((10, 2), 7.0)
+    chaser_valid = np.ones(10, dtype=bool)
+    with pytest.raises(ValueError, match="is constant"):
+        _assert_chaser_trace_moves(chaser_xy, chaser_valid, "chaser_distance_1")
+
+
+def test_assert_chaser_trace_moves_ignores_movement_in_invalid_samples() -> None:
+    chaser_xy = np.column_stack([np.arange(10.0), np.arange(10.0)])
+    chaser_valid = np.ones(10, dtype=bool)
+    chaser_valid[1:] = False  # only one valid sample; the rest "move" but are invalid
+    chaser_xy[0] = [3.0, 3.0]
+    _assert_chaser_trace_moves(chaser_xy, chaser_valid, "chaser_distance_1")
+
+
+def test_assert_chaser_trace_moves_raises_when_valid_samples_are_stuck() -> None:
+    chaser_xy = np.arange(20.0).reshape(10, 2)  # every row distinct...
+    chaser_valid = np.zeros(10, dtype=bool)
+    chaser_valid[[2, 5, 8]] = True
+    chaser_xy[[2, 5, 8]] = [4.0, 9.0]  # ...but the valid ones are identical
+    with pytest.raises(ValueError, match="is constant"):
+        _assert_chaser_trace_moves(chaser_xy, chaser_valid, "chaser_distance_1")
