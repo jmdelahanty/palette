@@ -36,8 +36,10 @@ Age profile (last touched): 2026-01: 3, 02: 9, 03: 26, 04: 41, 05: 70, 06: 77,
 No inbound references from living docs, code, or scripts (29), or checklist
 fully completed (5), or every referenced code path deleted (1).
 
-- [ ] Move to `docs/archive/` as a single dedicated commit (do not mix with
+- [x] Move to `docs/archive/` as a single dedicated commit (do not mix with
       working changes; time it when no parallel agent is mid-flight).
+      Done 2026-07-08. `camera_metadata.md` skimmed: prescriptive Jan schema
+      note, unreferenced — archived rather than promoted to src/fisheye/docs/.
 
 Unreferenced pre-May (29):
 
@@ -315,4 +317,6 @@ realtime acquisition — never delete via this process.
 
 ## Status log
 
-- 2026-07-08: inventory created; nothing executed yet.
+- 2026-07-08: inventory created.
+- 2026-07-08: docs tranche 1 executed — 35 docs moved to `docs/archive/`
+  (top-level docs/ 273 → 238). Tranches 2/3 and utils U1/U2 still open.
