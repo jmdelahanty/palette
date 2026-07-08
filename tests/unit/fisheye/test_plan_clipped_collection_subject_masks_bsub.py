@@ -148,6 +148,9 @@ def test_build_plan_resolves_subject_mask_shard_commands(tmp_path: Path) -> None
     assert "--source-clip-index" in first.subject_mask_command
     assert "1" in first.subject_mask_command
     assert "--profile-timings" in first.subject_mask_command
+    assert "--assignment-keypoint-group" not in first.subject_mask_command
+    assert "--assignment-keypoint-run" not in first.subject_mask_command
+    assert "refined_keypoints_collection" not in first.subject_mask_command
 
     finalizer_dependency_index = plan.finalizer_bsub_command.index("-w") + 1
     finalizer_dependency = plan.finalizer_bsub_command[finalizer_dependency_index]

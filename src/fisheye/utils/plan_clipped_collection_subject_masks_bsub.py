@@ -342,15 +342,6 @@ def build_plan(
                 subject_mask_command.extend(["--source-work-unit-id", source_work_unit_id])
             if row_index_path is not None:
                 subject_mask_command.extend(["--source-roi-cache-row-index-path", str(row_index_path)])
-            if assignment_keypoints_run:
-                subject_mask_command.extend(
-                    [
-                        "--assignment-keypoint-group",
-                        assignment_keypoint_group or DEFAULT_ASSIGNMENT_KEYPOINT_GROUP,
-                        "--assignment-keypoint-run",
-                        assignment_keypoints_run,
-                    ]
-                )
             if model_require_unique:
                 subject_mask_command.append("--model-require-unique")
             if model_include_non_success:
