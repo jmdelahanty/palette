@@ -30,8 +30,8 @@ Common options:
   --ncores N                        Keypoint shard CPU slots (default: 4)
   --mem-gb N                        Keypoint shard memory GB (default: 32)
   --gpus N                          Keypoint shard GPU count (default: 1)
-  --finalizer-queue NAME            Finalizer queue (default: normal)
-  --refine-queue NAME               Refined-keypoint queue (default: normal)
+  --finalizer-queue NAME            Finalizer queue (default: short)
+  --refine-queue NAME               Refined-keypoint queue (default: short)
   --log-dir PATH                    LSF/progress log directory
   --plan-json PATH                  Also write the plan as JSON
   --json                            Print JSON instead of text

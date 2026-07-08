@@ -724,6 +724,10 @@ keypoint_shard[clip]
 LSF dependency policy:
 
 - Use `done(<jobid>)` dependencies for finalization and refinement.
+- On Janelia LSF, CPU-only finalizer/refinement jobs should default to the
+  `short` queue. The cluster does not provide a `normal` queue, and using that
+  name causes `bsub` to reject the dependent job after shard jobs have already
+  been submitted.
 - Do not use `ended(<jobid>)` for required upstream work, because a failed
   shard must not trigger a partial collection finalizer.
 - Per-clip keypoint shard jobs should depend only on that clip's cache/proxy
@@ -797,7 +801,37 @@ Existing Palette precedent:
 - [x] Add clipped keypoint orchestration apply mode that creates proxy runs,
   submits per-clip shard jobs, parses LSF job ids, and submits collection
   finalizer/refinement jobs with explicit `done(<jobid>)` dependencies.
-- [ ] Smoke clipped keypoint orchestration apply mode on two clips.
+- [x] Smoke clipped keypoint orchestration apply mode on two clips.
+
+Two-clip apply smoke on 2026-07-07:
+
+- Source collection:
+  `sleepyfish_cam2010095_allclips_pynvvc_fixed_20260522_01`
+- Clips: `clip_000004`, `clip_000005`
+- Shard jobs: `152019149`, `152019150` on `gpu_l4`
+- Finalizer/refine jobs: `152019156`, `152019157` on `short`
+- Merged proxy crop run:
+  `crop_proxy_sleepyfish_kp_apply_smoke_20260707_01_collection`
+- Canonical keypoint run:
+  `keypoints_sleepyfish_kp_apply_smoke_20260707_01`
+- Refined keypoint run:
+  `refined_keypoints_sleepyfish_kp_apply_smoke_20260707_01`
+- Row count: `103,637`
+- Keypoint success: `103,582/103,637` (`99.95%`)
+- Refined usable keypoints: `103,569/103,637`
+- Finalizer duration: `6.94 s`
+- Refine duration: `36.24 s`
+- Validation: crop, keypoint, and refined-keypoint row counts matched, and
+  `frame_indices`, `source_frame_indices`, `source_clip_indices`,
+  `source_clip_local_frame_indices`, `source_crop_row_ids`,
+  `source_refined_row_ids`, `source_detect_row_index`, and
+  `detection_indices` matched across crop -> keypoints -> refined keypoints.
+
+The first apply attempt exposed two operational bugs: LSF can report `bsub` job
+IDs on stderr, and `normal` is not a valid Janelia CPU queue. The submitter now
+parses job IDs from stdout or stderr, persists partial `submission.json`
+snapshots during submission, and defaults CPU finalizer/refinement jobs to
+`short`.
 
 ### Phase 4: registry
 

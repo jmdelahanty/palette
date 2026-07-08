@@ -544,10 +544,11 @@ class CompletedProcessLike(Protocol):
 Runner = Callable[..., CompletedProcessLike]
 
 
-def _parse_bsub_job_id(stdout: str) -> str:
-    match = re.search(r"Job <([0-9]+)>", stdout)
+def _parse_bsub_job_id(*streams: object) -> str:
+    text = "\n".join(str(stream or "") for stream in streams)
+    match = re.search(r"Job <([0-9]+)>", text)
     if not match:
-        raise ValueError(f"Could not parse bsub job id from output: {stdout!r}")
+        raise ValueError(f"Could not parse bsub job id from output: {text!r}")
     return match.group(1)
 
 
@@ -586,6 +587,42 @@ def _run_command(argv: Sequence[str], *, cwd: Path, runner: Runner = subprocess.
     return payload
 
 
+def _write_submission_snapshot(
+    path: Path,
+    *,
+    plan: WorkflowPlan,
+    status: str,
+    proxy_results: Sequence[Mapping[str, Any]],
+    shard_results: Sequence[Mapping[str, Any]],
+    job_ids_by_name: Mapping[str, str],
+    finalizer: Mapping[str, Any] | None = None,
+    refine: Mapping[str, Any] | None = None,
+    error: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schema": "palette.clipped_collection_keypoint_bsub_submission.v1",
+        "status": status,
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "plan_path": str(path.with_name("submission_plan.json")),
+        "zarr_path": str(plan.zarr_path),
+        "collection_id": plan.collection_id,
+        "run_id": plan.run_id,
+        "run_label": plan.run_label,
+        "log_dir": str(plan.log_dir),
+        "proxy_results": list(proxy_results),
+        "keypoint_shard_results": list(shard_results),
+        "job_ids_by_name": dict(job_ids_by_name),
+    }
+    if finalizer is not None:
+        payload["finalizer"] = dict(finalizer)
+    if refine is not None:
+        payload["refine"] = dict(refine)
+    if error is not None:
+        payload["error"] = dict(error)
+    path.write_text(json.dumps(json_ready(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return json_ready(payload)
+
+
 def apply_plan(plan: WorkflowPlan, *, runner: Runner = subprocess.run) -> dict[str, Any]:
     """Create proxy runs and submit the planned clipped keypoint LSF DAG."""
 
@@ -606,73 +643,120 @@ def apply_plan(plan: WorkflowPlan, *, runner: Runner = subprocess.run) -> dict[s
     proxy_results: list[dict[str, Any]] = []
     shard_results: list[dict[str, Any]] = []
     job_ids_by_name: dict[str, str] = {}
+    finalizer_payload: dict[str, Any] | None = None
+    refine_payload: dict[str, Any] | None = None
 
-    for clip in plan.clips:
-        assert clip.proxy_command is not None
-        proxy_result = _run_command(clip.proxy_command, cwd=plan.repo, runner=runner)
-        proxy_results.append(
-            {
-                "clip_id": clip.clip_id,
-                "proxy_crop_run": clip.proxy_crop_run,
-                "alias_manifest": str(clip.alias_manifest) if clip.alias_manifest else None,
-                "command_result": proxy_result,
-            }
-        )
+    _write_submission_snapshot(
+        submission_path,
+        plan=plan,
+        status="submitting",
+        proxy_results=proxy_results,
+        shard_results=shard_results,
+        job_ids_by_name=job_ids_by_name,
+    )
 
-    for clip in plan.clips:
-        assert clip.keypoint_bsub_command is not None
-        submit_result = _run_command(clip.keypoint_bsub_command, cwd=plan.repo, runner=runner)
-        job_id = _parse_bsub_job_id(str(submit_result["stdout"]))
-        job_ids_by_name[clip.keypoint_job_name] = job_id
-        shard_results.append(
-            {
-                "clip_id": clip.clip_id,
-                "keypoint_job_name": clip.keypoint_job_name,
-                "keypoint_job_id": job_id,
-                "keypoint_shard_run": clip.keypoint_shard_run,
-                "command_result": submit_result,
-            }
-        )
+    try:
+        for clip in plan.clips:
+            assert clip.proxy_command is not None
+            proxy_result = _run_command(clip.proxy_command, cwd=plan.repo, runner=runner)
+            proxy_results.append(
+                {
+                    "clip_id": clip.clip_id,
+                    "proxy_crop_run": clip.proxy_crop_run,
+                    "alias_manifest": str(clip.alias_manifest) if clip.alias_manifest else None,
+                    "command_result": proxy_result,
+                }
+            )
+            _write_submission_snapshot(
+                submission_path,
+                plan=plan,
+                status="submitting",
+                proxy_results=proxy_results,
+                shard_results=shard_results,
+                job_ids_by_name=job_ids_by_name,
+            )
 
-    finalizer_command = _replace_job_placeholders(plan.finalizer_bsub_command, job_ids_by_name)
-    finalizer_result = _run_command(finalizer_command, cwd=plan.repo, runner=runner)
-    finalizer_job_id = _parse_bsub_job_id(str(finalizer_result["stdout"]))
-    finalizer_job_name = f"kp_finalize_{plan.run_label}"
-    job_ids_by_name[finalizer_job_name] = finalizer_job_id
+        for clip in plan.clips:
+            assert clip.keypoint_bsub_command is not None
+            submit_result = _run_command(clip.keypoint_bsub_command, cwd=plan.repo, runner=runner)
+            job_id = _parse_bsub_job_id(submit_result["stdout"], submit_result["stderr"])
+            job_ids_by_name[clip.keypoint_job_name] = job_id
+            shard_results.append(
+                {
+                    "clip_id": clip.clip_id,
+                    "keypoint_job_name": clip.keypoint_job_name,
+                    "keypoint_job_id": job_id,
+                    "keypoint_shard_run": clip.keypoint_shard_run,
+                    "command_result": submit_result,
+                }
+            )
+            _write_submission_snapshot(
+                submission_path,
+                plan=plan,
+                status="submitting",
+                proxy_results=proxy_results,
+                shard_results=shard_results,
+                job_ids_by_name=job_ids_by_name,
+            )
 
-    refine_command = _replace_job_placeholders(plan.refine_bsub_command, job_ids_by_name)
-    refine_result = _run_command(refine_command, cwd=plan.repo, runner=runner)
-    refine_job_id = _parse_bsub_job_id(str(refine_result["stdout"]))
-
-    submission = {
-        "schema": "palette.clipped_collection_keypoint_bsub_submission.v1",
-        "status": "submitted",
-        "submitted_at_utc": datetime.now(timezone.utc).isoformat(),
-        "plan_path": str(plan_path),
-        "zarr_path": str(plan.zarr_path),
-        "collection_id": plan.collection_id,
-        "run_id": plan.run_id,
-        "run_label": plan.run_label,
-        "log_dir": str(plan.log_dir),
-        "proxy_results": proxy_results,
-        "keypoint_shard_results": shard_results,
-        "finalizer": {
+        finalizer_command = _replace_job_placeholders(plan.finalizer_bsub_command, job_ids_by_name)
+        finalizer_result = _run_command(finalizer_command, cwd=plan.repo, runner=runner)
+        finalizer_job_id = _parse_bsub_job_id(finalizer_result["stdout"], finalizer_result["stderr"])
+        finalizer_job_name = f"kp_finalize_{plan.run_label}"
+        job_ids_by_name[finalizer_job_name] = finalizer_job_id
+        finalizer_payload = {
             "job_name": finalizer_job_name,
             "job_id": finalizer_job_id,
             "command": finalizer_command,
             "command_result": finalizer_result,
             "output_run": plan.keypoint_collection_run,
             "merged_proxy_crop_run": plan.merged_proxy_crop_run,
-        },
-        "refine": {
+        }
+        _write_submission_snapshot(
+            submission_path,
+            plan=plan,
+            status="submitting",
+            proxy_results=proxy_results,
+            shard_results=shard_results,
+            job_ids_by_name=job_ids_by_name,
+            finalizer=finalizer_payload,
+        )
+
+        refine_command = _replace_job_placeholders(plan.refine_bsub_command, job_ids_by_name)
+        refine_result = _run_command(refine_command, cwd=plan.repo, runner=runner)
+        refine_job_id = _parse_bsub_job_id(refine_result["stdout"], refine_result["stderr"])
+        refine_payload = {
             "job_name": f"kp_refine_{plan.run_label}",
             "job_id": refine_job_id,
             "command": refine_command,
             "command_result": refine_result,
             "output_run": plan.refined_keypoints_run,
-        },
-        "job_ids_by_name": job_ids_by_name,
-    }
+        }
+    except Exception as exc:
+        _write_submission_snapshot(
+            submission_path,
+            plan=plan,
+            status="failed",
+            proxy_results=proxy_results,
+            shard_results=shard_results,
+            job_ids_by_name=job_ids_by_name,
+            finalizer=finalizer_payload,
+            refine=refine_payload,
+            error={"type": type(exc).__name__, "message": str(exc)},
+        )
+        raise
+
+    submission = _write_submission_snapshot(
+        submission_path,
+        plan=plan,
+        status="submitted",
+        proxy_results=proxy_results,
+        shard_results=shard_results,
+        job_ids_by_name=job_ids_by_name,
+        finalizer=finalizer_payload,
+        refine=refine_payload,
+    )
+    submission["submitted_at_utc"] = submission["updated_at_utc"]
     submission_path.write_text(json.dumps(json_ready(submission), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     submission["submission_path"] = str(submission_path)
     return json_ready(submission)
@@ -698,10 +782,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ncores", type=int, default=4)
     parser.add_argument("--mem-gb", type=int, default=32)
     parser.add_argument("--gpus", type=int, default=1)
-    parser.add_argument("--finalizer-queue", default="normal")
+    parser.add_argument("--finalizer-queue", default="short")
     parser.add_argument("--finalizer-ncores", type=int, default=4)
     parser.add_argument("--finalizer-mem-gb", type=int, default=16)
-    parser.add_argument("--refine-queue", default="normal")
+    parser.add_argument("--refine-queue", default="short")
     parser.add_argument("--refine-ncores", type=int, default=4)
     parser.add_argument("--refine-mem-gb", type=int, default=16)
     parser.add_argument("--refine-num-workers", type=int, default=4)

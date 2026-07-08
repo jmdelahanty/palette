@@ -162,6 +162,7 @@ def test_build_plan_marks_missing_cache_without_keypoint_command(tmp_path: Path)
 
 def test_parse_and_replace_bsub_job_placeholders() -> None:
     assert _parse_bsub_job_id("Job <12345> is submitted to queue <gpu_l4>.") == "12345"
+    assert _parse_bsub_job_id("", "Job <67890> is submitted to queue <normal>.") == "67890"
     command = ["bsub", "-w", "done(<jobid:job_a>) && done(<jobid:job_b>)"]
     assert _replace_job_placeholders(command, {"job_a": "111", "job_b": "222"}) == [
         "bsub",
@@ -225,7 +226,7 @@ def test_apply_plan_creates_proxies_and_submits_dependency_dag(tmp_path: Path) -
         command = [str(item) for item in argv]
         calls.append(command)
         if command[0] == "bsub":
-            return SimpleNamespace(returncode=0, stdout=next(bsub_outputs), stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr=next(bsub_outputs))
         return SimpleNamespace(returncode=0, stdout='{"ok": true}', stderr="")
 
     submission = apply_plan(plan, runner=fake_runner)
@@ -245,4 +246,5 @@ def test_apply_plan_creates_proxies_and_submits_dependency_dag(tmp_path: Path) -
     assert submission_path.exists()
     saved = json.loads(submission_path.read_text(encoding="utf-8"))
     assert saved["schema"] == "palette.clipped_collection_keypoint_bsub_submission.v1"
+    assert saved["status"] == "submitted"
     assert saved["refine"]["job_id"] == "301"
