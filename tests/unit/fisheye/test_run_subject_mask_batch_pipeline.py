@@ -45,6 +45,25 @@ def test_parser_rejects_compact_only_mask_storage_mode() -> None:
         mod._build_parser().parse_args(["/recordings", "--mask-storage", "rle_v1"])
 
 
+def test_default_output_staging_root_falls_back_when_user_scratch_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("USER", "palette_test_user_without_scratch")
+    monkeypatch.setenv("LSB_JOBID", "12345")
+    monkeypatch.setenv("LSB_JOBINDEX", "7")
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+
+    assert mod._default_output_staging_root() == (  # noqa: SLF001
+        tmp_path
+        / "palette"
+        / "palette_test_user_without_scratch"
+        / "12345"
+        / "array_7"
+        / "subject_mask_output_staging"
+    )
+
+
 def test_safe_artifact_filename_hashes_long_names() -> None:
     filename = mod._safe_artifact_filename(
         ("recording_analysis", "subject_masks_" + ("very_long_" * 40)),

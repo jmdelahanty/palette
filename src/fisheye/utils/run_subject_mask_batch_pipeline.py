@@ -609,8 +609,9 @@ def _default_output_staging_root() -> Path:
     user = os.environ.get("USER") or "unknown"
     job_id = os.environ.get("LSB_JOBID") or f"manual_{os.getpid()}"
     job_index = os.environ.get("LSB_JOBINDEX")
-    if Path(f"/scratch/{user}").is_dir():
-        base = Path(f"/scratch/{user}") / str(job_id)
+    user_scratch = Path(f"/scratch/{user}")
+    if user_scratch.is_dir() and os.access(user_scratch, os.W_OK | os.X_OK):
+        base = user_scratch / str(job_id)
     else:
         base = Path(os.environ.get("TMPDIR") or "/tmp") / "palette" / str(user) / str(job_id)
     if job_index:
