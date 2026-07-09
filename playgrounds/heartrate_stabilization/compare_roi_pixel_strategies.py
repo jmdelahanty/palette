@@ -765,6 +765,15 @@ def main() -> None:
     parser.add_argument("--band-min-hz", type=float, default=1.0)
     parser.add_argument("--band-max-hz", type=float, default=4.0)
     parser.add_argument(
+        "--min-roi-mean-intensity",
+        type=float,
+        default=None,
+        help=(
+            "Mark frames invalid when the sampled ROI mean intensity is at or below this threshold. "
+            "Use 0 or 1 to reject all-black acquisition-dropout crop frames."
+        ),
+    )
+    parser.add_argument(
         "--primary-estimator",
         choices=("welch", "periodogram", "autocorr"),
         default="welch",
@@ -814,6 +823,7 @@ def main() -> None:
         frame_start=max(0, int(args.frame_start)),
         frame_count=max(0, int(args.frame_count)),
         stride=max(1, int(args.stride)),
+        min_roi_mean_intensity=args.min_roi_mean_intensity,
     )
     frame_index = loaded["frame_indices"]
     valid = loaded["valid"]
@@ -948,6 +958,9 @@ def main() -> None:
         "frame_count": int(args.frame_count),
         "stride": int(args.stride),
         "fps": effective_fps,
+        "min_roi_mean_intensity": loaded["min_roi_mean_intensity"],
+        "low_intensity_frame_count": int(loaded["low_intensity_frame_count"]),
+        "valid_loaded_frames": int(np.count_nonzero(loaded["valid"])),
         "band_hz": [float(args.band_min_hz), float(args.band_max_hz)],
         "primary_estimator": str(args.primary_estimator),
         "window_seconds": float(args.window_seconds),

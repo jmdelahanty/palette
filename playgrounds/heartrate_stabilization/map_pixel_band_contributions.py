@@ -427,6 +427,7 @@ def _load_roi_pixel_traces(
     frame_count: int,
     stride: int,
     sample_mask: np.ndarray | None = None,
+    min_roi_mean_intensity: float | None = None,
 ) -> dict[str, Any]:
     import cv2
 
@@ -455,8 +456,14 @@ def _load_roi_pixel_traces(
     valid = np.zeros(int(frame_indices.size), dtype=bool)
     mean_frame_sum = np.zeros((height, width, 3), dtype=np.float64)
     mean_frame_count = 0
+    low_intensity_frame_count = 0
     status = _read_status_csv(status_csv)
     next_expected: int | None = None
+    intensity_threshold = (
+        float(min_roi_mean_intensity)
+        if min_roi_mean_intensity is not None and np.isfinite(float(min_roi_mean_intensity))
+        else None
+    )
     try:
         for out_row, frame_index in enumerate(frame_indices.tolist()):
             if next_expected is None or int(frame_index) != int(next_expected):
@@ -468,7 +475,11 @@ def _load_roi_pixel_traces(
             if not status.get(int(frame_index), True):
                 continue
             gray = _gray(frame)
-            traces[out_row, :] = gray[yy, xx].astype(np.float32)
+            roi_values = gray[yy, xx].astype(np.float32)
+            if intensity_threshold is not None and float(np.mean(roi_values)) <= intensity_threshold:
+                low_intensity_frame_count += 1
+                continue
+            traces[out_row, :] = roi_values
             valid[out_row] = True
             mean_frame_sum += frame[:, :, :3].astype(np.float64)
             mean_frame_count += 1
@@ -490,6 +501,8 @@ def _load_roi_pixel_traces(
         "mean_frame": mean_frame,
         "width": width,
         "height": height,
+        "min_roi_mean_intensity": intensity_threshold,
+        "low_intensity_frame_count": int(low_intensity_frame_count),
     }
 
 
@@ -720,6 +733,15 @@ def main() -> None:
     parser.add_argument("--band-max-hz", type=float, default=2.0)
     parser.add_argument("--max-interpolated-gap-samples", type=int, default=5)
     parser.add_argument(
+        "--min-roi-mean-intensity",
+        type=float,
+        default=None,
+        help=(
+            "Mark frames invalid when the sampled ROI mean intensity is at or below this threshold. "
+            "Use 0 or 1 to reject all-black acquisition-dropout crop frames."
+        ),
+    )
+    parser.add_argument(
         "--include-mask-component",
         type=str,
         default=None,
@@ -784,6 +806,7 @@ def main() -> None:
         frame_count=max(0, int(args.frame_count)),
         stride=max(1, int(args.stride)),
         sample_mask=sample_mask,
+        min_roi_mean_intensity=args.min_roi_mean_intensity,
     )
     traces, interpolated_rows = _interpolate_short_gaps(
         loaded["traces"],
@@ -834,6 +857,8 @@ def main() -> None:
         "band_hz": [float(args.band_min_hz), float(args.band_max_hz)],
         "loaded_frames": int(loaded["traces"].shape[0]),
         "valid_frames": int(np.count_nonzero(loaded["valid"])),
+        "min_roi_mean_intensity": loaded["min_roi_mean_intensity"],
+        "low_intensity_frame_count": int(loaded["low_intensity_frame_count"]),
         "analysis_frames": int(traces.shape[0]),
         "interpolated_rows": int(interpolated_rows),
         "roi_pixel_count": int(band_power.size),

@@ -281,6 +281,7 @@ scripts/py playgrounds/heartrate_stabilization/compare_roi_pixel_strategies.py \
   --fps 100 \
   --band-min-hz 1.5 \
   --band-max-hz 3.0 \
+  --min-roi-mean-intensity 1 \
   --primary-estimator autocorr \
   --window-seconds 10 \
   --window-step-seconds 2.5 \
@@ -290,6 +291,113 @@ scripts/py playgrounds/heartrate_stabilization/compare_roi_pixel_strategies.py \
   --top-score-modes covariance \
   --output-prefix playgrounds/heartrate_stabilization/outputs/roi_pixel_strategy_compare_full_autocorr_1p5_3hz_step2p5s
 ```
+
+Visualize the underlying masked-ROI intensity structure behind that HR trace:
+
+```bash
+scripts/py playgrounds/heartrate_stabilization/visualize_roi_intensity_diagnostics.py \
+  --video playgrounds/heartrate_stabilization/outputs/stabilized_clean_full_eye_swim_origin_lossless.mkv \
+  --roi-json playgrounds/heartrate_stabilization/outputs/heart_roi_eye_swim_origin_smoke.json \
+  --status-csv playgrounds/heartrate_stabilization/outputs/stabilized_clean_full_eye_swim_origin_lossless.csv \
+  --mask-npz playgrounds/heartrate_stabilization/outputs/roi_pixel_band_contrib_mkv_60s_1p5_2hz_exclude_eyes.pixel_band_maps.npz \
+  --hr-csv playgrounds/heartrate_stabilization/outputs/hr_timeseries_eye_excluded_autocorr_1p5_3hz_step2p5s.csv \
+  --fps 100 \
+  --band-min-hz 1.5 \
+  --band-max-hz 3.0 \
+  --min-roi-mean-intensity 1 \
+  --window-seconds 10 \
+  --window-step-seconds 2.5 \
+  --darkening-phase-z-threshold 0.75 \
+  --top-pixels 120 \
+  --sort-by covariance \
+  --save-top-matrix \
+  --output-prefix playgrounds/heartrate_stabilization/outputs/roi_intensity_diagnostics_eye_excluded_full_1p5_3hz
+```
+
+This writes a masked-pixel overlay, a full-recording pixel-correlation map, raw
+and band-passed ROI mean traces, a top-pixel raster, and sliding-window
+correlation summaries. It also writes a directional darkening-support map: ROI
+band-passed z-scores below `-0.75` define the dark phase, values above `0.75`
+define the bright phase, and positive darkening support means a pixel is darker
+during the ROI dark phase than during the bright phase. A single frame cannot
+have a Pearson correlation by itself; the per-frame support trace is the signed
+agreement/covariance contribution of top band-passed pixels at that frame. Long
+invalid status gaps are preserved as gaps rather than filtered across.
+
+Use `--min-roi-mean-intensity 1` for acquisition-time crop dropouts. In these
+recordings, if the real-time detector fails to localize the fish, the crop
+recorder can save an all-black frame. Those frames must be treated as invalid
+photometry samples, not as real intensity changes.
+
+Render a video of the heartbeat-band fluctuations:
+
+```bash
+scripts/py playgrounds/heartrate_stabilization/render_roi_fluctuation_video.py \
+  --video playgrounds/heartrate_stabilization/outputs/stabilized_clean_full_eye_swim_origin_lossless.mkv \
+  --roi-json playgrounds/heartrate_stabilization/outputs/heart_roi_eye_swim_origin_smoke.json \
+  --status-csv playgrounds/heartrate_stabilization/outputs/stabilized_clean_full_eye_swim_origin_lossless.csv \
+  --mask-npz playgrounds/heartrate_stabilization/outputs/roi_pixel_band_contrib_mkv_60s_1p5_2hz_exclude_eyes.pixel_band_maps.npz \
+  --frame-start 30000 \
+  --frame-count 3000 \
+  --fps 100 \
+  --playback-fps 30 \
+  --band-min-hz 1.5 \
+  --band-max-hz 3.0 \
+  --min-roi-mean-intensity 1 \
+  --trace-seconds 8 \
+  --output playgrounds/heartrate_stabilization/outputs/roi_fluctuation_chase_start_30000_3000f_1p5_3hz.mp4
+```
+
+The video overlay is temporally filtered before display: each sampled ROI pixel
+is passed through the same third-order zero-phase Butterworth band-pass used by
+the diagnostics. With the example band, the display rejects slow drift below
+`1.5 Hz` and fast noise above `3.0 Hz`. Red means the pixel is darker than its
+local baseline in that heartbeat band; blue means brighter. Noise inside the
+selected band can still pass through, so spatial coherence, mask exclusion, and
+directional darkening support remain important QC signals.
+
+Derive a candidate heart mask from per-pixel spectral power, then use that mask
+only for time-domain luminance and beat timing:
+
+```bash
+scripts/py playgrounds/heartrate_stabilization/derive_heart_pixel_mask.py \
+  --video playgrounds/heartrate_stabilization/outputs/stabilized_clean_full_eye_swim_origin_lossless.mkv \
+  --roi-json playgrounds/heartrate_stabilization/outputs/heart_roi_eye_swim_origin_smoke.json \
+  --status-csv playgrounds/heartrate_stabilization/outputs/stabilized_clean_full_eye_swim_origin_lossless.csv \
+  --mask-npz playgrounds/heartrate_stabilization/outputs/roi_pixel_band_contrib_mkv_60s_1p5_2hz_exclude_eyes.pixel_band_maps.npz \
+  --frame-count 140035 \
+  --fps 100 \
+  --band-min-hz 1.5 \
+  --band-max-hz 3.5 \
+  --chunk-seconds 30 \
+  --chunk-step-seconds 30 \
+  --top-pixels 50 \
+  --chunk-top-fraction 0.20 \
+  --min-top-chunk-fraction 0.10 \
+  --boundary-penalty-width-px 5 \
+  --boundary-penalty-weight 5 \
+  --min-roi-mean-intensity 1 \
+  --beat-prominence-z 0.75 \
+  --output-prefix playgrounds/heartrate_stabilization/outputs/heart_pixel_mask_eye_excluded_30s_chunks_1p5_3p5hz_k50_boundary5w5
+```
+
+This uses Welch spectra per pixel and per chunk only to select pixels. It then
+averages the selected pixels in the time domain, band-passes that luminance
+trace, flips the sign so darkening is positive, and detects darkening peaks in
+time. Inspect the heart-mask image before trusting the beat table. In the first
+example run, the strongest pixels are concentrated along high-contrast ROI/body
+edges rather than forming a compact central heart-shaped region, so the result
+should be treated as evidence of residual motion/edge artifact, not a validated
+heart-rate extraction.
+
+Boundary penalization can be enabled with `--boundary-penalty-width-px` and
+`--boundary-penalty-weight`. The penalty subtracts from the per-pixel spectral
+selection score for pixels close to the edge of the usable candidate mask. In
+the checked example, both a moderate penalty (`5 px`, weight `5`) and a stronger
+penalty (`7 px`, weight `10`) still selected pixels with median distance only
+`2 px` from the usable-mask boundary, so this soft prior did not rescue the ROI.
+That suggests the strongest heartbeat-band evidence in this crop is still
+edge-dominated.
 
 Align those HR windows to GoodCopBadCop chase trials:
 

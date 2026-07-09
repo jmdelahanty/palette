@@ -1,0 +1,57 @@
+We are analyzing a stabilized grayscale video containing a small user-defined
+ROI. The goal is to determine whether there is a localized, time-periodic
+luminance source in the 1.5-3.5 Hz band, and to extract a reliable time-domain
+event series if such a source exists.
+
+Do not assume any semantic meaning for the ROI. Treat this as a signal-processing
+problem with possible nuisance sources: residual registration error, boundary
+motion, local contrast edges, global illumination drift, camera noise,
+compression or decoding artifacts, dropout frames, and mask/ROI geometry
+artifacts.
+
+Think deeply about a robust pipeline that separates these tasks:
+
+1. Pixel candidate discovery:
+   - Use per-pixel time series inside a candidate mask or bounding box.
+   - Score pixels by spectral evidence in 1.5-3.5 Hz, but do not use spectral
+     power itself as the final event-rate estimate.
+   - Compare whole-recording scores to chunked scores.
+   - Prefer pixels whose band-limited evidence is stable across chunks.
+   - Penalize or exclude pixels near usable-mask boundaries and high-contrast
+     edges.
+
+2. Spatial validation:
+   - Determine whether selected pixels form a compact spatial cluster or are
+     scattered/edge dominated.
+   - Quantify distance to candidate-mask boundary, connected-component size,
+     centroid stability, and score concentration.
+   - Compare selected pixels against null models such as shuffled time, phase-
+     randomized traces, random interior pixels, and boundary-only pixels.
+
+3. Time-domain extraction:
+   - Build a luminance trace from selected pixels only after pixel selection.
+   - Use temporal filtering only to isolate the band of interest.
+   - Detect events in the time domain from the selected-pixel trace.
+   - Enforce interval plausibility from the target band.
+   - Report event timing uncertainty and rejected intervals.
+
+4. Artifact controls:
+   - Explicitly handle all-black/dropout frames as invalid samples.
+   - Test whether broad spatial averages, image edges, or global intensity
+     components explain the apparent rhythm.
+   - Use PCA/ICA/robust regression to remove global or boundary-correlated
+     components before pixel selection.
+   - Compare results before and after hard erosion of the candidate mask.
+
+5. Deliverables:
+   - A ranked list of proposed analyses.
+   - Diagnostic plots/videos that distinguish localized periodic signal from
+     boundary or global motion.
+   - Concrete acceptance/rejection criteria for trusting the extracted event
+     series.
+   - Minimal code-level changes needed to test the most informative next
+     analysis.
+
+Be skeptical. The desired outcome is not to force a positive result, but to
+identify whether a localized, coherent, time-domain signal exists and whether its
+event timings are trustworthy.
