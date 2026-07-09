@@ -178,7 +178,7 @@ def _filter_work_units(
 
 def _job_cache_shell(prefix: str) -> str:
     return f"""scratch_user="${{USER:-$(id -un)}}"
-if [[ -n "${{LSB_JOBID:-}}" && -d "/scratch/${{scratch_user}}" ]]; then
+if [[ -n "${{LSB_JOBID:-}}" && -d "/scratch/${{scratch_user}}" && -w "/scratch/${{scratch_user}}" && -x "/scratch/${{scratch_user}}" ]]; then
   export PALETTE_JOB_CACHE="/scratch/${{scratch_user}}/${{LSB_JOBID}}/palette_cache"
 else
   export PALETTE_JOB_CACHE="${{TMPDIR:-/tmp}}/{prefix}_${{JOB_ID}}/palette_cache"

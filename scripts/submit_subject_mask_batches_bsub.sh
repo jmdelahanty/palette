@@ -672,7 +672,7 @@ if [[ "$WORKFLOW_STAGE" != "finalization" && -n "$manifest_path" ]]; then
     job_index="${LSB_JOBINDEX:-0}"
     if [[ -n "${ROI_CACHE_STAGING_DIR}" ]]; then
       LOCAL_CACHE_DIR="${ROI_CACHE_STAGING_DIR}/${job_id}_${job_index}"
-    elif [[ -d "/scratch/${user_name}" && -w "/scratch/${user_name}" ]]; then
+    elif [[ -d "/scratch/${user_name}" && -w "/scratch/${user_name}" && -x "/scratch/${user_name}" ]]; then
       LOCAL_CACHE_DIR="/scratch/${user_name}/${job_id}/palette_subject_mask_cache_${job_index}"
     else
       LOCAL_CACHE_DIR="${TMPDIR:-/tmp}/palette_subject_mask_cache_${job_id}_${job_index}"

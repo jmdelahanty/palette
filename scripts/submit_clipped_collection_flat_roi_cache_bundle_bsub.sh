@@ -331,7 +331,7 @@ HOST="\$(hostname)"
 BUNDLE_STATUS_JSON="\${RUN_DIR}/\${RUN_LABEL}.\${JOB_ID}.bundle.json"
 
 scratch_user="\${USER:-\$(id -un)}"
-if [[ -n "\${LSB_JOBID:-}" && -d "/scratch/\${scratch_user}" ]]; then
+if [[ -n "\${LSB_JOBID:-}" && -d "/scratch/\${scratch_user}" && -w "/scratch/\${scratch_user}" && -x "/scratch/\${scratch_user}" ]]; then
   SCRATCH_ROOT="/scratch/\${scratch_user}/\${LSB_JOBID}"
 else
   SCRATCH_ROOT="\${TMPDIR:-/tmp}/palette_clipped_collection_flat_roi_cache_bundle_\${JOB_ID}"

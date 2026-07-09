@@ -232,7 +232,7 @@ JOB_ID="\${LSB_JOBID:-manual_crop}"
 STATUS_JSON="\${RUN_DIR}/\${RUN_LABEL}.crop.\${JOB_ID}.json"
 
 scratch_user="\${USER:-\$(id -un)}"
-if [[ -n "\${LSB_JOBID:-}" && -d "/scratch/\${scratch_user}" ]]; then
+if [[ -n "\${LSB_JOBID:-}" && -d "/scratch/\${scratch_user}" && -w "/scratch/\${scratch_user}" && -x "/scratch/\${scratch_user}" ]]; then
   export PALETTE_JOB_CACHE="/scratch/\${scratch_user}/\${LSB_JOBID}/palette_cache"
 else
   export PALETTE_JOB_CACHE="\${TMPDIR:-/tmp}/palette_crop_geometry_\${JOB_ID}/palette_cache"
@@ -305,7 +305,7 @@ STATUS_JSON="\${RUN_DIR}/\${RUN_LABEL}.cache.\${JOB_ID}.json"
 PROGRESS_JSONL="\${RUN_DIR}/\${RUN_LABEL}.cache.\${JOB_ID}.progress.jsonl"
 
 scratch_user="\${USER:-\$(id -un)}"
-if [[ -n "\${LSB_JOBID:-}" && -d "/scratch/\${scratch_user}" ]]; then
+if [[ -n "\${LSB_JOBID:-}" && -d "/scratch/\${scratch_user}" && -w "/scratch/\${scratch_user}" && -x "/scratch/\${scratch_user}" ]]; then
   SCRATCH_ROOT="/scratch/\${scratch_user}/\${LSB_JOBID}"
 else
   SCRATCH_ROOT="\${TMPDIR:-/tmp}/palette_flat_roi_cache_\${JOB_ID}"

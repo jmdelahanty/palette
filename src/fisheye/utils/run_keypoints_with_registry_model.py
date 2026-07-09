@@ -60,8 +60,9 @@ def _infer_roi_cache_source_tier(path: Optional[Path]) -> Optional[str]:
 def _default_roi_cache_staging_dir() -> Path:
     user = os.environ.get("USER") or "unknown"
     job_id = os.environ.get("LSB_JOBID")
-    if job_id and Path(f"/scratch/{user}").is_dir():
-        return Path("/scratch") / user / job_id / "palette_roi_cache_stage"
+    user_scratch = Path(f"/scratch/{user}")
+    if job_id and user_scratch.is_dir() and os.access(user_scratch, os.W_OK | os.X_OK):
+        return user_scratch / job_id / "palette_roi_cache_stage"
     return Path(os.environ.get("TMPDIR") or "/tmp") / f"palette_roi_cache_stage_{os.getpid()}"
 
 

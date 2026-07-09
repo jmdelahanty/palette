@@ -194,7 +194,7 @@ JOB_ID="\${LSB_JOBID:-manual}"
 OUTPUT_JSON="\${RUN_DIR}/\${RUN_LABEL}.\${JOB_ID}.json"
 
 scratch_user="\${USER:-\$(id -un)}"
-if [[ -n "\${LSB_JOBID:-}" && -d "/scratch/\${scratch_user}" ]]; then
+if [[ -n "\${LSB_JOBID:-}" && -d "/scratch/\${scratch_user}" && -w "/scratch/\${scratch_user}" && -x "/scratch/\${scratch_user}" ]]; then
   export PALETTE_JOB_CACHE="/scratch/\${scratch_user}/\${LSB_JOBID}/palette_cache"
 else
   export PALETTE_JOB_CACHE="\${TMPDIR:-/tmp}/palette_cache"

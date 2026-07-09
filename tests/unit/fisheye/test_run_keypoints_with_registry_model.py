@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,19 @@ def test_pick_best_candidate_enforces_unique_when_tied() -> None:
     ]
     with pytest.raises(SystemExit, match="Top candidate score tied"):
         mod.pick_best_keypoint_candidate(candidates, require_unique=True)
+
+
+def test_default_roi_cache_staging_dir_falls_back_when_user_scratch_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("USER", "palette_keypoint_user_without_scratch")
+    monkeypatch.setenv("LSB_JOBID", "67890")
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+
+    assert mod._default_roi_cache_staging_dir() == (  # noqa: SLF001
+        tmp_path / f"palette_roi_cache_stage_{os.getpid()}"
+    )
 
 
 def test_write_model_resolution_provenance_updates_keypoint_run_attrs(

@@ -181,7 +181,7 @@ export NUMEXPR_NUM_THREADS="$THREADS_PER_PROCESS"
 USER_NAME="${USER:-unknown}"
 JOB_ID="${LSB_JOBID:-manual}"
 JOB_INDEX="${LSB_JOBINDEX:-0}"
-if [[ -d "/scratch/${USER_NAME}" ]]; then
+if [[ -d "/scratch/${USER_NAME}" && -w "/scratch/${USER_NAME}" && -x "/scratch/${USER_NAME}" ]]; then
   SCRATCH_ROOT="/scratch/${USER_NAME}/${JOB_ID}/finalizer_benchmark_${JOB_INDEX}"
 else
   SCRATCH_ROOT="${TMPDIR:-/tmp}/palette_finalizer_benchmark_${JOB_ID}_${JOB_INDEX}"
