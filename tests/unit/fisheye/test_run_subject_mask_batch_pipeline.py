@@ -156,18 +156,14 @@ def test_subject_mask_publish_preserves_staged_input_artifacts(tmp_path: Path) -
     ]
 
 
-def test_consolidate_metadata_quietly_suppresses_expected_zarr_noise(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _fake_consolidate(path: str) -> None:
-        assert path == "/tmp/archive.zarr"
+def test_consolidate_metadata_quietly_suppresses_expected_sidecar_noise(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_consolidate(store: str, *, path: str | None = None) -> None:
+        assert store == "/tmp/archive.zarr"
+        assert path is None
         warnings.warn("Object at logs is not recognized as a component of a Zarr hierarchy.", UserWarning)
         warnings.warn("Object at .failed is not recognized as a component of a Zarr hierarchy.", UserWarning)
         warnings.warn("Object at .imports is not recognized as a component of a Zarr hierarchy.", UserWarning)
         warnings.warn("Object at .incoming is not recognized as a component of a Zarr hierarchy.", UserWarning)
-        warnings.warn(
-            "Consolidated metadata is currently not part in the Zarr format 3 specification. "
-            "It may not be supported by other zarr implementations and may change in the future.",
-            UserWarning,
-        )
 
     monkeypatch.setattr(mod.zarr, "consolidate_metadata", _fake_consolidate)
 
@@ -181,7 +177,9 @@ def test_consolidate_metadata_quietly_suppresses_expected_zarr_noise(monkeypatch
 def test_consolidate_metadata_quietly_does_not_hide_unexpected_warnings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _fake_consolidate(path: str) -> None:
+    def _fake_consolidate(store: str, *, path: str | None = None) -> None:
+        assert store == "/tmp/archive.zarr"
+        assert path is None
         warnings.warn("unexpected zarr consolidation issue", UserWarning)
 
     monkeypatch.setattr(mod.zarr, "consolidate_metadata", _fake_consolidate)
@@ -408,11 +406,13 @@ def test_build_archive_plan_inference_mode_ignores_unrelated_subject_runs(tmp_pa
     assert plan.run_finalization is False
 
 
-def test_build_archive_plan_finalization_mode_requires_matching_subject_run(tmp_path: Path) -> None:
+def test_build_archive_plan_finalization_mode_uses_latest_existing_subject_run(tmp_path: Path) -> None:
     zarr_path = tmp_path / "recording_analysis.zarr"
     _seed_subject_mask_batch_prereqs(zarr_path)
     root = zarr.open_group(str(zarr_path), mode="a")
-    root.require_group("subject_mask_runs").create_group("old_subject_run")
+    subject_parent = root.require_group("subject_mask_runs")
+    subject_parent.attrs["latest"] = "old_subject_run"
+    subject_parent.create_group("old_subject_run")
 
     plan = mod.build_archive_plan(
         zarr_path,
@@ -424,8 +424,9 @@ def test_build_archive_plan_finalization_mode_requires_matching_subject_run(tmp_
     )
 
     assert plan.run_inference is False
-    assert plan.run_finalization is False
-    assert "target_subject_mask_run_missing" in plan.skip_reason
+    assert plan.run_finalization is True
+    assert plan.subject_run == "old_subject_run"
+    assert mod._selected_subject_run_for_finalization(plan) == "old_subject_run"
 
 
 def test_build_archive_plan_finalization_mode_targets_matching_subject_run(tmp_path: Path) -> None:

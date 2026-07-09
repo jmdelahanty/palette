@@ -272,6 +272,13 @@ def build_archive_plan(
     has_refined_subject_runs = bool(refined_children)
     target_subject_run_exists = subject_run_name in subject_children
     target_refined_run_exists = refined_run_name in refined_children
+    selected_subject_run = subject_run_name
+    selected_subject_run_exists = target_subject_run_exists
+    if workflow_stage == "finalization" and not target_subject_run_exists:
+        latest_subject_run = _latest_group_name(subject_parent)
+        if latest_subject_run is not None:
+            selected_subject_run = latest_subject_run
+            selected_subject_run_exists = True
     if workflow_stage == "inference":
         run_inference = bool(force_inference or not target_subject_run_exists)
         run_finalization = False
@@ -299,7 +306,7 @@ def build_archive_plan(
         skip_reasons.append("target_refined_subject_masks_run_present")
     elif workflow_stage == "all" and has_refined_subject_runs and not force_finalization:
         skip_reasons.append("refined_subject_masks_runs_present")
-    if workflow_stage == "finalization" and run_finalization and not target_subject_run_exists:
+    if workflow_stage == "finalization" and run_finalization and not selected_subject_run_exists:
         run_finalization = False
         skip_reasons.append("target_subject_mask_run_missing")
     if run_finalization and not run_inference and not has_subject_runs:
@@ -308,7 +315,7 @@ def build_archive_plan(
 
     return ArchivePlan(
         zarr_path=str(zarr_path),
-        subject_run=subject_run_name,
+        subject_run=selected_subject_run,
         refined_run=refined_run_name,
         subject_output_parent=subject_output_parent,
         crop_run=crop_run,
