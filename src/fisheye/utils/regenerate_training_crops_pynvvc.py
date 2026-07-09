@@ -38,6 +38,7 @@ from fisheye.shared.roi_pixel_contract import (
     SOURCE_PIXELS_ACQUISITION_CROP_VIDEO,
     orange_mono_pynvvc_luma_pixel_contract,
 )
+from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 
 
 SOURCE_FRAME_INDEX_MODES = ("auto", "direct", "original_frame_indices", "source_frame_index_parquet")
@@ -865,7 +866,7 @@ def regenerate_training_crops_pynvvc(
             _set_latest_pointers(crop_parent, resolved_target_crop)
         if consolidate_metadata:
             consolidate_started = time.perf_counter()
-            zarr.consolidate_metadata(str(archive_path))
+            consolidate_metadata_capture_expected_warnings(archive_path)
             timing["consolidate_metadata_seconds"] = float(time.perf_counter() - consolidate_started)
         target_group.attrs["timing"] = _json_safe(timing)
 

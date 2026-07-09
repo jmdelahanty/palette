@@ -9,7 +9,7 @@ LIMIT=0
 GROUPS_ONLY=1
 ORDER="desc"
 
-PUBLIC_CACHE_ROOT="/groups/johnson/johnsonlab/jeremy/recordings/tmp/palette_roi_cache"
+PUBLIC_CACHE_ROOT="/misc/public/palette_cache"
 PUBLIC_CACHE_DIR=""
 LOG_DIR=""
 RUN_ID=""
@@ -63,7 +63,7 @@ Discovery:
 
 Crop/cache:
   --workflow-id ID            Shared workflow namespace under --public-cache-root
-  --public-cache-root PATH    Shared cache root (default: /groups/.../recordings/tmp/palette_roi_cache)
+  --public-cache-root PATH    Shared cache root (default: /misc/public/palette_cache)
   --public-cache-dir PATH     Explicit shared cache publish dir; overrides root/workflow_id/roi_cache
   --source-type TYPE          Crop detection source type (default: refined)
   --source-path PATH          Explicit detection source path
@@ -161,6 +161,21 @@ case "$ORDER" in
   *) echo "--order must be asc or desc" >&2; exit 2;;
 esac
 
+reject_recordings_cache_dir() {
+  local cache_dir="$1"
+  local recordings_root="$2"
+  local resolved_cache_dir resolved_recordings_root
+  resolved_cache_dir="$(realpath -m "$cache_dir")"
+  resolved_recordings_root="$(realpath -m "$recordings_root")"
+  if [[ "$resolved_cache_dir" == "$resolved_recordings_root" || "$resolved_cache_dir" == "$resolved_recordings_root"/* ]]; then
+    echo "Refusing to publish disposable ROI caches under the recordings root:" >&2
+    echo "  cache_dir=$resolved_cache_dir" >&2
+    echo "  recordings_root=$resolved_recordings_root" >&2
+    echo "Use --public-cache-root /misc/public/palette_cache or another non-recordings scratch/cache root." >&2
+    exit 2
+  fi
+}
+
 if [[ -z "$RUN_ID" ]]; then
   RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 fi
@@ -169,6 +184,11 @@ if [[ -z "$WORKFLOW_ID" ]]; then
 fi
 if [[ -z "$LOG_DIR" ]]; then
   LOG_DIR="${ROOT%/}/logs/crop_flat_roi_cache_bsub"
+fi
+if [[ -n "$PUBLIC_CACHE_DIR" ]]; then
+  reject_recordings_cache_dir "$PUBLIC_CACHE_DIR" "$ROOT"
+else
+  reject_recordings_cache_dir "${PUBLIC_CACHE_ROOT%/}/${WORKFLOW_ID}/roi_cache" "$ROOT"
 fi
 
 RUN_ROOT="${LOG_DIR%/}/crop_flat_roi_cache_batch_${RUN_ID}"

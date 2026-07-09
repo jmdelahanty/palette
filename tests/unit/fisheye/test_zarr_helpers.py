@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import warnings
 
 import numpy as np
 import pytest
 import zarr
 
 from fisheye.shared.zarr_helpers import (
+    consolidate_metadata_capture_expected_warnings,
     first_array_length,
     first_array_length_in_group,
     infer_zarr_use,
@@ -418,6 +420,66 @@ def test_reconsolidate_zarr_metadata_records_attrs_and_calls_zarr(
     assert target.attrs["metadata_consolidation_policy"] == "unit_test"
     assert target.attrs["metadata_consolidation_status"] == "ok"
     assert target.attrs["metadata_consolidation_group_path"] == "detect_runs/detect_001/quality_reports"
+    assert report["suppressed_expected_warning_count"] == 0
+    assert report["unexpected_warning_count"] == 0
+
+
+def test_consolidate_metadata_capture_expected_warnings_suppresses_sidecars(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, str | None]] = []
+
+    def _fake_consolidate(store: str, *, path: str | None = None) -> None:
+        calls.append((store, path))
+        warnings.warn(
+            "Object at .failed is not recognized as a component of a Zarr hierarchy.",
+            UserWarning,
+            stacklevel=2,
+        )
+        warnings.warn(
+            "Object at .incoming is not recognized as a component of a Zarr hierarchy.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    monkeypatch.setattr(zarr, "consolidate_metadata", _fake_consolidate)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        report = consolidate_metadata_capture_expected_warnings(
+            tmp_path / "archive.zarr",
+            path="analysis",
+        )
+
+    assert caught == []
+    assert calls == [(str(tmp_path / "archive.zarr"), "analysis")]
+    assert report["suppressed_expected_warning_count"] == 2
+    assert report["unexpected_warning_count"] == 0
+    assert report["suppressed_expected_warning_messages"] == [
+        "Object at .failed is not recognized as a component of a Zarr hierarchy.",
+        "Object at .incoming is not recognized as a component of a Zarr hierarchy.",
+    ]
+
+
+def test_consolidate_metadata_capture_expected_warnings_reemits_unexpected(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def _fake_consolidate(store: str, *, path: str | None = None) -> None:
+        warnings.warn(
+            "unexpected metadata warning",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    monkeypatch.setattr(zarr, "consolidate_metadata", _fake_consolidate)
+
+    with pytest.warns(UserWarning, match="unexpected metadata warning"):
+        report = consolidate_metadata_capture_expected_warnings(tmp_path / "archive.zarr")
+
+    assert report["suppressed_expected_warning_count"] == 0
+    assert report["unexpected_warning_count"] == 1
 
 
 def test_reconsolidate_zarr_metadata_returns_error_without_raising(

@@ -10,6 +10,7 @@ that point at the new crop run and records that the label transform is identity.
 from __future__ import annotations
 
 from fisheye.shared.batch_logging import utc_now as _utc_now
+from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 import argparse
 import json
 import os
@@ -328,7 +329,7 @@ def migrate_training_label_runs_identity(
 
     if not dry_run and consolidate_metadata and report["migrations"]:
         started = time.perf_counter()
-        zarr.consolidate_metadata(str(archive_path))
+        consolidate_metadata_capture_expected_warnings(archive_path)
         report["consolidate_metadata_seconds"] = float(time.perf_counter() - started)
 
     return _json_safe(report)

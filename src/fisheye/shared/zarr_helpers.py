@@ -3,8 +3,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 from typing import Any, Collection, Mapping, TypeAlias
 from urllib.parse import unquote, urlparse
+import warnings
 
 import numpy as np
 import zarr
@@ -15,6 +17,10 @@ from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
 
 ParentPath: TypeAlias = str | Sequence[str]
 DEFAULT_ZARR_USES: tuple[str, ...] = ("analysis", "training", "inference", "export")
+EXPECTED_NON_ZARR_SIDECAR_WARNING_RE = re.compile(
+    r"Object at (logs|\.failed|\.imports|\.incoming) is not recognized as a component "
+    r"of a Zarr hierarchy\."
+)
 
 
 def _path_tokens(parent_path: ParentPath) -> tuple[str, ...]:
@@ -305,6 +311,42 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def consolidate_metadata_capture_expected_warnings(
+    zarr_path: str | Path,
+    *,
+    path: str | None = None,
+) -> dict[str, Any]:
+    """Run ``zarr.consolidate_metadata`` while suppressing known sidecar warnings.
+
+    Palette archives may contain operational sidecar directories such as
+    ``logs``, ``.failed``, ``.imports``, and ``.incoming``. Zarr warns that
+    these are not hierarchy components during consolidation. That warning is
+    expected and is suppressed here; all other warnings are re-emitted.
+    """
+
+    expected_messages: list[str] = []
+    unexpected_warnings: list[warnings.WarningMessage] = []
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        zarr.consolidate_metadata(str(zarr_path), path=path)
+
+    for warning in caught:
+        message = str(warning.message)
+        if EXPECTED_NON_ZARR_SIDECAR_WARNING_RE.search(message):
+            expected_messages.append(message)
+        else:
+            unexpected_warnings.append(warning)
+
+    for warning in unexpected_warnings:
+        warnings.warn(warning.message, warning.category, stacklevel=2)
+
+    return {
+        "suppressed_expected_warning_count": int(len(expected_messages)),
+        "suppressed_expected_warning_messages": expected_messages,
+        "unexpected_warning_count": int(len(unexpected_warnings)),
+    }
+
+
 def reconsolidate_zarr_metadata(
     zarr_path: str | Path,
     *,
@@ -335,10 +377,11 @@ def reconsolidate_zarr_metadata(
         target_group.attrs["metadata_consolidation_status"] = "ok"
         target_group.attrs["metadata_consolidated_at_utc"] = report["consolidated_at_utc"]
         target_group.attrs["metadata_consolidation_group_path"] = normalized_group_path or ""
-        zarr.consolidate_metadata(
-            str(root_path),
+        warning_report = consolidate_metadata_capture_expected_warnings(
+            root_path,
             path=normalized_group_path,
         )
+        report.update(warning_report)
     except Exception as exc:
         report["status"] = "error"
         report["error"] = str(exc)

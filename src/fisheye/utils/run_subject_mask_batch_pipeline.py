@@ -23,7 +23,6 @@ import subprocess
 import sys
 import tarfile
 import time
-import warnings
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field
@@ -47,6 +46,7 @@ from fisheye.shared.subject_mask_registry_status import (
     emit_subject_mask_stage_completion,
 )
 from fisheye.shared.workflow_profile import WorkflowProfiler
+from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from fisheye.shared.zarr_run_completion import (
     COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     mark_run_complete,
@@ -63,15 +63,6 @@ SUBJECT_MASK_OUTPUT_PARENTS = (SUBJECT_MASK_CANONICAL_OUTPUT_PARENT, SUBJECT_MAS
 OUTPUT_RUN_PARENTS = (*SUBJECT_MASK_OUTPUT_PARENTS, "refined_subject_masks_runs")
 MAX_ARTIFACT_FILENAME_CHARS = 220
 DEFAULT_FINALIZE_DENSE_MASK_ROW_CHUNK = 128
-_EXPECTED_NON_ZARR_SIDECAR_WARNING_RE = (
-    r"Object at (logs|\.failed|\.imports|\.incoming) is not recognized as a component "
-    r"of a Zarr hierarchy\."
-)
-_ZARR_V3_CONSOLIDATED_METADATA_WARNING_RE = (
-    r"Consolidated metadata is currently not part in the Zarr format 3 specification\."
-)
-
-
 @dataclass(frozen=True)
 class ArchivePlan:
     zarr_path: str
@@ -1011,18 +1002,7 @@ def _cleanup_output_staging(ctx: OutputStagingContext) -> None:
 def _consolidate_metadata_quietly(zarr_path: str | Path) -> None:
     """Refresh consolidated metadata without leaking known sidecar warnings to stderr."""
 
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message=_EXPECTED_NON_ZARR_SIDECAR_WARNING_RE,
-            category=UserWarning,
-        )
-        warnings.filterwarnings(
-            "ignore",
-            message=_ZARR_V3_CONSOLIDATED_METADATA_WARNING_RE,
-            category=UserWarning,
-        )
-        zarr.consolidate_metadata(str(zarr_path))
+    consolidate_metadata_capture_expected_warnings(zarr_path)
 
 
 def _open_group(path: Path) -> zarr.Group:

@@ -9,8 +9,8 @@ MEM_GB=48
 GPUS=1
 SPLIT_FINALIZATION_JOB=1
 FINALIZE_QUEUE=""
-FINALIZE_NCORES=""
-FINALIZE_MEM_GB=""
+FINALIZE_NCORES=16
+FINALIZE_MEM_GB=32
 FINALIZE_MAX_ACTIVE=""
 REGISTRY="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
 LOG_DIR=""
@@ -39,7 +39,7 @@ FINALIZE_CHUNK_SIZE=256
 FINALIZE_DENSE_MASK_ROW_CHUNK=256
 FINALIZE_EXECUTION_BACKEND="process_shards"
 FINALIZE_SCHEDULER="processes"
-FINALIZE_NUM_WORKERS="auto"
+FINALIZE_NUM_WORKERS="16"
 FINALIZE_POSTCOMPUTE_BACKEND="process_shards"
 FINALIZE_POSTCOMPUTE_CHUNK_SIZE=""
 FINALIZE_POSTCOMPUTE_NUM_WORKERS="auto"
@@ -93,8 +93,8 @@ Options:
   --gpus N                  GPUs per job (default: 1); when >0 defaults --device 0
   --single-job-finalization Run finalization inside the GPU job instead of a dependent CPU job
   --finalize-queue NAME     CPU finalization queue (default: cluster default)
-  --finalize-ncores N       CPU finalization cores (default: --ncores)
-  --finalize-mem-gb N       CPU finalization memory in GB (default: --mem-gb)
+  --finalize-ncores N       CPU finalization cores (default: 16)
+  --finalize-mem-gb N       CPU finalization memory in GB (default: 32)
   --finalize-max-active N   Max concurrent finalization jobs (default: --max-active)
   --registry PATH           Registry sqlite path (default: $PALETTE_REGISTRY_PATH or PRFS registry)
   --source filesystem|registry
@@ -156,7 +156,7 @@ Options:
   --finalize-scheduler NAME Dask scheduler for dask_worker_chunks: single-threaded|threads|processes|distributed
                             (default: processes; ignored by process_shards)
   --finalize-num-workers N|auto
-                            Refined finalizer worker count (default: auto => --ncores)
+                            Refined finalizer worker count (default: 16; auto => --finalize-ncores)
   --finalize-postcompute-backend NAME
                             serial|process_shards for eye geometry/contours (default: process_shards)
   --finalize-postcompute-chunk-size N
@@ -315,9 +315,6 @@ fi
 if [[ -z "$DEVICE" ]]; then
   DEVICE="cuda:0"
 fi
-if [[ "$FINALIZE_NUM_WORKERS" == "auto" || -z "$FINALIZE_NUM_WORKERS" ]]; then
-  FINALIZE_NUM_WORKERS="$NCORES"
-fi
 if ! [[ "$NCORES" =~ ^[0-9]+$ ]] || [[ "$NCORES" -lt 1 ]]; then
   echo "--ncores must be a positive integer." >&2
   exit 2
@@ -334,6 +331,9 @@ fi
 if ! [[ "$FINALIZE_NCORES" =~ ^[0-9]+$ ]] || [[ "$FINALIZE_NCORES" -lt 1 ]]; then
   echo "--finalize-ncores must be a positive integer." >&2
   exit 2
+fi
+if [[ "$FINALIZE_NUM_WORKERS" == "auto" || -z "$FINALIZE_NUM_WORKERS" ]]; then
+  FINALIZE_NUM_WORKERS="$FINALIZE_NCORES"
 fi
 if ! [[ "$FINALIZE_NUM_WORKERS" =~ ^[0-9]+$ ]] || [[ "$FINALIZE_NUM_WORKERS" -lt 1 ]]; then
   echo "--finalize-num-workers must be a positive integer or auto." >&2

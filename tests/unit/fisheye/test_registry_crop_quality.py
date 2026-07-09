@@ -10,11 +10,30 @@ import zarr
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry
+from fisheye.registry.extractors.crop import _crop_run_names, _get_group
 from fisheye.shared.roi_pixel_contract import crop_run_pixel_contract
 from fisheye.shared.zarr_run_completion import mark_run_complete
 from fisheye.utils.finalize_crop_flat_roi_cache_batch_registry import (
     finalize_crop_flat_roi_cache_batch_registry,
 )
+
+
+class _StaleMetadataParent:
+    def __init__(self, *, store, path: str) -> None:
+        self.store = store
+        self.path = path
+
+    def group_keys(self):
+        return []
+
+    def keys(self):
+        return []
+
+    def get(self, _key):
+        return None
+
+    def __getitem__(self, _key):
+        raise KeyError(_key)
 
 
 def _create_crop_archive(path: Path, *, session_uuid: str) -> None:
@@ -125,6 +144,17 @@ def test_schema_has_crop_quality_table_views_and_indexes(tmp_path: Path) -> None
         "idx_crop_quality_recording",
     }
     registry.close()
+
+
+def test_crop_run_names_falls_back_to_filesystem_when_metadata_is_stale(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "stale_crop_metadata.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.create_group("crop_runs/crop_hidden")
+
+    parent = _StaleMetadataParent(store=root.store, path="crop_runs")
+
+    assert _crop_run_names(parent) == ["crop_hidden"]
+    assert getattr(_get_group(parent, "crop_hidden"), "path") == "crop_runs/crop_hidden"
 
 
 def test_register_from_root_populates_crop_quality_and_latest_views(tmp_path: Path) -> None:

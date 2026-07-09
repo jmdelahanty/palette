@@ -474,6 +474,7 @@ def load_goodcopbadcop_view(
     option: InteractiveSpecOption,
     *,
     timer: Any,
+    include_companion_analyses: bool = True,
 ) -> GoodCopBadCopLoadedView:
     load_t0 = timer.perf_counter()
     run_path = _owning_chaser_distance_run_path(option)
@@ -482,18 +483,23 @@ def load_goodcopbadcop_view(
         run_path=run_path,
         artifact_name=_dashboard_artifact_name_for_option(option),
     )
-    cra_endpoint = load_goodcopbadcop_cra_primary_endpoint_data(
-        zarr_path,
-        run_path=run_path,
-    )
-    cra_near_field = load_goodcopbadcop_cra_near_field_data(
-        zarr_path,
-        run_path=run_path,
-    )
-    escape_freeze = load_goodcopbadcop_escape_freeze_data(
-        zarr_path,
-        run_path=run_path,
-    )
+    if include_companion_analyses:
+        cra_endpoint = load_goodcopbadcop_cra_primary_endpoint_data(
+            zarr_path,
+            run_path=run_path,
+        )
+        cra_near_field = load_goodcopbadcop_cra_near_field_data(
+            zarr_path,
+            run_path=run_path,
+        )
+        escape_freeze = load_goodcopbadcop_escape_freeze_data(
+            zarr_path,
+            run_path=run_path,
+        )
+    else:
+        cra_endpoint = None
+        cra_near_field = None
+        escape_freeze = None
     epoch_behavior = load_goodcopbadcop_epoch_behavior_data(
         zarr_path,
         run_path=run_path,

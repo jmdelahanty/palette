@@ -11,6 +11,17 @@ import zarr
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.type_conversions import normalize_attr as _decode_attr
 
+_ABSENT_SOURCE_RUN_SENTINELS = {"unknown", "none", "null", "n/a", "na"}
+
+
+def _decode_source_run(value: Any) -> Optional[str]:
+    text = _decode_attr(value)
+    if text is None:
+        return None
+    if text.strip().lower() in _ABSENT_SOURCE_RUN_SENTINELS:
+        return None
+    return text
+
 
 def _as_float(value: Any) -> Optional[float]:
     if value is None:
@@ -142,11 +153,24 @@ def _get_group(parent: Any, key: str) -> Any:
 
 
 def _keypoint_run_names(parent: zarr.Group) -> List[str]:
+    names: List[str] = []
     try:
         names = list(parent.group_keys())
     except Exception:
         names = [name for name in parent.keys() if isinstance(name, str)]
-    return sorted(str(name) for name in names)
+    store_root = getattr(getattr(parent, "store", None), "root", None)
+    parent_path = _decode_attr(getattr(parent, "path", None))
+    if store_root is not None and parent_path:
+        try:
+            base_path = Path(store_root) / parent_path
+            names.extend(
+                child.name
+                for child in base_path.iterdir()
+                if child.is_dir() and (child / "zarr.json").is_file()
+            )
+        except Exception:
+            pass
+    return sorted({str(name) for name in names})
 
 
 def _extract_stat_value(metric_payload: Mapping[str, Any], key: str) -> Optional[float]:
@@ -216,9 +240,9 @@ def _extract_keypoint_performance_rows(
 
     rows: List[Dict[str, Any]] = []
     for keypoint_run in _keypoint_run_names(keypoints_parent):
-        if keypoint_run not in keypoints_parent:
+        keypoint_group = _get_group(keypoints_parent, keypoint_run)
+        if keypoint_group is None:
             continue
-        keypoint_group = keypoints_parent[keypoint_run]
         attrs = dict(keypoint_group.attrs)
         summary = _coerce_mapping(attrs.get("summary_statistics")) or {}
         parameters = _coerce_mapping(attrs.get("parameters")) or {}
@@ -306,9 +330,9 @@ def _extract_keypoint_performance_rows(
                 "model_set_id": model_set_id,
                 "model_path": model_path,
                 "model_name": model_name,
-                "source_crop_run": _decode_attr(attrs.get("source_crop_run")),
-                "source_detect_run": _decode_attr(attrs.get("source_detect_run")),
-                "source_refined_run": _decode_attr(attrs.get("source_refined_run")),
+                "source_crop_run": _decode_source_run(attrs.get("source_crop_run")),
+                "source_detect_run": _decode_source_run(attrs.get("source_detect_run")),
+                "source_refined_run": _decode_source_run(attrs.get("source_refined_run")),
                 "source_crop_storage_mode": _decode_attr(
                     _lookup_attr(attrs, provenance_inputs, "source_crop_storage_mode")
                 ),

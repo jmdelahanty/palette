@@ -1,0 +1,10 @@
+outputs/
+*.csv
+*.mp4
+*.png
+*.tif
+*.tiff
+*.zarr/
+*.npy
+*.npz
+config.toml

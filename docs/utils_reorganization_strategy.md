@@ -101,10 +101,16 @@ throwaway migration committed to the permanent surface per schema change, never 
 
 - **Eye-mask deletes are already done** (severance executed) — the prior review's
   ~4,500-LOC eye-mask delete list is gone; do not re-recommend it.
-- **High-confidence deletes (7, read-and-confirmed, zero refs, oldest in tree):** the
-  raw-H5 debug cluster — `read_h5_data`, `check_h5_tracking_data`,
-  `check_h5_subject_metadata`, `fix_stimulus_mode_mappings`, `backfill_h5_metadata`,
-  `patch_legacy_h5`, `inspect_zarr_events`.
+- **Correction after the 2026-07-08 H5 audit:** the previously listed
+  "high-confidence" raw-H5 deletes are **not** confirmed dead. The H5 cluster is
+  still import-adjacent operator tooling around live H5→Zarr stimulus ingestion:
+  `backfill_h5_metadata`, `fix_stimulus_mode_mappings`, `inspect_zarr_events`,
+  `read_h5_data`, `check_h5_tracking_data`, and `check_h5_subject_metadata`.
+  These files are deletion-gated per file by operator sign-off or a replacement
+  workflow, not by import-graph silence. The obsolete combined H5 timeline
+  visualizer and `patch_legacy_h5` were retired separately on 2026-07-08 after
+  operator confirmation that the visualizer is unused and enum patching now happens
+  at acquisition.
 - **Verify-then-delete migrations:** `rename_recording_zarrs_to_training`,
   `repair_keypoint_offset_corruption`, `migrate_legacy_detect_labels`, the
   subject-mask-bridge backfills — safe to remove **only once the store is confirmed
@@ -198,8 +204,12 @@ waist work. **Phases 1–3 can proceed now; runner moves (Phase 5) are gated on 
   Use one-release re-export shims (`utils/system.py` re-exports from `shared/`) then
   delete. This severs ~120 upward edges and the worst `shared→utils` edge — the
   prerequisite for forbidding `fisheye.utils`.
-- **Phase 3 — retire confirmed-dead (NOW).** Delete the 7 H5-debug files; move surviving
-  migrations to `apps/migrations/` with expiry markers; verify-then-delete the spent ones.
+- **Phase 3 — retire confirmed-dead (NOW).** Do not delete the H5 cluster as a batch.
+  Keep live/operator-gated H5 import, scanner, repair, and backfill tools until each
+  file has owner sign-off or a replacement path. `patch_legacy_h5` is the exception
+  already retired after confirming its enum-repair role has moved to acquisition.
+  Move surviving migrations to `apps/migrations/` with expiry markers;
+  verify-then-delete the spent ones.
 - **Phase 4 — trivial merges.** `validate_*` `--stage` merge; the `review_*_batch`
   driver; hoist `_register_merged_dataset_in_registry` to `shared/training_export.py`.
 - **Phase 5 — move runners (GATED on Slice D `verb(request)->Envelope`).** Do **not**

@@ -21,9 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
-import zarr
-
 from fisheye.shared.json_safety import write_json_atomic
+from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from fisheye.analysis.eye_angle_io import (
     EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2,
     EyeAngleIOError,
@@ -609,7 +608,7 @@ def _run_archive_plan(
             if status != "ok":
                 raise RuntimeError(detail)
             if args.consolidate_metadata:
-                zarr.consolidate_metadata(plan.zarr_path)
+                consolidate_metadata_capture_expected_warnings(plan.zarr_path)
     except Exception as exc:
         result.error = str(exc)
         if log_path is None:

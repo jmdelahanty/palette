@@ -14,7 +14,10 @@ should be used only when the operator has verified the physical configuration.
 
 from __future__ import annotations
 
-from fisheye.shared.zarr_helpers import infer_zarr_use as _infer_zarr_use
+from fisheye.shared.zarr_helpers import (
+    consolidate_metadata_capture_expected_warnings,
+    infer_zarr_use as _infer_zarr_use,
+)
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
 import argparse
 from dataclasses import dataclass
@@ -213,7 +216,7 @@ def _donor_calibration_plan(
     if operator_note:
         target_calibration.attrs["donor_backfill_note"] = str(operator_note)
     if consolidate_metadata:
-        zarr.consolidate_metadata(str(zarr_path))
+        consolidate_metadata_capture_expected_warnings(zarr_path)
 
     return BackfillPlan(
         zarr_path=zarr_path,
@@ -451,7 +454,7 @@ def plan_or_backfill_one(
         )
     _copy_legacy_calibration_attrs(root, overwrite_existing=overwrite_existing)
     if consolidate_metadata:
-        zarr.consolidate_metadata(str(zarr_path))
+        consolidate_metadata_capture_expected_warnings(zarr_path)
 
     return BackfillPlan(
         zarr_path=zarr_path,

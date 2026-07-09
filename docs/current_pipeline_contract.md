@@ -58,6 +58,16 @@ collection resolution before they should be treated as normal Crimson/operator
 review targets. See
 [`clipped_recording_consumer_mapping_contract.md`](clipped_recording_consumer_mapping_contract.md).
 
+For non-clipped recordings, the current canonical refined-detection surface is
+the flat top-level `refined_detect_runs/<run>/instances` table. For clipped
+recordings, the canonical refined-detection surface is the finalized clipped
+collection that selects concrete clip-local
+`clips/<clip_id>/cameras/<camera_serial>/refined_detect_runs/<run>/instances`
+tables and maps them onto the parent recording timeline. A top-level flat
+`refined_detect_runs/<run>/instances` table in a clipped analysis archive is a
+derived projection or compatibility/convenience view, not the source-preserving
+authoritative representation.
+
 ## Current Stage Contract
 
 | Family | Raw provenance | Current refined authority | Compatibility/cache surfaces | Operator/query truth |

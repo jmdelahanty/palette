@@ -10,6 +10,25 @@ import zarr
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry, _extract_keypoint_performance_rows
+from fisheye.registry.extractors.keypoint_performance import _get_group, _keypoint_run_names
+
+
+class _StaleMetadataParent:
+    def __init__(self, *, store, path: str) -> None:
+        self.store = store
+        self.path = path
+
+    def group_keys(self):
+        return []
+
+    def keys(self):
+        return []
+
+    def get(self, _key):
+        return None
+
+    def __getitem__(self, _key):
+        raise KeyError(_key)
 
 
 def _create_keypoint_archive(path: Path, *, session_uuid: str) -> None:
@@ -237,6 +256,39 @@ def test_extract_keypoint_performance_rows_prefers_created_at_utc(tmp_path: Path
 
     latest_row = next(row for row in rows if str(row["keypoint_run"]) == "keypoints_new")
     assert latest_row["keypoint_created_utc"] == "2026-02-09T00:10:00+00:00"
+
+
+def test_extract_keypoint_performance_rows_treats_unknown_source_runs_as_absent(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "keypoint_unknown_source_analysis.zarr"
+    _create_keypoint_archive(zarr_path, session_uuid="keypoint_unknown_source_uuid")
+    root = zarr.open_group(str(zarr_path), mode="a")
+    run = root["keypoints_runs"]["keypoints_new"]
+    run.attrs["source_crop_run"] = "crop_real"
+    run.attrs["source_detect_run"] = "unknown"
+    run.attrs["source_refined_run"] = "N/A"
+
+    rows = _extract_keypoint_performance_rows(
+        zarr.open_group(str(zarr_path), mode="r"),
+        zarr_path=zarr_path,
+        recording_id="keypoint_unknown_source_uuid",
+        zarr_use="analysis",
+    )
+
+    latest_row = next(row for row in rows if str(row["keypoint_run"]) == "keypoints_new")
+    assert latest_row["source_crop_run"] == "crop_real"
+    assert latest_row["source_detect_run"] is None
+    assert latest_row["source_refined_run"] is None
+
+
+def test_keypoint_run_names_falls_back_to_filesystem_when_metadata_is_stale(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "stale_keypoint_metadata.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.create_group("keypoints_runs/keypoints_hidden")
+
+    parent = _StaleMetadataParent(store=root.store, path="keypoints_runs")
+
+    assert _keypoint_run_names(parent) == ["keypoints_hidden"]
+    assert getattr(_get_group(parent, "keypoints_hidden"), "path") == "keypoints_runs/keypoints_hidden"
 
 
 def test_extract_keypoint_performance_rows_reads_pixel_contract_from_provenance_inputs(

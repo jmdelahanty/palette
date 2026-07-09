@@ -154,6 +154,10 @@ _PROCESS_SHARD_POSTCOMPUTE_BACKEND = "process_shards"
 _ASSIGNMENT_REUSE_POSTCOMPUTE_BACKEND = "assignment_reuse"
 _ASSIGNMENT_REUSE_EYE_GEOMETRY_SOURCE = "eyes_union_assignment_measure_mask"
 _POSTCOMPUTE_EYE_GEOMETRY_SOURCE = "refined_subject_component_mask_measure_mask"
+_EYE_GEOMETRY_REUSE_STATUS_NOT_REQUESTED = "not_requested"
+_EYE_GEOMETRY_REUSE_STATUS_ASSIGNMENT_REUSE = "assignment_reuse"
+_EYE_GEOMETRY_REUSE_STATUS_FALLBACK_REFIT = "fallback_refit"
+_EYE_GEOMETRY_FALLBACK_WARNING_CODE = "EYE_GEOMETRY_FALLBACK_REFIT"
 _MASK_STORAGE_CHOICES = (
     "dense_uint8",
     "dense_and_bitpacked",
@@ -4618,6 +4622,10 @@ def finalize_subject_mask_run(
         and sum(int(item["stop_row"]) - int(item["start_row"]) for item in assignment_eye_geometry_shards)
         == int(total_rows)
     )
+    assignment_eye_geometry_rows = int(
+        sum(int(item["stop_row"]) - int(item["start_row"]) for item in assignment_eye_geometry_shards)
+    )
+    finalizer_warnings: list[dict[str, object]] = []
     postcompute_summary: dict[str, object] = {}
     contour_summaries: list[dict[str, object]] = []
 
@@ -4689,6 +4697,34 @@ def finalize_subject_mask_run(
     if eye_components_present and not write_eye_geometry:
         run_group.attrs["eye_geometry_status"] = "deferred"
         run_group.attrs["eye_geometry_deferred_reason"] = "write_eye_geometry=false"
+
+    if not eye_geometry_requested:
+        eye_geometry_reuse_status = _EYE_GEOMETRY_REUSE_STATUS_NOT_REQUESTED
+    elif assignment_eye_geometry_complete:
+        eye_geometry_reuse_status = _EYE_GEOMETRY_REUSE_STATUS_ASSIGNMENT_REUSE
+    else:
+        eye_geometry_reuse_status = _EYE_GEOMETRY_REUSE_STATUS_FALLBACK_REFIT
+        warning = {
+            "code": _EYE_GEOMETRY_FALLBACK_WARNING_CODE,
+            "message": (
+                "Eye geometry was requested but assignment-time geometry was incomplete; "
+                "the finalizer used the fallback mask-refit path."
+            ),
+            "assignment_geometry_rows": int(assignment_eye_geometry_rows),
+            "expected_rows": int(total_rows),
+            "assignment_geometry_shards": int(len(assignment_eye_geometry_shards)),
+            "expected_shards": int(len(chunk_ranges)),
+        }
+        finalizer_warnings.append(warning)
+        progress.emit("warning", **warning)
+    run_group.attrs["eye_geometry_reuse_status"] = str(eye_geometry_reuse_status)
+    run_group.attrs["eye_geometry_assignment_geometry_rows"] = int(assignment_eye_geometry_rows)
+    run_group.attrs["eye_geometry_assignment_geometry_expected_rows"] = int(total_rows if eye_geometry_requested else 0)
+    run_group.attrs["eye_geometry_assignment_geometry_shards"] = int(len(assignment_eye_geometry_shards))
+    run_group.attrs["eye_geometry_assignment_geometry_expected_shards"] = int(
+        len(chunk_ranges) if eye_geometry_requested else 0
+    )
+    run_group.attrs["smart_finalizer_warnings"] = list(_json_safe(finalizer_warnings))
 
     if postcompute_backend != _PROCESS_SHARD_POSTCOMPUTE_BACKEND or not component_contours_requested:
         if component_contours_requested:
@@ -4909,6 +4945,14 @@ def finalize_subject_mask_run(
             "postcompute_chunk_size": int(normalized_postcompute_chunk_size),
             "postcompute_num_workers": normalized_postcompute_num_workers,
             "postcompute_summary": dict(_json_safe(postcompute_summary)),
+            "eye_geometry_reuse_status": str(eye_geometry_reuse_status),
+            "eye_geometry_assignment_geometry_rows": int(assignment_eye_geometry_rows),
+            "eye_geometry_assignment_geometry_expected_rows": int(total_rows if eye_geometry_requested else 0),
+            "eye_geometry_assignment_geometry_shards": int(len(assignment_eye_geometry_shards)),
+            "eye_geometry_assignment_geometry_expected_shards": int(
+                len(chunk_ranges) if eye_geometry_requested else 0
+            ),
+            "warnings": list(_json_safe(finalizer_warnings)),
             "component_contours": contour_summaries,
             "review_counts": review_counts,
             "eyes_union_assignment_summary": (

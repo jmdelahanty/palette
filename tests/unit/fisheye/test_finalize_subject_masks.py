@@ -892,17 +892,51 @@ def test_finalize_subject_mask_run_writes_assignment_reuse_eye_geometry_without_
     )
 
     assert summary["write_eye_geometry"] is True
+    assert summary["eye_geometry_reuse_status"] == "assignment_reuse"
+    assert summary["eye_geometry_assignment_geometry_rows"] == summary["roi_count"]
+    assert summary["warnings"] == []
     phase_seconds = summary["timing_summary"]["phase_seconds"]
     assert "write_eye_geometry_from_assignment" in phase_seconds
     assert "write_eye_geometry" not in phase_seconds
 
     run = root["refined_subject_masks_runs"]["refined_subject_masks_assignment_reuse_geometry"]
     assert run.attrs["eye_geometry_status"] == "computed"
+    assert run.attrs["eye_geometry_reuse_status"] == "assignment_reuse"
+    assert run.attrs["smart_finalizer_warnings"] == []
     assert run.attrs["eye_geometry_postcompute_backend"] == "assignment_reuse"
     assert run.attrs["eye_geometry_source_measurement"] == "eyes_union_assignment_measure_mask"
     assert run["components/eye_left/geometry"].attrs["source_measurement"] == "eyes_union_assignment_measure_mask"
     assert run["components/eye_right/geometry"].attrs["source_measurement"] == "eyes_union_assignment_measure_mask"
     assert run["relations/eye_pair/metrics"].attrs["source_measurement"] == "eyes_union_assignment_measure_mask"
+
+
+def test_finalize_subject_mask_run_warns_when_eye_geometry_falls_back_to_refit(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root()
+
+    monkeypatch.setattr(mod, "_eye_geometry_from_assignment_result", lambda _assignment: None)
+
+    summary = mod.finalize_subject_mask_run(
+        root,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_fallback_geometry_warning",
+        chunk_size=1,
+        write_eye_geometry=True,
+    )
+
+    assert summary["write_eye_geometry"] is True
+    assert summary["eye_geometry_reuse_status"] == "fallback_refit"
+    assert summary["eye_geometry_assignment_geometry_rows"] == 0
+    assert summary["eye_geometry_assignment_geometry_expected_rows"] == summary["roi_count"]
+    assert summary["warnings"][0]["code"] == "EYE_GEOMETRY_FALLBACK_REFIT"
+    phase_seconds = summary["timing_summary"]["phase_seconds"]
+    assert "write_eye_geometry_from_assignment" not in phase_seconds
+    assert "write_eye_geometry" in phase_seconds
+
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_fallback_geometry_warning"]
+    assert run.attrs["eye_geometry_status"] == "computed"
+    assert run.attrs["eye_geometry_reuse_status"] == "fallback_refit"
+    assert run.attrs["smart_finalizer_warnings"][0]["code"] == "EYE_GEOMETRY_FALLBACK_REFIT"
 
 
 def test_finalize_subject_mask_run_can_write_body_and_swim_contours(monkeypatch) -> None:

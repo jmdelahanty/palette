@@ -19,7 +19,7 @@ import zarr
 
 from fisheye.shared.row_lineage import normalize_chunks_for_data
 from fisheye.shared.zarr_discovery import iter_filesystem_zarrs as _iter_zarr
-from fisheye.shared.zarr_helpers import infer_zarr_use
+from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings, infer_zarr_use
 
 
 IDENTITY_ARRAY_NAMES = ("source_refined_row_ids", "source_detect_row_index")
@@ -463,7 +463,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.consolidate_metadata and modified_zarrs:
         for zarr_path in sorted(modified_zarrs):
             try:
-                zarr.consolidate_metadata(str(zarr_path))
+                consolidate_metadata_capture_expected_warnings(zarr_path)
                 consolidated += 1
             except Exception as exc:
                 errors += 1

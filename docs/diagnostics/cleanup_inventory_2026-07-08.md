@@ -218,18 +218,23 @@ session's census confirmed the reframe the hard way.
   `setup_experiment_metadata.py` (census said unreferenced) is invoked as a
   subprocess script by `cli/interactive_launcher.py` — a near-miss deletion of
   live code. `patch_legacy_h5.py` (strategy said zero-ref) is referenced by
-  `visualization/visualize_experiment_timeline_combined_h5.py`. **Gate deletion
-  on code+test+script greps of the bare module name, not import-graph class.**
+  the now-retired `visualization/visualize_experiment_timeline_combined_h5.py`.
+  That visualizer was deleted after operator confirmation that it is no longer
+  used; `patch_legacy_h5.py` was then deleted after operator confirmation that
+  enum patching now happens at acquisition. **Gate deletion on code+test+script
+  greps of the bare module name plus operator sign-off, not import-graph class.**
 - **H5 is not fully legacy.** `analysis/create_analysis_zarr.py`,
   `analysis/import_stimulus_to_zarr.py`, `analysis/calibration_manager.py` still
   ingest H5.
 
-### What this session actually executed: ZERO utils deletions — and why
+### What this session actually executed for utils — and why
 
 The strategy's "7 high-confidence deletes (read-and-confirmed, zero refs)" list
 did **not** survive per-file inspection. Under operator review (Jeremy flagged
-the `check_h5_*` scripts as import-adjacent), all 7 turned out to be the **live
-H5→zarr stimulus-import toolkit**, not spent debris:
+the `check_h5_*` scripts as import-adjacent), the H5 group turned out to be the
+**live or operator-gated H5→zarr stimulus-import toolkit**, not spent debris.
+Six files remain gated; one file, `patch_legacy_h5.py`, was deleted only after
+the separate confirmation that enum patching now happens at acquisition:
 
 | File | Reality |
 |---|---|
@@ -237,7 +242,7 @@ H5→zarr stimulus-import toolkit**, not spent debris:
 | `fix_stimulus_mode_mappings.py` | mutates `/enums/stimulus_modes` in Citrus H5 — stimulus repair tool |
 | `inspect_zarr_events.py` | verifies `import_stimulus_to_zarr` captured the event stream |
 | `read_h5_data.py`, `check_h5_tracking_data.py`, `check_h5_subject_metadata.py` | operator eyeball scanners for the same H5 import path |
-| `patch_legacy_h5.py` | referenced by `visualization/visualize_experiment_timeline_combined_h5.py` |
+| `patch_legacy_h5.py` | deleted after confirming enum patching happens at acquisition and the H5 timeline visualizer is retired |
 
 **Lesson (reinforces the strategy's own guardrail, harder than it stated it):**
 "H5 + old" read as "dead" to both my census *and* four opus agents; it was
@@ -267,5 +272,13 @@ regenerate on demand rather than maintaining a second copy.
   `utils_reorganization_strategy.md` (2026-07-04) after discovering it as the
   authoritative plan. Attempted the strategy's 7-file "high-confidence delete";
   reverted all of it — operator review found the H5 cluster is the live
-  stimulus-import toolkit. **Net utils deletions: 0.** No competing utils plan
-  is maintained in this doc.
+  stimulus-import toolkit. At that point, **net utils deletions: 0**. No
+  competing utils plan is maintained in this doc.
+- 2026-07-08: deleted obsolete
+  `src/fisheye/visualization/visualize_experiment_timeline_combined_h5.py` after
+  operator confirmation that the H5 timeline visualizer is unused. This removes
+  the live import of `patch_legacy_h5.py`.
+- 2026-07-08: deleted `src/fisheye/utils/patch_legacy_h5.py` after operator
+  confirmation that legacy enum patching now happens at acquisition. The
+  remaining H5 import, scanner, repair, and backfill tools are still
+  operator-gated per file.

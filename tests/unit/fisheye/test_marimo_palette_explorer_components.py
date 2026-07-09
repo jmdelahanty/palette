@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
 import time
 
+import apps.marimo.components.registry as registry_component
 import numpy as np
 import polars as pl
 import plotly.express as px
@@ -45,7 +47,8 @@ from fisheye.analysis.cra_near_field import (
 from fisheye.analysis.chaser_distance_runs import write_chaser_distance_run
 from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
 from fisheye.visualization.goodcopbadcop_interactive import (
-    DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT,
+    CHASER_DASHBOARD_RENDERER,
+    DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT,
     GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
 )
 from fisheye.analysis.chaser_egocentric_bearing import (
@@ -193,12 +196,12 @@ def test_palette_explorer_registry_discovers_goodcopbadcop_interactive_spec(tmp_
 
     assert len(options) == 1
     option = options[0]
-    assert option.renderer == GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER
+    assert option.renderer == CHASER_DASHBOARD_RENDERER
     assert option.renderer in supported_renderer_ids()
     assert option.is_supported is True
     assert is_goodcopbadcop_option(option) is True
     assert option.run_path == "analysis/chaser_distance_runs/chaser_distance_1"
-    assert option.artifact_name == DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT
+    assert option.artifact_name == DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT
     assert option.artifact_path == artifact_path_for(option.run_path, option.artifact_name)
     assert option.spec["source_runs"]["detection_occupancy"] == "occupancy_1"
 
@@ -210,6 +213,84 @@ def test_palette_explorer_registry_discovers_goodcopbadcop_interactive_spec(tmp_
     )
     assert filtered == options
     assert discover_interactive_spec_options(zarr_path, renderer_filter="missing-renderer") == []
+
+
+def test_palette_explorer_discovers_interactive_specs_from_manifest_without_recursive_walk(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_spec(tmp_path)
+
+    def _fail_recursive_walk(_root):
+        raise AssertionError("recursive visualization walk should not be used when manifest entries exist")
+
+    monkeypatch.setattr(registry_component, "iter_visualization_artifacts", _fail_recursive_walk)
+
+    options = discover_interactive_spec_options(zarr_path)
+
+    assert len(options) == 1
+    assert options[0].renderer == CHASER_DASHBOARD_RENDERER
+
+
+def test_palette_explorer_registry_backed_recording_list_is_lazy(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    first = _make_archive_with_goodcopbadcop_spec(
+        tmp_path / "2026-06-23T16-01-09Z_arena_1_RedScare" / "zarr"
+    )
+    second = _make_archive_with_goodcopbadcop_spec(
+        tmp_path / "2026-06-23T17-16-51Z_arena_3_RedScare" / "zarr"
+    )
+    other = _make_archive_with_goodcopbadcop_spec(
+        tmp_path / "2026-06-14T21-12-08Z_arena_1_GoodCopBadCop" / "zarr"
+    )
+    registry = tmp_path / "palette_registry.sqlite"
+    with sqlite3.connect(registry) as conn:
+        conn.execute(
+            """
+            CREATE TABLE datasets (
+                dataset_id TEXT,
+                recording_id TEXT,
+                zarr_path TEXT,
+                zarr_use TEXT,
+                status TEXT
+            );
+            """
+        )
+        conn.executemany(
+            "INSERT INTO datasets(dataset_id, recording_id, zarr_path, zarr_use, status) VALUES (?, ?, ?, ?, ?);",
+            [
+                ("red-1", "2026-06-23T16-01-09Z_arena_1_RedScare", str(first), "analysis", "active"),
+                ("red-2", "2026-06-23T17-16-51Z_arena_3_RedScare", str(second), "analysis", "active"),
+                ("other-1", "2026-06-14T21-12-08Z_arena_1_GoodCopBadCop", str(other), "analysis", "active"),
+                ("missing-1", "2026-06-23T18-00-00Z_arena_4_RedScare", str(tmp_path / "missing.zarr"), "analysis", "missing"),
+            ],
+        )
+
+    def _fail_directory_discovery(*_args, **_kwargs):
+        raise AssertionError("directory discovery should not be used when registry_path is provided")
+
+    def _fail_spec_discovery(*_args, **_kwargs):
+        raise AssertionError("registry-backed recording list should not open each zarr eagerly")
+
+    monkeypatch.setattr(registry_component, "_candidate_analysis_zarrs", _fail_directory_discovery)
+    monkeypatch.setattr(registry_component, "discover_interactive_spec_options", _fail_spec_discovery)
+
+    options = discover_protocol_recording_options(
+        first,
+        registry_path=registry,
+        name_contains="RedScare",
+    )
+
+    assert [option.recording_id for option in options] == [
+        "2026-06-23T16-01-09Z_arena_1_RedScare",
+        "2026-06-23T17-16-51Z_arena_3_RedScare",
+    ]
+    assert {option.zarr_path for option in options} == {first, second}
+    assert all(option.spec_counts_loaded is False for option in options)
+    assert all(option.interactive_spec_count == 0 for option in options)
+    assert all(option.supported_spec_count == 0 for option in options)
 
 
 def test_palette_explorer_discovers_sibling_goodcopbadcop_recordings(tmp_path) -> None:
@@ -242,7 +323,7 @@ def test_palette_explorer_discovers_sibling_goodcopbadcop_recordings(tmp_path) -
     assert {option.zarr_path for option in options} == {first, second}
     assert all(option.supported_spec_count == 1 for option in options)
     assert all(
-        option.renderer_counts == {GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER: 1}
+        option.renderer_counts == {CHASER_DASHBOARD_RENDERER: 1}
         for option in options
     )
 
@@ -586,6 +667,35 @@ def test_goodcopbadcop_component_loads_and_renders_cra_near_field(tmp_path) -> N
         "CRA Near-Field: Global-State QC",
     ]
     assert figures[5].layout.yaxis.range == (0, 1)
+
+
+def test_goodcopbadcop_component_can_skip_companion_analysis_loads(tmp_path) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_cra_near_field_spec(tmp_path)
+    _add_track_kinematics_run(zarr_path)
+    _add_swim_bout_run(zarr_path)
+    result = build_goodcopbadcop_epoch_behavior_summary_result(
+        zarr_path,
+        chaser_distance_run="chaser_distance_1",
+    )
+    write_goodcopbadcop_epoch_behavior_summary_component(
+        zarr_path,
+        result,
+        overwrite=True,
+    )
+    option = discover_interactive_spec_options(zarr_path)[0]
+
+    loaded = load_goodcopbadcop_view(
+        zarr_path,
+        option,
+        timer=time,
+        include_companion_analyses=False,
+    )
+
+    assert loaded.cra_endpoint is None
+    assert loaded.cra_near_field is None
+    assert loaded.escape_freeze is None
+    assert loaded.epoch_behavior is not None
+    assert loaded.epoch_summary_computed_in_viewer is False
 
 
 def test_goodcopbadcop_controls_do_not_read_widget_values_during_creation(tmp_path) -> None:

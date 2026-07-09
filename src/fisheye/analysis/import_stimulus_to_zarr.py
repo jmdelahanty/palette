@@ -111,6 +111,7 @@ from fisheye.shared.citrus_enums import (
 )
 from fisheye.shared.json_safety import json_attr_safe, strict_json_dumps
 from fisheye.shared.run_provenance import build_writer_run_provenance
+from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 
 
@@ -1655,8 +1656,9 @@ def backfill_stimulus_step_metadata(
             add_detail("error", run_name=run_name, source_h5=str(h5_path), reason=str(exc))
 
     if apply and consolidate_metadata:
-        zarr.consolidate_metadata(str(zarr_path))
+        consolidate_report = consolidate_metadata_capture_expected_warnings(zarr_path)
         summary["consolidated_metadata"] = True
+        summary["metadata_consolidation"] = consolidate_report
     else:
         summary["consolidated_metadata"] = False
 

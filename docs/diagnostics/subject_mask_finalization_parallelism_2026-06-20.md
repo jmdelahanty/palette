@@ -637,3 +637,86 @@ Interpretation: `cc3d` is worth keeping in the benchmark harness and may be wort
 an opt-in connected-components backend after stage-level profiling, but the current
 data does not justify replacing OpenCV globally. cuCIM was parity-correct but slower
 than both OpenCV and `cc3d` on these CPU-sized real slices.
+
+## 2026-07-08 Local `/tmp` Finalizer Worker Sweep
+
+Question: after the primitive/backend work, is the production bottleneck still
+`finalize_component_mask`, and how many process-shard workers are useful when PRFS/NFS
+write noise is removed?
+
+Diagnostic:
+
+```bash
+scripts/py -m fisheye.diagnostics.benchmark_subject_mask_full_finalizer \
+  /groups/johnson/johnsonlab/jeremy/recordings/2026-06-14T21-12-08Z_arena_1_GoodCopBadCop/zarr/2026-06-14T21-12-08Z_arena_1_GoodCopBadCop_analysis.zarr \
+  --source-run subject_masks_unet_registry_subject_mask_dense_and_rle_smoke_20260620_apply_01 \
+  --start-row 60000 \
+  --roi-count <1024-or-4096> \
+  --chunk-size 256 \
+  --metric-level cheap \
+  --execution-backend process_shards \
+  --scheduler processes \
+  --num-workers <N> \
+  --mask-storage dense_uint8 \
+  --temp-dir /tmp \
+  --keep-temp
+```
+
+This copies the selected source rows into a local temporary Zarr first, then runs the
+finalizer against that local store. Copy time is reported separately, so finalizer wall
+time is not dominated by PRFS writes.
+
+### 1024-row slice
+
+Rows: `60000:61024`. With `chunk_size=256`, this creates only four worker chunks.
+
+| case | workers | chunks | finalizer s | rows/s | copy s |
+|---|---:|---:|---:|---:|---:|
+| `serial_driver` | 1 | 4 | 24.707 | 41.45 | n/a |
+| `process_shards` | 2 | 4 | 14.547 | 71.01 | 2.799 |
+| `process_shards` | 4 | 4 | 8.839 | 117.56 | 2.767 |
+| `process_shards` | 8 | 4 | 9.318 | 111.47 | 3.014 |
+| `process_shards` | 12 | 4 | 9.211 | 112.50 | 2.689 |
+
+Interpretation:
+
+- Four workers saturated the four available 256-row chunks.
+- More workers did not help because there was no additional row-shard work to distribute.
+- For this slice, forcing `cv2.setNumThreads(1)` with four process workers was slower:
+  `9.595s` / `108.18 rows/s` versus default OpenCV threading at `8.839s` /
+  `117.56 rows/s`.
+
+### 4096-row slice
+
+Rows: `60000:64096`. With `chunk_size=256`, this creates sixteen worker chunks.
+
+| case | workers | chunks | finalizer s | rows/s | copy s |
+|---|---:|---:|---:|---:|---:|
+| `process_shards` | 4 | 16 | 42.715 | 96.33 | 7.794 |
+| `process_shards` | 8 | 16 | 32.892 | 125.11 | 8.161 |
+| `process_shards` | 12 | 16 | 33.127 | 124.33 | 8.440 |
+| `process_shards` | 16 | 16 | 27.599 | 149.29 | 8.681 |
+
+Interpretation:
+
+- Larger slices expose more safe 256-row chunks, so higher worker counts become useful.
+- `16` workers was fastest on this workstation-sized local benchmark because there were
+  sixteen chunk-aligned shards available.
+- Per-phase seconds in `smart_finalizer_timing_summary.phase_seconds` are summed across
+  worker processes. Use finalizer wall time / rows per second for worker-count comparisons.
+
+### Operational conclusion
+
+For full GoodCopBadCop-scale recordings, the finalizer should not use a fixed low worker
+count simply because small benchmark slices saturate early. Worker count should be chosen
+relative to the number of available 256-row chunks:
+
+```text
+effective_workers = min(requested_workers, ceil(row_count / 256))
+```
+
+The benchmark supports testing higher CPU finalizer worker counts on cluster jobs
+(`12-16` workers) when the scheduler allocation and storage path can support it. It does
+not justify changing the connected-components primitive globally: OpenCV remains the
+production default, and the main speed lever in this result is row-sharded process
+parallelism.

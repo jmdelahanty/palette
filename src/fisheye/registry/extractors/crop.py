@@ -73,11 +73,60 @@ def _normalize_path_text(value: Any) -> Optional[str]:
 
 
 def _crop_run_names(crop_parent: zarr.Group) -> List[str]:
+    names: List[str] = []
     try:
         names = list(crop_parent.group_keys())
     except Exception:
         names = [name for name in crop_parent.keys() if isinstance(name, str)]
-    return sorted(str(name) for name in names)
+    store_root = getattr(getattr(crop_parent, "store", None), "root", None)
+    parent_path = _decode_attr(getattr(crop_parent, "path", None))
+    if store_root is not None and parent_path:
+        try:
+            base_path = Path(store_root) / parent_path
+            names.extend(
+                child.name
+                for child in base_path.iterdir()
+                if child.is_dir() and (child / "zarr.json").is_file()
+            )
+        except Exception:
+            pass
+    return sorted({str(name) for name in names})
+
+
+def _open_child_group(parent: Any, key: str) -> Any:
+    store = getattr(parent, "store", None)
+    if store is None:
+        return None
+    parent_path = _decode_attr(getattr(parent, "path", None))
+    child_path = f"{parent_path}/{key}" if parent_path else key
+    try:
+        return zarr.open_group(store=store, path=child_path, mode="r")
+    except TypeError:
+        try:
+            return zarr.open_group(store, mode="r", path=child_path)
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def _get_group(parent: Any, key: str) -> Any:
+    child = None
+    getter = getattr(parent, "get", None)
+    if callable(getter):
+        try:
+            child = getter(key)
+        except Exception:
+            child = None
+    if child is not None:
+        return child
+    try:
+        child = parent[key]
+    except Exception:
+        child = None
+    if child is not None:
+        return child
+    return _open_child_group(parent, key)
 
 
 def _infer_crop_storage_mode(crop_group: zarr.Group) -> Optional[str]:
@@ -120,9 +169,9 @@ def _extract_crop_quality_rows(
 
     rows: List[Dict[str, Any]] = []
     for crop_run in _crop_run_names(crop_parent):
-        if crop_run not in crop_parent:
+        crop_group = _get_group(crop_parent, crop_run)
+        if crop_group is None:
             continue
-        crop_group = crop_parent[crop_run]
         summary = _coerce_mapping(crop_group.attrs.get("summary_statistics")) or {}
         review_status = _coerce_mapping(crop_group.attrs.get("crop_review_status")) or {}
 

@@ -161,11 +161,28 @@ if [[ -e "$RUN_DIR" ]]; then
   echo "Choose a different --run-id or --log-dir." >&2
   exit 2
 fi
-mkdir -p "$RUN_DIR"
 
 if [[ -z "$PUBLIC_CACHE_DIR" ]]; then
   PUBLIC_CACHE_DIR="${PUBLIC_CACHE_ROOT}/${SAFE_WORKFLOW_ID}/roi_cache"
 fi
+
+reject_recordings_cache_dir() {
+  local cache_dir="$1"
+  local recordings_root="/groups/johnson/johnsonlab/jeremy/recordings"
+  local resolved_cache_dir resolved_recordings_root
+  resolved_cache_dir="$(realpath -m "$cache_dir")"
+  resolved_recordings_root="$(realpath -m "$recordings_root")"
+  if [[ "$resolved_cache_dir" == "$resolved_recordings_root" || "$resolved_cache_dir" == "$resolved_recordings_root"/* ]]; then
+    echo "Refusing to publish disposable ROI caches under the recordings root:" >&2
+    echo "  cache_dir=$resolved_cache_dir" >&2
+    echo "  recordings_root=$resolved_recordings_root" >&2
+    echo "Use --public-cache-root /misc/public/palette_cache or another non-recordings scratch/cache root." >&2
+    exit 2
+  fi
+}
+reject_recordings_cache_dir "$PUBLIC_CACHE_DIR"
+
+mkdir -p "$RUN_DIR"
 
 CROP_ARGS=(
   "$ZARR_PATH"

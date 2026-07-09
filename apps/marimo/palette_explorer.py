@@ -101,6 +101,7 @@ def _(Path, discover_protocol_recording_options, mo):
     cli_args = mo.cli_args()
     zarr_path_raw = cli_args.get("zarr-path")
     recordings_root_raw = cli_args.get("recordings-root")
+    registry_raw = cli_args.get("registry")
     recording_name_contains = cli_args.get("recording-name-contains", "GoodCopBadCop")
     initial_renderer = cli_args.get("renderer")
     initial_run_path = cli_args.get("run-path")
@@ -116,6 +117,7 @@ def _(Path, discover_protocol_recording_options, mo):
     recording_options = discover_protocol_recording_options(
         seed_zarr_path,
         recordings_root=Path(str(recordings_root_raw)) if recordings_root_raw else None,
+        registry_path=Path(str(registry_raw)) if registry_raw else None,
         renderer_filter=recording_selector_renderer or None,
         run_path_filter=str(initial_run_path) if initial_run_path else None,
         artifact_filter=str(initial_artifact) if initial_artifact else None,
@@ -130,6 +132,7 @@ def _(Path, discover_protocol_recording_options, mo):
         initial_artifact,
         initial_renderer,
         initial_run_path,
+        registry_raw,
         recording_options,
         recording_selector_renderer,
         seed_zarr_path,
@@ -166,6 +169,7 @@ def _(infer_recordings_root_from_zarr_path, mo, recording_options, seed_zarr_pat
                 "zarr_path": str(option.zarr_path),
                 "interactive_specs": option.interactive_spec_count,
                 "supported_specs": option.supported_spec_count,
+                "spec_counts_loaded": option.spec_counts_loaded,
                 "renderers": dict(option.renderer_counts),
             }
             for option in recording_options
@@ -205,8 +209,6 @@ def _(
         run_path_filter=str(initial_run_path) if initial_run_path else None,
         artifact_filter=str(initial_artifact) if initial_artifact else None,
     )
-    if not spec_options:
-        raise ValueError(f"No persisted interactive visualization specs were found in {zarr_path}.")
     return (spec_options,)
 
 
@@ -229,64 +231,124 @@ def _(
         "renderers": {renderer: len(options) for renderer, options in renderer_groups.items()},
         "supported_renderers": list(supported_renderer_ids()),
     }
-    spec_label_to_option = {
-        f"{index + 1}. {option.label}": option
-        for index, option in enumerate(spec_options)
-    }
-    default_label = next(
-        (
-            label
-            for label, option in spec_label_to_option.items()
-            if option.renderer in CHASER_DASHBOARD_RENDERERS
-        ),
-        None,
-    )
-    if default_label is None:
-        default_label = next(
-            (label for label, option in spec_label_to_option.items() if option.is_supported),
-            next(iter(spec_label_to_option)),
+    if not spec_options:
+        spec_label_to_option = {}
+        spec_picker = None
+        overview = mo.vstack(
+            [
+                mo.md(f"## Interactive Views\n\n`{zarr_path}`"),
+                mo.hstack(
+                    [
+                        mo.stat(label="Interactive specs", value="0"),
+                        mo.stat(label="Supported", value="0"),
+                        mo.stat(label="Renderer types", value="0"),
+                    ]
+                ),
+                mo.md(
+                    "No persisted interactive visualization specs were found for this recording. "
+                    "Run the chaser/CRA analysis for this recording first, or choose another recording."
+                ),
+                mo.tree(summary),
+            ]
         )
-    spec_picker = mo.ui.dropdown(
-        options=list(spec_label_to_option),
-        value=default_label,
-        label="Interactive view",
-    )
-    selected_preview = spec_label_to_option[default_label]
-    selected_registration_preview = renderer_registration_for(selected_preview.renderer)
-    overview = mo.vstack(
-        [
-            mo.md(f"## Interactive Views\n\n`{zarr_path}`"),
-            mo.hstack(
-                [
-                    mo.stat(label="Interactive specs", value=f"{len(spec_options):,}"),
-                    mo.stat(label="Supported", value=f"{summary['supported_specs']:,}"),
-                    mo.stat(label="Renderer types", value=f"{len(renderer_groups):,}"),
-                ]
+    else:
+        spec_label_to_option = {
+            f"{index + 1}. {option.label}": option
+            for index, option in enumerate(spec_options)
+        }
+        default_label = next(
+            (
+                label
+                for label, option in spec_label_to_option.items()
+                if option.renderer in CHASER_DASHBOARD_RENDERERS
             ),
-            spec_picker,
-            mo.md(
-                "Selected renderer: "
-                f"`{selected_registration_preview.label if selected_registration_preview else selected_preview.renderer}`"
-            ),
-            mo.tree(summary),
-        ]
-    )
+            None,
+        )
+        if default_label is None:
+            default_label = next(
+                (label for label, option in spec_label_to_option.items() if option.is_supported),
+                next(iter(spec_label_to_option)),
+            )
+        spec_picker = mo.ui.dropdown(
+            options=list(spec_label_to_option),
+            value=default_label,
+            label="Interactive view",
+        )
+        selected_preview = spec_label_to_option[default_label]
+        selected_registration_preview = renderer_registration_for(selected_preview.renderer)
+        overview = mo.vstack(
+            [
+                mo.md(f"## Interactive Views\n\n`{zarr_path}`"),
+                mo.hstack(
+                    [
+                        mo.stat(label="Interactive specs", value=f"{len(spec_options):,}"),
+                        mo.stat(label="Supported", value=f"{summary['supported_specs']:,}"),
+                        mo.stat(label="Renderer types", value=f"{len(renderer_groups):,}"),
+                    ]
+                ),
+                spec_picker,
+                mo.md(
+                    "Selected renderer: "
+                    f"`{selected_registration_preview.label if selected_registration_preview else selected_preview.renderer}`"
+                ),
+                mo.tree(summary),
+            ]
+        )
     overview
     return spec_label_to_option, spec_picker
 
 
 @app.cell
 def _(is_goodcopbadcop_option, renderer_registration_for, spec_label_to_option, spec_picker):
-    selected_spec_option = spec_label_to_option[spec_picker.value]
-    selected_registration = renderer_registration_for(selected_spec_option.renderer)
-    selected_component_key = selected_registration.component_key if selected_registration is not None else ""
-    selected_is_goodcopbadcop = is_goodcopbadcop_option(selected_spec_option)
+    if spec_picker is None:
+        selected_spec_option = None
+        selected_registration = None
+        selected_component_key = ""
+        selected_is_goodcopbadcop = False
+    else:
+        selected_spec_option = spec_label_to_option[spec_picker.value]
+        selected_registration = renderer_registration_for(selected_spec_option.renderer)
+        selected_component_key = selected_registration.component_key if selected_registration is not None else ""
+        selected_is_goodcopbadcop = is_goodcopbadcop_option(selected_spec_option)
     return selected_component_key, selected_is_goodcopbadcop, selected_registration, selected_spec_option
 
 
 @app.cell
+def _(CHASER_DASHBOARD_RENDERERS, mo, selected_is_goodcopbadcop, selected_spec_option):
+    def _truthy(value):
+        return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    if selected_is_goodcopbadcop and selected_spec_option is not None:
+        _cli_args = mo.cli_args()
+        companion_default = (
+            selected_spec_option.renderer not in CHASER_DASHBOARD_RENDERERS
+            or _truthy(_cli_args.get("load-companion-panels"))
+        )
+        gcb_load_companion_panels = mo.ui.checkbox(
+            value=companion_default,
+            label="Load CRA / near-field / escape panels",
+        )
+        gcb_companion_panel_control_output = mo.vstack(
+            [
+                gcb_load_companion_panels,
+                mo.md(
+                    "Companion panels read additional persisted analysis components. "
+                    "Leave this off for faster bout/trajectory inspection."
+                ),
+            ]
+        )
+    else:
+        gcb_load_companion_panels = None
+        gcb_companion_panel_control_output = mo.md("")
+    gcb_companion_panel_control_output
+    return (gcb_load_companion_panels,)
+
+
+@app.cell
 def _(mo, selected_is_goodcopbadcop, selected_registration, selected_spec_option):
-    if selected_is_goodcopbadcop:
+    if selected_is_goodcopbadcop and selected_spec_option is not None:
+        unsupported_output = mo.md("")
+    elif selected_spec_option is None:
         unsupported_output = mo.md("")
     else:
         label = selected_registration.label if selected_registration is not None else selected_spec_option.renderer
@@ -299,10 +361,27 @@ def _(mo, selected_is_goodcopbadcop, selected_registration, selected_spec_option
 
 
 @app.cell
-def _(load_goodcopbadcop_view, selected_is_goodcopbadcop, selected_spec_option, time, zarr_path):
-    if selected_is_goodcopbadcop:
+def _(
+    CHASER_DASHBOARD_RENDERERS,
+    gcb_load_companion_panels,
+    load_goodcopbadcop_view,
+    selected_is_goodcopbadcop,
+    selected_spec_option,
+    time,
+    zarr_path,
+):
+    if selected_is_goodcopbadcop and selected_spec_option is not None:
         try:
-            gcb_loaded = load_goodcopbadcop_view(zarr_path, selected_spec_option, timer=time)
+            include_companion_analyses = (
+                selected_spec_option.renderer not in CHASER_DASHBOARD_RENDERERS
+                or bool(gcb_load_companion_panels.value)
+            )
+            gcb_loaded = load_goodcopbadcop_view(
+                zarr_path,
+                selected_spec_option,
+                timer=time,
+                include_companion_analyses=include_companion_analyses,
+            )
             gcb_load_error = None
         except Exception as exc:
             gcb_loaded = None

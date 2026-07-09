@@ -1,0 +1,48 @@
+[inputs]
+recording_dir = "/groups/johnson/johnsonlab/jeremy/jlcrsi/example_heartrate_recording"
+crop_video = "/groups/johnson/johnsonlab/jeremy/jlcrsi/example_heartrate_recording/derived/external_crop_recorder/Cam2010096_2026-06-14T21-12-08Z_arena_4_crop_external.mp4"
+crop_meta_csv = "/groups/johnson/johnsonlab/jeremy/jlcrsi/example_heartrate_recording/derived/external_crop_recorder/Cam2010096_2026-06-14T21-12-08Z_arena_4_crop_meta.csv"
+zarr_path = "/groups/johnson/johnsonlab/jeremy/jlcrsi/example_heartrate_recording/zarr/2026-06-14T21-12-08Z_arena_4_GoodCopBadCop_analysis.zarr"
+keypoint_group = "refined_keypoints_runs/refined_keypoints_2026-06-18_15-00-03"
+
+[alignment]
+# Pseudo-column resolved from the row number in crop_meta_csv. The zarr
+# keypoint frame_indices for this example start at 0 and align to crop-video
+# frame index, not camera_frame_id.
+frame_id_column = "crop_video_frame_index"
+keypoint_frame_array = "frame_indices"
+keypoint_coordinate_array = "keypoints_img"
+keypoint_valid_array = "usable_keypoints"
+origin = "eye_swim_midpoint"
+forward_axis = "swim_bladder_to_eye_midpoint"
+target_forward = "up"
+stable_width = 256
+stable_height = 256
+stable_center_x = 128.0
+stable_center_y = 128.0
+scale = 1.0
+min_forward_length_px = 8.0
+min_eye_span_px = 4.0
+stable_circular_mask = true
+stable_mask_radius_px = 122.0
+
+[probe]
+frame_start = 0
+frame_count = 120
+stride = 10
+output_dir = "playgrounds/heartrate_stabilization/outputs"
+
+[roi]
+# Placeholder stabilized-view rectangle: x, y, width, height.
+# Replace after drawing over a representative stabilized frame.
+rect = [118.0, 108.0, 20.0, 20.0]
+
+[mask]
+# Disabled for the checked example because the current zarr does not yet
+# contain subject_mask_runs or refined_subject_masks_runs. Enable after a
+# compatible mask job writes one of those groups.
+enabled = false
+parent = "auto"
+run = "latest"
+component = "subject_body"
+require_mask = false
