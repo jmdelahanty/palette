@@ -122,6 +122,28 @@ scripts/py playgrounds/heartrate_stabilization/draw_roi.py \
 For headless smoke tests, pass `--roi x,y,width,height` to write the same JSON
 without opening the selector.
 
+Build a fixed mask-relative ROI in canonical stabilized-video coordinates:
+
+```bash
+scripts/py playgrounds/heartrate_stabilization/build_mask_relative_roi.py \
+  --config playgrounds/heartrate_stabilization/config.example.toml \
+  --frame-start 0 \
+  --frame-count 6000 \
+  --mask-projection-stride 10 \
+  --body-component subject_body \
+  --eye-components eye_left,eye_right \
+  --center-mode eye_midpoint \
+  --width-px 20 \
+  --height-px 12 \
+  --output-prefix playgrounds/heartrate_stabilization/outputs/mask_relative_roi
+```
+
+This projects the subject body and eye masks into the canonical rotated frame,
+uses the lower eye-mask boundary as the top anchor and the midpoint of the
+projected eye-mask centroids as the lateral anchor, then writes a full-frame
+`roi_mask` NPZ plus a matching ROI JSON. Downstream probes can use the pair as
+`--roi-json ...mask_relative_roi.roi.json --mask-npz ...mask_relative_roi.npz`.
+
 Measure a placeholder rectangular ROI in stabilized coordinates:
 
 ```bash
