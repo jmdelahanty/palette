@@ -129,7 +129,11 @@ if [[ -e "$RUN_DIR" ]]; then
 fi
 mkdir -p "$RUN_DIR"
 mkdir -p "$RUN_DIR/source_snapshot"
-cp -a "$REPO_ROOT/src/fisheye" "$RUN_DIR/source_snapshot/"
+# The submitter may run from the shared /groups checkout while RUN_DIR is also
+# on PRFS.  Preserving source ACL/mode metadata with `cp -a` can fail there even
+# though copying file contents is allowed.  The snapshot is an import-only
+# Python source tree, so use destination-native permissions.
+cp -R "$REPO_ROOT/src/fisheye" "$RUN_DIR/source_snapshot/"
 cp "$REPO_ROOT/scripts/py" "$RUN_DIR/palette_py"
 chmod +x "$RUN_DIR/palette_py"
 git -C "$REPO_ROOT" status --short > "$RUN_DIR/source_git_status.txt"
