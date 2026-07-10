@@ -452,6 +452,8 @@ def test_write_refined_subject_mask_edit_owns_pixels_and_metadata(tmp_path: Path
         refined_run="refined_subject_masks_001",
         components=("subject_body", "swim_bladder"),
     )
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_001"]
+    area_before = float(np.asarray(run["metrics/area_px"][0, 0], dtype=np.float32))
 
     edited_mask = np.zeros((8, 8), dtype=np.uint8)
     edited_mask[2:5, 2:5] = 1
@@ -462,6 +464,7 @@ def test_write_refined_subject_mask_edit_owns_pixels_and_metadata(tmp_path: Path
         roi_index=0,
         mask=edited_mask,
         reason="crimson_refined_subject_mask_edit",
+        expected_row_revision=0,
         validate=True,
     )
 
@@ -473,20 +476,99 @@ def test_write_refined_subject_mask_edit_owns_pixels_and_metadata(tmp_path: Path
     assert summary["row_revision_after"] == 1
     assert summary["edit_applied"] is True
     assert summary["mask_changed"] is True
+    assert summary["expected_row_revision"] == 0
+    assert summary["write_scope"] == "selected_dense_component"
+    assert summary["derived_refresh_policy"] == "mark_stale"
+    assert summary["lock_scope"] == "refined_run"
+    assert summary["lock_wait_seconds"] >= 0.0
+    assert summary["lock_hold_seconds"] >= 0.0
+    assert summary["logical_mask_bytes"] == 64
+    assert summary["dense_mask_chunk_shape"] == [2, 1, 8, 8]
+    assert summary["dense_mask_touched_chunk_count"] == 1
+    assert summary["dense_mask_touched_chunk_logical_bytes"] == 128
+    assert summary["dense_mask_read_seconds"] >= 0.0
+    assert summary["authority_write_seconds"] >= 0.0
+    assert summary["validation_seconds"] >= 0.0
+    assert summary["validated"] is True
+    assert summary["validation_status"] == "passed"
+    assert summary["total_save_seconds"] >= 0.0
     assert summary["derived_mask_caches_stale"] is True
     assert summary["metrics_stale"] is True
     assert summary["contours_stale"] is True
     assert summary["updated_at_utc"]
 
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
     run = root["refined_subject_masks_runs"]["refined_subject_masks_001"]
     np.testing.assert_array_equal(np.asarray(run["masks_roi"][0, 0], dtype=np.uint8), edited_mask)
-    assert float(np.asarray(run["metrics/area_px"][0, 0], dtype=np.float32)) == 9.0
-    assert bool(np.asarray(run["metrics/mask_present"][0, 0], dtype=bool)) is True
+    assert float(np.asarray(run["metrics/area_px"][0, 0], dtype=np.float32)) == area_before
     body_group = run["components"]["subject_body"]
     assert body_group.attrs["last_row_update_reason"] == "crimson_refined_subject_mask_edit"
     assert bool(run.attrs["contours_stale"]) is True
     assert summary["contour_points"] == 0
     assert body_group["provenance"].attrs["last_update_method"] == review_mod.REFINED_SUBJECT_WRITEBACK_METHOD
+
+
+def test_write_refined_subject_mask_edit_rejects_stale_row_revision(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "subject_review.zarr"
+    _build_subject_review_archive(zarr_path)
+
+    root = zarr.open_group(str(zarr_path), mode="a")
+    review_mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+    original = np.asarray(
+        root["refined_subject_masks_runs/refined_subject_masks_001/masks_roi"][0, 0],
+        dtype=np.uint8,
+    ).copy()
+    edited_mask = np.zeros((8, 8), dtype=np.uint8)
+    edited_mask[2:5, 2:5] = 1
+
+    with np.testing.assert_raises_regex(RuntimeError, "expected row revision 7, found 0"):
+        review_mod.write_refined_subject_mask_edit(
+            zarr_path,
+            refined_run="refined_subject_masks_001",
+            component_name="subject_body",
+            roi_index=0,
+            mask=edited_mask,
+            expected_row_revision=7,
+        )
+
+    np.testing.assert_array_equal(
+        np.asarray(root["refined_subject_masks_runs/refined_subject_masks_001/masks_roi"][0, 0], dtype=np.uint8),
+        original,
+    )
+
+
+def test_write_refined_subject_mask_edit_times_out_behind_run_lock(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "subject_review.zarr"
+    _build_subject_review_archive(zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    review_mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+    edited_mask = np.zeros((8, 8), dtype=np.uint8)
+    edited_mask[2:5, 2:5] = 1
+
+    with review_mod._refined_subject_write_lock(  # noqa: SLF001
+        zarr_path,
+        refined_run="refined_subject_masks_001",
+    ):
+        with np.testing.assert_raises_regex(TimeoutError, "Timed out"):
+            review_mod.write_refined_subject_mask_edit(
+                zarr_path,
+                refined_run="refined_subject_masks_001",
+                component_name="subject_body",
+                roi_index=0,
+                mask=edited_mask,
+                expected_row_revision=0,
+                lock_timeout_seconds=0.0,
+            )
 
 
 def test_write_refined_subject_mask_edit_cli_emits_json_and_noops_same_pixels(
@@ -520,6 +602,8 @@ def test_write_refined_subject_mask_edit_cli_emits_json_and_noops_same_pixels(
             "0",
             "--mask-path",
             str(mask_path),
+            "--expected-row-revision",
+            "0",
             "--validate",
         ]
     )
@@ -543,6 +627,8 @@ def test_write_refined_subject_mask_edit_cli_emits_json_and_noops_same_pixels(
             "0",
             "--mask-path",
             str(mask_path),
+            "--expected-row-revision",
+            "1",
             "--validate",
         ]
     )
@@ -551,3 +637,5 @@ def test_write_refined_subject_mask_edit_cli_emits_json_and_noops_same_pixels(
     assert payload["status"] == "noop"
     assert payload["row_revision_before"] == 1
     assert payload["row_revision_after"] == 1
+    assert payload["validated"] is False
+    assert payload["validation_status"] == "not_needed_noop"

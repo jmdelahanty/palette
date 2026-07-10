@@ -83,7 +83,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=None,
         help="Optional subject_mask_runs/<run> override. Defaults to the refined run lineage attr.",
     )
-    parser.add_argument("--validate", action="store_true", help="Validate row-local metrics after the write.")
+    parser.add_argument(
+        "--expected-row-revision",
+        type=int,
+        default=None,
+        help="Reject the save unless the component row still has this revision.",
+    )
+    parser.add_argument(
+        "--lock-timeout-seconds",
+        type=float,
+        default=30.0,
+        help="Maximum time to wait for the Palette-owned refined-run write lock.",
+    )
+    parser.add_argument("--validate", action="store_true", help="Re-read and validate authoritative pixels/revision.")
     args = parser.parse_args(argv)
 
     mask = _load_binary_mask(args.mask_path, raw_shape=args.mask_shape)
@@ -95,6 +107,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         mask=mask,
         reason=str(args.reason),
         source_subject_mask_run=str(args.source_subject_mask_run) if args.source_subject_mask_run else None,
+        expected_row_revision=args.expected_row_revision,
+        lock_timeout_seconds=float(args.lock_timeout_seconds),
         validate=bool(args.validate),
     )
     summary["mask_path"] = str(args.mask_path)

@@ -1138,8 +1138,9 @@ Important attrs:
   relation metrics are present; `deferred` when intentionally skipped)
 - `smart_finalizer_timing_summary` and `smart_finalizer_chunk_timings` for runs
   created by `fisheye.refinement.finalize_subject_masks`
-- `execution_backend`, `dask_scheduler`, `dask_num_workers`, and
-  `dask_chunk_size` for Dask-backed smart-finalizer runs
+- `execution_backend`, `process_shard_execution_enabled`,
+  `worker_process_count`, `requested_chunk_size`, `worker_chunk_size`, and
+  `chunk_alignment` for smart-finalizer runs
 
 Refined subject-mask runs preserve the same portable crop snapshot contract as
 their upstream `subject_mask_runs/<run>` source rather than re-deriving lineage

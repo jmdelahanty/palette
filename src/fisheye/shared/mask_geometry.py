@@ -16,13 +16,24 @@ _COORD_GRID_CACHE: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
 def fill_holes(mask: np.ndarray) -> np.ndarray:
     """Fill enclosed background holes in a 2D binary mask."""
 
+    filled, _changed = fill_holes_with_change(mask)
+    return filled
+
+
+def fill_holes_with_change(mask: np.ndarray) -> tuple[np.ndarray, bool]:
+    """Fill enclosed holes and report whether any pixel changed.
+
+    The change result comes from the hole mask already required for filling, so
+    callers do not need a second full-mask equality scan.
+    """
+
     mask_bool = mask.astype(bool, copy=False)
     if not np.any(mask_bool):
-        return mask_bool.copy()
+        return mask_bool.copy(), False
     holes = hole_mask(mask_bool)
     if not np.any(holes):
-        return mask_bool.copy()
-    return mask_bool | holes
+        return mask_bool.copy(), False
+    return mask_bool | holes, True
 
 
 def hole_mask(mask: np.ndarray) -> np.ndarray:

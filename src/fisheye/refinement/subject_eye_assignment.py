@@ -22,6 +22,7 @@ _HALFPLANE_EXACT_BOUNDARY_EPS = np.float32(0.25)
 class EyesUnionAssignmentResult:
     masks: Mapping[str, np.ndarray]
     reason_labels: Mapping[str, np.ndarray]
+    spatial_metrics: Mapping[str, Mapping[str, np.ndarray]]
     assignment_status: np.ndarray
     summary: dict[str, object]
     phase_seconds: Mapping[str, float]
@@ -442,6 +443,45 @@ def _join_reason_tags(tags: list[str]) -> str:
     return "|".join(str(tag) for tag in tags if str(tag).strip())
 
 
+def _empty_spatial_metric_buffers(row_count: int) -> dict[str, np.ndarray]:
+    return {
+        "mask_present": np.zeros((row_count,), dtype=bool),
+        "area_px": np.zeros((row_count,), dtype=np.float32),
+        "centroid_xy": np.zeros((row_count, 2), dtype=np.float32),
+        "centroid_valid": np.zeros((row_count,), dtype=bool),
+        "bbox_xyxy": np.zeros((row_count, 4), dtype=np.float32),
+        "bbox_valid": np.zeros((row_count,), dtype=bool),
+    }
+
+
+def _store_sparse_spatial_metrics(
+    metrics: dict[str, np.ndarray],
+    row_idx: int,
+    *,
+    xs: np.ndarray,
+    ys: np.ndarray,
+) -> None:
+    area = int(xs.size)
+    if area <= 0:
+        return
+    area_f32 = np.float32(area)
+    metrics["mask_present"][row_idx] = True
+    metrics["area_px"][row_idx] = area_f32
+    metrics["centroid_xy"][row_idx] = np.asarray(
+        [
+            xs.astype(np.float32, copy=False).sum(dtype=np.float32) / area_f32,
+            ys.astype(np.float32, copy=False).sum(dtype=np.float32) / area_f32,
+        ],
+        dtype=np.float32,
+    )
+    metrics["centroid_valid"][row_idx] = True
+    metrics["bbox_xyxy"][row_idx] = np.asarray(
+        [xs.min(), ys.min(), xs.max(), ys.max()],
+        dtype=np.float32,
+    )
+    metrics["bbox_valid"][row_idx] = True
+
+
 def _add_phase(phase_seconds: dict[str, float], name: str, started_at: float) -> None:
     phase_seconds[str(name)] = float(phase_seconds.get(str(name), 0.0)) + float(time.perf_counter() - started_at)
 
@@ -495,6 +535,10 @@ def assign_eyes_union_to_lr(
 
     left_masks = np.zeros((total_rows, height, width), dtype=np.uint8)
     right_masks = np.zeros((total_rows, height, width), dtype=np.uint8)
+    spatial_metrics = {
+        component_name: _empty_spatial_metric_buffers(total_rows)
+        for component_name in EYE_COMPONENTS
+    }
     reason_labels = {
         "eye_left": np.empty((total_rows,), dtype=object),
         "eye_right": np.empty((total_rows,), dtype=object),
@@ -580,7 +624,9 @@ def assign_eyes_union_to_lr(
                     selected_left = _select_component_near_point(split_left, eye_left)
                     selected_right = _select_component_near_point(split_right, eye_right)
                     _add_phase(phase_seconds, "select_components", phase_start)
-                if int(np.count_nonzero(selected_left)) <= 0 or int(np.count_nonzero(selected_right)) <= 0:
+                left_ys, left_xs = np.nonzero(selected_left)
+                right_ys, right_xs = np.nonzero(selected_right)
+                if int(left_xs.size) <= 0 or int(right_xs.size) <= 0:
                     tags.append("split_empty_component")
                     status = "failed_empty_split_component"
                 elif bool(np.any(np.logical_and(selected_left, selected_right))):
@@ -589,6 +635,18 @@ def assign_eyes_union_to_lr(
                 else:
                     left_masks[row_idx] = selected_left.astype(np.uint8, copy=False)
                     right_masks[row_idx] = selected_right.astype(np.uint8, copy=False)
+                    _store_sparse_spatial_metrics(
+                        spatial_metrics["eye_left"],
+                        row_idx,
+                        xs=left_xs,
+                        ys=left_ys,
+                    )
+                    _store_sparse_spatial_metrics(
+                        spatial_metrics["eye_right"],
+                        row_idx,
+                        xs=right_xs,
+                        ys=right_ys,
+                    )
                     tags.append("split_by_keypoint")
                     if measure_ellipses:
                         phase_start = time.perf_counter()
@@ -646,6 +704,7 @@ def assign_eyes_union_to_lr(
     return EyesUnionAssignmentResult(
         masks={"eye_left": left_masks, "eye_right": right_masks},
         reason_labels=reason_labels,
+        spatial_metrics=spatial_metrics,
         assignment_status=assignment_status,
         summary=summary,
         phase_seconds=phase_seconds,

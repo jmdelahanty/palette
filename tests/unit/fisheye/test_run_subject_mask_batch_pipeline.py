@@ -175,6 +175,38 @@ def test_subject_mask_publish_preserves_staged_input_artifacts(tmp_path: Path) -
     ]
 
 
+def test_run_group_storage_stats_reports_layout_and_top_level_file_pressure(tmp_path: Path) -> None:
+    run_path = tmp_path / "refined_run"
+    run = zarr.open_group(str(run_path), mode="w")
+    run.create_array(
+        "metric",
+        data=np.arange(8, dtype=np.float32).reshape(4, 2),
+        chunks=(2, 2),
+        overwrite=True,
+    )
+
+    stats = mod._run_group_storage_stats(run_path)  # noqa: SLF001
+
+    assert stats["schema"] == "palette_run_group_storage_stats_v1"
+    assert stats["file_count"] == 4
+    assert stats["metadata_file_count"] == 2
+    assert stats["payload_file_count"] == 2
+    assert stats["array_count"] == 1
+    assert stats["stat_error_count"] == 0
+    assert stats["metadata_error_count"] == 0
+    assert stats["top_level"]["__root__"]["file_count"] == 1
+    assert stats["top_level"]["metric"]["file_count"] == 3
+    assert stats["arrays"][0]["path"] == "metric"
+    assert stats["arrays"][0]["shape"] == [4, 2]
+    assert stats["arrays"][0]["data_type"] == "float32"
+    assert stats["arrays"][0]["chunk_shape"] == [2, 2]
+    assert stats["arrays"][0]["file_count"] == 3
+    assert stats["arrays"][0]["metadata_file_count"] == 1
+    assert stats["arrays"][0]["payload_file_count"] == 2
+    assert stats["arrays"][0]["apparent_bytes"] > 0
+    assert stats["scan_duration_seconds"] >= 0.0
+
+
 def test_consolidate_metadata_quietly_suppresses_expected_sidecar_noise(monkeypatch: pytest.MonkeyPatch) -> None:
     def _fake_consolidate(store: str, *, path: str | None = None) -> None:
         assert store == "/tmp/archive.zarr"
@@ -661,7 +693,6 @@ def test_finalization_command_passes_postcompute_options(tmp_path: Path) -> None
         finalize_chunk_size=256,
         metric_level="cheap",
         finalize_execution_backend="process_shards",
-        finalize_scheduler="processes",
         finalize_num_workers=8,
         finalize_dense_mask_row_chunk=512,
         finalize_postcompute_backend="process_shards",
@@ -706,7 +737,6 @@ def test_finalization_command_uses_length_safe_progress_filename(tmp_path: Path)
         finalize_chunk_size=256,
         metric_level="cheap",
         finalize_execution_backend="process_shards",
-        finalize_scheduler="processes",
         finalize_num_workers=8,
         finalize_dense_mask_row_chunk=None,
         finalize_postcompute_backend="process_shards",
@@ -1001,7 +1031,7 @@ def test_publish_staged_outputs_copies_groups_and_emits_real_path_status(
     monkeypatch.setattr(mod, "emit_subject_mask_stage_completion", _emit_subject)
     monkeypatch.setattr(mod, "emit_refined_subject_mask_stage_completion", _emit_refined)
 
-    mod._publish_staged_outputs(ctx, plan=plan, overwrite=False)
+    publish_summary = mod._publish_staged_outputs(ctx, plan=plan, overwrite=False)
 
     published = zarr.open_group(str(zarr_path), mode="r")
     assert "subject_run" in published["subject_mask_runs"]
@@ -1012,3 +1042,20 @@ def test_publish_staged_outputs_copies_groups_and_emits_real_path_status(
     assert published["refined_subject_masks_runs"]["refined_run"].attrs[RUN_COMPLETION_STATUS_ATTR] == "complete"
     assert ("subject", "subject_run", zarr_path) in emitted
     assert ("refined", "refined_run", zarr_path) in emitted
+    assert publish_summary["publish_backend"] == "multiple"
+    assert publish_summary["published_run_group_count"] == 2
+    assert publish_summary["publish_file_count"] > 0
+    assert publish_summary["publish_apparent_bytes"] > 0
+    assert publish_summary["publish_allocated_bytes"] >= 0
+    assert publish_summary["publish_storage_scan_duration_seconds"] >= 0.0
+    assert publish_summary["publish_copy_duration_seconds"] >= 0.0
+    assert publish_summary["publish_commit_duration_seconds"] >= 0.0
+    published_by_parent = {
+        item["parent"]: item
+        for item in publish_summary["published_run_groups"]
+    }
+    refined_publish = published_by_parent["refined_subject_masks_runs"]
+    assert refined_publish["publish_backend"] == "shutil.copytree"
+    assert refined_publish["storage_stats"]["schema"] == "palette_run_group_storage_stats_v1"
+    assert refined_publish["storage_stats"]["top_level"]["masks_roi"]["file_count"] >= 1
+    assert refined_publish["storage_stats"]["arrays"][0]["path"] == "masks_roi"

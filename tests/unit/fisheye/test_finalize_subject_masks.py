@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -22,6 +23,26 @@ from fisheye.shared.zarr_run_completion import (
 )
 from fisheye.shared.zarr.stage_arrays import REFINED_SUBJECT_MASKS_SPEC, validate_run
 from fisheye.tune import refined_subject_mask_review as review_mod
+
+
+def test_numeric_reason_payload_omits_clean_string_rows_without_assignment_labels() -> None:
+    batch = SimpleNamespace(
+        reason_flags=np.asarray([0, 0], dtype=np.uint32),
+        source_surface_kind="binary",
+    )
+
+    payload = mod._finalization_reason_payload(  # noqa: SLF001
+        batch,
+        np.asarray([0, 1], dtype=np.uint16),
+    )
+
+    assert "extra_labels" not in payload
+    assert np.asarray(payload["reason_flags"]).dtype == np.uint32
+    assert np.asarray(payload["metric_qc_reason_flags"]).dtype == np.uint16
+    assert mod._decode_finalization_reason_payload(payload).tolist() == [  # noqa: SLF001
+        "clean",
+        "needs_review_metric_empty_mask",
+    ]
 
 
 def _patch_refined_subject_provenance(monkeypatch) -> None:
@@ -325,8 +346,6 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
         subject_run="subject_probs_001",
         refined_run="refined_subject_masks_smart_001",
         chunk_size=1,
-        scheduler="threads",
-        num_workers=2,
     )
 
     assert summary["status"] == "updated"
@@ -338,13 +357,19 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert summary["retain_source_seeds"] is False
     assert summary["source_seed_masks_status"] == "omitted"
     assert summary["execution_backend"] == "serial_driver"
-    assert summary["dask_execution_enabled"] is False
-    assert summary["dask_scheduler"] == "threads"
-    assert summary["dask_num_workers"] == 2
+    assert summary["process_shard_execution_enabled"] is False
+    assert summary["worker_process_count"] is None
+    assert summary["requested_chunk_size"] == 1
+    assert summary["worker_chunk_size"] == 1
+    assert summary["chunk_alignment"] == "requested_chunk_size"
+    assert summary["finalization_compute_kernel"] == "numeric_struct_of_arrays_spatial_reuse_v2"
+    assert summary["finalization_metric_layout"] == "float32_n_by_metric_v1"
+    assert summary["finalization_reason_encoding"] == "uint32_bitflags_v1"
+    assert summary["finalization_review_encoding"] == "uint8_review_code_v1"
     assert summary["timing_summary"]["chunk_count"] == 2
-    assert summary["timing_summary"]["dask_scheduler"] == "threads"
     assert "finalize_subject_body" in summary["timing_summary"]["phase_seconds"]
-    assert "compute_spatial_metrics_subject_body" in summary["timing_summary"]["phase_seconds"]
+    assert "compute_spatial_metrics_subject_body" not in summary["timing_summary"]["phase_seconds"]
+    assert "reuse_spatial_metrics_subject_body" in summary["timing_summary"]["phase_seconds"]
     assert "write_masks_roi_subject_body" in summary["timing_summary"]["phase_seconds"]
     assert "write_finalization_metrics_subject_body" in summary["timing_summary"]["phase_seconds"]
     assert "compute_hole_metrics_eye_left" in summary["timing_summary"]["phase_seconds"]
@@ -364,14 +389,25 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert run.attrs["finalization_semantics"] == "smart_probability_to_refined_candidate"
     assert run.attrs["smart_finalizer_chunk_count"] == 2
     assert run.attrs["smart_finalizer_chunk_size"] == 1
+    assert run.attrs["smart_finalizer_finalization_metric_row_chunk"] == 2
+    assert (
+        run.attrs["smart_finalizer_finalization_metric_write_policy"]
+        == mod.FINALIZATION_METRIC_WRITE_POLICY
+    )
     assert run.attrs["smart_finalizer_metric_level"] == "cheap"
     assert run.attrs["smart_finalizer_retain_source_seeds"] is False
     assert run.attrs["source_seed_masks_status"] == "omitted"
     assert run.attrs["source_seed_masks_reason"] == "production_default"
     assert run.attrs["smart_finalizer_execution_backend"] == "serial_driver"
-    assert run.attrs["dask_execution_enabled"] is False
-    assert run.attrs["dask_scheduler"] == "threads"
-    assert run.attrs["dask_num_workers"] == 2
+    assert run.attrs["process_shard_execution_enabled"] is False
+    assert run.attrs["worker_process_count"] is None
+    assert run.attrs["requested_chunk_size"] == 1
+    assert run.attrs["worker_chunk_size"] == 1
+    assert run.attrs["chunk_alignment"] == "requested_chunk_size"
+    assert run.attrs["smart_finalizer_compute_kernel"] == "numeric_struct_of_arrays_spatial_reuse_v2"
+    assert run.attrs["smart_finalizer_metric_layout"] == "float32_n_by_metric_v1"
+    assert run.attrs["smart_finalizer_reason_encoding"] == "uint32_bitflags_v1"
+    assert run.attrs["smart_finalizer_review_encoding"] == "uint8_review_code_v1"
     assert run.attrs["smart_finalizer_timing_summary"]["chunk_count"] == 2
     assert len(run.attrs["smart_finalizer_chunk_timings"]) == 2
     assert run.attrs["source_roi_image_representation"] == "grayscale_uint8"
@@ -398,8 +434,10 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     )
     provenance_parameters = run.attrs["provenance"]["parameters"]
     assert provenance_parameters["execution_backend"] == "serial_driver"
-    assert provenance_parameters["dask_scheduler"] == "threads"
-    assert provenance_parameters["dask_num_workers"] == 2
+    assert provenance_parameters["process_shard_execution_enabled"] is False
+    assert provenance_parameters["worker_process_count"] is None
+    assert provenance_parameters["requested_chunk_size"] == 1
+    assert provenance_parameters["chunk_alignment"] == "requested_chunk_size"
     assert provenance_parameters["chunk_size"] == 1
     assert provenance_parameters["metric_level"] == "cheap"
     assert provenance_parameters["retain_source_seeds"] is False
@@ -440,6 +478,9 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert "finalization_metrics" in run["components/subject_body"]
     metrics = run["components/subject_body/finalization_metrics"]
     assert metrics.attrs["schema_id"] == "refined_subject_component_finalization_metrics_v1"
+    assert metrics.attrs["surface_role"] == "sealed_derived_analysis"
+    assert metrics.attrs["write_policy"] == mod.FINALIZATION_METRIC_WRITE_POLICY
+    assert metrics.attrs["row_chunk"] == 2
     assert np.asarray(metrics["quality_code"][:], dtype=np.int16).shape == (2,)
     component_metrics = run["components/subject_body/metrics"]
     assert component_metrics.attrs["schema_id"] == "refined_subject_component_mask_metrics_v1"
@@ -450,6 +491,24 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert run["components/subject_body"].attrs["source_seed_masks_status"] == "omitted"
     assert "source_seed_masks_roi" not in run["components/subject_body"]
     assert "relations" not in run
+
+
+def test_finalization_metric_shell_uses_large_driver_owned_row_chunks() -> None:
+    root = zarr.group()
+    component = root.require_group("components").require_group("subject_body")
+
+    mod._create_finalization_metric_shell(  # noqa: SLF001
+        component,
+        metric_names=("area_px_before",),
+        total_rows=20000,
+    )
+
+    metrics = component["finalization_metrics"]
+    assert metrics["area_px_before"].chunks == (mod.FINALIZATION_METRIC_ROW_CHUNK,)
+    assert metrics["quality_code"].chunks == (mod.FINALIZATION_METRIC_ROW_CHUNK,)
+    assert metrics["quality_score"].chunks == (mod.FINALIZATION_METRIC_ROW_CHUNK,)
+    assert metrics.attrs["row_chunk"] == mod.FINALIZATION_METRIC_ROW_CHUNK
+    assert metrics.attrs["write_policy"] == mod.FINALIZATION_METRIC_WRITE_POLICY
 
 
 def test_finalize_subject_mask_run_rejects_eye_union_keypoint_row_identity_mismatch(monkeypatch) -> None:
@@ -1134,6 +1193,14 @@ def test_full_finalizer_benchmark_includes_expensive_phases(monkeypatch, tmp_pat
     assert "copy_benchmark_slice" in workflow_phase_seconds
     assert "finalizer_run" in workflow_phase_seconds
     assert payload["summary_statistics"]["rows_total"] == 2
+    output_storage = payload["refined_output_storage_stats"]
+    assert output_storage["schema"] == "palette_run_group_storage_stats_v1"
+    assert output_storage["file_count"] > 0
+    assert output_storage["top_level"]["masks_roi"]["file_count"] > 0
+    assert any(
+        item["path"] == "components/subject_body/finalization_metrics/quality_score"
+        for item in output_storage["arrays"]
+    )
     root = zarr.open_group(str(payload["temp_zarr_path"]), mode="r")
     run = root["refined_subject_masks_runs/refined_subject_masks_full_finalizer_benchmark"]
     assert "mask_bitpacked/masks_packed" in run
@@ -1261,123 +1328,6 @@ def test_refresh_refined_subject_mask_metrics_updates_metric_qc_reasons(monkeypa
     assert "needs_review_metric_multiple_components" in str(body_reasons[1])
 
 
-def test_refresh_refined_subject_mask_metrics_dask_worker_chunks_updates_metric_qc_reasons(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    _patch_refined_subject_provenance(monkeypatch)
-    zarr_path = tmp_path / "analysis.zarr"
-    _build_probability_root(zarr_path)
-    mod.finalize_subject_masks(
-        zarr_path,
-        subject_run="subject_probs_001",
-        refined_run="refined_subject_masks_smart_refresh_dask_001",
-        chunk_size=1,
-    )
-    root = zarr.open_group(str(zarr_path), mode="a")
-    run = root["refined_subject_masks_runs/refined_subject_masks_smart_refresh_dask_001"]
-    labels = list(run.attrs["mask_labels"])
-    body_idx = labels.index("subject_body")
-
-    edited_body = np.zeros((10, 10), dtype=np.uint8)
-    edited_body[1, 1] = 1
-    edited_body[8, 8] = 1
-    run["masks_roi"][1, body_idx] = edited_body
-    write_reason_columns(
-        run["components/subject_body"],
-        np.asarray(["clean", "manual_correction|needs_review_metric_holes"], dtype=object),
-        chunk_size=2,
-        include_reason_text=True,
-        overwrite=True,
-    )
-
-    summary = mod.refresh_refined_subject_mask_metrics(
-        zarr_path,
-        refined_run="refined_subject_masks_smart_refresh_dask_001",
-        components=["subject_body"],
-        chunk_size=1,
-        metric_level="cheap",
-        execution_backend="dask_worker_chunks",
-        scheduler="threads",
-        num_workers=2,
-    )
-
-    assert summary["components"] == ["subject_body"]
-    assert summary["execution_backend"] == "dask_worker_chunks"
-    assert summary["dask_execution_enabled"] is True
-    assert summary["dask_scheduler"] == "threads"
-    assert summary["dask_num_workers"] == 2
-    assert summary["dask_requested_chunk_size"] == 1
-    assert summary["dask_chunk_size"] == 2
-    assert summary["worker_chunk_size"] == 2
-    assert summary["review_counts"]["subject_body"]["needs_review"] == 1
-
-    root = zarr.open_group(str(zarr_path), mode="r")
-    run = root["refined_subject_masks_runs/refined_subject_masks_smart_refresh_dask_001"]
-    assert run.attrs["component_metric_qc_execution_backend"] == "dask_worker_chunks"
-    assert run.attrs["component_metric_qc_timing_summary"]["dask_execution_enabled"] is True
-    assert run.attrs["component_metric_qc_timing_summary"]["dask_requested_chunk_size"] == 1
-    assert run.attrs["component_metric_qc_timing_summary"]["dask_chunk_size"] == 2
-    assert run.attrs["component_metric_qc_timing_summary"]["dask_chunk_alignment"] == (
-        "refined_subject_mask_metric_row_chunk"
-    )
-    assert "dask_compute" in run.attrs["component_metric_qc_timing_summary"]["phase_seconds"]
-    assert len(run.attrs["component_metric_qc_chunk_timings"]) == 1
-    assert float(np.asarray(run["metrics/area_px"][1, body_idx], dtype=np.float32)) == pytest.approx(2.0)
-    component_metrics = run["components/subject_body/metrics"]
-    assert int(np.asarray(component_metrics["component_count"][1], dtype=np.int32)) == 2
-
-    body_reasons = read_reason_labels(run["components/subject_body"])
-    assert body_reasons is not None
-    assert "manual_correction" in str(body_reasons[1])
-    assert "needs_review_metric_holes" not in str(body_reasons[1])
-    assert "needs_review_metric_small_area" in str(body_reasons[1])
-    assert "needs_review_metric_multiple_components" in str(body_reasons[1])
-
-
-def test_finalize_subject_masks_dask_worker_chunks_writes_disjoint_rows(monkeypatch, tmp_path: Path) -> None:
-    _patch_refined_subject_provenance(monkeypatch)
-    zarr_path = tmp_path / "analysis.zarr"
-    _build_probability_root(zarr_path)
-
-    summary = mod.finalize_subject_masks(
-        zarr_path,
-        subject_run="subject_probs_001",
-        refined_run="refined_subject_masks_smart_dask_001",
-        chunk_size=1,
-        execution_backend="dask_worker_chunks",
-        scheduler="threads",
-        num_workers=2,
-    )
-
-    assert summary["execution_backend"] == "dask_worker_chunks"
-    assert summary["dask_execution_enabled"] is True
-    assert summary["dask_scheduler"] == "threads"
-    assert summary["timing_summary"]["dask_execution_enabled"] is True
-    root = zarr.open_group(str(zarr_path), mode="r")
-    run = root["refined_subject_masks_runs/refined_subject_masks_smart_dask_001"]
-    assert run.attrs["smart_finalizer_execution_backend"] == "dask_worker_chunks"
-    assert run.attrs["dask_execution_enabled"] is True
-    assert run.attrs["dask_scheduler"] == "threads"
-    provenance_parameters = run.attrs["provenance"]["parameters"]
-    assert provenance_parameters["execution_backend"] == "dask_worker_chunks"
-    assert provenance_parameters["dask_execution_enabled"] is True
-    assert provenance_parameters["dask_scheduler"] == "threads"
-    assert provenance_parameters["dask_num_workers"] == 2
-    assert provenance_parameters["dask_requested_chunk_size"] == 1
-    assert provenance_parameters["dask_chunk_size"] == 2
-    assert provenance_parameters["worker_chunk_size"] == 2
-    assert provenance_parameters["dask_chunk_alignment"] == "refined_subject_mask_metric_row_chunk"
-    assert len(run.attrs["smart_finalizer_chunk_timings"]) == 1
-    labels = list(run.attrs["mask_labels"])
-    masks = np.asarray(run["masks_roi"][:], dtype=np.uint8)
-    assert np.count_nonzero(masks[:, labels.index("subject_body")]) > 0
-    assert np.count_nonzero(masks[:, labels.index("eye_left")]) > 0
-    assert np.count_nonzero(masks[:, labels.index("eye_right")]) > 0
-    assert np.count_nonzero(masks[:, labels.index("swim_bladder")]) > 0
-    assert "dask_compute" in run.attrs["smart_finalizer_timing_summary"]["phase_seconds"]
-
-
 def test_finalize_subject_masks_process_shards_writes_disjoint_rows(monkeypatch, tmp_path: Path) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     zarr_path = tmp_path / "analysis.zarr"
@@ -1405,10 +1355,13 @@ def test_finalize_subject_masks_process_shards_writes_disjoint_rows(monkeypatch,
     assert provenance_parameters["execution_backend"] == "process_shards"
     assert provenance_parameters["process_shard_execution_enabled"] is True
     assert provenance_parameters["worker_process_count"] == 2
-    assert provenance_parameters["dask_requested_chunk_size"] == 1
-    assert provenance_parameters["dask_chunk_size"] == 2
+    assert provenance_parameters["requested_chunk_size"] == 1
     assert provenance_parameters["worker_chunk_size"] == 2
-    assert provenance_parameters["dask_chunk_alignment"] == "refined_subject_mask_metric_row_chunk"
+    assert provenance_parameters["chunk_alignment"] == (
+        "refined_subject_mask_metric_row_chunk+dense_mask_row_chunk"
+    )
+    assert provenance_parameters["finalization_metric_row_chunk"] == 2
+    assert provenance_parameters["finalization_metric_write_policy"] == mod.FINALIZATION_METRIC_WRITE_POLICY
     assert len(run.attrs["smart_finalizer_chunk_timings"]) == 1
     labels = list(run.attrs["mask_labels"])
     masks = np.asarray(run["masks_roi"][:], dtype=np.uint8)
@@ -1417,6 +1370,11 @@ def test_finalize_subject_masks_process_shards_writes_disjoint_rows(monkeypatch,
     assert np.count_nonzero(masks[:, labels.index("eye_right")]) > 0
     assert np.count_nonzero(masks[:, labels.index("swim_bladder")]) > 0
     assert "process_shard_compute" in run.attrs["smart_finalizer_timing_summary"]["phase_seconds"]
+    assert "write_finalization_metrics_subject_body" in run.attrs["smart_finalizer_timing_summary"]["phase_seconds"]
+    assert (
+        run["components/subject_body/finalization_metrics"].attrs["write_policy"]
+        == mod.FINALIZATION_METRIC_WRITE_POLICY
+    )
 
     progress_records = [json.loads(line) for line in progress_path.read_text(encoding="utf-8").splitlines()]
     aggregate_events = [item for item in progress_records if item["event"] == "process_shards_submitted"]
@@ -1567,7 +1525,6 @@ def test_finalize_subject_mask_run_dry_run_and_overwrite_guard(monkeypatch) -> N
         subject_run="subject_probs_001",
         refined_run="refined_subject_masks_smart_001",
         chunk_size=1,
-        scheduler="single-thread",
         dry_run=True,
     )
 
@@ -1575,8 +1532,8 @@ def test_finalize_subject_mask_run_dry_run_and_overwrite_guard(monkeypatch) -> N
     assert dry["mutates_archive"] is False
     assert dry["metric_level"] == "cheap"
     assert dry["write_eye_geometry"] is False
-    assert dry["dask_scheduler"] == "single-threaded"
-    assert dry["dask_execution_enabled"] is False
+    assert dry["execution_backend"] == "serial_driver"
+    assert dry["process_shard_execution_enabled"] is False
     assert "refined_subject_masks_runs" not in root
 
     mod.finalize_subject_mask_run(

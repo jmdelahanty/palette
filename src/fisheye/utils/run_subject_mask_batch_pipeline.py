@@ -109,9 +109,13 @@ class OutputStagingContext:
 
 @dataclass(frozen=True)
 class RunGroupPublishPlan:
+    source_path: Path
     tmp_path: Path
     target_path: Path
     overwrite: bool
+    publish_backend: str
+    storage_stats: Mapping[str, Any]
+    copy_duration_seconds: float
 
 
 def _read_json(path: Path) -> Optional[dict[str, Any]]:
@@ -132,6 +136,122 @@ def _child_groups(group_path: Path) -> list[str]:
     if not group_path.is_dir():
         return []
     return sorted(path.name for path in group_path.iterdir() if path.is_dir())
+
+
+_ZARR_METADATA_FILENAMES = frozenset({"zarr.json", ".zarray", ".zattrs", ".zgroup"})
+
+
+def _empty_storage_counter() -> dict[str, int]:
+    return {
+        "file_count": 0,
+        "metadata_file_count": 0,
+        "payload_file_count": 0,
+        "apparent_bytes": 0,
+        "allocated_bytes": 0,
+    }
+
+
+def _accumulate_storage_file(counter: dict[str, int], *, filename: str, stat_result: os.stat_result) -> None:
+    counter["file_count"] += 1
+    if filename in _ZARR_METADATA_FILENAMES:
+        counter["metadata_file_count"] += 1
+    else:
+        counter["payload_file_count"] += 1
+    counter["apparent_bytes"] += int(stat_result.st_size)
+    counter["allocated_bytes"] += int(getattr(stat_result, "st_blocks", 0)) * 512
+
+
+def _run_group_storage_stats(run_group_path: Path) -> dict[str, Any]:
+    """Inspect one materialized run group without opening it through zarr.
+
+    The scan records filesystem-object pressure as well as the logical array
+    layouts responsible for it.  It deliberately does not follow symlinked
+    directories: staged output run groups are expected to be self-contained,
+    and following an unexpected link could scan unrelated archive content.
+    """
+
+    path = run_group_path.expanduser()
+    started = time.perf_counter()
+    totals = _empty_storage_counter()
+    top_level: dict[str, dict[str, int]] = {}
+    arrays: dict[str, dict[str, Any]] = {}
+    array_ancestor_by_directory: dict[Path, str | None] = {}
+    stat_error_count = 0
+    metadata_error_count = 0
+
+    if not path.is_dir():
+        raise FileNotFoundError(f"Run group not found for storage scan: {path}")
+
+    for root_text, directory_names, filenames in os.walk(path, topdown=True, followlinks=False):
+        root = Path(root_text)
+        relative_directory = root.relative_to(path)
+        relative_directory_text = relative_directory.as_posix() if relative_directory.parts else "."
+        inherited_array = array_ancestor_by_directory.get(root.parent)
+        current_array = inherited_array
+
+        if "zarr.json" in filenames:
+            metadata = _read_json(root / "zarr.json")
+            if metadata is None:
+                metadata_error_count += 1
+            elif metadata.get("node_type") == "array":
+                current_array = relative_directory_text
+                chunk_grid = metadata.get("chunk_grid")
+                chunk_configuration = (
+                    chunk_grid.get("configuration")
+                    if isinstance(chunk_grid, Mapping)
+                    else None
+                )
+                arrays[current_array] = {
+                    "path": current_array,
+                    "shape": list(metadata.get("shape") or []),
+                    "data_type": metadata.get("data_type"),
+                    "chunk_shape": list(
+                        chunk_configuration.get("chunk_shape") or []
+                    )
+                    if isinstance(chunk_configuration, Mapping)
+                    else [],
+                    "codecs": list(metadata.get("codecs") or []),
+                    "chunk_key_encoding": metadata.get("chunk_key_encoding"),
+                    **_empty_storage_counter(),
+                }
+
+        array_ancestor_by_directory[root] = current_array
+        for directory_name in directory_names:
+            array_ancestor_by_directory[root / directory_name] = current_array
+
+        for filename in filenames:
+            file_path = root / filename
+            try:
+                stat_result = file_path.lstat()
+            except OSError:
+                stat_error_count += 1
+                continue
+
+            _accumulate_storage_file(totals, filename=filename, stat_result=stat_result)
+            relative_file = file_path.relative_to(path)
+            top_key = relative_file.parts[0] if len(relative_file.parts) > 1 else "__root__"
+            top_counter = top_level.setdefault(top_key, _empty_storage_counter())
+            _accumulate_storage_file(top_counter, filename=filename, stat_result=stat_result)
+
+            if current_array is not None and current_array in arrays:
+                _accumulate_storage_file(
+                    arrays[current_array],
+                    filename=filename,
+                    stat_result=stat_result,
+                )
+
+    sorted_arrays = [arrays[key] for key in sorted(arrays)]
+    return {
+        "schema": "palette_run_group_storage_stats_v1",
+        "run_group_path": str(path),
+        **totals,
+        "array_count": int(len(sorted_arrays)),
+        "arrays": sorted_arrays,
+        "top_level": {key: top_level[key] for key in sorted(top_level)},
+        "stat_error_count": int(stat_error_count),
+        "metadata_error_count": int(metadata_error_count),
+        "scan_duration_seconds": float(time.perf_counter() - started),
+    }
 
 
 def _latest_group_name(parent_path: Path) -> Optional[str]:
@@ -470,8 +590,6 @@ def _finalization_command(
         args.mask_rle_validation_mode,
         "--execution-backend",
         args.finalize_execution_backend,
-        "--scheduler",
-        args.finalize_scheduler,
         "--assignment-keypoint-group",
         str(plan.assignment_keypoint_group),
         "--assignment-keypoints-run",
@@ -710,8 +828,18 @@ def _prepare_run_group_publish(
     tmp = target_parent / f".{run_name}.publish_tmp.{os.getpid()}"
     if tmp.exists() or tmp.is_symlink():
         _remove_path(tmp)
+    storage_stats = _run_group_storage_stats(source)
+    copy_started = time.perf_counter()
     shutil.copytree(source, tmp, symlinks=True)
-    return RunGroupPublishPlan(tmp_path=tmp, target_path=target, overwrite=overwrite)
+    return RunGroupPublishPlan(
+        source_path=source,
+        tmp_path=tmp,
+        target_path=target,
+        overwrite=overwrite,
+        publish_backend="shutil.copytree",
+        storage_stats=storage_stats,
+        copy_duration_seconds=float(time.perf_counter() - copy_started),
+    )
 
 
 def _commit_run_group_publish(plan: RunGroupPublishPlan) -> None:
@@ -883,16 +1011,22 @@ def _publish_staged_outputs(
             run_name=plan.refined_run,
             overwrite=overwrite,
         ))
-    published_run_groups = [
-        {
-            "run_group_path": str(publish_plan.target_path),
-            "run_name": str(publish_plan.target_path.name),
-            "parent": str(publish_plan.target_path.parent.name),
-        }
-        for publish_plan in publish_plans
-    ]
+    published_run_groups: list[dict[str, Any]] = []
     for publish_plan in publish_plans:
+        commit_started = time.perf_counter()
         _commit_run_group_publish(publish_plan)
+        published_run_groups.append(
+            {
+                "run_group_path": str(publish_plan.target_path),
+                "source_run_group_path": str(publish_plan.source_path),
+                "run_name": str(publish_plan.target_path.name),
+                "parent": str(publish_plan.target_path.parent.name),
+                "publish_backend": str(publish_plan.publish_backend),
+                "storage_stats": dict(publish_plan.storage_stats),
+                "copy_duration_seconds": float(publish_plan.copy_duration_seconds),
+                "commit_duration_seconds": float(time.perf_counter() - commit_started),
+            }
+        )
 
     root = _open_group_mutable(ctx.source_zarr_path)
     publish_payload = _staging_publish_payload(ctx)
@@ -989,9 +1123,34 @@ def _publish_staged_outputs(
             "reason": "noncanonical_subject_output_parent",
             "subject_output_parent": plan.subject_output_parent,
         }
+    storage_stats = [
+        dict(item.get("storage_stats") or {})
+        for item in published_run_groups
+    ]
     return {
         "published_run_groups": published_run_groups,
         "published_run_group_count": int(len(published_run_groups)),
+        "publish_backend": (
+            str(published_run_groups[0]["publish_backend"])
+            if len(published_run_groups) == 1
+            else "multiple"
+        ),
+        "publish_file_count": int(sum(int(item.get("file_count") or 0) for item in storage_stats)),
+        "publish_apparent_bytes": int(
+            sum(int(item.get("apparent_bytes") or 0) for item in storage_stats)
+        ),
+        "publish_allocated_bytes": int(
+            sum(int(item.get("allocated_bytes") or 0) for item in storage_stats)
+        ),
+        "publish_storage_scan_duration_seconds": float(
+            sum(float(item.get("scan_duration_seconds") or 0.0) for item in storage_stats)
+        ),
+        "publish_copy_duration_seconds": float(
+            sum(float(item.get("copy_duration_seconds") or 0.0) for item in published_run_groups)
+        ),
+        "publish_commit_duration_seconds": float(
+            sum(float(item.get("commit_duration_seconds") or 0.0) for item in published_run_groups)
+        ),
         "handoff_packages": handoff_packages,
         "handoff_package_count": int(len(handoff_packages)),
         **registry_refresh,
@@ -1231,10 +1390,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--finalize-execution-backend",
-        choices=("serial_driver", "dask_worker_chunks", "process_shards"),
+        choices=("serial_driver", "process_shards"),
         default="process_shards",
     )
-    parser.add_argument("--finalize-scheduler", choices=("single-threaded", "threads", "processes", "distributed"), default="processes")
     parser.add_argument("--finalize-num-workers", type=int, default=8)
     parser.add_argument(
         "--finalize-postcompute-backend",

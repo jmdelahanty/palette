@@ -428,3 +428,7 @@ Post-refactor benchmark confirmation:
 - `rows_per_second`: `321.0` -> `323.9`;
 - `eye_assignment`: `7.48s` -> `7.23s`;
 - assignment status counts unchanged.
+> Historical performance log. The current backend decision is documented in
+> `subject_mask_finalizer_publication_status_2026-07-09.md`: use
+> `process_shards` for production parallel finalization; the Dask finalizer
+> implementations have been retired.

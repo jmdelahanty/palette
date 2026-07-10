@@ -1,11 +1,10 @@
-"""Benchmark the full subject-mask finalizer on a temporary zarr slice.
+"""Benchmark the production subject-mask finalizer on a temporary Zarr slice.
 
-The existing scheduler diagnostic profiles only the pure spatial mask
-finalization path. This diagnostic copies a contiguous subject-mask row window
-into a temporary mini archive, runs the production finalizer there, and reports
-the same phase timings written by normal finalized runs. It includes optional
-eye-geometry and component-contour writes, so it can profile the expensive
-postcompute phases without mutating canonical recording zarrs.
+This diagnostic copies a contiguous subject-mask row window into a temporary
+mini archive, runs the production-shaped process-shard finalizer there, and
+reports the same phase timings written by normal finalized runs. It includes
+optional eye-geometry and component-contour writes, so it can profile expensive
+postcompute phases without mutating canonical recording Zarrs.
 """
 
 from __future__ import annotations
@@ -46,6 +45,7 @@ from ..shared.workflow_profile import json_safe
 from ..shared.zarr_run_completion import require_runs_parent
 from ..tune.refined_subject_mask_review import _load_source_subject_mask_run
 from ..shared.zarr_io import open_zarr_root
+from ..utils.run_subject_mask_batch_pipeline import _run_group_storage_stats
 
 _ROW_ARRAY_CANDIDATES = (
     "mask_probs_roi",
@@ -59,8 +59,7 @@ _ROW_ARRAY_CANDIDATES = (
 )
 _FULL_ARRAY_CANDIDATES = ("available_channels",)
 _KEYPOINT_ROW_ARRAYS = ("keypoints_roi", "keypoints_img", "keypoint_scores")
-_EXECUTION_BACKENDS = ("serial_driver", "dask_worker_chunks", "process_shards")
-_SCHEDULERS = ("single-threaded", "threads", "processes", "distributed")
+_EXECUTION_BACKENDS = ("serial_driver", "process_shards")
 _POSTCOMPUTE_MODES = ("production", "sharded")
 _CONTOUR_COMPONENTS = ("subject_body", "swim_bladder")
 
@@ -847,11 +846,11 @@ def benchmark_subject_mask_full_finalizer(
     write_component_contours: bool = True,
     retain_source_seeds: bool = False,
     mask_storage: str = "dense_uint8",
+    dense_mask_row_chunk: int | None = 256,
     postcompute_mode: str = "production",
     postcompute_chunk_size: Optional[int] = None,
     postcompute_num_workers: Optional[int] = None,
     execution_backend: str = "serial_driver",
-    scheduler: str = "single-threaded",
     num_workers: Optional[int] = None,
     assignment_keypoint_group: Optional[str] = None,
     assignment_keypoints_run: Optional[str] = None,
@@ -888,6 +887,7 @@ def benchmark_subject_mask_full_finalizer(
         postcompute_mode=postcompute_mode_key,
         retain_source_seeds=bool(retain_source_seeds),
         mask_storage=str(mask_storage),
+        dense_mask_row_chunk=dense_mask_row_chunk,
     )
     payload: dict[str, object] | None = None
     caught: BaseException | None = None
@@ -921,13 +921,13 @@ def benchmark_subject_mask_full_finalizer(
             temp_zarr_path=str(temp_zarr_path),
             refined_run=refined_run,
             execution_backend=execution_backend,
-            scheduler=scheduler,
             num_workers=num_workers,
             chunk_size=int(chunk_size),
             write_eye_geometry=bool(write_eye_geometry) and postcompute_mode_key == "production",
             write_component_contours=bool(write_component_contours) and postcompute_mode_key == "production",
             retain_source_seeds=bool(retain_source_seeds),
             mask_storage=str(mask_storage),
+            dense_mask_row_chunk=dense_mask_row_chunk,
             postcompute_mode=postcompute_mode_key,
         ) as phase:
             finalizer_summary = finalize_subject_masks(
@@ -941,8 +941,8 @@ def benchmark_subject_mask_full_finalizer(
                 write_component_contours=bool(write_component_contours) and postcompute_mode_key == "production",
                 retain_source_seeds=bool(retain_source_seeds),
                 mask_storage=str(mask_storage),
+                dense_mask_row_chunk=dense_mask_row_chunk,
                 execution_backend=execution_backend,
-                scheduler=scheduler,
                 num_workers=num_workers,
                 overwrite=True,
                 dry_run=False,
@@ -984,6 +984,7 @@ def benchmark_subject_mask_full_finalizer(
         timing_summary = dict(run_group.attrs.get("smart_finalizer_timing_summary") or {})
         summary_statistics = dict(run_group.attrs.get("summary_statistics") or {})
         output_group_path = temp_zarr_path / "refined_subject_masks_runs" / refined_run
+        output_storage_stats = _run_group_storage_stats(output_group_path)
         payload = {
             "status": "ok",
             "source_zarr_path": str(Path(zarr_path)),
@@ -999,6 +1000,7 @@ def benchmark_subject_mask_full_finalizer(
             "requested_write_component_contours": bool(write_component_contours),
             "retain_source_seeds": bool(retain_source_seeds),
             "mask_storage": str(mask_storage),
+            "dense_mask_row_chunk": dense_mask_row_chunk,
             "mask_storage_encoding": run_group.attrs.get("mask_storage_encoding"),
             "mask_store_encodings": list(run_group.attrs.get("mask_store_encodings") or []),
             "masks_roi_materialized": run_group.attrs.get("masks_roi_materialized"),
@@ -1017,6 +1019,7 @@ def benchmark_subject_mask_full_finalizer(
             "workflow_profile_jsonl_retained": bool(workflow_profile_explicit or keep_temp),
             "temp_zarr_size_bytes": _dir_size_bytes(temp_zarr_path),
             "refined_output_size_bytes": _dir_size_bytes(output_group_path),
+            "refined_output_storage_stats": output_storage_stats,
             "temp_removed_after_run": not bool(keep_temp),
         }
     except BaseException as exc:
@@ -1083,6 +1086,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Physical mask storage mode passed to the production finalizer.",
     )
     parser.add_argument(
+        "--dense-mask-row-chunk",
+        type=int,
+        default=256,
+        help="Physical row chunk for dense masks_roi (default: production-matched 256).",
+    )
+    parser.add_argument(
         "--postcompute-mode",
         choices=_POSTCOMPUTE_MODES,
         default="production",
@@ -1103,8 +1112,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Worker count for sharded postcompute. Defaults to --num-workers, then 1.",
     )
     parser.add_argument("--execution-backend", choices=_EXECUTION_BACKENDS, default="serial_driver")
-    parser.add_argument("--scheduler", choices=_SCHEDULERS, default="single-threaded")
-    parser.add_argument("--num-workers", type=int, help="Worker count for process_shards or dask_worker_chunks.")
+    parser.add_argument("--num-workers", type=int, help="Worker count for process_shards.")
     parser.add_argument(
         "--assignment-keypoint-group",
         choices=("refined_keypoints_runs", "keypoints_runs"),
@@ -1115,6 +1123,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--keep-temp", action="store_true", help="Keep the temporary archive for inspection.")
     parser.add_argument("--progress-jsonl", help="Optional path for finalizer progress events.")
     parser.add_argument("--workflow-profile-jsonl", help="Optional path for benchmark workflow profile events.")
+    parser.add_argument("--json-out", type=Path, help="Optional path for the complete benchmark result JSON.")
     return parser
 
 
@@ -1132,11 +1141,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         write_component_contours=bool(args.write_component_contours),
         retain_source_seeds=bool(args.retain_source_seeds),
         mask_storage=args.mask_storage,
+        dense_mask_row_chunk=args.dense_mask_row_chunk,
         postcompute_mode=args.postcompute_mode,
         postcompute_chunk_size=args.postcompute_chunk_size,
         postcompute_num_workers=args.postcompute_num_workers,
         execution_backend=args.execution_backend,
-        scheduler=args.scheduler,
         num_workers=args.num_workers,
         assignment_keypoint_group=args.assignment_keypoint_group,
         assignment_keypoints_run=args.assignment_keypoints_run,
@@ -1145,7 +1154,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         progress_jsonl=args.progress_jsonl,
         workflow_profile_jsonl=args.workflow_profile_jsonl,
     )
-    print(json.dumps(payload, indent=2, sort_keys=True))
+    rendered = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    if args.json_out is not None:
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        args.json_out.write_text(rendered, encoding="utf-8")
+    print(rendered, end="")
     return 0
 
 

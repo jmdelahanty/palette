@@ -106,7 +106,8 @@ Current rules:
   `eye_left`, `eye_right`, and `swim_bladder`.
 - The smart finalizer is the canonical bridge from raw probabilities to refined
   binary component masks. It records cleanup reasons, component metrics,
-  assignment provenance, Dask execution metadata, and review triage counts.
+  assignment provenance, process-shard execution metadata, and review triage
+  counts.
 - Refined-subject eye geometry is now materialized from
   `refined_subject_masks_runs/<run>/components/eye_left|eye_right` and records
   `eye_geometry_status=computed` when the geometry/relations arrays are present.

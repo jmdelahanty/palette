@@ -720,3 +720,9 @@ The benchmark supports testing higher CPU finalizer worker counts on cluster job
 not justify changing the connected-components primitive globally: OpenCV remains the
 production default, and the main speed lever in this result is row-sharded process
 parallelism.
+> Historical diagnostic. As of 2026-07-09, the delayed-task and Dask-array
+> finalizer backends have been removed. `process_shards` is the only supported
+> production parallel backend, with `serial_driver` retained for deterministic
+> correctness/debugging. See
+> `subject_mask_finalizer_publication_status_2026-07-09.md` for the final
+> comparison and decision.

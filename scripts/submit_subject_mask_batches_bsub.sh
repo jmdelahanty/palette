@@ -38,7 +38,6 @@ MODEL_INCLUDE_NON_SUCCESS=0
 FINALIZE_CHUNK_SIZE=256
 FINALIZE_DENSE_MASK_ROW_CHUNK=256
 FINALIZE_EXECUTION_BACKEND="process_shards"
-FINALIZE_SCHEDULER="processes"
 FINALIZE_NUM_WORKERS="16"
 FINALIZE_POSTCOMPUTE_BACKEND="process_shards"
 FINALIZE_POSTCOMPUTE_CHUNK_SIZE=""
@@ -152,9 +151,7 @@ Options:
                             Physical dense masks_roi row chunk for refined outputs
                             (default: 256, current cluster production candidate)
   --finalize-execution-backend NAME
-                            serial_driver|dask_worker_chunks|process_shards (default: process_shards)
-  --finalize-scheduler NAME Dask scheduler for dask_worker_chunks: single-threaded|threads|processes|distributed
-                            (default: processes; ignored by process_shards)
+                            serial_driver|process_shards (default: process_shards)
   --finalize-num-workers N|auto
                             Refined finalizer worker count (default: 16; auto => --finalize-ncores)
   --finalize-postcompute-backend NAME
@@ -238,7 +235,6 @@ while [[ $# -gt 0 ]]; do
     --finalize-chunk-size) FINALIZE_CHUNK_SIZE="$2"; shift 2;;
     --finalize-dense-mask-row-chunk) FINALIZE_DENSE_MASK_ROW_CHUNK="$2"; shift 2;;
     --finalize-execution-backend) FINALIZE_EXECUTION_BACKEND="$2"; shift 2;;
-    --finalize-scheduler) FINALIZE_SCHEDULER="$2"; shift 2;;
     --finalize-num-workers) FINALIZE_NUM_WORKERS="$2"; shift 2;;
     --finalize-postcompute-backend) FINALIZE_POSTCOMPUTE_BACKEND="$2"; shift 2;;
     --finalize-postcompute-chunk-size) FINALIZE_POSTCOMPUTE_CHUNK_SIZE="$2"; shift 2;;
@@ -265,8 +261,8 @@ if [[ "$SOURCE" != "filesystem" && "$SOURCE" != "registry" ]]; then
   echo "--source must be filesystem or registry." >&2
   exit 2
 fi
-if [[ "$FINALIZE_EXECUTION_BACKEND" != "serial_driver" && "$FINALIZE_EXECUTION_BACKEND" != "dask_worker_chunks" && "$FINALIZE_EXECUTION_BACKEND" != "process_shards" ]]; then
-  echo "--finalize-execution-backend must be serial_driver, dask_worker_chunks, or process_shards." >&2
+if [[ "$FINALIZE_EXECUTION_BACKEND" != "serial_driver" && "$FINALIZE_EXECUTION_BACKEND" != "process_shards" ]]; then
+  echo "--finalize-execution-backend must be serial_driver or process_shards." >&2
   exit 2
 fi
 if [[ -n "$FINALIZE_DENSE_MASK_ROW_CHUNK" ]]; then
@@ -274,10 +270,6 @@ if [[ -n "$FINALIZE_DENSE_MASK_ROW_CHUNK" ]]; then
     echo "--finalize-dense-mask-row-chunk must be a positive integer." >&2
     exit 2
   fi
-fi
-if [[ "$FINALIZE_SCHEDULER" != "single-threaded" && "$FINALIZE_SCHEDULER" != "threads" && "$FINALIZE_SCHEDULER" != "processes" && "$FINALIZE_SCHEDULER" != "distributed" ]]; then
-  echo "--finalize-scheduler must be single-threaded, threads, processes, or distributed." >&2
-  exit 2
 fi
 if [[ "$FINALIZE_POSTCOMPUTE_BACKEND" != "serial" && "$FINALIZE_POSTCOMPUTE_BACKEND" != "process_shards" ]]; then
   echo "--finalize-postcompute-backend must be serial or process_shards." >&2
@@ -551,7 +543,6 @@ SUBJECT_ARGS=(
   --mask-rle-validation-mode "$MASK_RLE_VALIDATION_MODE"
   --finalize-chunk-size "$FINALIZE_CHUNK_SIZE"
   --finalize-execution-backend "$FINALIZE_EXECUTION_BACKEND"
-  --finalize-scheduler "$FINALIZE_SCHEDULER"
   --finalize-num-workers "$FINALIZE_NUM_WORKERS"
   --finalize-postcompute-backend "$FINALIZE_POSTCOMPUTE_BACKEND"
   --roi-cache-policy "$ROI_CACHE_POLICY"
@@ -837,7 +828,7 @@ echo "Resources: ncores=$NCORES mem_gb=$MEM_GB gpus=$GPUS device=$DEVICE"
 echo "Subject output parent: $SUBJECT_OUTPUT_PARENT"
 echo "Split finalization job: $SPLIT_FINALIZATION_JOB"
 echo "Run finalization: $RUN_FINALIZATION"
-echo "Finalizer: chunk_size=$FINALIZE_CHUNK_SIZE workers=$FINALIZE_NUM_WORKERS backend=$FINALIZE_EXECUTION_BACKEND scheduler=$FINALIZE_SCHEDULER"
+echo "Finalizer: chunk_size=$FINALIZE_CHUNK_SIZE workers=$FINALIZE_NUM_WORKERS backend=$FINALIZE_EXECUTION_BACKEND"
 echo "Finalizer dense mask row chunk: ${FINALIZE_DENSE_MASK_ROW_CHUNK:-<finalizer default>}"
 echo "Refined mask storage: $MASK_STORAGE"
 echo "Finalizer resources: queue=${FINALIZE_QUEUE:-<default>} ncores=$FINALIZE_NCORES mem_gb=$FINALIZE_MEM_GB max_active=$FINALIZE_MAX_ACTIVE"

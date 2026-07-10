@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -32,6 +35,10 @@ from ..shared.mask_store import (
     open_mask_store,
 )
 from ..shared.mask_geometry import batch_mask_spatial_metrics
+from ..shared.mask_fingerprint import (
+    batch_mask_row_fingerprints as _compute_mask_row_fingerprints,
+    mask_row_fingerprint as _mask_row_fingerprint,
+)
 from ..shared.mask_probability_encoding import (
     decode_probability_values,
     probabilities_encoding_from_attrs,
@@ -299,9 +306,8 @@ class RefinedSubjectComponentSeed:
 
 @dataclass(frozen=True)
 class _RefinedSubjectApplyContext:
-    source: SourceSubjectMaskRun
+    source_run_name: str
     refined: RefinedSubjectMaskRun
-    component_sources: dict[str, SourceSubjectMaskRun]
     component_name: str
     comp_idx: int
     component_group: zarr.Group
@@ -324,6 +330,51 @@ class ReviewPanelRegion:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+@contextmanager
+def _refined_subject_write_lock(
+    zarr_path: str | Path,
+    *,
+    refined_run: str,
+    timeout_seconds: float = 30.0,
+):
+    """Serialize live writes to one refined run across local processes/hosts.
+
+    This intentionally starts with a run-scoped lock. It is coarser than the
+    eventual physical-chunk lock set, but it safely covers dense pixels,
+    row-revision arrays, and run-level stale attrs as one write boundary.
+    """
+
+    archive_path = Path(zarr_path).expanduser().resolve()
+    lock_root = archive_path.parent / f".{archive_path.name}.palette_write_locks"
+    lock_root.mkdir(parents=True, exist_ok=True)
+    lock_key = hashlib.sha256(
+        f"{archive_path}\0refined_subject_masks_runs\0{refined_run}".encode("utf-8")
+    ).hexdigest()
+    lock_path = lock_root / f"refined_subject_run_{lock_key}.lock"
+    wait_started = time.perf_counter()
+    timeout = max(0.0, float(timeout_seconds))
+    with lock_path.open("a+b") as handle:
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if (time.perf_counter() - wait_started) >= timeout:
+                    raise TimeoutError(
+                        f"Timed out after {timeout:.3f}s waiting for refined subject-mask write lock "
+                        f"for run {refined_run!r}."
+                    )
+                time.sleep(min(0.05, max(0.001, timeout / 20.0)))
+        try:
+            yield {
+                "scope": "refined_run",
+                "path": str(lock_path),
+                "wait_seconds": float(time.perf_counter() - wait_started),
+            }
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _normalize_component_name(name: object) -> Optional[str]:
@@ -662,22 +713,6 @@ def _component_masks_from_source(source: SourceSubjectMaskRun, component_name: s
     if source_idx >= int(source.available_channels.shape[0]) or not bool(source.available_channels[source_idx]):
         return masks
     return np.asarray(source.masks_roi[:, source_idx], dtype=np.uint8)
-
-
-def _mask_row_fingerprint(mask: np.ndarray) -> np.uint64:
-    payload = np.ascontiguousarray(np.asarray(mask, dtype=np.uint8))
-    digest = hashlib.blake2b(payload.tobytes(), digest_size=8).digest()
-    return np.uint64(int.from_bytes(digest, byteorder="little", signed=False))
-
-
-def _compute_mask_row_fingerprints(masks: np.ndarray) -> np.ndarray:
-    rows = np.asarray(masks, dtype=np.uint8)
-    if rows.ndim != 3:
-        raise ValueError(f"Expected component masks with shape (N,H,W), got {tuple(rows.shape)}")
-    out = np.zeros((int(rows.shape[0]),), dtype=np.uint64)
-    for row_idx in range(int(rows.shape[0])):
-        out[row_idx] = _mask_row_fingerprint(rows[row_idx])
-    return out
 
 
 def _compute_manual_override_flags(
@@ -2790,9 +2825,8 @@ def _resolve_refined_subject_apply_context(
         raise RuntimeError(f"refined_subject_masks_runs/{refined_run} not found.")
 
     existing_run = refined_parent[str(refined_run)]
-    labels_raw = existing_run.attrs.get("mask_labels")
-    if not isinstance(labels_raw, (list, tuple)) or not labels_raw:
-        raise RuntimeError(f"refined_subject_masks_runs/{refined_run} missing usable mask_labels attr.")
+    refined = _open_existing_refined_subject_run(root, str(refined_run))
+    labels_raw = refined.component_names
 
     normalized_component = _normalize_component_name(component_name)
     if normalized_component is None:
@@ -2808,20 +2842,6 @@ def _resolve_refined_subject_apply_context(
             f"refined_subject_masks_runs/{refined_run} is missing source_subject_mask_run and no override was provided."
         )
 
-    source, refined = prepare_refined_subject_run(
-        root,
-        subject_run=resolved_source_run,
-        refined_run=str(refined_run),
-        components=tuple(str(item) for item in labels_raw),
-    )
-    if refined.run_name != str(refined_run):
-        raise RuntimeError(f"Resolved refined run mismatch: expected {refined_run}, got {refined.run_name}.")
-    if source.run_name != str(resolved_source_run):
-        raise RuntimeError(
-            f"Resolved source subject-mask run mismatch: expected {resolved_source_run}, got {source.run_name}."
-        )
-    _primary_source, component_sources = _load_refined_component_source_runs(root, refined, default_source=source)
-
     comp_idx = int(refined.component_to_index[normalized_component])
     available_arr = refined.group.get("available_channels")
     if available_arr is not None:
@@ -2833,9 +2853,8 @@ def _resolve_refined_subject_apply_context(
 
     component_group = refined.group.require_group("components").require_group(normalized_component)
     return _RefinedSubjectApplyContext(
-        source=source,
+        source_run_name=str(resolved_source_run),
         refined=refined,
-        component_sources=component_sources,
         component_name=normalized_component,
         comp_idx=comp_idx,
         component_group=component_group,
@@ -2856,6 +2875,40 @@ def _read_component_contour_len(component_group: zarr.Group, roi_idx: int) -> in
     return int(np.asarray(contours["len"][int(roi_idx)], dtype=np.int32))
 
 
+def _selected_component_chunk_telemetry(
+    masks_array: zarr.Array,
+    *,
+    roi_idx: int,
+    comp_idx: int,
+) -> dict[str, object]:
+    shape = tuple(int(value) for value in masks_array.shape)
+    chunks = tuple(int(value) for value in (masks_array.chunks or shape))
+    if len(shape) != 4 or len(chunks) != 4:
+        return {
+            "dense_mask_chunk_shape": list(chunks),
+            "dense_mask_touched_chunk_count": None,
+            "dense_mask_touched_chunk_logical_bytes": None,
+        }
+    row_chunk_start = (int(roi_idx) // chunks[0]) * chunks[0]
+    component_chunk_start = (int(comp_idx) // chunks[1]) * chunks[1]
+    row_chunk_extent = min(chunks[0], shape[0] - row_chunk_start)
+    component_chunk_extent = min(chunks[1], shape[1] - component_chunk_start)
+    spatial_chunk_count = 1
+    for axis in (2, 3):
+        spatial_chunk_count *= (shape[axis] + chunks[axis] - 1) // chunks[axis]
+    touched_logical_elements = (
+        int(row_chunk_extent)
+        * int(component_chunk_extent)
+        * int(shape[2])
+        * int(shape[3])
+    )
+    return {
+        "dense_mask_chunk_shape": list(chunks),
+        "dense_mask_touched_chunk_count": int(spatial_chunk_count),
+        "dense_mask_touched_chunk_logical_bytes": int(touched_logical_elements * masks_array.dtype.itemsize),
+    }
+
+
 def _validate_refined_subject_mask_edit_row(
     *,
     run_group: zarr.Group,
@@ -2863,23 +2916,70 @@ def _validate_refined_subject_mask_edit_row(
     comp_idx: int,
     roi_idx: int,
     mask: np.ndarray,
+    expected_row_revision: int,
 ) -> None:
     binary = (np.asarray(mask, dtype=np.uint8) > 0).astype(np.uint8, copy=False)
-    expected_area = float(np.count_nonzero(binary))
-    expected_present = bool(expected_area > 0.0)
-    metrics = run_group["metrics"]
-    actual_present = bool(np.asarray(metrics["mask_present"][int(roi_idx), int(comp_idx)], dtype=bool))
-    actual_area = float(np.asarray(metrics["area_px"][int(roi_idx), int(comp_idx)], dtype=np.float32))
-    component_present = bool(np.asarray(component_group["mask_present"][int(roi_idx)], dtype=bool))
-    component_area = float(np.asarray(component_group["area_px"][int(roi_idx)], dtype=np.float32))
-    if actual_present != expected_present or component_present != expected_present:
+    actual = np.asarray(run_group["masks_roi"][int(roi_idx), int(comp_idx)], dtype=np.uint8)
+    if not np.array_equal(actual, binary):
         raise RuntimeError(
-            f"Post-write validation failed for row {int(roi_idx)}: mask_present does not match mask pixels."
+            f"Post-write validation failed for row {int(roi_idx)}: authoritative mask pixels differ."
         )
-    if not np.isclose(actual_area, expected_area) or not np.isclose(component_area, expected_area):
+    actual_revision = _read_component_row_revision(component_group, int(roi_idx))
+    if actual_revision != int(expected_row_revision):
         raise RuntimeError(
-            f"Post-write validation failed for row {int(roi_idx)}: area_px does not match mask pixels."
+            f"Post-write validation failed for row {int(roi_idx)}: expected revision "
+            f"{int(expected_row_revision)}, found {actual_revision}."
         )
+    if not bool(np.asarray(run_group["edit_applied"][int(roi_idx), int(comp_idx)], dtype=bool)):
+        raise RuntimeError(f"Post-write validation failed for row {int(roi_idx)}: edit_applied is false.")
+
+
+def _write_refined_subject_mask_authority_row(
+    context: _RefinedSubjectApplyContext,
+    *,
+    roi_idx: int,
+    binary_mask: np.ndarray,
+    reason: str,
+) -> tuple[int, str]:
+    """Persist only canonical pixels and minimal live-edit state."""
+
+    run_group = context.refined.group
+    run_group["masks_roi"][int(roi_idx), int(context.comp_idx)] = np.asarray(binary_mask, dtype=np.uint8)
+    run_group["edit_applied"][int(roi_idx), int(context.comp_idx)] = True
+
+    component_group = context.component_group
+    component_edit_applied = component_group.get("edit_applied")
+    if component_edit_applied is not None:
+        component_edit_applied[int(roi_idx)] = True
+    manual_override = component_group.get("manual_override")
+    if manual_override is not None:
+        manual_override[int(roi_idx)] = True
+
+    row_updates = mark_component_rows_updated(
+        component_group,
+        (int(roi_idx),),
+        component=context.component_name,
+        roi_count=int(run_group["masks_roi"].shape[0]),
+        reason=str(reason),
+    )
+    row_revision_after = int(row_updates[0].row_revision)
+    updated_at_utc = _utc_now()
+    run_group.attrs["updated_at_utc"] = updated_at_utc
+    mark_derived_mask_caches_stale_attrs(
+        run_group,
+        updated_at_utc=updated_at_utc,
+        updated_components=(context.component_name,),
+        updated_rows=(int(roi_idx),),
+        reason=str(reason),
+    )
+    _write_refined_component_last_update(
+        run_group,
+        component_name=context.component_name,
+        updated_at_utc=updated_at_utc,
+        update_mode="external_writeback",
+        update_method=REFINED_SUBJECT_WRITEBACK_METHOD,
+    )
+    return row_revision_after, updated_at_utc
 
 
 def write_refined_subject_mask_edit(
@@ -2891,77 +2991,123 @@ def write_refined_subject_mask_edit(
     mask: np.ndarray,
     reason: str = DEFAULT_REFINED_SUBJECT_WRITEBACK_REASON,
     source_subject_mask_run: Optional[str] = None,
+    expected_row_revision: Optional[int] = None,
+    lock_timeout_seconds: float = 30.0,
     validate: bool = False,
 ) -> dict[str, object]:
-    """Write one refined subject-mask row/component and refresh Palette-owned metadata."""
+    """Write one canonical dense row/component under a revision-checked lock."""
 
-    context = _resolve_refined_subject_apply_context(
+    operation_started = time.perf_counter()
+    resolved_reason = str(reason or DEFAULT_REFINED_SUBJECT_WRITEBACK_REASON)
+    with _refined_subject_write_lock(
         zarr_path,
-        refined_run=refined_run,
-        component_name=component_name,
-        source_subject_mask_run=source_subject_mask_run,
-    )
-    run_group = context.refined.group
-    total_rois = int(run_group["masks_roi"].shape[0])
-    normalized_rows = _normalize_roi_indices([int(roi_index)], total_rois)
-    roi_idx = int(normalized_rows[0])
-    expected_mask_shape = tuple(int(dim) for dim in run_group["masks_roi"].shape[2:])
-    binary_mask = (np.asarray(mask, dtype=np.uint8) > 0).astype(np.uint8, copy=False)
-    if tuple(binary_mask.shape) != expected_mask_shape:
-        raise ValueError(f"mask shape mismatch: expected {expected_mask_shape}, got {tuple(binary_mask.shape)}")
-
-    row_revision_before = _read_component_row_revision(context.component_group, roi_idx)
-    current_stack = np.asarray(run_group["masks_roi"][roi_idx], dtype=np.uint8)
-    previous_mask = np.asarray(current_stack[context.comp_idx], dtype=np.uint8)
-    mask_changed = not np.array_equal(previous_mask, binary_mask)
-    if mask_changed:
-        edited_stack = current_stack.copy()
-        edited_stack[context.comp_idx] = binary_mask
-        _apply_refined_subject_roi_rows(
-            component_sources=context.component_sources,
-            refined=context.refined,
-            roi_indices=(roi_idx,),
-            edited_masks_batch=edited_stack,
-            component_names=(context.component_name,),
-            update_mode="external_writeback",
-            update_method=REFINED_SUBJECT_WRITEBACK_METHOD,
-            update_reason=str(reason or DEFAULT_REFINED_SUBJECT_WRITEBACK_REASON),
+        refined_run=str(refined_run),
+        timeout_seconds=float(lock_timeout_seconds),
+    ) as lock_summary:
+        lock_hold_started = time.perf_counter()
+        context = _resolve_refined_subject_apply_context(
+            zarr_path,
+            refined_run=refined_run,
+            component_name=component_name,
+            source_subject_mask_run=source_subject_mask_run,
         )
+        run_group = context.refined.group
+        total_rois = int(run_group["masks_roi"].shape[0])
+        normalized_rows = _normalize_roi_indices([int(roi_index)], total_rois)
+        roi_idx = int(normalized_rows[0])
+        expected_mask_shape = tuple(int(dim) for dim in run_group["masks_roi"].shape[2:])
+        binary_mask = (np.asarray(mask, dtype=np.uint8) > 0).astype(np.uint8, copy=False)
+        if tuple(binary_mask.shape) != expected_mask_shape:
+            raise ValueError(f"mask shape mismatch: expected {expected_mask_shape}, got {tuple(binary_mask.shape)}")
 
-    if validate:
-        _validate_refined_subject_mask_edit_row(
-            run_group=run_group,
-            component_group=context.component_group,
-            comp_idx=context.comp_idx,
+        row_revision_before = _read_component_row_revision(context.component_group, roi_idx)
+        if expected_row_revision is not None and row_revision_before != int(expected_row_revision):
+            raise RuntimeError(
+                f"Stale refined subject-mask edit for row {roi_idx}, component {context.component_name!r}: "
+                f"expected row revision {int(expected_row_revision)}, found {row_revision_before}."
+            )
+        masks_array = run_group["masks_roi"]
+        chunk_telemetry = _selected_component_chunk_telemetry(
+            masks_array,
             roi_idx=roi_idx,
-            mask=binary_mask,
+            comp_idx=context.comp_idx,
         )
+        read_started = time.perf_counter()
+        previous_mask = np.asarray(
+            masks_array[roi_idx, context.comp_idx],
+            dtype=np.uint8,
+        )
+        dense_read_seconds = float(time.perf_counter() - read_started)
+        mask_changed = not np.array_equal(previous_mask, binary_mask)
+        updated_at_utc = str(run_group.attrs.get("updated_at_utc") or "")
+        write_seconds = 0.0
+        if mask_changed:
+            write_started = time.perf_counter()
+            row_revision_after, updated_at_utc = _write_refined_subject_mask_authority_row(
+                context,
+                roi_idx=roi_idx,
+                binary_mask=binary_mask,
+                reason=resolved_reason,
+            )
+            write_seconds = float(time.perf_counter() - write_started)
+        else:
+            row_revision_after = row_revision_before
 
-    row_revision_after = _read_component_row_revision(context.component_group, roi_idx)
-    edit_applied = bool(np.asarray(run_group["edit_applied"][roi_idx, context.comp_idx], dtype=bool))
-    attrs = run_group.attrs
-    return {
-        "ok": True,
-        "status": "updated" if mask_changed else "noop",
-        "zarr_path": str(Path(zarr_path)),
-        "refined_run": context.refined.run_name,
-        "source_subject_mask_run": context.source.run_name,
-        "roi_index": roi_idx,
-        "component_name": context.component_name,
-        "row_revision_before": int(row_revision_before),
-        "row_revision_after": int(row_revision_after),
-        "edit_applied": edit_applied,
-        "mask_changed": bool(mask_changed),
-        "contour_points": int(_read_component_contour_len(context.component_group, roi_idx)),
-        "derived_mask_caches_stale": bool(attrs.get("derived_mask_caches_stale", False)),
-        "metrics_stale": bool(attrs.get("metrics_stale", False)),
-        "contours_stale": bool(attrs.get("contours_stale", False)),
-        "mask_bitpacked_stale": bool(attrs.get("mask_bitpacked_stale", False)),
-        "mask_rle_stale": bool(attrs.get("mask_rle_stale", False)),
-        "updated_at_utc": str(run_group.attrs.get("updated_at_utc") or ""),
-        "reason": str(reason or DEFAULT_REFINED_SUBJECT_WRITEBACK_REASON),
-        "validated": bool(validate),
-    }
+        validation_seconds = 0.0
+        if validate and mask_changed:
+            validation_started = time.perf_counter()
+            _validate_refined_subject_mask_edit_row(
+                run_group=run_group,
+                component_group=context.component_group,
+                comp_idx=context.comp_idx,
+                roi_idx=roi_idx,
+                mask=binary_mask,
+                expected_row_revision=row_revision_after,
+            )
+            validation_seconds = float(time.perf_counter() - validation_started)
+
+        edit_applied = bool(np.asarray(run_group["edit_applied"][roi_idx, context.comp_idx], dtype=bool))
+        attrs = run_group.attrs
+        result = {
+            "ok": True,
+            "status": "updated" if mask_changed else "noop",
+            "zarr_path": str(Path(zarr_path)),
+            "refined_run": context.refined.run_name,
+            "source_subject_mask_run": context.source_run_name,
+            "roi_index": roi_idx,
+            "component_name": context.component_name,
+            "expected_row_revision": int(expected_row_revision) if expected_row_revision is not None else None,
+            "row_revision_before": int(row_revision_before),
+            "row_revision_after": int(row_revision_after),
+            "edit_applied": edit_applied,
+            "mask_changed": bool(mask_changed),
+            "contour_points": int(_read_component_contour_len(context.component_group, roi_idx)),
+            "derived_mask_caches_stale": bool(attrs.get("derived_mask_caches_stale", False)),
+            "metrics_stale": bool(attrs.get("metrics_stale", False)),
+            "contours_stale": bool(attrs.get("contours_stale", False)),
+            "mask_bitpacked_stale": bool(attrs.get("mask_bitpacked_stale", False)),
+            "mask_rle_stale": bool(attrs.get("mask_rle_stale", False)),
+            "updated_at_utc": updated_at_utc,
+            "reason": resolved_reason,
+            "validated": bool(validate and mask_changed),
+            "validation_status": (
+                "passed"
+                if validate and mask_changed
+                else ("not_needed_noop" if validate else "not_requested")
+            ),
+            "write_scope": "selected_dense_component",
+            "derived_refresh_policy": "mark_stale",
+            "lock_scope": str(lock_summary["scope"]),
+            "lock_wait_seconds": float(lock_summary["wait_seconds"]),
+            "lock_hold_seconds": float(time.perf_counter() - lock_hold_started),
+            "logical_mask_bytes": int(binary_mask.nbytes),
+            "dense_mask_read_seconds": dense_read_seconds,
+            "authority_write_seconds": write_seconds,
+            "validation_seconds": validation_seconds,
+            **chunk_telemetry,
+        }
+    result["total_save_seconds"] = float(time.perf_counter() - operation_started)
+    return result
 
 
 def sync_refined_subject_mask_metadata(

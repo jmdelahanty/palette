@@ -134,7 +134,6 @@ def finalize_subject_mask_clip_package(
     mask_rle_validation_mode: str = "invariants",
     dense_mask_row_chunk: int | None = None,
     execution_backend: str = "process_shards",
-    scheduler: str = "processes",
     num_workers: int | None = None,
     postcompute_backend: str = "process_shards",
     postcompute_num_workers: int | None = None,
@@ -172,7 +171,6 @@ def finalize_subject_mask_clip_package(
             mask_rle_validation_mode=mask_rle_validation_mode,
             dense_mask_row_chunk=dense_mask_row_chunk,
             execution_backend=execution_backend,
-            scheduler=scheduler,
             num_workers=num_workers,
             postcompute_backend=postcompute_backend,
             postcompute_num_workers=postcompute_num_workers,
@@ -244,8 +242,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mask-storage", default="dense_and_bitpacked")
     parser.add_argument("--mask-rle-validation-mode", default="invariants")
     parser.add_argument("--dense-mask-row-chunk", type=int)
-    parser.add_argument("--execution-backend", default="process_shards")
-    parser.add_argument("--scheduler", default="processes")
+    parser.add_argument("--execution-backend", choices=("serial_driver", "process_shards"), default="process_shards")
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--postcompute-backend", default="process_shards")
     parser.add_argument("--postcompute-num-workers", type=int)
@@ -277,7 +274,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         mask_rle_validation_mode=args.mask_rle_validation_mode,
         dense_mask_row_chunk=args.dense_mask_row_chunk,
         execution_backend=args.execution_backend,
-        scheduler=args.scheduler,
         num_workers=args.num_workers,
         postcompute_backend=args.postcompute_backend,
         postcompute_num_workers=args.postcompute_num_workers,

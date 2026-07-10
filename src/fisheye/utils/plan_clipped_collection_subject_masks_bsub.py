@@ -212,7 +212,6 @@ def build_plan(
     finalizer_chunk_size: int,
     finalizer_dense_mask_row_chunk: int | None,
     finalizer_execution_backend: str,
-    finalizer_scheduler: str,
     finalizer_postcompute_backend: str,
     finalizer_postcompute_num_workers: int | None,
     finalizer_postcompute_chunk_size: int | None,
@@ -460,8 +459,6 @@ def build_plan(
         mask_rle_validation_mode,
         "--execution-backend",
         finalizer_execution_backend,
-        "--scheduler",
-        finalizer_scheduler,
         "--num-workers",
         str(finalizer_num_workers),
         "--postcompute-backend",
@@ -558,8 +555,6 @@ def build_plan(
                 mask_rle_validation_mode,
                 "--execution-backend",
                 finalizer_execution_backend,
-                "--scheduler",
-                finalizer_scheduler,
                 "--num-workers",
                 str(finalizer_num_workers),
                 "--postcompute-backend",
@@ -1052,7 +1047,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--finalizer-chunk-size", type=int, default=256)
     parser.add_argument("--finalizer-dense-mask-row-chunk", type=int, default=128)
     parser.add_argument("--finalizer-execution-backend", default="process_shards")
-    parser.add_argument("--finalizer-scheduler", default="processes")
     parser.add_argument("--finalizer-postcompute-backend", default="process_shards")
     parser.add_argument("--finalizer-postcompute-num-workers", type=int)
     parser.add_argument("--finalizer-postcompute-chunk-size", type=int)
@@ -1151,7 +1145,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         finalizer_chunk_size=int(args.finalizer_chunk_size),
         finalizer_dense_mask_row_chunk=int(args.finalizer_dense_mask_row_chunk),
         finalizer_execution_backend=args.finalizer_execution_backend,
-        finalizer_scheduler=args.finalizer_scheduler,
         finalizer_postcompute_backend=args.finalizer_postcompute_backend,
         finalizer_postcompute_num_workers=postcompute_workers,
         finalizer_postcompute_chunk_size=args.finalizer_postcompute_chunk_size,

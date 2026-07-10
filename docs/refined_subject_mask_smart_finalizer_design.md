@@ -74,7 +74,7 @@ Target V1 behavior:
   troubleshooting
 - record phase and chunk timings so scheduler/write changes have a measurable
   baseline
-- optionally use Dask worker chunks for disjoint row-range zarr writes
+- use contiguous process shards for production parallel finalization
 - optionally write expensive shape QC metrics and eye geometry after
   `eye_left` and `eye_right` assignment
 
@@ -252,9 +252,9 @@ scripts/py -m fisheye.utils.backfill_refined_subject_mask_metrics \
 
 Use `--metric-level full` when the expensive shape-QC metrics are needed, and
 `--no-refresh-reason-tags` when only numeric arrays should be recomputed. For
-large archives, use `--execution-backend dask_worker_chunks --scheduler
-processes --num-workers <N>` so workers recompute and write disjoint row chunks
-while the driver consolidates metadata and generated reason tags.
+large archives, metric refresh is currently a sealed serial maintenance pass;
+the parallel production path applies when creating the refined run with
+`--execution-backend process_shards`.
 
 Recommended reason tags:
 
@@ -277,9 +277,10 @@ Recommended reason tags:
 `quality_code`, `quality_score`, and reason tags are machine-generated
 review-routing signals. They are not approval state.
 
-## Dask Execution Model
+## Parallel Execution Model
 
-Use Dask for chunk-level batch computation, not for interactive review events.
+Use `process_shards` for production parallel finalization. Keep
+`serial_driver` as the deterministic correctness and debugging fallback.
 
 Natural task unit:
 
@@ -297,197 +298,44 @@ Driver responsibilities:
 - open the zarr archive
 - resolve source and target runs
 - create target `refined_subject_masks_runs/<run>` arrays and attrs
-- submit chunk tasks
-- write returned chunk results in deterministic row ranges
+- partition the run into contiguous, whole-physical-chunk-aligned shards
+- merge sealed metrics and packed variable-length outputs deterministically
 - write aggregate attrs and provenance
 - run refined eye geometry after left/right masks exist
 - emit registry status
 
-Current implementation note:
+Worker responsibilities:
 
-- the default `serial_driver` backend is still available and remains the
-  deterministic debug path
-- `--execution-backend dask_worker_chunks` lets Dask workers compute and write
-  disjoint fixed-shape row chunks while the driver finalizes attrs, reasons,
-  provenance, registry status, and optional eye geometry
-- `--scheduler` and `--num-workers` control the Dask compute mode when the Dask
-  backend is selected; in serial mode they are recorded as instrumentation only
-
-Task responsibilities:
-
-- no zarr metadata mutation
+- open the source and target Zarr once per contiguous shard
+- own whole, non-overlapping physical chunks for every directly written array
 - no registry writes
 - no global attrs
 - no approval changes
-- pure or near-pure computation over an input chunk
+- finalize body, swim bladder, and eye masks for the owned rows
+- return sealed finalization-metric payloads and optional packed postcompute
+  payloads to the driver
 
 This avoids workers racing over zarr group metadata and keeps failed runs
 recoverable.
 
-Supported scheduler modes should mirror existing refined-subject tooling:
+### Backend Decision
 
-- `single-threaded` for deterministic debugging and tests
-- `threads` for local low-overhead parallelism
-- `processes` when CPU cleanup dominates and thread scaling is poor
-- `distributed` local cluster for real batch execution when it wins on measured
-  workload timing
+The retired delayed-task and Dask-array implementations were slower than
+`process_shards` on production-matched real-data benchmarks. The Dask-array
+thread canary was about 2.5 times slower on 4,096 rows; the process canary was
+stopped after 536 seconds with low CPU utilization and high memory use. The
+full staged delayed-task Dask process run was also slower than
+`process_shards` (451.72 versus 279.18 seconds). Detailed evidence is preserved
+in `docs/diagnostics/subject_mask_finalizer_publication_status_2026-07-09.md`.
 
-Recommended initial default:
+The supported decision is therefore:
 
-- keep `single-threaded` explicit for small dry-runs
-- benchmark `threads`, `processes`, and local `distributed` before selecting
-  the recommended operator path
-- promote local `distributed` as the recommended mode if it is faster on real
-  finalization workloads and produces byte-equivalent outputs
-
-## Scheduler Benchmark Plan
-
-Scheduler choice should be measured on the actual finalizer workload, not on a
-synthetic Dask microbenchmark.
-
-Benchmark modes:
-
-- `single-threaded`
-- `threads`
-- `processes`
-- `distributed` local cluster
-
-Benchmark sizes:
-
-- small subset: `256` or `512` ROI rows
-- medium subset: `2k` to `5k` ROI rows
-- full canary: the complete arena-2 U-Net subject-mask run, after subset output
-  inspection passes
-
-Benchmark controls:
-
-- use the same zarr archive
-- use the same source `subject_mask_runs/<run>`
-- use the same target output mode
-- use the same components
-- use the same chunk size
-- use the same cleanup policies and thresholds
-- do not compare schedulers across different model outputs or source runs
-
-Metrics to record:
-
-- wall time
-- rows per second
-- scheduler startup time
-- probability-read time
-- finalizer compute time
-- zarr write time
-- eye-geometry time
-- peak memory when easy to collect
-- failed or retried chunk count
-
-Correctness gate:
-
-- masks must be byte-equivalent across schedulers for the benchmark subset
-- numeric metrics must be exactly equal or within documented dtype tolerance
-- reason labels must match exactly
-- component review-routing states must match exactly
-- registry emission should be skipped during benchmark runs or performed only
-  for the selected final canary output
-
-Output naming:
-
-- benchmark target runs should include the scheduler and subset size in the run
-  name
-- failed or incomplete benchmark runs should not become `latest`
-- the selected final canary run should use a clean operator-facing run name
-
-Decision rule:
-
-- keep `single-threaded` as the deterministic debug mode regardless of timing
-- recommend the fastest scheduler that passes the correctness gate on the
-  medium subset
-- require a full-canary confirmation before making a scheduler the documented
-  default for operator commands
-- if local `distributed` wins, document it as the preferred real-run path rather
-  than treating it as only a future scaling option
-
-### Initial Diagnostic Results
-
-Initial diagnostic tool:
-
-```bash
-scripts/py -m fisheye.diagnostics.benchmark_subject_mask_finalizer_schedulers \
-  /nvme1/recordings/2026-01-28T23-15-10Z_arena_2_Feeding/zarr/2026-01-28T23-15-10Z_arena_2_Feeding_analysis.zarr \
-  --source-run subject_masks_unet_registry_gpu_metrics_profile_2026-04-26
-```
-
-This diagnostic reads real `mask_probs_roi` chunks and runs spatial
-finalization plus `eyes_union -> eye_left/eye_right` assignment, but it does not
-write refined zarr outputs or run refined eye ellipse geometry. It is a compute
-and source-read benchmark, not a full production writer benchmark.
-
-Before benchmarking schedulers, the body/swim hole-fill implementation was
-changed from a pure-Python flood-fill loop to `scipy.ndimage.binary_fill_holes`.
-On a 32-row single-threaded smoke, that reduced wall time from about `55.0s` to
-about `1.86s`. Scheduler comparisons should use the vectorized hole-fill path.
-
-256-row subset, chunk size `64`, all schedulers:
-
-| Scheduler | Wall seconds | Rows/sec | Output parity |
-| --- | ---: | ---: | --- |
-| `single-threaded` | `13.89` | `18.43` | baseline |
-| `threads` | `4.39` | `58.36` | matched |
-| `processes` | `14.83` | `17.26` | matched |
-| `distributed` local cluster | `9.10` | `28.12` | matched |
-
-2,048-row subset, chunk size `256`, focused comparison:
-
-| Scheduler | Wall seconds | Rows/sec | Output parity |
-| --- | ---: | ---: | --- |
-| `threads` | `26.81` | `76.39` | baseline |
-| `distributed` local cluster | `33.05` | `61.97` | matched |
-
-Current interpretation:
-
-- `threads` is the fastest mode for the current spatial-finalizer diagnostic.
-- local `distributed` is valid and output-equivalent, but did not win on these
-  subsets.
-- this does not yet settle the final production default because the diagnostic
-  does not include refined zarr writes, registry emission, or eye ellipse
-  geometry.
-- production default selection should be revisited after the writer path exists.
-
-### Full Writer Canary Results
-
-Full real-zarr canary source:
-
-```text
-/nvme1/recordings/2026-01-28T23-15-10Z_arena_2_Feeding/zarr/2026-01-28T23-15-10Z_arena_2_Feeding_analysis.zarr
-source run: subject_masks_unet_registry_gpu_metrics_profile_2026-04-26
-rows: 19,235
-mask_probs_roi chunks: (32, 1, 512, 512)
-```
-
-Worker-chunk writer, `--chunk-size 64`, `--metric-level cheap`, deferred eye
-geometry:
-
-| Scheduler | Workers | Wall seconds | Rows/sec | Notes |
-| --- | ---: | ---: | ---: | --- |
-| `processes` | `24` | `132.21` | `145.49` | one worker per physical core |
-| `distributed` local cluster | `24` | `247.70` | `77.65` | valid, but higher overhead |
-| `processes` | `48` | `108.51` | `177.26` | fastest canary on this workstation |
-
-Current operator recommendation for this workstation:
-
-- use `--execution-backend dask_worker_chunks`
-- use `--scheduler processes`
-- use `--num-workers 48` when the machine is otherwise available
-- fall back to `--num-workers 24` if interactive responsiveness, I/O
-  contention, or worker memory pressure becomes an issue
-- keep `--scheduler distributed` as an explicit diagnostic/scaling option, not
-  the default local operator path
-
-The fastest canary was then refreshed with
-`fisheye.utils.backfill_refined_subject_eye_geometry`. The latest refined run
-contained all four canonical components with `masks_roi = (19235, 4, 512, 512)`
-and `eye_geometry_status = computed`; eye-pair separation was valid for
-`19233 / 19235` rows.
+- `process_shards` is the only production parallel backend
+- `serial_driver` is retained only for deterministic correctness/debugging
+- Dask finalizer backends and scheduler options are not part of the active API
+- a future alternative must begin as a separate benchmark canary and pass
+  output-parity, throughput, memory, and publication-layout gates before it is
+  added to production code
 
 ## Failure And Restart Semantics
 
@@ -498,7 +346,7 @@ Safe behavior:
 - raw source run remains unchanged
 - target refined run name is explicit
 - existing target requires `--overwrite`
-- `--dry-run` plans rows, components, scheduler, chunk count, and expected
+- `--dry-run` plans rows, components, backend, chunk count, and expected
   output arrays without writing
 - small `--roi-indices` or `--roi-index` subsets can be finalized first for
   visual inspection
@@ -543,11 +391,10 @@ scripts/py -m fisheye.refinement.finalize_subject_masks \
   --source-run subject_masks_unet_... \
   --refined-run refined_subject_masks_unet_finalized_... \
   --components subject_body eyes_union swim_bladder \
-  --chunk-size 64 \
+  --chunk-size 256 \
   --metric-level cheap \
-  --execution-backend dask_worker_chunks \
-  --scheduler processes \
-  --num-workers 48 \
+  --execution-backend process_shards \
+  --num-workers 16 \
   --dry-run
 ```
 
@@ -558,11 +405,10 @@ scripts/py -m fisheye.refinement.finalize_subject_masks \
   /path/to/analysis.zarr \
   --source-run subject_masks_unet_... \
   --refined-run refined_subject_masks_unet_finalized_... \
-  --chunk-size 64 \
+  --chunk-size 256 \
   --metric-level cheap \
-  --execution-backend dask_worker_chunks \
-  --scheduler processes \
-  --num-workers 48
+  --execution-backend process_shards \
+  --num-workers 16
 ```
 
 Use `--metric-level full --write-eye-geometry` when the operator explicitly
@@ -595,8 +441,6 @@ Implemented:
     deferred instead of blocking canonical mask publication
   - defaults to deferred eye geometry; `--write-eye-geometry` computes ellipse
     relation surfaces during finalization
-  - supports `--execution-backend dask_worker_chunks` for Dask worker-written
-    disjoint row chunks
   - supports `--execution-backend process_shards` for row-sharded worker
     processes that open the zarr once per shard and write disjoint row chunks
   - supports `--postcompute-backend process_shards` for expensive derived
@@ -607,9 +451,9 @@ Implemented:
   - writes `smart_finalizer_timing_summary` and
     `smart_finalizer_chunk_timings` attrs to expose per-phase and per-chunk
     runtime
-  - records Dask instrumentation attrs: `execution_backend`,
-    `dask_execution_enabled`, `dask_scheduler`, `dask_num_workers`,
-    `dask_chunk_size`, and `dask_version`
+  - records process-shard instrumentation attrs including `execution_backend`,
+    `process_shard_execution_enabled`, `worker_process_count`, requested and
+    effective worker chunk sizes, and the chunk-alignment policy
   - leaves component and run approval states `pending`
   - emits refined-subject registry status when run through the path-based CLI
 
@@ -635,11 +479,11 @@ Still open:
    - add eyes-union cleanup policy
    - avoid left/right assignment in this module; assignment stays separate
 
-3. Add a batch driver. Sequential chunk-range writer and opt-in
-   `dask_worker_chunks` execution are in place.
+3. Add a batch driver. Sequential debug execution and production
+   `process_shards` execution are in place.
    - creates target refined run
    - writes deterministic chunks sequentially in the default debug path
-   - can submit equivalent Dask worker chunks for disjoint row-range writes
+   - assigns contiguous, physical-chunk-aligned row shards to worker processes
    - can run eye geometry after LR masks exist when explicitly requested
 
 4. Add tests. In progress.
@@ -660,5 +504,5 @@ Still open:
 - no automatic approval
 - no temporal mask repair
 - no distributed cluster deployment requirement
-- no interactive brush/save event through Dask
+- no interactive brush/save event through the batch finalizer
 - no overwrite of existing curated refined runs unless explicitly requested

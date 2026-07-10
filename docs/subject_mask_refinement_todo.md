@@ -1121,7 +1121,8 @@ implemented for the current U-Net design:
   `refined_subject_masks_runs/<run>` candidates with
   `["subject_body", "eye_left", "eye_right", "swim_bladder"]`
 - the smart finalizer writes cleanup metrics, reason tags, source-seed masks,
-  component provenance, review-triage counts, and Dask execution metadata
+  component provenance, review-triage counts, and process-shard execution
+  metadata
 - refined-subject eye geometry can be written during finalization or backfilled
   afterward with `fisheye.utils.backfill_refined_subject_eye_geometry`
 - subject-body mask QC writes
@@ -1135,7 +1136,7 @@ Real canary evidence:
   `/nvme1/recordings/2026-01-28T23-15-10Z_arena_2_Feeding/zarr/2026-01-28T23-15-10Z_arena_2_Feeding_analysis.zarr`
 - raw source run:
   `subject_masks_unet_registry_gpu_metrics_profile_2026-04-26`
-- latest refined candidate:
+- historical refined candidate from the retired Dask finalizer canary:
   `refined_subject_masks_smart_finalizer_dask_processes48_c64_canary_2026-04-26`
 - refined candidate shape:
   `masks_roi = (19235, 4, 512, 512)`

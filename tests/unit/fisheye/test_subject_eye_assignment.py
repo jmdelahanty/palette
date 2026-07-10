@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from fisheye.shared.mask_geometry import batch_mask_spatial_metrics
 from fisheye.refinement.subject_eye_assignment import (
     _split_union_by_keypoints,
     _split_union_by_keypoints_batch_into,
@@ -400,6 +401,13 @@ def test_assign_eyes_union_records_subphase_timings() -> None:
     assert np.asarray(result.eye_geometry["ellipse_success"]).shape == (4, 2)
     assert np.asarray(result.eye_geometry["ellipse_success"], dtype=bool)[0].all()
     assert set(result.eye_geometry["contours"]) == {"eye_left", "eye_right"}
+    for component_name in ("eye_left", "eye_right"):
+        expected_spatial = batch_mask_spatial_metrics(result.masks[component_name])
+        for metric_name, expected_values in expected_spatial.items():
+            np.testing.assert_array_equal(
+                result.spatial_metrics[component_name][metric_name],
+                expected_values,
+            )
 
 
 def test_assign_eyes_union_can_skip_ellipse_measurement_for_diagnostics() -> None:

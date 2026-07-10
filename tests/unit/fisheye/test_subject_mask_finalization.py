@@ -3,12 +3,82 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from fisheye.shared.mask_geometry import batch_mask_spatial_metrics
 from fisheye.refinement.subject_mask_finalization import (
+    FINALIZATION_METRIC_NAMES,
     QUALITY_CLEANUP_APPLIED,
     QUALITY_NEEDS_REVIEW,
+    REVIEW_NEEDS_REVIEW,
+    REVIEW_PENDING,
     ComponentFinalizationPolicy,
+    decode_reason_flags,
     finalize_component_mask,
+    finalize_component_masks_batch,
+    reason_tags_from_flags,
 )
+
+
+def test_batch_finalization_uses_numeric_struct_of_arrays_and_preserves_rows() -> None:
+    surfaces = np.zeros((3, 20, 20), dtype=np.float32)
+    surfaces[0, 4:14, 4:14] = 0.9
+    surfaces[1, 5:15, 5:15] = 0.9
+    surfaces[1, 1:4, 1:4] = 0.95
+    surfaces[2, 4:8, 4:8] = 0.9
+
+    policy = ComponentFinalizationPolicy(
+        component_name="subject_body",
+        threshold=0.5,
+        high_threshold=0.8,
+        fill_holes=True,
+        min_component_area_px=1,
+        keep_largest_component=True,
+        max_removed_high_prob_mass_fraction=0.001,
+        max_changed_area_fraction=1.0,
+    )
+    batch = finalize_component_masks_batch("subject_body", surfaces, policy=policy)
+
+    assert batch.masks.shape == surfaces.shape
+    assert batch.source_masks.shape == surfaces.shape
+    assert batch.metrics.shape == (3, len(FINALIZATION_METRIC_NAMES))
+    assert batch.masks.dtype == np.uint8
+    assert batch.source_masks.dtype == np.uint8
+    assert batch.metrics.dtype == np.float32
+    assert batch.reason_flags.dtype == np.uint32
+    assert batch.quality_code.dtype == np.int16
+    assert batch.quality_score.dtype == np.float32
+    assert batch.review_code.dtype == np.uint8
+    assert batch.centroid_xy.shape == (3, 2)
+    assert batch.bbox_xyxy.shape == (3, 4)
+    assert batch.centroid_xy.dtype == np.float32
+    assert batch.bbox_xyxy.dtype == np.float32
+    assert all(values.dtype != object for values in (
+        batch.masks,
+        batch.source_masks,
+        batch.metrics,
+        batch.reason_flags,
+        batch.quality_code,
+        batch.quality_score,
+        batch.review_code,
+        batch.centroid_xy,
+        batch.bbox_xyxy,
+    ))
+    spatial_metrics = batch_mask_spatial_metrics(batch.masks)
+    np.testing.assert_array_equal(batch.centroid_xy, spatial_metrics["centroid_xy"])
+    np.testing.assert_array_equal(batch.bbox_xyxy, spatial_metrics["bbox_xyxy"])
+    assert batch.review_code.tolist() == [REVIEW_PENDING, REVIEW_NEEDS_REVIEW, REVIEW_PENDING]
+    assert "needs_review_removed_high_prob_island" in reason_tags_from_flags(batch.reason_flags[1])
+
+    decoded = decode_reason_flags(batch.reason_flags, probability_source=True)
+    assert all(str(label).startswith("cleanup_thresholded_probability") for label in decoded)
+    for row_idx in range(surfaces.shape[0]):
+        single = finalize_component_mask("subject_body", surfaces[row_idx], policy=policy)
+        np.testing.assert_array_equal(batch.masks[row_idx], single.mask)
+        np.testing.assert_array_equal(batch.source_masks[row_idx], single.source_mask)
+        assert reason_tags_from_flags(batch.reason_flags[row_idx]) == single.reason_tags
+        assert int(batch.quality_code[row_idx]) == single.quality_code
+        assert float(batch.quality_score[row_idx]) == single.quality_score
+        for metric_index, metric_name in enumerate(FINALIZATION_METRIC_NAMES):
+            assert float(batch.metrics[row_idx, metric_index]) == single.metrics[metric_name]
 
 
 def test_subject_body_finalization_fills_holes_and_removes_small_islands() -> None:

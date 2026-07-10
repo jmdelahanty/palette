@@ -367,11 +367,21 @@ Zarr chunk before writing. After a successful apply:
 - increment `edit_revision`
 - append a durable edit event with a retry-stable `apply_id` or equivalent
   idempotency key
-- update touched row/component metrics, reasons, contours, and geometry caches
-- refresh touched `mask_bitpacked` rows/components when `mask_bitpacked` exists
-- mark `mask_rle` stale when `mask_rle` exists unless it is explicitly
-  regenerated
+- persist only the authoritative dense row/component and minimal revision,
+  review, editor, reason, and timestamp state synchronously
+- mark metrics, reasons, contours, geometry, `mask_bitpacked`, and `mask_rle`
+  stale for the touched row/component when those derived surfaces exist
+- refresh derived products only during an explicit validation, promotion, or
+  maintenance operation; a UI may compute ephemeral feedback without making
+  it part of the durable save transaction
 - refresh registry/QC summaries after apply, not after every session checkpoint
+
+The Palette-owned write boundary must hold a lock that covers every physical
+chunk and shared metadata record it mutates. A refined-run-wide lock is an
+acceptable conservative first implementation. Finer per-physical-chunk locks
+are safe only when concurrent stale-scope and revision updates cannot overwrite
+one another. The writer must re-read and compare the target row revision after
+acquiring the lock and before changing `masks_roi`.
 
 When `mask_rle` is marked stale by an apply, writers should set at least:
 
@@ -503,11 +513,12 @@ Current implementation note:
 - `fisheye.refinement.finalize_subject_masks` is the smart finalizer for raw
   probability-first `subject_mask_runs`; it writes deterministic row chunks,
   cleanup metrics, source-seed masks, component provenance, reason tags,
-  review-triage counts, Dask execution metadata, and optional eye geometry
-- the measured local fast path for a full 19,235-row analysis-zarr canary used
-  `--execution-backend dask_worker_chunks --scheduler processes --num-workers 48
-  --chunk-size 64 --metric-level cheap`, then refreshed eye geometry with
-  `fisheye.utils.backfill_refined_subject_eye_geometry`
+  review-triage counts, process-shard execution metadata, and optional eye
+  geometry
+- the supported production parallel backend is `process_shards`: each worker
+  opens the archive once, owns a contiguous whole-physical-chunk-aligned row
+  shard, and writes only that shard; `serial_driver` remains a deterministic
+  correctness/debug fallback
 
 Source ROI pixel/decode provenance preservation:
 
