@@ -487,6 +487,210 @@ fish/body-frame stability without watching the source crop corners rotate
 through the view. Disable `[alignment].stable_circular_mask` in a local
 `config.toml` when debugging warp boundaries.
 
+To compare whole-frame keypoint stabilization against a local rostral-segment
+correction, render the eye-to-swim-bladder diagnostic:
+
+```bash
+scripts/py playgrounds/heartrate_stabilization/render_local_rostral_alignment_comparison.py \
+  --video playgrounds/heartrate_stabilization/outputs/stabilized_clean_full_eye_swim_origin_lossless.mkv \
+  --status-csv playgrounds/heartrate_stabilization/outputs/stabilized_clean_full_eye_swim_origin_lossless.csv \
+  --roi-json playgrounds/heartrate_stabilization/outputs/mask_relative_roi_chase_start_30000_3000f_eye_mid_w20_h12.mask_relative_roi.roi.json \
+  --mask-npz playgrounds/heartrate_stabilization/outputs/mask_relative_roi_chase_start_30000_3000f_eye_mid_w20_h12.mask_relative_roi.npz \
+  --center-frames 30700,31190,31440 \
+  --context-frames 60 \
+  --stride 1 \
+  --output playgrounds/heartrate_stabilization/outputs/local_rostral_alignment_comparison_component_eye_anchor_gated_worst_frames_eye_mid_w20_h12.mp4
+```
+
+The local correction is a rigid translate/rotate only. It uses the midpoint of
+the two individual eye-component bottom anchors and the rostral swim-bladder
+anchor. Corrections above `50 deg` or `150 px` are rejected and shown as local
+alignment failures; they should be treated as tracking/mask-quality flags, not
+as frames to warp into place.
+
+To compare source-pixel intensity traces from the fixed ROI and the gated local
+ROI:
+
+```bash
+scripts/py playgrounds/heartrate_stabilization/measure_local_roi_signal_compare.py \
+  --roi-json playgrounds/heartrate_stabilization/outputs/mask_relative_roi_chase_start_30000_3000f_eye_mid_w20_h12.mask_relative_roi.roi.json \
+  --mask-npz playgrounds/heartrate_stabilization/outputs/mask_relative_roi_chase_start_30000_3000f_eye_mid_w20_h12.mask_relative_roi.npz \
+  --status-csv playgrounds/heartrate_stabilization/outputs/stabilized_clean_full_eye_swim_origin_lossless.csv \
+  --frame-start 30000 \
+  --frame-count 3000 \
+  --window-seconds 5 \
+  --window-step-seconds 2.5 \
+  --primary-estimator autocorr \
+  --output-prefix playgrounds/heartrate_stabilization/outputs/local_roi_signal_compare_chase_start_30000_3000f_1p5_3p5hz_5s_windows
+```
+
+This measurement still samples original crop-video pixels. The local correction
+only maps the fixed ROI back into each frame's source-pixel coordinates and
+gates frames with missing or implausible local anchors.
+
+For calibrated per-pixel discovery, held-out confirmation, confirmed-only event
+extraction, and source-raster injection recovery, use:
+
+```bash
+scripts/py playgrounds/heartrate_stabilization/extract_reliable_local_rostral_heartrate.py \
+  --roi-json playgrounds/heartrate_stabilization/outputs/mask_relative_roi_chase_start_30000_3000f_eye_mid_w20_h12.mask_relative_roi.roi.json \
+  --mask-npz playgrounds/heartrate_stabilization/outputs/mask_relative_roi_chase_start_30000_3000f_eye_mid_w20_h12.mask_relative_roi.npz \
+  --status-csv playgrounds/heartrate_stabilization/outputs/stabilized_clean_full_eye_swim_origin_lossless.csv \
+  --frame-start 30000 \
+  --frame-count 3000 \
+  --output-prefix playgrounds/heartrate_stabilization/outputs/reliable_local_rostral_chase_start_30000_3000f \
+  --extract-only
+```
+
+The matrix persists the original timestamp grid, invalid rows, canonical and
+source coordinates, bilinear weights, mask occupancy, risk surfaces, transform
+diagnostics, and nuisance covariates. Reuse it without Zarr reads:
+
+```bash
+scripts/py playgrounds/heartrate_stabilization/extract_reliable_local_rostral_heartrate.py \
+  --dataset-npz playgrounds/heartrate_stabilization/outputs/reliable_local_rostral_chase_start_30000_3000f.local_pixel_matrix.npz \
+  --surrogate-count 199 \
+  --alpha 0.05 \
+  --output-prefix playgrounds/heartrate_stabilization/outputs/reliable_local_rostral_chase_start_30000_3000f_confirmatory
+```
+
+To test an extended anatomical support whose pixels may have different phase or
+contrast polarity, use `--analyze-dynamic-support`. A cluster-union mask from
+the same interval is always exploratory. For confirmation, supply a mask frozen
+from an earlier interval and predeclare the frequency search:
+
+```bash
+scripts/py playgrounds/heartrate_stabilization/extract_reliable_local_rostral_heartrate.py \
+  --dataset-npz playgrounds/heartrate_stabilization/outputs/reliable_local_rostral_chase_start_33000_3000f.local_pixel_matrix.npz \
+  --surrogate-count 199 \
+  --alpha 0.05 \
+  --analyze-dynamic-support \
+  --dynamic-heart-mask-npz playgrounds/heartrate_stabilization/outputs/reliable_local_rostral_chase_start_30000_3000f_dynamic_support.dynamic_support.arrays.npz \
+  --dynamic-heart-mask-key heart_support_mask \
+  --dynamic-support-mask-independent \
+  --dynamic-support-frequency-min-hz 3.0 \
+  --dynamic-support-frequency-max-hz 3.5 \
+  --dynamic-support-surrogate-count 199 \
+  --render-dynamic-phase \
+  --dynamic-phase-frame-stride 3 \
+  --dynamic-phase-playback-fps 30 \
+  --output-prefix playgrounds/heartrate_stabilization/outputs/reliable_local_rostral_chase_start_33000_3000f_frozen_union_confirmatory
+```
+
+The checked frozen-mask interval supports a cross-fitted latent spatial pattern
+at `3.35 Hz` with `p=0.010`, but it does not yet provide validated cardiac event
+times. Same-sign whole-mask averaging remains non-significant.
+
+`--render-dynamic-phase` writes a three-panel diagnostic video, a static phase
+strip, the frame-resolved arrays, and a JSON summary. The panels show fixed-scale
+local stabilized samples with the frozen support contours, held-out band-limited
+activation, and unaligned pixel phase with confidence encoded by opacity. A
+synchronized trace shows the opposite-fold phase-aligned latent signal. Invalid
+frames, partition guards, long gaps, and filter edges remain uncolored. In the
+checked interval, phase is available on `25.0%` of source frames and median
+within-frame spatial alignment is `0.660`. These are visualization diagnostics,
+not cardiac-event annotations or validated beat coverage. The presence of
+smooth color cycles is expected after narrow-band analytic filtering; the color
+cycles themselves are not additional evidence of a heartbeat.
+
+To measure whether an apparent upper-to-lower flow repeats, add:
+
+```text
+--analyze-regional-phase-delay
+--regional-phase-surrogate-count 199
+```
+
+The default split uses only frozen-mask geometry: it chooses the horizontal
+boundary that most evenly divides support pixels. For this mask, canonical
+`y=121.5` produces 18 upper and 20 lower pixels. Positive reported lag means
+the lower region reaches the same phase after the upper region. Outputs include
+frame-level lag arrays, per-block and per-cycle CSVs, a summary, and a diagnostic
+figure.
+
+The checked source interval has highly repeatable delay within each valid block,
+but the block means range from `-38` to `-138 ms`; across-block stability is not
+above the conditional block-phase null (`PLV=0.720`, `p=0.14`). The independent
+video interval reverses direction between blocks (`-119`, `+43`, `+148`, and
+`-39 ms`) and is clearly unstable across blocks (`PLV=0.180`, `p=0.86`). Thus
+the visible flow is measurable within short blocks, but it is not currently a
+stable propagation signature.
+
+This regional hypothesis was formulated after viewing these intervals and is
+exploratory for both. The generated `upper_mask` and `lower_mask` can be frozen
+for a future interval using `--regional-phase-regions-npz` with
+`--regional-phase-regions-independent`.
+
+### Long Frame-0 Cache
+
+The first five minutes can be extracted as ten resumable parts and merged into
+one validated cache:
+
+```bash
+scripts/py playgrounds/heartrate_stabilization/extract_local_rostral_cache_chunks.py \
+  --roi-json playgrounds/heartrate_stabilization/outputs/mask_relative_roi_chase_start_30000_3000f_eye_mid_w20_h12.mask_relative_roi.roi.json \
+  --mask-npz playgrounds/heartrate_stabilization/outputs/mask_relative_roi_chase_start_30000_3000f_eye_mid_w20_h12.mask_relative_roi.npz \
+  --status-csv playgrounds/heartrate_stabilization/outputs/stabilized_clean_full_eye_swim_origin_lossless.csv \
+  --frame-start 0 \
+  --frame-count 30000 \
+  --chunk-frames 3000 \
+  --workers 4 \
+  --mask-read-cache-rows 256 \
+  --reference-anterior-xy 128,113 \
+  --reference-posterior-xy 127,143 \
+  --output-prefix playgrounds/heartrate_stabilization/outputs/reliable_local_rostral_start_0_30000f
+```
+
+The dense subject-mask arrays use physical chunks of `(256, 1, 512, 512)`.
+Without a row-block cache, reading one mask row repeatedly decompresses the same
+256-row component chunk. The aligned cache reduced a checked 300-frame run from
+`73.5 s` to `7.6 s` (`9.7x`) with identical numeric arrays. One-frame overlaps
+preserve motion prediction and duplicate-frame detection at part boundaries.
+The merge fails unless all parts have identical pixel grids, schemas, masks,
+anchors, and static metadata, then rebuilds timestamps from acquisition metadata.
+
+The merged cache contains frames `0..29999`, spans `299.99 s`, and has
+`26959/30000` valid local-coordinate frames (`89.86%`). Apply the later frozen
+hypothesis to this earlier interval with:
+
+```bash
+scripts/py playgrounds/heartrate_stabilization/extract_reliable_local_rostral_heartrate.py \
+  --dataset-npz playgrounds/heartrate_stabilization/outputs/reliable_local_rostral_start_0_30000f.local_pixel_matrix.npz \
+  --surrogate-count 39 \
+  --alpha 0.05 \
+  --analyze-dynamic-support \
+  --dynamic-heart-mask-npz playgrounds/heartrate_stabilization/outputs/reliable_local_rostral_chase_start_30000_3000f_dynamic_support.dynamic_support.arrays.npz \
+  --dynamic-heart-mask-key heart_support_mask \
+  --dynamic-support-mask-independent \
+  --dynamic-support-frequency-min-hz 3.0 \
+  --dynamic-support-frequency-max-hz 3.5 \
+  --dynamic-support-surrogate-count 199 \
+  --render-dynamic-phase \
+  --dynamic-phase-frame-stride 10 \
+  --dynamic-phase-playback-fps 30 \
+  --analyze-regional-phase-delay \
+  --regional-phase-regions-npz playgrounds/heartrate_stabilization/outputs/reliable_local_rostral_chase_start_30000_3000f_dynamic_support.regional_phase_delay.arrays.npz \
+  --regional-phase-regions-independent \
+  --regional-phase-surrogate-count 999 \
+  --output-prefix playgrounds/heartrate_stabilization/outputs/reliable_local_rostral_start_0_30000f_frozen_hypothesis_confirmatory199
+```
+
+The later frozen support independently identifies `3.20 Hz` in the frame-0
+cache. Support, shared-phase, and latent-pattern statistics are each `p=0.005`
+with 199 full-pipeline surrogates, and the latent score is `4.61x` the strongest
+motion/control score. The standard compact-cluster method still emits no
+estimate. The frozen upper/lower split has 55 valid blocks, 306 paired cycles,
+median within-block PLV `0.979`, across-block PLV `0.592`, and conditional
+`p=0.001`; the lower region leads in 47/55 blocks. This is strong evidence for a
+reproducible periodic anatomical source near `3.2 Hz`, not yet validated cardiac
+event timing.
+
+The command is expected to emit no estimate when either held-out fold, matched
+controls, cross-fit frequency agreement, or cluster reproducibility fails. It
+never emits events from an unconfirmed source or a held-out block that fails
+the maximum-statistic correction across confirmation blocks. See
+`docs/heartrate_local_rostral_roi_status_2026-07-09.md` for the checked result
+and injection-recovery command.
+
 ## Frame-Domain Guard
 
 This example's refined-keypoint `frame_indices` start at `0` and align to the
@@ -509,10 +713,16 @@ inspection does not require zarr reads; rendering and ROI measurement do.
 
 ## Promotion Criteria
 
-Only promote this into `src/fisheye/analysis` after the playground can show:
+The reusable inference/statistics core lives in
+`src/fisheye/analysis/local_rostral_heartrate.py` and
+`src/fisheye/analysis/dynamic_heart_support.py`. Do not promote their outputs to
+a production metric until the workflow can show:
 
 - low residual motion of the swim bladder and eye midpoint in stabilized view;
 - visually stable heart ROI over a representative rotation interval;
 - reduced motion artifacts in the intensity trace compared with fixed crop
   pixels;
 - explicit invalid-frame handling when keypoints or crop metadata are missing.
+- calibrated false-positive and sensitivity estimates across multiple real
+  null recordings;
+- reproducible cross-fit clusters and independent biological event timing.

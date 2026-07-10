@@ -1,11 +1,16 @@
 # Heartrate Stabilized ROI Case
 <!-- contract-meta
 status: draft
-last_updated: 2026-07-09
+last_updated: 2026-07-10
 -->
 
 Purpose: document the concrete heartrate use case that needs a fish-attached
 ROI workflow over acquisition crop-video pixels.
+
+Current local-rostral ROI status and results are summarized in
+[`heartrate_frozen_mask_validation_status_2026-07-10.md`](heartrate_frozen_mask_validation_status_2026-07-10.md).
+The detailed implementation history remains in
+[`heartrate_local_rostral_roi_status_2026-07-09.md`](heartrate_local_rostral_roi_status_2026-07-09.md).
 
 ## Case
 
@@ -271,6 +276,22 @@ Before promoting this from playground to a production analysis surface:
   HR prior used for peak selection.
 - record whether spectral pixel maps used all ROI pixels, mask-filtered pixels,
   or a top-K/thresholded subset, and how that subset was validated.
+- preserve acquisition timestamps and invalid rows instead of compressing the
+  time axis; interpolate only explicitly bounded short gaps.
+- choose frequency, pixels, cluster, weights, polarity, and event threshold on
+  discovery blocks, then apply them frozen to disjoint held-out blocks.
+- calibrate the complete adaptive discovery search with a maximum cluster-mass
+  surrogate null that permits an empty/no-estimate result.
+- require cross-fit spatial reproducibility and matched physical-boundary,
+  interior, body, global, and external controls before event extraction.
+- report event coverage and explicit no-estimate intervals, and validate
+  detection/localization/timing through source-raster injection recovery on real
+  null backgrounds.
+- for extended anatomical supports, learn per-pixel phase/polarity only on
+  discovery blocks and confirm the frozen mask over predeclared frequency bounds
+  on an independent interval.
+- validate latent-trace event times against blinded manual contraction landmarks
+  or a synchronized cardiac reference before reporting heart rate.
 
 For mask-constrained photometry, additionally validate that:
 
