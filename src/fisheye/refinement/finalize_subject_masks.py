@@ -25,7 +25,6 @@ import zarr
 from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from ..shared.json_safety import json_attr_safe
 from ..shared.mask_geometry import batch_mask_spatial_metrics
-from ..shared.mask_fingerprint import batch_mask_row_fingerprints
 from ..shared.mask_probability_encoding import decode_probability_values
 from ..shared.mask_bitpack import (
     MASK_BITPACKED_AXIS,
@@ -76,6 +75,7 @@ from ..tune.refined_subject_mask_review import (
     _compute_component_shape_qc_metrics,
     _compute_component_sigma_noise_metrics,
     _compute_component_topology_metrics,
+    _compute_mask_row_fingerprints,
     _default_refined_run_name,
     _ensure_refined_component_provenance_payload,
     _infer_refined_label_schema_id,
@@ -115,16 +115,9 @@ from .subject_eye_assignment import (
     reconcile_keypoint_mask_row_identity,
 )
 from .subject_mask_finalization import (
-    FINALIZATION_COMPUTE_KERNEL,
-    FINALIZATION_METRIC_INDEX,
-    FINALIZATION_METRIC_LAYOUT,
-    FINALIZATION_METRIC_NAMES,
-    FINALIZATION_REASON_ENCODING,
-    FINALIZATION_REVIEW_ENCODING,
     ComponentFinalizationPolicy,
     _default_policy_for_component,
-    decode_reason_flags,
-    finalize_component_masks_batch,
+    finalize_component_mask,
 )
 
 SMART_FINALIZE_SUBJECT_MASKS_METHOD = "smart_finalize_subject_masks_v1"
@@ -168,17 +161,6 @@ _COMPONENT_METRICS_SCHEMA_ID = "refined_subject_component_mask_metrics_v1"
 _COMPONENT_METRIC_QC_SCHEMA_ID = "refined_subject_component_metric_qc_reasons_v1"
 _SOURCE_SEED_MASKS_SCHEMA_ID = "refined_subject_component_source_seed_masks_v1"
 _COMPONENT_QC_REASON_PREFIX = "needs_review_metric_"
-_COMPONENT_QC_REASON_TAG_BITS = (
-    ("needs_review_metric_empty_mask", 1 << 0),
-    ("needs_review_metric_small_area", 1 << 1),
-    ("needs_review_metric_multiple_components", 1 << 2),
-    ("needs_review_metric_fragmented_component", 1 << 3),
-    ("needs_review_metric_holes", 1 << 4),
-    ("needs_review_metric_low_solidity", 1 << 5),
-)
-_COMPONENT_QC_REASON_BITS = {
-    tag: np.uint16(bit) for tag, bit in _COMPONENT_QC_REASON_TAG_BITS
-}
 _COMPONENT_METRIC_NAMES = (
     "component_count",
     "largest_component_fraction",
@@ -189,7 +171,27 @@ _COMPONENT_METRIC_NAMES = (
     "ipr",
     "solidity",
 )
-_FINALIZATION_METRIC_NAMES = FINALIZATION_METRIC_NAMES
+_FINALIZATION_METRIC_NAMES = (
+    "added_area_px",
+    "area_px_after",
+    "area_px_before",
+    "changed_area_fraction",
+    "changed_area_px",
+    "component_count_after",
+    "component_count_before",
+    "hole_area_fraction_after",
+    "hole_area_fraction_before",
+    "hole_count_after",
+    "hole_count_before",
+    "largest_component_fraction_after",
+    "largest_component_fraction_before",
+    "removed_area_fraction",
+    "removed_area_px",
+    "removed_component_count",
+    "removed_high_prob_area_px",
+    "removed_prob_mass",
+    "removed_prob_mass_fraction",
+)
 FINALIZATION_METRIC_ROW_CHUNK = 16384
 FINALIZATION_METRIC_WRITE_POLICY = "driver_merged_sealed_v1"
 _COMPONENT_METRIC_FINALIZATION_SOURCES = {
@@ -231,13 +233,11 @@ class _FinalizedComponentBatch:
     component_name: str
     masks: np.ndarray
     source_masks: np.ndarray
-    metrics: np.ndarray
-    reason_flags: np.ndarray
+    reason_labels: np.ndarray
     quality_code: np.ndarray
     quality_score: np.ndarray
-    review_code: np.ndarray
-    centroid_xy: np.ndarray
-    bbox_xyxy: np.ndarray
+    review_recommendation: np.ndarray
+    metrics: dict[str, np.ndarray]
     policy: ComponentFinalizationPolicy
     source_surface_path: str
     source_surface_kind: str
@@ -366,14 +366,14 @@ class _ComponentMetricQcPolicy:
 @dataclass(frozen=True)
 class _ComponentMetricWriteResult:
     mask_present: np.ndarray
-    reason_flags: np.ndarray
+    reason_labels: np.ndarray
 
 
 @dataclass(frozen=True)
 class _ComponentMetricPayload:
     spatial_metrics: dict[str, np.ndarray]
     component_metrics: dict[str, np.ndarray]
-    reason_flags: np.ndarray
+    reason_labels: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -392,7 +392,6 @@ class _EyeAssignmentContext:
 class _EyeAssignmentChunk:
     masks: dict[str, np.ndarray]
     reason_labels: dict[str, np.ndarray]
-    spatial_metrics: dict[str, dict[str, np.ndarray]]
     component_metrics: dict[str, dict[str, np.ndarray]]
     summary: dict[str, object]
     phase_seconds: dict[str, float]
@@ -920,6 +919,23 @@ def _decode_probabilities(values: np.ndarray, *, encoding: Optional[str], source
     return decode_probability_values(values, encoding=encoding, source_path=source_path)
 
 
+def _join_reason_tags(tags: Sequence[object], *, probability_source: bool) -> str:
+    merged: list[str] = []
+    if probability_source:
+        merged.append("cleanup_thresholded_probability")
+    for raw_tag in tags:
+        tag = str(raw_tag or "").strip()
+        if not tag:
+            continue
+        if probability_source and tag == "clean":
+            continue
+        if tag not in merged:
+            merged.append(tag)
+    if not merged:
+        merged.append("clean")
+    return "|".join(merged)
+
+
 def _combine_reason_labels(*labels: object) -> str:
     merged: list[str] = []
     for label in labels:
@@ -1016,7 +1032,7 @@ def _replace_metric_qc_reason_labels(base_labels: np.ndarray, qc_labels: np.ndar
     return refreshed
 
 
-def _compute_component_metric_qc_reason_flags(
+def _compute_component_metric_qc_reason_labels(
     component_name: str,
     *,
     mask_present: np.ndarray,
@@ -1041,34 +1057,23 @@ def _compute_component_metric_qc_reason_flags(
     solidity_raw = component_metrics.get("solidity")
     solidity = np.asarray(solidity_raw, dtype=np.float32).reshape(-1) if solidity_raw is not None else None
 
-    flags = np.zeros((int(area.shape[0]),), dtype=np.uint16)
-    empty = ~present | (area <= 0.0)
-    flags[empty] |= _COMPONENT_QC_REASON_BITS["needs_review_metric_empty_mask"]
-    flags[~empty & (area < float(policy.min_area_px))] |= (
-        _COMPONENT_QC_REASON_BITS["needs_review_metric_small_area"]
-    )
-    flags[component_count > int(policy.max_component_count)] |= (
-        _COMPONENT_QC_REASON_BITS["needs_review_metric_multiple_components"]
-    )
-    flags[present & (largest_fraction < float(policy.min_largest_component_fraction))] |= (
-        _COMPONENT_QC_REASON_BITS["needs_review_metric_fragmented_component"]
-    )
-    flags[hole_count > int(policy.max_hole_count)] |= (
-        _COMPONENT_QC_REASON_BITS["needs_review_metric_holes"]
-    )
-    if solidity is not None and policy.min_solidity is not None:
-        flags[np.isfinite(solidity) & (solidity < float(policy.min_solidity))] |= (
-            _COMPONENT_QC_REASON_BITS["needs_review_metric_low_solidity"]
-        )
-    return flags
-
-
-def _decode_component_metric_qc_reason_flags(values: np.ndarray) -> np.ndarray:
-    flags = np.asarray(values, dtype=np.uint16).reshape(-1)
-    labels = np.empty(flags.shape, dtype=object)
-    for row_idx, value in enumerate(flags):
-        numeric = int(value)
-        tags = [tag for tag, bit in _COMPONENT_QC_REASON_TAG_BITS if numeric & int(bit)]
+    labels = np.full((int(area.shape[0]),), "clean", dtype=object)
+    for row_idx in range(int(area.shape[0])):
+        tags: list[str] = []
+        if not bool(present[row_idx]) or float(area[row_idx]) <= 0.0:
+            tags.append("needs_review_metric_empty_mask")
+        elif float(area[row_idx]) < float(policy.min_area_px):
+            tags.append("needs_review_metric_small_area")
+        if int(component_count[row_idx]) > int(policy.max_component_count):
+            tags.append("needs_review_metric_multiple_components")
+        if bool(present[row_idx]) and float(largest_fraction[row_idx]) < float(policy.min_largest_component_fraction):
+            tags.append("needs_review_metric_fragmented_component")
+        if int(hole_count[row_idx]) > int(policy.max_hole_count):
+            tags.append("needs_review_metric_holes")
+        if solidity is not None and policy.min_solidity is not None:
+            value = float(solidity[row_idx])
+            if np.isfinite(value) and value < float(policy.min_solidity):
+                tags.append("needs_review_metric_low_solidity")
         labels[row_idx] = "|".join(tags) if tags else "clean"
     return labels
 
@@ -1166,76 +1171,53 @@ def _finalize_source_component_rows(
     base_policy = _default_policy_for_component(component_name)
     policy = replace(base_policy, threshold=float(threshold))
 
-    result = finalize_component_masks_batch(
-        component_name,
-        surfaces,
-        policy=policy,
-        surface_is_probability=is_probability,
-        probabilities_are_normalized=bool(is_probability),
-    )
+    total_rows = int(surfaces.shape[0])
+    masks = np.zeros(surfaces.shape, dtype=np.uint8)
+    source_masks = np.zeros(surfaces.shape, dtype=np.uint8)
+    reason_labels = np.full((total_rows,), "clean", dtype=object)
+    quality_code = np.zeros((total_rows,), dtype=np.int16)
+    quality_score = np.zeros((total_rows,), dtype=np.float32)
+    review_recommendation = np.full((total_rows,), "pending", dtype=object)
+    metric_values: dict[str, list[float]] = {}
+
+    for row_idx in range(total_rows):
+        result = finalize_component_mask(
+            component_name,
+            surfaces[row_idx],
+            policy=policy,
+            surface_is_probability=is_probability,
+        )
+        masks[row_idx] = np.asarray(result.mask, dtype=np.uint8)
+        source_masks[row_idx] = np.asarray(result.source_mask, dtype=np.uint8)
+        reason_labels[row_idx] = _join_reason_tags(
+            result.reason_tags,
+            probability_source=bool(is_probability),
+        )
+        quality_code[row_idx] = np.int16(result.quality_code)
+        quality_score[row_idx] = np.float32(result.quality_score)
+        review_recommendation[row_idx] = str(result.review_recommendation)
+        for name, value in result.metrics.items():
+            metric_values.setdefault(str(name), []).append(float(value))
+
+    metrics = {
+        name: np.asarray(values, dtype=np.float32)
+        for name, values in sorted(metric_values.items())
+    }
     return _FinalizedComponentBatch(
         component_name=component_name,
-        masks=np.asarray(result.masks, dtype=np.uint8),
-        source_masks=np.asarray(result.source_masks, dtype=np.uint8),
-        metrics=np.asarray(result.metrics, dtype=np.float32),
-        reason_flags=np.asarray(result.reason_flags, dtype=np.uint32),
-        quality_code=np.asarray(result.quality_code, dtype=np.int16),
-        quality_score=np.asarray(result.quality_score, dtype=np.float32),
-        review_code=np.asarray(result.review_code, dtype=np.uint8),
-        centroid_xy=np.asarray(result.centroid_xy, dtype=np.float32),
-        bbox_xyxy=np.asarray(result.bbox_xyxy, dtype=np.float32),
+        masks=masks,
+        source_masks=source_masks,
+        reason_labels=reason_labels,
+        quality_code=quality_code,
+        quality_score=quality_score,
+        review_recommendation=review_recommendation,
+        metrics=metrics,
         policy=policy,
         source_surface_path=surface_path,
         source_surface_kind="probability" if is_probability else "binary",
         source_probability_encoding=encoding,
         source_probability_threshold=float(threshold),
     )
-
-
-def _finalization_reason_payload(
-    batch: _FinalizedComponentBatch,
-    metric_qc_reason_flags: np.ndarray,
-    *,
-    extra_labels: np.ndarray | None = None,
-) -> dict[str, object]:
-    row_count = int(batch.reason_flags.shape[0])
-    payload: dict[str, object] = {
-        "reason_flags": np.asarray(batch.reason_flags, dtype=np.uint32),
-        "metric_qc_reason_flags": np.asarray(metric_qc_reason_flags, dtype=np.uint16),
-        "probability_source": batch.source_surface_kind == "probability",
-    }
-    if extra_labels is None:
-        return payload
-    labels = np.asarray(extra_labels, dtype=object).reshape(-1)
-    if labels.shape[0] != row_count:
-        raise ValueError("Finalization reason payload extra labels must match the batch row count.")
-    payload["extra_labels"] = [str(value) for value in labels.tolist()]
-    return payload
-
-
-def _decode_finalization_reason_payload(payload: Mapping[str, object]) -> np.ndarray:
-    base_labels = decode_reason_flags(
-        np.asarray(payload.get("reason_flags"), dtype=np.uint32),
-        probability_source=bool(payload.get("probability_source")),
-    )
-    metric_qc_labels = _decode_component_metric_qc_reason_flags(
-        np.asarray(payload.get("metric_qc_reason_flags"), dtype=np.uint16)
-    )
-    if metric_qc_labels.shape[0] != base_labels.shape[0]:
-        raise ValueError(
-            "Finalization reason payload flags and metric-QC flags must have the same row count."
-        )
-    raw_extra_labels = payload.get("extra_labels")
-    if raw_extra_labels is None:
-        merged_labels = base_labels
-    else:
-        extra_labels = np.asarray(raw_extra_labels, dtype=object).reshape(-1)
-        if extra_labels.shape[0] != base_labels.shape[0]:
-            raise ValueError(
-                "Finalization reason payload flags and extra labels must have the same row count."
-            )
-        merged_labels = _merge_reason_label_arrays(base_labels, extra_labels)
-    return _merge_reason_label_arrays(merged_labels, metric_qc_labels)
 
 
 def _source_payload_for_finalized_component(
@@ -1509,21 +1491,19 @@ def _assign_finalized_eyes_union_rows(
     component_metrics: dict[str, dict[str, np.ndarray]] = {}
     for component_name in _EYE_COMPONENTS:
         assignment_reasons = np.asarray(assignment.reason_labels[component_name], dtype=object)
-        reason_labels_by_component[component_name] = assignment_reasons
+        reason_labels = np.asarray(
+            [
+                _combine_reason_labels(union_batch.reason_labels[row_idx], assignment_reasons[row_idx])
+                for row_idx in range(int(union_batch.reason_labels.shape[0]))
+            ],
+            dtype=object,
+        )
+        reason_labels_by_component[component_name] = reason_labels
         masks[component_name] = np.asarray(assignment.masks[component_name], dtype=np.uint8)
         component_metrics[component_name] = _component_metrics_from_assigned_eye_masks(masks[component_name])
     return _EyeAssignmentChunk(
         masks=masks,
         reason_labels=reason_labels_by_component,
-        spatial_metrics={
-            component_name: {
-                str(metric_name): np.asarray(values)
-                for metric_name, values in dict(
-                    assignment.spatial_metrics[component_name]
-                ).items()
-            }
-            for component_name in _EYE_COMPONENTS
-        },
         component_metrics=component_metrics,
         summary=summary,
         phase_seconds={str(key): float(value) for key, value in dict(assignment.phase_seconds).items()},
@@ -1629,6 +1609,13 @@ def _add_review_counts(target: dict[str, dict[str, int]], component_name: str, l
     existing = target.setdefault(str(component_name), {"pending": 0, "needs_review": 0})
     for key, value in counts.items():
         existing[str(key)] = int(existing.get(str(key), 0)) + int(value)
+
+
+def _merge_review_counts(target: dict[str, dict[str, int]], source: Mapping[str, object]) -> None:
+    for component_name, counts_raw in dict(source).items():
+        existing = target.setdefault(str(component_name), {"pending": 0, "needs_review": 0})
+        for key, value in dict(counts_raw or {}).items():
+            existing[str(key)] = int(existing.get(str(key), 0)) + int(value)
 
 
 def _row_chunks(total_rows: int, chunk_size: int) -> list[tuple[int, int]]:
@@ -1878,7 +1865,7 @@ def _create_finalization_metric_shell(
 ) -> None:
     metrics_group = component_group.require_group("finalization_metrics")
     metric_chunks = (max(1, min(int(FINALIZATION_METRIC_ROW_CHUNK), int(total_rows))),)
-    names_source = metric_names or (FINALIZATION_METRIC_NAMES if batch is not None else ())
+    names_source = metric_names or (batch.metrics if batch is not None else ())
     names = sorted(str(name) for name in names_source)
     for metric_name in names:
         if metric_name not in metrics_group:
@@ -2186,10 +2173,6 @@ def _create_refined_run_shell(
             "finalization_metric_write_policy": provenance_inputs.get(
                 "finalization_metric_write_policy"
             ),
-            "finalization_compute_kernel": provenance_inputs.get("finalization_compute_kernel"),
-            "finalization_metric_layout": provenance_inputs.get("finalization_metric_layout"),
-            "finalization_reason_encoding": provenance_inputs.get("finalization_reason_encoding"),
-            "finalization_review_encoding": provenance_inputs.get("finalization_review_encoding"),
             "write_eye_geometry": provenance_inputs.get("eye_geometry_requested"),
             "write_component_contours": provenance_inputs.get("component_contours_requested"),
             "retain_source_seeds": provenance_inputs.get("retain_source_seeds"),
@@ -2215,44 +2198,14 @@ def _component_metrics_from_finalization_batch(
 
     component_metrics: dict[str, np.ndarray] = {}
     for target_name, (source_name, dtype) in _COMPONENT_METRIC_FINALIZATION_SOURCES.items():
-        metric_index = FINALIZATION_METRIC_INDEX.get(source_name)
-        if metric_index is None:
+        values = batch.metrics.get(source_name)
+        if values is None:
             continue
-        arr = np.asarray(batch.metrics[:, int(metric_index)], dtype=dtype).reshape(-1)
+        arr = np.asarray(values, dtype=dtype).reshape(-1)
         if int(arr.shape[0]) != int(row_count):
             continue
         component_metrics[str(target_name)] = arr
     return component_metrics
-
-
-def _spatial_metrics_from_finalization_batch(
-    batch: _FinalizedComponentBatch,
-    *,
-    row_count: int,
-) -> dict[str, np.ndarray]:
-    """Reuse exact area, centroid, and bbox values from final component stats."""
-
-    area = np.asarray(
-        batch.metrics[:, FINALIZATION_METRIC_INDEX["area_px_after"]],
-        dtype=np.float32,
-    ).reshape(-1)
-    centroid_xy = np.asarray(batch.centroid_xy, dtype=np.float32).reshape(-1, 2)
-    bbox_xyxy = np.asarray(batch.bbox_xyxy, dtype=np.float32).reshape(-1, 4)
-    if not (
-        int(area.shape[0]) == int(row_count)
-        and int(centroid_xy.shape[0]) == int(row_count)
-        and int(bbox_xyxy.shape[0]) == int(row_count)
-    ):
-        raise ValueError("Finalization spatial metric rows must match the component mask block.")
-    present = area > 0.0
-    return {
-        "mask_present": present,
-        "area_px": area,
-        "centroid_xy": centroid_xy,
-        "centroid_valid": present,
-        "bbox_xyxy": bbox_xyxy,
-        "bbox_valid": present,
-    }
 
 
 def _component_metrics_from_assigned_eye_masks(masks: np.ndarray) -> dict[str, np.ndarray]:
@@ -2468,7 +2421,6 @@ def _write_mask_local_metrics_chunk(
     row_slice: slice,
     masks: np.ndarray,
     metric_level: str,
-    precomputed_spatial_metrics: Optional[Mapping[str, np.ndarray]] = None,
     precomputed_component_metrics: Optional[Mapping[str, np.ndarray]] = None,
     write_metric_attrs: bool = True,
     timing: Optional[_TimingRecorder] = None,
@@ -2478,7 +2430,6 @@ def _write_mask_local_metrics_chunk(
         component_name=component_name,
         masks=masks,
         metric_level=metric_level,
-        precomputed_spatial_metrics=precomputed_spatial_metrics,
         precomputed_component_metrics=precomputed_component_metrics,
         timing=timing,
         chunk_timing=chunk_timing,
@@ -2514,7 +2465,7 @@ def _write_mask_local_metrics_chunk(
         _set_component_metric_attrs(component_group, metric_level=metric_level)
     return _ComponentMetricWriteResult(
         mask_present=np.asarray(mask_present, dtype=bool),
-        reason_flags=np.asarray(payload.reason_flags, dtype=np.uint16),
+        reason_labels=np.asarray(payload.reason_labels, dtype=object),
     )
 
 
@@ -2523,7 +2474,6 @@ def _compute_mask_local_metric_payload(
     component_name: str,
     masks: np.ndarray,
     metric_level: str,
-    precomputed_spatial_metrics: Optional[Mapping[str, np.ndarray]] = None,
     precomputed_component_metrics: Optional[Mapping[str, np.ndarray]] = None,
     timing: Optional[_TimingRecorder] = None,
     chunk_timing: Optional[dict[str, object]] = None,
@@ -2531,33 +2481,11 @@ def _compute_mask_local_metric_payload(
     """Compute all fixed-shape mask-local metrics without destination I/O."""
 
     masks_u8 = np.asarray(masks, dtype=np.uint8)
-    if precomputed_spatial_metrics is None:
-        with _timed_chunk_phase(timing, chunk_timing, f"compute_spatial_metrics_{component_name}"):
-            spatial_metrics = {
-                str(name): np.asarray(values)
-                for name, values in _compute_component_spatial_metrics(masks_u8).items()
-            }
-    else:
-        with _timed_chunk_phase(timing, chunk_timing, f"reuse_spatial_metrics_{component_name}"):
-            required_spatial_metrics = (
-                "mask_present",
-                "area_px",
-                "centroid_xy",
-                "centroid_valid",
-                "bbox_xyxy",
-                "bbox_valid",
-            )
-            missing = [
-                name for name in required_spatial_metrics if name not in precomputed_spatial_metrics
-            ]
-            if missing:
-                raise ValueError(
-                    f"Precomputed spatial metrics for {component_name!r} are missing {missing!r}."
-                )
-            spatial_metrics = {
-                name: np.asarray(precomputed_spatial_metrics[name])
-                for name in required_spatial_metrics
-            }
+    with _timed_chunk_phase(timing, chunk_timing, f"compute_spatial_metrics_{component_name}"):
+        spatial_metrics = {
+            str(name): np.asarray(values)
+            for name, values in _compute_component_spatial_metrics(masks_u8).items()
+        }
     component_metrics = _compute_component_metrics_payload(
         component_name=component_name,
         masks=masks_u8,
@@ -2567,7 +2495,7 @@ def _compute_mask_local_metric_payload(
         chunk_timing=chunk_timing,
     )
     with _timed_chunk_phase(timing, chunk_timing, f"compute_metric_qc_reasons_{component_name}"):
-        reason_flags = _compute_component_metric_qc_reason_flags(
+        reason_labels = _compute_component_metric_qc_reason_labels(
             component_name,
             mask_present=np.asarray(spatial_metrics["mask_present"], dtype=bool),
             area_px=np.asarray(spatial_metrics["area_px"], dtype=np.float32),
@@ -2576,7 +2504,7 @@ def _compute_mask_local_metric_payload(
     return _ComponentMetricPayload(
         spatial_metrics=spatial_metrics,
         component_metrics=component_metrics,
-        reason_flags=np.asarray(reason_flags, dtype=np.uint16),
+        reason_labels=np.asarray(reason_labels, dtype=object),
     )
 
 
@@ -2589,7 +2517,6 @@ def _write_canonical_component_chunk(
     masks: np.ndarray,
     source_masks: np.ndarray,
     metric_level: str,
-    precomputed_spatial_metrics: Optional[Mapping[str, np.ndarray]] = None,
     precomputed_component_metrics: Optional[Mapping[str, np.ndarray]] = None,
     write_metric_attrs: bool = True,
     retain_source_seeds: bool = False,
@@ -2614,9 +2541,9 @@ def _write_canonical_component_chunk(
         with _timed_chunk_phase(timing, chunk_timing, f"write_source_seed_masks_{component_name}"):
             component_group["source_seed_masks_roi"][row_slice] = source_u8
     with _timed_chunk_phase(timing, chunk_timing, f"compute_source_row_fingerprint_{component_name}"):
-        fingerprint_values = batch_mask_row_fingerprints(source_u8)
+        source_row_fingerprint = _compute_mask_row_fingerprints(source_u8)
     with _timed_chunk_phase(timing, chunk_timing, f"write_source_row_fingerprint_{component_name}"):
-        component_group["source_row_fingerprint"][row_slice] = fingerprint_values
+        component_group["source_row_fingerprint"][row_slice] = source_row_fingerprint
     return _write_mask_local_metrics_chunk(
         run_group,
         component_name=component_name,
@@ -2624,7 +2551,6 @@ def _write_canonical_component_chunk(
         row_slice=row_slice,
         masks=masks_u8,
         metric_level=metric_level,
-        precomputed_spatial_metrics=precomputed_spatial_metrics,
         precomputed_component_metrics=precomputed_component_metrics,
         write_metric_attrs=write_metric_attrs,
         timing=timing,
@@ -3420,7 +3346,7 @@ def refresh_refined_subject_mask_metrics_run(
             if refresh_reason_tags:
                 reason_labels_by_component[component_name][row_slice] = _replace_metric_qc_reason_labels(
                     reason_labels_by_component[component_name][row_slice],
-                    _decode_component_metric_qc_reason_flags(write_result.reason_flags),
+                    write_result.reason_labels,
                 )
         chunk_timing["total_seconds"] = float(time.perf_counter() - chunk_start)
         timing.chunk_timings.append(chunk_timing)
@@ -3534,8 +3460,8 @@ def refresh_refined_subject_mask_metrics(
 def _finalization_metric_chunk_payload(batch: _FinalizedComponentBatch) -> dict[str, object]:
     return {
         "metrics": {
-            str(metric_name): np.asarray(batch.metrics[:, metric_index], dtype=np.float32)
-            for metric_index, metric_name in enumerate(FINALIZATION_METRIC_NAMES)
+            str(metric_name): np.asarray(values, dtype=np.float32)
+            for metric_name, values in batch.metrics.items()
         },
         "quality_code": np.asarray(batch.quality_code, dtype=np.int16),
         "quality_score": np.asarray(batch.quality_score, dtype=np.float32),
@@ -3632,7 +3558,8 @@ def _process_and_write_finalizer_chunk_open(
     chunk_start = time.perf_counter()
     chunk_any = np.zeros((int(stop_row) - int(start_row),), dtype=bool)
     chunk_batches: dict[str, _FinalizedComponentBatch] = {}
-    reason_payloads_by_component: dict[str, dict[str, object]] = {}
+    review_counts: dict[str, dict[str, int]] = {}
+    reason_labels_by_component: dict[str, list[str]] = {}
     finalization_metrics_by_component: dict[str, dict[str, object]] = {}
     eyes_union_assignment_summary: dict[str, object] = {}
     eye_geometry_payload: dict[str, object] | None = None
@@ -3661,10 +3588,6 @@ def _process_and_write_finalizer_chunk_open(
             masks=batch.masks,
             source_masks=batch.source_masks,
             metric_level=metric_level,
-            precomputed_spatial_metrics=_spatial_metrics_from_finalization_batch(
-                batch,
-                row_count=int(stop_row) - int(start_row),
-            ),
             precomputed_component_metrics=_component_metrics_from_finalization_batch(
                 batch,
                 row_count=int(stop_row) - int(start_row),
@@ -3678,10 +3601,9 @@ def _process_and_write_finalizer_chunk_open(
         elapsed = timing.add(f"write_{raw_component}", time.perf_counter() - phase_start)
         chunk_timing[f"write_{raw_component}_seconds"] = elapsed
         chunk_any |= write_result.mask_present
-        reason_payloads_by_component[raw_component] = _finalization_reason_payload(
-            batch,
-            write_result.reason_flags,
-        )
+        labels = _merge_reason_label_arrays(batch.reason_labels, write_result.reason_labels)
+        reason_labels_by_component[raw_component] = [str(value) for value in labels.tolist()]
+        _add_review_counts(review_counts, raw_component, labels)
 
     if eye_assignment_context is not None:
         union_batch = chunk_batches[_RAW_EYE_UNION_COMPONENT]
@@ -3710,7 +3632,6 @@ def _process_and_write_finalizer_chunk_open(
                 masks=masks,
                 source_masks=masks,
                 metric_level=metric_level,
-                precomputed_spatial_metrics=assignment_chunk.spatial_metrics.get(component_name),
                 precomputed_component_metrics=assignment_chunk.component_metrics.get(component_name),
                 write_metric_attrs=False,
                 retain_source_seeds=retain_source_seeds,
@@ -3720,18 +3641,20 @@ def _process_and_write_finalizer_chunk_open(
             elapsed = timing.add(f"write_{component_name}", time.perf_counter() - phase_start)
             chunk_timing[f"write_{component_name}_seconds"] = elapsed
             chunk_any |= write_result.mask_present
-            reason_payloads_by_component[component_name] = _finalization_reason_payload(
-                union_batch,
-                write_result.reason_flags,
-                extra_labels=assignment_chunk.reason_labels[component_name],
+            labels = _merge_reason_label_arrays(
+                assignment_chunk.reason_labels[component_name],
+                write_result.reason_labels,
             )
+            reason_labels_by_component[component_name] = [str(value) for value in labels.tolist()]
+            _add_review_counts(review_counts, component_name, labels)
 
     chunk_timing["total_seconds"] = float(time.perf_counter() - chunk_start)
     return {
         "chunk_timing": chunk_timing,
         "phase_seconds": dict(timing.phase_seconds),
         "phase_counts": dict(timing.phase_counts),
-        "reason_payloads_by_component": reason_payloads_by_component,
+        "review_counts": review_counts,
+        "reason_labels_by_component": reason_labels_by_component,
         "finalization_metrics_by_component": finalization_metrics_by_component,
         "rows_with_nonempty_masks": int(np.count_nonzero(chunk_any)),
         "eyes_union_assignment_summary": dict(_json_safe(eyes_union_assignment_summary)),
@@ -4084,10 +4007,6 @@ def finalize_subject_mask_run(
         "dense_mask_storage_chunks": [int(value) for value in dense_mask_storage_chunks],
         "finalization_metric_row_chunk": int(finalization_metric_row_chunk),
         "finalization_metric_write_policy": finalization_metric_write_policy,
-        "finalization_compute_kernel": FINALIZATION_COMPUTE_KERNEL,
-        "finalization_metric_layout": FINALIZATION_METRIC_LAYOUT,
-        "finalization_reason_encoding": FINALIZATION_REASON_ENCODING,
-        "finalization_review_encoding": FINALIZATION_REVIEW_ENCODING,
         "metric_level": metric_level,
         "write_eye_geometry": bool(write_eye_geometry),
         "write_component_contours": bool(write_component_contours),
@@ -4131,10 +4050,6 @@ def finalize_subject_mask_run(
         dense_mask_storage_chunks=[int(value) for value in dense_mask_storage_chunks],
         finalization_metric_row_chunk=int(finalization_metric_row_chunk),
         finalization_metric_write_policy=finalization_metric_write_policy,
-        finalization_compute_kernel=FINALIZATION_COMPUTE_KERNEL,
-        finalization_metric_layout=FINALIZATION_METRIC_LAYOUT,
-        finalization_reason_encoding=FINALIZATION_REASON_ENCODING,
-        finalization_review_encoding=FINALIZATION_REVIEW_ENCODING,
         chunk_count=int(len(chunk_ranges)),
         execution_backend=str(execution_backend),
         num_workers=normalized_num_workers,
@@ -4213,10 +4128,6 @@ def finalize_subject_mask_run(
         "dense_mask_storage_chunks": [int(value) for value in dense_mask_storage_chunks],
         "finalization_metric_row_chunk": int(finalization_metric_row_chunk),
         "finalization_metric_write_policy": finalization_metric_write_policy,
-        "finalization_compute_kernel": FINALIZATION_COMPUTE_KERNEL,
-        "finalization_metric_layout": FINALIZATION_METRIC_LAYOUT,
-        "finalization_reason_encoding": FINALIZATION_REASON_ENCODING,
-        "finalization_review_encoding": FINALIZATION_REVIEW_ENCODING,
         "postcompute_backend": postcompute_backend,
         "postcompute_chunk_size": int(normalized_postcompute_chunk_size),
         "postcompute_num_workers": normalized_postcompute_num_workers,
@@ -4349,14 +4260,11 @@ def finalize_subject_mask_run(
             timing.chunk_timings.append(chunk_timing)
             for phase, seconds in dict(result.get("phase_seconds") or {}).items():
                 timing.add(str(phase), float(seconds))
+            _merge_review_counts(review_counts, dict(result.get("review_counts") or {}))
             rows_with_nonempty_masks += int(result.get("rows_with_nonempty_masks") or 0)
             row_slice = slice(int(chunk_timing["start_row"]), int(chunk_timing["stop_row"]))
-            for component_name, payload in dict(
-                result.get("reason_payloads_by_component") or {}
-            ).items():
-                labels = _decode_finalization_reason_payload(dict(payload))
-                reason_labels_by_component[str(component_name)][row_slice] = labels
-                _add_review_counts(review_counts, str(component_name), labels)
+            for component_name, labels in dict(result.get("reason_labels_by_component") or {}).items():
+                reason_labels_by_component[str(component_name)][row_slice] = np.asarray(labels, dtype=object)
             for component_name, payload in dict(
                 result.get("finalization_metrics_by_component") or {}
             ).items():
@@ -4429,10 +4337,6 @@ def finalize_subject_mask_run(
                     masks=batch.masks,
                     source_masks=batch.source_masks,
                     metric_level=metric_level,
-                    precomputed_spatial_metrics=_spatial_metrics_from_finalization_batch(
-                        batch,
-                        row_count=int(stop_row) - int(start_row),
-                    ),
                     precomputed_component_metrics=_component_metrics_from_finalization_batch(
                         batch,
                         row_count=int(stop_row) - int(start_row),
@@ -4451,9 +4355,7 @@ def finalize_subject_mask_run(
                 )
                 elapsed = timing.add(f"write_{raw_component}", time.perf_counter() - phase_start)
                 chunk_timing[f"write_{raw_component}_seconds"] = elapsed
-                labels = _decode_finalization_reason_payload(
-                    _finalization_reason_payload(batch, write_result.reason_flags)
-                )
+                labels = _merge_reason_label_arrays(batch.reason_labels, write_result.reason_labels)
                 reason_labels_by_component[raw_component][row_slice] = labels
                 _add_review_counts(review_counts, raw_component, labels)
                 source_payloads.setdefault(raw_component, _source_payload_for_finalized_component(source, batch))
@@ -4492,7 +4394,6 @@ def finalize_subject_mask_run(
                         masks=masks,
                         source_masks=masks,
                         metric_level=metric_level,
-                        precomputed_spatial_metrics=assignment_chunk.spatial_metrics.get(component_name),
                         precomputed_component_metrics=assignment_chunk.component_metrics.get(component_name),
                         retain_source_seeds=bool(retain_source_seeds),
                         timing=timing,
@@ -4501,12 +4402,9 @@ def finalize_subject_mask_run(
                     elapsed = timing.add(f"write_{component_name}", time.perf_counter() - phase_start)
                     chunk_timing[f"write_{component_name}_seconds"] = elapsed
                     chunk_any |= write_result.mask_present
-                    labels = _decode_finalization_reason_payload(
-                        _finalization_reason_payload(
-                            union_batch,
-                            write_result.reason_flags,
-                            extra_labels=assignment_chunk.reason_labels[component_name],
-                        )
+                    labels = _merge_reason_label_arrays(
+                        assignment_chunk.reason_labels[component_name],
+                        write_result.reason_labels,
                     )
                     reason_labels_by_component[component_name][row_slice] = labels
                     _add_review_counts(review_counts, component_name, labels)
@@ -4889,10 +4787,6 @@ def finalize_subject_mask_run(
     run_group.attrs["smart_finalizer_finalization_metric_write_policy"] = (
         finalization_metric_write_policy
     )
-    run_group.attrs["smart_finalizer_compute_kernel"] = FINALIZATION_COMPUTE_KERNEL
-    run_group.attrs["smart_finalizer_metric_layout"] = FINALIZATION_METRIC_LAYOUT
-    run_group.attrs["smart_finalizer_reason_encoding"] = FINALIZATION_REASON_ENCODING
-    run_group.attrs["smart_finalizer_review_encoding"] = FINALIZATION_REVIEW_ENCODING
     run_group.attrs["smart_finalizer_chunk_count"] = int(len(chunk_ranges))
     run_group.attrs["smart_finalizer_metric_level"] = metric_level
     run_group.attrs["smart_finalizer_write_eye_geometry"] = bool(write_eye_geometry)

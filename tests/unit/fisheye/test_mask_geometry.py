@@ -7,7 +7,6 @@ from scipy.ndimage import binary_fill_holes
 
 from fisheye.shared.mask_geometry import (
     fill_holes,
-    fill_holes_with_change,
     hole_stats,
     mask_pixel_centroid,
     select_component_near_point,
@@ -34,22 +33,6 @@ def test_fill_holes_matches_scipy_binary_fill_holes(case: str) -> None:
     actual = fill_holes(mask)
 
     assert np.array_equal(actual, expected)
-
-
-@pytest.mark.parametrize("case, expected_changed", [("solid", False), ("hole", True)])
-def test_fill_holes_reports_change_without_altering_semantics(
-    case: str,
-    expected_changed: bool,
-) -> None:
-    mask = np.zeros((20, 20), dtype=bool)
-    mask[3:17, 3:17] = True
-    if case == "hole":
-        mask[8:12, 8:12] = False
-
-    filled, changed = fill_holes_with_change(mask)
-
-    np.testing.assert_array_equal(filled, binary_fill_holes(mask))
-    assert changed is expected_changed
 
 
 def test_hole_stats_reports_count_fraction_and_area() -> None:

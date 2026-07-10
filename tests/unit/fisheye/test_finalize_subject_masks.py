@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -23,26 +22,6 @@ from fisheye.shared.zarr_run_completion import (
 )
 from fisheye.shared.zarr.stage_arrays import REFINED_SUBJECT_MASKS_SPEC, validate_run
 from fisheye.tune import refined_subject_mask_review as review_mod
-
-
-def test_numeric_reason_payload_omits_clean_string_rows_without_assignment_labels() -> None:
-    batch = SimpleNamespace(
-        reason_flags=np.asarray([0, 0], dtype=np.uint32),
-        source_surface_kind="binary",
-    )
-
-    payload = mod._finalization_reason_payload(  # noqa: SLF001
-        batch,
-        np.asarray([0, 1], dtype=np.uint16),
-    )
-
-    assert "extra_labels" not in payload
-    assert np.asarray(payload["reason_flags"]).dtype == np.uint32
-    assert np.asarray(payload["metric_qc_reason_flags"]).dtype == np.uint16
-    assert mod._decode_finalization_reason_payload(payload).tolist() == [  # noqa: SLF001
-        "clean",
-        "needs_review_metric_empty_mask",
-    ]
 
 
 def _patch_refined_subject_provenance(monkeypatch) -> None:
@@ -362,14 +341,9 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert summary["requested_chunk_size"] == 1
     assert summary["worker_chunk_size"] == 1
     assert summary["chunk_alignment"] == "requested_chunk_size"
-    assert summary["finalization_compute_kernel"] == "numeric_struct_of_arrays_spatial_reuse_v2"
-    assert summary["finalization_metric_layout"] == "float32_n_by_metric_v1"
-    assert summary["finalization_reason_encoding"] == "uint32_bitflags_v1"
-    assert summary["finalization_review_encoding"] == "uint8_review_code_v1"
     assert summary["timing_summary"]["chunk_count"] == 2
     assert "finalize_subject_body" in summary["timing_summary"]["phase_seconds"]
-    assert "compute_spatial_metrics_subject_body" not in summary["timing_summary"]["phase_seconds"]
-    assert "reuse_spatial_metrics_subject_body" in summary["timing_summary"]["phase_seconds"]
+    assert "compute_spatial_metrics_subject_body" in summary["timing_summary"]["phase_seconds"]
     assert "write_masks_roi_subject_body" in summary["timing_summary"]["phase_seconds"]
     assert "write_finalization_metrics_subject_body" in summary["timing_summary"]["phase_seconds"]
     assert "compute_hole_metrics_eye_left" in summary["timing_summary"]["phase_seconds"]
@@ -404,10 +378,6 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert run.attrs["requested_chunk_size"] == 1
     assert run.attrs["worker_chunk_size"] == 1
     assert run.attrs["chunk_alignment"] == "requested_chunk_size"
-    assert run.attrs["smart_finalizer_compute_kernel"] == "numeric_struct_of_arrays_spatial_reuse_v2"
-    assert run.attrs["smart_finalizer_metric_layout"] == "float32_n_by_metric_v1"
-    assert run.attrs["smart_finalizer_reason_encoding"] == "uint32_bitflags_v1"
-    assert run.attrs["smart_finalizer_review_encoding"] == "uint8_review_code_v1"
     assert run.attrs["smart_finalizer_timing_summary"]["chunk_count"] == 2
     assert len(run.attrs["smart_finalizer_chunk_timings"]) == 2
     assert run.attrs["source_roi_image_representation"] == "grayscale_uint8"

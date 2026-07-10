@@ -333,7 +333,7 @@ their saved JSON has phase timing but not the new process-tree samples. The
 ### Compute-Kernel Optimization Result
 
 The initial controlled benchmark used `numeric_struct_of_arrays_v1`; the
-follow-up spatial-stat reuse candidate is identified as
+follow-up spatial-stat reuse candidate was identified as
 `numeric_struct_of_arrays_spatial_reuse_v2`:
 
 1. Each component block returns dense numeric arrays for masks, source masks,
@@ -407,8 +407,10 @@ restore the replayed baseline and reintroduce only separately measured slices.
 The local replay initially made the compact typed contract look like useful
 performance-neutral architectural cleanup, but the cluster gate shows that
 architecture alone is not sufficient reason to retain it in the production
-hot path. A C++/pybind block loop is also not justified by these timings.
-Restore the baseline, then profile one separately introduced slice at a time.
+hot path. The exact replayed baseline has now been restored; the rejected
+implementation remains only in Git history and the benchmark artifacts. A
+C++/pybind block loop is also not justified by these timings. Profile one
+separately introduced slice at a time from the restored baseline.
 
 No hardware cache-miss counters were collected in these runs. Statements about
 keeping row-local data hot are working-set/locality reasoning supported by the
@@ -417,34 +419,34 @@ L1/L2/L3 cache-hit rate.
 
 ### Current Compute Implementation Checklist
 
-Implemented and parity-validated; candidate-only items remain subject to the
-cluster rejection above:
+Active production path:
 
 - [x] Keep `process_shards` as the only production parallel backend; each
   process owns contiguous, physical-chunk-aligned rows and opens the Zarr once.
 - [x] Keep native OpenCV/BLAS thread pools at one thread per worker process.
-- [x] Return numeric struct-of-arrays finalization payloads instead of per-row
-  result objects, metric dictionaries, and base reason/review strings.
-- [x] Vectorize simple thresholding, finalization/review predicates, and
-  component metric-QC predicates across compact row-summary arrays.
-- [x] Decode base finalization and metric-QC reason flags at the driver/write
-  boundary; omit body/swim `extra_labels` entirely when they do not exist.
-- [x] Reuse connected-component labels and stats through small-component
-  filtering, final selection, finalization metrics, and body/swim topology
-  publication.
+- [x] Use the exact cluster-winning row-wise finalization result path.
+- [x] Merge finalization-metric payloads on the driver and write sealed
+  16384-row physical chunks without overlapping worker writes.
 - [x] Reuse assignment-time eye ellipses and contours for persisted eye
   geometry instead of measuring them again during postcompute.
 - [x] Read body/swim masks in contiguous chunks for contour postcompute rather
   than once per row.
-- [x] Record phase/resource telemetry and validate against the saved exact
-  pre-refactor implementation on the real 4096-row canary.
-- [x] Construct the morphology kernel once per component block, reuse one
-  row-local boolean scratch buffer, avoid a dense high-threshold temporary, and
-  derive fill/filter/select change flags without later equality scans.
-- [x] Reuse connected-component area/centroid/bbox stats for body/swim spatial
-  publication and reuse sparse coordinates already produced during eye
-  assignment for eye spatial publication. The later dense spatial scan is now
-  eliminated for all four published components.
+- [x] Record in-job phase, process-tree CPU, CPU-efficiency, thread-count, and
+  RSS telemetry and retain the position-balanced cluster A/B harness.
+
+Rejected and removed from active source:
+
+- [x] Numeric struct-of-arrays batch results and block-level reason/review
+  vectorization.
+- [x] Numeric reason-flag transport and driver-side reason decoding.
+- [x] Block-scoped morphology kernels, reusable pixel scratch, and
+  change-aware hole-fill helpers.
+- [x] Connected-component and assigned-eye spatial-stat transport used to skip
+  later dense spatial scans.
+
+These candidates are not retained behind production flags or as parallel
+implementations. Git history and the saved A/B run are the reproducibility
+surface if a narrower idea is reconsidered.
 
 Partially complete:
 
@@ -461,41 +463,15 @@ Not started:
 
 ### Next Compute Implementation Order
 
-1. **Remove row-local temporary allocations without changing algorithms — implemented.**
-   Precompute the morphology kernel once per block; reuse caller-owned boolean
-   scratch buffers for removed/added pixels; derive high-probability removal
-   from the already selected removed probabilities; and have fill/filter/select
-   helpers return change flags instead of rescanning masks with
-   `np.array_equal`. Reuse before-hole values when the selected mask is exactly
-   unchanged.
-2. **Fuse source fingerprinting at the existing hot-row boundary — attempted,
-   then reverted.** A fixed `uint64[N]` transport was added temporarily to
-   body/swim and eye-assignment outputs. It preserved exact BLAKE2b values but
-   merely moved hashing time into finalization/assignment and increased payload
-   complexity without a credible wall-time gain. The fingerprint primitive is
-   now centralized in `shared.mask_fingerprint`, while production retains the
-   separately timed fingerprint phase.
-3. **Carry spatial stats out of connected-components — implemented for
-   body/swim.** Retain bounding boxes and centroids from final component stats
-   and use them to seed body/swim spatial publication. Exact integer
-   area/bbox/presence and float32 centroids matched all 4096 real comparison
-   rows.
-4. **Return selected-eye stats from assignment — spatial portion implemented.**
-   Reuse selected component area/bbox/centroid and existing contour
-   measurements in the eye metric payload. Sparse assignment-time summaries
-   matched every stored eye spatial value on the 4096-row comparison. Eye hole
-   metrics still require a separate background-labeling pass.
-5. **Profile again — completed; v2 rejected.** Four position-balanced old/new
-   4096-row local-copy canaries ran in `AB`, `BA`, `AB`, `BA` order with
-   identical workers, native-thread limits, source rows, and output policy.
-   Exact parity passed, but v2 was slower by both median and symmetric-sequence
-   mean and used more CPU time. Restore the baseline before any new call-level
-   profiling experiment.
-6. **Consider a compiled loop only with evidence.** If the retained Python row
-   loop and native-call transitions remain material after steps 1-5, prototype
-   a small compiled block loop that releases the GIL and calls the same OpenCV
-   operations. Rely on OpenCV/compiler SIMD before considering handwritten
-   architecture-specific intrinsics.
+1. Profile the restored baseline at call level to identify one measured hot
+   transition or duplicate scan.
+2. Implement only that one slice in an experiment branch or frozen source
+   snapshot; do not add a second production backend or dormant hot-path code.
+3. Require exact output parity and a position-balanced cluster improvement
+   beyond run noise before promotion.
+4. Consider a compiled loop only if profiling shows Python/native transitions
+   remain material after simpler isolated changes. Rely on OpenCV/compiler SIMD
+   before considering handwritten architecture-specific intrinsics.
 
 Every slice must preserve exact masks, row identity, integer metrics, reason
 flags/order, review codes, and chunk ownership. Approximate floating metrics
