@@ -333,7 +333,7 @@ their saved JSON has phase timing but not the new process-tree samples. The
 ### Compute-Kernel Optimization Result
 
 The initial controlled benchmark used `numeric_struct_of_arrays_v1`; the
-current working tree identifies the follow-up spatial-stat reuse path as
+follow-up spatial-stat reuse candidate is identified as
 `numeric_struct_of_arrays_spatial_reuse_v2`:
 
 1. Each component block returns dense numeric arrays for masks, source masks,
@@ -384,13 +384,31 @@ and masks. The earlier 26.82-second `process_shards` result came from a
 different point in the working-tree history and is not valid causal evidence
 for this refactor.
 
-This is useful architectural cleanup: it removes most per-row Python object
-construction and gives workers a compact typed contract, but it does not
-establish a wall-time speedup. The nearly identical finalization phase times
-show that native morphology, connected-components, hole/eye work, and
-mask-memory traffic now dominate. A C++/pybind block loop is not justified by
-these timings alone. First profile the remaining duplicate image scans and
-Python/native transitions.
+The isolated cluster promotion gate subsequently rejected the v2 candidate.
+LSF job `153050432` ran committed candidate `fb64b70` against the frozen exact
+pre-refactor source in symmetric `AB`, `BA`, `AB`, `BA` order on the same
+4096-row scratch copy and eight-slot allocation:
+
+| implementation | finalizer seconds, four runs | median seconds | mean seconds | median CPU seconds | median process-tree RSS |
+|---|---|---:|---:|---:|---:|
+| exact pre-refactor replay | 193.953, 89.178, 82.924, 105.533 | 97.355 | 117.897 | 707.843 | 10.67 GiB |
+| v2 candidate | 181.978, 153.437, 121.563, 111.715 | 137.500 | 142.173 | 1031.896 | 10.62 GiB |
+
+The candidate median was 41.2% slower and its symmetric-sequence arithmetic
+mean was 20.6% slower. Median CPU time was 45.8% higher, CPU efficiency was
+similar (88.4% versus 87.5% of eight allocated slots), and RSS was effectively
+unchanged. The candidate was slower in three of four same-repeat comparisons.
+All 122 arrays written under this no-contour/no-eye-geometry benchmark policy
+matched exactly. Strong cold-cache/time drift means these data should not be
+used to claim a precise micro-optimization cost, but they decisively fail to
+show a production benefit. Do not promote the numeric/spatial-reuse kernel;
+restore the replayed baseline and reintroduce only separately measured slices.
+
+The local replay initially made the compact typed contract look like useful
+performance-neutral architectural cleanup, but the cluster gate shows that
+architecture alone is not sufficient reason to retain it in the production
+hot path. A C++/pybind block loop is also not justified by these timings.
+Restore the baseline, then profile one separately introduced slice at a time.
 
 No hardware cache-miss counters were collected in these runs. Statements about
 keeping row-local data hot are working-set/locality reasoning supported by the
@@ -399,7 +417,8 @@ L1/L2/L3 cache-hit rate.
 
 ### Current Compute Implementation Checklist
 
-Completed and production-shaped:
+Implemented and parity-validated; candidate-only items remain subject to the
+cluster rejection above:
 
 - [x] Keep `process_shards` as the only production parallel backend; each
   process owns contiguous, physical-chunk-aligned rows and opens the Zarr once.
@@ -466,12 +485,12 @@ Not started:
    measurements in the eye metric payload. Sparse assignment-time summaries
    matched every stored eye spatial value on the 4096-row comparison. Eye hole
    metrics still require a separate background-labeling pass.
-5. **Profile again — prepared for an isolated cluster A/B gate.** Run four
-   position-balanced old/new 4096-row local-copy canaries in `AB`, `BA`, `AB`,
-   `BA` order with identical workers, native-thread limits, source rows, and
-   output policy. Compare median wall time, per-phase CPU attribution, CPU
-   efficiency, and peak RSS. Add call-level profiling only after the phase
-   result identifies a remaining Python/native transition target.
+5. **Profile again — completed; v2 rejected.** Four position-balanced old/new
+   4096-row local-copy canaries ran in `AB`, `BA`, `AB`, `BA` order with
+   identical workers, native-thread limits, source rows, and output policy.
+   Exact parity passed, but v2 was slower by both median and symmetric-sequence
+   mean and used more CPU time. Restore the baseline before any new call-level
+   profiling experiment.
 6. **Consider a compiled loop only with evidence.** If the retained Python row
    loop and native-call transitions remain material after steps 1-5, prototype
    a small compiled block loop that releases the GIL and calls the same OpenCV
@@ -524,11 +543,21 @@ LSF 153050421: exited at startup because a workstation /home checkout is not
 ```
 
 The corrected harness uses
-`/groups/johnson/johnsonlab/jeremy/gitrepos/palette` for provenance and refuses
-to snapshot it when dirty. The next run is submitted with `bsub` through the
-login node only after the candidate commit is pushed and that shared checkout
-is fast-forwarded. Treat its `reports/summary.json` plus `reports/parity.json`
-as the performance acceptance gate for the v2 kernel.
+`/groups/johnson/johnsonlab/jeremy/gitrepos/palette` for provenance, refuses to
+snapshot it when dirty, and archives only committed `src/fisheye` files. The
+completed non-publishing gate is:
+
+```text
+run: /groups/johnson/johnsonlab/jeremy/recordings/logs/
+     subject_mask_finalizer_benchmarks/
+     subject_mask_finalizer_kernel_ab_spatialreuse_20260710_05
+job: 153050432
+candidate commit: fb64b704d9d731930da0f204c8b17864737b7715
+```
+
+`reports/parity.json` records zero mismatches across 122 arrays.
+`reports/summary.json` records the failed performance gate summarized above.
+The job completed in 1175 seconds with an empty stderr file.
 
 ## Why Publication Is Still Expensive
 
