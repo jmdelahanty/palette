@@ -250,6 +250,7 @@ the same production-matched `[256, 1, 512, 512]` dense-mask layout:
 
 | backend | workers | finalizer seconds | rows/s | fixed-shape compute seconds | output files |
 |---|---:|---:|---:|---:|---:|
+| current `process_shards`, sampled contours only | 16 | 468.17 | 256.79 | 432.10 | 11185 |
 | current `process_shards`, expanded common metrics | 16 | 433.17 | 277.54 | 395.95 | 28119 |
 | earlier `process_shards`, first metric layout | 16 | 279.18 | 430.63 | 255.78 | 48639 |
 | delayed-task Dask processes | 16 | 451.72 | 266.14 | 414.55 | 48639 |
@@ -261,13 +262,13 @@ production file count because its dense mask chunk was `[128, 1, 512, 512]`.
 
 The production-matched staged inventories are now:
 
-| subtree | published reference | first metric layout | expanded common metrics |
-|---|---:|---:|---:|
-| full refined run | 66087 | 48639 | 28119 |
-| `masks_roi` | 1875 | 1875 | 1875 |
-| `components/` | 51385 | 33937 | 24619 |
-| `metrics/` | 11257 | 11257 | 55 |
-| `relations/` | n/a | 942 | 942 |
+| subtree | published reference | first metric layout | expanded common metrics | sampled contours only |
+|---|---:|---:|---:|---:|
+| full refined run | 66087 | 48639 | 28119 | 11185 |
+| `masks_roi` | 1875 | 1875 | 1875 | 1875 |
+| `components/` | 51385 | 33937 | 24619 | 7685 |
+| `metrics/` | 11257 | 11257 | 55 | 55 |
+| `relations/` | n/a | 942 | 942 | 942 |
 
 The expanded layout removes 20520 files from the first-layout staged run
 (42.2%) and 37968 files from the published reference (57.5%). Run-level
@@ -283,6 +284,25 @@ not the expected endpoint of the publication cleanup. The expanded
 common-metric canary is LSF job `153050747`, run from clean commit `cef17a9` on
 `h07u24`; it completed with empty stderr, 90.1% sampled CPU efficiency across
 16 allocated slots, and 28119 files.
+
+The sampled-only staged canary is LSF job `153052624`, run from clean commit
+`1afcc34` on `h07u27`. It completed all 120221 rows with empty stderr and 11185
+files: 16934 fewer than the expanded-common-metric run (60.2%) and 54902 fewer
+than the published reference (83.1%). Its 12 sampled-contour arrays account for
+1428 files: each array has 118 payload chunks plus metadata. The row chunks are
+`[1024, 128, 2]` for body points, `[1024, 64, 2]` for each eye, and
+`[1024, 32, 2]` for swim-bladder points; validity and source-count arrays use
+`[1024]`.
+
+This is primarily a file-count and bounded-read win, not a byte-size win. The
+sampled-only run uses 261992541 apparent bytes and 296726528 allocated bytes,
+about 88.2 MB and 49.3 MB more respectively than the comparable full-ragged
+staged run. It nevertheless avoids tens of thousands of small contour files.
+Contour postcompute took 17.26 seconds versus 17.68 seconds in the full-ragged
+run. Do not attribute the overall wall-time difference to contour format: the
+runs used different hosts and the fixed-shape compute phase was also slower in
+the sampled canary. The sampled run averaged 14.15 effective cores, 88.45% CPU
+efficiency, and 20.26 GB peak process-tree RSS.
 
 Do not attribute the current canary's 433.17-second duration to the layout. The
 279.18-second first-layout run executed on `h06u02`, while the current run
@@ -686,11 +706,12 @@ chunk alternatives are:
 | 262144 | about 231 | 2 MiB | stronger publication reduction, heavier on-demand row reads |
 | 1048576 | about 59 | 8 MiB | publication-oriented; too large for routine exact interactive contour reads unless visibility gating and caching are proven |
 
-The first default-layout canary should combine large fixed-shape derived metric
-chunks with sampled contours and omit full ragged contours. Compare full file
-inventory, finalizer time, sampled single-row/window read latency, Crimson
-overlay fidelity, and hidden-target PRFS copy time. Test 65536-point chunks only
-in a separate opt-in full-ragged build.
+The first default-layout staged canary combined large fixed-shape derived
+metric chunks with sampled contours and omitted full ragged contours. It
+completed successfully with 11185 files. Remaining gates are sampled
+single-row/window read latency, Crimson overlay fidelity, and hidden-target
+PRFS copy time. Test 65536-point chunks only in a separate opt-in full-ragged
+build.
 
 ## Crimson Live-Reader Implications
 
@@ -939,7 +960,9 @@ physical chunks and can run through either serial or `process_shards`
 postcompute. Full ragged contours are controlled independently. Production
 wrappers retain full ragged output until Crimson reads the sampled schema; the
 default flip is therefore a coordinated reader/writer rollout, not a Palette-
-only change. The July 8 contour diagnostic supports these candidates:
+only change. The full staged sampled-only canary passed with 11185 files,
+including 1428 files for all sampled arrays. The July 8 contour diagnostic
+supports these candidates:
 
 | component | current candidate K | safe use |
 |---|---:|---|
@@ -976,6 +999,9 @@ to the fixed-size sampled representation.
 - The clean-commit 120221-row staged canary completed successfully with 28119
   files: 57.5% fewer than the published reference and 42.2% fewer than the
   first metric-layout staged run.
+- The clean-commit sampled-only 120221-row staged canary completed successfully
+  with 11185 files: 83.1% fewer than the published reference and 60.2% fewer
+  than the expanded-common-metric staged run.
 - Interactive and browser mask saves leave derived arrays byte-unchanged and
   mark their affected row/component scope stale; explicit maintenance refresh
   remains available.
@@ -985,15 +1011,17 @@ to the fixed-size sampled representation.
 
 ## What Is Not Solved
 
-- Publication still takes several minutes because the refined run contains
-  about `66k` files.
+- Current production publication still handles about `66k` files until the
+  sampled-contour reader/writer rollout is complete; the staged candidate has
+  reduced that inventory to 11185 files but has not yet been published to PRFS.
 - Finalization-only runs currently do not create a refined-run handoff package
   on NRS; the workflow event reported `handoff_package_count=0`. NRS packages
   are still primarily tied to raw subject-mask inference handoff.
 - Full ragged contours, reason columns, and remaining eye-geometry surfaces
   still need their default publication layout reduced.
-- Fixed-K contours are implemented and unit-validated, but the full-run file
-  inventory/fidelity canary and Crimson reader migration are still pending.
+- Fixed-K contours are implemented, unit-validated, and full-run inventory
+  validated; Crimson fidelity/read-latency validation and reader migration are
+  still pending.
 - The production wrapper still enables full ragged contour generation until
   Crimson can consume fixed-K sampled contours.
 - Crimson's current manual bounding-box save rewrites the complete curated
@@ -1012,9 +1040,9 @@ to the fixed-size sampled representation.
 
 1. Use the existing publish telemetry in the next layout canary.
    Compare file count, total bytes, top-level subtree file counts, publish
-   backend, and publish duration for the 28119-file expanded layout against both
-   the 66087-file published reference and the 48639-file first-layout staged
-   run.
+   backend, and publish duration for the 11185-file sampled layout against the
+   28119-file expanded layout, the 66087-file published reference, and the
+   48639-file first-layout staged run.
 
 2. Separate Crimson's mask-fill, contour, and eye-geometry read paths.
    Do not automatically attach optional contour reads to mask-chunk prefetch.
@@ -1050,10 +1078,10 @@ to the fixed-size sampled representation.
    existing archives in place.
 
 8. Promote the implemented sampled-contour surface.
-   Run the full staged inventory/fidelity canary for body `K=128`, eyes `K=64`,
-   and swim bladder `K=32`; migrate Crimson's overlay reader to the fixed-K
-   schema; then make full ragged contour generation an explicit
-   analysis/archive/export option.
+   The full staged inventory canary for body `K=128`, eyes `K=64`, and swim
+   bladder `K=32` passed. Validate Crimson overlay fidelity/read latency,
+   migrate its overlay reader to the fixed-K schema, and then make full ragged
+   contour generation an explicit analysis/archive/export option.
 
 9. Consider an NRS refined-run package path.
    If finalization produces a tar package on NRS after local scratch compute,

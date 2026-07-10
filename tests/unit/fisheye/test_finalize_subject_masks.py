@@ -1154,10 +1154,12 @@ def test_finalize_subject_masks_can_write_postcompute_with_process_shards(
     assert postcompute_calls[0]["write_component_contours"] is True
     assert postcompute_calls[0]["sampled_contour_counts"] == {
         "subject_body": 8,
-        "eye_left": 4,
-        "eye_right": 4,
         "swim_bladder": 4,
     }
+    assert "write_sampled_eye_contours_from_assignment" in sharded.attrs[
+        "smart_finalizer_timing_summary"
+    ]["phase_seconds"]
+    assert sharded.attrs["sampled_component_contours_postcompute_backend"] == "mixed"
 
     for component in ("eye_left", "eye_right"):
         assert sharded[f"components/{component}/geometry"].attrs["source_measurement"] == "eyes_union_assignment_measure_mask"

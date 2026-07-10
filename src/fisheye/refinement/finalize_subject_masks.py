@@ -3139,12 +3139,97 @@ def _write_sharded_sampled_component_contours(
         payload = asdict(summary)
         payload["postcompute_backend"] = str(postcompute_backend)
         summaries.append(payload)
-    if summaries:
-        run_group.attrs["sampled_component_contours_status"] = "computed"
-        run_group.attrs["sampled_component_contours_components"] = [item["component"] for item in summaries]
-        run_group.attrs["sampled_component_contours_updated_at_utc"] = _utc_now()
-        run_group.attrs["sampled_component_contours_summary"] = list(_json_safe(summaries))
-        run_group.attrs["sampled_component_contours_postcompute_backend"] = str(postcompute_backend)
+    _update_sampled_component_contour_attrs(
+        run_group,
+        summaries,
+        postcompute_backend=postcompute_backend,
+    )
+    return summaries
+
+
+def _update_sampled_component_contour_attrs(
+    run_group: zarr.Group,
+    summaries: Sequence[Mapping[str, object]],
+    *,
+    postcompute_backend: str,
+) -> None:
+    if not summaries:
+        return
+    combined = {
+        str(item["component"]): dict(item)
+        for item in list(run_group.attrs.get("sampled_component_contours_summary") or [])
+        if isinstance(item, Mapping) and item.get("component")
+    }
+    for item in summaries:
+        combined[str(item["component"])] = dict(item)
+    ordered = [combined[name] for name in CANONICAL_COMPONENT_ORDER if name in combined]
+    run_group.attrs["sampled_component_contours_status"] = "computed"
+    run_group.attrs["sampled_component_contours_components"] = [item["component"] for item in ordered]
+    run_group.attrs["sampled_component_contours_updated_at_utc"] = _utc_now()
+    run_group.attrs["sampled_component_contours_summary"] = list(_json_safe(ordered))
+    previous_backend = str(run_group.attrs.get("sampled_component_contours_postcompute_backend") or "")
+    resolved_backend = (
+        str(postcompute_backend)
+        if not previous_backend or previous_backend == str(postcompute_backend)
+        else "mixed"
+    )
+    run_group.attrs["sampled_component_contours_postcompute_backend"] = resolved_backend
+
+
+def _write_sampled_component_contours_from_raw_shards(
+    run_group: zarr.Group,
+    shards: Sequence[Mapping[str, object]],
+    *,
+    sample_counts: Mapping[str, int],
+    source_key: str,
+    row_chunk: int,
+    refined_run: str,
+    postcompute_backend: str,
+) -> list[dict[str, object]]:
+    total_rois = int(run_group["masks_roi"].shape[0])
+    source_label_schema = str(run_group.attrs.get("label_schema_id") or "")
+    components_parent = run_group.require_group("components")
+    summaries: list[dict[str, object]] = []
+    for component_name, raw_sample_count in sample_counts.items():
+        sample_count = int(raw_sample_count)
+        points_xy = np.full((total_rois, sample_count, 2), np.nan, dtype=np.float32)
+        valid = np.zeros((total_rois,), dtype=bool)
+        source_point_count = np.zeros((total_rois,), dtype=np.int32)
+        for shard in shards:
+            source_payload = shard.get(source_key)
+            if not isinstance(source_payload, Mapping):
+                continue
+            contours = source_payload.get("contours")
+            if not isinstance(contours, Mapping):
+                continue
+            pack = contours.get(component_name)
+            if not isinstance(pack, Mapping):
+                continue
+            sampled = _sample_packed_contours(pack, sample_count)
+            start = int(shard["start_row"])
+            stop = int(shard["stop_row"])
+            points_xy[start:stop] = sampled["points_xy"]
+            valid[start:stop] = sampled["valid"]
+            source_point_count[start:stop] = sampled["source_point_count"]
+        summary = write_sampled_component_contour_arrays(
+            components_parent.require_group(component_name),
+            points_xy=points_xy,
+            valid=valid,
+            source_point_count=source_point_count,
+            row_chunk=int(row_chunk),
+            component=component_name,
+            source_mask_run=refined_run,
+            source_mask_label_schema_id=source_label_schema,
+            min_points=2,
+        )
+        payload = asdict(summary)
+        payload["postcompute_backend"] = str(postcompute_backend)
+        summaries.append(payload)
+    _update_sampled_component_contour_attrs(
+        run_group,
+        summaries,
+        postcompute_backend=postcompute_backend,
+    )
     return summaries
 
 
@@ -4945,6 +5030,7 @@ def finalize_subject_mask_run(
     postcompute_summary: dict[str, object] = {}
     contour_summaries: list[dict[str, object]] = []
     sampled_contour_summaries: list[dict[str, object]] = []
+    remaining_sampled_contour_counts = dict(sampled_contour_counts_requested)
 
     if assignment_eye_geometry_complete:
         with progress.phase("write_eye_geometry_from_assignment"):
@@ -4958,13 +5044,34 @@ def finalize_subject_mask_run(
                     write_component_contours=bool(component_contours_requested),
                 )
         run_group.attrs["eye_geometry_status"] = "computed"
+        sampled_eye_counts = {
+            name: remaining_sampled_contour_counts.pop(name)
+            for name in _EYE_COMPONENTS
+            if name in remaining_sampled_contour_counts
+        }
+        if sampled_eye_counts:
+            with progress.phase("write_sampled_eye_contours_from_assignment"):
+                with timing.phase("write_sampled_eye_contours_from_assignment"):
+                    assignment_sampled_summaries = _write_sampled_component_contours_from_raw_shards(
+                        run_group,
+                        sorted(assignment_eye_geometry_shards, key=lambda item: int(item["start_row"])),
+                        sample_counts=sampled_eye_counts,
+                        source_key="eye_geometry",
+                        row_chunk=normalized_sampled_contour_row_chunk,
+                        refined_run=target_run,
+                        postcompute_backend=_ASSIGNMENT_REUSE_POSTCOMPUTE_BACKEND,
+                    )
+            sampled_contour_summaries.extend(_summaries_to_json_safe(assignment_sampled_summaries))
+            postcompute_summary["sampled_component_contours"] = list(
+                _json_safe(sampled_contour_summaries)
+            )
 
     if (
         postcompute_backend == _PROCESS_SHARD_POSTCOMPUTE_BACKEND
         and (
             (eye_geometry_requested and not assignment_eye_geometry_complete)
             or component_contours_requested
-            or sampled_component_contours_requested
+            or bool(remaining_sampled_contour_counts)
         )
     ):
         assert zarr_path is not None
@@ -4972,7 +5079,7 @@ def finalize_subject_mask_run(
             "postcompute_process_shards",
             write_eye_geometry=bool(eye_geometry_requested and not assignment_eye_geometry_complete),
             write_component_contours=bool(component_contours_requested),
-            write_sampled_component_contours=bool(sampled_component_contours_requested),
+            write_sampled_component_contours=bool(remaining_sampled_contour_counts),
             chunk_size=int(normalized_postcompute_chunk_size),
             num_workers=normalized_postcompute_num_workers,
         ):
@@ -4984,7 +5091,7 @@ def finalize_subject_mask_run(
                     num_workers=normalized_postcompute_num_workers,
                     write_eye_geometry=bool(eye_geometry_requested and not assignment_eye_geometry_complete),
                     write_component_contours=component_contours_requested,
-                    sampled_contour_counts=sampled_contour_counts_requested,
+                    sampled_contour_counts=remaining_sampled_contour_counts,
                     sampled_contour_row_chunk=normalized_sampled_contour_row_chunk,
                 )
         for key, value in dict(postcompute_result).items():
@@ -4994,8 +5101,17 @@ def finalize_subject_mask_run(
         contour_summaries = _summaries_to_json_safe(
             list(postcompute_summary.get("component_contours") or [])
         )
-        sampled_contour_summaries = _summaries_to_json_safe(
-            list(postcompute_summary.get("sampled_component_contours") or [])
+        process_sampled_summaries = _summaries_to_json_safe(
+            list(postcompute_result.get("sampled_component_contours") or [])
+        )
+        _update_sampled_component_contour_attrs(
+            run_group,
+            process_sampled_summaries,
+            postcompute_backend=_PROCESS_SHARD_POSTCOMPUTE_BACKEND,
+        )
+        sampled_contour_summaries.extend(process_sampled_summaries)
+        postcompute_summary["sampled_component_contours"] = list(
+            _json_safe(sampled_contour_summaries)
         )
         eye_summary = postcompute_summary.get("eye_geometry")
         if (
@@ -5075,27 +5191,28 @@ def finalize_subject_mask_run(
             run_group.attrs["component_contours_updated_at_utc"] = _utc_now()
             run_group.attrs["component_contours_summary"] = list(_json_safe(contour_summaries))
             postcompute_summary["component_contours"] = list(_json_safe(contour_summaries))
-    if postcompute_backend != _PROCESS_SHARD_POSTCOMPUTE_BACKEND and sampled_component_contours_requested:
+    if postcompute_backend != _PROCESS_SHARD_POSTCOMPUTE_BACKEND and remaining_sampled_contour_counts:
         with progress.phase(
             "write_sampled_component_contours",
-            components=list(sampled_contour_counts_requested),
+            components=list(remaining_sampled_contour_counts),
         ):
             with timing.phase("write_sampled_component_contours"):
-                sampled_contour_summaries = _summaries_to_json_safe(
+                serial_sampled_summaries = _summaries_to_json_safe(
                     write_refined_subject_sampled_component_contours(
                         run_group,
-                        components=tuple(sampled_contour_counts_requested),
-                        sample_counts=sampled_contour_counts_requested,
+                        components=tuple(remaining_sampled_contour_counts),
+                        sample_counts=remaining_sampled_contour_counts,
                         source_mask_run=target_run,
                         row_chunk=normalized_sampled_contour_row_chunk,
                         read_chunk_size=max(1, min(256, total_rows)),
                     )
                 )
-        run_group.attrs["sampled_component_contours_status"] = "computed"
-        run_group.attrs["sampled_component_contours_components"] = list(sampled_contour_counts_requested)
-        run_group.attrs["sampled_component_contours_updated_at_utc"] = _utc_now()
-        run_group.attrs["sampled_component_contours_summary"] = list(_json_safe(sampled_contour_summaries))
-        run_group.attrs["sampled_component_contours_postcompute_backend"] = _SERIAL_POSTCOMPUTE_BACKEND
+                sampled_contour_summaries.extend(serial_sampled_summaries)
+        _update_sampled_component_contour_attrs(
+            run_group,
+            serial_sampled_summaries,
+            postcompute_backend=_SERIAL_POSTCOMPUTE_BACKEND,
+        )
         postcompute_summary["sampled_component_contours"] = list(_json_safe(sampled_contour_summaries))
     if write_component_contours and not contour_components:
         run_group.attrs["component_contours_status"] = "deferred"
@@ -5103,6 +5220,15 @@ def finalize_subject_mask_run(
     if write_sampled_component_contours and not sampled_component_contours_requested:
         run_group.attrs["sampled_component_contours_status"] = "deferred"
         run_group.attrs["sampled_component_contours_deferred_reason"] = "no_supported_components_selected"
+    sampled_order = {name: index for index, name in enumerate(CANONICAL_COMPONENT_ORDER)}
+    sampled_contour_summaries = sorted(
+        sampled_contour_summaries,
+        key=lambda item: sampled_order.get(str(item.get("component")), len(sampled_order)),
+    )
+    if sampled_contour_summaries:
+        postcompute_summary["sampled_component_contours"] = list(
+            _json_safe(sampled_contour_summaries)
+        )
     if postcompute_summary and "status" not in postcompute_summary:
         postcompute_summary = {
             "status": "updated",
