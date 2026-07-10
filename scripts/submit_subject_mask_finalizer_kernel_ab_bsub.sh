@@ -110,9 +110,13 @@ if [[ -e "$RUN_DIR" ]]; then
   exit 2
 fi
 mkdir -p "$RUN_DIR/baseline_source" "$RUN_DIR/candidate_source" "$RUN_DIR/reports"
-cp -a "${BASELINE_SOURCE%/}/fisheye" "$RUN_DIR/baseline_source/"
-cp -a "$PROVENANCE_REPO/src/fisheye" "$RUN_DIR/candidate_source/"
-cp "$PROVENANCE_REPO/scripts/py" "$RUN_DIR/palette_py"
+cp -R --no-preserve=mode,ownership,timestamps \
+  "${BASELINE_SOURCE%/}/fisheye" "$RUN_DIR/baseline_source/"
+git -C "$PROVENANCE_REPO" archive --format=tar "$CANDIDATE_GIT_SHA" src/fisheye \
+  | tar --extract --directory "$RUN_DIR/candidate_source" --strip-components=1 \
+      --no-same-owner --no-same-permissions
+cp --no-preserve=mode,ownership,timestamps \
+  "$PROVENANCE_REPO/scripts/py" "$RUN_DIR/palette_py"
 chmod +x "$RUN_DIR/palette_py"
 git -C "$PROVENANCE_REPO" status --short > "$RUN_DIR/candidate_git_status.txt"
 git -C "$PROVENANCE_REPO" diff --binary > "$RUN_DIR/candidate_worktree.patch"
