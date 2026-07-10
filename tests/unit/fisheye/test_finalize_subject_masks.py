@@ -1065,6 +1065,13 @@ def test_finalize_subject_mask_run_can_write_sampled_contours_without_full_ragge
         "eye_right",
         "swim_bladder",
     ]
+    sampled_summaries = {
+        item["component"]: item for item in summary["sampled_component_contours"]
+    }
+    assert sampled_summaries["subject_body"]["sample_count"] == 8
+    assert sampled_summaries["subject_body"]["valid_count"] == 2
+    assert sampled_summaries["subject_body"]["source_point_count"] > 0
+    assert sampled_summaries["subject_body"]["row_chunk"] == 2
     run = root["refined_subject_masks_runs/refined_subject_masks_sampled_contours_001"]
     assert run.attrs["sampled_component_contours_status"] == "computed"
     assert run.attrs["smart_finalizer_sampled_contour_row_chunk"] == 2

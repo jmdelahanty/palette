@@ -1213,8 +1213,9 @@ Sampled contour policy:
   the authoritative dense mask;
 - sampled contours are display caches, never edit/training authority and never
   the source for eye ellipse geometry;
-- full ragged contours remain a compatibility/analysis opt-in during the
-  Crimson reader migration.
+- full ragged contours are an explicit compatibility/analysis/archive/export
+  opt-in; Crimson commit `f50bc59` reads sampled contours and retains ragged
+  fallback for historical runs.
 
 Metric-QC policy:
 
@@ -1290,8 +1291,8 @@ Current implementation note:
   - `relations/eye_pair/metrics/{separation_px,separation_valid}`
 - The finalizer can additionally materialize fixed-K sampled contours for all
   selected components. Full ragged `contours/{ptr,len,points_xy}` are controlled
-  separately and remain enabled in production wrappers until Crimson reads the
-  sampled schema.
+  separately. Production wrappers default to sampled contours on and full
+  ragged contours off after the successful 2026-07-10 PRFS/Crimson canary.
 - These arrays are derived from the refined subject-mask component masks during
   refined-run creation/finalization.
 

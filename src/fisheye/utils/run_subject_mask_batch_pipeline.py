@@ -1423,14 +1423,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--write-component-contours",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Write full ragged contours for current Crimson compatibility (default: true during migration).",
+        default=False,
+        help="Write optional full ragged contours for analysis/archive/export builds (default: false).",
     )
     parser.add_argument(
         "--write-sampled-component-contours",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Write fixed-K sampled display contours (opt-in until Crimson migration).",
+        default=True,
+        help="Write fixed-K sampled display contours for Crimson (default: true).",
     )
     parser.add_argument(
         "--sampled-contour-row-chunk",

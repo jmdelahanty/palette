@@ -1,7 +1,7 @@
 # Subject-Mask Finalizer And Publication Status
 
 **Date:** 2026-07-09
-**Status:** current cluster diagnostic, completed full-run storage/performance gates, and pending PRFS publication canary
+**Status:** completed staged and PRFS sampled-contour publication gates; production defaults promoted
 
 ## Scope
 
@@ -59,7 +59,8 @@ FINALIZE_NUM_WORKERS=16
 FINALIZE_POSTCOMPUTE_BACKEND=process_shards
 MASK_STORAGE=dense_uint8
 WRITE_EYE_GEOMETRY=1
-WRITE_COMPONENT_CONTOURS=1
+WRITE_COMPONENT_CONTOURS=0
+WRITE_SAMPLED_COMPONENT_CONTOURS=1
 STAGE_OUTPUT_TO_SCRATCH=1
 STAGE_FINALIZATION_INPUT_TO_SCRATCH=1
 ```
@@ -191,7 +192,8 @@ tasks perform read-modify-write operations inside one 16384-row Zarr chunk.
 Focused and broader unit suites pass. A clean-commit full node-local staged run
 also completed successfully and reduced the refined-run inventory to 28119
 files. A same-allocation position-balanced comparison found no performance
-regression. The separate PRFS publication canary is still pending.
+regression. The sampled-only PRFS publication canary also completed and is
+readable by Crimson without full ragged contours.
 
 ### Zarr Chunk-Size And Sharding Guidance
 
@@ -303,6 +305,41 @@ run. Do not attribute the overall wall-time difference to contour format: the
 runs used different hosts and the fixed-shape compute phase was also slower in
 the sampled canary. The sampled run averaged 14.15 effective cores, 88.45% CPU
 efficiency, and 20.26 GB peak process-tree RSS.
+
+The production-path PRFS canary is LSF job `153053844`, run from shared Palette
+commit `977dde9` on `h06u04`. It finalized and published
+`refined_subject_masks_smart_finalizer_crimson_sampled_contour_prfs_canary_20260710_02`
+with sampled contours enabled and full ragged contours disabled. Finalization,
+staged validation, publication, published validation, registry refresh, and
+scratch cleanup all completed successfully.
+
+| PRFS canary field | sampled-only canary | 66087-file reference |
+|---|---:|---:|
+| full run files | 11185 | 66087 |
+| publish seconds | 125.05 | 425.07 |
+| archive total seconds | 423.26 | 1031.20 |
+| finalizer seconds | 281.86 | 583.67 |
+| finalizer rows/s | 426.53 | 205.97 |
+
+The published canary contains 1875 `masks_roi` files, 7685 files under
+`components/`, 55 under `metrics/`, and 942 under `relations/`. It contains no
+`components/<component>/contours` groups. Its four sampled-contour groups
+contain 1432 files including group metadata, and the complete run occupies
+261980829 apparent bytes and 265364480 allocated bytes.
+
+Crimson commit `f50bc59` reads `sampled_component_contours_v1`, prefers it over
+ragged contours, retains ragged fallback for historical runs, and refuses
+stored contours when `contours_stale=true`. Against the exact published PRFS
+canary, its probe loaded all four components as sampled, materialized frame 0,
+and reported 57.19 ms for the first 256-row sampled contour window and 28.64 ms
+for the adjacent prefetched window. Authenticated GPU playback then passed
+frames 0 through 120 with `sampled=4`, `ragged=0`.
+
+The canary's generic console summary displayed zero `contour_count` and
+`point_count` because those are full-ragged field names; the sampled arrays
+were populated correctly. The summary normalizer now preserves sampled
+`sample_count`, `valid_count`, `source_point_count`, and `row_chunk` fields so
+future reports do not misstate the sampled payload.
 
 Do not attribute the current canary's 433.17-second duration to the layout. The
 279.18-second first-layout run executed on `h06u02`, while the current run
@@ -954,14 +991,13 @@ inside a shard can amplify a small edit into a much larger shard update.
 
 ## Current Contour Position
 
-The canonical writer now has an opt-in fixed-K sampled contour surface with
+The canonical writer now has a default fixed-K sampled contour surface with
 `points_xy[N,K,2]`, `valid[N]`, and `source_point_count[N]`. It uses 1024-row
 physical chunks and can run through either serial or `process_shards`
-postcompute. Full ragged contours are controlled independently. Production
-wrappers retain full ragged output until Crimson reads the sampled schema; the
-default flip is therefore a coordinated reader/writer rollout, not a Palette-
-only change. The full staged sampled-only canary passed with 11185 files,
-including 1428 files for all sampled arrays. The July 8 contour diagnostic
+postcompute. Full ragged contours are controlled independently and are now
+disabled by default in production wrappers. Crimson reads the sampled schema
+and retains ragged fallback for historical runs. Both the staged and published
+sampled-only canaries passed with 11185 files. The July 8 contour diagnostic
 supports these candidates:
 
 | component | current candidate K | safe use |
@@ -993,7 +1029,7 @@ to the fixed-size sampled representation.
   layout telemetry before deleting its local staged archive.
 - The new-run finalization and common-metric writers use driver-owned large
   sealed chunks without allowing workers to share a physical Zarr metric chunk;
-  production promotion remains gated on the full-run canary.
+  the full staged and PRFS canaries have now passed.
 - New run-level common metrics use `[16384, C, ...]`; component
   spatial/topology metrics and source fingerprints use `[16384, ...]`.
 - The clean-commit 120221-row staged canary completed successfully with 28119
@@ -1002,6 +1038,8 @@ to the fixed-size sampled representation.
 - The clean-commit sampled-only 120221-row staged canary completed successfully
   with 11185 files: 83.1% fewer than the published reference and 60.2% fewer
   than the expanded-common-metric staged run.
+- The sampled-only production-path PRFS canary published successfully in
+  125.05 seconds, and Crimson loaded/rendered it with no ragged contour groups.
 - Interactive and browser mask saves leave derived arrays byte-unchanged and
   mark their affected row/component scope stale; explicit maintenance refresh
   remains available.
@@ -1011,19 +1049,14 @@ to the fixed-size sampled representation.
 
 ## What Is Not Solved
 
-- Current production publication still handles about `66k` files until the
-  sampled-contour reader/writer rollout is complete; the staged candidate has
-  reduced that inventory to 11185 files but has not yet been published to PRFS.
+- Existing historical production runs still contain their original full
+  ragged contour files; they are not rewritten in place.
 - Finalization-only runs currently do not create a refined-run handoff package
   on NRS; the workflow event reported `handoff_package_count=0`. NRS packages
   are still primarily tied to raw subject-mask inference handoff.
-- Full ragged contours, reason columns, and remaining eye-geometry surfaces
-  still need their default publication layout reduced.
-- Fixed-K contours are implemented, unit-validated, and full-run inventory
-  validated; Crimson fidelity/read-latency validation and reader migration are
-  still pending.
-- The production wrapper still enables full ragged contour generation until
-  Crimson can consume fixed-K sampled contours.
+- Reason columns and remaining eye-geometry surfaces still need their
+  publication layout reduced. Full ragged contours remain intentionally
+  available for explicit analysis/archive/export builds.
 - Crimson's current manual bounding-box save rewrites the complete curated
   `instances/` subgroup rather than applying a row-local update.
 - Dense mask save amplification has not yet been benchmarked for editable row
@@ -1031,18 +1064,15 @@ to the fixed-size sampled representation.
 - The working-tree writeback lock is run-scoped rather than per-physical-chunk;
   this is safe but limits concurrent saves until stale metadata is made
   transaction-safe at finer granularity.
-- The PRFS hidden-target publication canary has not yet been run for the
-  expanded common-metric layout.
 - Optional Crimson contour and eye-geometry reads are deferred from startup but
   are still requested automatically rather than only when visible.
 
 ## Practical Next Steps
 
-1. Use the existing publish telemetry in the next layout canary.
-   Compare file count, total bytes, top-level subtree file counts, publish
-   backend, and publish duration for the 11185-file sampled layout against the
-   28119-file expanded layout, the 66087-file published reference, and the
-   48639-file first-layout staged run.
+1. Monitor the promoted sampled-only production layout.
+   Retain file count, total bytes, subtree counts, publish duration, and Crimson
+   cold/warm contour-read telemetry for subsequent recordings. The first PRFS
+   canary established the 11185-file and 125.05-second publication baseline.
 
 2. Separate Crimson's mask-fill, contour, and eye-geometry read paths.
    Do not automatically attach optional contour reads to mask-chunk prefetch.
@@ -1077,11 +1107,10 @@ to the fixed-size sampled representation.
    reason columns and remaining sealed eye-geometry arrays without changing
    existing archives in place.
 
-8. Promote the implemented sampled-contour surface.
-   The full staged inventory canary for body `K=128`, eyes `K=64`, and swim
-   bladder `K=32` passed. Validate Crimson overlay fidelity/read latency,
-   migrate its overlay reader to the fixed-K schema, and then make full ragged
-   contour generation an explicit analysis/archive/export option.
+8. Keep full ragged contours explicit.
+   Production now writes body `K=128`, eyes `K=64`, and swim bladder `K=32`
+   sampled contours by default. Request full ragged contours only for a named
+   analysis/archive/export requirement and record that choice in provenance.
 
 9. Consider an NRS refined-run package path.
    If finalization produces a tar package on NRS after local scratch compute,

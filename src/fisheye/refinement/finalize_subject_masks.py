@@ -788,29 +788,37 @@ def _summaries_to_json_safe(summaries: Sequence[object]) -> list[dict[str, objec
     payload: list[dict[str, object]] = []
     for summary in summaries:
         if isinstance(summary, Mapping):
-            payload.append(
-                {
-                    "component": str(summary.get("component", "")),
-                    "status": str(summary.get("status", "")),
-                    "reason": summary.get("reason"),
-                    "roi_count": int(summary.get("roi_count", 0) or 0),
-                    "contour_count": int(summary.get("contour_count", 0) or 0),
-                    "point_count": int(summary.get("point_count", 0) or 0),
-                    "existing": bool(summary.get("existing", False)),
-                }
-            )
-            continue
-        payload.append(
-            {
-                "component": str(getattr(summary, "component", "")),
-                "status": str(getattr(summary, "status", "")),
-                "reason": getattr(summary, "reason", None),
-                "roi_count": int(getattr(summary, "roi_count", 0) or 0),
-                "contour_count": int(getattr(summary, "contour_count", 0) or 0),
-                "point_count": int(getattr(summary, "point_count", 0) or 0),
-                "existing": bool(getattr(summary, "existing", False)),
+            item: dict[str, object] = {
+                "component": str(summary.get("component", "")),
+                "status": str(summary.get("status", "")),
+                "reason": summary.get("reason"),
+                "roi_count": int(summary.get("roi_count", 0) or 0),
+                "contour_count": int(summary.get("contour_count", 0) or 0),
+                "point_count": int(summary.get("point_count", 0) or 0),
+                "existing": bool(summary.get("existing", False)),
             }
-        )
+            for key in ("sample_count", "valid_count", "source_point_count", "row_chunk"):
+                if key in summary:
+                    item[key] = int(summary.get(key, 0) or 0)
+            if "postcompute_backend" in summary:
+                item["postcompute_backend"] = str(summary.get("postcompute_backend") or "")
+            payload.append(item)
+            continue
+        item = {
+            "component": str(getattr(summary, "component", "")),
+            "status": str(getattr(summary, "status", "")),
+            "reason": getattr(summary, "reason", None),
+            "roi_count": int(getattr(summary, "roi_count", 0) or 0),
+            "contour_count": int(getattr(summary, "contour_count", 0) or 0),
+            "point_count": int(getattr(summary, "point_count", 0) or 0),
+            "existing": bool(getattr(summary, "existing", False)),
+        }
+        for key in ("sample_count", "valid_count", "source_point_count", "row_chunk"):
+            if hasattr(summary, key):
+                item[key] = int(getattr(summary, key, 0) or 0)
+        if hasattr(summary, "postcompute_backend"):
+            item["postcompute_backend"] = str(getattr(summary, "postcompute_backend", "") or "")
+        payload.append(item)
     return payload
 
 

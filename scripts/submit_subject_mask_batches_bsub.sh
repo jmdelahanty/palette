@@ -46,8 +46,8 @@ METRIC_LEVEL="cheap"
 MASK_STORAGE="dense_uint8"
 MASK_RLE_VALIDATION_MODE="invariants"
 WRITE_EYE_GEOMETRY=1
-WRITE_COMPONENT_CONTOURS=1
-WRITE_SAMPLED_COMPONENT_CONTOURS=0
+WRITE_COMPONENT_CONTOURS=0
+WRITE_SAMPLED_COMPONENT_CONTOURS=1
 RETAIN_SOURCE_SEEDS=0
 FORCE_INFERENCE=0
 FORCE_FINALIZATION=0
@@ -170,9 +170,9 @@ Options:
                             (default: invariants for production batch runs)
   --no-write-eye-geometry   Do not ask finalizer to write eye geometry
   --write-component-contours
-                            Write full ragged contours (default during Crimson migration)
+                            Also write optional full ragged contours
   --write-sampled-component-contours
-                            Also write the fixed-K sampled contour cache
+                            Write the fixed-K sampled contour cache (default)
   --no-write-sampled-component-contours
                             Disable the default fixed-K sampled contour cache
   --retain-source-seeds     Retain dense source_seed_masks_roi debug arrays during finalization
