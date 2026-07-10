@@ -11,6 +11,7 @@ from fisheye.shared.refined_subject_component_contours import (
     build_component_contours_from_masks,
     refresh_component_contour_rows_from_masks,
     write_refined_subject_component_contours,
+    write_refined_subject_sampled_component_contours,
 )
 
 
@@ -112,6 +113,34 @@ def test_write_component_contours_reads_compact_mask_store_without_dense_masks(t
         assert int(np.count_nonzero(np.asarray(contours["len"][:], dtype=np.int64) > 0)) == int(
             np.count_nonzero(dense[:, run.attrs["mask_labels"].index(component)].reshape(2, -1).any(axis=1))
         )
+
+
+def test_write_sampled_component_contours_uses_fixed_k_and_requested_row_chunk(tmp_path: Path) -> None:
+    run = _build_refined_run(tmp_path / "sampled_contours.zarr")
+
+    summaries = write_refined_subject_sampled_component_contours(
+        run,
+        components=["subject_body", "swim_bladder"],
+        sample_counts={"subject_body": 8, "swim_bladder": 4},
+        source_mask_run="refined",
+        row_chunk=2,
+        read_chunk_size=1,
+    )
+
+    assert [summary.status for summary in summaries] == ["written", "written"]
+    body = run["components/subject_body/sampled_contours"]
+    swim = run["components/swim_bladder/sampled_contours"]
+    assert body.attrs["schema_id"] == "sampled_component_contours_v1"
+    assert body.attrs["sampling_method"] == "closed_arc_length_uniform"
+    assert body.attrs["surface_role"] == "derived_display_cache"
+    assert body.attrs["authoritative_pixels"] is False
+    assert tuple(body["points_xy"].shape) == (2, 8, 2)
+    assert tuple(body["points_xy"].chunks) == (2, 8, 2)
+    assert np.asarray(body["valid"][:], dtype=bool).tolist() == [True, True]
+    assert np.all(np.asarray(body["source_point_count"][:], dtype=np.int32) > 0)
+    assert tuple(swim["points_xy"].shape) == (2, 4, 2)
+    assert np.asarray(swim["valid"][:], dtype=bool).tolist() == [True, False]
+    assert np.all(np.isnan(np.asarray(swim["points_xy"][1], dtype=np.float32)))
 
 
 def test_build_component_contours_reads_masks_in_chunks(monkeypatch, tmp_path: Path) -> None:

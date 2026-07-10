@@ -12,14 +12,13 @@ import numpy as np
 import zarr
 
 from fisheye.shared.crop_image_source import CropImageSource
+from fisheye.shared.refined_subject_component_contours import (
+    DEFAULT_SAMPLED_CONTOUR_COUNTS,
+    resample_closed_contour,
+)
 
 
-DEFAULT_COMPONENT_K = {
-    "subject_body": 256,
-    "swim_bladder": 96,
-    "eye_left": 64,
-    "eye_right": 64,
-}
+DEFAULT_COMPONENT_K = dict(DEFAULT_SAMPLED_CONTOUR_COUNTS)
 
 
 @dataclass(frozen=True)
@@ -156,28 +155,7 @@ def resample_closed_polyline(points_xy: np.ndarray, k: int) -> np.ndarray:
     first point is not duplicated as the last fixed-K point.
     """
 
-    points = np.asarray(points_xy, dtype=np.float32).reshape(-1, 2)
-    sample_count = int(k)
-    if sample_count <= 0:
-        raise ValueError("k must be positive.")
-    if points.shape[0] == 0:
-        return np.full((sample_count, 2), np.nan, dtype=np.float32)
-    if points.shape[0] == 1:
-        return np.repeat(points.astype(np.float32, copy=False), sample_count, axis=0)
-
-    closed = points
-    if not np.allclose(closed[0], closed[-1]):
-        closed = np.concatenate([closed, closed[:1]], axis=0)
-    segment_lengths = np.linalg.norm(np.diff(closed, axis=0), axis=1)
-    perimeter = float(np.sum(segment_lengths))
-    if not np.isfinite(perimeter) or perimeter <= 0.0:
-        return np.repeat(points[:1].astype(np.float32, copy=False), sample_count, axis=0)
-
-    cumulative = np.concatenate([[0.0], np.cumsum(segment_lengths)]).astype(np.float64)
-    targets = np.linspace(0.0, perimeter, num=sample_count, endpoint=False, dtype=np.float64)
-    x = np.interp(targets, cumulative, closed[:, 0].astype(np.float64))
-    y = np.interp(targets, cumulative, closed[:, 1].astype(np.float64))
-    return np.stack([x, y], axis=1).astype(np.float32)
+    return resample_closed_contour(points_xy, int(k))
 
 
 def parse_component_k(values: Sequence[str] | None) -> dict[str, int]:

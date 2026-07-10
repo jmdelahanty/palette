@@ -142,6 +142,7 @@ def finalize_subject_mask_clip_package(
     assignment_keypoints_run: str | None = None,
     write_eye_geometry: bool = True,
     write_component_contours: bool = True,
+    write_sampled_component_contours: bool = False,
     retain_source_seeds: bool = False,
     overwrite: bool = False,
     cleanup: bool = True,
@@ -179,6 +180,7 @@ def finalize_subject_mask_clip_package(
             assignment_keypoints_run=assignment_keypoints_run,
             write_eye_geometry=bool(write_eye_geometry),
             write_component_contours=bool(write_component_contours),
+            write_sampled_component_contours=bool(write_sampled_component_contours),
             retain_source_seeds=bool(retain_source_seeds),
             overwrite=bool(overwrite),
         )
@@ -251,6 +253,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--assignment-keypoints-run")
     parser.add_argument("--no-write-eye-geometry", action="store_true")
     parser.add_argument("--no-write-component-contours", action="store_true")
+    parser.add_argument("--write-sampled-component-contours", action="store_true")
+    parser.add_argument("--no-write-sampled-component-contours", action="store_true")
     parser.add_argument("--retain-source-seeds", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--no-cleanup", action="store_true")
@@ -282,6 +286,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         assignment_keypoints_run=args.assignment_keypoints_run,
         write_eye_geometry=not bool(args.no_write_eye_geometry),
         write_component_contours=not bool(args.no_write_component_contours),
+        write_sampled_component_contours=bool(args.write_sampled_component_contours)
+        and not bool(args.no_write_sampled_component_contours),
         retain_source_seeds=bool(args.retain_source_seeds),
         overwrite=bool(args.overwrite),
         cleanup=not bool(args.no_cleanup),

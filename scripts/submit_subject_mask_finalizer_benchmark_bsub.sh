@@ -21,7 +21,8 @@ POSTCOMPUTE_BACKEND="process_shards"
 POSTCOMPUTE_CHUNK_SIZE=256
 POSTCOMPUTE_NUM_WORKERS=""
 WRITE_EYE_GEOMETRY=1
-WRITE_COMPONENT_CONTOURS=1
+WRITE_COMPONENT_CONTOURS=0
+WRITE_SAMPLED_COMPONENT_CONTOURS=1
 DRY_RUN=0
 VARIANTS=()
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -58,7 +59,10 @@ Options:
   --postcompute-chunk-size N       Rows per postcompute shard (default: 256).
   --postcompute-num-workers N      Postcompute workers (default: variant worker count).
   --no-write-eye-geometry          Disable eye geometry output.
-  --no-write-component-contours    Disable component contour output.
+  --write-component-contours       Also write full ragged component contours.
+  --no-write-component-contours    Compatibility alias; full ragged is already off by default.
+  --no-write-sampled-component-contours
+                                   Disable the default fixed-K sampled contour cache.
   --variant SPEC                   Add process_shards variant workers[:chunk_size].
                                    Repeatable. Default: 8 workers with --chunk-size.
   --dry-run                        Write scripts/manifests and print bsub command; do not submit.
@@ -88,7 +92,9 @@ while [[ $# -gt 0 ]]; do
     --postcompute-chunk-size) POSTCOMPUTE_CHUNK_SIZE="$2"; shift 2;;
     --postcompute-num-workers) POSTCOMPUTE_NUM_WORKERS="$2"; shift 2;;
     --no-write-eye-geometry) WRITE_EYE_GEOMETRY=0; shift;;
+    --write-component-contours) WRITE_COMPONENT_CONTOURS=1; shift;;
     --no-write-component-contours) WRITE_COMPONENT_CONTOURS=0; shift;;
+    --no-write-sampled-component-contours) WRITE_SAMPLED_COMPONENT_CONTOURS=0; shift;;
     --variant) VARIANTS+=("$2"); shift 2;;
     --dry-run) DRY_RUN=1; shift;;
     -h|--help) usage; exit 0;;
@@ -173,6 +179,7 @@ cat > "$RUN_DIR/manifest.json" <<JSON
   "postcompute_num_workers": ${POSTCOMPUTE_NUM_WORKERS:-null},
   "write_eye_geometry": $([[ "$WRITE_EYE_GEOMETRY" == "1" ]] && echo true || echo false),
   "write_component_contours": $([[ "$WRITE_COMPONENT_CONTOURS" == "1" ]] && echo true || echo false),
+  "write_sampled_component_contours": $([[ "$WRITE_SAMPLED_COMPONENT_CONTOURS" == "1" ]] && echo true || echo false),
   "source_git_head": "$SOURCE_GIT_HEAD",
   "source_git_branch": "$SOURCE_GIT_BRANCH",
   "source_dirty_file_count": $SOURCE_DIRTY_FILE_COUNT,
@@ -313,6 +320,9 @@ fi
 if [[ "$WRITE_COMPONENT_CONTOURS" == "1" ]]; then
   cmd+=(--write-component-contours)
 fi
+if [[ "$WRITE_SAMPLED_COMPONENT_CONTOURS" == "1" ]]; then
+  cmd+=(--write-sampled-component-contours --sampled-contour-row-chunk 1024)
+fi
 
 printf '+ %q ' "${cmd[@]}"
 printf '\n'
@@ -377,6 +387,7 @@ POSTCOMPUTE_CHUNK_SIZE=$POSTCOMPUTE_CHUNK_SIZE
 POSTCOMPUTE_NUM_WORKERS=$(printf '%q' "$POSTCOMPUTE_NUM_WORKERS")
 WRITE_EYE_GEOMETRY=$WRITE_EYE_GEOMETRY
 WRITE_COMPONENT_CONTOURS=$WRITE_COMPONENT_CONTOURS
+WRITE_SAMPLED_COMPONENT_CONTOURS=$WRITE_SAMPLED_COMPONENT_CONTOURS
 SETTINGS
 
 BSUB_ARGS=(-J "sm_fin_bench[1-${idx}]%${MAX_ACTIVE}" -n "$NCORES" -W "$WALLTIME" -R "rusage[mem=${MEM_GB}G]" -oo "${RUN_DIR}/%J_%I.out" -eo "${RUN_DIR}/%J_%I.err")

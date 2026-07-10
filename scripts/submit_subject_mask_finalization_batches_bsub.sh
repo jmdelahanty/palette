@@ -33,6 +33,7 @@ MASK_STORAGE="dense_uint8"
 MASK_RLE_VALIDATION_MODE="invariants"
 WRITE_EYE_GEOMETRY=1
 WRITE_COMPONENT_CONTOURS=1
+WRITE_SAMPLED_COMPONENT_CONTOURS=0
 RETAIN_SOURCE_SEEDS=0
 PROFILE_TIMINGS=1
 
@@ -75,8 +76,12 @@ Finalizer:
   --mask-rle-validation-mode MODE
                             full|invariants|none (default: invariants)
   --no-write-eye-geometry   Do not write eye geometry
-  --no-write-component-contours
-                            Do not write component contours
+  --write-component-contours
+                            Write full ragged contours (default during Crimson migration)
+  --write-sampled-component-contours
+                            Also write the fixed-K sampled contour cache
+  --no-write-sampled-component-contours
+                            Disable the default fixed-K sampled contour cache
   --retain-source-seeds     Retain source_seed_masks_roi debug arrays
   --force-finalization      Re-finalize even if target refined run exists
   --overwrite               Replace an existing target run when finalizing
@@ -121,7 +126,10 @@ while [[ $# -gt 0 ]]; do
     --mask-storage) MASK_STORAGE="$2"; shift 2;;
     --mask-rle-validation-mode) MASK_RLE_VALIDATION_MODE="$2"; shift 2;;
     --no-write-eye-geometry) WRITE_EYE_GEOMETRY=0; shift;;
+    --write-component-contours) WRITE_COMPONENT_CONTOURS=1; shift;;
     --no-write-component-contours) WRITE_COMPONENT_CONTOURS=0; shift;;
+    --write-sampled-component-contours) WRITE_SAMPLED_COMPONENT_CONTOURS=1; shift;;
+    --no-write-sampled-component-contours) WRITE_SAMPLED_COMPONENT_CONTOURS=0; shift;;
     --retain-source-seeds) RETAIN_SOURCE_SEEDS=1; shift;;
     --force-finalization) FORCE_FINALIZATION=1; shift;;
     --overwrite) OVERWRITE=1; shift;;
@@ -229,6 +237,7 @@ if [[ -n "$FINALIZE_POSTCOMPUTE_CHUNK_SIZE" ]]; then SUBJECT_ARGS+=(--finalize-p
 if [[ -n "$FINALIZE_POSTCOMPUTE_NUM_WORKERS" ]]; then SUBJECT_ARGS+=(--finalize-postcompute-num-workers "$FINALIZE_POSTCOMPUTE_NUM_WORKERS"); fi
 if [[ "$WRITE_EYE_GEOMETRY" == "1" ]]; then SUBJECT_ARGS+=(--write-eye-geometry); else SUBJECT_ARGS+=(--no-write-eye-geometry); fi
 if [[ "$WRITE_COMPONENT_CONTOURS" == "1" ]]; then SUBJECT_ARGS+=(--write-component-contours); else SUBJECT_ARGS+=(--no-write-component-contours); fi
+if [[ "$WRITE_SAMPLED_COMPONENT_CONTOURS" == "1" ]]; then SUBJECT_ARGS+=(--write-sampled-component-contours); else SUBJECT_ARGS+=(--no-write-sampled-component-contours); fi
 if [[ "$RETAIN_SOURCE_SEEDS" == "1" ]]; then SUBJECT_ARGS+=(--retain-source-seeds); fi
 if [[ "$FORCE_FINALIZATION" == "1" ]]; then SUBJECT_ARGS+=(--force-finalization); fi
 if [[ "$OVERWRITE" == "1" ]]; then SUBJECT_ARGS+=(--overwrite); fi

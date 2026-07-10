@@ -1151,7 +1151,9 @@ Recommended component-local primitives:
 
 ### `subject_body`
 
-- contour tables under `components/subject_body/contours/`
+- default display contours under `components/subject_body/sampled_contours/`
+- optional full ragged contours under `components/subject_body/contours/` for
+  explicit analysis/archive/export builds
 - centroid, area, bbox, mask-present, and validity metrics
 - simple shape descriptors directly derived from the mask, such as component
   count, hole fraction, solidity, or an unoriented ellipse/PCA summary when the
@@ -1164,7 +1166,8 @@ Recommended component-local primitives:
 
 ### `swim_bladder`
 
-- contour tables under `components/swim_bladder/contours/`
+- default display contours under `components/swim_bladder/sampled_contours/`
+- optional full ragged contours under `components/swim_bladder/contours/`
 - centroid, area, bbox, mask-present, and validity metrics
 - simple blob/ellipse summaries directly derived from the swim-bladder mask
 
@@ -1177,9 +1180,12 @@ Recommended component-local primitives:
   - `components/eye_left/geometry/ellipse_success`
   - `components/eye_right/geometry/ellipse_params`
   - `components/eye_right/geometry/ellipse_success`
-- eye-specific contour stores should live under:
-  - `components/eye_left/contours/{ptr, len, points_xy}`
-  - `components/eye_right/contours/{ptr, len, points_xy}`
+- eye display contour stores should live under:
+  - `components/eye_left|eye_right/sampled_contours/points_xy`
+  - `components/eye_left|eye_right/sampled_contours/valid`
+  - `components/eye_left|eye_right/sampled_contours/source_point_count`
+- optional full ragged eye contours live under
+  `components/eye_left|eye_right/contours/{ptr,len,points_xy}`
 - cross-eye relation metrics should live under:
   - `relations/eye_pair/metrics/separation_px`
   - `relations/eye_pair/metrics/separation_valid`
@@ -1193,6 +1199,22 @@ Geometry policy:
   `mask_rle` through `MaskStore`) plus the documented method/policy attrs
 - downstream `analysis/subject_shape_runs` should consume refined masks and/or these
   mask-local primitives, not raw `subject_mask_runs`
+
+Sampled contour policy:
+
+- `sampled_contours.attrs["schema_id"]` is
+  `sampled_component_contours_v1`;
+- `points_xy` has shape `(N,K,2)` in ROI-pixel `xy` order, `valid` has shape
+  `(N,)`, and `source_point_count` records the pre-sampling contour length;
+- current K values are body `128`, eyes `64`, and swim bladder `32`;
+- the physical row chunk is `1024` by default, keeping body point payloads near
+  1 MiB uncompressed while bounding Crimson row-window reads;
+- sampling is uniform closed-contour arc length and is derived directly from
+  the authoritative dense mask;
+- sampled contours are display caches, never edit/training authority and never
+  the source for eye ellipse geometry;
+- full ragged contours remain a compatibility/analysis opt-in during the
+  Crimson reader migration.
 
 Metric-QC policy:
 
@@ -1265,8 +1287,11 @@ Current implementation note:
   `refined_subject_masks_runs` materializes:
   - `components/eye_left|eye_right/geometry/ellipse_params`
   - `components/eye_left|eye_right/geometry/ellipse_success`
-  - `components/eye_left|eye_right/contours/{ptr,len,points_xy}`
   - `relations/eye_pair/metrics/{separation_px,separation_valid}`
+- The finalizer can additionally materialize fixed-K sampled contours for all
+  selected components. Full ragged `contours/{ptr,len,points_xy}` are controlled
+  separately and remain enabled in production wrappers until Crimson reads the
+  sampled schema.
 - These arrays are derived from the refined subject-mask component masks during
   refined-run creation/finalization.
 

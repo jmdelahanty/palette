@@ -1037,6 +1037,51 @@ def test_finalize_subject_mask_run_can_write_body_and_swim_contours(monkeypatch)
         assert np.all(np.asarray(contours["len"][:], dtype=np.int32) > 0)
 
 
+def test_finalize_subject_mask_run_can_write_sampled_contours_without_full_ragged(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root()
+
+    summary = mod.finalize_subject_mask_run(
+        root,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_sampled_contours_001",
+        chunk_size=1,
+        write_eye_geometry=True,
+        write_sampled_component_contours=True,
+        sampled_contour_counts={
+            "subject_body": 8,
+            "eye_left": 4,
+            "eye_right": 4,
+            "swim_bladder": 4,
+        },
+        sampled_contour_row_chunk=2,
+    )
+
+    assert summary["write_sampled_component_contours"] is True
+    assert summary["write_component_contours"] is False
+    assert [item["component"] for item in summary["sampled_component_contours"]] == [
+        "subject_body",
+        "eye_left",
+        "eye_right",
+        "swim_bladder",
+    ]
+    run = root["refined_subject_masks_runs/refined_subject_masks_sampled_contours_001"]
+    assert run.attrs["sampled_component_contours_status"] == "computed"
+    assert run.attrs["smart_finalizer_sampled_contour_row_chunk"] == 2
+    for component, sample_count in {
+        "subject_body": 8,
+        "eye_left": 4,
+        "eye_right": 4,
+        "swim_bladder": 4,
+    }.items():
+        component_group = run[f"components/{component}"]
+        assert "contours" not in component_group
+        sampled = component_group["sampled_contours"]
+        assert sampled.attrs["surface_role"] == "derived_display_cache"
+        assert tuple(sampled["points_xy"].shape) == (2, sample_count, 2)
+        assert tuple(sampled["points_xy"].chunks) == (2, sample_count, 2)
+
+
 def test_finalize_subject_masks_can_write_postcompute_with_process_shards(
     monkeypatch,
     tmp_path: Path,
@@ -1052,6 +1097,9 @@ def test_finalize_subject_masks_can_write_postcompute_with_process_shards(
         chunk_size=1,
         write_eye_geometry=True,
         write_component_contours=True,
+        write_sampled_component_contours=True,
+        sampled_contour_counts={"subject_body": 8, "eye_left": 4, "eye_right": 4, "swim_bladder": 4},
+        sampled_contour_row_chunk=2,
         defer_registry_status=True,
     )
     postcompute_calls: list[dict[str, object]] = []
@@ -1069,6 +1117,9 @@ def test_finalize_subject_masks_can_write_postcompute_with_process_shards(
         chunk_size=1,
         write_eye_geometry=True,
         write_component_contours=True,
+        write_sampled_component_contours=True,
+        sampled_contour_counts={"subject_body": 8, "eye_left": 4, "eye_right": 4, "swim_bladder": 4},
+        sampled_contour_row_chunk=2,
         postcompute_backend="process_shards",
         postcompute_chunk_size=1,
         postcompute_num_workers=1,
@@ -1101,6 +1152,12 @@ def test_finalize_subject_masks_can_write_postcompute_with_process_shards(
     assert postcompute_calls
     assert postcompute_calls[0]["write_eye_geometry"] is False
     assert postcompute_calls[0]["write_component_contours"] is True
+    assert postcompute_calls[0]["sampled_contour_counts"] == {
+        "subject_body": 8,
+        "eye_left": 4,
+        "eye_right": 4,
+        "swim_bladder": 4,
+    }
 
     for component in ("eye_left", "eye_right"):
         assert sharded[f"components/{component}/geometry"].attrs["source_measurement"] == "eyes_union_assignment_measure_mask"
@@ -1129,6 +1186,11 @@ def test_finalize_subject_masks_can_write_postcompute_with_process_shards(
             np.testing.assert_array_equal(
                 np.asarray(serial[f"components/{component}/contours/{array_name}"][:]),
                 np.asarray(sharded[f"components/{component}/contours/{array_name}"][:]),
+            )
+        for array_name in ("points_xy", "valid", "source_point_count"):
+            np.testing.assert_array_equal(
+                np.asarray(serial[f"components/{component}/sampled_contours/{array_name}"][:]),
+                np.asarray(sharded[f"components/{component}/sampled_contours/{array_name}"][:]),
             )
 
 

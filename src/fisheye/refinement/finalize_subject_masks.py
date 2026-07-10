@@ -104,8 +104,13 @@ from ..shared.refined_subject_component_contours import (
     DEFAULT_CONTOUR_COORDINATE_SPACE,
     DEFAULT_CONTOUR_METHOD,
     DEFAULT_CONTOUR_METHOD_VERSION,
+    DEFAULT_SAMPLED_CONTOUR_COUNTS,
+    DEFAULT_SAMPLED_CONTOUR_ROW_CHUNK,
     extract_largest_external_contour,
+    resample_closed_contour,
     write_refined_subject_component_contours,
+    write_refined_subject_sampled_component_contours,
+    write_sampled_component_contour_arrays,
 )
 from .subject_eye_assignment import (
     EYES_UNION_ASSIGNMENT_METHOD,
@@ -2196,6 +2201,11 @@ def _create_refined_run_shell(
             "common_metric_write_policy": provenance_inputs.get("common_metric_write_policy"),
             "write_eye_geometry": provenance_inputs.get("eye_geometry_requested"),
             "write_component_contours": provenance_inputs.get("component_contours_requested"),
+            "write_sampled_component_contours": provenance_inputs.get(
+                "sampled_component_contours_requested"
+            ),
+            "sampled_contour_counts": provenance_inputs.get("sampled_contour_counts"),
+            "sampled_contour_row_chunk": provenance_inputs.get("sampled_contour_row_chunk"),
             "retain_source_seeds": provenance_inputs.get("retain_source_seeds"),
             "source_seed_masks_status": provenance_inputs.get("source_seed_masks_status"),
             "execution_backend": provenance_inputs.get("execution_backend"),
@@ -2691,6 +2701,36 @@ def _finalize_local_contour_pack(pack: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _sample_packed_contours(pack: Mapping[str, object], sample_count: int) -> dict[str, np.ndarray]:
+    """Convert one row-indexed ragged pack into a fixed-K numeric payload."""
+
+    ptr = np.asarray(pack["ptr"], dtype=np.int64).reshape(-1)
+    length = np.asarray(pack["len"], dtype=np.int32).reshape(-1)
+    points = np.asarray(pack["points_xy"], dtype=np.float32).reshape(-1, 2)
+    row_count = int(length.shape[0])
+    k = int(sample_count)
+    if k <= 0:
+        raise ValueError("sample_count must be positive.")
+    sampled = np.full((row_count, k, 2), np.nan, dtype=np.float32)
+    valid = np.zeros((row_count,), dtype=bool)
+    source_point_count = np.maximum(length, 0).astype(np.int32, copy=True)
+    for row_index in np.flatnonzero(length >= 2):
+        offset = int(ptr[int(row_index)])
+        count = int(length[int(row_index)])
+        if offset < 0 or offset + count > int(points.shape[0]):
+            continue
+        row_points = resample_closed_contour(points[offset : offset + count], k)
+        if not bool(np.isfinite(row_points).all()):
+            continue
+        sampled[int(row_index)] = row_points
+        valid[int(row_index)] = True
+    return {
+        "points_xy": sampled,
+        "valid": valid,
+        "source_point_count": source_point_count,
+    }
+
+
 def _compute_refined_subject_postcompute_shard(
     zarr_path: str,
     refined_run: str,
@@ -2699,6 +2739,7 @@ def _compute_refined_subject_postcompute_shard(
     *,
     write_eye_geometry: bool,
     write_component_contours: bool,
+    sampled_contour_counts: Mapping[str, int] | None = None,
 ) -> dict[str, object]:
     from ..shared.mask_geometry import measure_mask_ellipse as _measure_mask
 
@@ -2714,6 +2755,8 @@ def _compute_refined_subject_postcompute_shard(
     row_count = max(0, stop - start)
     masks = np.asarray(masks_roi[start:stop], dtype=np.uint8)
 
+    sampled_counts = {str(name): int(value) for name, value in dict(sampled_contour_counts or {}).items()}
+    raw_contour_packs: dict[str, dict[str, object]] = {}
     eye_payload: dict[str, object] | None = None
     if write_eye_geometry and set(_EYE_COMPONENTS).issubset(label_map):
         ellipse_params = np.full((row_count, 2, 5), np.nan, dtype=np.float32)
@@ -2737,29 +2780,50 @@ def _compute_refined_subject_postcompute_shard(
                 separation_px[local_idx] = np.float32(np.linalg.norm(centroids[local_idx, 0] - centroids[local_idx, 1]))
                 separation_valid[local_idx] = True
 
+        finalized_eye_contours = {
+            name: _finalize_local_contour_pack(pack) for name, pack in eye_contours.items()
+        }
+        raw_contour_packs.update(finalized_eye_contours)
         eye_payload = {
             "ellipse_params": ellipse_params,
             "ellipse_success": ellipse_success,
             "separation_px": separation_px,
             "separation_valid": separation_valid,
-            "contours": {name: _finalize_local_contour_pack(pack) for name, pack in eye_contours.items()},
+            "contours": finalized_eye_contours,
             "ellipse_success_count": int(np.count_nonzero(ellipse_success)),
             "pair_success_count": int(np.count_nonzero(separation_valid)),
         }
+
+    raw_components = set(sampled_counts)
+    if write_component_contours:
+        raw_components.update(_COMPONENT_CONTOUR_COMPONENTS)
+    for component_name in sorted(raw_components):
+        if component_name in raw_contour_packs:
+            continue
+        if component_name not in label_map:
+            continue
+        comp_idx = int(label_map[component_name])
+        if comp_idx >= int(available.shape[0]) or not bool(available[comp_idx]):
+            continue
+        pack = _empty_local_contour_pack(row_count)
+        for local_idx in range(row_count):
+            contour = extract_largest_external_contour(masks[local_idx, comp_idx], min_points=2)
+            _add_local_contour(pack, local_idx, contour, min_points=2)
+        raw_contour_packs[component_name] = _finalize_local_contour_pack(pack)
 
     contour_payload: dict[str, object] = {}
     if write_component_contours:
         for component_name in _COMPONENT_CONTOUR_COMPONENTS:
             if component_name not in label_map:
                 continue
-            comp_idx = int(label_map[component_name])
-            if comp_idx >= int(available.shape[0]) or not bool(available[comp_idx]):
-                continue
-            pack = _empty_local_contour_pack(row_count)
-            for local_idx in range(row_count):
-                contour = extract_largest_external_contour(masks[local_idx, comp_idx], min_points=2)
-                _add_local_contour(pack, local_idx, contour, min_points=2)
-            contour_payload[component_name] = _finalize_local_contour_pack(pack)
+            if component_name in raw_contour_packs:
+                contour_payload[component_name] = raw_contour_packs[component_name]
+
+    sampled_payload = {
+        component_name: _sample_packed_contours(raw_contour_packs[component_name], sample_count)
+        for component_name, sample_count in sampled_counts.items()
+        if component_name in raw_contour_packs
+    }
 
     return {
         "start_row": start,
@@ -2768,6 +2832,7 @@ def _compute_refined_subject_postcompute_shard(
         "duration_seconds": float(time.perf_counter() - started),
         "eye_geometry": eye_payload,
         "component_contours": contour_payload,
+        "sampled_component_contours": sampled_payload,
     }
 
 
@@ -2883,6 +2948,7 @@ def _write_sharded_eye_geometry(
     chunk_rois: int,
     refined_run: str,
     postcompute_backend: str,
+    write_component_contours: bool = True,
 ) -> dict[str, object]:
     label_map = _label_index_map(run_group)
     if not set(_EYE_COMPONENTS).issubset(label_map):
@@ -2937,17 +3003,18 @@ def _write_sharded_eye_geometry(
             chunks=(max(1, int(chunk_rois)),),
             overwrite=True,
         )
-        pack = _merge_contour_packs(shards, component_name, total_rois=total_rois, source_key="eye_geometry")
-        _write_packed_component_contours(
-            component_group,
-            pack,
-            chunk_rois=chunk_rois,
-            component=component_name,
-            source_mask_run=refined_run,
-            source_mask_label_schema_id=source_label_schema,
-            min_points=1,
-            postcompute_backend=postcompute_backend,
-        )
+        if write_component_contours:
+            pack = _merge_contour_packs(shards, component_name, total_rois=total_rois, source_key="eye_geometry")
+            _write_packed_component_contours(
+                component_group,
+                pack,
+                chunk_rois=chunk_rois,
+                component=component_name,
+                source_mask_run=refined_run,
+                source_mask_label_schema_id=source_label_schema,
+                min_points=1,
+                postcompute_backend=postcompute_backend,
+            )
 
     relation_metrics = run_group.require_group("relations").require_group("eye_pair").require_group("metrics")
     relation_metrics.attrs["relation_schema_id"] = EYE_PAIR_RELATION_SCHEMA_ID
@@ -3022,6 +3089,65 @@ def _write_sharded_component_contours(
     return summaries
 
 
+def _write_sharded_sampled_component_contours(
+    run_group: zarr.Group,
+    shards: Sequence[Mapping[str, object]],
+    *,
+    sample_counts: Mapping[str, int],
+    row_chunk: int,
+    refined_run: str,
+    postcompute_backend: str,
+) -> list[dict[str, object]]:
+    masks_roi = run_group.get("masks_roi")
+    if masks_roi is None:
+        return []
+    total_rois = int(masks_roi.shape[0])
+    label_map = _label_index_map(run_group)
+    source_label_schema = str(run_group.attrs.get("label_schema_id") or "")
+    components_parent = run_group.require_group("components")
+    summaries: list[dict[str, object]] = []
+    for component_name, raw_sample_count in sample_counts.items():
+        if component_name not in label_map:
+            continue
+        sample_count = int(raw_sample_count)
+        points_xy = np.full((total_rois, sample_count, 2), np.nan, dtype=np.float32)
+        valid = np.zeros((total_rois,), dtype=bool)
+        source_point_count = np.zeros((total_rois,), dtype=np.int32)
+        for shard in shards:
+            sampled_by_component = shard.get("sampled_component_contours")
+            if not isinstance(sampled_by_component, Mapping):
+                continue
+            payload = sampled_by_component.get(component_name)
+            if not isinstance(payload, Mapping):
+                continue
+            start = int(shard["start_row"])
+            stop = int(shard["stop_row"])
+            points_xy[start:stop] = np.asarray(payload["points_xy"], dtype=np.float32)
+            valid[start:stop] = np.asarray(payload["valid"], dtype=bool)
+            source_point_count[start:stop] = np.asarray(payload["source_point_count"], dtype=np.int32)
+        summary = write_sampled_component_contour_arrays(
+            components_parent.require_group(component_name),
+            points_xy=points_xy,
+            valid=valid,
+            source_point_count=source_point_count,
+            row_chunk=int(row_chunk),
+            component=component_name,
+            source_mask_run=refined_run,
+            source_mask_label_schema_id=source_label_schema,
+            min_points=2,
+        )
+        payload = asdict(summary)
+        payload["postcompute_backend"] = str(postcompute_backend)
+        summaries.append(payload)
+    if summaries:
+        run_group.attrs["sampled_component_contours_status"] = "computed"
+        run_group.attrs["sampled_component_contours_components"] = [item["component"] for item in summaries]
+        run_group.attrs["sampled_component_contours_updated_at_utc"] = _utc_now()
+        run_group.attrs["sampled_component_contours_summary"] = list(_json_safe(summaries))
+        run_group.attrs["sampled_component_contours_postcompute_backend"] = str(postcompute_backend)
+    return summaries
+
+
 def _run_sharded_refined_subject_postcompute(
     zarr_path: str | Path,
     *,
@@ -3030,8 +3156,11 @@ def _run_sharded_refined_subject_postcompute(
     num_workers: Optional[int],
     write_eye_geometry: bool,
     write_component_contours: bool,
+    sampled_contour_counts: Mapping[str, int] | None = None,
+    sampled_contour_row_chunk: int = DEFAULT_SAMPLED_CONTOUR_ROW_CHUNK,
 ) -> dict[str, object]:
-    if not write_eye_geometry and not write_component_contours:
+    sampled_counts = {str(name): int(value) for name, value in dict(sampled_contour_counts or {}).items()}
+    if not write_eye_geometry and not write_component_contours and not sampled_counts:
         return {"status": "skipped", "reason": "no_postcompute_requested"}
 
     root = open_zarr_root(zarr_path, mode="r")
@@ -3053,6 +3182,7 @@ def _run_sharded_refined_subject_postcompute(
                 stop,
                 write_eye_geometry=write_eye_geometry,
                 write_component_contours=write_component_contours,
+                sampled_contour_counts=sampled_counts,
             )
             for start, stop in ranges
         ]
@@ -3067,6 +3197,7 @@ def _run_sharded_refined_subject_postcompute(
                     stop,
                     write_eye_geometry=write_eye_geometry,
                     write_component_contours=write_component_contours,
+                    sampled_contour_counts=sampled_counts,
                 )
                 for start, stop in ranges
             ]
@@ -3083,6 +3214,7 @@ def _run_sharded_refined_subject_postcompute(
             chunk_rois=chunk_rois,
             refined_run=refined_run,
             postcompute_backend=_PROCESS_SHARD_POSTCOMPUTE_BACKEND,
+            write_component_contours=bool(write_component_contours),
         )
         if write_eye_geometry
         else {"status": "skipped", "reason": "write_eye_geometry=false"}
@@ -3098,6 +3230,14 @@ def _run_sharded_refined_subject_postcompute(
         if write_component_contours
         else []
     )
+    sampled_contour_summaries = _write_sharded_sampled_component_contours(
+        run_group,
+        shards,
+        sample_counts=sampled_counts,
+        row_chunk=int(sampled_contour_row_chunk),
+        refined_run=refined_run,
+        postcompute_backend=_PROCESS_SHARD_POSTCOMPUTE_BACKEND,
+    )
     duration_seconds = float(time.perf_counter() - started)
     return dict(
         _json_safe(
@@ -3112,8 +3252,10 @@ def _run_sharded_refined_subject_postcompute(
                 "num_workers": int(worker_count),
                 "write_eye_geometry": bool(write_eye_geometry),
                 "write_component_contours": bool(write_component_contours),
+                "write_sampled_component_contours": bool(sampled_counts),
                 "eye_geometry": eye_summary,
                 "component_contours": contour_summaries,
+                "sampled_component_contours": sampled_contour_summaries,
                 "worker_durations_seconds": [float(item.get("duration_seconds") or 0.0) for item in shards],
             }
         )
@@ -4040,6 +4182,9 @@ def finalize_subject_mask_run(
     metric_level: str = "cheap",
     write_eye_geometry: bool = False,
     write_component_contours: bool = False,
+    write_sampled_component_contours: bool = False,
+    sampled_contour_counts: Mapping[str, int] | None = None,
+    sampled_contour_row_chunk: int = DEFAULT_SAMPLED_CONTOUR_ROW_CHUNK,
     retain_source_seeds: bool = False,
     mask_storage: str = "dense_uint8",
     mask_rle_validation_mode: str = "full",
@@ -4092,11 +4237,18 @@ def finalize_subject_mask_run(
         if postcompute_num_workers is not None
         else normalized_num_workers
     )
+    resolved_sampled_contour_counts = {
+        str(name): int(value)
+        for name, value in {**DEFAULT_SAMPLED_CONTOUR_COUNTS, **dict(sampled_contour_counts or {})}.items()
+    }
+    if any(value <= 0 for value in resolved_sampled_contour_counts.values()):
+        raise ValueError("All sampled contour counts must be positive.")
+    normalized_sampled_contour_row_chunk = max(1, int(sampled_contour_row_chunk))
     if execution_backend == _PROCESS_SHARD_EXECUTION_BACKEND and zarr_path is None:
         raise ValueError(f"execution_backend={execution_backend!r} requires a filesystem zarr_path.")
     if (
         postcompute_backend == _PROCESS_SHARD_POSTCOMPUTE_BACKEND
-        and (write_eye_geometry or write_component_contours)
+        and (write_eye_geometry or write_component_contours or write_sampled_component_contours)
         and zarr_path is None
     ):
         raise ValueError("postcompute_backend='process_shards' requires a filesystem zarr_path.")
@@ -4191,6 +4343,9 @@ def finalize_subject_mask_run(
         "metric_level": metric_level,
         "write_eye_geometry": bool(write_eye_geometry),
         "write_component_contours": bool(write_component_contours),
+        "write_sampled_component_contours": bool(write_sampled_component_contours),
+        "sampled_contour_counts": dict(resolved_sampled_contour_counts),
+        "sampled_contour_row_chunk": int(normalized_sampled_contour_row_chunk),
         "retain_source_seeds": bool(retain_source_seeds),
         "source_seed_masks_status": "retained" if bool(retain_source_seeds) else "omitted",
         "mask_storage": mask_storage,
@@ -4239,6 +4394,9 @@ def finalize_subject_mask_run(
         num_workers=normalized_num_workers,
         write_eye_geometry=bool(write_eye_geometry),
         write_component_contours=bool(write_component_contours),
+        write_sampled_component_contours=bool(write_sampled_component_contours),
+        sampled_contour_counts=dict(resolved_sampled_contour_counts),
+        sampled_contour_row_chunk=int(normalized_sampled_contour_row_chunk),
         retain_source_seeds=bool(retain_source_seeds),
         mask_storage=str(mask_storage),
         mask_rle_validation_mode=str(mask_rle_validation_mode),
@@ -4304,6 +4462,9 @@ def finalize_subject_mask_run(
         "component_metric_level": metric_level,
         "eye_geometry_requested": bool(write_eye_geometry),
         "component_contours_requested": bool(write_component_contours),
+        "sampled_component_contours_requested": bool(write_sampled_component_contours),
+        "sampled_contour_counts": dict(resolved_sampled_contour_counts),
+        "sampled_contour_row_chunk": int(normalized_sampled_contour_row_chunk),
         "retain_source_seeds": bool(retain_source_seeds),
         "source_seed_masks_status": "retained" if bool(retain_source_seeds) else "omitted",
         "source_seed_masks_reason": "retain_source_seeds=true" if bool(retain_source_seeds) else "production_default",
@@ -4366,6 +4527,9 @@ def finalize_subject_mask_run(
         "component_metric_level": metric_level,
         "eye_geometry_requested": bool(write_eye_geometry),
         "component_contours_requested": bool(write_component_contours),
+        "sampled_component_contours_requested": bool(write_sampled_component_contours),
+        "sampled_contour_counts": dict(resolved_sampled_contour_counts),
+        "sampled_contour_row_chunk": int(normalized_sampled_contour_row_chunk),
         "retain_source_seeds": bool(retain_source_seeds),
         "source_seed_masks_status": "retained" if bool(retain_source_seeds) else "omitted",
         "source_seed_masks_reason": "retain_source_seeds=true" if bool(retain_source_seeds) else "production_default",
@@ -4758,6 +4922,16 @@ def finalize_subject_mask_run(
     contour_components = _component_contour_targets(component_names)
     eye_geometry_requested = bool(write_eye_geometry and eye_components_present)
     component_contours_requested = bool(write_component_contours and contour_components)
+    sampled_contour_counts_requested = (
+        {
+            name: int(resolved_sampled_contour_counts[name])
+            for name in component_names
+            if name in resolved_sampled_contour_counts
+        }
+        if write_sampled_component_contours
+        else {}
+    )
+    sampled_component_contours_requested = bool(sampled_contour_counts_requested)
     assignment_eye_geometry_complete = bool(
         eye_geometry_requested
         and len(assignment_eye_geometry_shards) == len(chunk_ranges)
@@ -4770,6 +4944,7 @@ def finalize_subject_mask_run(
     finalizer_warnings: list[dict[str, object]] = []
     postcompute_summary: dict[str, object] = {}
     contour_summaries: list[dict[str, object]] = []
+    sampled_contour_summaries: list[dict[str, object]] = []
 
     if assignment_eye_geometry_complete:
         with progress.phase("write_eye_geometry_from_assignment"):
@@ -4780,18 +4955,24 @@ def finalize_subject_mask_run(
                     chunk_rois=max(1, min(256, total_rows if total_rows > 0 else 1)),
                     refined_run=target_run,
                     postcompute_backend=_ASSIGNMENT_REUSE_POSTCOMPUTE_BACKEND,
+                    write_component_contours=bool(component_contours_requested),
                 )
         run_group.attrs["eye_geometry_status"] = "computed"
 
     if (
         postcompute_backend == _PROCESS_SHARD_POSTCOMPUTE_BACKEND
-        and ((eye_geometry_requested and not assignment_eye_geometry_complete) or component_contours_requested)
+        and (
+            (eye_geometry_requested and not assignment_eye_geometry_complete)
+            or component_contours_requested
+            or sampled_component_contours_requested
+        )
     ):
         assert zarr_path is not None
         with progress.phase(
             "postcompute_process_shards",
             write_eye_geometry=bool(eye_geometry_requested and not assignment_eye_geometry_complete),
             write_component_contours=bool(component_contours_requested),
+            write_sampled_component_contours=bool(sampled_component_contours_requested),
             chunk_size=int(normalized_postcompute_chunk_size),
             num_workers=normalized_postcompute_num_workers,
         ):
@@ -4803,6 +4984,8 @@ def finalize_subject_mask_run(
                     num_workers=normalized_postcompute_num_workers,
                     write_eye_geometry=bool(eye_geometry_requested and not assignment_eye_geometry_complete),
                     write_component_contours=component_contours_requested,
+                    sampled_contour_counts=sampled_contour_counts_requested,
+                    sampled_contour_row_chunk=normalized_sampled_contour_row_chunk,
                 )
         for key, value in dict(postcompute_result).items():
             if key == "eye_geometry" and assignment_eye_geometry_complete:
@@ -4810,6 +4993,9 @@ def finalize_subject_mask_run(
             postcompute_summary[str(key)] = value
         contour_summaries = _summaries_to_json_safe(
             list(postcompute_summary.get("component_contours") or [])
+        )
+        sampled_contour_summaries = _summaries_to_json_safe(
+            list(postcompute_summary.get("sampled_component_contours") or [])
         )
         eye_summary = postcompute_summary.get("eye_geometry")
         if (
@@ -4833,7 +5019,10 @@ def finalize_subject_mask_run(
     elif eye_geometry_requested and not assignment_eye_geometry_complete:
         with progress.phase("write_eye_geometry"):
             with timing.phase("write_eye_geometry"):
-                postcompute_summary["eye_geometry"] = write_refined_subject_eye_geometry(run_group)
+                postcompute_summary["eye_geometry"] = write_refined_subject_eye_geometry(
+                    run_group,
+                    write_component_contours=bool(component_contours_requested),
+                )
         run_group.attrs["eye_geometry_status"] = "computed"
 
     if eye_components_present and not write_eye_geometry:
@@ -4886,9 +5075,34 @@ def finalize_subject_mask_run(
             run_group.attrs["component_contours_updated_at_utc"] = _utc_now()
             run_group.attrs["component_contours_summary"] = list(_json_safe(contour_summaries))
             postcompute_summary["component_contours"] = list(_json_safe(contour_summaries))
+    if postcompute_backend != _PROCESS_SHARD_POSTCOMPUTE_BACKEND and sampled_component_contours_requested:
+        with progress.phase(
+            "write_sampled_component_contours",
+            components=list(sampled_contour_counts_requested),
+        ):
+            with timing.phase("write_sampled_component_contours"):
+                sampled_contour_summaries = _summaries_to_json_safe(
+                    write_refined_subject_sampled_component_contours(
+                        run_group,
+                        components=tuple(sampled_contour_counts_requested),
+                        sample_counts=sampled_contour_counts_requested,
+                        source_mask_run=target_run,
+                        row_chunk=normalized_sampled_contour_row_chunk,
+                        read_chunk_size=max(1, min(256, total_rows)),
+                    )
+                )
+        run_group.attrs["sampled_component_contours_status"] = "computed"
+        run_group.attrs["sampled_component_contours_components"] = list(sampled_contour_counts_requested)
+        run_group.attrs["sampled_component_contours_updated_at_utc"] = _utc_now()
+        run_group.attrs["sampled_component_contours_summary"] = list(_json_safe(sampled_contour_summaries))
+        run_group.attrs["sampled_component_contours_postcompute_backend"] = _SERIAL_POSTCOMPUTE_BACKEND
+        postcompute_summary["sampled_component_contours"] = list(_json_safe(sampled_contour_summaries))
     if write_component_contours and not contour_components:
         run_group.attrs["component_contours_status"] = "deferred"
         run_group.attrs["component_contours_deferred_reason"] = "no_subject_body_or_swim_bladder_components_selected"
+    if write_sampled_component_contours and not sampled_component_contours_requested:
+        run_group.attrs["sampled_component_contours_status"] = "deferred"
+        run_group.attrs["sampled_component_contours_deferred_reason"] = "no_supported_components_selected"
     if postcompute_summary and "status" not in postcompute_summary:
         postcompute_summary = {
             "status": "updated",
@@ -5044,6 +5258,15 @@ def finalize_subject_mask_run(
     run_group.attrs["smart_finalizer_metric_level"] = metric_level
     run_group.attrs["smart_finalizer_write_eye_geometry"] = bool(write_eye_geometry)
     run_group.attrs["smart_finalizer_write_component_contours"] = bool(write_component_contours)
+    run_group.attrs["smart_finalizer_write_sampled_component_contours"] = bool(
+        write_sampled_component_contours
+    )
+    run_group.attrs["smart_finalizer_sampled_contour_counts"] = dict(
+        resolved_sampled_contour_counts
+    )
+    run_group.attrs["smart_finalizer_sampled_contour_row_chunk"] = int(
+        normalized_sampled_contour_row_chunk
+    )
     run_group.attrs["smart_finalizer_retain_source_seeds"] = bool(retain_source_seeds)
     run_group.attrs["source_seed_masks_status"] = "retained" if bool(retain_source_seeds) else "omitted"
     run_group.attrs["source_seed_masks_reason"] = (
@@ -5085,6 +5308,9 @@ def finalize_subject_mask_run(
             "metric_level": metric_level,
             "write_eye_geometry": bool(write_eye_geometry),
             "write_component_contours": bool(write_component_contours),
+            "write_sampled_component_contours": bool(write_sampled_component_contours),
+            "sampled_contour_counts": dict(resolved_sampled_contour_counts),
+            "sampled_contour_row_chunk": int(normalized_sampled_contour_row_chunk),
             "retain_source_seeds": bool(retain_source_seeds),
             "source_seed_masks_status": "retained" if bool(retain_source_seeds) else "omitted",
             "mask_storage": mask_storage,
@@ -5104,6 +5330,7 @@ def finalize_subject_mask_run(
             ),
             "warnings": list(_json_safe(finalizer_warnings)),
             "component_contours": contour_summaries,
+            "sampled_component_contours": sampled_contour_summaries,
             "review_counts": review_counts,
             "eyes_union_assignment_summary": (
                 dict(_json_safe(eyes_union_assignment_summary))
@@ -5135,6 +5362,9 @@ def finalize_subject_masks(
     metric_level: str = "cheap",
     write_eye_geometry: bool = False,
     write_component_contours: bool = False,
+    write_sampled_component_contours: bool = False,
+    sampled_contour_counts: Mapping[str, int] | None = None,
+    sampled_contour_row_chunk: int = DEFAULT_SAMPLED_CONTOUR_ROW_CHUNK,
     retain_source_seeds: bool = False,
     mask_storage: str = "dense_uint8",
     mask_rle_validation_mode: str = "full",
@@ -5166,6 +5396,9 @@ def finalize_subject_masks(
         metric_level=metric_level,
         write_eye_geometry=write_eye_geometry,
         write_component_contours=write_component_contours,
+        write_sampled_component_contours=write_sampled_component_contours,
+        sampled_contour_counts=sampled_contour_counts,
+        sampled_contour_row_chunk=sampled_contour_row_chunk,
         retain_source_seeds=retain_source_seeds,
         mask_storage=mask_storage,
         mask_rle_validation_mode=mask_rle_validation_mode,
@@ -5204,6 +5437,20 @@ def _parse_components(values: Optional[Sequence[Sequence[str]]], single_values: 
     for value in single_values or ():
         merged.append(str(value))
     return merged or None
+
+
+def _parse_sampled_contour_counts(values: Sequence[str] | None) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values or ():
+        if "=" not in str(value):
+            raise ValueError(f"Expected COMPONENT=K for --sampled-contour-k; got {value!r}.")
+        component, raw_count = str(value).split("=", 1)
+        component = component.strip()
+        count = int(raw_count)
+        if not component or count <= 0:
+            raise ValueError(f"Expected a component name and positive K; got {value!r}.")
+        counts[component] = count
+    return counts
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -5272,7 +5519,25 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--write-component-contours",
         action="store_true",
-        help="Also compute body/swim component contour caches during finalization.",
+        help="Also compute full ragged component contours; intended for explicit analysis/archive builds.",
+    )
+    parser.add_argument(
+        "--write-sampled-component-contours",
+        action="store_true",
+        help="Write fixed-K sampled display contours directly from finalized dense masks.",
+    )
+    parser.add_argument(
+        "--sampled-contour-k",
+        action="append",
+        default=[],
+        metavar="COMPONENT=K",
+        help="Override a fixed-K sampled contour count. Repeat per component.",
+    )
+    parser.add_argument(
+        "--sampled-contour-row-chunk",
+        type=int,
+        default=DEFAULT_SAMPLED_CONTOUR_ROW_CHUNK,
+        help="Physical row chunk for fixed-K sampled contour arrays (default: 1024).",
     )
     parser.add_argument(
         "--retain-source-seeds",
@@ -5391,6 +5656,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     components = _parse_components(args.components, args.component_values)
+    try:
+        sampled_contour_counts = _parse_sampled_contour_counts(args.sampled_contour_k)
+    except (TypeError, ValueError) as exc:
+        parser.error(str(exc))
     subject_shard_runs = list(args.subject_shard_run or [])
     if args.subject_shard_runs_file is not None:
         subject_shard_runs.extend(_load_shard_names_from_file(args.subject_shard_runs_file))
@@ -5405,6 +5674,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         metric_level=args.metric_level,
         write_eye_geometry=bool(args.write_eye_geometry),
         write_component_contours=bool(args.write_component_contours),
+        write_sampled_component_contours=bool(args.write_sampled_component_contours),
+        sampled_contour_counts=sampled_contour_counts,
+        sampled_contour_row_chunk=int(args.sampled_contour_row_chunk),
         retain_source_seeds=bool(args.retain_source_seeds),
         mask_storage=args.mask_storage,
         mask_rle_validation_mode=args.mask_rle_validation_mode,

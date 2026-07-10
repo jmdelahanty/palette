@@ -67,6 +67,7 @@ def write_refined_subject_eye_geometry(
     refined_group: zarr.Group,
     *,
     updated_components: Optional[Sequence[str]] = None,
+    write_component_contours: bool = True,
 ) -> dict[str, Any]:
     """Write canonical LR eye geometry/relation arrays into a refined subject run.
 
@@ -134,14 +135,15 @@ def write_refined_subject_eye_geometry(
             ellipse_success[:, eye_idx],
             chunks=(chunk_rois,),
         )
-        _write_component_contours(
-            component_group,
-            contours[component_name],
-            chunk_rois=chunk_rois,
-            component=component_name,
-            source_mask_label_schema_id=str(refined_group.attrs.get("label_schema_id") or ""),
-            min_points=1,
-        )
+        if write_component_contours:
+            _write_component_contours(
+                component_group,
+                contours[component_name],
+                chunk_rois=chunk_rois,
+                component=component_name,
+                source_mask_label_schema_id=str(refined_group.attrs.get("label_schema_id") or ""),
+                min_points=1,
+            )
 
     relation_metrics = refined_group.require_group("relations").require_group("eye_pair").require_group("metrics")
     relation_metrics.attrs["relation_schema_id"] = EYE_PAIR_RELATION_SCHEMA_ID

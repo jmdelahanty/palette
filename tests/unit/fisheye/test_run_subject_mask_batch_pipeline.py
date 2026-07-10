@@ -702,6 +702,9 @@ def test_finalization_command_passes_postcompute_options(tmp_path: Path) -> None
         mask_rle_validation_mode="invariants",
         write_eye_geometry=True,
         write_component_contours=True,
+        write_sampled_component_contours=True,
+        sampled_contour_row_chunk=1024,
+        sampled_contour_k=["subject_body=128"],
         retain_source_seeds=True,
         progress_dir=None,
         overwrite=False,
@@ -729,6 +732,9 @@ def test_finalization_command_passes_postcompute_options(tmp_path: Path) -> None
     assert cmd[cmd.index("--mask-rle-validation-mode") + 1] == "invariants"
     assert "--write-eye-geometry" in cmd
     assert "--write-component-contours" in cmd
+    assert "--write-sampled-component-contours" in cmd
+    assert cmd[cmd.index("--sampled-contour-row-chunk") + 1] == "1024"
+    assert cmd[cmd.index("--sampled-contour-k") + 1] == "subject_body=128"
     assert "--retain-source-seeds" in cmd
 
 
@@ -746,6 +752,9 @@ def test_finalization_command_uses_length_safe_progress_filename(tmp_path: Path)
         mask_rle_validation_mode="invariants",
         write_eye_geometry=True,
         write_component_contours=True,
+        write_sampled_component_contours=True,
+        sampled_contour_row_chunk=1024,
+        sampled_contour_k=[],
         retain_source_seeds=False,
         progress_dir=tmp_path / "progress",
         overwrite=False,

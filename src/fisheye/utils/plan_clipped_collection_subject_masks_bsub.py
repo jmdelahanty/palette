@@ -242,6 +242,7 @@ def build_plan(
     finalization_mode: str = "collection_direct",
     clip_finalizer_package_dir: Path | None = None,
     import_array_copy_workers: int = 1,
+    write_sampled_component_contours: bool = False,
 ) -> SubjectMaskWorkflowPlan:
     zarr_path = zarr_path.expanduser().resolve()
     cache_dir_root = cache_dir_root.expanduser().resolve()
@@ -484,6 +485,8 @@ def build_plan(
         finalize_command.append("--write-eye-geometry")
     if write_component_contours:
         finalize_command.append("--write-component-contours")
+    if write_sampled_component_contours:
+        finalize_command.extend(["--write-sampled-component-contours", "--sampled-contour-row-chunk", "1024"])
     if retain_source_seeds:
         finalize_command.append("--retain-source-seeds")
     if defer_registry_status:
@@ -582,6 +585,8 @@ def build_plan(
                 clip_finalize_command.append("--no-write-eye-geometry")
             if not write_component_contours:
                 clip_finalize_command.append("--no-write-component-contours")
+            if not write_sampled_component_contours:
+                clip_finalize_command.append("--no-write-sampled-component-contours")
             if retain_source_seeds:
                 clip_finalize_command.append("--retain-source-seeds")
             if overwrite_final_outputs:
@@ -1063,6 +1068,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--assignment-keypoints-run", help="Collection keypoint/refined-keypoint run for eyes_union assignment.")
     parser.add_argument("--no-write-eye-geometry", action="store_true")
     parser.add_argument("--no-write-component-contours", action="store_true")
+    parser.add_argument("--write-sampled-component-contours", action="store_true")
+    parser.add_argument("--no-write-sampled-component-contours", action="store_true")
     parser.add_argument("--retain-source-seeds", action="store_true")
     parser.add_argument("--model-coverage-class", default="dense_all_components")
     parser.add_argument("--model-component-coverage-key", default="body+eyes+swim_bladder")
@@ -1175,6 +1182,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         finalization_mode=args.finalization_mode,
         clip_finalizer_package_dir=args.clip_finalizer_package_dir,
         import_array_copy_workers=max(1, int(args.import_array_copy_workers)),
+        write_sampled_component_contours=bool(args.write_sampled_component_contours)
+        and not bool(args.no_write_sampled_component_contours),
     )
     payload = json_ready(plan.to_json())
     if args.plan_json:

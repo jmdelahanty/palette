@@ -604,6 +604,11 @@ def _finalization_command(
         cmd.append("--write-eye-geometry")
     if args.write_component_contours:
         cmd.append("--write-component-contours")
+    if args.write_sampled_component_contours:
+        cmd.append("--write-sampled-component-contours")
+        cmd.extend(["--sampled-contour-row-chunk", str(args.sampled_contour_row_chunk)])
+        for value in args.sampled_contour_k:
+            cmd.extend(["--sampled-contour-k", str(value)])
     if args.retain_source_seeds:
         cmd.append("--retain-source-seeds")
     cmd.extend(["--postcompute-backend", args.finalize_postcompute_backend])
@@ -1415,7 +1420,31 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Worker count for process-sharded postcompute. Defaults to --finalize-num-workers inside the finalizer.",
     )
     parser.add_argument("--write-eye-geometry", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--write-component-contours", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--write-component-contours",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write full ragged contours for current Crimson compatibility (default: true during migration).",
+    )
+    parser.add_argument(
+        "--write-sampled-component-contours",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Write fixed-K sampled display contours (opt-in until Crimson migration).",
+    )
+    parser.add_argument(
+        "--sampled-contour-row-chunk",
+        type=int,
+        default=1024,
+        help="Physical row chunk for fixed-K sampled contour arrays (default: 1024).",
+    )
+    parser.add_argument(
+        "--sampled-contour-k",
+        action="append",
+        default=[],
+        metavar="COMPONENT=K",
+        help="Override one sampled contour K; repeat per component.",
+    )
     parser.add_argument(
         "--retain-source-seeds",
         action="store_true",

@@ -47,6 +47,7 @@ MASK_STORAGE="dense_uint8"
 MASK_RLE_VALIDATION_MODE="invariants"
 WRITE_EYE_GEOMETRY=1
 WRITE_COMPONENT_CONTOURS=1
+WRITE_SAMPLED_COMPONENT_CONTOURS=0
 RETAIN_SOURCE_SEEDS=0
 FORCE_INFERENCE=0
 FORCE_FINALIZATION=0
@@ -168,8 +169,12 @@ Options:
                             full|invariants|none after writing compact mask_rle
                             (default: invariants for production batch runs)
   --no-write-eye-geometry   Do not ask finalizer to write eye geometry
-  --no-write-component-contours
-                            Do not ask finalizer to write component contours
+  --write-component-contours
+                            Write full ragged contours (default during Crimson migration)
+  --write-sampled-component-contours
+                            Also write the fixed-K sampled contour cache
+  --no-write-sampled-component-contours
+                            Disable the default fixed-K sampled contour cache
   --retain-source-seeds     Retain dense source_seed_masks_roi debug arrays during finalization
   --force-inference         Run inference even if subject_mask_runs exists
   --force-finalization      Run finalization even if refined_subject_masks_runs exists
@@ -243,7 +248,10 @@ while [[ $# -gt 0 ]]; do
     --mask-storage) MASK_STORAGE="$2"; shift 2;;
     --mask-rle-validation-mode) MASK_RLE_VALIDATION_MODE="$2"; shift 2;;
     --no-write-eye-geometry) WRITE_EYE_GEOMETRY=0; shift;;
+    --write-component-contours) WRITE_COMPONENT_CONTOURS=1; shift;;
     --no-write-component-contours) WRITE_COMPONENT_CONTOURS=0; shift;;
+    --write-sampled-component-contours) WRITE_SAMPLED_COMPONENT_CONTOURS=1; shift;;
+    --no-write-sampled-component-contours) WRITE_SAMPLED_COMPONENT_CONTOURS=0; shift;;
     --retain-source-seeds) RETAIN_SOURCE_SEEDS=1; shift;;
     --force-inference) FORCE_INFERENCE=1; shift;;
     --force-finalization) FORCE_FINALIZATION=1; shift;;
@@ -566,6 +574,7 @@ if [[ -n "$SOURCE_ROI_CACHE_ROW_INDEX_PATH" ]]; then SUBJECT_ARGS+=(--source-roi
 if [[ "$PROFILE_TIMINGS" == "1" ]]; then SUBJECT_ARGS+=(--profile-timings); fi
 if [[ "$WRITE_EYE_GEOMETRY" == "1" ]]; then SUBJECT_ARGS+=(--write-eye-geometry); else SUBJECT_ARGS+=(--no-write-eye-geometry); fi
 if [[ "$WRITE_COMPONENT_CONTOURS" == "1" ]]; then SUBJECT_ARGS+=(--write-component-contours); else SUBJECT_ARGS+=(--no-write-component-contours); fi
+if [[ "$WRITE_SAMPLED_COMPONENT_CONTOURS" == "1" ]]; then SUBJECT_ARGS+=(--write-sampled-component-contours); else SUBJECT_ARGS+=(--no-write-sampled-component-contours); fi
 if [[ "$RETAIN_SOURCE_SEEDS" == "1" ]]; then SUBJECT_ARGS+=(--retain-source-seeds); fi
 if [[ "$STAGE_OUTPUT_TO_SCRATCH" == "1" ]]; then SUBJECT_ARGS+=(--stage-output-to-scratch); fi
 if [[ -n "$OUTPUT_STAGING_DIR" ]]; then SUBJECT_ARGS+=(--output-staging-dir "$OUTPUT_STAGING_DIR"); fi

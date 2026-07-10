@@ -14,11 +14,19 @@ from .mask_store import MaskStoreError, open_mask_store
 
 
 COMPONENT_CONTOUR_SCHEMA_ID = "component_contours_v1"
+SAMPLED_COMPONENT_CONTOUR_SCHEMA_ID = "sampled_component_contours_v1"
 COMPONENT_ROW_UPDATE_SCHEMA_ID = "refined_subject_component_row_updates_v1"
 DEFAULT_CONTOUR_METHOD = "largest_external_contour"
 DEFAULT_CONTOUR_METHOD_VERSION = 1
 DEFAULT_BOUNDARY_POLICY = "external_only"
 DEFAULT_CONTOUR_COORDINATE_SPACE = "roi_pixels"
+DEFAULT_SAMPLED_CONTOUR_ROW_CHUNK = 1024
+DEFAULT_SAMPLED_CONTOUR_COUNTS = {
+    "subject_body": 128,
+    "swim_bladder": 32,
+    "eye_left": 64,
+    "eye_right": 64,
+}
 ROW_UPDATE_TIMESTAMP_WIDTH = 40
 ROW_UPDATE_REASON_WIDTH = 128
 
@@ -32,6 +40,18 @@ class ComponentContourSummary:
     point_count: int = 0
     reason: Optional[str] = None
     existing: bool = False
+
+
+@dataclass(frozen=True)
+class SampledComponentContourSummary:
+    component: str
+    status: str
+    roi_count: int
+    sample_count: int
+    valid_count: int = 0
+    source_point_count: int = 0
+    row_chunk: int = DEFAULT_SAMPLED_CONTOUR_ROW_CHUNK
+    reason: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +90,186 @@ def extract_largest_external_contour(
     if int(contour.shape[0]) < int(min_points):
         return None
     return contour
+
+
+def resample_closed_contour(points_xy: np.ndarray, sample_count: int) -> np.ndarray:
+    """Arc-length resample a closed ROI-pixel contour to a fixed point count."""
+
+    points = np.asarray(points_xy, dtype=np.float32).reshape(-1, 2)
+    k = int(sample_count)
+    if k <= 0:
+        raise ValueError("sample_count must be positive.")
+    finite = np.isfinite(points).all(axis=1)
+    points = points[finite]
+    if int(points.shape[0]) == 0:
+        return np.full((k, 2), np.nan, dtype=np.float32)
+    if int(points.shape[0]) == 1:
+        return np.repeat(points, k, axis=0).astype(np.float32, copy=False)
+
+    closed = points
+    if not np.allclose(closed[0], closed[-1]):
+        closed = np.concatenate([closed, closed[:1]], axis=0)
+    segment_lengths = np.linalg.norm(np.diff(closed, axis=0), axis=1)
+    perimeter = float(np.sum(segment_lengths))
+    if not np.isfinite(perimeter) or perimeter <= 0.0:
+        return np.repeat(points[:1], k, axis=0).astype(np.float32, copy=False)
+
+    cumulative = np.concatenate([[0.0], np.cumsum(segment_lengths)]).astype(np.float64)
+    targets = np.linspace(0.0, perimeter, num=k, endpoint=False, dtype=np.float64)
+    x = np.interp(targets, cumulative, closed[:, 0].astype(np.float64))
+    y = np.interp(targets, cumulative, closed[:, 1].astype(np.float64))
+    return np.stack([x, y], axis=1).astype(np.float32)
+
+
+def sample_contours_fixed_k(
+    contours_by_row: Sequence[np.ndarray | None],
+    *,
+    sample_count: int,
+    min_points: int = 2,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Convert row contours to fixed-K points, validity, and source lengths."""
+
+    row_count = int(len(contours_by_row))
+    k = int(sample_count)
+    if k <= 0:
+        raise ValueError("sample_count must be positive.")
+    points_xy = np.full((row_count, k, 2), np.nan, dtype=np.float32)
+    valid = np.zeros((row_count,), dtype=bool)
+    source_point_count = np.zeros((row_count,), dtype=np.int32)
+    for row_index, contour in enumerate(contours_by_row):
+        if contour is None:
+            continue
+        points = np.asarray(contour, dtype=np.float32).reshape(-1, 2)
+        points = points[np.isfinite(points).all(axis=1)]
+        source_point_count[row_index] = np.int32(points.shape[0])
+        if int(points.shape[0]) < int(min_points):
+            continue
+        sampled = resample_closed_contour(points, k)
+        if not bool(np.isfinite(sampled).all()):
+            continue
+        points_xy[row_index] = sampled
+        valid[row_index] = True
+    return points_xy, valid, source_point_count
+
+
+def write_sampled_component_contours(
+    component_group: zarr.Group,
+    contours_by_row: Sequence[np.ndarray | None],
+    *,
+    sample_count: int,
+    row_chunk: int = DEFAULT_SAMPLED_CONTOUR_ROW_CHUNK,
+    component: str,
+    source_mask_run: str | None = None,
+    source_mask_label_schema_id: str | None = None,
+    method: str = DEFAULT_CONTOUR_METHOD,
+    method_version: int = DEFAULT_CONTOUR_METHOD_VERSION,
+    boundary_policy: str = DEFAULT_BOUNDARY_POLICY,
+    coordinate_space: str = DEFAULT_CONTOUR_COORDINATE_SPACE,
+    min_points: int = 2,
+) -> SampledComponentContourSummary:
+    """Write a fixed-K sampled display contour cache for one component."""
+
+    points_xy, valid, source_point_count = sample_contours_fixed_k(
+        contours_by_row,
+        sample_count=int(sample_count),
+        min_points=int(min_points),
+    )
+    return write_sampled_component_contour_arrays(
+        component_group,
+        points_xy=points_xy,
+        valid=valid,
+        source_point_count=source_point_count,
+        row_chunk=int(row_chunk),
+        component=component,
+        source_mask_run=source_mask_run,
+        source_mask_label_schema_id=source_mask_label_schema_id,
+        method=method,
+        method_version=int(method_version),
+        boundary_policy=boundary_policy,
+        coordinate_space=coordinate_space,
+        min_points=int(min_points),
+    )
+
+
+def write_sampled_component_contour_arrays(
+    component_group: zarr.Group,
+    *,
+    points_xy: np.ndarray,
+    valid: np.ndarray,
+    source_point_count: np.ndarray,
+    row_chunk: int = DEFAULT_SAMPLED_CONTOUR_ROW_CHUNK,
+    component: str,
+    source_mask_run: str | None = None,
+    source_mask_label_schema_id: str | None = None,
+    method: str = DEFAULT_CONTOUR_METHOD,
+    method_version: int = DEFAULT_CONTOUR_METHOD_VERSION,
+    boundary_policy: str = DEFAULT_BOUNDARY_POLICY,
+    coordinate_space: str = DEFAULT_CONTOUR_COORDINATE_SPACE,
+    min_points: int = 2,
+) -> SampledComponentContourSummary:
+    """Persist a precomputed fixed-K sampled contour payload."""
+
+    points_xy = np.asarray(points_xy, dtype=np.float32)
+    valid = np.asarray(valid, dtype=bool).reshape(-1)
+    source_point_count = np.asarray(source_point_count, dtype=np.int32).reshape(-1)
+    if points_xy.ndim != 3 or int(points_xy.shape[2]) != 2:
+        raise ValueError(f"points_xy must have shape (N,K,2); got {tuple(points_xy.shape)}.")
+    total_rois = int(points_xy.shape[0])
+    sample_count = int(points_xy.shape[1])
+    if sample_count <= 0:
+        raise ValueError("points_xy sample axis must be non-empty.")
+    if tuple(valid.shape) != (total_rois,) or tuple(source_point_count.shape) != (total_rois,):
+        raise ValueError("valid and source_point_count must have one entry per points_xy row.")
+    if bool(np.any(valid & ~np.isfinite(points_xy).all(axis=(1, 2)))):
+        raise ValueError("valid sampled contour rows must contain only finite points.")
+    total_rois = int(points_xy.shape[0])
+    chunk = max(1, min(int(row_chunk), total_rois if total_rois > 0 else 1))
+    sampled_group = component_group.require_group("sampled_contours")
+    sampled_group.attrs.update(
+        {
+            "schema_id": SAMPLED_COMPONENT_CONTOUR_SCHEMA_ID,
+            "contour_schema_id": SAMPLED_COMPONENT_CONTOUR_SCHEMA_ID,
+            "coordinate_space": str(coordinate_space),
+            "point_order": "xy",
+            "source_component": str(component),
+            "source_mask_run": str(source_mask_run or ""),
+            "source_mask_label_schema_id": str(source_mask_label_schema_id or ""),
+            "source_contour_method": str(method),
+            "source_contour_method_version": int(method_version),
+            "sampling_method": "closed_arc_length_uniform",
+            "sampling_method_version": 1,
+            "sample_count": sample_count,
+            "boundary_policy": str(boundary_policy),
+            "min_source_points": int(min_points),
+            "generated_at_utc": _utc_now(),
+            "cache_coverage": "full_indexed_rows",
+            "surface_role": "derived_display_cache",
+            "authoritative_pixels": False,
+            "row_chunk": int(chunk),
+        }
+    )
+    sampled_group.create_array(
+        "points_xy",
+        data=points_xy,
+        chunks=(chunk, sample_count, 2),
+        overwrite=True,
+    )
+    sampled_group.create_array("valid", data=valid, chunks=(chunk,), overwrite=True)
+    sampled_group.create_array(
+        "source_point_count",
+        data=source_point_count,
+        chunks=(chunk,),
+        overwrite=True,
+    )
+    return SampledComponentContourSummary(
+        component=str(component),
+        status="written",
+        roi_count=total_rois,
+        sample_count=sample_count,
+        valid_count=int(np.count_nonzero(valid)),
+        source_point_count=int(np.sum(source_point_count, dtype=np.int64)),
+        row_chunk=int(chunk),
+    )
 
 
 def component_contours_exist(component_group: zarr.Group, roi_count: int) -> bool:
@@ -663,4 +863,58 @@ def write_refined_subject_component_contours(
             min_points=min_points,
         )
         summaries.append(written)
+    return summaries
+
+
+def write_refined_subject_sampled_component_contours(
+    refined_group: zarr.Group,
+    *,
+    components: Sequence[str],
+    sample_counts: Optional[dict[str, int]] = None,
+    source_mask_run: str | None = None,
+    row_chunk: int = DEFAULT_SAMPLED_CONTOUR_ROW_CHUNK,
+    min_points: int = 2,
+    read_chunk_size: int = 256,
+) -> list[SampledComponentContourSummary]:
+    """Build fixed-K sampled contours directly from authoritative masks."""
+
+    source_label_schema = str(refined_group.attrs.get("label_schema_id") or "")
+    resolved_counts = {**DEFAULT_SAMPLED_CONTOUR_COUNTS, **dict(sample_counts or {})}
+    summaries: list[SampledComponentContourSummary] = []
+    for component in components:
+        component_name = str(component)
+        sample_count = int(resolved_counts.get(component_name, 64))
+        if sample_count <= 0:
+            raise ValueError(f"Sample count for {component_name!r} must be positive; got {sample_count}.")
+        contours, contour_summary = build_component_contours_from_masks(
+            refined_group,
+            component_name,
+            min_points=int(min_points),
+            read_chunk_size=int(read_chunk_size),
+        )
+        if contour_summary.status != "computed":
+            summaries.append(
+                SampledComponentContourSummary(
+                    component=component_name,
+                    status=contour_summary.status,
+                    roi_count=int(contour_summary.roi_count),
+                    sample_count=sample_count,
+                    row_chunk=max(1, int(row_chunk)),
+                    reason=contour_summary.reason,
+                )
+            )
+            continue
+        component_group = refined_group.require_group("components").require_group(component_name)
+        summaries.append(
+            write_sampled_component_contours(
+                component_group,
+                contours,
+                sample_count=sample_count,
+                row_chunk=int(row_chunk),
+                component=component_name,
+                source_mask_run=source_mask_run,
+                source_mask_label_schema_id=source_label_schema,
+                min_points=int(min_points),
+            )
+        )
     return summaries

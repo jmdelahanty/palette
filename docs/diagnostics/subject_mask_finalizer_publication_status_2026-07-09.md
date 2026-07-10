@@ -933,10 +933,13 @@ inside a shard can amplify a small edit into a much larger shard update.
 
 ## Current Contour Position
 
-The target policy is decided but not yet implemented in the canonical writer:
-sampled fixed-K contours are the default saved/published contour surface, and
-full ragged contours require an explicit analysis/archive/export opt-in. The
-July 8 contour diagnostic supports these sampled display/summary candidates:
+The canonical writer now has an opt-in fixed-K sampled contour surface with
+`points_xy[N,K,2]`, `valid[N]`, and `source_point_count[N]`. It uses 1024-row
+physical chunks and can run through either serial or `process_shards`
+postcompute. Full ragged contours are controlled independently. Production
+wrappers retain full ragged output until Crimson reads the sampled schema; the
+default flip is therefore a coordinated reader/writer rollout, not a Palette-
+only change. The July 8 contour diagnostic supports these candidates:
 
 | component | current candidate K | safe use |
 |---|---:|---|
@@ -989,10 +992,10 @@ to the fixed-size sampled representation.
   are still primarily tied to raw subject-mask inference handoff.
 - Full ragged contours, reason columns, and remaining eye-geometry surfaces
   still need their default publication layout reduced.
-- Fixed-K contours are validated only as a diagnostic candidate, not yet part
-  of the canonical refined-subject-mask writer.
-- The production wrapper still enables full ragged contour generation; it has
-  not yet been changed to the decided sampled-default/full-ragged-opt-in policy.
+- Fixed-K contours are implemented and unit-validated, but the full-run file
+  inventory/fidelity canary and Crimson reader migration are still pending.
+- The production wrapper still enables full ragged contour generation until
+  Crimson can consume fixed-K sampled contours.
 - Crimson's current manual bounding-box save rewrites the complete curated
   `instances/` subgroup rather than applying a row-local update.
 - Dense mask save amplification has not yet been benchmarked for editable row
@@ -1046,11 +1049,10 @@ to the fixed-size sampled representation.
    reason columns and remaining sealed eye-geometry arrays without changing
    existing archives in place.
 
-8. Implement the decided sampled-contour default.
-   Add fixed-size sampled contours with body `K=128`, eyes `K=64`, and swim
-   bladder `K=32` for display (`K>=64` for geometry-sensitive opt-ins). Derive
-   them directly from dense masks during validation/promotion, migrate Crimson's
-   overlay reader, and make full ragged contour generation an explicit
+8. Promote the implemented sampled-contour surface.
+   Run the full staged inventory/fidelity canary for body `K=128`, eyes `K=64`,
+   and swim bladder `K=32`; migrate Crimson's overlay reader to the fixed-K
+   schema; then make full ragged contour generation an explicit
    analysis/archive/export option.
 
 9. Consider an NRS refined-run package path.
