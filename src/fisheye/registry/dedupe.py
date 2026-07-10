@@ -167,14 +167,18 @@ def _total_dependent_count(conn: sqlite3.Connection, refs: Sequence[DatasetRef],
     return sum(_dependent_count(conn, ref, dataset_id) for ref in refs)
 
 
+def _is_canonical_dataset_id(row: Mapping[str, Any]) -> bool:
+    dataset_id = str(row.get("dataset_id") or "")
+    session_uuid = str(row.get("session_uuid") or "")
+    return bool(session_uuid and dataset_id.startswith(f"{session_uuid}:z"))
+
+
 def _is_legacy_preferred(row: Mapping[str, Any]) -> bool:
     dataset_id = str(row.get("dataset_id") or "")
     session_uuid = str(row.get("session_uuid") or "")
-    if session_uuid and dataset_id == session_uuid:
-        return True
-    if ":z" not in dataset_id and not dataset_id.startswith("path-"):
-        return True
-    return False
+    return bool(session_uuid and dataset_id == session_uuid) or (
+        ":z" not in dataset_id and not dataset_id.startswith("path-")
+    )
 
 
 def _choose_canonical(
@@ -186,7 +190,7 @@ def _choose_canonical(
         dep_count = _total_dependent_count(conn, refs, str(row["dataset_id"]))
         last_seen = str(row.get("last_seen_utc") or "")
         return (
-            1 if _is_legacy_preferred(row) else 0,
+            1 if _is_canonical_dataset_id(row) else 0,
             dep_count,
             last_seen,
             str(row["dataset_id"]),

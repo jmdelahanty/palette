@@ -128,16 +128,15 @@ def test_plan_registry_dataset_dedupe_reports_conflicting_step_status(tmp_path: 
     assert report["status"] == "conflicts"
     assert report["duplicate_group_count"] == 1
     group = report["groups"][0]
-    assert group["canonical_dataset_id"] == "rec_a"
+    assert group["canonical_dataset_id"] == "rec_a:zhash"
     assert group["rows_to_repoint"] == 2
     assert group["conflicting_rows"] == 1
     duplicate = group["duplicates"][0]
-    assert duplicate["dataset"]["dataset_id"] == "rec_a:zhash"
+    assert duplicate["dataset"]["dataset_id"] == "rec_a"
     refs = {(item["table"], item["column"]): item for item in duplicate["reference_updates"]}
     assert refs[("recording_step_status", "dataset_id")]["rows_to_repoint"] == 1
     assert refs[("recording_step_status", "dataset_id")]["conflicts"][0]["constraint"] == "primary_key"
-    assert refs[("recording_step_status_history", "dataset_id")]["rows_to_repoint"] == 1
-    assert refs[("recording_step_status_history", "dataset_id")]["conflicts"] == []
+    assert ("recording_step_status_history", "dataset_id") not in refs
 
 
 def test_plan_registry_dataset_dedupe_scopes_by_zarr_use_and_path(tmp_path: Path) -> None:
@@ -189,7 +188,7 @@ def test_plan_registry_dataset_dedupe_scopes_by_zarr_use_and_path(tmp_path: Path
     assert report["status"] == "ok"
     assert report["duplicate_group_count"] == 1
     assert report["groups"][0]["zarr_path"] == "/data/rec_a_training.zarr"
-    assert report["groups"][0]["canonical_dataset_id"] == "rec_a"
+    assert report["groups"][0]["canonical_dataset_id"] == "rec_a:zhash"
 
 
 def test_plan_registry_dataset_dedupe_flags_dataset_lineage_self_edge(tmp_path: Path) -> None:
@@ -223,7 +222,7 @@ def test_plan_registry_dataset_dedupe_flags_dataset_lineage_self_edge(tmp_path: 
     assert report["status"] == "conflicts"
     lineage_update = report["groups"][0]["duplicates"][0]["reference_updates"][0]
     assert lineage_update["table"] == "dataset_lineage"
-    assert lineage_update["column"] == "child_dataset_id"
+    assert lineage_update["column"] == "parent_dataset_id"
     constraints = {item["constraint"] for item in lineage_update["conflicts"]}
     assert "dataset_lineage_no_self_edge" in constraints
 
@@ -272,13 +271,13 @@ def test_apply_registry_dataset_dedupe_merges_duplicate_rows(tmp_path: Path) -> 
 
     conn = sqlite3.connect(str(registry))
     try:
-        assert conn.execute("SELECT dataset_id FROM datasets;").fetchall() == [("rec_a",)]
+        assert conn.execute("SELECT dataset_id FROM datasets;").fetchall() == [("rec_a:zhash",)]
         assert conn.execute(
             "SELECT dataset_id, step_name, status FROM recording_step_status;"
-        ).fetchall() == [("rec_a", "detect", "ok")]
+        ).fetchall() == [("rec_a:zhash", "detect", "missing")]
         assert conn.execute(
             "SELECT dataset_id, step_name, status FROM recording_step_status_history;"
-        ).fetchall() == [("rec_a", "detect", "missing")]
+        ).fetchall() == [("rec_a:zhash", "detect", "missing")]
         assert conn.execute("PRAGMA foreign_key_check;").fetchall() == []
     finally:
         conn.close()
@@ -325,14 +324,14 @@ def test_apply_registry_dataset_dedupe_removes_lineage_self_edges(tmp_path: Path
 
     assert report["status"] == "ok"
     assert report["self_edge_rows_deleted"] == 1
-    assert report["rows_repointed"] == 1
+    assert report["rows_repointed"] == 0
 
     conn = sqlite3.connect(str(registry))
     try:
         assert conn.execute(
             "SELECT child_dataset_id, parent_dataset_id, relationship_type "
             "FROM dataset_lineage ORDER BY relationship_type;"
-        ).fetchall() == [("rec_a", "parent", "source")]
+        ).fetchall() == [("rec_a:zhash", "parent", "source")]
         assert conn.execute("PRAGMA foreign_key_check;").fetchall() == []
     finally:
         conn.close()
