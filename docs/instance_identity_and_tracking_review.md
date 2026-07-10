@@ -1,7 +1,7 @@
 # Instance identity, association, and tracking — architecture review & roadmap
 
 <!-- contract-meta
-status: proposed
+status: partially superseded by docs/instance_track_subject_identity_contract.md
 created: 2026-07-03
 owner: jeremy
 audience: maintainer (forward-looking design; no code change yet)
@@ -21,6 +21,12 @@ judgment for multi-object tracking (MOT). No code was changed.
 
 The audience is the maintainer, who is building this kind of system for the first time,
 so the document explains the *why* and the *steps*, not just the findings.
+
+> Current-state note (2026-07-09): the observation `instance_key` proposed by
+> this review has since shipped, and keypoint/mask eye-row reconciliation is now
+> implemented. Use `docs/instance_track_subject_identity_contract.md` for the
+> authoritative current contract. This document remains the rationale and
+> multi-subject algorithm roadmap.
 
 ---
 

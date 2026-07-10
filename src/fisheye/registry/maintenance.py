@@ -5768,7 +5768,53 @@ def _extract_tracking_summary_details(tracks_group: object) -> Dict[str, object]
         details["tracking_block_threshold_rows"] = int(tracking_block_threshold_rows)
     if tracking_block_threshold_percent is not None:
         details["tracking_block_threshold_percent"] = float(tracking_block_threshold_percent)
+    for attr_name in (
+        "tracking_identity_mode",
+        "source_rowset_path",
+        "source_rowset_fingerprint",
+        "source_rowset_fingerprint_status",
+        "source_arena_assignment_run",
+    ):
+        value = _decode_text(attrs.get(attr_name))
+        if value is not None:
+            details[attr_name] = value
+    for attr_name in ("source_rowset_row_count", "source_rowset_edit_revision"):
+        value = _coerce_int_value(attrs.get(attr_name))
+        if value is not None:
+            details[attr_name] = int(value)
     return details
+
+
+def _tracking_source_freshness(
+    *,
+    tracks_group: object | None,
+    arena_assignment_group: object | None,
+    selected_arena_assignment_run: str | None,
+) -> tuple[str, str]:
+    """Compare a selected tracking run with its selected arena/source snapshot."""
+
+    if tracks_group is None or not hasattr(tracks_group, "attrs"):
+        return "missing", "run_missing"
+    track_attrs = tracks_group.attrs  # type: ignore[attr-defined]
+    expected_arena_run = _decode_text(track_attrs.get("source_arena_assignment_run"))
+    if (
+        selected_arena_assignment_run is not None
+        and expected_arena_run is not None
+        and expected_arena_run != selected_arena_assignment_run
+    ):
+        return "stale", "stale_vs_selected_arena_assignment"
+
+    if arena_assignment_group is not None and hasattr(arena_assignment_group, "attrs"):
+        arena_attrs = arena_assignment_group.attrs  # type: ignore[attr-defined]
+        track_fingerprint = _decode_text(track_attrs.get("source_rowset_fingerprint"))
+        arena_fingerprint = _decode_text(arena_attrs.get("source_rowset_fingerprint"))
+        if (
+            track_fingerprint is not None
+            and arena_fingerprint is not None
+            and track_fingerprint != arena_fingerprint
+        ):
+            return "stale", "source_rowset_fingerprint_mismatch"
+    return "ok", "present"
 
 
 def _extract_updated_utc(group: object, *, fallback: str) -> str:
@@ -6224,6 +6270,12 @@ def _build_recording_step_rows_from_root(
         tracks_group.attrs.get("method")  # type: ignore[union-attr]
     ) if tracks_group is not None else None
     tracks_summary_details = _extract_tracking_summary_details(tracks_group)
+    if tracks_group is not None and tracks_status == "ok":
+        tracks_status, tracks_reason = _tracking_source_freshness(
+            tracks_group=tracks_group,
+            arena_assignment_group=arena_assignment_group,
+            selected_arena_assignment_run=arena_assignment_run,
+        )
 
     stimulus_runs = 0
     stimulus_run: Optional[str] = None
@@ -6805,6 +6857,18 @@ def _build_recording_step_rows_from_root(
                     "keypoints": keypoints_status,
                     "refined_keypoints": refined_keypoints_status,
                 },
+                **(
+                    {
+                        "source_rowset_fingerprint": _decode_text(
+                            arena_assignment_group.attrs.get("source_rowset_fingerprint")
+                        ),
+                        "source_rowset_fingerprint_status": _decode_text(
+                            arena_assignment_group.attrs.get("source_rowset_fingerprint_status")
+                        ),
+                    }
+                    if arena_assignment_group is not None
+                    else {}
+                ),
             },
             source=source,
             zarr_mtime_ns=zarr_mtime_ns,

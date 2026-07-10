@@ -19,15 +19,21 @@ from rich.panel import Panel
 from ..shared.experiment_setup import infer_experiment_setup
 from ..registry.stage_complete import emit_stage_completion
 from ..shared.run_provenance import build_run_provenance_from_stage_record
+from ..shared.rowset_fingerprint import (
+    assert_rowset_fingerprint_matches,
+    build_group_rowset_fingerprint,
+    resolve_rowset_edit_revision,
+)
 from ..shared.frame_domains import FrameDomain, FrameDomainError, FrameDomains
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
 from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
 from ..shared.zarr_io import open_zarr_root
-from .single_subject_per_arena import (
+from .api import (
     TRACKING_METHOD_SINGLE_SUBJECT_PER_ARENA,
-    write_single_subject_per_arena_tracking_run,
+    available_tracking_methods,
+    write_tracking_run,
 )
 from ..shared.system_metadata import get_environment_info
 
@@ -206,6 +212,42 @@ def _get_group_by_path(root: zarr.Group, path: str) -> zarr.Group:
             raise KeyError(path)
         current = current[part]
     return current
+
+
+def _optional_row_array(
+    group: zarr.Group,
+    names: Sequence[str],
+    *,
+    dtype: np.dtype,
+    row_count: int,
+) -> np.ndarray | None:
+    """Load the first available optional row-lineage vector."""
+
+    for name in names:
+        if name not in group:
+            continue
+        value = np.asarray(group[name][:], dtype=dtype).reshape(-1)
+        if int(value.shape[0]) != int(row_count):
+            raise ValueError(
+                f"{name} row count ({int(value.shape[0])}) does not match source rows ({row_count})."
+            )
+        return value
+    return None
+
+
+def _source_rowset_edit_revision(
+    root: zarr.Group,
+    *,
+    source_rowset_path: str,
+    source_group: zarr.Group,
+) -> int | None:
+    """Resolve a mutable rowset revision from row and run-level attrs."""
+
+    parent_attrs: Mapping[str, Any] | None = None
+    parts = source_rowset_path.split("/")
+    if len(parts) >= 2 and parts[0] == "refined_detect_runs":
+        parent_attrs = _get_group_by_path(root, "/".join(parts[:2])).attrs
+    return resolve_rowset_edit_revision(source_group.attrs, parent_attrs)
 
 
 def _resolve_frame_shape(root: zarr.Group, detection_group: zarr.Group) -> Tuple[int, int]:
@@ -430,6 +472,7 @@ def assign_arenas_spatial(
     config: Dict[str, Any],
     console: Optional[Console] = None,
     source_rowset_path: Optional[str] = None,
+    tracking_method: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Assign detections to arenas based on spatial location (sub-dish ROIs).
@@ -451,6 +494,7 @@ def assign_arenas_spatial(
         source_rowset_path: Optional exact rowset to assign. Use this when a
             downstream crop/keypoint rowset, not refined-detect instances, is
             the row identity that consumers must track.
+        tracking_method: Optional method registered by ``fisheye.tracking.api``.
         
     Returns:
         Dictionary with summary statistics
@@ -474,6 +518,17 @@ def assign_arenas_spatial(
     start_time = time.perf_counter()
     
     root = open_zarr_root(zarr_path, mode='a')
+    tracking_config = config.get("tracking", {})
+    if not isinstance(tracking_config, Mapping):
+        raise ValueError("config['tracking'] must be a mapping when provided.")
+    selected_tracking_method = str(
+        tracking_method
+        or tracking_config.get("method")
+        or TRACKING_METHOD_SINGLE_SUBJECT_PER_ARENA
+    ).strip()
+    tracker_parameters = dict(tracking_config.get("parameters") or {})
+    if selected_tracking_method == TRACKING_METHOD_SINGLE_SUBJECT_PER_ARENA:
+        tracker_parameters.setdefault("conflict_policy", "fail")
 
     def _resolve_tracks_status(id_status: str) -> Tuple[str, str, Optional[str], Optional[str]]:
         tracks_parent = root.get("tracking_runs")
@@ -700,6 +755,8 @@ def assign_arenas_spatial(
                 raise ValueError("Unable to determine source detect run for refined detections.")
     
     # Store metadata
+    if not selected_source_rowset_path:
+        raise ValueError("Arena assignment resolved no source_rowset_path.")
     metadata_dict = {
         'arena_assignment_timestamp_utc': datetime.now(timezone.utc).isoformat(),
         'method': 'spatial',
@@ -714,7 +771,8 @@ def assign_arenas_spatial(
         'source_rowset_path': selected_source_rowset_path,
         'assignment_method': 'spatial',
         'assignment_source': assignment_source,
-        'num_arenas': len(subdish_masks)
+        'num_arenas': len(subdish_masks),
+        'tracking_method': selected_tracking_method,
     }
     if refined_run_name:
         metadata_dict['source_refined_run'] = refined_run_name
@@ -724,6 +782,35 @@ def assign_arenas_spatial(
     # Load detection data
     frame_indices = detection_group['frame_indices'][:].astype(np.int64, copy=False)
     bbox_coords = detection_group['bbox_norm_coords'][:]
+    source_edit_revision = _source_rowset_edit_revision(
+        root,
+        source_rowset_path=str(selected_source_rowset_path),
+        source_group=detection_group,
+    )
+    source_rowset_fingerprint = build_group_rowset_fingerprint(
+        detection_group,
+        source_rowset_path=str(selected_source_rowset_path),
+        source_edit_revision=source_edit_revision,
+    )
+    assign_group.attrs.update(source_rowset_fingerprint.to_attrs())
+    instance_key = _optional_row_array(
+        detection_group,
+        ("instance_key",),
+        dtype=np.dtype(np.uint64),
+        row_count=int(frame_indices.shape[0]),
+    )
+    source_refined_row_ids = _optional_row_array(
+        detection_group,
+        ("source_refined_row_ids", "refined_row_ids"),
+        dtype=np.dtype(np.int64),
+        row_count=int(frame_indices.shape[0]),
+    )
+    source_detect_row_index = _optional_row_array(
+        detection_group,
+        ("source_detect_row_index",),
+        dtype=np.dtype(np.int32),
+        row_count=int(frame_indices.shape[0]),
+    )
     if 'frame_counts' in detection_group:
         frame_counts = detection_group['frame_counts'][:]
         run_frame_count = _count_from_domains(root, FrameDomain.RUN_FRAME, run_group=detection_group)
@@ -840,6 +927,9 @@ def assign_arenas_spatial(
         'source_detect_run': source_detect_run,
         'source_rowset_path': selected_source_rowset_path,
         'assignment_source': assignment_source,
+        'source_rowset_fingerprint': source_rowset_fingerprint.fingerprint,
+        'source_rowset_fingerprint_status': source_rowset_fingerprint.status,
+        'source_rowset_edit_revision': source_edit_revision,
     }
     if refined_run_name:
         provenance_inputs['source_refined_run'] = refined_run_name
@@ -885,6 +975,17 @@ def assign_arenas_spatial(
         'hostname': env_info['platform']['hostname']
     })
     
+    current_source_fingerprint = build_group_rowset_fingerprint(
+        detection_group,
+        source_rowset_path=str(selected_source_rowset_path),
+        source_edit_revision=_source_rowset_edit_revision(
+            root,
+            source_rowset_path=str(selected_source_rowset_path),
+            source_group=detection_group,
+        ),
+    )
+    assert_rowset_fingerprint_matches(source_rowset_fingerprint, current_source_fingerprint)
+
     if arena_parent is not None:
         mark_run_complete(
             assign_group,
@@ -895,7 +996,7 @@ def assign_arenas_spatial(
 
     try:
         track_run_name, _track_group, tracking_summary = (
-            write_single_subject_per_arena_tracking_run(
+            write_tracking_run(
                 root=root,
                 arena_ids=arena_ids,
                 frame_indices=frame_indices,
@@ -903,19 +1004,34 @@ def assign_arenas_spatial(
                 source_refined_run=str(refined_run_name) if refined_run_name else None,
                 source_arena_assignment_run=run_group_name,
                 source_rowset_path=str(selected_source_rowset_path),
-                conflict_policy="fail",
+                method=selected_tracking_method,
+                tracker_parameters=tracker_parameters,
+                instance_key=instance_key,
+                source_refined_row_ids=source_refined_row_ids,
+                source_detect_row_index=source_detect_row_index,
+                source_edit_revision=source_edit_revision,
+                expected_source_rowset_fingerprint=source_rowset_fingerprint,
+                source_rowset_fingerprint_reader=lambda: build_group_rowset_fingerprint(
+                    detection_group,
+                    source_rowset_path=str(selected_source_rowset_path),
+                    source_edit_revision=_source_rowset_edit_revision(
+                        root,
+                        source_rowset_path=str(selected_source_rowset_path),
+                        source_group=detection_group,
+                    ),
+                ),
                 console=console,
             )
         )
         tracks_status = "ok"
         tracks_reason = "present"
-        tracks_method = TRACKING_METHOD_SINGLE_SUBJECT_PER_ARENA
+        tracks_method = selected_tracking_method
     except Exception as exc:
         track_run_name = None
         tracking_summary = {}
         tracks_status = "error"
         tracks_reason = "tracking_generation_failed"
-        tracks_method = TRACKING_METHOD_SINGLE_SUBJECT_PER_ARENA
+        tracks_method = selected_tracking_method
         _emit_tracking_step_statuses(
             root=root,
             zarr_path=zarr_path,
@@ -1095,6 +1211,11 @@ if __name__ == "__main__":
             "downstream keypoints/track kinematics are aligned to crop rows."
         ),
     )
+    parser.add_argument(
+        "--tracking-method",
+        choices=available_tracking_methods(),
+        help="Tracking method to run after arena assignment (defaults to config or strict arena tracking).",
+    )
     
     args = parser.parse_args()
     
@@ -1110,6 +1231,7 @@ if __name__ == "__main__":
         config,
         console=console,
         source_rowset_path=args.source_rowset,
+        tracking_method=args.tracking_method,
     )
     
     if results.get("status") == "missing":

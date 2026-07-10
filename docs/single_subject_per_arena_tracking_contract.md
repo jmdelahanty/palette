@@ -125,6 +125,9 @@ Target namespace:
 | `arena_ids` | `(n_rows,)` | `int32` | Arena assignment per source row. Mirrors the bound arena-assignment run. |
 | `frame_indices` | `(n_rows,)` | `int32` | Copied from the tracked source rowset for direct auditing/debugging. |
 | `source_row_indices` | `(n_rows,)` | `int32` | `0..n_rows-1` index into the exact tracked source rowset. |
+| `instance_key` *(modern keyed runs)* | `(n_rows,)` | `uint64` | Observation identity copied from the exact source rowset. |
+| `source_refined_row_ids` *(when available)* | `(n_rows,)` | `int64` | Stable curated detect-row lineage. |
+| `source_detect_row_index` *(when available)* | `(n_rows,)` | `int32` | Raw detect-row lineage. |
 | `track_ids_present` | `(n_tracks,)` | `int32` | Sorted list of real emitted track IDs. |
 | `track_arena_ids` | `(n_tracks,)` | `int32` | Arena ID for each emitted track. Parallel to `track_ids_present`. |
 
@@ -164,6 +167,8 @@ Target namespace:
 | `tracking_block_threshold_percent` | Future blocking threshold on unassigned percentage. |
 | `summary_statistics` | JSON-friendly counts and coverage summaries. |
 | `arena_assignment_namespace` | `arena_assignment_runs`. |
+| `tracking_identity_mode` | `instance_key` for modern runs or explicit `legacy_positional`. |
+| `source_rowset_fingerprint` | Order-independent exact source-rowset identity for modern keyed runs. |
 
 ## Track ID Semantics
 

@@ -93,6 +93,8 @@ def _build_root() -> _FakeGroup:
         data=np.array([[0.25, 0.25, 0.1, 0.1], [0.75, 0.75, 0.1, 0.1]], dtype=np.float64),
     )
     detect_run.create_array("frame_counts", data=np.array([1, 1], dtype=np.int32))
+    detect_run.create_array("instance_key", data=np.array([101, 102], dtype=np.uint64))
+    detect_run.create_array("source_detect_row_index", data=np.array([0, 1], dtype=np.int32))
 
     refined_parent = root.create_group("refined_detect_runs")
     refined_parent.attrs["latest"] = "refined_001"
@@ -107,6 +109,9 @@ def _build_root() -> _FakeGroup:
     instances.create_array("frame_counts", data=np.array([1, 1], dtype=np.int32))
     instances.create_array("source_kind_codes", data=np.array([0, 0], dtype=np.int8))
     instances.create_array("manual_edit_flags", data=np.array([0, 0], dtype=np.int8))
+    instances.create_array("instance_key", data=np.array([201, 202], dtype=np.uint64))
+    instances.create_array("refined_row_ids", data=np.array([11, 12], dtype=np.int64))
+    instances.create_array("source_detect_row_index", data=np.array([0, 1], dtype=np.int32))
 
     crop_parent = root.create_group("crop_runs")
     crop_run = crop_parent.create_group("crop_001")
@@ -127,6 +132,9 @@ def _build_root() -> _FakeGroup:
         ),
     )
     crop_run.create_array("frame_counts", data=np.array([1, 1, 1], dtype=np.int32))
+    crop_run.create_array("instance_key", data=np.array([301, 302, 303], dtype=np.uint64))
+    crop_run.create_array("source_refined_row_ids", data=np.array([11, 12, 13], dtype=np.int64))
+    crop_run.create_array("source_detect_row_index", data=np.array([0, 1, -1], dtype=np.int32))
 
     root.create_group("arena_assignment_runs")
     return root
@@ -218,6 +226,16 @@ def _set_multiarena_crop_rows(
     crop_run["frame_counts"] = _FakeArray(
         np.bincount(frame_indices, minlength=n_frames).astype(np.int32)
     )
+    row_count = int(frame_indices.shape[0])
+    crop_run["instance_key"] = _FakeArray(
+        np.arange(301, 301 + row_count, dtype=np.uint64)
+    )
+    crop_run["source_refined_row_ids"] = _FakeArray(
+        np.arange(11, 11 + row_count, dtype=np.int64)
+    )
+    crop_run["source_detect_row_index"] = _FakeArray(
+        np.arange(row_count, dtype=np.int32)
+    )
 
 
 def _four_square_rois() -> list[dict[str, object]]:
@@ -274,7 +292,7 @@ def test_assign_arenas_spatial_prefers_sparse_refined_instances(monkeypatch: pyt
     monkeypatch.setattr(mod, "get_run_group", fake_get_run_group)
     monkeypatch.setattr(mod, "infer_experiment_setup", lambda _attrs: SimpleNamespace(setup_type="single_dish", num_dishes=1, source="experiment_setup"))
     monkeypatch.setattr(mod, "get_single_dish_roi_from_mask", fake_get_single_dish_roi_from_mask)
-    monkeypatch.setattr(mod, "write_single_subject_per_arena_tracking_run", fake_write_tracking_run)
+    monkeypatch.setattr(mod, "write_tracking_run", fake_write_tracking_run)
     monkeypatch.setattr(mod, "emit_stage_completion", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "build_stage_provenance", lambda **kwargs: {"ok": True})
     monkeypatch.setattr(mod, "write_stage_provenance", lambda *args, **kwargs: None)
@@ -303,6 +321,10 @@ def test_assign_arenas_spatial_prefers_sparse_refined_instances(monkeypatch: pyt
     assert captured["source_refined_run"] == "refined_001"
     assert captured["source_detect_run"] == "detect_source_001"
     assert root["arena_assignment_runs"]["arena_assignment_001"].attrs["assignment_source"] == "refined_instances"
+    assert captured["instance_key"].tolist() == [201, 202]
+    assert captured["source_refined_row_ids"].tolist() == [11, 12]
+    assert captured["source_detect_row_index"].tolist() == [0, 1]
+    assert captured["expected_source_rowset_fingerprint"].is_complete
     assert result["assigned_detections"] == 2
 
 
@@ -333,7 +355,7 @@ def test_assign_arenas_spatial_falls_back_to_raw_when_instances_missing(monkeypa
     monkeypatch.setattr(mod, "get_run_group", fake_get_run_group)
     monkeypatch.setattr(mod, "infer_experiment_setup", lambda _attrs: SimpleNamespace(setup_type="single_dish", num_dishes=1, source="experiment_setup"))
     monkeypatch.setattr(mod, "get_single_dish_roi_from_mask", fake_get_single_dish_roi_from_mask)
-    monkeypatch.setattr(mod, "write_single_subject_per_arena_tracking_run", fake_write_tracking_run)
+    monkeypatch.setattr(mod, "write_tracking_run", fake_write_tracking_run)
     monkeypatch.setattr(mod, "emit_stage_completion", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "build_stage_provenance", lambda **kwargs: {"ok": True})
     monkeypatch.setattr(mod, "write_stage_provenance", lambda *args, **kwargs: None)
@@ -397,7 +419,7 @@ def test_assign_arenas_spatial_can_track_explicit_crop_rowset(
     monkeypatch.setattr(mod, "get_run_group", fake_get_run_group)
     monkeypatch.setattr(mod, "infer_experiment_setup", lambda _attrs: SimpleNamespace(setup_type="single_dish", num_dishes=1, source="experiment_setup"))
     monkeypatch.setattr(mod, "get_single_dish_roi_from_mask", fake_get_single_dish_roi_from_mask)
-    monkeypatch.setattr(mod, "write_single_subject_per_arena_tracking_run", fake_write_tracking_run)
+    monkeypatch.setattr(mod, "write_tracking_run", fake_write_tracking_run)
     monkeypatch.setattr(mod, "emit_stage_completion", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "build_stage_provenance", lambda **kwargs: {"ok": True})
     monkeypatch.setattr(mod, "write_stage_provenance", lambda *args, **kwargs: None)
@@ -450,7 +472,7 @@ def test_assign_arenas_spatial_accepts_external_crop_recorder_rowset(
         lambda _attrs: SimpleNamespace(setup_type="single_dish", num_dishes=1, source="experiment_setup"),
     )
     monkeypatch.setattr(mod, "get_single_dish_roi_from_mask", fake_get_single_dish_roi_from_mask)
-    monkeypatch.setattr(mod, "write_single_subject_per_arena_tracking_run", fake_write_tracking_run)
+    monkeypatch.setattr(mod, "write_tracking_run", fake_write_tracking_run)
 
     result = assign_arenas_spatial(
         "/tmp/fake.zarr",
@@ -502,7 +524,7 @@ def test_assign_arenas_spatial_accepts_clipped_collection_proxy_rowset(
         lambda _attrs: SimpleNamespace(setup_type="single_dish", num_dishes=1, source="experiment_setup"),
     )
     monkeypatch.setattr(mod, "get_single_dish_roi_from_mask", fake_get_single_dish_roi_from_mask)
-    monkeypatch.setattr(mod, "write_single_subject_per_arena_tracking_run", fake_write_tracking_run)
+    monkeypatch.setattr(mod, "write_tracking_run", fake_write_tracking_run)
 
     result = assign_arenas_spatial(
         "/tmp/fake.zarr",
@@ -568,9 +590,13 @@ def test_assign_arenas_spatial_tracks_four_subjects_in_four_subarenas(
     track_group = track_parent[track_parent.attrs["latest"]]
     assert track_group.attrs["source_rowset_path"] == "crop_runs/crop_001"
     assert track_group.attrs["source_arena_assignment_run"] == "arena_assignment_001"
+    assert track_group.attrs["tracking_identity_mode"] == "instance_key"
+    assert track_group.attrs["source_rowset_fingerprint_status"] == "complete"
+    assert assign_group.attrs["source_rowset_fingerprint"] == track_group.attrs["source_rowset_fingerprint"]
     assert track_group["track_ids"][:].tolist() == [0, 1, 2, 3]
     assert track_group["arena_ids"][:].tolist() == [10, 20, 30, 40]
     assert track_group["track_arena_ids"][:].tolist() == [10, 20, 30, 40]
+    assert track_group["instance_key"][:].tolist() == [301, 302, 303, 304]
     assert track_group.attrs["num_tracks"] == 4
     assert track_group.attrs["tracking_qc_state"] == "ok"
 

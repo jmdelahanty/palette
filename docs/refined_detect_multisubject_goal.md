@@ -9,6 +9,11 @@ Purpose: define the long-term target architecture for refined detect storage
 once Palette supports true multi-subject detect and tracking, while preserving
 the current single-subject workflow until a deliberate migration is chosen.
 
+Current-state note (2026-07-09): the sparse `instances/` target described here
+is now active. See `docs/refined_detect_sparse_instances_schema.md` and
+`docs/instance_track_subject_identity_contract.md`. This file is retained as
+the migration rationale.
+
 ## Scope
 
 This design decides:

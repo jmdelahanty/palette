@@ -192,15 +192,19 @@ Recommended fingerprint model:
 
 ### Phase 3: Spatial Assignment And Tracking
 
-- [ ] Keep `arena_assignment_runs` spatial-only.
-- [ ] Record source rowset path, source revision, and source fingerprint on
+- [x] Keep `arena_assignment_runs` spatial-only.
+- [x] Record source rowset path, source revision, and source fingerprint on
       arena assignment runs.
 - [ ] Fix schema drift between `ARENA_ASSIGNMENT_SPEC` and the writer
       (`confidence` vs `n_detections_per_arena`).
-- [ ] Keep `single_subject_per_arena` as the strict current workflow.
+- [x] Keep `single_subject_per_arena` as the strict current workflow, now
+      dispatched through the method-neutral `TrackingObservations` /
+      `TrackingResult` API.
 - [ ] Add a separate multi-subject tracking method with the same public
       `tracking_runs` contract.
-- [ ] Tracking rows should include:
+- [ ] Tracking rows now include the stable observation/source lineage subset;
+      confidence/status and identity events remain method/review work:
+  - `instance_key`
   - `track_ids`
   - `arena_ids`
   - `source_row_indices`

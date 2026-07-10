@@ -40,6 +40,11 @@ from fisheye.shared.stage_provenance import (
 )
 from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
+from fisheye.shared.rowset_fingerprint import (
+    RowsetFingerprint,
+    build_group_rowset_fingerprint,
+    resolve_rowset_edit_revision,
+)
 from fisheye.shared.zarr.chunk_profiles import (
     geometry_preload_chunks_for_shape,
     stamp_geometry_preload_attrs,
@@ -155,6 +160,8 @@ class OfflinePositionSource:
     detection_source: Optional[np.ndarray]
     path: str
     kind: str
+    instance_key: Optional[np.ndarray]
+    rowset_fingerprint: RowsetFingerprint
 
 
 def resolve_keypoint_group(
@@ -408,6 +415,7 @@ def load_offline_position_source(
     *,
     crop_run_name: str,
     detection: Optional[DetectionResolution],
+    root: Optional[zarr.Group] = None,
 ) -> OfflinePositionSource:
     """Load the row-aligned bbox/frame source for offline keypoint motion.
 
@@ -430,6 +438,13 @@ def load_offline_position_source(
                 f"{int(frame_indices.shape[0])} rows but bbox_norm_coords has "
                 f"{int(bbox_norm_coords.shape[0])} rows."
             )
+        path = f"crop_runs/{crop_run_name}"
+        revision = resolve_rowset_edit_revision(crop_group.attrs)
+        fingerprint = build_group_rowset_fingerprint(
+            crop_group,
+            source_rowset_path=path,
+            source_edit_revision=revision,
+        )
         return OfflinePositionSource(
             bbox_norm_coords=bbox_norm_coords,
             frame_indices=frame_indices,
@@ -438,8 +453,14 @@ def load_offline_position_source(
                 if "detection_source" in crop_group
                 else None
             ),
-            path=f"crop_runs/{crop_run_name}",
+            path=path,
             kind="crop_rows",
+            instance_key=(
+                np.asarray(crop_group["instance_key"][:], dtype=np.uint64).reshape(-1)
+                if "instance_key" in crop_group
+                else None
+            ),
+            rowset_fingerprint=fingerprint,
         )
 
     if detection is None:
@@ -449,6 +470,15 @@ def load_offline_position_source(
         )
 
     detection_group = detection.group
+    revision_sources: list[Mapping[str, Any]] = [detection_group.attrs]
+    if root is not None and detection.is_refined and detection.parent_path in root:
+        revision_sources.append(root[detection.parent_path].attrs)
+    revision = resolve_rowset_edit_revision(*revision_sources)
+    fingerprint = build_group_rowset_fingerprint(
+        detection_group,
+        source_rowset_path=detection.path,
+        source_edit_revision=revision,
+    )
     return OfflinePositionSource(
         bbox_norm_coords=detection_group["bbox_norm_coords"][:],
         frame_indices=detection_group["frame_indices"][:].astype(np.int64, copy=False),
@@ -459,6 +489,12 @@ def load_offline_position_source(
         ),
         path=detection.path,
         kind="detection_rows",
+        instance_key=(
+            np.asarray(detection_group["instance_key"][:], dtype=np.uint64).reshape(-1)
+            if "instance_key" in detection_group
+            else None
+        ),
+        rowset_fingerprint=fingerprint,
     )
 
 
@@ -2660,6 +2696,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             crop_group_offline,
             crop_run_name=keypoints_offline.crop_run,
             detection=detection_offline,
+            root=root,
         )
         bbox_norm_offline = position_source_offline.bbox_norm_coords
         frame_indices_offline = position_source_offline.frame_indices
@@ -2713,6 +2750,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 else None
             ),
             expected_source_rowset_path=position_source_offline.path,
+            expected_instance_key=position_source_offline.instance_key,
+            expected_source_rowset_fingerprint=position_source_offline.rowset_fingerprint,
             return_metadata=True,
         )
         track_ids_offline = track_ids_offline.astype(np.int64, copy=False)
@@ -2895,6 +2934,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             "crop_run": keypoints_offline.crop_run,
                             "source_tracking_run": tracking_metadata.get("track_run"),
                             "source_arena_assignment_run": tracking_metadata.get("source_arena_assignment_run"),
+                            "source_tracking_rowset_fingerprint": tracking_metadata.get("source_rowset_fingerprint"),
                         }
                         if tracking_metadata:
                             offline_inputs["tracking_metadata"] = tracking_metadata
@@ -2950,6 +2990,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                                 "hysteresis_band_policy": args.hysteresis_band_policy if not args.no_hysteresis else None,
                                 "source_tracking_run": tracking_metadata.get("track_run"),
                                 "source_arena_assignment_run": tracking_metadata.get("source_arena_assignment_run"),
+                                "source_tracking_rowset_fingerprint": tracking_metadata.get("source_rowset_fingerprint"),
                                 "inputs": offline_inputs,
                                 "summary": summaries_offline,
                                 "num_tracks": len(ordered_ids_offline),

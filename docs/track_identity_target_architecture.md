@@ -10,6 +10,9 @@ in fisheye so the pipeline can correctly support:
 - multiple dishes in one camera view
 - multiple subjects across multiple dishes
 
+Current authoritative contract: `docs/instance_track_subject_identity_contract.md`.
+This document retains the longer target-architecture rationale.
+
 This document is the proposed follow-on to
 [`track_assignment_id_status.md`](./archive/track_assignment_id_status.md)
 (archived; captured the pre-`tracking_runs` state — see

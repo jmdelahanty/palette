@@ -1,6 +1,6 @@
 # Tracking Runs Contract Status
 
-Date anchored: 2026-03-06
+Date anchored: 2026-07-09
 
 Purpose: document the implemented `tracking_runs` contract after the
 `arena_assignment` rename and the `single_subject_per_arena` tracking work.
@@ -8,6 +8,9 @@ Purpose: document the implemented `tracking_runs` contract after the
 ## Executive Summary
 
 `tracking_runs` is now active architecture, not a legacy side path.
+
+The authoritative identity semantics now live in
+[`instance_track_subject_identity_contract.md`](./instance_track_subject_identity_contract.md).
 
 - [`src/fisheye/tracking/arena_assignment.py`](../src/fisheye/tracking/arena_assignment.py)
   writes `tracking_runs/<run>` automatically after a successful
@@ -66,8 +69,16 @@ Current required arrays under `tracking_runs/<run>/`:
 | `arena_ids` | Arena assignment per source row. |
 | `frame_indices` | Copied frame index per source row. |
 | `source_row_indices` | `0..n_rows-1` index into the bound source rowset. |
+| `instance_key` | Observation identity copied by modern keyed runs; absent only for legacy positional sources. |
+| `source_refined_row_ids` | Optional refined-detect logical row identity. |
+| `source_detect_row_index` | Optional raw detect lineage. |
 | `track_ids_present` | Sorted list of emitted real track IDs. |
 | `track_arena_ids` | Arena ID parallel to `track_ids_present`. |
+
+New runs also record an order-independent source-rowset fingerprint covering
+the exact rowset path, row count, optional edit revision, and sorted
+`instance_key` digest. Keyed consumers join assignments by `instance_key` and
+fail closed on membership/fingerprint mismatch.
 
 ## Persisted Attrs
 
@@ -155,8 +166,10 @@ Current behavior:
 - `tracks` is considered downstream of `arena_assignment`
 - status is presence-based at the run-group level
 - tracking QA is also exposed as a structured `tracking_qc_state`
-- registry rows do not currently verify detailed lineage between
-  `tracking_runs` and `arena_assignment_runs`
+- registry rows verify the selected tracking run's
+  `source_arena_assignment_run` and recorded source-rowset fingerprint against
+  the selected arena-assignment run, rendering mismatches stale; writers and
+  keyed consumers perform the stronger current-rowset verification
 
 ### Tracking Readiness Guard
 
@@ -240,6 +253,10 @@ Policy reference:
 
 Today `track_id` is separate from `arena_id`, but it is still derived entirely
 from occupied arenas. There is not yet a multi-subject temporal identity model.
+
+The method is now invoked through the shared `fisheye.tracking.build_tracking`
+input/result contract, so a future method can preserve the same writer and
+consumer surfaces.
 
 ### 5. A few descriptions outside the tracking module are stale
 
