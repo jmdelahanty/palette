@@ -1,7 +1,7 @@
 # Subject-Mask Finalizer And Publication Status
 
 **Date:** 2026-07-09
-**Status:** current cluster diagnostic, locally validated implementation, and pending full-run benchmark checklist
+**Status:** current cluster diagnostic, completed full-run storage/performance gates, and pending PRFS publication canary
 
 ## Scope
 
@@ -188,9 +188,10 @@ chunks and a driver-merged sealed write. Workers return fixed-size metric
 payloads; only the driver writes the large physical metric chunks after worker
 compute is complete. This avoids the unsafe case where several 256-row worker
 tasks perform read-modify-write operations inside one 16384-row Zarr chunk.
-Focused and broader unit suites pass. The full node-local staged run and
-separate PRFS publication canary for this expanded common-metric layout are
-still pending.
+Focused and broader unit suites pass. A clean-commit full node-local staged run
+also completed successfully and reduced the refined-run inventory to 28119
+files. A same-allocation position-balanced comparison found no performance
+regression. The separate PRFS publication canary is still pending.
 
 ### Zarr Chunk-Size And Sharding Guidance
 
@@ -249,7 +250,8 @@ the same production-matched `[256, 1, 512, 512]` dense-mask layout:
 
 | backend | workers | finalizer seconds | rows/s | fixed-shape compute seconds | output files |
 |---|---:|---:|---:|---:|---:|
-| `process_shards` processes | 16 | 279.18 | 430.63 | 255.78 | 48639 |
+| current `process_shards`, expanded common metrics | 16 | 433.17 | 277.54 | 395.95 | 28119 |
+| earlier `process_shards`, first metric layout | 16 | 279.18 | 430.63 | 255.78 | 48639 |
 | delayed-task Dask processes | 16 | 451.72 | 266.14 | 414.55 | 48639 |
 
 The earlier dense-row-128 comparison produced the same ordering:
@@ -257,28 +259,49 @@ The earlier dense-row-128 comparison produced the same ordering:
 906.93 seconds. That run is useful for backend comparison but not for the final
 production file count because its dense mask chunk was `[128, 1, 512, 512]`.
 
-The production-matched staged run contains:
+The production-matched staged inventories are now:
 
-| subtree | files |
-|---|---:|
-| full refined run | 48639 |
-| `masks_roi` | 1875 |
-| `components/` | 33937 |
-| `metrics/` | 11257 |
+| subtree | published reference | first metric layout | expanded common metrics |
+|---|---:|---:|---:|
+| full refined run | 66087 | 48639 | 28119 |
+| `masks_roi` | 1875 | 1875 | 1875 |
+| `components/` | 51385 | 33937 | 24619 |
+| `metrics/` | 11257 | 11257 | 55 |
+| `relations/` | n/a | 942 | 942 |
 
-This is 17448 fewer files than the published 66087-file reference, a reduction
-of about 26.4%. The reduction is almost entirely in sealed body/swim
-finalization metrics. That run established common metrics and contours as the
-next publication targets.
+The expanded layout removes 20520 files from the first-layout staged run
+(42.2%) and 37968 files from the published reference (57.5%). Run-level
+`metrics/` alone falls by 11202 files; the additional component reduction comes
+from large spatial/topology metric and fingerprint chunks.
 
 This was not an unchanged-layout run. It already used the working-tree
 `16384`-row, driver-merged layout for sealed component finalization metrics.
 It did **not** yet apply the proposed large chunks to common run metrics and
 other sealed component arrays, and it still wrote the production full ragged
 contours. Therefore 48639 is the measured result of the first layout change,
-not the expected endpoint of the publication cleanup. The common-metric change
-is now implemented and locally validated, but its full-run file count has not
-yet been measured.
+not the expected endpoint of the publication cleanup. The expanded
+common-metric canary is LSF job `153050747`, run from clean commit `cef17a9` on
+`h07u24`; it completed with empty stderr, 90.1% sampled CPU efficiency across
+16 allocated slots, and 28119 files.
+
+Do not attribute the current canary's 433.17-second duration to the layout. The
+279.18-second first-layout run executed on `h06u02`, while the current run
+executed on `h07u24`, and nearly every compute phase—not just metric
+persistence—was slower. The new driver-owned common metric writes themselves
+took about 0.24 seconds total.
+
+LSF job `153050823` resolved the performance question on `h07u24`. It compared
+the exact restored `46b3fe1` source with clean candidate `cef17a9` over the same
+4096-row local copy in `AB`, `BA`, `AB`, `BA` order:
+
+| implementation | four finalizer runs, seconds | median seconds | median CPU seconds | median process-tree RSS |
+|---|---|---:|---:|---:|
+| restored baseline | 30.442, 28.868, 28.627, 28.487 | 28.748 | 195.985 | 8.68 GiB |
+| expanded common metrics | 28.706, 28.472, 28.524, 28.409 | 28.498 | 194.010 | 8.74 GiB |
+
+The candidate was about 0.9% faster by median finalizer time, used about 1.0%
+less median CPU time, and used about 0.7% more median RSS. Treat that as
+performance-neutral rather than a speedup. All 122 arrays matched exactly.
 
 ### Dask-Array Row-Window Result
 
@@ -608,8 +631,9 @@ mutability-aware policy rather than one row chunk to every array.
 | optional full contour | ragged `contours/{ptr,len,points_xy}` | explicit analysis/archive/export build only | no in-place row edits; regenerate packed artifact |
 
 The measured common `metrics/` arrays contain 11250 payload chunks plus seven
-metadata files. The new-run writer now uses `[16384, 4, ...]`, requiring at
-most eight payload chunks per array: about 55 total files rather than 11257.
+metadata files in the reference layout. The new-run writer uses
+`[16384, 4, ...]`, requiring eight payload chunks per array: the full-run canary
+measured 55 total files rather than 11257.
 `process_shards` workers return their small fixed-shape metric/fingerprint
 payloads without writing those arrays. The driver merges all rows, stacks the
 full component axis, and writes each run metric once; component metrics and
@@ -946,6 +970,9 @@ to the fixed-size sampled representation.
   production promotion remains gated on the full-run canary.
 - New run-level common metrics use `[16384, C, ...]`; component
   spatial/topology metrics and source fingerprints use `[16384, ...]`.
+- The clean-commit 120221-row staged canary completed successfully with 28119
+  files: 57.5% fewer than the published reference and 42.2% fewer than the
+  first metric-layout staged run.
 - Interactive and browser mask saves leave derived arrays byte-unchanged and
   mark their affected row/component scope stale; explicit maintenance refresh
   remains available.
@@ -973,8 +1000,8 @@ to the fixed-size sampled representation.
 - The working-tree writeback lock is run-scoped rather than per-physical-chunk;
   this is safe but limits concurrent saves until stale metadata is made
   transaction-safe at finer granularity.
-- The full 120221-row staged benchmark and PRFS publication canary have not yet
-  been rerun for the expanded common-metric layout.
+- The PRFS hidden-target publication canary has not yet been run for the
+  expanded common-metric layout.
 - Optional Crimson contour and eye-geometry reads are deferred from startup but
   are still requested automatically rather than only when visible.
 
@@ -982,8 +1009,9 @@ to the fixed-size sampled representation.
 
 1. Use the existing publish telemetry in the next layout canary.
    Compare file count, total bytes, top-level subtree file counts, publish
-   backend, and publish duration against both the 66087-file published reference
-   and the 48639-file first-layout staged run.
+   backend, and publish duration for the 28119-file expanded layout against both
+   the 66087-file published reference and the 48639-file first-layout staged
+   run.
 
 2. Separate Crimson's mask-fill, contour, and eye-geometry read paths.
    Do not automatically attach optional contour reads to mask-chunk prefetch.
