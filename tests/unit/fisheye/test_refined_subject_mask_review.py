@@ -827,7 +827,35 @@ def test_load_refined_component_source_runs_falls_back_to_coarse_subject_source_
     assert refined.group["components/eye_right/provenance"].attrs["source_stage"] == "refined_eye_masks_runs"
 
 
-def test_save_refined_subject_roi_updates_edit_applied_metrics_and_reasons() -> None:
+def _snapshot_refined_subject_derived_arrays(run: zarr.Group) -> dict[str, np.ndarray]:
+    live_component_arrays = {
+        "edit_applied",
+        "manual_override",
+        "source_row_stale",
+        "row_revision",
+        "row_updated_at_utc_bytes",
+        "row_update_reason_bytes",
+    }
+    snapshot: dict[str, np.ndarray] = {}
+
+    def _collect(group: zarr.Group, prefix: str, *, skip_live: bool = False) -> None:
+        for name, member in group.members():
+            if skip_live and str(name) in live_component_arrays:
+                continue
+            path = f"{prefix}/{name}" if prefix else str(name)
+            if isinstance(member, zarr.Array):
+                snapshot[path] = np.asarray(member[:]).copy()
+            elif isinstance(member, zarr.Group):
+                _collect(member, path, skip_live=False)
+
+    _collect(run["metrics"], "metrics")
+    for component_name, component_group in run["components"].members():
+        if isinstance(component_group, zarr.Group):
+            _collect(component_group, f"components/{component_name}", skip_live=True)
+    return snapshot
+
+
+def test_save_refined_subject_roi_writes_authority_and_marks_derived_stale() -> None:
     root = _build_subject_review_root()
     source, refined = mod.prepare_refined_subject_run(
         root,
@@ -835,6 +863,7 @@ def test_save_refined_subject_roi_updates_edit_applied_metrics_and_reasons() -> 
         refined_run="refined_subject_masks_001",
         components=("subject_body", "swim_bladder"),
     )
+    derived_before = _snapshot_refined_subject_derived_arrays(refined.group)
 
     edited = np.asarray(refined.group["masks_roi"][0], dtype=np.uint8)
     edited[0, 1:7, 1:7] = 0
@@ -853,25 +882,10 @@ def test_save_refined_subject_roi_updates_edit_applied_metrics_and_reasons() -> 
 
     edit_applied = np.asarray(run["edit_applied"][0], dtype=bool)
     np.testing.assert_array_equal(edit_applied, np.asarray([True, True], dtype=bool))
-
-    mask_present = np.asarray(run["metrics/mask_present"][0], dtype=bool)
-    area_px = np.asarray(run["metrics/area_px"][0], dtype=np.float32)
-    centroid_xy = np.asarray(run["metrics/centroid_xy"][0], dtype=np.float32)
-    centroid_valid = np.asarray(run["metrics/centroid_valid"][0], dtype=bool)
-    bbox_xyxy = np.asarray(run["metrics/bbox_xyxy"][0], dtype=np.float32)
-    bbox_valid = np.asarray(run["metrics/bbox_valid"][0], dtype=bool)
-    np.testing.assert_array_equal(mask_present, np.asarray([False, True], dtype=bool))
-    np.testing.assert_allclose(area_px, np.asarray([0.0, 4.0], dtype=np.float32))
-    np.testing.assert_allclose(
-        centroid_xy,
-        np.asarray([[0.0, 0.0], [4.5, 4.5]], dtype=np.float32),
-    )
-    np.testing.assert_array_equal(centroid_valid, np.asarray([False, True], dtype=bool))
-    np.testing.assert_allclose(
-        bbox_xyxy,
-        np.asarray([[0.0, 0.0, 0.0, 0.0], [4.0, 4.0, 5.0, 5.0]], dtype=np.float32),
-    )
-    np.testing.assert_array_equal(bbox_valid, np.asarray([False, True], dtype=bool))
+    derived_after = _snapshot_refined_subject_derived_arrays(run)
+    assert derived_after.keys() == derived_before.keys()
+    for path, before in derived_before.items():
+        np.testing.assert_array_equal(derived_after[path], before, err_msg=path)
 
     body_group = run["components/subject_body"]
     swim_group = run["components/swim_bladder"]
@@ -882,12 +896,6 @@ def test_save_refined_subject_roi_updates_edit_applied_metrics_and_reasons() -> 
     assert bool(np.asarray(body_group["manual_override"][0], dtype=bool)) is True
     assert bool(np.asarray(swim_group["manual_override"][0], dtype=bool)) is True
     assert bool(np.asarray(body_group["source_row_stale"][0], dtype=bool)) is False
-    body_reasons = read_reason_labels(body_group)
-    swim_reasons = read_reason_labels(swim_group)
-    assert body_reasons is not None
-    assert swim_reasons is not None
-    assert body_reasons[0] == "manual_correction"
-    assert swim_reasons[0] == "manual_correction"
     assert bool(run.attrs["derived_mask_caches_stale"]) is True
     assert bool(run.attrs["metrics_stale"]) is True
     assert bool(run.attrs["contours_stale"]) is True
@@ -897,45 +905,6 @@ def test_save_refined_subject_roi_updates_edit_applied_metrics_and_reasons() -> 
     assert int(swim_group["row_revision"][0]) == 1
     assert int(body_group["row_revision"][1]) == 0
     assert int(swim_group["row_revision"][1]) == 0
-    np.testing.assert_allclose(
-        np.asarray(body_group["metrics/largest_component_fraction"][0], dtype=np.float32),
-        np.float32(0.0),
-    )
-    np.testing.assert_allclose(
-        np.asarray(body_group["metrics/sigma_noise"][0], dtype=np.float32),
-        np.float32(0.0),
-    )
-    np.testing.assert_allclose(
-        np.asarray(body_group["metrics/curvature_var"][0], dtype=np.float32),
-        np.float32(0.0),
-    )
-    np.testing.assert_allclose(
-        np.asarray(body_group["metrics/ipr"][0], dtype=np.float32),
-        np.float32(0.0),
-    )
-    np.testing.assert_allclose(
-        np.asarray(body_group["metrics/solidity"][0], dtype=np.float32),
-        np.float32(0.0),
-    )
-    np.testing.assert_array_equal(
-        np.asarray(body_group["metrics/component_count"][0], dtype=np.int32),
-        np.int32(0),
-    )
-    np.testing.assert_array_equal(
-        np.asarray(swim_group["metrics/component_count"][0], dtype=np.int32),
-        np.int32(1),
-    )
-    np.testing.assert_allclose(
-        np.asarray(swim_group["metrics/largest_component_fraction"][0], dtype=np.float32),
-        np.float32(1.0),
-    )
-    assert float(np.asarray(swim_group["metrics/sigma_noise"][0], dtype=np.float32)) > 0.0
-    assert float(np.asarray(swim_group["metrics/curvature_var"][0], dtype=np.float32)) == 0.0
-    assert float(np.asarray(swim_group["metrics/ipr"][0], dtype=np.float32)) > 1.0
-    np.testing.assert_allclose(
-        np.asarray(swim_group["metrics/solidity"][0], dtype=np.float32),
-        np.float32(1.0),
-    )
     assert body_provenance.attrs["last_update_stage"] == mod.REFINED_SUBJECT_STAGE_NAME
     assert body_provenance.attrs["last_update_mode"] == "interactive"
     assert body_provenance.attrs["last_update_method"] == mod.DEFAULT_RUN_METHOD
@@ -1353,6 +1322,7 @@ def test_apply_refined_subject_roi_rows_updates_only_requested_component() -> No
         refined_run="refined_subject_masks_001",
         components=("subject_body", "swim_bladder"),
     )
+    derived_before = _snapshot_refined_subject_derived_arrays(refined.group)
 
     edited_batch = np.stack(
         [
@@ -1396,16 +1366,13 @@ def test_apply_refined_subject_roi_rows_updates_only_requested_component() -> No
     swim_group = run["components/swim_bladder"]
     body_provenance = body_group["provenance"]
     swim_provenance = swim_group["provenance"]
-    body_reasons = read_reason_labels(body_group)
-    swim_reasons = read_reason_labels(swim_group)
-    assert body_reasons is not None
-    assert swim_reasons is not None
-    assert body_reasons.tolist() == ["manual_correction", "copied_from_source"]
-    assert swim_reasons.tolist() == ["clean", "clean"]
-    np.testing.assert_allclose(
-        np.asarray(swim_group["area_px"][:], dtype=np.float32),
-        np.asarray([0.0, 0.0], dtype=np.float32),
-    )
+    derived_after = _snapshot_refined_subject_derived_arrays(run)
+    assert derived_after.keys() == derived_before.keys()
+    for path, before in derived_before.items():
+        np.testing.assert_array_equal(derived_after[path], before, err_msg=path)
+    assert bool(run.attrs["metrics_stale"]) is True
+    assert bool(run.attrs["contours_stale"]) is True
+    assert run.attrs["derived_mask_caches_stale_component_names"] == ["subject_body"]
     assert body_provenance.attrs["last_update_mode"] == "interactive"
     assert body_provenance.attrs["last_update_method"] == mod.DEFAULT_RUN_METHOD
     assert body_provenance.attrs["updated_at_utc"] == run.attrs["updated_at_utc"]

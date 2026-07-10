@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from dataclasses import field
 from dataclasses import replace
 from datetime import datetime, timezone
-import math
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional, Sequence
 
@@ -194,6 +193,8 @@ _FINALIZATION_METRIC_NAMES = (
 )
 FINALIZATION_METRIC_ROW_CHUNK = 16384
 FINALIZATION_METRIC_WRITE_POLICY = "driver_merged_sealed_v1"
+COMMON_DERIVED_METRIC_ROW_CHUNK = 16384
+COMMON_DERIVED_METRIC_WRITE_POLICY = "driver_merged_sealed_v1"
 _COMPONENT_METRIC_FINALIZATION_SOURCES = {
     "component_count": ("component_count_after", np.int32),
     "largest_component_fraction": ("largest_component_fraction_after", np.float32),
@@ -374,6 +375,15 @@ class _ComponentMetricPayload:
     spatial_metrics: dict[str, np.ndarray]
     component_metrics: dict[str, np.ndarray]
     reason_labels: np.ndarray
+
+
+@dataclass(frozen=True)
+class _CanonicalComponentChunkResult:
+    mask_present: np.ndarray
+    reason_labels: np.ndarray
+    spatial_metrics: dict[str, np.ndarray]
+    component_metrics: dict[str, np.ndarray]
+    source_row_fingerprint: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -1635,17 +1645,9 @@ def _parallel_worker_row_chunk_size(
 ) -> int:
     """Return a worker chunk size that avoids concurrent partial Zarr chunk writes."""
 
-    metric_chunk = refined_subject_mask_metric_row_chunk(total_rows)
     requested = max(1, int(requested_chunk_size))
-    metric_aligned = max(
-        int(metric_chunk),
-        int(((requested + int(metric_chunk) - 1) // int(metric_chunk)) * int(metric_chunk)),
-    )
     dense_chunk = refined_subject_mask_storage_row_chunk(total_rows, dense_mask_row_chunk)
-    alignment = math.lcm(int(metric_chunk), int(dense_chunk))
-    if metric_aligned <= alignment:
-        return int(alignment)
-    return int(((metric_aligned + alignment - 1) // alignment) * alignment)
+    return int(max(dense_chunk, ((requested + dense_chunk - 1) // dense_chunk) * dense_chunk))
 
 
 def _worker_chunk_size_for_backend(
@@ -1668,9 +1670,7 @@ def _worker_chunk_size_for_backend(
 def _chunk_alignment_label(execution_backend: str, *, dense_mask_row_chunk: int | None = None) -> str:
     if execution_backend != _PROCESS_SHARD_EXECUTION_BACKEND:
         return "requested_chunk_size"
-    if dense_mask_row_chunk is None:
-        return "refined_subject_mask_metric_row_chunk"
-    return "refined_subject_mask_metric_row_chunk+dense_mask_row_chunk"
+    return "dense_mask_row_chunk"
 
 
 def _row_chunk_shards(
@@ -1722,12 +1722,20 @@ def _create_filled_array(
     )
 
 
-def _metric_chunks_2d(total_rows: int) -> tuple[int, int]:
+def _common_derived_metric_row_chunk(total_rows: int) -> int:
+    return max(1, min(int(COMMON_DERIVED_METRIC_ROW_CHUNK), int(total_rows)))
+
+
+def _derived_metric_chunks_2d(total_rows: int, component_count: int) -> tuple[int, int]:
+    return (_common_derived_metric_row_chunk(total_rows), int(component_count))
+
+
+def _derived_metric_chunks_lastdim(total_rows: int, component_count: int, width: int) -> tuple[int, int, int]:
+    return (_common_derived_metric_row_chunk(total_rows), int(component_count), int(width))
+
+
+def _live_metric_chunks_2d(total_rows: int) -> tuple[int, int]:
     return (refined_subject_mask_metric_row_chunk(total_rows), 1)
-
-
-def _metric_chunks_lastdim(total_rows: int, width: int) -> tuple[int, int, int]:
-    return (refined_subject_mask_metric_row_chunk(total_rows), 1, int(width))
 
 
 def _source_lineage_map(source: SourceSubjectMaskRun) -> dict[str, object | None]:
@@ -1757,27 +1765,28 @@ def _create_component_shell(
     dense_mask_row_chunk: int | None = None,
 ) -> zarr.Group:
     component_group = run_group.require_group("components").require_group(component_name)
-    metric_chunks = (refined_subject_mask_metric_row_chunk(total_rows),)
+    derived_metric_chunks = (_common_derived_metric_row_chunk(total_rows),)
+    live_metric_chunks = (refined_subject_mask_metric_row_chunk(total_rows),)
     _create_filled_array(
         component_group,
         "mask_present",
         shape=(total_rows,),
         dtype=bool,
-        chunks=metric_chunks,
+        chunks=derived_metric_chunks,
     )
     _create_filled_array(
         component_group,
         "area_px",
         shape=(total_rows,),
         dtype=np.float32,
-        chunks=metric_chunks,
+        chunks=derived_metric_chunks,
     )
     _create_filled_array(
         component_group,
         "edit_applied",
         shape=(total_rows,),
         dtype=bool,
-        chunks=metric_chunks,
+        chunks=live_metric_chunks,
     )
     component_group.attrs["source_sync_schema_id"] = REFINED_SUBJECT_SOURCE_SYNC_SCHEMA_ID
     _create_filled_array(
@@ -1785,21 +1794,21 @@ def _create_component_shell(
         "source_row_fingerprint",
         shape=(total_rows,),
         dtype=np.uint64,
-        chunks=metric_chunks,
+        chunks=derived_metric_chunks,
     )
     _create_filled_array(
         component_group,
         "manual_override",
         shape=(total_rows,),
         dtype=bool,
-        chunks=metric_chunks,
+        chunks=live_metric_chunks,
     )
     _create_filled_array(
         component_group,
         "source_row_stale",
         shape=(total_rows,),
         dtype=bool,
-        chunks=metric_chunks,
+        chunks=live_metric_chunks,
     )
     if retain_source_seeds:
         _create_filled_array(
@@ -1825,6 +1834,11 @@ def _create_component_shell(
         component_group.attrs["pectoral_fin_policy"] = DEFAULT_SUBJECT_BODY_PECTORAL_FIN_POLICY
 
     metrics_group = component_group.require_group("metrics")
+    component_group.attrs["derived_metric_row_chunk"] = int(derived_metric_chunks[0])
+    component_group.attrs["derived_metric_write_policy"] = COMMON_DERIVED_METRIC_WRITE_POLICY
+    metrics_group.attrs["surface_role"] = "sealed_derived_analysis"
+    metrics_group.attrs["row_chunk"] = int(derived_metric_chunks[0])
+    metrics_group.attrs["write_policy"] = COMMON_DERIVED_METRIC_WRITE_POLICY
     for metric_name, dtype in (
         ("component_count", np.int32),
         ("largest_component_fraction", np.float32),
@@ -1836,7 +1850,7 @@ def _create_component_shell(
             metric_name,
             shape=(total_rows,),
             dtype=dtype,
-            chunks=metric_chunks,
+            chunks=derived_metric_chunks,
         )
     for metric_name, dtype, fill_value in (
         ("sigma_noise", np.float32, np.nan),
@@ -1849,7 +1863,7 @@ def _create_component_shell(
             metric_name,
             shape=(total_rows,),
             dtype=dtype,
-            chunks=metric_chunks,
+            chunks=derived_metric_chunks,
             fill_value=fill_value,
         )
     return component_group
@@ -2023,7 +2037,7 @@ def _create_refined_run_shell(
         "edit_applied",
         shape=(total_rows, len(component_names)),
         dtype=bool,
-        chunks=_metric_chunks_2d(total_rows),
+        chunks=_live_metric_chunks_2d(total_rows),
     )
     copy_row_lineage_arrays_from_sources(run_group, _source_lineage_map(source), total_rois=total_rows)
 
@@ -2033,21 +2047,21 @@ def _create_refined_run_shell(
         "mask_present",
         shape=(total_rows, len(component_names)),
         dtype=bool,
-        chunks=_metric_chunks_2d(total_rows),
+        chunks=_derived_metric_chunks_2d(total_rows, len(component_names)),
     )
     _create_filled_array(
         metrics_group,
         "area_px",
         shape=(total_rows, len(component_names)),
         dtype=np.float32,
-        chunks=_metric_chunks_2d(total_rows),
+        chunks=_derived_metric_chunks_2d(total_rows, len(component_names)),
     )
     _create_filled_array(
         metrics_group,
         "centroid_xy",
         shape=(total_rows, len(component_names), 2),
         dtype=np.float32,
-        chunks=_metric_chunks_lastdim(total_rows, 2),
+        chunks=_derived_metric_chunks_lastdim(total_rows, len(component_names), 2),
         fill_value=np.nan,
     )
     _create_filled_array(
@@ -2055,22 +2069,26 @@ def _create_refined_run_shell(
         "centroid_valid",
         shape=(total_rows, len(component_names)),
         dtype=bool,
-        chunks=_metric_chunks_2d(total_rows),
+        chunks=_derived_metric_chunks_2d(total_rows, len(component_names)),
     )
     _create_filled_array(
         metrics_group,
         "bbox_xyxy",
         shape=(total_rows, len(component_names), 4),
         dtype=np.float32,
-        chunks=_metric_chunks_lastdim(total_rows, 4),
+        chunks=_derived_metric_chunks_lastdim(total_rows, len(component_names), 4),
     )
     _create_filled_array(
         metrics_group,
         "bbox_valid",
         shape=(total_rows, len(component_names)),
         dtype=bool,
-        chunks=_metric_chunks_2d(total_rows),
+        chunks=_derived_metric_chunks_2d(total_rows, len(component_names)),
     )
+    metrics_group.attrs["surface_role"] = "sealed_derived_analysis"
+    metrics_group.attrs["row_chunk"] = int(_common_derived_metric_row_chunk(total_rows))
+    metrics_group.attrs["component_chunk"] = int(len(component_names))
+    metrics_group.attrs["write_policy"] = COMMON_DERIVED_METRIC_WRITE_POLICY
 
     for component_name in component_names:
         _create_component_shell(
@@ -2173,6 +2191,9 @@ def _create_refined_run_shell(
             "finalization_metric_write_policy": provenance_inputs.get(
                 "finalization_metric_write_policy"
             ),
+            "common_metric_row_chunk": provenance_inputs.get("common_metric_row_chunk"),
+            "common_metric_component_chunk": provenance_inputs.get("common_metric_component_chunk"),
+            "common_metric_write_policy": provenance_inputs.get("common_metric_write_policy"),
             "write_eye_geometry": provenance_inputs.get("eye_geometry_requested"),
             "write_component_contours": provenance_inputs.get("component_contours_requested"),
             "retain_source_seeds": provenance_inputs.get("retain_source_seeds"),
@@ -2434,6 +2455,31 @@ def _write_mask_local_metrics_chunk(
         timing=timing,
         chunk_timing=chunk_timing,
     )
+    return _write_mask_local_metric_payload(
+        run_group,
+        component_name=component_name,
+        component_idx=component_idx,
+        row_slice=row_slice,
+        payload=payload,
+        metric_level=metric_level,
+        write_metric_attrs=write_metric_attrs,
+        timing=timing,
+        chunk_timing=chunk_timing,
+    )
+
+
+def _write_mask_local_metric_payload(
+    run_group: zarr.Group,
+    *,
+    component_name: str,
+    component_idx: int,
+    row_slice: slice,
+    payload: _ComponentMetricPayload,
+    metric_level: str,
+    write_metric_attrs: bool = True,
+    timing: Optional[_TimingRecorder] = None,
+    chunk_timing: Optional[dict[str, object]] = None,
+) -> _ComponentMetricWriteResult:
     spatial_metrics = payload.spatial_metrics
     mask_present = np.asarray(spatial_metrics["mask_present"], dtype=bool)
     area_px = np.asarray(spatial_metrics["area_px"], dtype=np.float32)
@@ -2519,10 +2565,11 @@ def _write_canonical_component_chunk(
     metric_level: str,
     precomputed_component_metrics: Optional[Mapping[str, np.ndarray]] = None,
     write_metric_attrs: bool = True,
+    write_derived_metrics: bool = True,
     retain_source_seeds: bool = False,
     timing: Optional[_TimingRecorder] = None,
     chunk_timing: Optional[dict[str, object]] = None,
-) -> _ComponentMetricWriteResult:
+) -> _CanonicalComponentChunkResult:
     masks_u8 = np.asarray(masks, dtype=np.uint8)
     source_u8 = np.asarray(source_masks, dtype=np.uint8)
     if "masks_roi" in run_group:
@@ -2542,19 +2589,39 @@ def _write_canonical_component_chunk(
             component_group["source_seed_masks_roi"][row_slice] = source_u8
     with _timed_chunk_phase(timing, chunk_timing, f"compute_source_row_fingerprint_{component_name}"):
         source_row_fingerprint = _compute_mask_row_fingerprints(source_u8)
-    with _timed_chunk_phase(timing, chunk_timing, f"write_source_row_fingerprint_{component_name}"):
-        component_group["source_row_fingerprint"][row_slice] = source_row_fingerprint
-    return _write_mask_local_metrics_chunk(
-        run_group,
+    metric_payload = _compute_mask_local_metric_payload(
         component_name=component_name,
-        component_idx=component_idx,
-        row_slice=row_slice,
         masks=masks_u8,
         metric_level=metric_level,
         precomputed_component_metrics=precomputed_component_metrics,
-        write_metric_attrs=write_metric_attrs,
         timing=timing,
         chunk_timing=chunk_timing,
+    )
+    if write_derived_metrics:
+        with _timed_chunk_phase(timing, chunk_timing, f"write_source_row_fingerprint_{component_name}"):
+            component_group["source_row_fingerprint"][row_slice] = source_row_fingerprint
+        write_result = _write_mask_local_metric_payload(
+            run_group,
+            component_name=component_name,
+            component_idx=component_idx,
+            row_slice=row_slice,
+            payload=metric_payload,
+            metric_level=metric_level,
+            write_metric_attrs=write_metric_attrs,
+            timing=timing,
+            chunk_timing=chunk_timing,
+        )
+    else:
+        write_result = _ComponentMetricWriteResult(
+            mask_present=np.asarray(metric_payload.spatial_metrics["mask_present"], dtype=bool),
+            reason_labels=np.asarray(metric_payload.reason_labels, dtype=object),
+        )
+    return _CanonicalComponentChunkResult(
+        mask_present=np.asarray(write_result.mask_present, dtype=bool),
+        reason_labels=np.asarray(write_result.reason_labels, dtype=object),
+        spatial_metrics={str(name): np.asarray(values) for name, values in metric_payload.spatial_metrics.items()},
+        component_metrics={str(name): np.asarray(values) for name, values in metric_payload.component_metrics.items()},
+        source_row_fingerprint=np.asarray(source_row_fingerprint, dtype=np.uint64),
     )
 
 
@@ -3092,21 +3159,21 @@ def _ensure_refined_run_metric_shell(run_group: zarr.Group, *, total_rows: int, 
         "mask_present",
         shape=(total_rows, component_count),
         dtype=bool,
-        chunks=_metric_chunks_2d(total_rows),
+        chunks=_derived_metric_chunks_2d(total_rows, component_count),
     )
     _ensure_metric_array(
         metrics_group,
         "area_px",
         shape=(total_rows, component_count),
         dtype=np.float32,
-        chunks=_metric_chunks_2d(total_rows),
+        chunks=_derived_metric_chunks_2d(total_rows, component_count),
     )
     _ensure_metric_array(
         metrics_group,
         "centroid_xy",
         shape=(total_rows, component_count, 2),
         dtype=np.float32,
-        chunks=_metric_chunks_lastdim(total_rows, 2),
+        chunks=_derived_metric_chunks_lastdim(total_rows, component_count, 2),
         fill_value=np.nan,
     )
     _ensure_metric_array(
@@ -3114,21 +3181,21 @@ def _ensure_refined_run_metric_shell(run_group: zarr.Group, *, total_rows: int, 
         "centroid_valid",
         shape=(total_rows, component_count),
         dtype=bool,
-        chunks=_metric_chunks_2d(total_rows),
+        chunks=_derived_metric_chunks_2d(total_rows, component_count),
     )
     _ensure_metric_array(
         metrics_group,
         "bbox_xyxy",
         shape=(total_rows, component_count, 4),
         dtype=np.float32,
-        chunks=_metric_chunks_lastdim(total_rows, 4),
+        chunks=_derived_metric_chunks_lastdim(total_rows, component_count, 4),
     )
     _ensure_metric_array(
         metrics_group,
         "bbox_valid",
         shape=(total_rows, component_count),
         dtype=bool,
-        chunks=_metric_chunks_2d(total_rows),
+        chunks=_derived_metric_chunks_2d(total_rows, component_count),
     )
 
 
@@ -3139,20 +3206,21 @@ def _ensure_refined_component_metric_shell(
     total_rows: int,
 ) -> zarr.Group:
     component_group = run_group.require_group("components").require_group(component_name)
-    metric_chunks = (refined_subject_mask_metric_row_chunk(total_rows),)
+    derived_metric_chunks = (_common_derived_metric_row_chunk(total_rows),)
+    live_metric_chunks = (refined_subject_mask_metric_row_chunk(total_rows),)
     _ensure_metric_array(
         component_group,
         "mask_present",
         shape=(total_rows,),
         dtype=bool,
-        chunks=metric_chunks,
+        chunks=derived_metric_chunks,
     )
     _ensure_metric_array(
         component_group,
         "area_px",
         shape=(total_rows,),
         dtype=np.float32,
-        chunks=metric_chunks,
+        chunks=derived_metric_chunks,
     )
     if "edit_applied" not in component_group:
         _create_filled_array(
@@ -3160,7 +3228,7 @@ def _ensure_refined_component_metric_shell(
             "edit_applied",
             shape=(total_rows,),
             dtype=bool,
-            chunks=metric_chunks,
+            chunks=live_metric_chunks,
         )
     metrics_group = component_group.require_group("metrics")
     for metric_name, dtype in (
@@ -3174,7 +3242,7 @@ def _ensure_refined_component_metric_shell(
             metric_name,
             shape=(total_rows,),
             dtype=dtype,
-            chunks=metric_chunks,
+            chunks=derived_metric_chunks,
         )
     for metric_name, dtype, fill_value in (
         ("sigma_noise", np.float32, np.nan),
@@ -3187,7 +3255,7 @@ def _ensure_refined_component_metric_shell(
             metric_name,
             shape=(total_rows,),
             dtype=dtype,
-            chunks=metric_chunks,
+            chunks=derived_metric_chunks,
             fill_value=fill_value,
         )
     return component_group
@@ -3457,6 +3525,108 @@ def refresh_refined_subject_mask_metrics(
     )
 
 
+def _common_metric_chunk_payload(result: _CanonicalComponentChunkResult) -> dict[str, object]:
+    return {
+        "spatial_metrics": {
+            str(name): np.asarray(values)
+            for name, values in result.spatial_metrics.items()
+        },
+        "component_metrics": {
+            str(name): np.asarray(values)
+            for name, values in result.component_metrics.items()
+        },
+        "source_row_fingerprint": np.asarray(result.source_row_fingerprint, dtype=np.uint64),
+    }
+
+
+def _merge_common_metric_chunk_payload(
+    target: dict[str, dict[str, object]],
+    *,
+    component_name: str,
+    row_slice: slice,
+    payload: Mapping[str, object],
+    total_rows: int,
+) -> None:
+    component = target.get(str(component_name))
+    raw_spatial = dict(payload.get("spatial_metrics") or {})
+    raw_component_metrics = dict(payload.get("component_metrics") or {})
+    if component is None:
+        component = {
+            "spatial_metrics": {
+                str(name): np.zeros(
+                    (int(total_rows), *tuple(np.asarray(values).shape[1:])),
+                    dtype=np.asarray(values).dtype,
+                )
+                for name, values in raw_spatial.items()
+            },
+            "component_metrics": {
+                str(name): np.zeros(
+                    (int(total_rows), *tuple(np.asarray(values).shape[1:])),
+                    dtype=np.asarray(values).dtype,
+                )
+                for name, values in raw_component_metrics.items()
+            },
+            "source_row_fingerprint": np.zeros((int(total_rows),), dtype=np.uint64),
+        }
+        target[str(component_name)] = component
+
+    spatial_arrays = dict(component["spatial_metrics"])
+    for name, values in raw_spatial.items():
+        np.asarray(spatial_arrays[str(name)])[row_slice] = np.asarray(values)
+    component["spatial_metrics"] = spatial_arrays
+
+    metric_arrays = dict(component["component_metrics"])
+    for name, values in raw_component_metrics.items():
+        metric_name = str(name)
+        if metric_name not in metric_arrays:
+            metric_arrays[metric_name] = np.zeros(
+                (int(total_rows), *tuple(np.asarray(values).shape[1:])),
+                dtype=np.asarray(values).dtype,
+            )
+        np.asarray(metric_arrays[metric_name])[row_slice] = np.asarray(values)
+    component["component_metrics"] = metric_arrays
+    np.asarray(component["source_row_fingerprint"], dtype=np.uint64)[row_slice] = np.asarray(
+        payload["source_row_fingerprint"],
+        dtype=np.uint64,
+    )
+
+
+def _write_common_run_metrics(
+    run_group: zarr.Group,
+    *,
+    component_names: Sequence[str],
+    payloads_by_component: Mapping[str, Mapping[str, object]],
+) -> None:
+    run_metrics = run_group["metrics"]
+    for name in ("mask_present", "area_px", "centroid_xy", "centroid_valid", "bbox_xyxy", "bbox_valid"):
+        component_values = [
+            np.asarray(dict(payloads_by_component[str(component_name)]["spatial_metrics"])[name])
+            for component_name in component_names
+        ]
+        run_metrics[name][:] = np.stack(component_values, axis=1)
+
+
+def _write_common_component_metrics(
+    run_group: zarr.Group,
+    *,
+    component_name: str,
+    payload: Mapping[str, object],
+    metric_level: str,
+) -> None:
+    spatial_metrics = dict(payload.get("spatial_metrics") or {})
+    component_metrics = dict(payload.get("component_metrics") or {})
+    component_group = run_group["components"][component_name]
+    component_group["mask_present"][:] = np.asarray(spatial_metrics["mask_present"], dtype=bool)
+    component_group["area_px"][:] = np.asarray(spatial_metrics["area_px"], dtype=np.float32)
+    component_group["source_row_fingerprint"][:] = np.asarray(
+        payload["source_row_fingerprint"],
+        dtype=np.uint64,
+    )
+    for name, values in component_metrics.items():
+        component_group["metrics"][str(name)][:] = np.asarray(values)
+    _set_component_metric_attrs(component_group, metric_level=metric_level)
+
+
 def _finalization_metric_chunk_payload(batch: _FinalizedComponentBatch) -> dict[str, object]:
     return {
         "metrics": {
@@ -3560,6 +3730,7 @@ def _process_and_write_finalizer_chunk_open(
     chunk_batches: dict[str, _FinalizedComponentBatch] = {}
     review_counts: dict[str, dict[str, int]] = {}
     reason_labels_by_component: dict[str, list[str]] = {}
+    common_metrics_by_component: dict[str, dict[str, object]] = {}
     finalization_metrics_by_component: dict[str, dict[str, object]] = {}
     eyes_union_assignment_summary: dict[str, object] = {}
     eye_geometry_payload: dict[str, object] | None = None
@@ -3593,10 +3764,12 @@ def _process_and_write_finalizer_chunk_open(
                 row_count=int(stop_row) - int(start_row),
             ),
             write_metric_attrs=False,
+            write_derived_metrics=False,
             retain_source_seeds=retain_source_seeds,
             timing=timing,
             chunk_timing=chunk_timing,
         )
+        common_metrics_by_component[raw_component] = _common_metric_chunk_payload(write_result)
         finalization_metrics_by_component[raw_component] = _finalization_metric_chunk_payload(batch)
         elapsed = timing.add(f"write_{raw_component}", time.perf_counter() - phase_start)
         chunk_timing[f"write_{raw_component}_seconds"] = elapsed
@@ -3634,10 +3807,12 @@ def _process_and_write_finalizer_chunk_open(
                 metric_level=metric_level,
                 precomputed_component_metrics=assignment_chunk.component_metrics.get(component_name),
                 write_metric_attrs=False,
+                write_derived_metrics=False,
                 retain_source_seeds=retain_source_seeds,
                 timing=timing,
                 chunk_timing=chunk_timing,
             )
+            common_metrics_by_component[component_name] = _common_metric_chunk_payload(write_result)
             elapsed = timing.add(f"write_{component_name}", time.perf_counter() - phase_start)
             chunk_timing[f"write_{component_name}_seconds"] = elapsed
             chunk_any |= write_result.mask_present
@@ -3655,6 +3830,7 @@ def _process_and_write_finalizer_chunk_open(
         "phase_counts": dict(timing.phase_counts),
         "review_counts": review_counts,
         "reason_labels_by_component": reason_labels_by_component,
+        "common_metrics_by_component": common_metrics_by_component,
         "finalization_metrics_by_component": finalization_metrics_by_component,
         "rows_with_nonempty_masks": int(np.count_nonzero(chunk_any)),
         "eyes_union_assignment_summary": dict(_json_safe(eyes_union_assignment_summary)),
@@ -3944,6 +4120,8 @@ def finalize_subject_mask_run(
         1,
         min(int(FINALIZATION_METRIC_ROW_CHUNK), int(total_rows)),
     )
+    common_metric_row_chunk = _common_derived_metric_row_chunk(total_rows)
+    common_metric_write_policy = COMMON_DERIVED_METRIC_WRITE_POLICY
     dense_mask_storage_chunks = refined_subject_mask_storage_chunks(
         total_rows,
         height,
@@ -4007,6 +4185,9 @@ def finalize_subject_mask_run(
         "dense_mask_storage_chunks": [int(value) for value in dense_mask_storage_chunks],
         "finalization_metric_row_chunk": int(finalization_metric_row_chunk),
         "finalization_metric_write_policy": finalization_metric_write_policy,
+        "common_metric_row_chunk": int(common_metric_row_chunk),
+        "common_metric_component_chunk": int(len(component_names)),
+        "common_metric_write_policy": common_metric_write_policy,
         "metric_level": metric_level,
         "write_eye_geometry": bool(write_eye_geometry),
         "write_component_contours": bool(write_component_contours),
@@ -4050,6 +4231,9 @@ def finalize_subject_mask_run(
         dense_mask_storage_chunks=[int(value) for value in dense_mask_storage_chunks],
         finalization_metric_row_chunk=int(finalization_metric_row_chunk),
         finalization_metric_write_policy=finalization_metric_write_policy,
+        common_metric_row_chunk=int(common_metric_row_chunk),
+        common_metric_component_chunk=int(len(component_names)),
+        common_metric_write_policy=common_metric_write_policy,
         chunk_count=int(len(chunk_ranges)),
         execution_backend=str(execution_backend),
         num_workers=normalized_num_workers,
@@ -4086,6 +4270,7 @@ def finalize_subject_mask_run(
     review_counts: dict[str, dict[str, int]] = {}
     source_payloads: dict[str, dict[str, object]] = {}
     first_batches: dict[str, _FinalizedComponentBatch] = {}
+    common_metrics_by_component: dict[str, dict[str, object]] = {}
     finalization_metrics_by_component: dict[str, dict[str, object]] = {}
     rows_with_nonempty_masks = 0
     eyes_union_assignment_summary: dict[str, object] = {}
@@ -4128,6 +4313,9 @@ def finalize_subject_mask_run(
         "dense_mask_storage_chunks": [int(value) for value in dense_mask_storage_chunks],
         "finalization_metric_row_chunk": int(finalization_metric_row_chunk),
         "finalization_metric_write_policy": finalization_metric_write_policy,
+        "common_metric_row_chunk": int(common_metric_row_chunk),
+        "common_metric_component_chunk": int(len(component_names)),
+        "common_metric_write_policy": common_metric_write_policy,
         "postcompute_backend": postcompute_backend,
         "postcompute_chunk_size": int(normalized_postcompute_chunk_size),
         "postcompute_num_workers": normalized_postcompute_num_workers,
@@ -4172,6 +4360,9 @@ def finalize_subject_mask_run(
         "dense_mask_storage_chunks": [int(value) for value in dense_mask_storage_chunks],
         "finalization_metric_row_chunk": int(finalization_metric_row_chunk),
         "finalization_metric_write_policy": finalization_metric_write_policy,
+        "common_metric_row_chunk": int(common_metric_row_chunk),
+        "common_metric_component_chunk": int(len(component_names)),
+        "common_metric_write_policy": common_metric_write_policy,
         "component_metric_level": metric_level,
         "eye_geometry_requested": bool(write_eye_geometry),
         "component_contours_requested": bool(write_component_contours),
@@ -4265,6 +4456,14 @@ def finalize_subject_mask_run(
             row_slice = slice(int(chunk_timing["start_row"]), int(chunk_timing["stop_row"]))
             for component_name, labels in dict(result.get("reason_labels_by_component") or {}).items():
                 reason_labels_by_component[str(component_name)][row_slice] = np.asarray(labels, dtype=object)
+            for component_name, payload in dict(result.get("common_metrics_by_component") or {}).items():
+                _merge_common_metric_chunk_payload(
+                    common_metrics_by_component,
+                    component_name=str(component_name),
+                    row_slice=row_slice,
+                    payload=dict(payload),
+                    total_rows=total_rows,
+                )
             for component_name, payload in dict(
                 result.get("finalization_metrics_by_component") or {}
             ).items():
@@ -4341,9 +4540,17 @@ def finalize_subject_mask_run(
                         batch,
                         row_count=int(stop_row) - int(start_row),
                     ),
+                    write_derived_metrics=False,
                     retain_source_seeds=bool(retain_source_seeds),
                     timing=timing,
                     chunk_timing=chunk_timing,
+                )
+                _merge_common_metric_chunk_payload(
+                    common_metrics_by_component,
+                    component_name=raw_component,
+                    row_slice=row_slice,
+                    payload=_common_metric_chunk_payload(write_result),
+                    total_rows=total_rows,
                 )
                 chunk_any |= write_result.mask_present
                 _merge_finalization_metric_chunk_payload(
@@ -4395,9 +4602,17 @@ def finalize_subject_mask_run(
                         source_masks=masks,
                         metric_level=metric_level,
                         precomputed_component_metrics=assignment_chunk.component_metrics.get(component_name),
+                        write_derived_metrics=False,
                         retain_source_seeds=bool(retain_source_seeds),
                         timing=timing,
                         chunk_timing=chunk_timing,
+                    )
+                    _merge_common_metric_chunk_payload(
+                        common_metrics_by_component,
+                        component_name=component_name,
+                        row_slice=row_slice,
+                        payload=_common_metric_chunk_payload(write_result),
+                        total_rows=total_rows,
                     )
                     elapsed = timing.add(f"write_{component_name}", time.perf_counter() - phase_start)
                     chunk_timing[f"write_{component_name}_seconds"] = elapsed
@@ -4422,6 +4637,41 @@ def finalize_subject_mask_run(
                 rows_total=int(total_rows),
                 total_seconds=float(chunk_timing["total_seconds"]),
             )
+
+    missing_common_metric_components = sorted(set(component_names) - set(common_metrics_by_component))
+    if missing_common_metric_components:
+        raise RuntimeError(
+            "Missing driver-merge common metrics for components: "
+            f"{missing_common_metric_components}."
+        )
+    phase_name = "write_common_run_metrics"
+    with progress.phase(
+        phase_name,
+        write_policy=COMMON_DERIVED_METRIC_WRITE_POLICY,
+        row_chunk=int(_common_derived_metric_row_chunk(total_rows)),
+        component_chunk=int(len(component_names)),
+    ):
+        with timing.phase(phase_name):
+            _write_common_run_metrics(
+                run_group,
+                component_names=component_names,
+                payloads_by_component=common_metrics_by_component,
+            )
+    for component_name in component_names:
+        phase_name = f"write_common_metrics_{component_name}"
+        with progress.phase(
+            phase_name,
+            component=component_name,
+            write_policy=COMMON_DERIVED_METRIC_WRITE_POLICY,
+            row_chunk=int(_common_derived_metric_row_chunk(total_rows)),
+        ):
+            with timing.phase(phase_name):
+                _write_common_component_metrics(
+                    run_group,
+                    component_name=component_name,
+                    payload=common_metrics_by_component[component_name],
+                    metric_level=metric_level,
+                )
 
     expected_finalization_metric_components = {
         str(component_name)
@@ -4787,6 +5037,9 @@ def finalize_subject_mask_run(
     run_group.attrs["smart_finalizer_finalization_metric_write_policy"] = (
         finalization_metric_write_policy
     )
+    run_group.attrs["smart_finalizer_common_metric_row_chunk"] = int(common_metric_row_chunk)
+    run_group.attrs["smart_finalizer_common_metric_component_chunk"] = int(len(component_names))
+    run_group.attrs["smart_finalizer_common_metric_write_policy"] = common_metric_write_policy
     run_group.attrs["smart_finalizer_chunk_count"] = int(len(chunk_ranges))
     run_group.attrs["smart_finalizer_metric_level"] = metric_level
     run_group.attrs["smart_finalizer_write_eye_geometry"] = bool(write_eye_geometry)

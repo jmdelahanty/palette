@@ -136,6 +136,12 @@ REFINED_SUBJECT_SYNC_METHOD = "sync_refined_subject_mask_metadata"
 REFINED_SUBJECT_SOURCE_UPDATE_METHOD = "check_refined_subject_source_updates"
 REFINED_SUBJECT_WRITEBACK_METHOD = "palette_write_refined_subject_mask_edit"
 DEFAULT_REFINED_SUBJECT_WRITEBACK_REASON = "crimson_refined_subject_mask_edit"
+DERIVED_UPDATE_POLICY_AUTHORITY_ONLY = "authority_only_mark_stale"
+DERIVED_UPDATE_POLICY_REFRESH = "refresh_derived"
+DERIVED_UPDATE_POLICIES = (
+    DERIVED_UPDATE_POLICY_AUTHORITY_ONLY,
+    DERIVED_UPDATE_POLICY_REFRESH,
+)
 DEFAULT_SUBJECT_BODY_COMPONENT_SCHEMA_ID = "subject_body_v1"
 DEFAULT_SUBJECT_BODY_ANATOMICAL_SCOPE = "body_core"
 DEFAULT_SUBJECT_BODY_PECTORAL_FIN_POLICY = "excluded_or_unresolved"
@@ -2558,6 +2564,57 @@ def _write_refined_subject_component_apply_rows(
     sync_source_subject_mask_stale_payload(run_group)
 
 
+def _write_refined_subject_component_authority_rows(
+    *,
+    component_sources: Mapping[str, SourceSubjectMaskRun],
+    refined: RefinedSubjectMaskRun,
+    component_name: str,
+    roi_indices: Sequence[int],
+    edited_masks_batch: np.ndarray,
+    row_update_reason: str,
+) -> None:
+    """Persist canonical pixels and minimal live state without derived writes."""
+
+    run_group = refined.group
+    comp_idx = int(refined.component_to_index[component_name])
+    masks_arr = run_group["masks_roi"]
+    edit_arr = run_group["edit_applied"]
+    component_group = run_group.require_group("components").require_group(component_name)
+    component_edit_arr = component_group.get("edit_applied")
+    manual_override_arr = component_group.get("manual_override")
+    source_row_stale_arr = component_group.get("source_row_stale")
+    pending_rows = sorted(set(int(v) for v in (component_group.attrs.get("source_update_pending_rows") or [])))
+
+    for row_offset, roi_idx in enumerate(roi_indices):
+        row = int(roi_idx)
+        binary_mask = np.asarray(edited_masks_batch[int(row_offset), comp_idx], dtype=np.uint8)
+        source_mask = _source_seed_mask_for_component(refined, component_name, row)
+        if source_mask is None:
+            source_mask = _source_mask_for_resolved_component(component_sources, component_name, row)
+        edited = not np.array_equal(binary_mask, np.asarray(source_mask, dtype=np.uint8))
+
+        masks_arr[row, comp_idx] = binary_mask
+        edit_arr[row, comp_idx] = bool(edited)
+        if component_edit_arr is not None:
+            component_edit_arr[row] = bool(edited)
+        if manual_override_arr is not None:
+            manual_override_arr[row] = bool(edited)
+        if source_row_stale_arr is not None:
+            source_row_stale_arr[row] = False
+        if row in pending_rows:
+            pending_rows.remove(row)
+
+    component_group.attrs["source_update_pending_rows"] = pending_rows
+    mark_component_rows_updated(
+        component_group,
+        roi_indices,
+        component=component_name,
+        roi_count=int(masks_arr.shape[0]),
+        reason=str(row_update_reason),
+    )
+    sync_source_subject_mask_stale_payload(run_group)
+
+
 def _finalize_refined_subject_apply(
     refined: RefinedSubjectMaskRun,
     *,
@@ -2590,6 +2647,7 @@ def _apply_refined_subject_roi_rows(
     update_method: Optional[str] = None,
     update_reason: Optional[str] = None,
     compute_workers: int = 1,
+    derived_update_policy: str = DERIVED_UPDATE_POLICY_AUTHORITY_ONLY,
 ) -> tuple[int, ...]:
     if component_sources is None:
         if source is None:
@@ -2600,6 +2658,41 @@ def _apply_refined_subject_roi_rows(
     normalized_rows = tuple(_normalize_roi_indices(roi_indices, total_rois))
     normalized_components = _normalize_refined_component_names(refined, component_names)
     edited_batch = _normalize_refined_edited_masks_batch(refined, normalized_rows, edited_masks_batch)
+    resolved_derived_policy = str(derived_update_policy or "").strip().lower()
+    if resolved_derived_policy not in DERIVED_UPDATE_POLICIES:
+        raise ValueError(
+            f"Unsupported derived_update_policy {derived_update_policy!r}; "
+            f"expected one of {DERIVED_UPDATE_POLICIES}."
+        )
+    resolved_reason = str(update_reason or f"{update_mode}_refined_subject_mask_edit")
+    resolved_method = str(update_method or DEFAULT_RUN_METHOD)
+
+    if resolved_derived_policy == DERIVED_UPDATE_POLICY_AUTHORITY_ONLY:
+        for component_name in normalized_components:
+            _write_refined_subject_component_authority_rows(
+                component_sources=component_sources,
+                refined=refined,
+                component_name=component_name,
+                roi_indices=normalized_rows,
+                edited_masks_batch=edited_batch,
+                row_update_reason=resolved_reason,
+            )
+        updated_at_utc = _finalize_refined_subject_apply(
+            refined,
+            updated_components=normalized_components,
+            updated_rows=normalized_rows,
+            stale_reason=resolved_reason,
+        )
+        for component_name in normalized_components:
+            _write_refined_component_last_update(
+                run_group,
+                component_name=component_name,
+                updated_at_utc=updated_at_utc,
+                update_mode=update_mode,
+                update_method=resolved_method,
+            )
+        return normalized_rows
+
     before_states = {
         component_name: _capture_component_sync_states(
             run_group,
@@ -2626,16 +2719,15 @@ def _apply_refined_subject_roi_rows(
             roi_indices=normalized_rows,
             edited_masks_batch=edited_batch,
             component_updates=component_updates,
-            row_update_reason=str(update_reason or f"{update_mode}_refined_subject_mask_edit"),
+            row_update_reason=resolved_reason,
         )
 
     updated_at_utc = _finalize_refined_subject_apply(
         refined,
         updated_components=normalized_components,
         updated_rows=normalized_rows,
-        stale_reason=str(update_reason or f"{update_mode}_refined_subject_mask_edit"),
+        stale_reason=resolved_reason,
     )
-    resolved_method = str(update_method or DEFAULT_RUN_METHOD)
     for component_name in normalized_components:
         comp_idx = int(refined.component_to_index[component_name])
         if _component_sync_states_changed(
@@ -3178,6 +3270,7 @@ def sync_refined_subject_mask_metadata(
         component_names=(normalized_component,),
         update_mode="interactive",
         update_method=REFINED_SUBJECT_SYNC_METHOD,
+        derived_update_policy=DERIVED_UPDATE_POLICY_REFRESH,
     )
 
     changed_count = 0
@@ -3319,6 +3412,7 @@ def check_refined_subject_source_updates(
             component_names=(normalized_component,),
             update_mode="sync",
             update_method=REFINED_SUBJECT_SOURCE_UPDATE_METHOD,
+            derived_update_policy=DERIVED_UPDATE_POLICY_REFRESH,
         )
         auto_synced_rows = list(auto_sync_rows)
         updated_at_utc = str(run_group.attrs.get("updated_at_utc") or "")

@@ -1,7 +1,7 @@
 # Subject-Mask Finalizer And Publication Status
 
 **Date:** 2026-07-09
-**Status:** current cluster run diagnostic, working-tree implementation, and benchmark checklist
+**Status:** current cluster diagnostic, locally validated implementation, and pending full-run benchmark checklist
 
 ## Scope
 
@@ -188,8 +188,9 @@ chunks and a driver-merged sealed write. Workers return fixed-size metric
 payloads; only the driver writes the large physical metric chunks after worker
 compute is complete. This avoids the unsafe case where several 256-row worker
 tasks perform read-modify-write operations inside one 16384-row Zarr chunk.
-Focused tests and a full node-local staged run pass. The separate PRFS
-publication canary is still pending.
+Focused and broader unit suites pass. The full node-local staged run and
+separate PRFS publication canary for this expanded common-metric layout are
+still pending.
 
 ### Zarr Chunk-Size And Sharding Guidance
 
@@ -267,15 +268,17 @@ The production-matched staged run contains:
 
 This is 17448 fewer files than the published 66087-file reference, a reduction
 of about 26.4%. The reduction is almost entirely in sealed body/swim
-finalization metrics; common metrics and contours remain the next publication
-targets.
+finalization metrics. That run established common metrics and contours as the
+next publication targets.
 
 This was not an unchanged-layout run. It already used the working-tree
 `16384`-row, driver-merged layout for sealed component finalization metrics.
 It did **not** yet apply the proposed large chunks to common run metrics and
 other sealed component arrays, and it still wrote the production full ragged
 contours. Therefore 48639 is the measured result of the first layout change,
-not the expected endpoint of the publication cleanup.
+not the expected endpoint of the publication cleanup. The common-metric change
+is now implemented and locally validated, but its full-run file count has not
+yet been measured.
 
 ### Dask-Array Row-Window Result
 
@@ -605,18 +608,19 @@ mutability-aware policy rather than one row chunk to every array.
 | optional full contour | ragged `contours/{ptr,len,points_xy}` | explicit analysis/archive/export build only | no in-place row edits; regenerate packed artifact |
 
 The measured common `metrics/` arrays contain 11250 payload chunks plus seven
-metadata files. A `[16384, 4, ...]` layout would require at most eight payload
-chunks per array: about 55 total files rather than 11257. This change requires
-the production `process_shards` workers to return their small fixed-shape metric
-payloads for a driver merge; direct 256-row worker writes would be unsafe inside
-16384-row physical chunks.
+metadata files. The new-run writer now uses `[16384, 4, ...]`, requiring at
+most eight payload chunks per array: about 55 total files rather than 11257.
+`process_shards` workers return their small fixed-shape metric/fingerprint
+payloads without writing those arrays. The driver merges all rows, stacks the
+full component axis, and writes each run metric once; component metrics and
+fingerprints are likewise driver-owned `[16384, ...]` surfaces.
 
-Do not immediately apply the same large chunks to every component array. The
-new canonical external writeback correctly persists only dense pixels and
-minimal live edit state, but older in-process review helpers still update
-spatial metrics, fingerprints, and reason arrays synchronously. Route those
-legacy saves through the same authority-only/stale-derived policy before
-rechunking the affected arrays.
+The edit-safety prerequisite is also implemented. External single-component
+writeback, in-process interactive review saves, and browser checkpoint applies
+persist only authoritative dense pixels plus minimal edit/revision/source-sync
+state, then mark metrics and contours stale. Explicit metadata/source-sync
+maintenance must opt into derived refresh. Existing runs are not silently
+rechunked; the layout applies when a new refined run is created.
 
 Full ragged contour points are the largest remaining single contributor:
 
@@ -937,8 +941,14 @@ to the fixed-size sampled representation.
 - Publication reports now include run-group storage and copy/commit telemetry.
 - The full finalizer benchmark now retains refined-output file-count and chunk
   layout telemetry before deleting its local staged archive.
-- The working-tree finalization-metric writer uses driver-owned large sealed
-  chunks without allowing workers to share a physical Zarr metric chunk.
+- The new-run finalization and common-metric writers use driver-owned large
+  sealed chunks without allowing workers to share a physical Zarr metric chunk;
+  production promotion remains gated on the full-run canary.
+- New run-level common metrics use `[16384, C, ...]`; component
+  spatial/topology metrics and source fingerprints use `[16384, ...]`.
+- Interactive and browser mask saves leave derived arrays byte-unchanged and
+  mark their affected row/component scope stale; explicit maintenance refresh
+  remains available.
 - The Palette-owned single-component writeback candidate provides revision
   checks, conservative cross-process serialization, minimal authority writes,
   stale-derived markers, and write-amplification telemetry.
@@ -950,8 +960,8 @@ to the fixed-size sampled representation.
 - Finalization-only runs currently do not create a refined-run handoff package
   on NRS; the workflow event reported `handoff_package_count=0`. NRS packages
   are still primarily tied to raw subject-mask inference handoff.
-- The component/metric/contour layout has not yet been redesigned to reduce
-  file count.
+- Full ragged contours, reason columns, and remaining eye-geometry surfaces
+  still need their default publication layout reduced.
 - Fixed-K contours are validated only as a diagnostic candidate, not yet part
   of the canonical refined-subject-mask writer.
 - The production wrapper still enables full ragged contour generation; it has
@@ -964,16 +974,16 @@ to the fixed-size sampled representation.
   this is safe but limits concurrent saves until stale metadata is made
   transaction-safe at finer granularity.
 - The full 120221-row staged benchmark and PRFS publication canary have not yet
-  been rerun for the large finalization-metric layout.
+  been rerun for the expanded common-metric layout.
 - Optional Crimson contour and eye-geometry reads are deferred from startup but
   are still requested automatically rather than only when visible.
 
 ## Practical Next Steps
 
-1. Add publish telemetry to the workflow report.
-   Record file count, total bytes, top-level subtree file counts, publish
-   backend, and publish duration. This makes future runs self-diagnosing instead
-   of requiring ad hoc `find` and `du` probes.
+1. Use the existing publish telemetry in the next layout canary.
+   Compare file count, total bytes, top-level subtree file counts, publish
+   backend, and publish duration against both the 66087-file published reference
+   and the 48639-file first-layout staged run.
 
 2. Separate Crimson's mask-fill, contour, and eye-geometry read paths.
    Do not automatically attach optional contour reads to mask-chunk prefetch.
@@ -1001,12 +1011,12 @@ to the fixed-size sampled representation.
    `tar | tar` extraction into a `.publish_tmp` directory. This will tell us
    how much time is Python overhead versus unavoidable PRFS metadata overhead.
 
-7. Rechunk or repack sealed derived arrays.
-   Keep mutable bbox/keypoint/mask authorities on modest unsharded chunks. Focus
-   large-chunk or sharding experiments on common metrics, finalization metrics,
-   reasons, fingerprints, and other sealed QC arrays. For example, common
-   `[N, C]` metrics can use a large row chunk with the full component axis
-   instead of `[256, 1]`.
+7. Continue the sealed-derived layout conversion.
+   Common metrics, component metrics, fingerprints, and finalization metrics
+   now use driver-owned large chunks for new runs. Keep mutable
+   bbox/keypoint/mask authorities on modest unsharded chunks; next evaluate
+   reason columns and remaining sealed eye-geometry arrays without changing
+   existing archives in place.
 
 8. Implement the decided sampled-contour default.
    Add fixed-size sampled contours with body `K=128`, eyes `K=64`, and swim

@@ -341,6 +341,9 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert summary["requested_chunk_size"] == 1
     assert summary["worker_chunk_size"] == 1
     assert summary["chunk_alignment"] == "requested_chunk_size"
+    assert summary["common_metric_row_chunk"] == 2
+    assert summary["common_metric_component_chunk"] == 4
+    assert summary["common_metric_write_policy"] == mod.COMMON_DERIVED_METRIC_WRITE_POLICY
     assert summary["timing_summary"]["chunk_count"] == 2
     assert "finalize_subject_body" in summary["timing_summary"]["phase_seconds"]
     assert "compute_spatial_metrics_subject_body" in summary["timing_summary"]["phase_seconds"]
@@ -367,6 +370,12 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert (
         run.attrs["smart_finalizer_finalization_metric_write_policy"]
         == mod.FINALIZATION_METRIC_WRITE_POLICY
+    )
+    assert run.attrs["smart_finalizer_common_metric_row_chunk"] == 2
+    assert run.attrs["smart_finalizer_common_metric_component_chunk"] == 4
+    assert (
+        run.attrs["smart_finalizer_common_metric_write_policy"]
+        == mod.COMMON_DERIVED_METRIC_WRITE_POLICY
     )
     assert run.attrs["smart_finalizer_metric_level"] == "cheap"
     assert run.attrs["smart_finalizer_retain_source_seeds"] is False
@@ -457,6 +466,13 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert component_metrics.attrs["qc_schema_id"] == "refined_subject_component_metric_qc_reasons_v1"
     assert component_metrics.attrs["qc_policy"]["component_name"] == "subject_body"
     assert component_metrics.attrs["metric_level"] == "cheap"
+    assert run["metrics/area_px"].chunks == (2, 4)
+    assert run["metrics/centroid_xy"].chunks == (2, 4, 2)
+    assert run["metrics"].attrs["write_policy"] == mod.COMMON_DERIVED_METRIC_WRITE_POLICY
+    assert run["components/subject_body/area_px"].chunks == (2,)
+    assert run["components/subject_body/source_row_fingerprint"].chunks == (2,)
+    assert component_metrics["component_count"].chunks == (2,)
+    assert component_metrics.attrs["write_policy"] == mod.COMMON_DERIVED_METRIC_WRITE_POLICY
     assert np.isnan(np.asarray(component_metrics["sigma_noise"][:], dtype=np.float32)[0])
     assert run["components/subject_body"].attrs["source_seed_masks_status"] == "omitted"
     assert "source_seed_masks_roi" not in run["components/subject_body"]
@@ -479,6 +495,30 @@ def test_finalization_metric_shell_uses_large_driver_owned_row_chunks() -> None:
     assert metrics["quality_score"].chunks == (mod.FINALIZATION_METRIC_ROW_CHUNK,)
     assert metrics.attrs["row_chunk"] == mod.FINALIZATION_METRIC_ROW_CHUNK
     assert metrics.attrs["write_policy"] == mod.FINALIZATION_METRIC_WRITE_POLICY
+
+
+def test_common_metric_shells_use_large_driver_owned_chunks_and_keep_live_state_small() -> None:
+    root = zarr.group()
+    run = root.create_group("run")
+    mod._ensure_refined_run_metric_shell(run, total_rows=20000, component_count=4)  # noqa: SLF001
+    component = mod._create_component_shell(  # noqa: SLF001
+        run,
+        component_name="subject_body",
+        total_rows=20000,
+        height=8,
+        width=8,
+        retain_source_seeds=False,
+    )
+
+    assert run["metrics/area_px"].chunks == (mod.COMMON_DERIVED_METRIC_ROW_CHUNK, 4)
+    assert run["metrics/centroid_xy"].chunks == (mod.COMMON_DERIVED_METRIC_ROW_CHUNK, 4, 2)
+    assert component["area_px"].chunks == (mod.COMMON_DERIVED_METRIC_ROW_CHUNK,)
+    assert component["source_row_fingerprint"].chunks == (mod.COMMON_DERIVED_METRIC_ROW_CHUNK,)
+    assert component["metrics/component_count"].chunks == (mod.COMMON_DERIVED_METRIC_ROW_CHUNK,)
+    assert component["edit_applied"].chunks == (256,)
+    assert component["manual_override"].chunks == (256,)
+    assert component["source_row_stale"].chunks == (256,)
+    assert component.attrs["derived_metric_write_policy"] == mod.COMMON_DERIVED_METRIC_WRITE_POLICY
 
 
 def test_finalize_subject_mask_run_rejects_eye_union_keypoint_row_identity_mismatch(monkeypatch) -> None:
@@ -1313,12 +1353,20 @@ def test_finalize_subject_masks_process_shards_writes_disjoint_rows(monkeypatch,
         num_workers=2,
         progress_jsonl=progress_path,
     )
+    mod.finalize_subject_masks(
+        zarr_path,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_smart_serial_reference_001",
+        chunk_size=1,
+        execution_backend="serial_driver",
+    )
 
     assert summary["execution_backend"] == "process_shards"
     assert summary["process_shard_execution_enabled"] is True
     assert summary["timing_summary"]["process_shard_execution_enabled"] is True
     root = zarr.open_group(str(zarr_path), mode="r")
     run = root["refined_subject_masks_runs/refined_subject_masks_smart_process_shards_001"]
+    serial = root["refined_subject_masks_runs/refined_subject_masks_smart_serial_reference_001"]
     assert run.attrs["smart_finalizer_execution_backend"] == "process_shards"
     assert run.attrs["process_shard_execution_enabled"] is True
     provenance_parameters = run.attrs["provenance"]["parameters"]
@@ -1327,9 +1375,10 @@ def test_finalize_subject_masks_process_shards_writes_disjoint_rows(monkeypatch,
     assert provenance_parameters["worker_process_count"] == 2
     assert provenance_parameters["requested_chunk_size"] == 1
     assert provenance_parameters["worker_chunk_size"] == 2
-    assert provenance_parameters["chunk_alignment"] == (
-        "refined_subject_mask_metric_row_chunk+dense_mask_row_chunk"
-    )
+    assert provenance_parameters["chunk_alignment"] == "dense_mask_row_chunk"
+    assert provenance_parameters["common_metric_row_chunk"] == 2
+    assert provenance_parameters["common_metric_component_chunk"] == 4
+    assert provenance_parameters["common_metric_write_policy"] == mod.COMMON_DERIVED_METRIC_WRITE_POLICY
     assert provenance_parameters["finalization_metric_row_chunk"] == 2
     assert provenance_parameters["finalization_metric_write_policy"] == mod.FINALIZATION_METRIC_WRITE_POLICY
     assert len(run.attrs["smart_finalizer_chunk_timings"]) == 1
@@ -1340,11 +1389,36 @@ def test_finalize_subject_masks_process_shards_writes_disjoint_rows(monkeypatch,
     assert np.count_nonzero(masks[:, labels.index("eye_right")]) > 0
     assert np.count_nonzero(masks[:, labels.index("swim_bladder")]) > 0
     assert "process_shard_compute" in run.attrs["smart_finalizer_timing_summary"]["phase_seconds"]
+    assert "write_common_run_metrics" in run.attrs["smart_finalizer_timing_summary"]["phase_seconds"]
+    assert "write_common_metrics_subject_body" in run.attrs["smart_finalizer_timing_summary"]["phase_seconds"]
+    assert "write_run_spatial_metrics_subject_body" not in run.attrs["smart_finalizer_timing_summary"]["phase_seconds"]
     assert "write_finalization_metrics_subject_body" in run.attrs["smart_finalizer_timing_summary"]["phase_seconds"]
     assert (
         run["components/subject_body/finalization_metrics"].attrs["write_policy"]
         == mod.FINALIZATION_METRIC_WRITE_POLICY
     )
+    for array_name in ("mask_present", "area_px", "centroid_xy", "centroid_valid", "bbox_xyxy", "bbox_valid"):
+        np.testing.assert_allclose(
+            np.asarray(run[f"metrics/{array_name}"][:]),
+            np.asarray(serial[f"metrics/{array_name}"][:]),
+            equal_nan=True,
+            err_msg=f"metrics/{array_name}",
+        )
+    for component_name in labels:
+        for array_name in ("mask_present", "area_px", "source_row_fingerprint"):
+            np.testing.assert_allclose(
+                np.asarray(run[f"components/{component_name}/{array_name}"][:]),
+                np.asarray(serial[f"components/{component_name}/{array_name}"][:]),
+                equal_nan=True,
+                err_msg=f"components/{component_name}/{array_name}",
+            )
+        for metric_name in mod._COMPONENT_METRIC_NAMES:  # noqa: SLF001
+            np.testing.assert_allclose(
+                np.asarray(run[f"components/{component_name}/metrics/{metric_name}"][:]),
+                np.asarray(serial[f"components/{component_name}/metrics/{metric_name}"][:]),
+                equal_nan=True,
+                err_msg=f"components/{component_name}/metrics/{metric_name}",
+            )
 
     progress_records = [json.loads(line) for line in progress_path.read_text(encoding="utf-8").splitlines()]
     aggregate_events = [item for item in progress_records if item["event"] == "process_shards_submitted"]
