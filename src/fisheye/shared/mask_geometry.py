@@ -213,6 +213,7 @@ def extract_mask_contour(mask: np.ndarray, min_points: int) -> np.ndarray | None
 def measure_mask_ellipse(
     mask: np.ndarray,
     min_contour_points: int = 5,
+    min_axis_length_px: float = 1.0,
 ) -> tuple[bool, np.ndarray, np.ndarray, np.ndarray | None, str | None]:
     """Extract ellipse metrics from a binary mask using OpenCV ellipse fitting."""
 
@@ -244,7 +245,16 @@ def measure_mask_ellipse(
         theta += 90.0
     theta = float((theta + 180.0) % 180.0)
 
-    if not all(np.isfinite([xc, yc, major, minor, theta])) or major <= 0.0 or minor <= 0.0:
+    minimum_axis = float(min_axis_length_px)
+    if not np.isfinite(minimum_axis) or minimum_axis < 0.0:
+        raise ValueError(f"min_axis_length_px must be finite and nonnegative, got {min_axis_length_px!r}.")
+    if (
+        not all(np.isfinite([xc, yc, major, minor, theta]))
+        or major <= 0.0
+        or minor <= 0.0
+        or major < minimum_axis
+        or minor < minimum_axis
+    ):
         ellipse = np.full(5, np.nan, dtype=np.float32)
         centroid = mask_pixel_centroid(mask)
         return False, ellipse, centroid, contour, "ellipse_invalid_params"

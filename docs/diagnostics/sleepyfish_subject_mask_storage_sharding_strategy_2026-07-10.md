@@ -2,9 +2,10 @@
 
 **Date:** 2026-07-10
 **Last updated:** 2026-07-11
-**Status:** diagnostic, implementation, and core-finalizer layout record
-complete; the complete default-surface timing canary remains pending and no
-canonical storage migration has been approved or applied
+**Status:** diagnostic, implementation, and complete single-clip finalizer
+timing record complete; a corrected exact-parity rerun and the full-collection
+canary remain pending, and no canonical storage migration has been approved or
+applied
 
 ## Scope
 
@@ -53,6 +54,8 @@ The principal implementation and reproduction surfaces are:
   `submit_subject_mask_probability_sharding_benchmark_bsub.sh`,
   `submit_subject_mask_finalizer_ab_fixture_bsub.sh`, and
   `submit_subject_mask_finalizer_layout_ab_bsub.sh` — cluster wrappers;
+- `scripts/submit_subject_mask_complete_finalizer_matrix_bsub.sh` — complete
+  default-output 8/16-worker finalizer and publication matrix;
 - `tests/unit/fisheye/test_finalize_subject_masks.py` and the two probability
   sharding benchmark test modules — deterministic regression coverage.
 
@@ -790,6 +793,70 @@ as the candidate for new read-only probability-mask stores. Repeat the A/B with
 all default derived surfaces, then run a full collection canary before any bulk
 rewrite of the existing `22` raw shards.
 
+### Complete Default-Output 8/16-Worker Matrix
+
+LSF job `153061568` then ran one complete default-output finalization for each
+layout at 8 and 16 workers on `h07u28.int.janelia.org`. All cases used `256`
+logical rows per worker chunk, `256` rows per dense output chunk, dense
+`uint8` masks, cheap metrics, eye geometry, full ragged component contours,
+sampled contours, and `process_shards` postcompute. Raw probabilities were
+read directly from PRFS, refined outputs were written to node-local scratch,
+and each completed run was copied and atomically committed to a benchmark-only
+PRFS Zarr with the production publication helpers.
+
+```text
+/groups/johnson/johnsonlab/jeremy/recordings/logs/
+  subject_mask_complete_finalizer_matrix/
+    sleepyfish_complete_finalizer_matrix_clip000000_20260711_01/
+      reports/summary.json
+      published_outputs.zarr
+```
+
+| Layout | Workers | Finalizer seconds | Core process-shard seconds | Derived postcompute seconds | Peak process-tree RSS GiB | Average effective cores |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| regular | 8 | `335.00` | `301.06` | `11.69` | `9.83` | `7.20` |
+| sharded 2,048 | 8 | `332.08` | `301.76` | `11.73` | `9.60` | `7.33` |
+| sharded 2,048 | 16 | `210.78` | `184.03` | `9.16` | `20.54` | `13.61` |
+| regular | 16 | `223.00` | `195.98` | `9.17` | `18.74` | `13.66` |
+
+At eight workers the layouts were again operationally equivalent: sharding
+reduced total finalizer time by `2.91 s` (`0.87%`), while its core phase was
+actually `0.70 s` slower. At 16 workers the sharded run was `12.22 s`
+(`5.48%`) faster than regular. That is a modest high-concurrency signal, not a
+replicated throughput claim. Moving from 8 to 16 workers reduced sharded
+finalizer time by `36.5%` and regular time by `33.4%`; scaling was useful but
+sublinear because per-chunk time rose under PRFS and CPU contention.
+
+The 16-worker runs approximately doubled process-tree RSS. The sharded case
+peaked at `20.54 GiB`, so a production 16-worker request must include margin
+above roughly `21 GiB`. LSF reported no swap. Sharding used `2.3%` less RSS at
+8 workers but `9.6%` more at 16 workers; there is no consistent memory win.
+
+Every run created `155` arrays in `13,122` files. Apparent output size was
+about `151.28 MB` and allocated size `188.22 MB`, despite the much larger
+logical dense-mask shape. Node-local-to-PRFS copy took `94.7-101.2 s`, the
+post-copy inventory/validation scan took `17.8-18.9 s`, and atomic commit took
+about `0.003 s`. Publication is therefore a separate, metadata-heavy
+`113-121 s` phase that worker-count tuning does not improve.
+
+The matrix runner requires all four completion checks—eye geometry, full
+contours, sampled contours, and the run completion contract—before publication
+is accepted. It then compares every corresponding output array exactly against
+the regular 8-worker reference. The fixture Zarrs and registry remain
+read-only.
+
+The initial exact comparison passed all `155` arrays for regular versus
+sharded input at 8 workers, but failed two float arrays for both 16-worker runs
+at row `53,074`: right-eye ellipse parameters and the derived eye separation.
+The masks, packed contours, statuses, and every other array were exact. The
+offending right-eye mask contained only `7` pixels and its contour enclosed
+`1 px²`, yet OpenCV returned a nominally successful ellipse with axes near
+`0.26 x 0.06 px`. Its underdetermined angle varied by `13.29 degrees` with
+worker partitioning. This is a shared eye-geometry validity bug, not storage-
+layout drift. `measure_mask_ellipse()` now rejects fitted axes below one pixel
+as `ellipse_invalid_params`; the complete matrix must be rerun from that
+correction before the exact-output gate is considered passed.
+
 From a workstation without `bsub`, submit through the configured login host:
 
 ```bash
@@ -823,6 +890,15 @@ scripts/submit_subject_mask_finalizer_layout_ab_bsub.sh \
   --submit-host login1-citrus-poller
 ```
 
+Submit the complete default-output 8/16-worker matrix with:
+
+```bash
+scripts/submit_subject_mask_complete_finalizer_matrix_bsub.sh \
+  --fixture-root "$FIXTURE_ROOT" \
+  --queue local \
+  --submit-host login1-citrus-poller
+```
+
 ## External Guidance
 
 - Zarr recommends selecting chunk shape from the access pattern and notes that
@@ -845,9 +921,10 @@ scripts/submit_subject_mask_finalizer_layout_ab_bsub.sh \
   the eight-worker real-collection initialization smoke passed with about
   `2 GiB` LSF process-tree memory.
 - The `2,048`-row indexed-sharding layout has cleared the single-clip storage,
-  probability exactness, construction, and core-finalizer layout gates. It is
-  the selected candidate for new immutable read-only probability-mask stores,
-  subject to a complete default-surface timing canary.
+  probability exactness, construction, core-finalizer, and complete default-
+  output timing gates. It remains the selected candidate for new immutable
+  read-only probability-mask stores, subject to the corrected complete-output
+  exact-parity rerun and a full-collection canary.
 - Finalized runs include eye geometry, full ragged component contours, and
   sampled component contours by default. The historical `335 s` layout A/B
   excluded those surfaces and must not be quoted as complete production time.

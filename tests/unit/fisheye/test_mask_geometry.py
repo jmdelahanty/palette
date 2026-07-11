@@ -9,6 +9,7 @@ from fisheye.shared.mask_geometry import (
     fill_holes,
     hole_stats,
     mask_pixel_centroid,
+    measure_mask_ellipse,
     select_component_near_point,
 )
 
@@ -77,6 +78,36 @@ def test_mask_pixel_centroid_returns_xy_or_nan() -> None:
 
     np.testing.assert_allclose(mask_pixel_centroid(mask), np.asarray([5.0, 3.0], dtype=np.float32))
     assert np.all(np.isnan(mask_pixel_centroid(np.zeros((4, 4), dtype=np.uint8))))
+
+
+def test_measure_mask_ellipse_rejects_subpixel_degenerate_fit() -> None:
+    mask = np.zeros((512, 512), dtype=np.uint8)
+    mask[275, 248] = 1
+    mask[276:281, 247] = 1
+    mask[279, 246] = 1
+
+    success, ellipse, centroid, contour, failure = measure_mask_ellipse(mask)
+
+    assert success is False
+    assert failure == "ellipse_invalid_params"
+    assert np.all(np.isnan(ellipse))
+    np.testing.assert_allclose(centroid, mask_pixel_centroid(mask))
+    assert contour is not None
+    assert contour.shape == (10, 2)
+
+
+def test_measure_mask_ellipse_accepts_resolved_pixel_scale_ellipse() -> None:
+    mask = np.zeros((64, 64), dtype=np.uint8)
+    cv2.ellipse(mask, (32, 31), (8, 4), 20, 0, 360, 1, -1)
+
+    success, ellipse, centroid, contour, failure = measure_mask_ellipse(mask)
+
+    assert success is True
+    assert failure is None
+    assert contour is not None
+    assert np.all(np.isfinite(ellipse))
+    assert ellipse[2] >= ellipse[3] >= 1.0
+    assert np.all(np.isfinite(centroid))
 
 
 def _legacy_select_component_near_point(mask: np.ndarray, point_xy: np.ndarray) -> np.ndarray:
