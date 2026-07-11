@@ -1423,8 +1423,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--write-component-contours",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Write optional full ragged contours for analysis/archive/export builds (default: false).",
+        default=True,
+        help="Write full ragged component contours (default: true).",
     )
     parser.add_argument(
         "--write-sampled-component-contours",

@@ -2,9 +2,9 @@
 
 **Date:** 2026-07-10
 **Last updated:** 2026-07-11
-**Status:** diagnostic, implementation, and benchmark record complete through
-the single-clip end-to-end finalizer A/B; no canonical storage migration has
-been approved or applied
+**Status:** diagnostic, implementation, and core-finalizer layout record
+complete; the complete default-surface timing canary remains pending and no
+canonical storage migration has been approved or applied
 
 ## Scope
 
@@ -738,7 +738,14 @@ against the PRFS fixtures on `h07u30.int.janelia.org`. The order was regular,
 sharded, sharded, regular, so each physical layout occupied each execution
 position once. All runs used eight `process_shards` workers, `256` logical rows
 per worker chunk, `128` rows per physical dense output chunk, cheap metrics,
-dense `uint8` refined masks, and no optional contours or eye geometry.
+dense `uint8` refined masks, and explicitly disabled eye geometry, full ragged
+component contours, and sampled component contours.
+
+This was a core-finalizer storage-layout benchmark, not a complete production
+contract benchmark. As of 2026-07-11, eye geometry, full ragged component
+contours, and sampled component contours are default finalized outputs. Narrow
+diagnostics must opt out explicitly with `--no-write-*`; production timing and
+the full-collection canary must include all three surfaces.
 
 ```text
 /groups/johnson/johnsonlab/jeremy/recordings/logs/
@@ -774,12 +781,14 @@ zero mismatches. Validation took `738.38 s` and was excluded from finalizer
 timing. The complete LSF job used `9,558 MB` maximum memory, no swap, and
 finished successfully in `2,140 s` including validation.
 
-This end-to-end result clears the final runtime gate for the `2,048`-row
-probability-sharding candidate. Together with the approximately `63x`
+This result clears the core mask-finalizer layout gate for the `2,048`-row
+probability-sharding candidate, but it does not establish complete default-
+surface runtime. Together with the approximately `63x`
 probability-payload object reduction, unchanged stored size, faster fixture
-construction, and exact output parity, it supports using `2,048`-row indexed
-shards for new read-only probability-mask stores. A full collection canary
-should still precede any bulk rewrite of the existing `22` raw shards.
+construction, and exact core-output parity, it supports retaining `2,048` rows
+as the candidate for new read-only probability-mask stores. Repeat the A/B with
+all default derived surfaces, then run a full collection canary before any bulk
+rewrite of the existing `22` raw shards.
 
 From a workstation without `bsub`, submit through the configured login host:
 
@@ -836,8 +845,12 @@ scripts/submit_subject_mask_finalizer_layout_ab_bsub.sh \
   the eight-worker real-collection initialization smoke passed with about
   `2 GiB` LSF process-tree memory.
 - The `2,048`-row indexed-sharding layout has cleared the single-clip storage,
-  exactness, construction, and end-to-end finalizer runtime gates. It is the
-  selected candidate for new immutable read-only probability-mask stores.
+  probability exactness, construction, and core-finalizer layout gates. It is
+  the selected candidate for new immutable read-only probability-mask stores,
+  subject to a complete default-surface timing canary.
+- Finalized runs include eye geometry, full ragged component contours, and
+  sampled component contours by default. The historical `335 s` layout A/B
+  excluded those surfaces and must not be quoted as complete production time.
 - Before enabling it broadly or migrating existing raw runs, perform a full
   `22`-shard collection canary. That canary must exercise the compact parent
   identity plan, finalizer completion/publication behavior, and exact output

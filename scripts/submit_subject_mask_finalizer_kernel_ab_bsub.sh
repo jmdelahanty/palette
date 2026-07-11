@@ -154,7 +154,8 @@ cat > "$RUN_DIR/manifest.json" <<JSON
   "order": "position_balanced_ab_ba_ab_ba",
   "copy_policy": "one_real_row_window_per_job",
   "write_eye_geometry": false,
-  "write_component_contours": false
+    "write_component_contours": false,
+    "write_sampled_component_contours": false
 }
 JSON
 
@@ -241,6 +242,9 @@ for repeat in $(seq 1 "$REPEATS"); do
       --dense-mask-row-chunk "$DENSE_MASK_ROW_CHUNK"
       --metric-level cheap
       --mask-storage dense_uint8
+      --no-write-eye-geometry
+      --no-write-component-contours
+      --no-write-sampled-component-contours
       --execution-backend process_shards
       --num-workers "$WORKERS"
       --assignment-keypoint-group "$ASSIGNMENT_KEYPOINT_GROUP"

@@ -376,6 +376,25 @@ def test_indexed_collection_slice_allocates_only_requested_positions(monkeypatch
     np.testing.assert_array_equal(view[50:55, :], values[50:55, :])
 
 
+def test_cli_defaults_to_complete_derived_surfaces() -> None:
+    defaults = mod._build_parser().parse_args(["/tmp/analysis.zarr"])
+    assert defaults.write_eye_geometry is True
+    assert defaults.write_component_contours is True
+    assert defaults.write_sampled_component_contours is True
+
+    disabled = mod._build_parser().parse_args(
+        [
+            "/tmp/analysis.zarr",
+            "--no-write-eye-geometry",
+            "--no-write-component-contours",
+            "--no-write-sampled-component-contours",
+        ]
+    )
+    assert disabled.write_eye_geometry is False
+    assert disabled.write_component_contours is False
+    assert disabled.write_sampled_component_contours is False
+
+
 def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities(monkeypatch) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     root = _build_probability_root()
@@ -392,7 +411,9 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert summary["chunk_count"] == 2
     assert summary["chunk_size"] == 1
     assert summary["metric_level"] == "cheap"
-    assert summary["write_eye_geometry"] is False
+    assert summary["write_eye_geometry"] is True
+    assert summary["write_component_contours"] is True
+    assert summary["write_sampled_component_contours"] is True
     assert summary["retain_source_seeds"] is False
     assert summary["source_seed_masks_status"] == "omitted"
     assert summary["execution_backend"] == "serial_driver"
@@ -481,7 +502,9 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert provenance_parameters["metric_level"] == "cheap"
     assert provenance_parameters["retain_source_seeds"] is False
     assert provenance_parameters["source_seed_masks_status"] == "omitted"
-    assert run.attrs["eye_geometry_status"] == "deferred"
+    assert run.attrs["eye_geometry_status"] == "computed"
+    assert run.attrs["component_contours_status"] == "computed"
+    assert run.attrs["sampled_component_contours_status"] == "computed"
     assert run.attrs["refined_subject_mask_review_status"]["state"] == "pending"
     assert run.attrs["component_review_statuses"]["subject_body"]["state"] == "pending"
     assert run.attrs["summary_statistics"]["rows_total"] == 2
@@ -536,7 +559,7 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert np.isnan(np.asarray(component_metrics["sigma_noise"][:], dtype=np.float32)[0])
     assert run["components/subject_body"].attrs["source_seed_masks_status"] == "omitted"
     assert "source_seed_masks_roi" not in run["components/subject_body"]
-    assert "relations" not in run
+    assert "relations/eye_pair/metrics/separation_px" in run
 
 
 def test_finalization_metric_shell_uses_large_driver_owned_row_chunks() -> None:
@@ -1107,6 +1130,7 @@ def test_finalize_subject_mask_run_can_write_sampled_contours_without_full_ragge
         refined_run="refined_subject_masks_sampled_contours_001",
         chunk_size=1,
         write_eye_geometry=True,
+        write_component_contours=False,
         write_sampled_component_contours=True,
         sampled_contour_counts={
             "subject_body": 8,
@@ -1832,7 +1856,9 @@ def test_finalize_subject_mask_run_dry_run_and_overwrite_guard(monkeypatch) -> N
     assert dry["status"] == "planned"
     assert dry["mutates_archive"] is False
     assert dry["metric_level"] == "cheap"
-    assert dry["write_eye_geometry"] is False
+    assert dry["write_eye_geometry"] is True
+    assert dry["write_component_contours"] is True
+    assert dry["write_sampled_component_contours"] is True
     assert dry["execution_backend"] == "serial_driver"
     assert dry["process_shard_execution_enabled"] is False
     assert "refined_subject_masks_runs" not in root

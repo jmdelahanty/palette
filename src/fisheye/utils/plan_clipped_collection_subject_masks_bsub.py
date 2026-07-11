@@ -242,7 +242,7 @@ def build_plan(
     finalization_mode: str = "collection_direct",
     clip_finalizer_package_dir: Path | None = None,
     import_array_copy_workers: int = 1,
-    write_sampled_component_contours: bool = False,
+    write_sampled_component_contours: bool = True,
 ) -> SubjectMaskWorkflowPlan:
     zarr_path = zarr_path.expanduser().resolve()
     cache_dir_root = cache_dir_root.expanduser().resolve()
@@ -1068,7 +1068,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--assignment-keypoints-run", help="Collection keypoint/refined-keypoint run for eyes_union assignment.")
     parser.add_argument("--no-write-eye-geometry", action="store_true")
     parser.add_argument("--no-write-component-contours", action="store_true")
-    parser.add_argument("--write-sampled-component-contours", action="store_true")
+    parser.add_argument("--write-sampled-component-contours", action="store_true", default=True)
     parser.add_argument("--no-write-sampled-component-contours", action="store_true")
     parser.add_argument("--retain-source-seeds", action="store_true")
     parser.add_argument("--model-coverage-class", default="dense_all_components")

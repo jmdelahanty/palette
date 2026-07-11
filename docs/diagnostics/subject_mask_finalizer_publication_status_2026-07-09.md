@@ -1,7 +1,8 @@
 # Subject-Mask Finalizer And Publication Status
 
 **Date:** 2026-07-09
-**Status:** completed staged and PRFS sampled-contour publication gates; production defaults promoted
+**Status:** completed staged and PRFS publication record; default derived-
+surface policy updated 2026-07-11
 
 ## Scope
 
@@ -59,7 +60,7 @@ FINALIZE_NUM_WORKERS=16
 FINALIZE_POSTCOMPUTE_BACKEND=process_shards
 MASK_STORAGE=dense_uint8
 WRITE_EYE_GEOMETRY=1
-WRITE_COMPONENT_CONTOURS=0
+WRITE_COMPONENT_CONTOURS=1
 WRITE_SAMPLED_COMPONENT_CONTOURS=1
 STAGE_OUTPUT_TO_SCRATCH=1
 STAGE_FINALIZATION_INPUT_TO_SCRATCH=1
@@ -685,7 +686,7 @@ mutability-aware policy rather than one row chunk to every array.
 | fixed-shape derived metrics | run `metrics/*`, component spatial/topology metrics, source fingerprints | `[16384, 4, ...]` for run-level arrays and `[16384, ...]` for component arrays; driver-owned merged write | never synchronously rewritten by canonical saves; mark stale and refresh explicitly |
 | derived eye geometry/relations | ellipse arrays and eye-pair metrics | `[16384, ...]`; driver/maintenance write | stale after relevant mask edits |
 | sampled display contour | bounded fixed-K points plus validity/count | component-specific K; benchmark 256/1024/4096 row chunks | default derived contour; stale after relevant mask edits |
-| optional full contour | ragged `contours/{ptr,len,points_xy}` | explicit analysis/archive/export build only | no in-place row edits; regenerate packed artifact |
+| default full contour | ragged `contours/{ptr,len,points_xy}` | finalization/postcompute output | no in-place row edits; regenerate packed artifact |
 
 The measured common `metrics/` arrays contain 11250 payload chunks plus seven
 metadata files in the reference layout. The new-run writer uses
@@ -714,12 +715,15 @@ Full ragged contour points are the largest remaining single contributor:
 
 The current point chunk is effectively 4096 `(x, y)` rows. Across all four
 components that produces 14596 payload files, plus the `ptr`/`len` row-index
-chunks. These files should not be part of the default publication layout.
+chunks. Full contours are now required by the default finalized-output policy,
+so their object count must be reduced without omitting the surface.
 
 The contour policy decision is:
 
-- default finalized/published runs materialize a fixed-K sampled contour cache;
-- full ragged contours are opt-in for analysis, archive, or export builds;
+- default finalized/published runs materialize eye geometry, full ragged
+  contours, and a fixed-K sampled contour cache;
+- full ragged contours remain derived and regenerable, but are no longer
+  opt-in at initial finalization;
 - sampled contours are derived directly from dense masks, not by first writing
   the full ragged representation;
 - eye ellipse/angle geometry continues to be measured from dense masks or
@@ -734,7 +738,7 @@ Benchmark sampled-contour row chunks `256`, `1024`, and `4096`; `1024` is the
 leading candidate because its uncompressed point payload is about 1 MiB for a
 body chunk, 512 KiB for an eye chunk, and 256 KiB for a swim-bladder chunk.
 
-If optional full-ragged builds still need fewer files, their independent point
+The default full-ragged surface needs fewer files. Its independent point
 chunk alternatives are:
 
 | point chunk | aggregate payload chunks | uncompressed bytes per chunk | tradeoff |
@@ -743,12 +747,12 @@ chunk alternatives are:
 | 262144 | about 231 | 2 MiB | stronger publication reduction, heavier on-demand row reads |
 | 1048576 | about 59 | 8 MiB | publication-oriented; too large for routine exact interactive contour reads unless visibility gating and caching are proven |
 
-The first default-layout staged canary combined large fixed-shape derived
-metric chunks with sampled contours and omitted full ragged contours. It
-completed successfully with 11185 files. Remaining gates are sampled
+The first default-layout staged canary historically combined large fixed-shape
+derived metric chunks with sampled contours and omitted full ragged contours.
+It completed successfully with 11185 files, but no longer represents the full
+default output contract. Remaining gates are full-surface publication cost, sampled
 single-row/window read latency, Crimson overlay fidelity, and hidden-target
-PRFS copy time. Test 65536-point chunks only in a separate opt-in full-ragged
-build.
+PRFS copy time. Test 65536-point chunks for the default full-ragged surface.
 
 ## Crimson Live-Reader Implications
 
@@ -983,19 +987,19 @@ One chunking or sharding policy should not serve every surface:
   modest Zarr shards;
 - display-only sampled contours or bitpacked masks: row windows aligned to
   Crimson prefetch, and replaceable when stale;
-- full ragged contours: sealed analysis/archive data, not part of the required
-  live save or playback path.
+- full ragged contours: default sealed derived data, not part of the synchronous
+  live-save transaction and regenerated explicitly after edits.
 
 Large shards should not contain mutable edit targets. Rewriting one inner chunk
 inside a shard can amplify a small edit into a much larger shard update.
 
 ## Current Contour Position
 
-The canonical writer now has a default fixed-K sampled contour surface with
+The canonical writer has a default fixed-K sampled contour surface with
 `points_xy[N,K,2]`, `valid[N]`, and `source_point_count[N]`. It uses 1024-row
 physical chunks and can run through either serial or `process_shards`
-postcompute. Full ragged contours are controlled independently and are now
-disabled by default in production wrappers. Crimson reads the sampled schema
+postcompute. Full ragged contours are controlled independently but are now
+enabled by default in production wrappers. Crimson reads the sampled schema
 and retains ragged fallback for historical runs. Both the staged and published
 sampled-only canaries passed with 11185 files. The July 8 contour diagnostic
 supports these candidates:
@@ -1107,10 +1111,11 @@ to the fixed-size sampled representation.
    reason columns and remaining sealed eye-geometry arrays without changing
    existing archives in place.
 
-8. Keep full ragged contours explicit.
-   Production now writes body `K=128`, eyes `K=64`, and swim bladder `K=32`
-   sampled contours by default. Request full ragged contours only for a named
-   analysis/archive/export requirement and record that choice in provenance.
+8. Keep full ragged contours default but derived.
+   Production writes full ragged contours plus body `K=128`, eyes `K=64`, and
+   swim bladder `K=32` sampled contours by default. Dense masks remain the
+   authority; after edits, mark both contour surfaces stale and regenerate them
+   through explicit validation or maintenance.
 
 9. Consider an NRS refined-run package path.
    If finalization produces a tar package on NRS after local scratch compute,

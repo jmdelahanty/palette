@@ -23,8 +23,9 @@ def test_parser_defaults_to_sharded_postcompute_for_batch_workflow() -> None:
     assert args.mask_storage == "dense_uint8"
     assert args.mask_rle_validation_mode == "invariants"
     assert args.subject_output_parent == mod.SUBJECT_MASK_CANONICAL_OUTPUT_PARENT
+    assert args.write_eye_geometry is True
     assert args.write_sampled_component_contours is True
-    assert args.write_component_contours is False
+    assert args.write_component_contours is True
 
 
 def test_parser_accepts_subject_mask_shard_output_parent() -> None:

@@ -388,6 +388,60 @@ connected-component, contour, and ellipse semantics. It should be protected by
 strict parity tests against the current Python/OpenCV implementation before
 becoming a production dependency.
 
+#### Concrete C++/OpenCV Batch-Kernel Plan (2026-07-11)
+
+The active `palette-py311` environment is sufficient for a prototype without
+installing another image-processing stack. It contains OpenCV `4.12.0` as C++17
+dynamic libraries, the `opencv4` headers and `pkg-config`/CMake metadata,
+`pybind11`, CMake, Ninja, and a C++ compiler. The extension should link to the
+same `opencv_core` and `opencv_imgproc` libraries used by Python `cv2`; it should
+not reimplement connected components, contours, flood fill, or ellipse fitting.
+
+The proposed boundary is a private extension such as
+`fisheye.shared._mask_geometry_cv`, wrapped by the existing policy-free
+`fisheye.shared.mask_geometry` module. The Python wrapper retains the current
+implementation as an exact fallback and records `python_opencv` or
+`cpp_opencv_batch_v1` in finalizer provenance.
+
+The first native API should expose two GIL-releasing batch calls:
+
+1. `finalize_components(masks, policy)` accepts contiguous binary/`uint8`
+   `(N,C,H,W)` masks and performs the existing thresholded-component cleanup,
+   8-connected labeling, flood-fill hole processing, topology/spatial metrics,
+   source-row fingerprints, and external contour extraction while each mask is
+   resident in memory.
+2. `assign_eyes(eyes_union, keypoints, policy)` preserves the exact tie-to-left
+   pixel split, nearest-component selection, `RETR_EXTERNAL` plus
+   `CHAIN_APPROX_NONE` contour behavior, `fitEllipse` normalization, failure
+   codes, and review-routing inputs used by the Python path.
+
+Fixed outputs should be preallocated NumPy arrays: cleaned dense masks,
+presence/area/centroid/bbox/topology metrics, fingerprints, ellipse parameters,
+validity, status, and reason codes. Variable full contours should be returned as
+one packed `points_xy` buffer plus `ptr`/`len`; fixed-K sampled contours should
+be derived in the same native pass. This is important because eye geometry,
+full ragged contours, and sampled contours are default finalized outputs as of
+2026-07-11. Computing them while masks and contours are already resident avoids
+a later full dense-Zarr reread. Process workers continue to own non-overlapping
+row/output chunks; the driver retains deterministic merging and completion.
+
+Implementation should proceed in narrow parity gates:
+
+1. Bind one existing primitive at a time and compare exact masks, integer
+   metrics, packed contours, status/reason codes, and float values including
+   NaN placement against Python/OpenCV.
+2. Cover empty, border-touching, holed, multi-component, ambiguous eye-split,
+   short-contour, and invalid-ellipse cases plus real rows from several
+   recordings.
+3. Run the complete `54,000`-row Sleepyfish fixture through both backends and
+   require equality for every output array and identical review counts.
+4. Promote only after the complete default-surface workflow improves by at
+   least `20%`; otherwise keep the simpler Python/OpenCV backend.
+
+Do not JIT-compile on LSF workers. Build the extension once against the shared
+Palette environment, load it on workstation and compute nodes, and fall back to
+Python/OpenCV when the native module or ABI-compatible OpenCV library is absent.
+
 ### High Risk: CUDA / True Batched Geometry
 
 CUDA could accelerate thresholding, morphology, reductions, and maybe connected
@@ -398,11 +452,12 @@ cost is multi-week and the main risk is silent drift in QC/review labels.
 
 ## Recommended Next Step
 
-Do not start with a low-level rewrite. After the select-components optimization,
-the next incremental target is the vectorized split itself or the remaining raw
-component finalization/write phases. If those are not enough for production
-throughput, define the C++/pybind11 mask-geometry kernel as a separate,
-parity-tested project.
+The Python/OpenCV split, component-selection, hole-fill, metric, and postcompute
+optimizations above are now implemented. The 2026-07-11 full-clip benchmark
+still spent about `95%` of wall time inside `process_shard_compute`, so after
+capturing a complete default-surface 8/16-worker baseline, the next code
+optimization is the separate parity-tested C++/pybind11 OpenCV batch kernel
+defined above.
 
 ## Shared Mask-Geometry Surface
 

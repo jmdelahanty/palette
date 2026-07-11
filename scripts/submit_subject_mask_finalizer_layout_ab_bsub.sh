@@ -131,6 +131,10 @@ cat > "$RUN_DIR/manifest.json" <<JSON
   "source_git_head": "$SOURCE_GIT_HEAD",
   "source_git_branch": "$SOURCE_GIT_BRANCH",
   "provenance_checkout": "node_local_clean_checkout_from_source_git.bundle",
+  "write_eye_geometry": true,
+  "write_component_contours": true,
+  "write_sampled_component_contours": true,
+  "postcompute_backend": "process_shards",
   "mutates_registry": false
 }
 JSON
@@ -202,6 +206,12 @@ for repeat in $(seq 1 "$REPEATS"); do
       --dense-mask-row-chunk "$DENSE_MASK_ROW_CHUNK"
       --metric-level cheap
       --mask-storage dense_uint8
+      --write-eye-geometry
+      --write-component-contours
+      --write-sampled-component-contours
+      --postcompute-backend process_shards
+      --postcompute-chunk-size "$CHUNK_SIZE"
+      --postcompute-num-workers "$WORKERS"
       --execution-backend process_shards
       --num-workers "$WORKERS"
       --assignment-keypoint-group refined_keypoints_runs

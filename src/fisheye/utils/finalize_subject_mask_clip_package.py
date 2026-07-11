@@ -142,7 +142,7 @@ def finalize_subject_mask_clip_package(
     assignment_keypoints_run: str | None = None,
     write_eye_geometry: bool = True,
     write_component_contours: bool = True,
-    write_sampled_component_contours: bool = False,
+    write_sampled_component_contours: bool = True,
     retain_source_seeds: bool = False,
     overwrite: bool = False,
     cleanup: bool = True,
@@ -253,7 +253,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--assignment-keypoints-run")
     parser.add_argument("--no-write-eye-geometry", action="store_true")
     parser.add_argument("--no-write-component-contours", action="store_true")
-    parser.add_argument("--write-sampled-component-contours", action="store_true")
+    parser.add_argument("--write-sampled-component-contours", action="store_true", default=True)
     parser.add_argument("--no-write-sampled-component-contours", action="store_true")
     parser.add_argument("--retain-source-seeds", action="store_true")
     parser.add_argument("--overwrite", action="store_true")

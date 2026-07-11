@@ -4421,9 +4421,9 @@ def finalize_subject_mask_run(
     components: Optional[Sequence[str]] = None,
     chunk_size: int = 256,
     metric_level: str = "cheap",
-    write_eye_geometry: bool = False,
-    write_component_contours: bool = False,
-    write_sampled_component_contours: bool = False,
+    write_eye_geometry: bool = True,
+    write_component_contours: bool = True,
+    write_sampled_component_contours: bool = True,
     sampled_contour_counts: Mapping[str, int] | None = None,
     sampled_contour_row_chunk: int = DEFAULT_SAMPLED_CONTOUR_ROW_CHUNK,
     retain_source_seeds: bool = False,
@@ -5651,9 +5651,9 @@ def finalize_subject_masks(
     components: Optional[Sequence[str]] = None,
     chunk_size: int = 256,
     metric_level: str = "cheap",
-    write_eye_geometry: bool = False,
-    write_component_contours: bool = False,
-    write_sampled_component_contours: bool = False,
+    write_eye_geometry: bool = True,
+    write_component_contours: bool = True,
+    write_sampled_component_contours: bool = True,
     sampled_contour_counts: Mapping[str, int] | None = None,
     sampled_contour_row_chunk: int = DEFAULT_SAMPLED_CONTOUR_ROW_CHUNK,
     retain_source_seeds: bool = False,
@@ -5804,18 +5804,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--write-eye-geometry",
-        action="store_true",
-        help="Also compute refined eye geometry/ellipse relations during finalization.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Compute refined eye geometry/ellipse relations during finalization (default: enabled).",
     )
     parser.add_argument(
         "--write-component-contours",
-        action="store_true",
-        help="Also compute full ragged component contours; intended for explicit analysis/archive builds.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Compute full ragged component contours during finalization (default: enabled).",
     )
     parser.add_argument(
         "--write-sampled-component-contours",
-        action="store_true",
-        help="Write fixed-K sampled display contours directly from finalized dense masks.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write fixed-K sampled display contours from finalized dense masks (default: enabled).",
     )
     parser.add_argument(
         "--sampled-contour-k",
