@@ -695,6 +695,55 @@ memory, `1,725,388 KiB` driver peak RSS, and no swap. The source analysis Zarr
 and registry were read-only. This fixture is ready for the position-balanced
 end-to-end finalizer A/B.
 
+### Position-Balanced End-to-End Finalizer A/B
+
+LSF job `153061487` ran four complete `54,000`-row finalizations directly
+against the PRFS fixtures on `h07u30.int.janelia.org`. The order was regular,
+sharded, sharded, regular, so each physical layout occupied each execution
+position once. All runs used eight `process_shards` workers, `256` logical rows
+per worker chunk, `128` rows per physical dense output chunk, cheap metrics,
+dense `uint8` refined masks, and no optional contours or eye geometry.
+
+```text
+/groups/johnson/johnsonlab/jeremy/recordings/logs/
+  subject_mask_finalizer_layout_ab/
+    sleepyfish_finalizer_layout_ab_clip000000_20260711_02/
+      reports/summary.json
+```
+
+| Execution position | Layout | Finalizer seconds | Process wall seconds | Peak process-tree RSS GiB |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | regular | `338.32` | `376.22`* | `10.66` |
+| 2 | sharded | `334.41` | `338.10` | `9.40` |
+| 1 | sharded | `334.98` | `340.04` | `9.70` |
+| 2 | regular | `331.99` | `336.04` | `9.97` |
+
+The regular median finalizer time was `335.15 s`; the sharded median was
+`334.69 s`. Sharding was therefore `0.14%` faster, which is operationally
+indistinguishable from no runtime difference. The order-specific comparisons
+swung from sharded `1.16%` faster to sharded `0.90%` slower. Median process-tree
+RSS was `10.31 GiB` regular versus `9.55 GiB` sharded, a `7.4%` reduction.
+CPU time differed by less than `1%`.
+
+`*` The first regular process wall includes removal of an incomplete output
+left by an earlier wrapper attempt whose final computation succeeded but whose
+completion gate correctly rejected missing Git provenance. Internal finalizer
+time is not affected. The corrected job executed from a clean node-local
+checkout of commit `ba9e4d3` and all four runs completed normally.
+
+After the timed runs, an exhaustive logical comparison read every corresponding
+output element. Both repeat pairs contained `125` arrays per run and reported
+zero mismatches. Validation took `738.38 s` and was excluded from finalizer
+timing. The complete LSF job used `9,558 MB` maximum memory, no swap, and
+finished successfully in `2,140 s` including validation.
+
+This end-to-end result clears the final runtime gate for the `2,048`-row
+probability-sharding candidate. Together with the approximately `63x`
+probability-payload object reduction, unchanged stored size, faster fixture
+construction, and exact output parity, it supports using `2,048`-row indexed
+shards for new read-only probability-mask stores. A full collection canary
+should still precede any bulk rewrite of the existing `22` raw shards.
+
 From a workstation without `bsub`, submit through the configured login host:
 
 ```bash
