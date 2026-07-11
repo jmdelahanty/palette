@@ -452,28 +452,30 @@ cost is multi-week and the main risk is silent drift in QC/review labels.
 
 ## Complete Default-Output 8/16-Worker Baseline
 
-LSF job `153061568` captured the pending full `54,000`-row Sleepyfish baseline
-with the production default surfaces enabled: eye geometry, full ragged body
-and swim-bladder contours, and sampled contours for all components. It compared
-regular `[32,1,512,512]` probability chunks with the selected `2,048`-row
-indexed-sharding candidate at 8 and 16 `process_shards` workers.
+LSF job `153061568` captured the initial full `54,000`-row Sleepyfish baseline
+and exposed one degenerate-ellipse validity defect. Corrected job `153061604`
+repeated the matrix from commit `cb78692` and passed exhaustive parity. The
+production default surfaces were enabled: eye geometry, full ragged body and
+swim-bladder contours, and sampled contours for all components. The matrix
+compared regular `[32,1,512,512]` probability chunks with the selected
+`2,048`-row indexed-sharding candidate at 8 and 16 `process_shards` workers.
 
 | Layout | Workers | Finalizer seconds | Core shard seconds | Postcompute seconds | Peak process-tree RSS GiB |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| regular | 8 | `335.00` | `301.06` | `11.69` | `9.83` |
-| sharded | 8 | `332.08` | `301.76` | `11.73` | `9.60` |
-| sharded | 16 | `210.78` | `184.03` | `9.16` | `20.54` |
-| regular | 16 | `223.00` | `195.98` | `9.17` | `18.74` |
+| regular | 8 | `332.89` | `303.08` | `11.61` | `9.93` |
+| sharded | 8 | `332.81` | `303.62` | `11.59` | `9.49` |
+| sharded | 16 | `208.39` | `181.64` | `9.14` | `22.34` |
+| regular | 16 | `210.03` | `182.73` | `9.43` | `21.19` |
 
-Eight workers were layout-neutral. Sixteen workers reduced finalizer wall time
-by `33-36%` relative to eight, at approximately twice the process-tree RSS;
-the sharded 16-worker run was `5.48%` faster than regular in this single pair.
-The core shard phase still occupied `88-90%` of finalizer wall time. Derived
-postcompute is no longer the long pole.
+Both worker counts were layout-neutral: sharding differed from regular by only
+`0.02%` at 8 workers and `0.78%` at 16. Sixteen workers reduced finalizer wall
+time by about `37%` relative to eight, at approximately twice the process-tree
+RSS. The core shard phase still occupied `87-91%` of finalizer wall time.
+Derived postcompute is no longer the long pole.
 
 Each node-local completed run occupied about `151.28 MB` apparent bytes across
 `155` arrays and `13,122` files. Production-helper publication to PRFS added
-`113-121 s`: `94.7-101.2 s` copying, `17.8-18.9 s` inventory/validation, and
+`110-115 s`: `92.5-96.4 s` copying, `17.2-18.3 s` inventory/validation, and
 about `0.003 s` atomic commit. Treat publication/object creation as a separate
 optimization surface from mask geometry.
 
@@ -485,15 +487,17 @@ The initial exact comparison exposed one real validity defect rather than a
 layout difference. A `7`-pixel right-eye mask produced a subpixel OpenCV
 ellipse whose angle varied with 8- versus 16-worker partitioning; both layouts
 agreed within each worker count. The shared geometry helper now rejects axes
-below one pixel as `ellipse_invalid_params`. The complete exact-parity matrix
-must be repeated from that correction before backend promotion.
+below one pixel as `ellipse_invalid_params`. It reclassified `25` subpixel
+fits as reviewable failures. Corrected job `153061604` then compared all `155`
+arrays in each candidate against the regular 8-worker reference and reported
+zero mismatches. Exhaustive parity took `452.06 s`.
 
 ## Recommended Next Step
 
 The Python/OpenCV split, component-selection, hole-fill, metric, and postcompute
 optimizations above are now implemented, and the complete default-surface
 8/16-worker baseline is captured. Because the core shard phase still consumes
-`88-90%` of finalizer wall time, the next code optimization is the separate
+`87-91%` of finalizer wall time, the next code optimization is the separate
 parity-tested C++/pybind11 OpenCV batch kernel defined above. PRFS publication
 object count and validation scans should be optimized independently.
 

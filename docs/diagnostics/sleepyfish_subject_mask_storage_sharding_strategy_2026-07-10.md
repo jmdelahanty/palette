@@ -3,9 +3,8 @@
 **Date:** 2026-07-10
 **Last updated:** 2026-07-11
 **Status:** diagnostic, implementation, and complete single-clip finalizer
-timing record complete; a corrected exact-parity rerun and the full-collection
-canary remain pending, and no canonical storage migration has been approved or
-applied
+layout/parity record complete; the full-collection canary remains pending, and
+no canonical storage migration has been approved or applied
 
 ## Scope
 
@@ -34,10 +33,12 @@ The note has three purposes:
 It also records the related partial refined-finalizer failure because storage
 sharding and compute sharding must not be conflated.
 
-The implementation is recorded in two commits on branch `sun`:
+The implementation is recorded in four commits on branch `sun`:
 
 - `ba9e4d3` — `Optimize subject-mask collection finalization`;
-- `081c766` — `Add subject-mask finalizer layout benchmark`.
+- `081c766` — `Add subject-mask finalizer layout benchmark`;
+- `e7ad962` — `Default subject-mask derived outputs`;
+- `cb78692` — `Benchmark complete subject-mask finalization matrix`.
 
 The principal implementation and reproduction surfaces are:
 
@@ -795,9 +796,12 @@ rewrite of the existing `22` raw shards.
 
 ### Complete Default-Output 8/16-Worker Matrix
 
-LSF job `153061568` then ran one complete default-output finalization for each
-layout at 8 and 16 workers on `h07u28.int.janelia.org`. All cases used `256`
-logical rows per worker chunk, `256` rows per dense output chunk, dense
+LSF job `153061568` first ran one complete default-output finalization for each
+layout at 8 and 16 workers on `h07u28.int.janelia.org`. Its exact comparison
+exposed the degenerate-ellipse validity defect described below. After that
+contract was corrected in commit `cb78692`, LSF job `153061604` repeated the
+entire matrix on the same host and passed exhaustive parity. All cases used
+`256` logical rows per worker chunk, `256` rows per dense output chunk, dense
 `uint8` masks, cheap metrics, eye geometry, full ragged component contours,
 sampled contours, and `process_shards` postcompute. Raw probabilities were
 read directly from PRFS, refined outputs were written to node-local scratch,
@@ -807,37 +811,38 @@ PRFS Zarr with the production publication helpers.
 ```text
 /groups/johnson/johnsonlab/jeremy/recordings/logs/
   subject_mask_complete_finalizer_matrix/
-    sleepyfish_complete_finalizer_matrix_clip000000_20260711_01/
+    sleepyfish_complete_finalizer_matrix_clip000000_20260711_02/
       reports/summary.json
       published_outputs.zarr
 ```
 
 | Layout | Workers | Finalizer seconds | Core process-shard seconds | Derived postcompute seconds | Peak process-tree RSS GiB | Average effective cores |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| regular | 8 | `335.00` | `301.06` | `11.69` | `9.83` | `7.20` |
-| sharded 2,048 | 8 | `332.08` | `301.76` | `11.73` | `9.60` | `7.33` |
-| sharded 2,048 | 16 | `210.78` | `184.03` | `9.16` | `20.54` | `13.61` |
-| regular | 16 | `223.00` | `195.98` | `9.17` | `18.74` | `13.66` |
+| regular | 8 | `332.89` | `303.08` | `11.61` | `9.93` | `7.29` |
+| sharded 2,048 | 8 | `332.81` | `303.62` | `11.59` | `9.49` | `7.28` |
+| sharded 2,048 | 16 | `208.39` | `181.64` | `9.14` | `22.34` | `13.59` |
+| regular | 16 | `210.03` | `182.73` | `9.43` | `21.19` | `13.65` |
 
-At eight workers the layouts were again operationally equivalent: sharding
-reduced total finalizer time by `2.91 s` (`0.87%`), while its core phase was
-actually `0.70 s` slower. At 16 workers the sharded run was `12.22 s`
-(`5.48%`) faster than regular. That is a modest high-concurrency signal, not a
-replicated throughput claim. Moving from 8 to 16 workers reduced sharded
-finalizer time by `36.5%` and regular time by `33.4%`; scaling was useful but
-sublinear because per-chunk time rose under PRFS and CPU contention.
+The corrected matrix makes the layout result especially clear. Sharding was
+`0.08 s` (`0.02%`) faster at 8 workers and `1.64 s` (`0.78%`) faster at 16
+workers: both are operationally indistinguishable from no runtime difference.
+Moving from 8 to 16 workers reduced sharded finalizer time by `37.4%` and
+regular time by `36.9%`; scaling was useful but sublinear because per-chunk
+time rose under PRFS and CPU contention.
 
 The 16-worker runs approximately doubled process-tree RSS. The sharded case
-peaked at `20.54 GiB`, so a production 16-worker request must include margin
-above roughly `21 GiB`. LSF reported no swap. Sharding used `2.3%` less RSS at
-8 workers but `9.6%` more at 16 workers; there is no consistent memory win.
+peaked at `22.34 GiB`, so a production 16-worker request must include margin
+above roughly `23 GiB`. LSF reported `16.4 GiB` maximum job memory and no swap;
+the process-tree metric can count shared pages more than once. Sharding used
+`4.5%` less process-tree RSS at 8 workers but `5.4%` more at 16 workers; there
+is no consistent memory win.
 
 Every run created `155` arrays in `13,122` files. Apparent output size was
 about `151.28 MB` and allocated size `188.22 MB`, despite the much larger
-logical dense-mask shape. Node-local-to-PRFS copy took `94.7-101.2 s`, the
-post-copy inventory/validation scan took `17.8-18.9 s`, and atomic commit took
+logical dense-mask shape. Node-local-to-PRFS copy took `92.5-96.4 s`, the
+post-copy inventory/validation scan took `17.2-18.3 s`, and atomic commit took
 about `0.003 s`. Publication is therefore a separate, metadata-heavy
-`113-121 s` phase that worker-count tuning does not improve.
+`110-115 s` phase that worker-count tuning does not improve.
 
 The matrix runner requires all four completion checks—eye geometry, full
 contours, sampled contours, and the run completion contract—before publication
@@ -854,8 +859,15 @@ offending right-eye mask contained only `7` pixels and its contour enclosed
 `0.26 x 0.06 px`. Its underdetermined angle varied by `13.29 degrees` with
 worker partitioning. This is a shared eye-geometry validity bug, not storage-
 layout drift. `measure_mask_ellipse()` now rejects fitted axes below one pixel
-as `ellipse_invalid_params`; the complete matrix must be rerun from that
-correction before the exact-output gate is considered passed.
+as `ellipse_invalid_params`. This reclassified `25` subpixel fits, reducing
+paired ellipse success from `53,930` to `53,905` and increasing
+`assigned_needs_review` from `54` to `79`.
+
+Corrected job `153061604` compared each of the three candidate runs against the
+regular 8-worker reference. Every comparison contained `155` arrays and zero
+mismatches. Exhaustive parity took `452.06 s`. All four runs also passed eye
+geometry, full-contour, sampled-contour, and completion-contract checks. The
+job finished `DONE` with no swap.
 
 From a workstation without `bsub`, submit through the configured login host:
 
@@ -923,8 +935,7 @@ scripts/submit_subject_mask_complete_finalizer_matrix_bsub.sh \
 - The `2,048`-row indexed-sharding layout has cleared the single-clip storage,
   probability exactness, construction, core-finalizer, and complete default-
   output timing gates. It remains the selected candidate for new immutable
-  read-only probability-mask stores, subject to the corrected complete-output
-  exact-parity rerun and a full-collection canary.
+  read-only probability-mask stores, subject to a full-collection canary.
 - Finalized runs include eye geometry, full ragged component contours, and
   sampled component contours by default. The historical `335 s` layout A/B
   excluded those surfaces and must not be quoted as complete production time.
