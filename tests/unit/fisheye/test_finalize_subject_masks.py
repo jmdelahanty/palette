@@ -10,6 +10,12 @@ import zarr
 from fisheye.diagnostics.benchmark_subject_mask_full_finalizer import (
     benchmark_subject_mask_full_finalizer,
 )
+from fisheye.diagnostics.benchmark_subject_mask_collection_worker_init import (
+    benchmark_collection_worker_initialization,
+)
+from fisheye.diagnostics.build_subject_mask_finalizer_ab_fixture import (
+    build_finalizer_ab_fixture,
+)
 from fisheye.refinement import finalize_subject_masks as mod
 from fisheye.shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from fisheye.shared.mask_store import open_mask_store, write_component_rle_mask_store_from_dense
@@ -164,8 +170,8 @@ def _build_probability_root(
     return root
 
 
-def _build_sharded_subject_mask_root() -> zarr.Group:
-    root = zarr.group()
+def _build_sharded_subject_mask_root(zarr_path: Path | None = None) -> zarr.Group:
+    root = zarr.open_group(str(zarr_path), mode="w") if zarr_path is not None else zarr.group()
     crop_parent = root.create_group("crop_runs")
 
     crop_specs = {
@@ -314,6 +320,60 @@ def test_finalize_subject_mask_run_from_mixed_shards_requires_target_crop(monkey
             components=["subject_body", "swim_bladder"],
             chunk_size=1,
         )
+
+
+def test_collection_worker_plan_reuses_parent_rebase_without_identity_map(monkeypatch) -> None:
+    root = _build_sharded_subject_mask_root()
+    source, collection = mod._load_subject_mask_source(
+        root,
+        subject_run=None,
+        subject_shard_runs=["subject_masks_clip_b", "subject_masks_clip_a"],
+        target_crop_run="crop_collection",
+    )
+    assert collection is not None
+    plan = mod._build_collection_worker_plan(collection)
+    parent_masks = np.asarray(source.group["mask_probs_roi"][:])
+
+    def fail_rebuild(*args, **kwargs):
+        raise AssertionError("worker rebuilt the global crop identity map")
+
+    monkeypatch.setattr(mod, "_resolve_subject_mask_crop_rebase", fail_rebuild)
+    worker_source, worker_collection = mod._load_subject_mask_source(
+        root,
+        subject_run=None,
+        subject_shard_runs=["subject_masks_clip_b", "subject_masks_clip_a"],
+        target_crop_run="crop_collection",
+        collection_worker_plan=plan,
+    )
+
+    assert worker_collection is not None
+    np.testing.assert_array_equal(worker_source.group["mask_probs_roi"][:], parent_masks)
+    np.testing.assert_array_equal(worker_collection.source_crop_row_ids, collection.source_crop_row_ids)
+    plan_summary = mod._collection_worker_plan_summary(plan)
+    assert plan_summary is not None
+    assert plan_summary["global_identity_map_builds"] == 1
+    assert plan_summary["worker_identity_map_rebuilds"] == 0
+    assert plan_summary["array_bytes"] == 6
+    assert set(plan_summary["array_dtypes"].values()) == {"uint8"}
+
+
+def test_indexed_collection_slice_allocates_only_requested_positions(monkeypatch) -> None:
+    values = np.arange(100, dtype=np.int32).reshape(100, 1)
+    view = mod._IndexedCollectionArray(
+        [values],
+        source_indices=np.zeros((100,), dtype=np.uint8),
+        local_indices=np.arange(100, dtype=np.uint8),
+    )
+    original_arange = mod.np.arange
+
+    def bounded_arange(start, stop=None, step=1, **kwargs):
+        effective_start = 0 if stop is None else int(start)
+        effective_stop = int(start) if stop is None else int(stop)
+        assert effective_stop - effective_start <= 5
+        return original_arange(start, stop, step, **kwargs)
+
+    monkeypatch.setattr(mod.np, "arange", bounded_arange)
+    np.testing.assert_array_equal(view[50:55, :], values[50:55, :])
 
 
 def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities(monkeypatch) -> None:
@@ -1513,6 +1573,132 @@ def test_finalize_subject_masks_process_shards_writes_disjoint_rows(monkeypatch,
     assert all(int(item["rows_completed_in_shard"]) > 0 for item in shard_chunk_events)
     assert all(int(item["shard_rows_total"]) > 0 for item in shard_chunk_events)
     assert all(float(item["duration_seconds"]) >= 0.0 for item in shard_chunk_events)
+
+
+def test_finalize_subject_masks_process_shards_reuses_collection_worker_plan(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    zarr_path = tmp_path / "collection_analysis.zarr"
+    _build_sharded_subject_mask_root(zarr_path)
+
+    summary = mod.finalize_subject_masks(
+        zarr_path,
+        subject_shard_runs=["subject_masks_clip_b", "subject_masks_clip_a"],
+        target_crop_run="crop_collection",
+        refined_run="refined_subject_masks_collection_process_shards",
+        components=["subject_body", "swim_bladder"],
+        chunk_size=1,
+        dense_mask_row_chunk=1,
+        execution_backend="process_shards",
+        num_workers=2,
+    )
+    mod.finalize_subject_masks(
+        zarr_path,
+        subject_shard_runs=["subject_masks_clip_b", "subject_masks_clip_a"],
+        target_crop_run="crop_collection",
+        refined_run="refined_subject_masks_collection_serial",
+        components=["subject_body", "swim_bladder"],
+        chunk_size=1,
+        dense_mask_row_chunk=1,
+        execution_backend="serial_driver",
+    )
+
+    plan = summary["collection_worker_index_plan"]
+    assert plan["schema_id"] == mod._COLLECTION_WORKER_INDEX_PLAN_SCHEMA
+    assert plan["global_identity_map_builds"] == 1
+    assert plan["worker_identity_map_rebuilds"] == 0
+    assert plan["row_count"] == 2
+    root = zarr.open_group(str(zarr_path), mode="r")
+    process_run = root["refined_subject_masks_runs/refined_subject_masks_collection_process_shards"]
+    serial_run = root["refined_subject_masks_runs/refined_subject_masks_collection_serial"]
+    np.testing.assert_array_equal(process_run["masks_roi"][:], serial_run["masks_roi"][:])
+    provenance_plan = process_run.attrs["provenance"]["parameters"]["collection_worker_index_plan"]
+    assert provenance_plan["worker_identity_map_rebuilds"] == 0
+
+
+def test_collection_worker_initialization_benchmark_is_read_only(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "collection_init.zarr"
+    root = _build_sharded_subject_mask_root(zarr_path)
+    source_refined = root.create_group("refined_subject_masks_runs").create_group("failed_source")
+    source_refined.attrs.update(
+        {
+            "source_subject_mask_shard_runs": [
+                "subject_masks_clip_b",
+                "subject_masks_clip_a",
+            ],
+            "source_crop_rebase_target_run": "crop_collection",
+        }
+    )
+    output_path = tmp_path / "worker_init.json"
+
+    summary = benchmark_collection_worker_initialization(
+        zarr_path,
+        source_refined_run="failed_source",
+        num_workers=2,
+        sample_rows=1,
+        hold_seconds=0,
+        output_json=output_path,
+    )
+
+    assert summary["worker_count"] == 2
+    assert summary["collection_worker_plan"]["worker_identity_map_rebuilds"] == 0
+    assert summary["worker_current_rss_sum_kib"] > 0
+    assert len(summary["workers"]) == 2
+    assert all(worker["sample_rows"] == 1 for worker in summary["workers"])
+    assert output_path.is_file()
+    reopened = zarr.open_group(str(zarr_path), mode="r")
+    assert list(reopened["refined_subject_masks_runs"].group_keys()) == ["failed_source"]
+
+
+def test_build_finalizer_ab_fixture_changes_only_probability_layout(tmp_path: Path) -> None:
+    source_path = tmp_path / "source_collection.zarr"
+    root = _build_sharded_subject_mask_root(source_path)
+    keypoint_parent = root.create_group("refined_keypoints_runs")
+    keypoint_parent.attrs["latest"] = "refined_keypoints_collection"
+    keypoints = keypoint_parent.create_group("refined_keypoints_collection")
+    keypoints.attrs["keypoint_labels"] = ["swim_bladder", "eye_left", "eye_right"]
+    keypoints.create_array(
+        "keypoints_roi",
+        data=np.asarray(
+            [
+                [[5.0, 6.0], [2.0, 2.0], [7.0, 2.0]],
+                [[5.0, 6.0], [2.0, 4.0], [7.0, 4.0]],
+            ],
+            dtype=np.float32,
+        ),
+        overwrite=True,
+    )
+    keypoints.create_array("detection_success", data=np.asarray([True, True]), overwrite=True)
+    keypoints.create_array("source_crop_row_ids", data=np.asarray([0, 1], dtype=np.int64), overwrite=True)
+    output_root = tmp_path / "fixture"
+
+    summary = build_finalizer_ab_fixture(
+        source_path,
+        source_shard_run="subject_masks_clip_a",
+        target_crop_run="crop_collection",
+        assignment_keypoint_group="refined_keypoints_runs",
+        assignment_keypoints_run="refined_keypoints_collection",
+        output_root=output_root,
+        inner_chunk_rows=1,
+        shard_rows=2,
+    )
+
+    assert summary["row_count"] == 1
+    assert summary["all_exact"] is True
+    assert len({variant["destination_sha256"] for variant in summary["variants"]}) == 1
+    regular = zarr.open_group(str(output_root / "regular.zarr"), mode="r")
+    sharded = zarr.open_group(str(output_root / "shard_02048.zarr"), mode="r")
+    regular_probs = regular["subject_mask_runs/subject_masks_finalizer_ab_fixture/mask_probs_roi"]
+    sharded_probs = sharded["subject_mask_runs/subject_masks_finalizer_ab_fixture/mask_probs_roi"]
+    assert regular_probs.shards is None
+    assert sharded_probs.shards == (2, 1, 10, 10)
+    np.testing.assert_array_equal(regular_probs[:], sharded_probs[:])
+    assert regular["crop_runs/crop_finalizer_ab_fixture/frame_indices"].shape == (1,)
+    assert regular["refined_keypoints_runs/refined_keypoints_finalizer_ab_fixture/keypoints_roi"].shape[0] == 1
+    source_reopened = zarr.open_group(str(source_path), mode="r")
+    assert "refined_subject_masks_runs" not in source_reopened
 
 
 def test_finalize_subject_masks_process_shards_can_write_dense_plus_bitpacked(

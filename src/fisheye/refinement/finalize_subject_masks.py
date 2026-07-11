@@ -271,6 +271,89 @@ class _SubjectMaskShardCollection:
     source_crop_row_ids: np.ndarray
 
 
+_COLLECTION_WORKER_INDEX_PLAN_SCHEMA = "subject_mask_collection_worker_index_plan_v1"
+
+
+@dataclass(frozen=True)
+class _SubjectMaskCollectionWorkerPlan:
+    schema_id: str
+    shard_runs: tuple[str, ...]
+    shard_crop_runs: tuple[str, ...]
+    source_crop_run: str
+    source_crop_rebased_from_shards: bool
+    shard_row_counts: tuple[int, ...]
+    row_source_indices: np.ndarray
+    row_local_indices: np.ndarray
+    source_crop_row_ids: np.ndarray
+
+
+def _compact_nonnegative_index_array(values: np.ndarray, *, name: str) -> np.ndarray:
+    array = np.asarray(values, dtype=np.int64).reshape(-1)
+    if array.size and int(array.min()) < 0:
+        raise ValueError(f"{name} must contain only nonnegative indices.")
+    maximum = int(array.max()) if array.size else 0
+    if maximum <= np.iinfo(np.uint8).max:
+        dtype = np.dtype(np.uint8)
+    elif maximum <= np.iinfo(np.uint16).max:
+        dtype = np.dtype(np.uint16)
+    elif maximum <= np.iinfo(np.uint32).max:
+        dtype = np.dtype(np.uint32)
+    else:
+        dtype = np.dtype(np.uint64)
+    return np.ascontiguousarray(array, dtype=dtype)
+
+
+def _build_collection_worker_plan(
+    collection: _SubjectMaskShardCollection,
+) -> _SubjectMaskCollectionWorkerPlan:
+    source_indices = np.asarray(collection.row_source_indices, dtype=np.int64).reshape(-1)
+    shard_row_counts = np.bincount(
+        source_indices,
+        minlength=len(collection.shard_runs),
+    )
+    return _SubjectMaskCollectionWorkerPlan(
+        schema_id=_COLLECTION_WORKER_INDEX_PLAN_SCHEMA,
+        shard_runs=tuple(collection.shard_runs),
+        shard_crop_runs=tuple(collection.shard_crop_runs),
+        source_crop_run=str(collection.source_crop_run),
+        source_crop_rebased_from_shards=bool(collection.source_crop_rebased_from_shards),
+        shard_row_counts=tuple(int(value) for value in shard_row_counts.tolist()),
+        row_source_indices=_compact_nonnegative_index_array(
+            source_indices,
+            name="row_source_indices",
+        ),
+        row_local_indices=_compact_nonnegative_index_array(
+            collection.row_local_indices,
+            name="row_local_indices",
+        ),
+        source_crop_row_ids=_compact_nonnegative_index_array(
+            collection.source_crop_row_ids,
+            name="source_crop_row_ids",
+        ),
+    )
+
+
+def _collection_worker_plan_summary(
+    plan: _SubjectMaskCollectionWorkerPlan | None,
+) -> dict[str, object] | None:
+    if plan is None:
+        return None
+    arrays = {
+        "row_source_indices": plan.row_source_indices,
+        "row_local_indices": plan.row_local_indices,
+        "source_crop_row_ids": plan.source_crop_row_ids,
+    }
+    return {
+        "schema_id": str(plan.schema_id),
+        "row_count": int(plan.source_crop_row_ids.shape[0]),
+        "shard_row_counts": list(plan.shard_row_counts),
+        "array_bytes": int(sum(int(array.nbytes) for array in arrays.values())),
+        "array_dtypes": {name: str(array.dtype) for name, array in arrays.items()},
+        "global_identity_map_builds": 1,
+        "worker_identity_map_rebuilds": 0,
+    }
+
+
 class _SubjectMaskParentAliasRoot:
     """Root proxy exposing shard runs as ``subject_mask_runs`` for the legacy loader."""
 
@@ -301,8 +384,12 @@ class _IndexedCollectionArray:
         if not arrays:
             raise ValueError("Indexed collection array requires at least one source array.")
         self._arrays = tuple(arrays)
-        self._source_indices = np.asarray(source_indices, dtype=np.int64).reshape(-1)
-        self._local_indices = np.asarray(local_indices, dtype=np.int64).reshape(-1)
+        self._source_indices = np.asarray(source_indices).reshape(-1)
+        self._local_indices = np.asarray(local_indices).reshape(-1)
+        if self._source_indices.dtype.kind not in "iu":
+            self._source_indices = self._source_indices.astype(np.int64)
+        if self._local_indices.dtype.kind not in "iu":
+            self._local_indices = self._local_indices.astype(np.int64)
         if self._source_indices.shape != self._local_indices.shape:
             raise ValueError("source_indices and local_indices must have the same shape.")
         first = arrays[0]
@@ -324,12 +411,27 @@ class _IndexedCollectionArray:
             row_key = key
             rest = ()
         scalar_row = isinstance(row_key, (int, np.integer))
-        positions = np.arange(self.shape[0], dtype=np.int64)[row_key]
-        positions = (
-            np.asarray([positions], dtype=np.int64)
-            if np.ndim(positions) == 0
-            else np.asarray(positions, dtype=np.int64)
-        )
+        if scalar_row:
+            position = int(row_key)
+            if position < 0:
+                position += int(self.shape[0])
+            if position < 0 or position >= int(self.shape[0]):
+                raise IndexError(f"collection row index {row_key} is out of bounds")
+            positions = np.asarray([position], dtype=np.int64)
+        elif isinstance(row_key, slice):
+            start, stop, step = row_key.indices(int(self.shape[0]))
+            positions = np.arange(start, stop, step, dtype=np.int64)
+        else:
+            positions = np.asarray(row_key)
+            if positions.dtype.kind == "b":
+                if positions.ndim != 1 or int(positions.shape[0]) != int(self.shape[0]):
+                    raise IndexError("boolean collection row index must match the row count")
+                positions = np.flatnonzero(positions)
+            else:
+                positions = np.asarray(positions, dtype=np.int64)
+                positions = np.where(positions < 0, positions + int(self.shape[0]), positions)
+                if bool(np.any((positions < 0) | (positions >= int(self.shape[0])))):
+                    raise IndexError("collection row index is out of bounds")
         rows: list[np.ndarray] = []
         for position in positions.reshape(-1):
             source_idx = int(self._source_indices[int(position)])
@@ -616,31 +718,71 @@ def _load_subject_mask_source(
     subject_run: Optional[str],
     subject_shard_runs: Sequence[str] | None = None,
     target_crop_run: str | None = None,
+    collection_worker_plan: _SubjectMaskCollectionWorkerPlan | None = None,
 ) -> tuple[SourceSubjectMaskRun, _SubjectMaskShardCollection | None]:
     if subject_shard_runs:
         if subject_run:
             raise ValueError("Pass either --subject-run or --subject-shard-run, not both.")
         shards = _load_subject_mask_shard_sources(root, subject_shard_runs)
         _validate_subject_mask_shard_compatibility(shards)
-        source_crop_run, source_crop_row_ids, shard_crop_runs, rebased = _resolve_subject_mask_crop_rebase(
-            root,
-            shards,
-            target_crop_run=target_crop_run,
-        )
-        source_indices = np.concatenate(
-            [np.full(shard.row_count, shard_idx, dtype=np.int64) for shard_idx, shard in enumerate(shards)],
-            axis=0,
-        )
-        local_indices = np.concatenate(
-            [np.arange(shard.row_count, dtype=np.int64) for shard in shards],
-            axis=0,
-        )
-        order = np.argsort(np.asarray(source_crop_row_ids, dtype=np.int64), kind="stable")
-        sorted_crop_rows = np.asarray(source_crop_row_ids, dtype=np.int64)[order]
-        if np.unique(sorted_crop_rows).shape[0] != sorted_crop_rows.shape[0]:
-            raise ValueError("Duplicate source_crop_row_ids found across subject-mask shards for the target source_crop_run.")
-        source_indices = source_indices[order]
-        local_indices = local_indices[order]
+        if collection_worker_plan is not None:
+            if str(collection_worker_plan.schema_id) != _COLLECTION_WORKER_INDEX_PLAN_SCHEMA:
+                raise ValueError(
+                    f"Unsupported collection worker plan schema: {collection_worker_plan.schema_id!r}."
+                )
+            if tuple(collection_worker_plan.shard_runs) != tuple(str(name) for name in subject_shard_runs):
+                raise ValueError("Collection worker plan shard runs do not match the requested shard runs.")
+            source_crop_run = str(collection_worker_plan.source_crop_run)
+            if target_crop_run and source_crop_run != str(target_crop_run):
+                raise ValueError("Collection worker plan target crop run does not match the request.")
+            sorted_crop_rows = np.asarray(collection_worker_plan.source_crop_row_ids).reshape(-1)
+            shard_crop_runs = tuple(collection_worker_plan.shard_crop_runs)
+            if set(shard_crop_runs) != {shard.source_crop_run for shard in shards}:
+                raise ValueError("Collection worker plan source crop runs do not match the source shards.")
+            rebased = bool(collection_worker_plan.source_crop_rebased_from_shards)
+            source_indices = np.asarray(collection_worker_plan.row_source_indices).reshape(-1)
+            local_indices = np.asarray(collection_worker_plan.row_local_indices).reshape(-1)
+            expected_rows = int(sum(int(shard.row_count) for shard in shards))
+            if not (
+                int(sorted_crop_rows.shape[0])
+                == int(source_indices.shape[0])
+                == int(local_indices.shape[0])
+                == expected_rows
+            ):
+                raise ValueError(
+                    "Collection worker plan row arrays do not match the subject-mask shard row count."
+                )
+            if source_indices.size and int(source_indices.max()) >= len(shards):
+                raise ValueError("Collection worker plan contains an invalid shard index.")
+            if tuple(collection_worker_plan.shard_row_counts) != tuple(
+                int(shard.row_count) for shard in shards
+            ):
+                raise ValueError("Collection worker plan shard row counts do not match the source shards.")
+        else:
+            source_crop_run, source_crop_row_ids, shard_crop_runs, rebased = _resolve_subject_mask_crop_rebase(
+                root,
+                shards,
+                target_crop_run=target_crop_run,
+            )
+            source_indices = np.concatenate(
+                [
+                    np.full(shard.row_count, shard_idx, dtype=np.int64)
+                    for shard_idx, shard in enumerate(shards)
+                ],
+                axis=0,
+            )
+            local_indices = np.concatenate(
+                [np.arange(shard.row_count, dtype=np.int64) for shard in shards],
+                axis=0,
+            )
+            order = np.argsort(np.asarray(source_crop_row_ids, dtype=np.int64), kind="stable")
+            sorted_crop_rows = np.asarray(source_crop_row_ids, dtype=np.int64)[order]
+            if np.unique(sorted_crop_rows).shape[0] != sorted_crop_rows.shape[0]:
+                raise ValueError(
+                    "Duplicate source_crop_row_ids found across subject-mask shards for the target source_crop_run."
+                )
+            source_indices = source_indices[order]
+            local_indices = local_indices[order]
 
         first_source = shards[0].source
         arrays: dict[str, object] = {}
@@ -2221,6 +2363,7 @@ def _create_refined_run_shell(
             "worker_process_count": provenance_inputs.get("worker_process_count"),
             "requested_chunk_size": provenance_inputs.get("requested_chunk_size"),
             "chunk_alignment": provenance_inputs.get("chunk_alignment"),
+            "collection_worker_index_plan": provenance_inputs.get("collection_worker_index_plan"),
         },
         inputs=stage_inputs_payload,
     )
@@ -4079,6 +4222,7 @@ def _process_and_write_finalizer_shard(
     subject_run: str,
     subject_shard_runs: Sequence[str] | None = None,
     target_crop_run: Optional[str] = None,
+    collection_worker_plan: _SubjectMaskCollectionWorkerPlan | None = None,
     refined_run: str,
     component_names: Sequence[str],
     required_raw_components: Sequence[str],
@@ -4099,6 +4243,7 @@ def _process_and_write_finalizer_shard(
         subject_run=subject_run,
         subject_shard_runs=subject_shard_runs,
         target_crop_run=target_crop_run,
+        collection_worker_plan=collection_worker_plan,
     )
     run_group = root["refined_subject_masks_runs"][refined_run]
     component_names = tuple(str(name) for name in component_names)
@@ -4181,6 +4326,7 @@ def _compute_finalizer_process_shards(
     subject_run: str,
     subject_shard_runs: Sequence[str] | None = None,
     target_crop_run: Optional[str] = None,
+    collection_worker_plan: _SubjectMaskCollectionWorkerPlan | None = None,
     refined_run: str,
     component_names: Sequence[str],
     required_raw_components: Sequence[str],
@@ -4202,6 +4348,7 @@ def _compute_finalizer_process_shards(
         worker_count=int(worker_count),
         shard_count=int(len(shards)),
         chunk_count=int(len(chunk_ranges)),
+        collection_worker_plan=_collection_worker_plan_summary(collection_worker_plan),
     )
     results: list[dict[str, object]] = []
     with ProcessPoolExecutor(max_workers=worker_count) as executor:
@@ -4224,6 +4371,7 @@ def _compute_finalizer_process_shards(
                 subject_run=subject_run,
                 subject_shard_runs=tuple(subject_shard_runs or ()),
                 target_crop_run=target_crop_run,
+                collection_worker_plan=collection_worker_plan,
                 refined_run=refined_run,
                 component_names=tuple(component_names),
                 required_raw_components=tuple(required_raw_components),
@@ -4351,6 +4499,12 @@ def finalize_subject_mask_run(
         subject_shard_runs=subject_shard_runs,
         target_crop_run=target_crop_run,
     )
+    collection_worker_plan = (
+        _build_collection_worker_plan(shard_collection)
+        if execution_backend == _PROCESS_SHARD_EXECUTION_BACKEND and shard_collection is not None
+        else None
+    )
+    collection_worker_plan_summary = _collection_worker_plan_summary(collection_worker_plan)
     total_rows = int(source.masks_roi.shape[0])
     height = int(source.masks_roi.shape[2])
     width = int(source.masks_roi.shape[3])
@@ -4393,6 +4547,7 @@ def finalize_subject_mask_run(
             execution_backend,
             dense_mask_row_chunk=effective_dense_mask_row_chunk,
         ),
+        "collection_worker_index_plan": collection_worker_plan_summary,
     }
     component_names = _requested_output_components(source, components)
     if not component_names:
@@ -4500,6 +4655,7 @@ def finalize_subject_mask_run(
         finalized_from_subject_mask_shards=bool(shard_collection is not None),
         source_subject_mask_shard_runs=list(shard_collection.shard_runs) if shard_collection is not None else [],
         source_crop_rebase_target_run=str(target_crop_run or ""),
+        collection_worker_index_plan=collection_worker_plan_summary,
     )
 
     refined_parent = require_runs_parent(root, "refined_subject_masks_runs")
@@ -4691,6 +4847,7 @@ def finalize_subject_mask_run(
                     subject_run=worker_subject_run,
                     subject_shard_runs=tuple(subject_shard_runs or ()),
                     target_crop_run=target_crop_run,
+                    collection_worker_plan=collection_worker_plan,
                     refined_run=target_run,
                     component_names=component_names,
                     required_raw_components=tuple(required_raw_components),
