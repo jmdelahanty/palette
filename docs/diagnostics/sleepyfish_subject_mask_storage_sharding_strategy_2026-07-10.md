@@ -1,8 +1,10 @@
 # Sleepyfish Subject-Mask Storage And Sharding Strategy
 
 **Date:** 2026-07-10
-**Status:** current-state diagnostic and proposed benchmark plan; no storage
-migration has been approved or applied
+**Last updated:** 2026-07-11
+**Status:** diagnostic, implementation, and benchmark record complete through
+the single-clip end-to-end finalizer A/B; no canonical storage migration has
+been approved or applied
 
 ## Scope
 
@@ -21,14 +23,46 @@ The analysis archive is:
   sleepyfish_2026_05_05_17_45_30_cam2010095_analysis.zarr
 ```
 
-The note has two purposes:
+The note has three purposes:
 
 1. distinguish logical tensor size from physical compressed storage;
-2. propose a Zarr v3 indexed-sharding strategy that preserves current reads
-   while reducing filesystem-object count.
+2. record the collection-worker memory-amplifier fix;
+3. select and validate a Zarr v3 indexed-sharding candidate that preserves
+   finalizer behavior while reducing filesystem-object count.
 
 It also records the related partial refined-finalizer failure because storage
 sharding and compute sharding must not be conflated.
+
+The implementation is recorded in two commits on branch `sun`:
+
+- `ba9e4d3` — `Optimize subject-mask collection finalization`;
+- `081c766` — `Add subject-mask finalizer layout benchmark`.
+
+The principal implementation and reproduction surfaces are:
+
+- `src/fisheye/refinement/finalize_subject_masks.py` — compact parent-built
+  collection worker plan and bounded collection slicing;
+- `src/fisheye/diagnostics/benchmark_subject_mask_collection_worker_init.py`
+  — read-only real-collection worker initialization diagnostic;
+- `src/fisheye/diagnostics/benchmark_subject_mask_probability_sharding.py`
+  and `benchmark_subject_mask_probability_sharding_reads.py` — layout
+  construction and repeated read benchmarks;
+- `src/fisheye/diagnostics/build_subject_mask_finalizer_ab_fixture.py` — exact
+  contract-complete regular/sharded fixture builder;
+- `scripts/submit_subject_mask_collection_worker_init_bsub.sh`,
+  `submit_subject_mask_probability_sharding_benchmark_bsub.sh`,
+  `submit_subject_mask_finalizer_ab_fixture_bsub.sh`, and
+  `submit_subject_mask_finalizer_layout_ab_bsub.sh` — cluster wrappers;
+- `tests/unit/fisheye/test_finalize_subject_masks.py` and the two probability
+  sharding benchmark test modules — deterministic regression coverage.
+
+The focused finalizer module completed with `43 passed in 50.57 s`; the staged
+patches also passed `git diff --check` and shell syntax validation.
+
+All fixture construction and finalizer A/B writes were confined to
+`.palette_benchmarks` and benchmark log directories. The canonical analysis
+Zarr, its `22` raw subject-mask shards, and the registry were not modified by
+the storage-layout benchmark.
 
 ## Terminology
 
@@ -181,7 +215,7 @@ This is a likely memory amplifier for an eight-process, `32 GB` finalizer job.
 The simultaneous stop could also reflect a queue runtime limit; retained LSF
 accounting would be required to distinguish the external termination cause.
 
-This routing amplifier has now been removed in the working tree. The parent
+This routing amplifier was removed in commit `ba9e4d3`. The parent
 process performs the tuple/dictionary rebase once, converts the result into
 compact unsigned numeric arrays, and passes that validated plan to workers.
 Worker initialization still opens source groups but does not call the global
@@ -228,7 +262,8 @@ application/esub raised the effective eight-slot request to `120 GiB`
 (`15 GiB` per slot). It therefore confirms measured usage, not enforcement of
 a `16` or `32 GiB` limit. Even so, the approximately `2 GiB` process-tree
 initialization footprint leaves substantial room for the mask and output
-buffers that the finalizer A/B must measure next.
+buffers. The later end-to-end finalizer A/B measured approximately `9.4` to
+`10.7 GiB` peak process-tree RSS for a complete `54,000`-row clip.
 
 ## Design Goals
 
@@ -643,20 +678,21 @@ All five variants matched SHA-256
 Decode validation took approximately `36 s` per variant and was recorded
 separately from write time.
 
-The compute result preserves `2,048` rows as the balanced **sharded candidate**
-for the next end-to-end finalizer test, not as an approved production default.
-It gives about `63x` payload-object reduction for a typical clip with only
+At this intermediate stage, the compute result preserved `2,048` rows as the
+balanced **sharded candidate** for the then-pending end-to-end finalizer test,
+not as an approved production default. It gives about `63x` payload-object
+reduction for a typical clip with only
 `1.24 GiB` writer RSS. The `512`-row layout misses the initial `20x`
 object-reduction gate, while `4,096` and `8,192` rows spend an additional `1.0`
 and `3.0 GiB` of writer memory without improving reads. A `4,096`-row post-pack
 layout remains a reasonable low-concurrency alternative if minimizing PRFS
 objects outweighs worker memory.
 
-All sharded layouts are approximately `45%` slower than regular chunks for the
-dominant compute-node component scan, so they fail the current `20%` read
-regression gate. Promotion requires an end-to-end finalizer comparison to
-determine whether lower PRFS object-management and publication costs offset
-that array-scan regression in the real workflow.
+All sharded layouts were approximately `45%` slower than regular chunks for the
+isolated dominant compute-node component scan, so they failed the initial
+`20%` read-regression gate at this stage. A decision was therefore deferred to
+the end-to-end finalizer comparison recorded below, which found no material
+workflow regression.
 
 ### Contract-Complete Finalizer A/B Fixture
 
@@ -692,8 +728,8 @@ Both fixtures report keypoint identity mode `source_crop_row_ids_match` over all
 
 Fixture construction completed in `1,132 s` with `1,648 MiB` LSF maximum
 memory, `1,725,388 KiB` driver peak RSS, and no swap. The source analysis Zarr
-and registry were read-only. This fixture is ready for the position-balanced
-end-to-end finalizer A/B.
+and registry were read-only. This fixture was then used for the
+position-balanced end-to-end finalizer A/B below.
 
 ### Position-Balanced End-to-End Finalizer A/B
 
@@ -726,10 +762,11 @@ RSS was `10.31 GiB` regular versus `9.55 GiB` sharded, a `7.4%` reduction.
 CPU time differed by less than `1%`.
 
 `*` The first regular process wall includes removal of an incomplete output
-left by an earlier wrapper attempt whose final computation succeeded but whose
+left by LSF job `153061484`, whose final computation succeeded but whose
 completion gate correctly rejected missing Git provenance. Internal finalizer
-time is not affected. The corrected job executed from a clean node-local
-checkout of commit `ba9e4d3` and all four runs completed normally.
+time is not affected. The wrapper was corrected to carry a Git bundle; job
+`153061487` executed from a clean node-local checkout of commit `ba9e4d3` and
+all four runs completed normally.
 
 After the timed runs, an exhaustive logical comparison read every corresponding
 output element. Both repeat pairs contained `125` arrays per run and reported
@@ -759,12 +796,22 @@ scripts/py -m fisheye.diagnostics.benchmark_subject_mask_probability_sharding \
   /path/to/subject_mask_shard_runs/<run> \
   --output-root /tmp/palette_sleepyfish_probability_sharding_benchmark \
   --layout sharded \
-  --shard-rows 4096 \
+  --shard-rows 2048 \
   --sample-rows 8192 \
   --inner-chunk-rows 32 \
   --batch-rows 256 \
   --random-read-count 32 \
   --overwrite
+```
+
+Submit the contract-complete finalizer layout A/B with:
+
+```bash
+FIXTURE_ROOT=/groups/johnson/johnsonlab/jeremy/recordings/.palette_benchmarks/sleepyfish_finalizer_ab_clip000000_20260711
+scripts/submit_subject_mask_finalizer_layout_ab_bsub.sh \
+  --fixture-root "$FIXTURE_ROOT" \
+  --queue local \
+  --submit-host login1-citrus-poller
 ```
 
 ## External Guidance
@@ -782,9 +829,20 @@ scripts/py -m fisheye.diagnostics.benchmark_subject_mask_probability_sharding \
 ## Immediate Operational Conclusion
 
 - Keep the `22` completed raw probability shards; they are valid and compact
-  on disk.
+  on disk. Do not rewrite them in place.
 - Treat `refined_subject_masks_sleepyfish_sm_allclips_20260708_02` as failed or
   incomplete, not authoritative.
-- Recover by rerunning finalization from the existing raw shards into a new run
-  after the collection-mapping and publication risks are addressed.
+- The repeated collection identity-map construction is fixed in `ba9e4d3` and
+  the eight-worker real-collection initialization smoke passed with about
+  `2 GiB` LSF process-tree memory.
+- The `2,048`-row indexed-sharding layout has cleared the single-clip storage,
+  exactness, construction, and end-to-end finalizer runtime gates. It is the
+  selected candidate for new immutable read-only probability-mask stores.
+- Before enabling it broadly or migrating existing raw runs, perform a full
+  `22`-shard collection canary. That canary must exercise the compact parent
+  identity plan, finalizer completion/publication behavior, and exact output
+  validation at the complete `1,169,010`-row scale.
+- Recover the canonical refined output by rerunning finalization from the
+  existing raw shards into a new run only after that canary passes. Never
+  overwrite or promote the incomplete historical refined run.
 - Do not rerun GPU inference merely to recover this refined output.
