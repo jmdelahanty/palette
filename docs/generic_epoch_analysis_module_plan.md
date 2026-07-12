@@ -47,12 +47,12 @@ Protocol modules should own:
 
 - which event policy defines the segment set,
 - which source tables and signals are biologically meaningful,
-- protocol labels such as aggressive/benign or chaser identity,
+- protocol labels such as aggressive/inert or chaser identity,
 - protocol-specific metrics and statistical interpretation,
 - visual layout and captions.
 
 This keeps the shared layer mechanical and auditable. It should not know what
-"aggressive", "benign", "escape", "freeze", or "conditioned response" means.
+"aggressive", "inert", "escape", "freeze", or "conditioned response" means.
 
 ## Current Surfaces To Reuse
 

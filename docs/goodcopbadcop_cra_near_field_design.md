@@ -1,4 +1,8 @@
 # GoodCopBadCop CRA Near-Field Avoidance Design
+
+> Vocabulary update: canonical Palette outputs use `inert`. Historical v1
+> field names containing `benign` remain readable compatibility aliases; new
+> summary fields use the corresponding `_inert` names.
 <!-- design-meta
 status: draft
 last_updated: 2026-06-21
@@ -49,7 +53,7 @@ This matters because that stack has already done the hard, fragile work:
 - fish-to-chaser distances have already been converted to millimetres using
   the run's `pixels_per_mm_projector`;
 - GoodCopBadCop object roles have already been relabelled into
-  `aggressive` and `benign`;
+  `aggressive` and `inert`;
 - `pre_static` and `post_static` effective windows have already been resolved,
   including the post-settle trim;
 - primary endpoint dropout and quadrant summaries already exist and should be
@@ -144,7 +148,7 @@ The writer should require:
 - `distances/distance_mm` with shape `(frame, object)`;
 - `positions/fish_centroid_arena_xy` and `positions/fish_valid`;
 - `positions/chaser_arena_xy` and `positions/chaser_valid`;
-- exactly one `aggressive` and one `benign` object in the source CRA component
+- exactly one `aggressive` and one `inert` object in the source CRA component
   for v1;
 - `pre_static` and `post_static` phase rows from the source CRA component.
 
@@ -188,7 +192,7 @@ and object role axis:
 
 ```text
 aggressive
-benign
+inert
 ```
 
 ### Close-Approach Distance
@@ -588,7 +592,7 @@ per-recording zarr component.
 2. The component never recomputes camera-to-projector registration.
 3. The component excludes training and uses only `pre_static` and
    `post_static`.
-4. Metrics are role-resolved for aggressive and benign objects before
+4. Metrics are role-resolved for aggressive and inert objects before
    aggregation.
 5. Lower-tail metrics, radial diagnostics, CDF diagnostics, and thigmotaxis QC
    are persisted with parameters and provenance.

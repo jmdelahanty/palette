@@ -1,7 +1,7 @@
-# Apptainer deployment — vision & feasibility (DEFERRED)
+# Apptainer deployment — vision & feasibility
 
 <!-- contract-meta
-status: deferred
+status: partially-active
 created: 2026-07-04
 owner: jeremy
 picks-up-after: provenance enforcement (Slice 2) landed; repo structural cleanup further along
@@ -10,7 +10,13 @@ related: docs/interface_and_execution_strategy.md,
          docs/palette_cli_narrow_waist_design.md
 -->
 
-## Status: deferred, on purpose
+## Status: analytics active; full pipeline deferred
+
+> **2026-07-12 update:** the small CPU-only analytics/FileGlancer image is now
+> an active implementation target. The full CPU/GPU processing-pipeline image
+> described below remains deferred. Current packaging and distribution
+> decisions are in
+> [Container Packaging and Distribution Design](container_packaging_and_distribution_design.md).
 
 Package Palette as an **Apptainer** image so colleagues, the cluster, and eventually the
 autonomous executor run a *versioned image* instead of a live git checkout — removing the

@@ -4,6 +4,14 @@ Palette marimo apps are viewer layers over persisted Zarr artifacts. They
 should not define canonical scientific outputs, recompute analysis results, or
 invent a separate visualization run family.
 
+The published group-analytics application is also intended to run as a
+FileGlancer service app. FileGlancer owns authentication, filesystem selection,
+and service lifecycle; Marimo owns the reactive export selector and viewer UI.
+See [FileGlancer and Marimo Integration Design](fileglancer_marimo_integration_design.md).
+The desired dataset-selection flow, provider navigation, scientific display
+defaults, and packaging gate are specified in
+[Group Analytics Marimo Application Design](group_analytics_marimo_application_design.md).
+
 ## Direction
 
 `apps/marimo/palette_explorer.py` is the general entrypoint for interactive
@@ -16,6 +24,7 @@ Existing focused notebooks remain available while this pattern settles:
 ```text
 apps/marimo/track_kinematics_explorer.py
 apps/marimo/goodcopbadcop_explorer.py
+apps/marimo/group_analytics_explorer.py
 ```
 
 Those notebooks are useful as protocol-specific debug harnesses, but new
@@ -93,3 +102,16 @@ scripts/py -m marimo run apps/marimo/track_kinematics_explorer.py -- \
   --zarr-path <analysis.zarr>
 ```
 
+Group analytics export notebook:
+
+```bash
+scripts/py -m marimo run apps/marimo/group_analytics_explorer.py -- \
+  --export-root /nvme1/exports/palette_analytics \
+  --export-run-id latest \
+  --stats-run-id auto
+```
+
+The current command fixes one export at process startup. The FileGlancer design
+will replace that behavior with a reactive selector constrained to a
+FileGlancer-authorized export root. Until that implementation lands, this
+example remains the local focused-app invocation.

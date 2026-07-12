@@ -267,6 +267,12 @@ Implementation checklist:
   - annotate each marker with trial ordinal
   - title/caption must state that labels are candidate labels from the full-trial
     path threshold, not cohort-locked classifications
+- Trial identity is authoritative from positive controller `chase_trial_id`
+  values. On the aligned camera timeline, bridge missing or duplicate-mapping
+  gaps between active rows carrying the same ID. Use contiguous
+  `chase_sequence_active` segments only as a legacy fallback when positive trial
+  IDs are unavailable. Validate cohort counts against matching
+  `CHASER_CHASE_SEQUENCE_START` and `CHASER_CHASE_SEQUENCE_END` events.
 - Render fish-centered polar approach summaries:
   - `escape_freeze_fish_centered_polar_approach_png`: transparent frame points
     pooled across active pursuit, colored by trial ordinal
