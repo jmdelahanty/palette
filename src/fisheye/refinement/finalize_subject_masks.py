@@ -5767,7 +5767,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "JSON file containing shard run names, either as a list or as an object with "
-            "subject_shard_runs/shard_runs/runs. Mutually exclusive with --subject-run."
+            "subject_mask_shard_runs/shard_runs/runs. Mutually exclusive with --subject-run."
         ),
     )
     parser.add_argument(

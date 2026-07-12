@@ -58,6 +58,14 @@ def _patch_refined_subject_provenance(monkeypatch) -> None:
     )
 
 
+@pytest.mark.parametrize("key", ["shard_runs", "subject_mask_shard_runs", "runs"])
+def test_load_shard_names_from_file_accepts_documented_mapping_keys(tmp_path: Path, key: str) -> None:
+    path = tmp_path / "shards.json"
+    path.write_text(json.dumps({key: ["clip_a", {"run_name": "clip_b"}]}), encoding="utf-8")
+
+    assert mod._load_shard_names_from_file(path) == ["clip_a", "clip_b"]
+
+
 def _build_probability_root(
     store_path: Path | None = None,
     *,
