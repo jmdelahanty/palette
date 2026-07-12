@@ -1108,6 +1108,58 @@ def query_position_occupancy_histogram(
     }
 
 
+def query_position_occupancy_grid_options(
+    context: ViewerContext,
+) -> list[dict[str, Any]]:
+    """List incompatible normalized occupancy grids with explicit cohort coverage."""
+
+    rows = load_optional_table_rows(context, POSITION_OCCUPANCY_TABLE)
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        grid_id = str(row.get("normalized_grid_id") or "")
+        if not grid_id:
+            continue
+        item = grouped.setdefault(
+            grid_id,
+            {
+                "grid_id": grid_id,
+                "x_bin_count": _safe_int(row.get("x_bin_count")),
+                "y_bin_count": _safe_int(row.get("y_bin_count")),
+                "recording_ids": set(),
+            },
+        )
+        recording_id = str(row.get("recording_id") or "")
+        if recording_id:
+            item["recording_ids"].add(recording_id)
+    output = []
+    for item in grouped.values():
+        recording_count = len(item["recording_ids"])
+        x_count = item["x_bin_count"]
+        y_count = item["y_bin_count"]
+        output.append(
+            {
+                "grid_id": item["grid_id"],
+                "x_bin_count": x_count,
+                "y_bin_count": y_count,
+                "recording_count": recording_count,
+                "label": (
+                    f"{x_count} × {y_count} native bins · "
+                    f"{recording_count} recording{'s' if recording_count != 1 else ''} "
+                    f"[{item['grid_id']}]"
+                ),
+            }
+        )
+    output.sort(
+        key=lambda item: (
+            -int(item["recording_count"]),
+            _sort_int(item.get("y_bin_count")),
+            _sort_int(item.get("x_bin_count")),
+            str(item["grid_id"]),
+        )
+    )
+    return output
+
+
 def position_occupancy_rebin_options(
     rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:

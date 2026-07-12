@@ -63,6 +63,7 @@ def _():
         query_export_summary,
         query_group_statistics,
         query_options,
+        query_position_occupancy_grid_options,
         query_position_occupancy_histogram,
         query_recordings,
         query_spatial_occupancy,
@@ -109,6 +110,7 @@ def _():
         query_export_summary,
         query_group_statistics,
         query_options,
+        query_position_occupancy_grid_options,
         query_position_occupancy_histogram,
         query_recordings,
         query_spatial_occupancy,
@@ -481,9 +483,8 @@ def _(
     analysis_context,
     egocentric_rebin_options,
     mo,
-    position_occupancy_rebin_options,
     query_egocentric_histogram,
-    query_position_occupancy_histogram,
+    query_position_occupancy_grid_options,
     selected_capabilities,
     selected_panel_id,
 ):
@@ -518,10 +519,50 @@ def _(
         value=next(iter(egocentric_bearing_bin_labels)),
         label="Bearing bins",
     )
-    position_native_histogram = (
-        query_position_occupancy_histogram(analysis_context)
+    _position_grid_options = (
+        query_position_occupancy_grid_options(analysis_context)
         if selected_panel_id == "spatial"
         and "position.epoch.occupancy_histogram_2d" in selected_capabilities
+        else []
+    )
+    position_grid_labels = {
+        str(item["label"]): str(item["grid_id"])
+        for item in _position_grid_options
+    }
+    if not position_grid_labels:
+        position_grid_labels = {"Unavailable": ""}
+    position_grid_picker = mo.ui.dropdown(
+        options=list(position_grid_labels),
+        value=next(iter(position_grid_labels)),
+        label="Position grid",
+    )
+    return (
+        egocentric_bearing_bin_labels,
+        egocentric_bearing_bin_picker,
+        egocentric_distance_bin_labels,
+        egocentric_distance_bin_picker,
+        egocentric_native_histogram,
+        position_grid_labels,
+        position_grid_picker,
+    )
+
+
+@app.cell
+def _(
+    analysis_context,
+    mo,
+    position_grid_labels,
+    position_grid_picker,
+    position_occupancy_rebin_options,
+    query_position_occupancy_histogram,
+):
+    _position_grid_id = position_grid_labels[position_grid_picker.value]
+    position_native_histogram = (
+        query_position_occupancy_histogram(
+            analysis_context,
+            grid_id=_position_grid_id,
+        )
+        if _position_grid_id
         else {"rows": []}
     )
     _position_rebin_options = position_occupancy_rebin_options(
@@ -546,11 +587,6 @@ def _(
         label="Position Y bins",
     )
     return (
-        egocentric_bearing_bin_labels,
-        egocentric_bearing_bin_picker,
-        egocentric_distance_bin_labels,
-        egocentric_distance_bin_picker,
-        egocentric_native_histogram,
         position_native_histogram,
         position_x_bin_labels,
         position_x_bin_picker,
@@ -574,6 +610,7 @@ def _(
     panel_control_spec,
     panel_labels,
     panel_picker,
+    position_grid_picker,
     position_x_bin_picker,
     position_y_bin_picker,
     selected_capabilities,
@@ -612,7 +649,9 @@ def _(
         control_spec.show_position_bins
         and "position.epoch.occupancy_histogram_2d" in selected_capabilities
     ):
-        _controls.extend([position_x_bin_picker, position_y_bin_picker])
+        _controls.extend(
+            [position_grid_picker, position_x_bin_picker, position_y_bin_picker]
+        )
     mo.hstack(_controls) if _controls else mo.md(
         f"**{panel_picker.value}** has no additional analysis controls."
     )
@@ -1009,7 +1048,10 @@ def _(
                 mo.md(
                     "### Positional heatmaps\n\n"
                     f"Bins: `{_position.get('x_bin_label', 'native')}` × "
-                    f"`{_position.get('y_bin_label', 'native')}`."
+                    f"`{_position.get('y_bin_label', 'native')}`. "
+                    f"Grid `{_position.get('grid_id', 'unavailable')}` includes "
+                    f"{_position.get('recording_count', 0)} recording(s); incompatible "
+                    "native grids are never pooled."
                 ),
                 _position_output,
                 mo.md("### Named spatial zones"),

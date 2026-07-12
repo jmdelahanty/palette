@@ -38,6 +38,7 @@ from fisheye.group_analytics_viewer.query import (
     query_export_summary,
     query_group_statistics,
     query_options,
+    query_position_occupancy_grid_options,
     query_position_occupancy_histogram,
     query_recordings,
     query_speed_distance_bins,
@@ -243,7 +244,14 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(tmp_path: Path) -> 
     assert options["cra_near_field_object_phase_metrics"][0]["metric"] == "approach_p05_mm"
     assert options["egocentric_metrics"][0]["metric"] == "mean_alignment_cos"
 
-    position = query_position_occupancy_histogram(context)
+    position_grids = query_position_occupancy_grid_options(context)
+    assert len(position_grids) == 1
+    assert position_grids[0]["recording_count"] == 1
+    assert "2 × 2 native bins" in position_grids[0]["label"]
+    position = query_position_occupancy_histogram(
+        context,
+        grid_id=position_grids[0]["grid_id"],
+    )
     assert position["available"] is True
     assert position["recording_count"] == 1
     assert len(position["rows"]) == 12
