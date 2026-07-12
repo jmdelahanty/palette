@@ -7,6 +7,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from fisheye.analytics_exports.contracts import (
+    EXPORT_SCHEMA_ID,
+    EXPORT_SCHEMA_VERSION,
+    TABLE_CONTRACTS,
+    contract_snapshot,
+)
 from fisheye.group_statistics.goodcopbadcop import (
     DESCRIPTIVE_TABLE,
     GoodCopBadCopStatisticsConfig,
@@ -59,12 +65,15 @@ def _make_goodcopbadcop_export(root: Path, export_run_id: str = "source_export")
                     }
                 )
     _write_rows(
-        export_root / "v1" / "goodcopbadcop_chaser_epoch_summary" / f"export_run_id={export_run_id}",
+        export_root / "v1" / "chaser_epoch_distance_summary" / f"export_run_id={export_run_id}",
         rows,
     )
     manifest = {
         "export_run_id": export_run_id,
-        "row_counts_by_table": {"goodcopbadcop_chaser_epoch_summary": len(rows)},
+        "schema_id": EXPORT_SCHEMA_ID,
+        "schema_version": EXPORT_SCHEMA_VERSION,
+        "table_contracts": contract_snapshot(["chaser_epoch_distance_summary"]),
+        "row_counts_by_table": {"chaser_epoch_distance_summary": len(rows)},
         "collection_manifest": {
             "collection_id": "collection_test",
             "manifest_sha256": "abc123",
@@ -90,8 +99,8 @@ def _make_goodcopbadcop_cra_export(root: Path, export_run_id: str = "source_expo
             "delta_occ_agg": -0.1,
             "specificity_distance": 0.5,
             "specificity_occupancy": -0.2,
-            "delta_benign": 0.0,
-            "delta_occ_benign": 0.0,
+            "delta_inert": 0.0,
+            "delta_occ_inert": 0.0,
         },
         {
             "recording_id": "r2",
@@ -101,8 +110,8 @@ def _make_goodcopbadcop_cra_export(root: Path, export_run_id: str = "source_expo
             "delta_occ_agg": -0.2,
             "specificity_distance": 1.0,
             "specificity_occupancy": -0.1,
-            "delta_benign": 0.0,
-            "delta_occ_benign": 0.1,
+            "delta_inert": 0.0,
+            "delta_occ_inert": 0.1,
         },
         {
             "recording_id": "r3",
@@ -112,17 +121,20 @@ def _make_goodcopbadcop_cra_export(root: Path, export_run_id: str = "source_expo
             "delta_occ_agg": -0.3,
             "specificity_distance": 1.5,
             "specificity_occupancy": -0.3,
-            "delta_benign": 0.0,
-            "delta_occ_benign": -0.1,
+            "delta_inert": 0.0,
+            "delta_occ_inert": -0.1,
         },
     ]
     _write_rows(
-        export_root / "v1" / "goodcopbadcop_cra_primary_endpoint_summary" / f"export_run_id={export_run_id}",
+        export_root / "v1" / "chaser_cra_primary_endpoint_summary" / f"export_run_id={export_run_id}",
         rows,
     )
     manifest = {
         "export_run_id": export_run_id,
-        "row_counts_by_table": {"goodcopbadcop_cra_primary_endpoint_summary": len(rows)},
+        "schema_id": EXPORT_SCHEMA_ID,
+        "schema_version": EXPORT_SCHEMA_VERSION,
+        "table_contracts": contract_snapshot(["chaser_cra_primary_endpoint_summary"]),
+        "row_counts_by_table": {"chaser_cra_primary_endpoint_summary": len(rows)},
         "collection_manifest": {
             "collection_id": "collection_test",
             "manifest_sha256": "abc123",
@@ -181,12 +193,15 @@ def _make_goodcopbadcop_epoch_behavior_export(root: Path, export_run_id: str = "
                 }
             )
     _write_rows(
-        export_root / "v1" / "goodcopbadcop_epoch_behavior_summary" / f"export_run_id={export_run_id}",
+        export_root / "v1" / "chaser_epoch_behavior_summary" / f"export_run_id={export_run_id}",
         rows,
     )
     manifest = {
         "export_run_id": export_run_id,
-        "row_counts_by_table": {"goodcopbadcop_epoch_behavior_summary": len(rows)},
+        "schema_id": EXPORT_SCHEMA_ID,
+        "schema_version": EXPORT_SCHEMA_VERSION,
+        "table_contracts": contract_snapshot(["chaser_epoch_behavior_summary"]),
+        "row_counts_by_table": {"chaser_epoch_behavior_summary": len(rows)},
         "collection_manifest": {
             "collection_id": "collection_test",
             "manifest_sha256": "abc123",
@@ -302,10 +317,22 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
     assert part.is_file()
     table = pq.read_table(part).to_pylist()
     assert len(table) == 18
+    assert all(row["export_schema_version"] == EXPORT_SCHEMA_VERSION for row in table)
+    assert all(row["table_name"] == SUMMARY_TABLE for row in table)
+    summary_metadata = pq.ParquetFile(part).schema_arrow.metadata or {}
+    assert summary_metadata[b"palette.export_schema_id"].decode() == EXPORT_SCHEMA_ID
+    assert json.loads(summary_metadata[b"palette.table_contract"]) == TABLE_CONTRACTS[
+        SUMMARY_TABLE
+    ].to_dict()
     descriptive_part = export_root / "v1" / DESCRIPTIVE_TABLE / "export_run_id=stats_test" / "part-00000.parquet"
     assert descriptive_part.is_file()
     descriptive_table = pq.read_table(descriptive_part).to_pylist()
     assert len(descriptive_table) == 18
+    assert written["schema_version"] == EXPORT_SCHEMA_VERSION
+    assert set(written["capabilities"]) == {
+        "group.statistics",
+        "group.descriptive_statistics",
+    }
 
 
 def test_goodcopbadcop_statistics_computes_cra_primary_endpoint_wilcoxon(tmp_path: Path) -> None:
@@ -323,11 +350,11 @@ def test_goodcopbadcop_statistics_computes_cra_primary_endpoint_wilcoxon(tmp_pat
     rows, manifest = compute_goodcopbadcop_statistics(config)
 
     assert manifest["status_counts"] == {"computed": 6}
-    assert manifest["input_tables"] == ["goodcopbadcop_cra_primary_endpoint_summary"]
+    assert manifest["input_tables"] == ["chaser_cra_primary_endpoint_summary"]
     assert manifest["row_counts_by_table"][SUMMARY_TABLE] == 6
     target = next(row for row in rows if row["metric_name"] == "delta_agg")
     assert target["metric_family"] == "cra_primary_endpoint"
-    assert target["source_table"] == "goodcopbadcop_cra_primary_endpoint_summary"
+    assert target["source_table"] == "chaser_cra_primary_endpoint_summary"
     assert target["contrast_name"] == "vs-zero"
     assert target["condition_a"] == "zero"
     assert target["condition_b"] == "observed"
@@ -366,7 +393,7 @@ def test_goodcopbadcop_statistics_computes_epoch_behavior_metrics(tmp_path: Path
     rows, manifest = compute_goodcopbadcop_statistics(config)
     descriptive_rows = compute_goodcopbadcop_descriptive_summaries(config)
 
-    assert manifest["input_tables"] == ["goodcopbadcop_epoch_behavior_summary"]
+    assert manifest["input_tables"] == ["chaser_epoch_behavior_summary"]
     assert manifest["row_counts_by_table"][SUMMARY_TABLE] == 36
     assert manifest["status_counts"] == {"computed": 36}
     assert len(descriptive_rows) == 36
@@ -385,7 +412,7 @@ def test_goodcopbadcop_statistics_computes_epoch_behavior_metrics(tmp_path: Path
         and row["contrast_name"] == "post-pre"
     )
     assert target["metric_family"] == "epoch_behavior"
-    assert target["source_table"] == "goodcopbadcop_epoch_behavior_summary"
+    assert target["source_table"] == "chaser_epoch_behavior_summary"
     assert target["exploratory"] is True
     assert target["paired_unit_count"] == 3
     assert target["mean_a"] == pytest.approx(0.12)
@@ -397,7 +424,7 @@ def test_compute_group_statistics_cli_dry_run_and_apply(tmp_path: Path, capsys) 
     export_root = _make_goodcopbadcop_export(tmp_path)
     args = [
         "--profile",
-        "goodcopbadcop_chaser",
+        "chaser",
         "--source-export-run-id",
         "source_export",
         "--export-root",

@@ -25,8 +25,9 @@ The version-2 transition is intentionally breaking:
   `swim_bout_events` and `inter_bout_interval_events`;
 - stimulus or chaser epoch membership is represented separately from the
   general bout fact when practical;
-- canonical behavior vocabulary is `aggressive`, `inert`, and `static` where
-  those classes apply;
+- canonical chaser behavior vocabulary is `unknown`, `aggressive`,
+  `random_non_chasing`, and `inert`; `static` remains a distinct epoch/activity
+  state rather than a chaser behavior class;
 - `benign` values and `*_benign` columns are not accepted by the version-2
   capability/query path;
 - the published viewer does not translate version-1 tables or vocabulary at

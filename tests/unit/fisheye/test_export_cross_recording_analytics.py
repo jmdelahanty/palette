@@ -7,6 +7,11 @@ import numpy as np
 import pyarrow.parquet as pq
 import zarr
 
+from fisheye.analytics_exports.contracts import (
+    EXPORT_SCHEMA_ID,
+    EXPORT_SCHEMA_VERSION,
+    TABLE_CONTRACTS,
+)
 from fisheye.analysis.chaser_distance_runs import write_chaser_distance_run
 from fisheye.analysis.chaser_egocentric_bearing import (
     build_chaser_egocentric_bearing_result,
@@ -712,52 +717,68 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
         output_root=output,
         export_run_id="goodcopbadcop_export",
         tables=(
-            "goodcopbadcop_spatial_occupancy_zones",
-            "goodcopbadcop_chaser_epoch_summary",
-            "goodcopbadcop_epoch_behavior_summary",
-            "goodcopbadcop_epoch_bout_distribution",
-            "goodcopbadcop_epoch_bout_histogram",
-            "goodcopbadcop_epoch_inter_bout_interval_histogram",
-            "goodcopbadcop_epoch_center_distance_histogram",
-            "goodcopbadcop_epoch_speed_summary",
-            "goodcopbadcop_speed_distance_bins",
-            "goodcopbadcop_chaser_distance_histogram",
-            "goodcopbadcop_cra_primary_endpoint_summary",
-            "goodcopbadcop_cra_primary_endpoint_object_phase",
-            "goodcopbadcop_cra_quadrant_occupancy",
-            "goodcopbadcop_cra_near_field_summary",
-            "goodcopbadcop_cra_near_field_object_phase",
-            "goodcopbadcop_cra_near_field_radial_density",
-            "goodcopbadcop_cra_near_field_distance_cdf",
-            "goodcopbadcop_egocentric_epoch_summary",
-            "goodcopbadcop_egocentric_distance_bearing_histogram",
+            "chaser_epoch_spatial_occupancy_zones",
+            "chaser_epoch_distance_summary",
+            "chaser_epoch_behavior_summary",
+            "chaser_epoch_bout_events",
+            "chaser_epoch_bout_histogram",
+            "chaser_epoch_inter_bout_interval_histogram",
+            "chaser_epoch_center_distance_histogram",
+            "chaser_speed_distance_bins",
+            "chaser_epoch_distance_histogram",
+            "chaser_cra_primary_endpoint_summary",
+            "chaser_cra_primary_endpoint_object_phase",
+            "chaser_cra_quadrant_occupancy",
+            "chaser_cra_near_field_summary",
+            "chaser_cra_near_field_object_phase",
+            "chaser_cra_near_field_radial_density",
+            "chaser_cra_near_field_distance_cdf",
+            "chaser_egocentric_epoch_summary",
+            "chaser_egocentric_distance_bearing_histogram",
         ),
         jobs=1,
     )
 
-    assert manifest["row_counts_by_table"]["goodcopbadcop_spatial_occupancy_zones"] == 12
-    assert manifest["row_counts_by_table"]["goodcopbadcop_chaser_epoch_summary"] == 6
-    assert manifest["row_counts_by_table"]["goodcopbadcop_epoch_behavior_summary"] == 3
-    assert manifest["row_counts_by_table"]["goodcopbadcop_epoch_bout_distribution"] == 4
-    assert manifest["row_counts_by_table"]["goodcopbadcop_epoch_bout_histogram"] == 183
-    assert manifest["row_counts_by_table"]["goodcopbadcop_epoch_inter_bout_interval_histogram"] == 3
-    assert manifest["row_counts_by_table"]["goodcopbadcop_epoch_center_distance_histogram"] == 9
-    assert manifest["row_counts_by_table"]["goodcopbadcop_epoch_speed_summary"] == 3
-    assert manifest["row_counts_by_table"]["goodcopbadcop_speed_distance_bins"] == 18
-    assert manifest["row_counts_by_table"]["goodcopbadcop_chaser_distance_histogram"] == 18
-    assert manifest["row_counts_by_table"]["goodcopbadcop_cra_primary_endpoint_summary"] == 1
-    assert manifest["row_counts_by_table"]["goodcopbadcop_cra_primary_endpoint_object_phase"] == 4
-    assert manifest["row_counts_by_table"]["goodcopbadcop_cra_quadrant_occupancy"] == 8
-    assert manifest["row_counts_by_table"]["goodcopbadcop_cra_near_field_summary"] == 1
-    assert manifest["row_counts_by_table"]["goodcopbadcop_cra_near_field_object_phase"] == 4
-    assert manifest["row_counts_by_table"]["goodcopbadcop_cra_near_field_radial_density"] == 12
-    assert manifest["row_counts_by_table"]["goodcopbadcop_cra_near_field_distance_cdf"] == 8
-    assert manifest["row_counts_by_table"]["goodcopbadcop_egocentric_epoch_summary"] == 6
-    assert manifest["row_counts_by_table"]["goodcopbadcop_egocentric_distance_bearing_histogram"] == 72
+    assert manifest["row_counts_by_table"]["chaser_epoch_spatial_occupancy_zones"] == 12
+    assert manifest["row_counts_by_table"]["chaser_epoch_distance_summary"] == 6
+    assert manifest["row_counts_by_table"]["chaser_epoch_behavior_summary"] == 3
+    assert manifest["row_counts_by_table"]["chaser_epoch_bout_events"] == 4
+    assert manifest["row_counts_by_table"]["chaser_epoch_bout_histogram"] == 183
+    assert manifest["row_counts_by_table"]["chaser_epoch_inter_bout_interval_histogram"] == 3
+    assert manifest["row_counts_by_table"]["chaser_epoch_center_distance_histogram"] == 9
+    assert manifest["row_counts_by_table"]["chaser_speed_distance_bins"] == 18
+    assert manifest["row_counts_by_table"]["chaser_epoch_distance_histogram"] == 18
+    assert manifest["row_counts_by_table"]["chaser_cra_primary_endpoint_summary"] == 1
+    assert manifest["row_counts_by_table"]["chaser_cra_primary_endpoint_object_phase"] == 4
+    assert manifest["row_counts_by_table"]["chaser_cra_quadrant_occupancy"] == 8
+    assert manifest["row_counts_by_table"]["chaser_cra_near_field_summary"] == 1
+    assert manifest["row_counts_by_table"]["chaser_cra_near_field_object_phase"] == 4
+    assert manifest["row_counts_by_table"]["chaser_cra_near_field_radial_density"] == 12
+    assert manifest["row_counts_by_table"]["chaser_cra_near_field_distance_cdf"] == 8
+    assert manifest["row_counts_by_table"]["chaser_egocentric_epoch_summary"] == 6
+    assert manifest["row_counts_by_table"]["chaser_egocentric_distance_bearing_histogram"] == 72
+    assert manifest["schema_id"] == EXPORT_SCHEMA_ID
+    assert manifest["schema_version"] == EXPORT_SCHEMA_VERSION
+    assert "chaser.epoch.behavior_summary" in manifest["capabilities"]
+    assert "chaser.cra.primary" in manifest["capabilities"]
+    assert "chaser.egocentric" in manifest["capabilities"]
+    assert set(manifest["table_contracts"]) == set(manifest["tables_requested"])
+
+    first_part = Path(
+        manifest["part_files_by_table"]["chaser_epoch_behavior_summary"][0]
+    )
+    schema_metadata = pq.ParquetFile(first_part).schema_arrow.metadata or {}
+    assert schema_metadata[b"palette.export_schema_id"].decode() == EXPORT_SCHEMA_ID
+    assert schema_metadata[b"palette.export_schema_version"].decode() == str(
+        EXPORT_SCHEMA_VERSION
+    )
+    assert json.loads(schema_metadata[b"palette.table_contract"]) == TABLE_CONTRACTS[
+        "chaser_epoch_behavior_summary"
+    ].to_dict()
 
     spatial_rows = _read_dataset(
         output,
-        "goodcopbadcop_spatial_occupancy_zones",
+        "chaser_epoch_spatial_occupancy_zones",
         "goodcopbadcop_export",
     )
     pre_top_left = next(
@@ -786,7 +807,7 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
 
     chaser_summary_rows = _read_dataset(
         output,
-        "goodcopbadcop_chaser_epoch_summary",
+        "chaser_epoch_distance_summary",
         "goodcopbadcop_export",
     )
     post_chaser_1 = next(
@@ -808,7 +829,7 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
 
     epoch_behavior_rows = _read_dataset(
         output,
-        "goodcopbadcop_epoch_behavior_summary",
+        "chaser_epoch_behavior_summary",
         "goodcopbadcop_export",
     )
     assert len(epoch_behavior_rows) == 3
@@ -830,7 +851,7 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
 
     epoch_bout_rows = _read_dataset(
         output,
-        "goodcopbadcop_epoch_bout_distribution",
+        "chaser_epoch_bout_events",
         "goodcopbadcop_export",
     )
     assert len(epoch_bout_rows) == 4
@@ -853,7 +874,7 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
 
     bout_hist_rows = _read_dataset(
         output,
-        "goodcopbadcop_epoch_bout_histogram",
+        "chaser_epoch_bout_histogram",
         "goodcopbadcop_export",
     )
     assert len(bout_hist_rows) == 183
@@ -885,7 +906,7 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
 
     ibi_hist_rows = _read_dataset(
         output,
-        "goodcopbadcop_epoch_inter_bout_interval_histogram",
+        "chaser_epoch_inter_bout_interval_histogram",
         "goodcopbadcop_export",
     )
     assert len(ibi_hist_rows) == 3
@@ -899,7 +920,7 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
 
     center_hist_rows = _read_dataset(
         output,
-        "goodcopbadcop_epoch_center_distance_histogram",
+        "chaser_epoch_center_distance_histogram",
         "goodcopbadcop_export",
     )
     assert len(center_hist_rows) == 9
@@ -910,23 +931,23 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
 
     speed_rows = _read_dataset(
         output,
-        "goodcopbadcop_epoch_speed_summary",
+        "chaser_epoch_behavior_summary",
         "goodcopbadcop_export",
     )
     assert len(speed_rows) == 3
     pre_speed = next(row for row in speed_rows if row["window_label"] == "pre_event")
-    assert pre_speed["speed_sample_count"] == 2
-    np.testing.assert_allclose(pre_speed["mean_speed_mm_s"], 5.0)
+    assert pre_speed["speed_sample_count"] == 3
+    np.testing.assert_allclose(pre_speed["mean_speed_mm_s"], 20.0)
     assert pre_speed["valid_frame_count"] == 3
-    assert pre_speed["source_position_path"].endswith("/positions/fish_centroid_arena_xy")
+    assert pre_speed["source_track_kinematics_run"] == "tk_1"
     training_speed = next(row for row in speed_rows if row["window_label"] == "training_event")
-    assert training_speed["speed_sample_count"] == 0
-    assert training_speed["mean_speed_mm_s"] is None
+    assert training_speed["speed_sample_count"] == 2
+    np.testing.assert_allclose(training_speed["mean_speed_mm_s"], 45.0)
     np.testing.assert_allclose(training_speed["tracking_dropout_fraction"], 1.0 / 3.0)
 
     speed_distance_rows = _read_dataset(
         output,
-        "goodcopbadcop_speed_distance_bins",
+        "chaser_speed_distance_bins",
         "goodcopbadcop_export",
     )
     pre_chaser_0_bin_0_speed = next(
@@ -952,7 +973,7 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
 
     histogram_rows = _read_dataset(
         output,
-        "goodcopbadcop_chaser_distance_histogram",
+        "chaser_epoch_distance_histogram",
         "goodcopbadcop_export",
     )
     pre_chaser_0_bin_0 = next(
@@ -973,11 +994,15 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
 
     cra_summary_rows = _read_dataset(
         output,
-        "goodcopbadcop_cra_primary_endpoint_summary",
+        "chaser_cra_primary_endpoint_summary",
         "goodcopbadcop_export",
     )
     assert len(cra_summary_rows) == 1
     cra_summary = cra_summary_rows[0]
+    assert cra_summary["export_schema_version"] == EXPORT_SCHEMA_VERSION
+    assert cra_summary["table_name"] == "chaser_cra_primary_endpoint_summary"
+    assert not any("benign" in key.lower() for key in cra_summary)
+    assert "benign" not in {str(value).lower() for value in cra_summary.values()}
     assert cra_summary["export_run_id"] == "goodcopbadcop_export"
     assert cra_summary["cra_primary_endpoint_component"] == DEFAULT_CRA_COMPONENT_NAME
     assert cra_summary["cra_primary_endpoint_schema_id"] == "palette.goodcopbadcop.cra_primary_endpoint.v1"
@@ -1000,7 +1025,7 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
 
     cra_object_phase_rows = _read_dataset(
         output,
-        "goodcopbadcop_cra_primary_endpoint_object_phase",
+        "chaser_cra_primary_endpoint_object_phase",
         "goodcopbadcop_export",
     )
     post_aggressive = next(
@@ -1029,7 +1054,7 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
 
     cra_quadrant_rows = _read_dataset(
         output,
-        "goodcopbadcop_cra_quadrant_occupancy",
+        "chaser_cra_quadrant_occupancy",
         "goodcopbadcop_export",
     )
     assert len(cra_quadrant_rows) == 8
@@ -1063,7 +1088,7 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
 
     near_field_summary_rows = _read_dataset(
         output,
-        "goodcopbadcop_cra_near_field_summary",
+        "chaser_cra_near_field_summary",
         "goodcopbadcop_export",
     )
     assert len(near_field_summary_rows) == 1
@@ -1079,7 +1104,7 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
 
     near_field_object_phase_rows = _read_dataset(
         output,
-        "goodcopbadcop_cra_near_field_object_phase",
+        "chaser_cra_near_field_object_phase",
         "goodcopbadcop_export",
     )
     near_field_post_aggressive = next(
@@ -1101,7 +1126,7 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
 
     near_field_radial_rows = _read_dataset(
         output,
-        "goodcopbadcop_cra_near_field_radial_density",
+        "chaser_cra_near_field_radial_density",
         "goodcopbadcop_export",
     )
     assert len(near_field_radial_rows) == 12
@@ -1118,7 +1143,7 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
 
     near_field_cdf_rows = _read_dataset(
         output,
-        "goodcopbadcop_cra_near_field_distance_cdf",
+        "chaser_cra_near_field_distance_cdf",
         "goodcopbadcop_export",
     )
     assert len(near_field_cdf_rows) == 8
@@ -1133,7 +1158,7 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
 
     egocentric_rows = _read_dataset(
         output,
-        "goodcopbadcop_egocentric_epoch_summary",
+        "chaser_egocentric_epoch_summary",
         "goodcopbadcop_export",
     )
     post_egocentric_chaser_1 = next(
@@ -1163,7 +1188,7 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
 
     egocentric_histogram_rows = _read_dataset(
         output,
-        "goodcopbadcop_egocentric_distance_bearing_histogram",
+        "chaser_egocentric_distance_bearing_histogram",
         "goodcopbadcop_export",
     )
     pre_egocentric_chaser_0_bin = next(

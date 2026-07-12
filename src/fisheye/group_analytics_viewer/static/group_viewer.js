@@ -522,11 +522,11 @@ function craSpecificitySvg(data) {
   svg += `<text x="${margin.left}" y="20" fill="#182026" font-size="14" font-weight="700">CRA confirmatory specificity contrasts</text>`;
   svg += `<text x="${margin.left}" y="38" fill="#637080" font-size="11">Distance specificity is primary; occupancy index is the phase-relative quadrant companion.</text>`;
   svg += slopePanel(distanceRows, "aggressive", "Distance: aggressive", distanceDomain, xAgg, margin.top, "#b54848", "median fish-object distance (mm)");
-  svg += slopePanel(distanceRows, "benign", "Distance: benign", distanceDomain, xBenign, margin.top, "#2f6fbd", "same y-axis as aggressive");
+  svg += slopePanel(distanceRows, "inert", "Distance: inert", distanceDomain, xBenign, margin.top, "#2f6fbd", "same y-axis as aggressive");
   svg += dotPanel(data.distance_specificity_rows || [], "specificity_distance", data.distance_specificity_statistics, "Distance specificity", xSpec, margin.top, "#182026");
   const occY = margin.top + rowH + 18;
   svg += slopePanel(occRows, "aggressive", "Occupancy index: aggressive", occDomain, xAgg, occY, "#b54848", "object quadrant - mean(other quadrants)");
-  svg += slopePanel(occRows, "benign", "Occupancy index: benign", occDomain, xBenign, occY, "#2f6fbd", "same y-axis as aggressive");
+  svg += slopePanel(occRows, "inert", "Occupancy index: inert", occDomain, xBenign, occY, "#2f6fbd", "same y-axis as aggressive");
   svg += dotPanel(data.occupancy_index_specificity_rows || [], "occupancy_index_specificity", data.occupancy_index_specificity_statistics, "Occupancy specificity", xSpec, occY, "#182026");
   svg += "</svg>";
   return svg;
@@ -660,7 +660,7 @@ function nearFieldCurvesSvg(data) {
   const panelH = 190;
   const gapX = 50;
   const gapY = 44;
-  const roles = ["aggressive", "benign"];
+  const roles = ["aggressive", "inert"];
   const phaseColors = { pre_static: "#2f6fbd", post_static: "#b54848", pre: "#2f6fbd", post: "#b54848" };
   const radialRows = data.radial_rows || [];
   const cdfRows = data.cdf_rows || [];
@@ -735,60 +735,59 @@ async function loadSummary() {
     `${summary.export_run_id} | ${summary.collection ? summary.collection.collection_id : "no collection"}`;
   document.getElementById("summary-recordings").textContent = fmt(summary.source_recording_count, 0);
   document.getElementById("summary-spatial").textContent = fmt(
-    summary.row_counts_by_table.goodcopbadcop_spatial_occupancy_zones,
+    summary.row_counts_by_table.chaser_epoch_spatial_occupancy_zones,
     0
   );
   document.getElementById("summary-chaser").textContent = fmt(
-    summary.row_counts_by_table.goodcopbadcop_chaser_epoch_summary,
+    summary.row_counts_by_table.chaser_epoch_distance_summary,
     0
   );
   document.getElementById("summary-epoch-speed").textContent = fmt(
-    summary.row_counts_by_table.goodcopbadcop_epoch_behavior_summary ||
-      summary.row_counts_by_table.goodcopbadcop_epoch_speed_summary,
+    summary.row_counts_by_table.chaser_epoch_behavior_summary,
     0
   );
   document.getElementById("summary-speed-distance").textContent = fmt(
-    summary.row_counts_by_table.goodcopbadcop_speed_distance_bins,
+    summary.row_counts_by_table.chaser_speed_distance_bins,
     0
   );
   document.getElementById("summary-bout-histogram").textContent = fmt(
-    summary.row_counts_by_table.goodcopbadcop_epoch_bout_histogram,
+    summary.row_counts_by_table.chaser_epoch_bout_histogram,
     0
   );
   document.getElementById("summary-ibi-histogram").textContent = fmt(
-    summary.row_counts_by_table.goodcopbadcop_epoch_inter_bout_interval_histogram,
+    summary.row_counts_by_table.chaser_epoch_inter_bout_interval_histogram,
     0
   );
   document.getElementById("summary-histogram").textContent = fmt(
-    summary.row_counts_by_table.goodcopbadcop_chaser_distance_histogram,
+    summary.row_counts_by_table.chaser_epoch_distance_histogram,
     0
   );
   document.getElementById("summary-cra").textContent = fmt(
-    summary.row_counts_by_table.goodcopbadcop_cra_primary_endpoint_summary,
+    summary.row_counts_by_table.chaser_cra_primary_endpoint_summary,
     0
   );
   document.getElementById("summary-cra-object-phase").textContent = fmt(
-    summary.row_counts_by_table.goodcopbadcop_cra_primary_endpoint_object_phase,
+    summary.row_counts_by_table.chaser_cra_primary_endpoint_object_phase,
     0
   );
   document.getElementById("summary-cra-quadrant").textContent = fmt(
-    summary.row_counts_by_table.goodcopbadcop_cra_quadrant_occupancy,
+    summary.row_counts_by_table.chaser_cra_quadrant_occupancy,
     0
   );
   document.getElementById("summary-cra-near-field").textContent = fmt(
-    summary.row_counts_by_table.goodcopbadcop_cra_near_field_summary,
+    summary.row_counts_by_table.chaser_cra_near_field_summary,
     0
   );
   document.getElementById("summary-cra-near-field-object-phase").textContent = fmt(
-    summary.row_counts_by_table.goodcopbadcop_cra_near_field_object_phase,
+    summary.row_counts_by_table.chaser_cra_near_field_object_phase,
     0
   );
   document.getElementById("summary-egocentric").textContent = fmt(
-    summary.row_counts_by_table.goodcopbadcop_egocentric_epoch_summary,
+    summary.row_counts_by_table.chaser_egocentric_epoch_summary,
     0
   );
   document.getElementById("summary-egocentric-histogram").textContent = fmt(
-    summary.row_counts_by_table.goodcopbadcop_egocentric_distance_bearing_histogram,
+    summary.row_counts_by_table.chaser_egocentric_distance_bearing_histogram,
     0
   );
   document.getElementById("summary-diagnostics").textContent = fmt(summary.diagnostics_count, 0);
@@ -827,7 +826,7 @@ async function loadSpatial() {
   const metric = document.getElementById("spatial-metric").value || "time_s";
   const valueMode = document.getElementById("spatial-value-mode").value || "auto";
   const payload = await fetchJson(
-    `/api/goodcopbadcop/spatial?metric=${encodeURIComponent(metric)}&value_mode=${encodeURIComponent(valueMode)}`
+    `/api/chaser/spatial?metric=${encodeURIComponent(metric)}&value_mode=${encodeURIComponent(valueMode)}`
   );
   const data = payload.spatial;
   const groups = [...new Set(data.rows.map((row) => row.window_label))];
@@ -858,7 +857,7 @@ async function loadChaserSummary() {
   const metric = document.getElementById("chaser-metric").value || "p50_distance_mm";
   const stat = document.getElementById("chaser-stat").value || "mean";
   const payload = await fetchJson(
-    `/api/goodcopbadcop/chaser-summary?metric=${encodeURIComponent(metric)}&stat=${encodeURIComponent(stat)}`
+    `/api/chaser/distance-summary?metric=${encodeURIComponent(metric)}&stat=${encodeURIComponent(stat)}`
   );
   const data = payload.chaser_summary;
   const groups = [...new Set(data.rows.map((row) => row.window_label))];
@@ -891,7 +890,7 @@ async function loadHistogram() {
   if (windowLabel) {
     params.set("window_label", windowLabel);
   }
-  const payload = await fetchJson(`/api/goodcopbadcop/chaser-histogram?${params.toString()}`);
+  const payload = await fetchJson(`/api/chaser/distance-histogram?${params.toString()}`);
   const rows = payload.histogram.rows;
   const seriesCount = new Set(rows.map((row) => `${row.window_label}|${row.chaser_index}`)).size;
   document.getElementById("hist-meta").textContent = `${rows.length} bins | ${seriesCount} series`;
@@ -902,7 +901,7 @@ async function loadEpochSpeed() {
   const metric = document.getElementById("epoch-speed-metric").value || "mean_speed_mm_s";
   const stat = document.getElementById("epoch-speed-stat").value || "mean";
   const payload = await fetchJson(
-    `/api/goodcopbadcop/epoch-speed?metric=${encodeURIComponent(metric)}&stat=${encodeURIComponent(stat)}`
+    `/api/chaser/epoch-behavior?metric=${encodeURIComponent(metric)}&stat=${encodeURIComponent(stat)}`
   );
   const data = payload.epoch_speed;
   if (!data.available) {
@@ -948,7 +947,7 @@ async function loadSpeedDistance() {
   if (chaserValue) {
     params.set("chaser_index", chaserValue);
   }
-  const payload = await fetchJson(`/api/goodcopbadcop/speed-distance?${params.toString()}`);
+  const payload = await fetchJson(`/api/chaser/speed-distance?${params.toString()}`);
   const data = payload.speed_distance;
   if (!data.available) {
     document.getElementById("speed-distance-meta").textContent = data.message || "No speed-distance export";
@@ -985,7 +984,7 @@ async function loadEpochBoutHistogram() {
   if (windowLabel) {
     params.set("window_label", windowLabel);
   }
-  const payload = await fetchJson(`/api/goodcopbadcop/epoch-bout-histogram?${params.toString()}`);
+  const payload = await fetchJson(`/api/chaser/epoch-bout-histogram?${params.toString()}`);
   const data = payload.epoch_bout_histogram;
   if (!data.available) {
     document.getElementById("epoch-bout-hist-meta").textContent =
@@ -1020,7 +1019,7 @@ async function loadEpochInterBoutIntervalHistogram() {
     params.set("window_label", windowLabel);
   }
   const payload = await fetchJson(
-    `/api/goodcopbadcop/epoch-inter-bout-interval-histogram?${params.toString()}`
+    `/api/chaser/epoch-inter-bout-interval-histogram?${params.toString()}`
   );
   const data = payload.epoch_inter_bout_interval_histogram;
   if (!data.available) {
@@ -1053,7 +1052,7 @@ async function loadCraObjectPhase() {
   const metric = document.getElementById("cra-metric").value || "median_distance_mm";
   const stat = document.getElementById("cra-stat").value || "mean";
   const payload = await fetchJson(
-    `/api/goodcopbadcop/cra-object-phase?metric=${encodeURIComponent(metric)}&stat=${encodeURIComponent(stat)}`
+    `/api/chaser/cra-object-phase?metric=${encodeURIComponent(metric)}&stat=${encodeURIComponent(stat)}`
   );
   const data = payload.cra_object_phase;
   const groups = [...new Set(data.rows.map((row) => row.phase_label))];
@@ -1083,7 +1082,7 @@ async function loadCraObjectPhase() {
 }
 
 async function loadCraSummary() {
-  const payload = await fetchJson("/api/goodcopbadcop/cra-summary");
+  const payload = await fetchJson("/api/chaser/cra-summary");
   const data = payload.cra_summary;
   document.getElementById("cra-summary-meta").textContent = `${fmt(data.row_count, 0)} recordings`;
   document.getElementById("cra-summary-table").innerHTML = tableHtml(data.metrics, [
@@ -1100,12 +1099,12 @@ async function loadCraSummary() {
     { key: "recording_id", label: "Recording" },
     { key: "endpoint_status", label: "Status" },
     { key: "aggressive_color", label: "Agg color" },
-    { key: "benign_color", label: "Benign color" },
+    { key: "inert_color", label: "Inert color" },
     { key: "delta_agg", label: "dAgg mm" },
-    { key: "delta_benign", label: "dBenign mm" },
+    { key: "delta_inert", label: "dInert mm" },
     { key: "specificity_distance", label: "Spec dist" },
     { key: "delta_occ_agg", label: "dOcc agg" },
-    { key: "delta_occ_benign", label: "dOcc benign" },
+    { key: "delta_occ_inert", label: "dOcc inert" },
     { key: "specificity_occupancy", label: "Spec occ" },
     { key: "frac_tracking_dropout_pre", label: "Drop pre" },
     { key: "frac_tracking_dropout_post", label: "Drop post" },
@@ -1116,7 +1115,7 @@ async function loadCraSummary() {
 }
 
 async function loadCraSpecificity() {
-  const payload = await fetchJson("/api/goodcopbadcop/cra-specificity");
+  const payload = await fetchJson("/api/chaser/cra-specificity");
   const data = payload.cra_specificity;
   if (!data.available) {
     document.getElementById("cra-specificity-meta").textContent = data.message || "No CRA specificity rows";
@@ -1141,14 +1140,14 @@ async function loadCraSpecificity() {
       { key: "recording_id", label: "Recording" },
       { key: "specificity_distance", label: "Distance spec" },
       { key: "delta_agg", label: "dAgg mm" },
-      { key: "delta_benign", label: "dBenign mm" },
+      { key: "delta_inert", label: "dInert mm" },
       { key: "occupancy_index_specificity", label: "Occ-index spec" },
     ]
   );
 }
 
 async function loadCraStatistics() {
-  const payload = await fetchJson("/api/goodcopbadcop/statistics?metric_family=cra_primary_endpoint");
+  const payload = await fetchJson("/api/chaser/statistics?metric_family=cra_primary_endpoint");
   const data = payload.statistics;
   if (!data.available || !data.rows.length) {
     document.getElementById("cra-statistics-meta").textContent = data.message || "No CRA statistics";
@@ -1175,7 +1174,7 @@ async function loadCraStatistics() {
 }
 
 async function loadCraQuadrantDensity() {
-  const payload = await fetchJson("/api/goodcopbadcop/cra-quadrant-occupancy-density");
+  const payload = await fetchJson("/api/chaser/cra-quadrant-occupancy-density");
   const data = payload.cra_quadrant_occupancy_density;
   if (!data.available) {
     document.getElementById("cra-quadrant-density-meta").textContent = data.message || "No CRA quadrant table";
@@ -1214,7 +1213,7 @@ async function loadCraQuadrantDensity() {
 }
 
 async function loadCraNearFieldCurves() {
-  const payload = await fetchJson("/api/goodcopbadcop/cra-near-field-curves");
+  const payload = await fetchJson("/api/chaser/cra-near-field-curves");
   const data = payload.cra_near_field_curves;
   if (!data.available) {
     document.getElementById("cra-near-field-curves-meta").textContent = data.message || "No near-field curves";
@@ -1244,7 +1243,7 @@ async function loadCraNearFieldObjectPhase() {
   const metric = document.getElementById("cra-near-field-metric").value || "near_zone_occupancy_fraction";
   const stat = document.getElementById("cra-near-field-stat").value || "mean";
   const payload = await fetchJson(
-    `/api/goodcopbadcop/cra-near-field-object-phase?metric=${encodeURIComponent(metric)}&stat=${encodeURIComponent(stat)}`
+    `/api/chaser/cra-near-field-object-phase?metric=${encodeURIComponent(metric)}&stat=${encodeURIComponent(stat)}`
   );
   const data = payload.cra_near_field_object_phase;
   const groups = [...new Set(data.rows.map((row) => row.phase_label))];
@@ -1273,7 +1272,7 @@ async function loadCraNearFieldObjectPhase() {
 }
 
 async function loadCraNearFieldSummary() {
-  const payload = await fetchJson("/api/goodcopbadcop/cra-near-field-summary");
+  const payload = await fetchJson("/api/chaser/cra-near-field-summary");
   const data = payload.cra_near_field_summary;
   document.getElementById("cra-near-field-summary-meta").textContent = `${fmt(data.row_count, 0)} recordings`;
   document.getElementById("cra-near-field-summary-table").innerHTML = tableHtml(data.metrics, [
@@ -1290,7 +1289,7 @@ async function loadCraNearFieldSummary() {
     { key: "recording_id", label: "Recording" },
     { key: "endpoint_status", label: "Status" },
     { key: "aggressive_color", label: "Agg color" },
-    { key: "benign_color", label: "Benign color" },
+    { key: "inert_color", label: "Inert color" },
     { key: "approach_p05_specificity", label: "P05 spec" },
     { key: "approach_p10_specificity", label: "P10 spec" },
     { key: "nearzone_occ_specificity", label: "NZ occ spec" },
@@ -1306,7 +1305,7 @@ async function loadCraNearFieldSummary() {
 }
 
 async function loadCraNearFieldStatistics() {
-  const payload = await fetchJson("/api/goodcopbadcop/statistics?metric_family=cra_near_field");
+  const payload = await fetchJson("/api/chaser/statistics?metric_family=cra_near_field");
   const data = payload.statistics;
   if (!data.available || !data.rows.length) {
     document.getElementById("cra-near-field-statistics-meta").textContent = data.message || "No near-field statistics";
@@ -1336,7 +1335,7 @@ async function loadEgocentricSummary() {
   const metric = document.getElementById("egocentric-metric").value || "mean_alignment_cos";
   const stat = document.getElementById("egocentric-stat").value || "mean";
   const payload = await fetchJson(
-    `/api/goodcopbadcop/egocentric-summary?metric=${encodeURIComponent(metric)}&stat=${encodeURIComponent(stat)}`
+    `/api/chaser/egocentric-summary?metric=${encodeURIComponent(metric)}&stat=${encodeURIComponent(stat)}`
   );
   const data = payload.egocentric_summary;
   const groups = [...new Set(data.rows.map((row) => row.window_label))];
@@ -1369,7 +1368,7 @@ async function loadEgocentricHistogram() {
   if (windowLabel) {
     params.set("window_label", windowLabel);
   }
-  const payload = await fetchJson(`/api/goodcopbadcop/egocentric-histogram?${params.toString()}`);
+  const payload = await fetchJson(`/api/chaser/egocentric-histogram?${params.toString()}`);
   const rows = payload.histogram.rows;
   const seriesCount = new Set(rows.map((row) => `${row.window_label}|${row.chaser_index}`)).size;
   document.getElementById("egocentric-hist-meta").textContent = `${rows.length} bins | ${seriesCount} series`;
@@ -1385,7 +1384,7 @@ async function loadEgocentricHistogram() {
 }
 
 async function loadRecordings() {
-  const payload = await fetchJson("/api/goodcopbadcop/recordings");
+  const payload = await fetchJson("/api/chaser/recordings");
   const rows = payload.recordings.rows;
   document.getElementById("recording-meta").textContent = `${payload.recordings.row_count} recordings`;
   document.getElementById("recording-table").innerHTML = tableHtml(rows, [
@@ -1402,7 +1401,7 @@ async function loadRecordings() {
     { key: "post_event_mean_speed_mm_s", label: "Post speed" },
     { key: "cra_endpoint_status", label: "CRA status" },
     { key: "cra_delta_agg_mm", label: "CRA dAgg" },
-    { key: "cra_delta_benign_mm", label: "CRA dBenign" },
+    { key: "cra_delta_inert_mm", label: "CRA dInert" },
     { key: "cra_specificity_distance_mm", label: "CRA spec dist" },
     { key: "cra_delta_occ_agg", label: "CRA dOcc agg" },
     { key: "cra_specificity_occupancy", label: "CRA spec occ" },
@@ -1414,7 +1413,7 @@ async function loadRecordings() {
 }
 
 async function loadStatistics() {
-  const payload = await fetchJson("/api/goodcopbadcop/statistics");
+  const payload = await fetchJson("/api/chaser/statistics");
   const data = payload.statistics;
   if (!data.available) {
     document.getElementById("statistics-meta").textContent = data.message || "No statistics run";
@@ -1444,7 +1443,7 @@ async function loadStatistics() {
 }
 
 async function loadProvenance() {
-  const payload = await fetchJson("/api/goodcopbadcop/provenance");
+  const payload = await fetchJson("/api/chaser/provenance");
   document.getElementById("provenance-meta").textContent = payload.provenance.summary.manifest_path;
   document.getElementById("provenance-json").textContent = JSON.stringify(payload.provenance, null, 2);
 }

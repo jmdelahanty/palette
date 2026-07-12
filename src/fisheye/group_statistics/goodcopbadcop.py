@@ -15,6 +15,23 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import polars as pl
 
+from fisheye.analytics_exports.capabilities import resolve_capabilities
+from fisheye.analytics_exports.contracts import (
+    CHASER_CRA_NEAR_FIELD_SUMMARY_TABLE,
+    CHASER_CRA_SUMMARY_TABLE,
+    CHASER_DISTANCE_SUMMARY_TABLE,
+    CHASER_EGOCENTRIC_SUMMARY_TABLE,
+    CHASER_EPOCH_BEHAVIOR_TABLE,
+    CHASER_SPATIAL_TABLE,
+    DESCRIPTIVE_TABLE,
+    EXPORT_SCHEMA_ID,
+    EXPORT_SCHEMA_VERSION,
+    STATISTICS_TABLE,
+    TABLE_CONTRACTS,
+    canonicalize_export_row,
+    contract_snapshot,
+    validate_table_columns,
+)
 from fisheye.shared.json_safety import json_attr_safe, strict_json_dumps
 from fisheye.shared.system_metadata import get_git_info
 
@@ -26,13 +43,11 @@ from .paired import (
 )
 
 
-SUMMARY_TABLE = "goodcopbadcop_group_statistical_summary"
-DESCRIPTIVE_TABLE = "goodcopbadcop_group_descriptive_summary"
-CRA_SUMMARY_TABLE = "goodcopbadcop_cra_primary_endpoint_summary"
-CRA_NEAR_FIELD_SUMMARY_TABLE = "goodcopbadcop_cra_near_field_summary"
-EPOCH_BEHAVIOR_TABLE = "goodcopbadcop_epoch_behavior_summary"
-EPOCH_SPEED_TABLE = "goodcopbadcop_epoch_speed_summary"
-SCHEMA_VERSION = 1
+SUMMARY_TABLE = STATISTICS_TABLE
+CRA_SUMMARY_TABLE = CHASER_CRA_SUMMARY_TABLE
+CRA_NEAR_FIELD_SUMMARY_TABLE = CHASER_CRA_NEAR_FIELD_SUMMARY_TABLE
+EPOCH_BEHAVIOR_TABLE = CHASER_EPOCH_BEHAVIOR_TABLE
+SCHEMA_VERSION = EXPORT_SCHEMA_VERSION
 DEFAULT_CONTRASTS = (
     ContrastDefinition("training-pre", "pre", "training"),
     ContrastDefinition("post-pre", "pre", "post"),
@@ -53,37 +68,37 @@ class MetricSpec:
 DEFAULT_METRICS: tuple[MetricSpec, ...] = (
     MetricSpec(
         metric_family="chaser_distance",
-        source_table="goodcopbadcop_chaser_epoch_summary",
+        source_table=CHASER_DISTANCE_SUMMARY_TABLE,
         metric_name="mean_distance_mm",
         group_keys=("chaser_index",),
     ),
     MetricSpec(
         metric_family="chaser_distance",
-        source_table="goodcopbadcop_chaser_epoch_summary",
+        source_table=CHASER_DISTANCE_SUMMARY_TABLE,
         metric_name="p50_distance_mm",
         group_keys=("chaser_index",),
     ),
     MetricSpec(
         metric_family="chaser_distance",
-        source_table="goodcopbadcop_chaser_epoch_summary",
+        source_table=CHASER_DISTANCE_SUMMARY_TABLE,
         metric_name="fraction_within_threshold",
         group_keys=("chaser_index",),
     ),
     MetricSpec(
         metric_family="spatial_occupancy",
-        source_table="goodcopbadcop_spatial_occupancy_zones",
+        source_table=CHASER_SPATIAL_TABLE,
         metric_name="time_s",
         group_keys=("zone_set_id", "zone_id", "zone_label"),
     ),
     MetricSpec(
         metric_family="spatial_occupancy",
-        source_table="goodcopbadcop_spatial_occupancy_zones",
+        source_table=CHASER_SPATIAL_TABLE,
         metric_name="fraction_of_epoch",
         group_keys=("zone_set_id", "zone_id", "zone_label"),
     ),
     MetricSpec(
         metric_family="spatial_occupancy",
-        source_table="goodcopbadcop_spatial_occupancy_zones",
+        source_table=CHASER_SPATIAL_TABLE,
         metric_name="fraction_of_detected",
         group_keys=("zone_set_id", "zone_id", "zone_label"),
     ),
@@ -179,14 +194,6 @@ DEFAULT_METRICS: tuple[MetricSpec, ...] = (
         metric_family="epoch_behavior",
         source_table=EPOCH_BEHAVIOR_TABLE,
         metric_name="median_inter_bout_interval_s",
-        group_keys=(),
-        primary=False,
-        exploratory=True,
-    ),
-    MetricSpec(
-        metric_family="epoch_speed",
-        source_table=EPOCH_SPEED_TABLE,
-        metric_name="mean_speed_mm_s",
         group_keys=(),
         primary=False,
         exploratory=True,
@@ -291,31 +298,31 @@ DEFAULT_METRICS: tuple[MetricSpec, ...] = (
     ),
     MetricSpec(
         metric_family="egocentric_alignment",
-        source_table="goodcopbadcop_egocentric_epoch_summary",
+        source_table=CHASER_EGOCENTRIC_SUMMARY_TABLE,
         metric_name="mean_alignment_cos",
         group_keys=("chaser_index",),
     ),
     MetricSpec(
         metric_family="egocentric_alignment",
-        source_table="goodcopbadcop_egocentric_epoch_summary",
+        source_table=CHASER_EGOCENTRIC_SUMMARY_TABLE,
         metric_name="mean_lateral_sin",
         group_keys=("chaser_index",),
     ),
     MetricSpec(
         metric_family="egocentric_alignment",
-        source_table="goodcopbadcop_egocentric_epoch_summary",
+        source_table=CHASER_EGOCENTRIC_SUMMARY_TABLE,
         metric_name="fraction_front_45",
         group_keys=("chaser_index",),
     ),
     MetricSpec(
         metric_family="egocentric_alignment",
-        source_table="goodcopbadcop_egocentric_epoch_summary",
+        source_table=CHASER_EGOCENTRIC_SUMMARY_TABLE,
         metric_name="fraction_lateral_45",
         group_keys=("chaser_index",),
     ),
     MetricSpec(
         metric_family="egocentric_alignment",
-        source_table="goodcopbadcop_egocentric_epoch_summary",
+        source_table=CHASER_EGOCENTRIC_SUMMARY_TABLE,
         metric_name="fraction_behind_45",
         group_keys=("chaser_index",),
     ),
@@ -386,13 +393,16 @@ def _read_export_table(export_root: Path, source_export_run_id: str, table: str)
     files = sorted(table_dir.glob("*.parquet"))
     if not files:
         raise FileNotFoundError(f"No Parquet parts found for {table}: {table_dir}")
-    frame = pl.scan_parquet([str(path) for path in files]).collect()
-    aliases = [
-        pl.col(name).alias(name.replace("benign", "inert"))
-        for name in frame.columns
-        if "benign" in name and name.replace("benign", "inert") not in frame.columns
-    ]
-    return frame.with_columns(aliases) if aliases else frame
+    return pl.scan_parquet([str(path) for path in files]).collect()
+
+
+def _require_v2_source_manifest(manifest: Mapping[str, Any], *, path: Path) -> None:
+    if manifest.get("schema_id") != EXPORT_SCHEMA_ID or manifest.get("schema_version") != EXPORT_SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported analytics export contract at {path}: "
+            f"{manifest.get('schema_id')!r} version {manifest.get('schema_version')!r}; "
+            f"re-export with {EXPORT_SCHEMA_ID} version {EXPORT_SCHEMA_VERSION}."
+        )
 
 
 def _safe_float(value: Any) -> float | None:
@@ -843,6 +853,7 @@ def compute_goodcopbadcop_statistics(config: GoodCopBadCopStatisticsConfig) -> t
     export_root = Path(config.export_root).expanduser().resolve()
     source_manifest_file = source_manifest_path(export_root, config.source_export_run_id)
     source_manifest = _json_file(source_manifest_file)
+    _require_v2_source_manifest(source_manifest, path=source_manifest_file)
     source_manifest_sha256 = _sha256_file(source_manifest_file)
     rng = np.random.default_rng(int(config.random_seed))
     tables = sorted({spec.source_table for spec in config.metrics})
@@ -889,6 +900,7 @@ def compute_goodcopbadcop_statistics(config: GoodCopBadCopStatisticsConfig) -> t
                 )
             )
     apply_fdr(rows)
+    rows = [canonicalize_export_row(SUMMARY_TABLE, row) for row in rows]
 
     manifest = _build_stats_manifest(
         config=GoodCopBadCopStatisticsConfig(
@@ -915,6 +927,7 @@ def compute_goodcopbadcop_descriptive_summaries(config: GoodCopBadCopStatisticsC
     export_root = Path(config.export_root).expanduser().resolve()
     source_manifest_file = source_manifest_path(export_root, config.source_export_run_id)
     source_manifest = _json_file(source_manifest_file)
+    _require_v2_source_manifest(source_manifest, path=source_manifest_file)
     source_manifest_sha256 = _sha256_file(source_manifest_file)
     tables = sorted({spec.source_table for spec in config.metrics})
     frames = {
@@ -957,7 +970,7 @@ def compute_goodcopbadcop_descriptive_summaries(config: GoodCopBadCopStatisticsC
                     source_manifest_sha256=source_manifest_sha256,
                 )
             )
-    return rows
+    return [canonicalize_export_row(DESCRIPTIVE_TABLE, row) for row in rows]
 
 
 def _build_stats_manifest(
@@ -982,9 +995,10 @@ def _build_stats_manifest(
     return {
         "export_run_id": config.stats_run_id,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "schema_id": EXPORT_SCHEMA_ID,
         "schema_version": SCHEMA_VERSION,
         "tool": "fisheye.utils.compute_group_statistics",
-        "profile": "goodcopbadcop_chaser",
+        "profile": "chaser",
         "hostname": socket.gethostname(),
         "palette_git_commit": git.get("commit_hash"),
         "palette_git_branch": git.get("branch"),
@@ -996,6 +1010,7 @@ def _build_stats_manifest(
         "input_tables": sorted({spec.source_table for spec in config.metrics}),
         "source_row_counts_by_table": source_manifest.get("row_counts_by_table"),
         "output_tables": output_tables,
+        "table_contracts": contract_snapshot(output_tables),
         "row_counts_by_table": row_counts_by_table,
         "status_counts": status_counts,
         "metrics": [
@@ -1047,6 +1062,14 @@ def write_goodcopbadcop_statistics(
 
     output_root = Path(export_root).expanduser().resolve()
 
+    canonical_rows_by_table = {
+        SUMMARY_TABLE: [canonicalize_export_row(SUMMARY_TABLE, row) for row in rows],
+    }
+    if descriptive_rows:
+        canonical_rows_by_table[DESCRIPTIVE_TABLE] = [
+            canonicalize_export_row(DESCRIPTIVE_TABLE, row) for row in descriptive_rows
+        ]
+
     def write_table(table_name: str, table_rows: Sequence[Mapping[str, Any]]) -> list[str]:
         table_dir = output_root / "v1" / table_name / f"export_run_id={stats_run_id}"
         if table_dir.exists() and any(table_dir.iterdir()) and not overwrite:
@@ -1055,20 +1078,43 @@ def write_goodcopbadcop_statistics(
         normalized = _normalize_rows(table_rows)
         part_files: list[str] = []
         if normalized:
+            columns = tuple(normalized[0])
+            missing = validate_table_columns(table_name, columns)
+            if missing:
+                raise ValueError(
+                    f"{table_name} does not satisfy its V2 table contract; "
+                    f"missing columns: {list(missing)}"
+                )
             part_path = table_dir / "part-00000.parquet"
             tmp_path = table_dir / ".part-00000.parquet.tmp"
             if tmp_path.exists():
                 tmp_path.unlink()
-            pq.write_table(pa.Table.from_pylist(normalized), tmp_path)
+            arrow_table = pa.Table.from_pylist(normalized)
+            metadata = dict(arrow_table.schema.metadata or {})
+            metadata.update(
+                {
+                    b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode("utf-8"),
+                    b"palette.export_schema_version": str(EXPORT_SCHEMA_VERSION).encode("utf-8"),
+                    b"palette.table_contract": json.dumps(
+                        TABLE_CONTRACTS[table_name].to_dict(),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8"),
+                }
+            )
+            pq.write_table(arrow_table.replace_schema_metadata(metadata), tmp_path)
             os.replace(tmp_path, part_path)
             part_files.append(str(part_path))
         return part_files
 
     part_files_by_table: dict[str, list[str]] = {
-        SUMMARY_TABLE: write_table(SUMMARY_TABLE, rows),
+        SUMMARY_TABLE: write_table(SUMMARY_TABLE, canonical_rows_by_table[SUMMARY_TABLE]),
     }
     if descriptive_rows:
-        part_files_by_table[DESCRIPTIVE_TABLE] = write_table(DESCRIPTIVE_TABLE, descriptive_rows)
+        part_files_by_table[DESCRIPTIVE_TABLE] = write_table(
+            DESCRIPTIVE_TABLE,
+            canonical_rows_by_table[DESCRIPTIVE_TABLE],
+        )
 
     manifest_dir = output_root / "v1" / "manifests"
     manifest_dir.mkdir(parents=True, exist_ok=True)
@@ -1088,6 +1134,23 @@ def write_goodcopbadcop_statistics(
     payload["output_tables"] = output_tables
     payload["row_counts_by_table"] = row_counts_by_table
     payload["part_files_by_table"] = part_files_by_table
+    payload["schema_id"] = EXPORT_SCHEMA_ID
+    payload["schema_version"] = EXPORT_SCHEMA_VERSION
+    payload["table_contracts"] = contract_snapshot(output_tables)
+    columns_by_table = {
+        SUMMARY_TABLE: sorted(
+            {key for row in canonical_rows_by_table[SUMMARY_TABLE] for key in row}
+        ),
+    }
+    if descriptive_rows:
+        columns_by_table[DESCRIPTIVE_TABLE] = sorted(
+            {key for row in canonical_rows_by_table[DESCRIPTIVE_TABLE] for key in row}
+        )
+    capability_statuses = resolve_capabilities(columns_by_table)
+    payload["capabilities"] = [
+        status.capability_id for status in capability_statuses if status.available
+    ]
+    payload["capability_statuses"] = [status.to_dict() for status in capability_statuses]
     payload["manifest_path"] = str(manifest_path)
     tmp_manifest = manifest_path.with_suffix(".json.tmp")
     tmp_manifest.write_text(json.dumps(json_attr_safe(payload), indent=2, sort_keys=True) + "\n")

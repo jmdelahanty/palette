@@ -29,8 +29,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--profile",
-        default="goodcopbadcop_chaser",
-        choices=("goodcopbadcop_chaser",),
+        default="chaser",
+        choices=("chaser",),
         help="Statistics profile to compute.",
     )
     parser.add_argument(
@@ -51,9 +51,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--metrics",
         help=(
-            "Comma-separated metric families. Default: all initial GoodCopBadCop "
+            "Comma-separated metric families. Default: all chaser-analysis "
             "families. Known: chaser_distance, spatial_occupancy, "
-            "epoch_behavior, epoch_speed, cra_primary_endpoint, cra_near_field, egocentric_alignment."
+            "epoch_behavior, cra_primary_endpoint, cra_near_field, egocentric_alignment."
         ),
     )
     parser.add_argument(

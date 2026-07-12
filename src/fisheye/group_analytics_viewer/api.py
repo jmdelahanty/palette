@@ -135,7 +135,7 @@ def build_handler(*, context: ViewerContext, static_dir: Path) -> type[BaseHTTPR
                 self._write_json({"ok": True, "options": query_options(context)})
                 return True
 
-            if path == "/api/goodcopbadcop/spatial":
+            if path == "/api/chaser/spatial":
                 metric = _param_first(query_params, "metric") or "time_s"
                 value_mode = _param_first(query_params, "value_mode") or "auto"
                 zone_set_id = _param_first(query_params, "zone_set_id")
@@ -154,7 +154,7 @@ def build_handler(*, context: ViewerContext, static_dir: Path) -> type[BaseHTTPR
                 )
                 return True
 
-            if path == "/api/goodcopbadcop/chaser-summary":
+            if path == "/api/chaser/distance-summary":
                 metric = _param_first(query_params, "metric") or "p50_distance_mm"
                 stat = _param_first(query_params, "stat") or "mean"
                 include_recordings = _parse_bool_param(query_params, "include_recordings", default=False)
@@ -171,7 +171,7 @@ def build_handler(*, context: ViewerContext, static_dir: Path) -> type[BaseHTTPR
                 )
                 return True
 
-            if path == "/api/goodcopbadcop/chaser-histogram":
+            if path == "/api/chaser/distance-histogram":
                 window_label = _param_first(query_params, "window_label")
                 chaser_index = _parse_int_param(query_params, "chaser_index")
                 self._write_json(
@@ -186,7 +186,7 @@ def build_handler(*, context: ViewerContext, static_dir: Path) -> type[BaseHTTPR
                 )
                 return True
 
-            if path == "/api/goodcopbadcop/epoch-speed":
+            if path == "/api/chaser/epoch-behavior":
                 metric = _param_first(query_params, "metric") or "mean_speed_mm_s"
                 stat = _param_first(query_params, "stat") or "mean"
                 include_recordings = _parse_bool_param(query_params, "include_recordings", default=False)
@@ -203,7 +203,7 @@ def build_handler(*, context: ViewerContext, static_dir: Path) -> type[BaseHTTPR
                 )
                 return True
 
-            if path == "/api/goodcopbadcop/speed-distance":
+            if path == "/api/chaser/speed-distance":
                 window_label = _param_first(query_params, "window_label")
                 chaser_index = _parse_int_param(query_params, "chaser_index")
                 self._write_json(
@@ -218,7 +218,7 @@ def build_handler(*, context: ViewerContext, static_dir: Path) -> type[BaseHTTPR
                 )
                 return True
 
-            if path == "/api/goodcopbadcop/cra-object-phase":
+            if path == "/api/chaser/cra-object-phase":
                 metric = _param_first(query_params, "metric") or "median_distance_mm"
                 stat = _param_first(query_params, "stat") or "mean"
                 object_role = _param_first(query_params, "object_role")
@@ -237,7 +237,7 @@ def build_handler(*, context: ViewerContext, static_dir: Path) -> type[BaseHTTPR
                 )
                 return True
 
-            if path == "/api/goodcopbadcop/epoch-center-distance-histogram":
+            if path == "/api/chaser/epoch-center-distance-histogram":
                 window_label = _param_first(query_params, "window_label")
                 self._write_json(
                     {
@@ -250,7 +250,7 @@ def build_handler(*, context: ViewerContext, static_dir: Path) -> type[BaseHTTPR
                 )
                 return True
 
-            if path == "/api/goodcopbadcop/epoch-bout-histogram":
+            if path == "/api/chaser/epoch-bout-histogram":
                 metric = _param_first(query_params, "metric") or "bout_path_length_mm"
                 window_label = _param_first(query_params, "window_label")
                 self._write_json(
@@ -265,7 +265,7 @@ def build_handler(*, context: ViewerContext, static_dir: Path) -> type[BaseHTTPR
                 )
                 return True
 
-            if path == "/api/goodcopbadcop/epoch-inter-bout-interval-histogram":
+            if path == "/api/chaser/epoch-inter-bout-interval-histogram":
                 metric = _param_first(query_params, "metric") or "inter_bout_interval_s"
                 window_label = _param_first(query_params, "window_label")
                 self._write_json(
@@ -282,7 +282,7 @@ def build_handler(*, context: ViewerContext, static_dir: Path) -> type[BaseHTTPR
                 )
                 return True
 
-            if path == "/api/goodcopbadcop/cra-summary":
+            if path == "/api/chaser/cra-summary":
                 metric = _param_first(query_params, "metric")
                 endpoint_status = _param_first(query_params, "endpoint_status")
                 include_rows = _parse_bool_param(query_params, "include_rows", default=True)
@@ -299,7 +299,7 @@ def build_handler(*, context: ViewerContext, static_dir: Path) -> type[BaseHTTPR
                 )
                 return True
 
-            if path == "/api/goodcopbadcop/cra-specificity":
+            if path == "/api/chaser/cra-specificity":
                 self._write_json(
                     {
                         "ok": True,
@@ -308,7 +308,7 @@ def build_handler(*, context: ViewerContext, static_dir: Path) -> type[BaseHTTPR
                 )
                 return True
 
-            if path == "/api/goodcopbadcop/cra-quadrant-occupancy-density":
+            if path == "/api/chaser/cra-quadrant-occupancy-density":
                 self._write_json(
                     {
                         "ok": True,
@@ -317,7 +317,7 @@ def build_handler(*, context: ViewerContext, static_dir: Path) -> type[BaseHTTPR
                 )
                 return True
 
-            if path == "/api/goodcopbadcop/cra-near-field-object-phase":
+            if path == "/api/chaser/cra-near-field-object-phase":
                 metric = _param_first(query_params, "metric") or "near_zone_occupancy_fraction"
                 stat = _param_first(query_params, "stat") or "mean"
                 object_role = _param_first(query_params, "object_role")
@@ -336,7 +336,7 @@ def build_handler(*, context: ViewerContext, static_dir: Path) -> type[BaseHTTPR
                 )
                 return True
 
-            if path == "/api/goodcopbadcop/cra-near-field-curves":
+            if path == "/api/chaser/cra-near-field-curves":
                 self._write_json(
                     {
                         "ok": True,
@@ -345,7 +345,7 @@ def build_handler(*, context: ViewerContext, static_dir: Path) -> type[BaseHTTPR
                 )
                 return True
 
-            if path == "/api/goodcopbadcop/cra-near-field-summary":
+            if path == "/api/chaser/cra-near-field-summary":
                 metric = _param_first(query_params, "metric")
                 endpoint_status = _param_first(query_params, "endpoint_status")
                 include_rows = _parse_bool_param(query_params, "include_rows", default=True)
@@ -362,7 +362,7 @@ def build_handler(*, context: ViewerContext, static_dir: Path) -> type[BaseHTTPR
                 )
                 return True
 
-            if path == "/api/goodcopbadcop/egocentric-summary":
+            if path == "/api/chaser/egocentric-summary":
                 metric = _param_first(query_params, "metric") or "mean_alignment_cos"
                 stat = _param_first(query_params, "stat") or "mean"
                 include_recordings = _parse_bool_param(query_params, "include_recordings", default=False)
@@ -379,7 +379,7 @@ def build_handler(*, context: ViewerContext, static_dir: Path) -> type[BaseHTTPR
                 )
                 return True
 
-            if path == "/api/goodcopbadcop/egocentric-histogram":
+            if path == "/api/chaser/egocentric-histogram":
                 window_label = _param_first(query_params, "window_label")
                 chaser_index = _parse_int_param(query_params, "chaser_index")
                 self._write_json(
@@ -394,7 +394,7 @@ def build_handler(*, context: ViewerContext, static_dir: Path) -> type[BaseHTTPR
                 )
                 return True
 
-            if path == "/api/goodcopbadcop/statistics":
+            if path == "/api/chaser/statistics":
                 self._write_json(
                     {
                         "ok": True,
@@ -409,11 +409,11 @@ def build_handler(*, context: ViewerContext, static_dir: Path) -> type[BaseHTTPR
                 )
                 return True
 
-            if path == "/api/goodcopbadcop/recordings":
+            if path == "/api/chaser/recordings":
                 self._write_json({"ok": True, "recordings": query_recordings(context)})
                 return True
 
-            if path == "/api/goodcopbadcop/provenance":
+            if path == "/api/chaser/provenance":
                 self._write_json({"ok": True, "provenance": query_provenance(context)})
                 return True
 

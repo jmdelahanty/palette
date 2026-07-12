@@ -8,6 +8,13 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
+from fisheye.analytics_exports.capabilities import resolve_capabilities
+from fisheye.analytics_exports.contracts import (
+    EXPORT_SCHEMA_ID,
+    EXPORT_SCHEMA_VERSION,
+    TABLE_CONTRACTS,
+)
+
 
 @dataclass(frozen=True)
 class ExportCatalogDiagnostic:
@@ -36,6 +43,9 @@ class ExportCatalogEntry:
     collection_id: str | None
     collection_name: str | None
     table_names: tuple[str, ...]
+    schema_id: str
+    schema_version: int
+    capabilities: tuple[str, ...]
     export_diagnostics_count: int
     missing_part_count: int
 
@@ -65,6 +75,9 @@ class ExportCatalogEntry:
             "collection_id": self.collection_id,
             "collection_name": self.collection_name,
             "table_names": list(self.table_names),
+            "schema_id": self.schema_id,
+            "schema_version": self.schema_version,
+            "capabilities": list(self.capabilities),
             "export_diagnostics_count": self.export_diagnostics_count,
             "missing_part_count": self.missing_part_count,
             "ready": self.ready,
@@ -208,6 +221,23 @@ def discover_export_catalog(export_root: Path) -> ExportCatalog:
         if payload.get("source_export_run_id"):
             continue
 
+        if (
+            payload.get("schema_id") != EXPORT_SCHEMA_ID
+            or payload.get("schema_version") != EXPORT_SCHEMA_VERSION
+        ):
+            diagnostics.append(
+                ExportCatalogDiagnostic(
+                    manifest_path=str(manifest_path),
+                    code="unsupported_export_schema",
+                    message=(
+                        f"Unsupported analytics export contract {payload.get('schema_id')!r} "
+                        f"version {payload.get('schema_version')!r}; re-export with "
+                        f"{EXPORT_SCHEMA_ID} version {EXPORT_SCHEMA_VERSION}."
+                    ),
+                )
+            )
+            continue
+
         filename_run_id = manifest_path.name.removeprefix("export_run_id=").removesuffix(".json")
         payload_run_id = payload.get("export_run_id")
         if not isinstance(payload_run_id, str) or payload_run_id != filename_run_id:
@@ -223,8 +253,54 @@ def discover_export_catalog(export_root: Path) -> ExportCatalog:
             )
             continue
 
+        table_names = _table_names(payload)
+        unknown_tables = tuple(sorted(set(table_names) - set(TABLE_CONTRACTS)))
+        if unknown_tables:
+            diagnostics.append(
+                ExportCatalogDiagnostic(
+                    manifest_path=str(manifest_path),
+                    code="unknown_v2_table_contract",
+                    message=f"Manifest declares unknown V2 tables: {list(unknown_tables)}",
+                )
+            )
+            continue
+        declared_contracts = payload.get("table_contracts")
+        missing_contracts = (
+            tuple(table_names)
+            if not isinstance(declared_contracts, Mapping)
+            else tuple(table for table in table_names if table not in declared_contracts)
+        )
+        if missing_contracts:
+            diagnostics.append(
+                ExportCatalogDiagnostic(
+                    manifest_path=str(manifest_path),
+                    code="missing_table_contract_snapshot",
+                    message=f"Manifest lacks V2 contract snapshots for: {list(missing_contracts)}",
+                )
+            )
+            continue
+        mismatched_contracts = tuple(
+            table
+            for table in table_names
+            if declared_contracts.get(table) != TABLE_CONTRACTS[table].to_dict()
+        )
+        if mismatched_contracts:
+            diagnostics.append(
+                ExportCatalogDiagnostic(
+                    manifest_path=str(manifest_path),
+                    code="mismatched_table_contract_snapshot",
+                    message=(
+                        "Manifest contract snapshots do not match the installed V2 contracts for: "
+                        f"{list(mismatched_contracts)}"
+                    ),
+                )
+            )
+            continue
+
         missing_parts = 0
         unsafe_part: str | None = None
+        columns_by_table: dict[str, tuple[str, ...]] = {}
+        first_part_by_table: dict[str, Path] = {}
         for table_name, raw_part in _referenced_parts(payload):
             # Export manifests historically stored absolute paths. Rebase each
             # filename onto the schema-defined location so a copied export can
@@ -244,6 +320,8 @@ def discover_export_catalog(export_root: Path) -> ExportCatalog:
                 break
             if not resolved_part.is_file():
                 missing_parts += 1
+            else:
+                first_part_by_table.setdefault(table_name, resolved_part)
         if unsafe_part is not None:
             diagnostics.append(
                 ExportCatalogDiagnostic(
@@ -253,6 +331,49 @@ def discover_export_catalog(export_root: Path) -> ExportCatalog:
                 )
             )
             continue
+
+        invalid_part_contract: tuple[str, str] | None = None
+        if first_part_by_table:
+            import pyarrow.parquet as pq
+
+            for table_name, part_path in first_part_by_table.items():
+                try:
+                    schema = pq.ParquetFile(part_path).schema_arrow
+                    metadata = schema.metadata or {}
+                    schema_id = metadata.get(b"palette.export_schema_id", b"").decode("utf-8")
+                    schema_version = metadata.get(
+                        b"palette.export_schema_version", b""
+                    ).decode("utf-8")
+                    footer_contract = json.loads(
+                        metadata.get(b"palette.table_contract", b"null").decode("utf-8")
+                    )
+                except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    invalid_part_contract = (table_name, f"unreadable Parquet metadata: {exc}")
+                    break
+                if schema_id != EXPORT_SCHEMA_ID or schema_version != str(EXPORT_SCHEMA_VERSION):
+                    invalid_part_contract = (
+                        table_name,
+                        f"footer declares {schema_id!r} version {schema_version!r}",
+                    )
+                    break
+                if footer_contract != TABLE_CONTRACTS[table_name].to_dict():
+                    invalid_part_contract = (table_name, "footer table contract does not match V2")
+                    break
+                columns_by_table[table_name] = tuple(field.name for field in schema)
+        if invalid_part_contract is not None:
+            table_name, reason = invalid_part_contract
+            diagnostics.append(
+                ExportCatalogDiagnostic(
+                    manifest_path=str(manifest_path),
+                    code="invalid_parquet_contract_metadata",
+                    message=f"{table_name}: {reason}",
+                )
+            )
+            continue
+        capability_statuses = resolve_capabilities(columns_by_table)
+        capabilities = tuple(
+            status.capability_id for status in capability_statuses if status.available
+        )
 
         collection = payload.get("collection_manifest")
         if not isinstance(collection, Mapping):
@@ -278,7 +399,10 @@ def discover_export_catalog(export_root: Path) -> ExportCatalog:
                     if collection.get("collection_name") is not None
                     else None
                 ),
-                table_names=_table_names(payload),
+                table_names=table_names,
+                schema_id=EXPORT_SCHEMA_ID,
+                schema_version=EXPORT_SCHEMA_VERSION,
+                capabilities=capabilities,
                 export_diagnostics_count=(
                     len(export_diagnostics) if isinstance(export_diagnostics, list) else 0
                 ),

@@ -319,7 +319,7 @@ def _(
         mo.callout(
             mo.md(
                 "This export is discoverable and its provenance is available, but it does not "
-                "contain the GoodCopBadCop tables required by the currently implemented panels. "
+                "contain the chaser tables required by the currently implemented panels. "
                 "A provider-specific panel can be added without changing dataset discovery."
             ),
             kind="info",

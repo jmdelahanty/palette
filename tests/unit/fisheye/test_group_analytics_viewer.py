@@ -112,24 +112,23 @@ def _make_goodcopbadcop_export(tmp_path: Path):
         output_root=output,
         export_run_id="viewer_export",
         tables=(
-            "goodcopbadcop_spatial_occupancy_zones",
-            "goodcopbadcop_chaser_epoch_summary",
-            "goodcopbadcop_epoch_behavior_summary",
-            "goodcopbadcop_epoch_bout_histogram",
-            "goodcopbadcop_epoch_inter_bout_interval_histogram",
-            "goodcopbadcop_epoch_center_distance_histogram",
-            "goodcopbadcop_epoch_speed_summary",
-            "goodcopbadcop_speed_distance_bins",
-            "goodcopbadcop_chaser_distance_histogram",
-            "goodcopbadcop_cra_primary_endpoint_summary",
-            "goodcopbadcop_cra_primary_endpoint_object_phase",
-            "goodcopbadcop_cra_quadrant_occupancy",
-            "goodcopbadcop_cra_near_field_summary",
-            "goodcopbadcop_cra_near_field_object_phase",
-            "goodcopbadcop_cra_near_field_radial_density",
-            "goodcopbadcop_cra_near_field_distance_cdf",
-            "goodcopbadcop_egocentric_epoch_summary",
-            "goodcopbadcop_egocentric_distance_bearing_histogram",
+            "chaser_epoch_spatial_occupancy_zones",
+            "chaser_epoch_distance_summary",
+            "chaser_epoch_behavior_summary",
+            "chaser_epoch_bout_histogram",
+            "chaser_epoch_inter_bout_interval_histogram",
+            "chaser_epoch_center_distance_histogram",
+            "chaser_speed_distance_bins",
+            "chaser_epoch_distance_histogram",
+            "chaser_cra_primary_endpoint_summary",
+            "chaser_cra_primary_endpoint_object_phase",
+            "chaser_cra_quadrant_occupancy",
+            "chaser_cra_near_field_summary",
+            "chaser_cra_near_field_object_phase",
+            "chaser_cra_near_field_radial_density",
+            "chaser_cra_near_field_distance_cdf",
+            "chaser_egocentric_epoch_summary",
+            "chaser_egocentric_distance_bearing_histogram",
         ),
         jobs=1,
     )
@@ -165,24 +164,23 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(tmp_path: Path) -> 
 
     summary = query_export_summary(context)
     assert summary["source_recording_count"] == 1
-    assert summary["row_counts_by_table"]["goodcopbadcop_spatial_occupancy_zones"] == 12
-    assert summary["row_counts_by_table"]["goodcopbadcop_chaser_epoch_summary"] == 6
-    assert summary["row_counts_by_table"]["goodcopbadcop_epoch_behavior_summary"] == 3
-    assert summary["row_counts_by_table"]["goodcopbadcop_epoch_bout_histogram"] == 183
-    assert summary["row_counts_by_table"]["goodcopbadcop_epoch_inter_bout_interval_histogram"] == 3
-    assert summary["row_counts_by_table"]["goodcopbadcop_epoch_center_distance_histogram"] == 9
-    assert summary["row_counts_by_table"]["goodcopbadcop_epoch_speed_summary"] == 3
-    assert summary["row_counts_by_table"]["goodcopbadcop_speed_distance_bins"] == 18
-    assert summary["row_counts_by_table"]["goodcopbadcop_chaser_distance_histogram"] == 18
-    assert summary["row_counts_by_table"]["goodcopbadcop_cra_primary_endpoint_summary"] == 1
-    assert summary["row_counts_by_table"]["goodcopbadcop_cra_primary_endpoint_object_phase"] == 4
-    assert summary["row_counts_by_table"]["goodcopbadcop_cra_quadrant_occupancy"] == 8
-    assert summary["row_counts_by_table"]["goodcopbadcop_cra_near_field_summary"] == 1
-    assert summary["row_counts_by_table"]["goodcopbadcop_cra_near_field_object_phase"] == 4
-    assert summary["row_counts_by_table"]["goodcopbadcop_cra_near_field_radial_density"] == 12
-    assert summary["row_counts_by_table"]["goodcopbadcop_cra_near_field_distance_cdf"] == 8
-    assert summary["row_counts_by_table"]["goodcopbadcop_egocentric_epoch_summary"] == 6
-    assert summary["row_counts_by_table"]["goodcopbadcop_egocentric_distance_bearing_histogram"] == 72
+    assert summary["row_counts_by_table"]["chaser_epoch_spatial_occupancy_zones"] == 12
+    assert summary["row_counts_by_table"]["chaser_epoch_distance_summary"] == 6
+    assert summary["row_counts_by_table"]["chaser_epoch_behavior_summary"] == 3
+    assert summary["row_counts_by_table"]["chaser_epoch_bout_histogram"] == 183
+    assert summary["row_counts_by_table"]["chaser_epoch_inter_bout_interval_histogram"] == 3
+    assert summary["row_counts_by_table"]["chaser_epoch_center_distance_histogram"] == 9
+    assert summary["row_counts_by_table"]["chaser_speed_distance_bins"] == 18
+    assert summary["row_counts_by_table"]["chaser_epoch_distance_histogram"] == 18
+    assert summary["row_counts_by_table"]["chaser_cra_primary_endpoint_summary"] == 1
+    assert summary["row_counts_by_table"]["chaser_cra_primary_endpoint_object_phase"] == 4
+    assert summary["row_counts_by_table"]["chaser_cra_quadrant_occupancy"] == 8
+    assert summary["row_counts_by_table"]["chaser_cra_near_field_summary"] == 1
+    assert summary["row_counts_by_table"]["chaser_cra_near_field_object_phase"] == 4
+    assert summary["row_counts_by_table"]["chaser_cra_near_field_radial_density"] == 12
+    assert summary["row_counts_by_table"]["chaser_cra_near_field_distance_cdf"] == 8
+    assert summary["row_counts_by_table"]["chaser_egocentric_epoch_summary"] == 6
+    assert summary["row_counts_by_table"]["chaser_egocentric_distance_bearing_histogram"] == 72
     assert summary["statistics"]["available"] is False
 
     options = query_options(context)
@@ -238,14 +236,14 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(tmp_path: Path) -> 
     epoch_speed = query_epoch_speed_summary(context, metric="mean_speed_mm_s", stat="mean")
     pre_speed = next(row for row in epoch_speed["rows"] if row["window_label"] == "pre_event")
     assert epoch_speed["available"] is True
-    assert epoch_speed["source_table"] == "goodcopbadcop_epoch_behavior_summary"
+    assert epoch_speed["source_table"] == "chaser_epoch_behavior_summary"
     assert epoch_speed["source_label"] == "persisted_epoch_behavior"
     assert pre_speed["value"] == pytest.approx(20.0)
     assert pre_speed["recording_count"] == 1
 
     epoch_ibi = query_epoch_speed_summary(context, metric="mean_inter_bout_interval_s", stat="mean")
     pre_ibi = next(row for row in epoch_ibi["rows"] if row["window_label"] == "pre_event")
-    assert epoch_ibi["source_table"] == "goodcopbadcop_epoch_behavior_summary"
+    assert epoch_ibi["source_table"] == "chaser_epoch_behavior_summary"
     assert pre_ibi["value"] == pytest.approx(0.06)
 
     epoch_heading = query_epoch_speed_summary(context, metric="mean_bout_net_heading_change_deg", stat="mean")
@@ -255,7 +253,7 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(tmp_path: Path) -> 
 
     bout_hist = query_epoch_bout_histogram(context, metric="bout_duration_s", window_label="pre_event")
     assert bout_hist["available"] is True
-    assert bout_hist["source_table"] == "goodcopbadcop_epoch_bout_histogram"
+    assert bout_hist["source_table"] == "chaser_epoch_bout_histogram"
     assert bout_hist["metric_label"] == "Bout duration (s)"
     assert sum(row["pooled_count"] for row in bout_hist["rows"]) == 2
     assert sum(row["pooled_fraction"] for row in bout_hist["rows"]) == pytest.approx(1.0)
@@ -266,7 +264,7 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(tmp_path: Path) -> 
 
     ibi_hist = query_epoch_inter_bout_interval_histogram(context, window_label="pre_event")
     assert ibi_hist["available"] is True
-    assert ibi_hist["source_table"] == "goodcopbadcop_epoch_inter_bout_interval_histogram"
+    assert ibi_hist["source_table"] == "chaser_epoch_inter_bout_interval_histogram"
     assert ibi_hist["metric_label"] == "Inter-bout interval (s)"
     assert sum(row["pooled_count"] for row in ibi_hist["rows"]) == 1
     assert sum(row["pooled_fraction"] for row in ibi_hist["rows"]) == pytest.approx(1.0)
@@ -405,8 +403,8 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(tmp_path: Path) -> 
     assert recordings["row_count"] == 1
     assert recordings["rows"][0]["pre_event_coverage_pct"] == pytest.approx(100.0)
     assert recordings["rows"][0]["post_event_chaser_1_p50_mm"] == pytest.approx(6.0)
-    assert recordings["rows"][0]["pre_event_mean_speed_mm_s"] == pytest.approx(5.0)
-    assert recordings["rows"][0]["post_event_mean_speed_mm_s"] == pytest.approx(5.0)
+    assert recordings["rows"][0]["pre_event_mean_speed_mm_s"] == pytest.approx(20.0)
+    assert recordings["rows"][0]["post_event_mean_speed_mm_s"] == pytest.approx(70.0)
     assert recordings["rows"][0]["cra_endpoint_status"] == "computed"
     assert recordings["rows"][0]["cra_delta_occ_agg"] == pytest.approx(-1.0)
     assert recordings["rows"][0]["cra_post_aggressive_quadrant"] == "bottom_right"
@@ -456,7 +454,7 @@ def test_group_analytics_viewer_prefers_epoch_behavior_descriptive_summary(tmp_p
     assert summary["statistics"]["descriptive_row_count"] > 0
 
     epoch_ibi = query_epoch_speed_summary(context, metric="mean_inter_bout_interval_s", stat="mean")
-    assert epoch_ibi["source_table"] == "goodcopbadcop_epoch_behavior_summary"
+    assert epoch_ibi["source_table"] == "chaser_epoch_behavior_summary"
     assert epoch_ibi["summary_source"] == "persisted_descriptive_summary"
     pre_ibi = next(row for row in epoch_ibi["rows"] if row["window_label"] == "pre_event")
     assert pre_ibi["summary_source"] == "persisted_descriptive_summary"
@@ -464,17 +462,17 @@ def test_group_analytics_viewer_prefers_epoch_behavior_descriptive_summary(tmp_p
 
     center_hist = query_epoch_center_distance_histogram(context, window_label="pre_event")
     assert center_hist["available"] is True
-    assert center_hist["source_table"] == "goodcopbadcop_epoch_center_distance_histogram"
+    assert center_hist["source_table"] == "chaser_epoch_center_distance_histogram"
     assert sum(row["pooled_count"] for row in center_hist["rows"]) == 3
 
     bout_hist = query_epoch_bout_histogram(context, metric="bout_path_length_mm", window_label="pre_event")
     assert bout_hist["available"] is True
-    assert bout_hist["source_table"] == "goodcopbadcop_epoch_bout_histogram"
+    assert bout_hist["source_table"] == "chaser_epoch_bout_histogram"
     assert sum(row["pooled_count"] for row in bout_hist["rows"]) == 2
 
     ibi_hist = query_epoch_inter_bout_interval_histogram(context, window_label="pre_event")
     assert ibi_hist["available"] is True
-    assert ibi_hist["source_table"] == "goodcopbadcop_epoch_inter_bout_interval_histogram"
+    assert ibi_hist["source_table"] == "chaser_epoch_inter_bout_interval_histogram"
     assert sum(row["pooled_count"] for row in ibi_hist["rows"]) == 1
 
 

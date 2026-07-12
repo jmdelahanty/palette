@@ -24,6 +24,36 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
+from fisheye.analytics_exports.capabilities import resolve_capabilities
+from fisheye.analytics_exports.contracts import (
+    ALL_TABLES,
+    CHASER_BOUT_EVENTS_TABLE,
+    CHASER_BOUT_HISTOGRAM_TABLE,
+    CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
+    CHASER_CRA_NEAR_FIELD_CDF_TABLE,
+    CHASER_CRA_NEAR_FIELD_OBJECT_PHASE_TABLE,
+    CHASER_CRA_NEAR_FIELD_RADIAL_TABLE,
+    CHASER_CRA_NEAR_FIELD_SUMMARY_TABLE,
+    CHASER_CRA_OBJECT_PHASE_TABLE,
+    CHASER_CRA_QUADRANT_TABLE,
+    CHASER_CRA_SUMMARY_TABLE,
+    CHASER_DISTANCE_HISTOGRAM_TABLE,
+    CHASER_DISTANCE_SUMMARY_TABLE,
+    CHASER_EGOCENTRIC_HISTOGRAM_TABLE,
+    CHASER_EGOCENTRIC_SUMMARY_TABLE,
+    CHASER_EPOCH_BEHAVIOR_TABLE,
+    CHASER_IBI_HISTOGRAM_TABLE,
+    CHASER_SPATIAL_TABLE,
+    CHASER_SPEED_DISTANCE_TABLE,
+    CHASER_TABLES,
+    DEFAULT_TABLES,
+    EXPORT_SCHEMA_ID,
+    EXPORT_SCHEMA_VERSION,
+    TABLE_CONTRACTS,
+    canonicalize_export_row,
+    contract_snapshot,
+    validate_table_columns,
+)
 from fisheye.analysis.bout_kinematics import resolve_bout_kinematics_tables
 from fisheye.analysis.chaser_behavior import canonical_behavior_label
 from fisheye.analysis.cra_primary_endpoint import QUADRANT_LABELS, quadrant_code_for_xy
@@ -43,37 +73,32 @@ from fisheye.utils.virtual_collection_manifest import load_manifest, verify_mani
 from fisheye.shared.zarr_io import open_zarr_root
 
 
-EXPORT_SCHEMA_VERSION = 1
-DEFAULT_TABLES = (
-    "recording_summary",
-    "stimulus_steps",
-    "stimulus_step_summary",
-    "stimulus_response_per_fish_step",
-    "swim_bout_metrics",
-    "bout_kinematics_metrics",
-)
-GOODCOPBADCOP_TABLES = (
-    "goodcopbadcop_spatial_occupancy_zones",
-    "goodcopbadcop_chaser_epoch_summary",
-    "goodcopbadcop_epoch_behavior_summary",
-    "goodcopbadcop_epoch_bout_distribution",
-    "goodcopbadcop_epoch_bout_histogram",
-    "goodcopbadcop_epoch_inter_bout_interval_histogram",
-    "goodcopbadcop_epoch_center_distance_histogram",
-    "goodcopbadcop_epoch_speed_summary",
-    "goodcopbadcop_speed_distance_bins",
-    "goodcopbadcop_chaser_distance_histogram",
-    "goodcopbadcop_cra_primary_endpoint_summary",
-    "goodcopbadcop_cra_primary_endpoint_object_phase",
-    "goodcopbadcop_cra_quadrant_occupancy",
-    "goodcopbadcop_cra_near_field_summary",
-    "goodcopbadcop_cra_near_field_object_phase",
-    "goodcopbadcop_cra_near_field_radial_density",
-    "goodcopbadcop_cra_near_field_distance_cdf",
-    "goodcopbadcop_egocentric_epoch_summary",
-    "goodcopbadcop_egocentric_distance_bearing_histogram",
-)
-AVAILABLE_TABLES = DEFAULT_TABLES + GOODCOPBADCOP_TABLES
+AVAILABLE_TABLES = ALL_TABLES
+
+# The recording-Zarr extraction functions predate the protocol-neutral V2
+# Parquet contract. These names are internal source adapters only; callers and
+# written exports accept canonical V2 names exclusively.
+_SOURCE_TABLE_BY_V2 = {
+    CHASER_SPATIAL_TABLE: "goodcopbadcop_spatial_occupancy_zones",
+    CHASER_DISTANCE_SUMMARY_TABLE: "goodcopbadcop_chaser_epoch_summary",
+    CHASER_EPOCH_BEHAVIOR_TABLE: "goodcopbadcop_epoch_behavior_summary",
+    CHASER_BOUT_EVENTS_TABLE: "goodcopbadcop_epoch_bout_distribution",
+    CHASER_BOUT_HISTOGRAM_TABLE: "goodcopbadcop_epoch_bout_histogram",
+    CHASER_IBI_HISTOGRAM_TABLE: "goodcopbadcop_epoch_inter_bout_interval_histogram",
+    CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE: "goodcopbadcop_epoch_center_distance_histogram",
+    CHASER_SPEED_DISTANCE_TABLE: "goodcopbadcop_speed_distance_bins",
+    CHASER_DISTANCE_HISTOGRAM_TABLE: "goodcopbadcop_chaser_distance_histogram",
+    CHASER_CRA_SUMMARY_TABLE: "goodcopbadcop_cra_primary_endpoint_summary",
+    CHASER_CRA_OBJECT_PHASE_TABLE: "goodcopbadcop_cra_primary_endpoint_object_phase",
+    CHASER_CRA_QUADRANT_TABLE: "goodcopbadcop_cra_quadrant_occupancy",
+    CHASER_CRA_NEAR_FIELD_SUMMARY_TABLE: "goodcopbadcop_cra_near_field_summary",
+    CHASER_CRA_NEAR_FIELD_OBJECT_PHASE_TABLE: "goodcopbadcop_cra_near_field_object_phase",
+    CHASER_CRA_NEAR_FIELD_RADIAL_TABLE: "goodcopbadcop_cra_near_field_radial_density",
+    CHASER_CRA_NEAR_FIELD_CDF_TABLE: "goodcopbadcop_cra_near_field_distance_cdf",
+    CHASER_EGOCENTRIC_SUMMARY_TABLE: "goodcopbadcop_egocentric_epoch_summary",
+    CHASER_EGOCENTRIC_HISTOGRAM_TABLE: "goodcopbadcop_egocentric_distance_bearing_histogram",
+}
+_V2_TABLE_BY_SOURCE = {source: target for target, source in _SOURCE_TABLE_BY_V2.items()}
 
 CRA_PRIMARY_ENDPOINT_COMPONENT_PARENT = "cra_primary_endpoint"
 CRA_PRIMARY_ENDPOINT_ALLOWED_STATUSES = {"computed", "complete"}
@@ -4154,7 +4179,8 @@ def export_one_zarr(zarr_path: str | Path, *, tables: Sequence[str], export_run_
     zarr_path = Path(zarr_path).expanduser().resolve()
     recording_id = _recording_id_from_path(zarr_path)
     result = SourceExportResult(zarr_path=str(zarr_path), recording_id=recording_id)
-    table_set = set(tables)
+    requested_table_set = set(tables)
+    table_set = {_SOURCE_TABLE_BY_V2.get(table, table) for table in requested_table_set}
 
     try:
         root = open_zarr_root(zarr_path, mode="r")
@@ -4482,9 +4508,19 @@ def export_one_zarr(zarr_path: str | Path, *, tables: Sequence[str], export_run_
             goodcopbadcop_egocentric_histogram_rows
         )
 
-    for table in table_set:
-        if table not in result.rows_by_table:
-            result.rows_by_table[table] = []
+    canonical_rows: dict[str, list[dict[str, Any]]] = {}
+    for source_table, rows in result.rows_by_table.items():
+        table = _V2_TABLE_BY_SOURCE.get(source_table, source_table)
+        if table not in requested_table_set:
+            continue
+        canonical_rows[table] = [canonicalize_export_row(table, row) for row in rows]
+    for table in requested_table_set:
+        canonical_rows.setdefault(table, [])
+    result.rows_by_table = canonical_rows
+    for diagnostic in result.diagnostics:
+        source_table = diagnostic.get("table")
+        if isinstance(source_table, str):
+            diagnostic["table"] = _V2_TABLE_BY_SOURCE.get(source_table, source_table)
     return result
 
 
@@ -4536,10 +4572,23 @@ def _normalize_rows(rows: Sequence[Mapping[str, Any]], columns: Sequence[str]) -
     return [{column: row.get(column) for column in columns} for row in rows]
 
 
-def _infer_schema(rows: Sequence[Mapping[str, Any]]):
+def _infer_schema(rows: Sequence[Mapping[str, Any]], *, table: str):
     import pyarrow as pa
 
-    return pa.Table.from_pylist([dict(row) for row in rows]).schema
+    schema = pa.Table.from_pylist([dict(row) for row in rows]).schema
+    metadata = dict(schema.metadata or {})
+    metadata.update(
+        {
+            b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode("utf-8"),
+            b"palette.export_schema_version": str(EXPORT_SCHEMA_VERSION).encode("utf-8"),
+            b"palette.table_contract": json.dumps(
+                TABLE_CONTRACTS[table].to_dict(),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        }
+    )
+    return schema.with_metadata(metadata)
 
 
 def _write_table_parts(
@@ -4565,8 +4614,13 @@ def _write_table_parts(
         return 0, []
 
     columns = sorted({key for row in all_rows for key in row.keys()})
+    missing = validate_table_columns(table, columns)
+    if missing:
+        raise ValueError(
+            f"{table} does not satisfy its V2 table contract; missing columns: {list(missing)}"
+        )
     normalized_all = _normalize_rows(all_rows, columns)
-    schema = _infer_schema(normalized_all)
+    schema = _infer_schema(normalized_all, table=table)
 
     row_count = 0
     part_paths: list[str] = []
@@ -4644,6 +4698,20 @@ def export_sources(
                     row["collection_manifest_path"] = collection_summary.path
             rows_by_table_source[table].append((result.zarr_path, rows))
 
+    columns_by_table = {
+        table: sorted(
+            {
+                key
+                for _source, rows in rows_by_table_source[table]
+                for row in rows
+                for key in row
+            }
+        )
+        for table in tables
+        if any(rows for _source, rows in rows_by_table_source[table])
+    }
+    capability_statuses = resolve_capabilities(columns_by_table)
+
     output_root.mkdir(parents=True, exist_ok=True)
     row_counts: dict[str, int] = {}
     part_files: dict[str, list[str]] = {}
@@ -4662,6 +4730,7 @@ def export_sources(
     manifest = {
         "export_run_id": export_run_id,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "schema_id": EXPORT_SCHEMA_ID,
         "schema_version": EXPORT_SCHEMA_VERSION,
         "tool": "fisheye.utils.export_cross_recording_analytics",
         "hostname": socket.gethostname(),
@@ -4670,6 +4739,11 @@ def export_sources(
         "source_recording_count": len(zarr_paths),
         "source_zarrs": [str(path) for path in zarr_paths],
         "tables_requested": list(tables),
+        "table_contracts": contract_snapshot(tables),
+        "capabilities": [
+            status.capability_id for status in capability_statuses if status.available
+        ],
+        "capability_statuses": [status.to_dict() for status in capability_statuses],
         "row_counts_by_table": row_counts,
         "part_files_by_table": part_files,
         "diagnostics": diagnostics,

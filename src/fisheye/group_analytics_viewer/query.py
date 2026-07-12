@@ -14,35 +14,55 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
-from fisheye.analysis.chaser_behavior import canonical_behavior_label
+from fisheye.analytics_exports.contracts import (
+    CHASER_BOUT_EVENTS_TABLE,
+    CHASER_BOUT_HISTOGRAM_TABLE,
+    CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
+    CHASER_CRA_NEAR_FIELD_CDF_TABLE,
+    CHASER_CRA_NEAR_FIELD_OBJECT_PHASE_TABLE,
+    CHASER_CRA_NEAR_FIELD_RADIAL_TABLE,
+    CHASER_CRA_NEAR_FIELD_SUMMARY_TABLE,
+    CHASER_CRA_OBJECT_PHASE_TABLE,
+    CHASER_CRA_QUADRANT_TABLE,
+    CHASER_CRA_SUMMARY_TABLE,
+    CHASER_DISTANCE_HISTOGRAM_TABLE,
+    CHASER_DISTANCE_SUMMARY_TABLE,
+    CHASER_EGOCENTRIC_HISTOGRAM_TABLE,
+    CHASER_EGOCENTRIC_SUMMARY_TABLE,
+    CHASER_EPOCH_BEHAVIOR_TABLE,
+    CHASER_IBI_HISTOGRAM_TABLE,
+    CHASER_SPATIAL_TABLE,
+    CHASER_SPEED_DISTANCE_TABLE,
+    DESCRIPTIVE_TABLE,
+    EXPORT_SCHEMA_ID,
+    EXPORT_SCHEMA_VERSION,
+    STATISTICS_TABLE,
+)
 from fisheye.group_statistics.paired import bootstrap_median_ci, wilcoxon_signed_rank_p_value
 
 from .catalog import discover_export_catalog, select_export_run_id
 from .models import HealthReport
 
 
-SPATIAL_TABLE = "goodcopbadcop_spatial_occupancy_zones"
-CHASER_SUMMARY_TABLE = "goodcopbadcop_chaser_epoch_summary"
-EPOCH_BEHAVIOR_TABLE = "goodcopbadcop_epoch_behavior_summary"
-EPOCH_BOUT_DISTRIBUTION_TABLE = "goodcopbadcop_epoch_bout_distribution"
-EPOCH_BOUT_HISTOGRAM_TABLE = "goodcopbadcop_epoch_bout_histogram"
-EPOCH_INTER_BOUT_INTERVAL_HISTOGRAM_TABLE = "goodcopbadcop_epoch_inter_bout_interval_histogram"
-EPOCH_CENTER_DISTANCE_HISTOGRAM_TABLE = "goodcopbadcop_epoch_center_distance_histogram"
-EPOCH_SPEED_TABLE = "goodcopbadcop_epoch_speed_summary"
-SPEED_DISTANCE_TABLE = "goodcopbadcop_speed_distance_bins"
-CHASER_HISTOGRAM_TABLE = "goodcopbadcop_chaser_distance_histogram"
-CRA_SUMMARY_TABLE = "goodcopbadcop_cra_primary_endpoint_summary"
-CRA_OBJECT_PHASE_TABLE = "goodcopbadcop_cra_primary_endpoint_object_phase"
-CRA_QUADRANT_OCCUPANCY_TABLE = "goodcopbadcop_cra_quadrant_occupancy"
-CRA_NEAR_FIELD_SUMMARY_TABLE = "goodcopbadcop_cra_near_field_summary"
-CRA_NEAR_FIELD_OBJECT_PHASE_TABLE = "goodcopbadcop_cra_near_field_object_phase"
-CRA_NEAR_FIELD_RADIAL_TABLE = "goodcopbadcop_cra_near_field_radial_density"
-CRA_NEAR_FIELD_CDF_TABLE = "goodcopbadcop_cra_near_field_distance_cdf"
-EGOCENTRIC_SUMMARY_TABLE = "goodcopbadcop_egocentric_epoch_summary"
-EGOCENTRIC_HISTOGRAM_TABLE = "goodcopbadcop_egocentric_distance_bearing_histogram"
-STATISTICS_TABLE = "goodcopbadcop_group_statistical_summary"
-DESCRIPTIVE_TABLE = "goodcopbadcop_group_descriptive_summary"
-CORE_GOODCOPBADCOP_TABLES = (
+SPATIAL_TABLE = CHASER_SPATIAL_TABLE
+CHASER_SUMMARY_TABLE = CHASER_DISTANCE_SUMMARY_TABLE
+EPOCH_BEHAVIOR_TABLE = CHASER_EPOCH_BEHAVIOR_TABLE
+EPOCH_BOUT_DISTRIBUTION_TABLE = CHASER_BOUT_EVENTS_TABLE
+EPOCH_BOUT_HISTOGRAM_TABLE = CHASER_BOUT_HISTOGRAM_TABLE
+EPOCH_INTER_BOUT_INTERVAL_HISTOGRAM_TABLE = CHASER_IBI_HISTOGRAM_TABLE
+EPOCH_CENTER_DISTANCE_HISTOGRAM_TABLE = CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE
+SPEED_DISTANCE_TABLE = CHASER_SPEED_DISTANCE_TABLE
+CHASER_HISTOGRAM_TABLE = CHASER_DISTANCE_HISTOGRAM_TABLE
+CRA_SUMMARY_TABLE = CHASER_CRA_SUMMARY_TABLE
+CRA_OBJECT_PHASE_TABLE = CHASER_CRA_OBJECT_PHASE_TABLE
+CRA_QUADRANT_OCCUPANCY_TABLE = CHASER_CRA_QUADRANT_TABLE
+CRA_NEAR_FIELD_SUMMARY_TABLE = CHASER_CRA_NEAR_FIELD_SUMMARY_TABLE
+CRA_NEAR_FIELD_OBJECT_PHASE_TABLE = CHASER_CRA_NEAR_FIELD_OBJECT_PHASE_TABLE
+CRA_NEAR_FIELD_RADIAL_TABLE = CHASER_CRA_NEAR_FIELD_RADIAL_TABLE
+CRA_NEAR_FIELD_CDF_TABLE = CHASER_CRA_NEAR_FIELD_CDF_TABLE
+EGOCENTRIC_SUMMARY_TABLE = CHASER_EGOCENTRIC_SUMMARY_TABLE
+EGOCENTRIC_HISTOGRAM_TABLE = CHASER_EGOCENTRIC_HISTOGRAM_TABLE
+CORE_CHASER_TABLES = (
     SPATIAL_TABLE,
     CHASER_SUMMARY_TABLE,
     CHASER_HISTOGRAM_TABLE,
@@ -51,13 +71,12 @@ CORE_GOODCOPBADCOP_TABLES = (
     EGOCENTRIC_SUMMARY_TABLE,
     EGOCENTRIC_HISTOGRAM_TABLE,
 )
-OPTIONAL_GOODCOPBADCOP_TABLES = (
+OPTIONAL_CHASER_TABLES = (
     EPOCH_BEHAVIOR_TABLE,
     EPOCH_BOUT_DISTRIBUTION_TABLE,
     EPOCH_BOUT_HISTOGRAM_TABLE,
     EPOCH_INTER_BOUT_INTERVAL_HISTOGRAM_TABLE,
     EPOCH_CENTER_DISTANCE_HISTOGRAM_TABLE,
-    EPOCH_SPEED_TABLE,
     SPEED_DISTANCE_TABLE,
     CRA_QUADRANT_OCCUPANCY_TABLE,
     CRA_NEAR_FIELD_SUMMARY_TABLE,
@@ -65,7 +84,7 @@ OPTIONAL_GOODCOPBADCOP_TABLES = (
     CRA_NEAR_FIELD_RADIAL_TABLE,
     CRA_NEAR_FIELD_CDF_TABLE,
 )
-GOODCOPBADCOP_TABLES = CORE_GOODCOPBADCOP_TABLES + OPTIONAL_GOODCOPBADCOP_TABLES
+CHASER_TABLES = CORE_CHASER_TABLES + OPTIONAL_CHASER_TABLES
 
 SPATIAL_METRICS = {
     "time_s": "Time (s)",
@@ -343,24 +362,8 @@ def _load_table_rows(export_root: str, export_run_id: str, table_name: str) -> t
     return tuple(rows)
 
 
-def _canonicalize_behavior_row(raw_row: Mapping[str, Any]) -> dict[str, Any]:
-    row = dict(raw_row)
-    role = row.get("behavior_class") or row.get("object_role")
-    if role is not None:
-        canonical = canonical_behavior_label(role)
-        row["behavior_class"] = canonical
-        row["object_role"] = canonical
-    for key, value in list(row.items()):
-        if "benign" in key:
-            row.setdefault(key.replace("benign", "inert"), value)
-    return row
-
-
 def load_table_rows(context: ViewerContext, table_name: str) -> list[dict[str, Any]]:
-    return [
-        _canonicalize_behavior_row(row)
-        for row in _load_table_rows(str(context.export_root), context.export_run_id, table_name)
-    ]
+    return [dict(row) for row in _load_table_rows(str(context.export_root), context.export_run_id, table_name)]
 
 
 def load_optional_table_rows(context: ViewerContext, table_name: str) -> list[dict[str, Any]]:
@@ -371,10 +374,7 @@ def load_optional_table_rows(context: ViewerContext, table_name: str) -> list[di
 
 
 def _load_table_rows_for_run(context: ViewerContext, table_name: str, export_run_id: str) -> list[dict[str, Any]]:
-    return [
-        _canonicalize_behavior_row(row)
-        for row in _load_table_rows(str(context.export_root), export_run_id, table_name)
-    ]
+    return [dict(row) for row in _load_table_rows(str(context.export_root), export_run_id, table_name)]
 
 
 def _table_schema(context: ViewerContext, table_name: str, *, export_run_id: str | None = None) -> list[dict[str, str]]:
@@ -394,6 +394,11 @@ def _stats_manifest_candidates(context: ViewerContext) -> list[tuple[str, dict[s
         try:
             manifest = _json_file(manifest_path)
         except Exception:
+            continue
+        if (
+            manifest.get("schema_id") != EXPORT_SCHEMA_ID
+            or manifest.get("schema_version") != EXPORT_SCHEMA_VERSION
+        ):
             continue
         if manifest.get("source_export_run_id") != context.export_run_id:
             continue
@@ -420,6 +425,13 @@ def resolve_statistics_run_id(context: ViewerContext) -> str | None:
         if not manifest.is_file():
             raise FileNotFoundError(f"Statistics manifest not found: {manifest}")
         payload = _json_file(manifest)
+        if (
+            payload.get("schema_id") != EXPORT_SCHEMA_ID
+            or payload.get("schema_version") != EXPORT_SCHEMA_VERSION
+        ):
+            raise ValueError(
+                f"Statistics manifest is not {EXPORT_SCHEMA_ID} version {EXPORT_SCHEMA_VERSION}: {manifest}"
+            )
         if payload.get("source_export_run_id") != context.export_run_id:
             raise ValueError(
                 "Statistics manifest source_export_run_id does not match viewed export: "
@@ -449,7 +461,7 @@ def build_health_report(context: ViewerContext) -> HealthReport:
     if not manifest.is_file():
         ok = False
         messages.append(f"missing manifest: {manifest}")
-    for table_name in GOODCOPBADCOP_TABLES:
+    for table_name in CHASER_TABLES:
         try:
             files = parquet_files(context, table_name)
             details["tables"][table_name] = {
@@ -457,7 +469,7 @@ def build_health_report(context: ViewerContext) -> HealthReport:
                 "part_count": len(files),
             }
         except Exception as exc:
-            if table_name not in OPTIONAL_GOODCOPBADCOP_TABLES:
+            if table_name not in OPTIONAL_CHASER_TABLES:
                 ok = False
             details["tables"][table_name] = {"error": str(exc)}
     try:
@@ -490,7 +502,7 @@ def query_export_summary(context: ViewerContext) -> dict[str, Any]:
         part_files = {}
 
     tables: list[dict[str, Any]] = []
-    for table_name in GOODCOPBADCOP_TABLES:
+    for table_name in CHASER_TABLES:
         parts = part_files.get(table_name)
         if not isinstance(parts, list):
             try:
@@ -565,10 +577,7 @@ def canonical_condition(label: Any) -> str | None:
 def query_options(context: ViewerContext) -> dict[str, Any]:
     spatial = load_table_rows(context, SPATIAL_TABLE)
     chaser = load_table_rows(context, CHASER_SUMMARY_TABLE)
-    speed = load_optional_table_rows(context, EPOCH_BEHAVIOR_TABLE) + load_optional_table_rows(
-        context,
-        EPOCH_SPEED_TABLE,
-    )
+    speed = load_optional_table_rows(context, EPOCH_BEHAVIOR_TABLE)
     bout_histogram = load_optional_table_rows(context, EPOCH_BOUT_HISTOGRAM_TABLE)
     ibi_histogram = load_optional_table_rows(context, EPOCH_INTER_BOUT_INTERVAL_HISTOGRAM_TABLE)
     cra_object_phase = load_table_rows(context, CRA_OBJECT_PHASE_TABLE)
@@ -1038,10 +1047,6 @@ def query_epoch_speed_summary(
     rows = load_optional_table_rows(context, EPOCH_BEHAVIOR_TABLE)
     source_table = EPOCH_BEHAVIOR_TABLE
     source_label = "persisted_epoch_behavior"
-    if not rows and metric in EPOCH_SPEED_METRICS:
-        rows = load_optional_table_rows(context, EPOCH_SPEED_TABLE)
-        source_table = EPOCH_SPEED_TABLE
-        source_label = "legacy_epoch_speed"
     if not rows:
         return {
             "available": False,
@@ -1055,7 +1060,7 @@ def query_epoch_speed_summary(
         }
 
     _stats_run_id, descriptive_rows = _load_descriptive_rows(context)
-    metric_family = "epoch_behavior" if source_table == EPOCH_BEHAVIOR_TABLE else "epoch_speed"
+    metric_family = "epoch_behavior"
     grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         grouped[(
@@ -2712,7 +2717,7 @@ def query_egocentric_histogram(
 def query_recordings(context: ViewerContext) -> dict[str, Any]:
     spatial = load_table_rows(context, SPATIAL_TABLE)
     chaser = load_table_rows(context, CHASER_SUMMARY_TABLE)
-    speed = load_optional_table_rows(context, EPOCH_SPEED_TABLE)
+    speed = load_optional_table_rows(context, EPOCH_BEHAVIOR_TABLE)
     cra_summary = load_table_rows(context, CRA_SUMMARY_TABLE)
     cra_near_field_summary = load_optional_table_rows(context, CRA_NEAR_FIELD_SUMMARY_TABLE)
     egocentric = load_table_rows(context, EGOCENTRIC_SUMMARY_TABLE)
@@ -2847,11 +2852,11 @@ def query_recordings(context: ViewerContext) -> dict[str, Any]:
 def query_provenance(context: ViewerContext) -> dict[str, Any]:
     summary = query_export_summary(context)
     schemas = {}
-    for table_name in GOODCOPBADCOP_TABLES:
+    for table_name in CHASER_TABLES:
         try:
             schemas[table_name] = _table_schema(context, table_name)
         except FileNotFoundError:
-            if table_name not in OPTIONAL_GOODCOPBADCOP_TABLES:
+            if table_name not in OPTIONAL_CHASER_TABLES:
                 raise
     stats_run_id = resolve_statistics_run_id(context)
     if stats_run_id is not None:

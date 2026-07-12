@@ -3,8 +3,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
+from fisheye.analytics_exports.contracts import (
+    EXPORT_SCHEMA_ID,
+    EXPORT_SCHEMA_VERSION,
+    RECORDING_SUMMARY_TABLE,
+    contract_snapshot,
+)
 from fisheye.group_analytics_viewer.catalog import (
     discover_export_catalog,
     select_export_run_id,
@@ -18,7 +26,7 @@ from fisheye.group_analytics_viewer.query import (
 )
 
 
-TABLE = "example_behavior_summary"
+TABLE = RECORDING_SUMMARY_TABLE
 
 
 def _write_export_manifest(
@@ -34,14 +42,40 @@ def _write_export_manifest(
     part = root / "v1" / TABLE / f"export_run_id={export_run_id}" / "part-00000.parquet"
     if write_part:
         part.parent.mkdir(parents=True, exist_ok=True)
-        part.write_bytes(b"catalog discovery does not read parquet contents")
+        table = pa.Table.from_pylist(
+            [
+                {
+                    "export_schema_version": EXPORT_SCHEMA_VERSION,
+                    "table_name": TABLE,
+                    "recording_id": "recording_1",
+                }
+            ]
+        )
+        table = table.replace_schema_metadata(
+            {
+                b"palette.export_schema_id": EXPORT_SCHEMA_ID.encode("utf-8"),
+                b"palette.export_schema_version": str(EXPORT_SCHEMA_VERSION).encode("utf-8"),
+                b"palette.table_contract": json.dumps(
+                    contract_snapshot([TABLE])[TABLE],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8"),
+            }
+        )
+        pq.write_table(
+            table,
+            part,
+        )
     manifest_dir = root / "v1" / "manifests"
     manifest_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "export_run_id": payload_run_id or export_run_id,
+        "schema_id": EXPORT_SCHEMA_ID,
+        "schema_version": EXPORT_SCHEMA_VERSION,
         "created_at_utc": created_at_utc,
         "source_recording_count": 2,
         "tables_requested": [TABLE],
+        "table_contracts": contract_snapshot([TABLE]),
         "row_counts_by_table": {TABLE: 4},
         "part_files_by_table": {TABLE: [declared_part or str(part)]},
         "diagnostics": [],
@@ -99,7 +133,7 @@ def test_catalog_rebases_historical_absolute_part_paths_to_mounted_root(tmp_path
         root,
         "portable_export",
         created_at_utc="2025-02-01T00:00:00+00:00",
-        declared_part="/old/workstation/exports/v1/example_behavior_summary/"
+        declared_part="/old/workstation/exports/v1/recording_summary/"
         "export_run_id=portable_export/part-00000.parquet",
     )
 
@@ -140,6 +174,43 @@ def test_catalog_rejects_mismatched_manifest_identity(tmp_path: Path) -> None:
     assert [diagnostic.code for diagnostic in catalog.diagnostics] == [
         "export_run_id_mismatch"
     ]
+
+
+def test_catalog_rejects_version_1_export_with_reexport_message(tmp_path: Path) -> None:
+    root = tmp_path / "analytics"
+    manifest = _write_export_manifest(
+        root,
+        "legacy_export",
+        created_at_utc="2025-02-01T00:00:00+00:00",
+    )
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload.pop("schema_id")
+    payload["schema_version"] = 1
+    payload.pop("table_contracts")
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    catalog = discover_export_catalog(root)
+
+    assert catalog.entries == ()
+    assert catalog.diagnostics[0].code == "unsupported_export_schema"
+    assert "re-export" in catalog.diagnostics[0].message
+
+
+def test_catalog_rejects_v2_manifest_with_mismatched_contract_snapshot(tmp_path: Path) -> None:
+    root = tmp_path / "analytics"
+    manifest = _write_export_manifest(
+        root,
+        "mismatched_contract",
+        created_at_utc="2025-02-01T00:00:00+00:00",
+    )
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["table_contracts"][TABLE]["grain"] = "incorrect_grain"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    catalog = discover_export_catalog(root)
+
+    assert catalog.entries == ()
+    assert catalog.diagnostics[0].code == "mismatched_table_contract_snapshot"
 
 
 def test_catalog_and_query_reject_part_symlink_that_escapes_root(tmp_path: Path) -> None:
@@ -220,7 +291,7 @@ def test_explicit_statistics_manifest_cannot_escape_root_by_symlink(tmp_path: Pa
             {
                 "export_run_id": "unsafe_statistics",
                 "source_export_run_id": "safe_export",
-                "output_tables": ["goodcopbadcop_group_statistical_summary"],
+                "output_tables": ["group_statistical_summary"],
             }
         ),
         encoding="utf-8",
