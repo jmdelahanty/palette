@@ -285,9 +285,10 @@ Outputs from blob/YOLO detection stages.
 | `frame_indices` | `(n_detections,)` | `int32` | Corresponding frame per detection |
 | `frame_counts` | `(n_frames,)` | `int32` | Number of detections per frame |
 | `n_detections` | `(n_frames,)` | `int32` | Alias of `frame_counts` (kept for legacy consumers) |
-| `bbox_norm_coords` | `(n_detections, 4)` | `float32` | Normalized `[cx, cy, w, h]` |
+| `bbox_norm_coords` | `(n_detections, 4)` | `float32/float64` | Normalized `[cx, cy, w, h]`; current YOLO writer uses `float64` |
 | `scores` | `(n_detections,)` | `float32` | Confidence scores |
 | `class_ids` | `(n_detections,)` | `int32` | Detector class labels |
+| `instance_key` | `(n_detections,)` | `uint64` | Stable content-derived detection identity |
 | `centers_px` *(optional)* | `(n_detections, 2)` | `float32` | Pixel centers (blob) |
 
 Attributes store detector `method`, model identifiers, thresholds, duration,
@@ -298,6 +299,25 @@ and upstream background information. Standard values:
 | `blob` | Traditional background-subtraction detector |
 | `yolo_detect` | YOLO object detector |
 | `yolo_pose` | YOLO pose detector |
+
+YOLO detection storage note:
+
+- the serial YOLO detector supports indexed Zarr v3 shards while retaining its
+  existing inner chunk grid; enable the candidate layout with
+  `--detect-row-shard-rows 262144` and
+  `--detect-frame-shard-rows 262144`
+- detection inference already materializes the complete result table before
+  saving, so the sharded path writes complete outer shards directly and does
+  not allocate a second streaming buffer
+- `frame_indices`, `bbox_norm_coords`, `scores`, `class_ids`, and
+  `instance_key` share the detection-row grid; `frame_counts` and
+  `n_detections` share the independent frame-row grid
+- the writer rereads all seven arrays and requires exact decoded SHA-256 parity
+  before completion
+- sharded runs record `detect_storage_layout`, `detect_row_shard_rows`,
+  `detect_frame_shard_rows`, and `detect_shard_write` in attrs/provenance
+- the sharded YOLO layout is currently opt-in; blob/traditional detection
+  writers remain unchanged
 
 ---
 

@@ -13,6 +13,8 @@ REGISTRY="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/
 MODEL=""
 DECODE_BACKEND=""
 RESIZE_DIMS=()
+DETECT_ROW_SHARD_ROWS=""
+DETECT_FRAME_SHARD_ROWS=""
 SCHEDULER="threads"
 NUM_WORKERS=""
 SET_ID=""
@@ -47,6 +49,9 @@ Options:
   --model PATH              Explicit detect model path; bypass registry model resolution
   --decode-backend NAME     Decode backend passed to run_detections_batch
   --resize-dims H W         Canonical inference size passed to run_detections_batch
+  --detect-row-shard-rows N Enable indexed sharding for detection-row arrays
+  --detect-frame-shard-rows N
+                            Outer rows for frame-count arrays when sharding is enabled
   --scheduler NAME          Legacy pass-through option for batch runner compatibility
   --num-workers N           Legacy pass-through option for batch runner compatibility
   --set-id ID               Optional detect set filter for registry model resolution
@@ -81,6 +86,8 @@ while [[ $# -gt 0 ]]; do
     --model) MODEL="$2"; shift 2;;
     --decode-backend) DECODE_BACKEND="$2"; shift 2;;
     --resize-dims) RESIZE_DIMS=("$2" "$3"); shift 3;;
+    --detect-row-shard-rows) DETECT_ROW_SHARD_ROWS="$2"; shift 2;;
+    --detect-frame-shard-rows) DETECT_FRAME_SHARD_ROWS="$2"; shift 2;;
     --scheduler) SCHEDULER="$2"; shift 2;;
     --num-workers) NUM_WORKERS="$2"; shift 2;;
     --set-id) SET_ID="$2"; shift 2;;
@@ -101,6 +108,17 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown arg: $1"; usage; exit 2;;
   esac
 done
+
+for value in "$DETECT_ROW_SHARD_ROWS" "$DETECT_FRAME_SHARD_ROWS"; do
+  if [[ -n "$value" && ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Shard row counts must be positive integers; got: $value" >&2
+    exit 2
+  fi
+done
+if [[ -n "$DETECT_FRAME_SHARD_ROWS" && -z "$DETECT_ROW_SHARD_ROWS" ]]; then
+  echo "--detect-frame-shard-rows requires --detect-row-shard-rows" >&2
+  exit 2
+fi
 
 if [[ -z "$LOG_DIR" ]]; then
   LOG_DIR="${ROOT}/logs/run_detections_batch/bsub_submissions"
@@ -238,6 +256,12 @@ fi
 if [[ "${#RESIZE_DIMS[@]}" -gt 0 ]]; then
   EXTRA_ARGS+=(--resize-dims "${RESIZE_DIMS[@]}")
 fi
+if [[ -n "$DETECT_ROW_SHARD_ROWS" ]]; then
+  EXTRA_ARGS+=(--detect-row-shard-rows "$DETECT_ROW_SHARD_ROWS")
+fi
+if [[ -n "$DETECT_FRAME_SHARD_ROWS" ]]; then
+  EXTRA_ARGS+=(--detect-frame-shard-rows "$DETECT_FRAME_SHARD_ROWS")
+fi
 if [[ -n "$SCHEDULER" ]]; then
   EXTRA_ARGS+=(--scheduler "$SCHEDULER")
 fi
@@ -311,6 +335,8 @@ if [[ "${#RESIZE_DIMS[@]}" -gt 0 ]]; then
 else
   echo "Resize dims: <runner/config default>"
 fi
+echo "Detect row shard rows: ${DETECT_ROW_SHARD_ROWS:-<regular chunks>}"
+echo "Detect frame shard rows: ${DETECT_FRAME_SHARD_ROWS:-<runner default>}"
 echo "Analysis zarrs: $analysis_count"
 echo "Batch size: $BATCH_SIZE"
 echo "Batches: $batch_count"
