@@ -41,7 +41,7 @@ from fisheye.cluster.lsf import (
     submit_lsf_workflow,
     write_json_snapshot,
 )
-from fisheye.cluster.lsf.runtime import build_runtime_command
+from fisheye.cluster.lsf.runtime import RUNTIME_JOB_ID_TOKEN, build_runtime_command
 
 
 TARGET_MANIFEST_SCHEMA = "palette.whole_recording_keypoint_targets.v1"
@@ -425,13 +425,15 @@ def build_plan(
         str(
             resolved_run_root
             / "registry"
-            / "registry_finalizer.<jobid>.json"
+            / f"registry_finalizer.{RUNTIME_JOB_ID_TOKEN}.json"
         ),
     )
     finalizer_command = build_runtime_command(
         finalizer_worker,
         status_path_template=(
-            resolved_run_root / "status" / "registry_finalizer.<jobid>.json"
+            resolved_run_root
+            / "status"
+            / f"registry_finalizer.{RUNTIME_JOB_ID_TOKEN}.json"
         ),
         workflow_id=resolved_run_label,
         family="keypoints.whole_recording",
@@ -442,7 +444,7 @@ def build_plan(
             str(
                 resolved_run_root
                 / "registry"
-                / "registry_finalizer.<jobid>.json"
+                / f"registry_finalizer.{RUNTIME_JOB_ID_TOKEN}.json"
             ),
         ),
         python_launcher=(str(resolved_repo / "scripts" / "py"),),

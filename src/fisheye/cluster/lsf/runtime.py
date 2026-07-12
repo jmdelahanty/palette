@@ -16,13 +16,24 @@ from fisheye.shared.batch_logging import utc_now
 
 
 LSF_RUNTIME_STATUS_SCHEMA = "palette.lsf_job_runtime_status.v1"
+RUNTIME_JOB_ID_TOKEN = "__PALETTE_LSF_JOBID__"
+RUNTIME_JOB_INDEX_TOKEN = "__PALETTE_LSF_JOBINDEX__"
+RUNTIME_USER_TOKEN = "__PALETTE_LSF_USER__"
 
 
 def _runtime_tokens(environment: Mapping[str, str]) -> dict[str, str]:
+    job_id = str(environment.get("LSB_JOBID") or "manual")
+    job_index = str(environment.get("LSB_JOBINDEX") or "0")
+    user = str(environment.get("USER") or "unknown")
     return {
-        "<jobid>": str(environment.get("LSB_JOBID") or "manual"),
-        "<jobindex>": str(environment.get("LSB_JOBINDEX") or "0"),
-        "<user>": str(environment.get("USER") or "unknown"),
+        RUNTIME_JOB_ID_TOKEN: job_id,
+        RUNTIME_JOB_INDEX_TOKEN: job_index,
+        RUNTIME_USER_TOKEN: user,
+        # Read historical plan/status templates without emitting shell-active
+        # angle-bracket placeholders in new bsub command arguments.
+        "<jobid>": job_id,
+        "<jobindex>": job_index,
+        "<user>": user,
     }
 
 
@@ -376,6 +387,9 @@ if __name__ == "__main__":
 
 __all__ = [
     "LSF_RUNTIME_STATUS_SCHEMA",
+    "RUNTIME_JOB_ID_TOKEN",
+    "RUNTIME_JOB_INDEX_TOKEN",
+    "RUNTIME_USER_TOKEN",
     "build_runtime_command",
     "expand_runtime_tokens",
     "run_with_status",

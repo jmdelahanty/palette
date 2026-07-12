@@ -327,22 +327,38 @@ def test_submit_lsf_workflow_preserves_partial_state_on_parse_failure(
 
 
 def test_runtime_command_uses_structured_argv_and_scheduler_tokens(tmp_path: Path) -> None:
+    from fisheye.cluster.lsf.runtime import (
+        RUNTIME_JOB_ID_TOKEN,
+        RUNTIME_JOB_INDEX_TOKEN,
+        RUNTIME_USER_TOKEN,
+    )
+
     command = build_runtime_command(
-        ("scripts/py", "-m", "example.worker", "--cache", "/scratch/<user>/<jobid>/cache"),
-        status_path_template=tmp_path / "status" / "predict.<jobid>.json",
+        (
+            "scripts/py",
+            "-m",
+            "example.worker",
+            "--cache",
+            f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/cache",
+        ),
+        status_path_template=(
+            tmp_path / "status" / f"predict.{RUNTIME_JOB_ID_TOKEN}.json"
+        ),
         workflow_id="workflow_a",
         family="keypoints.whole_recording",
         job_key="predict:recording_a",
         stage="keypoint_prediction",
         cwd=Path("/groups/repo"),
         environment_overrides={"PALETTE_DISABLE_REGISTRY_WRITES": "1"},
-        cleanup_path_templates=("/scratch/<user>/<jobid>/cache",),
+        cleanup_path_templates=(
+            f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/cache",
+        ),
         expected_output_templates=(tmp_path / "outputs" / "run",),
     )
 
     assert command[:3] == ("scripts/py", "-m", "fisheye.cluster.lsf.runtime")
     assert command[command.index("--status-json") + 1].endswith(
-        "status/predict.<jobid>.json"
+        f"status/predict.{RUNTIME_JOB_ID_TOKEN}.json"
     )
     assert "PALETTE_DISABLE_REGISTRY_WRITES=1" in command
     assert str(tmp_path / "outputs" / "run") in command
@@ -352,12 +368,13 @@ def test_runtime_command_uses_structured_argv_and_scheduler_tokens(tmp_path: Pat
         "-m",
         "example.worker",
         "--cache",
-        "/scratch/<user>/<jobid>/cache",
+        f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/cache",
     )
     assert expand_runtime_tokens(
-        "/scratch/<user>/<jobid>/<jobindex>",
+        f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/{RUNTIME_JOB_INDEX_TOKEN}",
         {"USER": "jeremy", "LSB_JOBID": "123", "LSB_JOBINDEX": "4"},
     ) == "/scratch/jeremy/123/4"
+    assert all("<jobid>" not in arg and "<user>" not in arg for arg in command)
 
 
 def test_runtime_status_records_success_without_exposing_environment_values(

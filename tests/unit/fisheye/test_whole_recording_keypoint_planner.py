@@ -282,9 +282,13 @@ def test_whole_recording_plan_builds_independent_chains_and_serial_fanin(
     assert prediction_command[prediction_command.index("--keypoint-roi-shard-rows") + 1] == "65536"
     assert prediction_command[prediction_command.index("--keypoint-frame-shard-rows") + 1] == "262144"
     assert "--expected-output" in prediction_command
-    assert "/scratch/<user>/<jobid>/palette_keypoint_roi_cache_stage" in (
+    assert (
+        "/scratch/__PALETTE_LSF_USER__/__PALETTE_LSF_JOBID__/"
+        "palette_keypoint_roi_cache_stage"
+    ) in (
         prediction_command
     )
+    assert all("<jobid>" not in arg and "<user>" not in arg for arg in prediction_command)
     refinement_command = jobs["refine:target_0"].command
     assert "--keypoint-run" in refinement_command
     assert "keypoints_goodcopbadcop_20260710" in refinement_command

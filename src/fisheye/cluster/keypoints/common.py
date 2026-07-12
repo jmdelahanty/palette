@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from fisheye.cluster.lsf import LsfDependency, LsfJob, LsfResources
-from fisheye.cluster.lsf.runtime import build_runtime_command
+from fisheye.cluster.lsf.runtime import (
+    RUNTIME_JOB_ID_TOKEN,
+    RUNTIME_USER_TOKEN,
+    build_runtime_command,
+)
 from fisheye.registry.db import Registry
 from fisheye.registry.model_resolution import (
     load_candidates,
@@ -622,7 +626,10 @@ def build_prediction_job(
         default="keypoint_prediction",
         max_length=120,
     )
-    scratch_stage = "/scratch/<user>/<jobid>/palette_keypoint_roi_cache_stage"
+    scratch_stage = (
+        f"/scratch/{RUNTIME_USER_TOKEN}/{RUNTIME_JOB_ID_TOKEN}/"
+        "palette_keypoint_roi_cache_stage"
+    )
     storage = resolve_keypoint_storage(
         roi_shard_rows=keypoint_roi_shard_rows,
         frame_shard_rows=keypoint_frame_shard_rows,
@@ -663,7 +670,11 @@ def build_prediction_job(
         "--input-mode",
         str(input_mode),
         "--progress-jsonl",
-        str(run_root / "progress" / f"{safe_target}.prediction.<jobid>.jsonl"),
+        str(
+            run_root
+            / "progress"
+            / f"{safe_target}.prediction.{RUNTIME_JOB_ID_TOKEN}.jsonl"
+        ),
         "--progress-every-batches",
         str(int(progress_every_batches)),
         "--json",
@@ -681,7 +692,11 @@ def build_prediction_job(
         )
     command = build_runtime_command(
         worker,
-        status_path_template=run_root / "status" / f"{safe_target}.prediction.<jobid>.json",
+        status_path_template=(
+            run_root
+            / "status"
+            / f"{safe_target}.prediction.{RUNTIME_JOB_ID_TOKEN}.json"
+        ),
         workflow_id=workflow_id,
         family="keypoints.whole_recording",
         job_key=job_key,
@@ -758,7 +773,11 @@ def build_refinement_job(
         worker.extend(["--memory-limit", str(memory_limit)])
     command = build_runtime_command(
         worker,
-        status_path_template=run_root / "status" / f"{safe_target}.refinement.<jobid>.json",
+        status_path_template=(
+            run_root
+            / "status"
+            / f"{safe_target}.refinement.{RUNTIME_JOB_ID_TOKEN}.json"
+        ),
         workflow_id=workflow_id,
         family="keypoints.whole_recording",
         job_key=job_key,
