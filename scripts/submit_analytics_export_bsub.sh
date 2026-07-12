@@ -10,7 +10,7 @@ PALETTE_REPO="${PALETTE_GROUPS_REPO:-/groups/johnson/johnsonlab/jeremy/gitrepos/
 SUBMIT_HOST="${PALETTE_LSF_SUBMIT_HOST:-login1-citrus-poller}"
 REGISTRY="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
 LOG_DIR=""
-QUEUE="normal"
+QUEUE=""
 NCORES=4
 MEM_GB=16
 WALLTIME="2:00"
@@ -43,7 +43,7 @@ Options:
   --skip-statistics            Do not compute the linked chaser statistics export
   --index-registry             Index the completed base export in the shared registry
   --registry PATH              Registry path used with --index-registry
-  --queue NAME                 LSF queue (default: normal)
+  --queue NAME                 LSF queue (default: cluster default)
   --ncores N                   CPU slots and exporter workers (default: 4)
   --mem-gb N                   Memory request in GB (default: 16)
   --walltime H:MM              LSF wall time (default: 2:00)

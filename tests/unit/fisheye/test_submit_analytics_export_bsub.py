@@ -75,6 +75,37 @@ def test_submit_analytics_export_bsub_rejects_unsafe_run_id(tmp_path: Path) -> N
     assert "Unsafe --export-run-id" in result.stderr
 
 
+def test_submit_analytics_export_bsub_uses_cluster_default_queue(tmp_path: Path) -> None:
+    repo = Path(__file__).resolve().parents[3]
+    collection = tmp_path / "collection.manifest.json"
+    collection.write_text("{}\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(repo / "scripts" / "submit_analytics_export_bsub.sh"),
+            "--collection-manifest",
+            str(collection),
+            "--export-run-id",
+            "chaser_v2_default_queue_test",
+            "--output-root",
+            str(tmp_path / "shared" / "palette_analytics"),
+            "--palette-repo",
+            str(repo),
+            "--log-dir",
+            str(tmp_path / "logs"),
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    bsub_line = next(
+        line for line in result.stdout.splitlines() if line.startswith("bsub_command=")
+    )
+    assert " -q " not in bsub_line
+
+
 def test_submit_analytics_export_bsub_sshes_only_bsub_command(tmp_path: Path) -> None:
     repo = Path(__file__).resolve().parents[3]
     collection = tmp_path / "collection.manifest.json"
