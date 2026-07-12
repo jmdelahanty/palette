@@ -869,6 +869,172 @@ mismatches. Exhaustive parity took `452.06 s`. All four runs also passed eye
 geometry, full-contour, sampled-contour, and completion-contract checks. The
 job finished `DONE` with no swap.
 
+### Full 22-Shard Collection Canary
+
+LSF job `153063644` finalized all `1,169,010` rows from the existing 22 raw
+probability shards with 16 workers. Core process-shard computation took
+`5,164.82 s`; complete finalizer time was `5,805.09 s` (`202.82 rows/s`). The
+job averaged `14.70` effective CPU cores (`91.89%` of its allocation), used no
+swap, and LSF reported `20.59 GiB` maximum memory. The compact collection index
+plan was built once in the parent and never rebuilt by workers.
+
+The complete run contains `155` arrays in `298,677` files. Apparent size is
+`2.85 GB` and allocated size is `2.93 GB`. Node-local-to-PRFS copy took
+`2,109.59 s`; the atomic commit took `0.004 s`. Exhaustive source/publication
+comparison read `364,522` chunks and found zero mismatches.
+
+The original validation report rejected the canary because the 54,000-row
+reference stored eye `reason_bytes` with width 207, while the full collection
+needed widths 277 and 255. Decoded `reason` strings matched, common byte
+columns matched, and every additional byte was zero. Fixed-width byte width is
+therefore a run-local storage detail, not a semantic mismatch. The original
+report remains preserved; corrected validation v2 compares shared bytes
+exactly and accepts different trailing widths only when every extra byte is
+zero. The validation-only replay compared 137 reference arrays with zero
+mismatches and passed every gate in `242.16 s`.
+
+An independent dense-content audit also passed. All `18,268` expected
+`masks_roi` payload chunks exist. Subject-body coverage is `100%`; left- and
+right-eye coverage are each `99.9801%` with 233 absent rows; swim-bladder
+coverage is `99.9995%` with six absent rows. A total of 264 representative
+dense masks across all 22 source clips matched stored `area_px` exactly. The
+canary is classified as a data/finalizer/publication pass despite the original
+LSF exit code caused by the validator false negative.
+
+Corrected evidence is stored in:
+
+```text
+/groups/johnson/johnsonlab/jeremy/recordings/logs/
+  subject_mask_full_collection_canary/
+    sleepyfish_full_collection_canary_20260711_02/reports/
+      validation.json
+      validation_corrected.json
+      dense_content_audit.json
+      summary_corrected.json
+```
+
+### Next Benchmark: PRFS Input Staging
+
+The next controlled experiment will separate the benefit of indexed storage
+shards from the benefit of copying their physical files to node-local scratch.
+It will use the existing contract-complete `54,054`-row clip fixture and the
+selected `2,048`-row probability layout. All cases will run the same complete
+default-output finalizer with `16` workers, `256` logical rows per worker
+chunk, and node-local refined output. Only the input placement will change:
+
+1. **Direct PRFS:** read the sharded fixture directly through the node-local
+   PRFS overlay. This is the current baseline.
+2. **Probability-only stage:** copy the three sharded probability arrays and
+   their metadata to node-local scratch once, while leaving crop lineage,
+   detections, and keypoints on PRFS.
+3. **Full-source stage:** copy the complete contract fixture to node-local
+   scratch before starting the finalizer.
+
+Case 2 should exercise the existing production
+`stage_finalization_input_to_scratch` path rather than a benchmark-only copy
+implementation. That path copies the selected `subject_mask_runs/<run>` into
+the local output overlay and keeps the remaining root-level inputs linked to
+PRFS. Case 3 needs an explicit complete-fixture copy mode in the benchmark
+runner.
+
+For this full-clip benchmark, probability-only staging is a practical proxy
+for whole-storage-shard staging: every probability row will be consumed, so
+all outer shards are needed. A later partial-access implementation should
+assign complete `2,048`-row outer storage shards to workers and stage each
+physical shard once. Each staged outer shard then serves eight `256`-row
+worker chunks. It must not let multiple workers copy the same shard or assign
+workers ranges that split a physical output chunk.
+
+Each case will record these phases separately:
+
+- source inventory and staging seconds, bytes, and physical file count;
+- target initialization time;
+- core `process_shards` time and chunk-duration distribution;
+- derived-surface postcompute time;
+- total finalizer time after staging;
+- end-to-end time from staging start through completed local output;
+- peak process-tree RSS, LSF maximum memory, swap, CPU efficiency, and peak
+  local-scratch use;
+- output publication time as a separate invariant phase, not part of the input
+  placement comparison.
+
+The primary comparison is end-to-end time, `staging + finalization`, rather
+than finalizer time alone. The secondary comparison is operational behavior:
+chunk-duration variance and PRFS object pressure under 16 concurrent workers.
+The staged variants must produce exactly the same `155` arrays as the direct
+PRFS reference and pass eye-geometry, full-contour, sampled-contour, and run-
+completion checks.
+
+Adopt staging only if it has zero parity differences and either improves
+median end-to-end time by at least `10%` over repeated passes or materially
+reduces chunk-time variance and PRFS pressure without excessive scratch use.
+No case may swap. Cache state and run order must be repeated or alternated so
+one warm-page-cache pass cannot decide the result. Use three rotated blocks
+(`A-B-C`, `B-C-A`, and `C-A-B`), create a fresh scratch destination for every
+staged pass, request `POSIX_FADV_DONTNEED` for source and staged payload files
+between passes, and record whether each advisory cache-eviction request was
+accepted. The advisory is useful experimental control, not proof that PRFS or
+all kernel caches were cold.
+
+If probability-only staging wins, repeat the winning mode on the full
+`1,169,010`-row collection and compare 16 versus 24 workers. Test 32 workers
+only if the 24-worker run remains comfortably within its memory allocation and
+does not increase end-to-end time. This sequence answers separately whether
+local reads help and whether they recover useful scaling under PRFS
+contention.
+
+The first executable pilot combines the staging and worker-count questions in
+a position-balanced `2 x 2` matrix on the contract-complete clip: direct versus
+staged `subject_mask_runs` input, each at 16 and 24 workers. It runs the four
+cases forward and then in reverse, includes staging in end-to-end time, keeps
+all candidate outputs on node-local scratch, and requires exact parity across
+the complete output surface. Full-source staging remains the follow-up only if
+probability-run staging leaves a meaningful residual input cost.
+
+```bash
+scripts/submit_subject_mask_input_staging_workers_bsub.sh \
+  --fixture-root "$FIXTURE_ROOT" \
+  --queue local \
+  --wait-for-job 153063644 \
+  --submit-host login1-citrus-poller
+```
+
+LSF job `153064150` completed this matrix on `h07u05`. The staged source was
+`177.46 MB` in 110 regular files and copied to scratch in `0.79-0.91 s` after
+successful advisory cache eviction. Every run produced 155 arrays; all seven
+comparisons against the first direct 16-worker run had zero mismatches.
+
+| Input placement | Workers | Median end-to-end s | Two runs s | Median CPU efficiency | Peak process-tree RSS GiB |
+| --- | ---: | ---: | --- | ---: | ---: |
+| direct PRFS | 16 | `214.52` | `218.63`, `210.40` | `83.11%` | `22.42` |
+| staged subject run | 16 | `207.08` | `207.13`, `207.03` | `85.48%` | `20.18` |
+| direct PRFS | 24 | `173.64` | `174.58`, `172.70` | `82.87%` | `29.75` |
+| staged subject run | 24 | `172.57` | `171.64`, `173.50` | `83.40%` | `30.56` |
+
+At 16 workers, staging saved `7.44 s` (`3.47%`) by median end-to-end time. One
+direct run paid a `10.10 s` target initialization versus approximately `4 s`
+for every other case; after that outlier, the second paired staging advantage
+was only `1.60%`. Staging was very stable across its two 16-worker runs, but the
+sample is too small to treat variance reduction alone as a production gate.
+
+At 24 workers, staging saved only `1.07 s` (`0.62%`) by median and lost one of
+the two paired comparisons. Core process-shard time was essentially identical:
+direct median `141.69 s` versus staged `141.00 s`. Physical-shard staging does
+not materially accelerate this CPU-dominated clip once 24 workers are active,
+so it fails the planned `10%` adoption threshold. Do not make input staging a
+mandatory production step from this evidence; retain it as an optional full-
+collection/high-contention experiment.
+
+Moving from 16 to 24 workers reduced median end-to-end time by `19.06%` for
+direct reads and `16.67%` for staged reads. Per-chunk median duration increased
+from about `12.8 s` to `15.7 s`, showing the expected contention, but the extra
+parallelism still reduced wall time. CPU efficiency relative to requested
+workers stayed near `83%`. Peak process-tree RSS increased from approximately
+`20-22 GiB` to `30-31 GiB`; LSF reported `26.15 GiB` maximum memory for the
+overall job and no swap. A full-collection 24-worker run therefore needs
+meaningful memory margin above 32 GiB and should remain a canary before becoming
+the default.
+
 From a workstation without `bsub`, submit through the configured login host:
 
 ```bash
@@ -934,15 +1100,17 @@ scripts/submit_subject_mask_complete_finalizer_matrix_bsub.sh \
   `2 GiB` LSF process-tree memory.
 - The `2,048`-row indexed-sharding layout has cleared the single-clip storage,
   probability exactness, construction, core-finalizer, and complete default-
-  output timing gates. It remains the selected candidate for new immutable
-  read-only probability-mask stores, subject to a full-collection canary.
+  output timing gates. The complete 22-shard collection finalizer canary also
+  passed its identity, memory, publication, exhaustive parity, and dense-
+  content gates. The layout remains the selected candidate for new immutable
+  read-only probability-mask stores.
 - Finalized runs include eye geometry, full ragged component contours, and
   sampled component contours by default. The historical `335 s` layout A/B
   excluded those surfaces and must not be quoted as complete production time.
-- Before enabling it broadly or migrating existing raw runs, perform a full
-  `22`-shard collection canary. That canary must exercise the compact parent
-  identity plan, finalizer completion/publication behavior, and exact output
-  validation at the complete `1,169,010`-row scale.
+- The full `22`-shard canary exercised the compact parent identity plan,
+  finalizer completion/publication behavior, exhaustive array parity, and
+  independent dense-content validation at the complete `1,169,010`-row scale.
+  Preserve the same gates for future collection or storage-layout canaries.
 - Recover the canonical refined output by rerunning finalization from the
   existing raw shards into a new run only after that canary passes. Never
   overwrite or promote the incomplete historical refined run.
