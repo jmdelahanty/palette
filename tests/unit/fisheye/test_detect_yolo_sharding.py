@@ -4,6 +4,7 @@ import numpy as np
 import zarr
 
 from fisheye.detection import detect_yolo as mod
+from fisheye.diagnostics.audit_yolo_detection_sharding import audit_detection_runs
 
 
 def _detection_values() -> dict[str, np.ndarray]:
@@ -78,3 +79,33 @@ def test_write_detection_output_arrays_preserves_regular_layout(tmp_path) -> Non
     assert group["bbox_norm_coords"].chunks == (4, 4)
     assert group["bbox_norm_coords"].shards is None
     np.testing.assert_array_equal(group["bbox_norm_coords"][:], values["bbox_coords"])
+
+
+def test_audit_detection_runs_reports_exact_parity_and_physical_counts(tmp_path) -> None:
+    zarr_path = tmp_path / "detect_ab.zarr"
+    root = zarr.open_group(zarr_path, mode="w")
+    parent = root.create_group("detect_runs")
+    regular = parent.create_group("regular")
+    sharded = parent.create_group("sharded")
+    values = _detection_values()
+
+    mod._write_detection_output_arrays(  # noqa: SLF001
+        regular,
+        **values,
+        det_chunk=4,
+        detect_row_shard_rows=None,
+        detect_frame_shard_rows=32_768,
+    )
+    mod._write_detection_output_arrays(  # noqa: SLF001
+        sharded,
+        **values,
+        det_chunk=4,
+        detect_row_shard_rows=8,
+        detect_frame_shard_rows=32_768,
+    )
+
+    report = audit_detection_runs(zarr_path, regular_run="regular", sharded_run="sharded")
+
+    assert report["all_arrays_exact"] is True
+    assert all(item["exact"] for item in report["arrays"].values())
+    assert report["regular_physical"]["payload_files"] > report["sharded_physical"]["payload_files"]
