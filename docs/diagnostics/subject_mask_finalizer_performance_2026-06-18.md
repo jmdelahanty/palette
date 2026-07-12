@@ -419,9 +419,9 @@ Fixed outputs should be preallocated NumPy arrays: cleaned dense masks,
 presence/area/centroid/bbox/topology metrics, fingerprints, ellipse parameters,
 validity, status, and reason codes. Variable full contours should be returned as
 one packed `points_xy` buffer plus `ptr`/`len`; fixed-K sampled contours should
-be derived in the same native pass. This is important because eye geometry,
-full ragged contours, and sampled contours are default finalized outputs as of
-2026-07-11. Computing them while masks and contours are already resident avoids
+be derived in the same native pass. Eye geometry and sampled contours are
+default finalized outputs as of 2026-07-12; full ragged contours are an explicit
+compatibility/analysis opt-in. Computing requested surfaces while masks and contours are already resident avoids
 a later full dense-Zarr reread. Process workers continue to own non-overlapping
 row/output chunks; the driver retains deterministic merging and completion.
 

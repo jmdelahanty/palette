@@ -1075,7 +1075,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--assignment-keypoint-group", default=DEFAULT_ASSIGNMENT_KEYPOINT_GROUP)
     parser.add_argument("--assignment-keypoints-run", help="Collection keypoint/refined-keypoint run for eyes_union assignment.")
     parser.add_argument("--no-write-eye-geometry", action="store_true")
-    parser.add_argument("--no-write-component-contours", action="store_true")
+    parser.add_argument(
+        "--write-component-contours",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Write full ragged contours (default: false; sampled contours remain enabled).",
+    )
     parser.add_argument("--write-sampled-component-contours", action="store_true", default=True)
     parser.add_argument("--no-write-sampled-component-contours", action="store_true")
     parser.add_argument("--retain-source-seeds", action="store_true")
@@ -1184,7 +1189,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         assignment_keypoint_group=args.assignment_keypoint_group,
         assignment_keypoints_run=args.assignment_keypoints_run,
         write_eye_geometry=not bool(args.no_write_eye_geometry),
-        write_component_contours=not bool(args.no_write_component_contours),
+        write_component_contours=bool(args.write_component_contours),
         retain_source_seeds=bool(args.retain_source_seeds),
         model_coverage_class=args.model_coverage_class,
         model_component_coverage_key=args.model_component_coverage_key,

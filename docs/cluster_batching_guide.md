@@ -944,6 +944,7 @@ scripts/py -m fisheye.utils.run_subject_mask_batch_pipeline \
 | `--finalize-postcompute-backend` | `process_shards` | Expensive finalizer postcompute backend for eye geometry/body-swim contours; use `serial` only for historical in-process debugging |
 | `--finalize-postcompute-chunk-size` | *(finalizer default)* | Rows per postcompute shard; defaults inside the finalizer to `--finalize-chunk-size` |
 | `--finalize-postcompute-num-workers` | `auto` | Postcompute workers; `auto` lets the finalizer reuse `--finalize-num-workers` |
+| `--write-component-contours` | off | Opt in to full ragged compatibility/analysis contours; fixed-K sampled contours remain enabled by default |
 | `--retain-source-seeds`   | off     | Retain dense `source_seed_masks_roi` debug arrays in refined runs |
 | `--mask-storage`          | `dense_uint8` | Refined mask storage mode: `dense_uint8`, `dense_and_bitpacked`, `dense_and_rle`, or `dense_bitpacked_and_rle`; compact-only modes are legacy/display-only and rejected for editable outputs |
 | `--mask-rle-validation-mode` | `invariants` | Compact RLE validation mode: `invariants` for production structural checks, `full` for dense round-trip audits, or `none` for deliberate low-level debugging |
@@ -988,11 +989,11 @@ concurrent partial-chunk read-modify-write hazards. A 512-row benchmark reduced
 file count further but increased finalization wall time enough to lose overall,
 so treat `512` as experimental rather than the default.
 
-When the finalizer writes eye geometry and component contours, the batch
-workflow defaults to `--finalize-postcompute-backend process_shards`. This keeps
+When the finalizer writes eye geometry and sampled component contours, the batch
+workflow defaults to `--finalize-postcompute-backend process_shards`. Full
+ragged contours are an explicit `--write-component-contours` opt-in. This keeps
 canonical mask finalization on the main `--finalize-execution-backend` path, but
-parallelizes the expensive derived geometry/contour pass and merges packed
-contour arrays in the parent process. Use `--finalize-postcompute-backend
+parallelizes requested derived geometry/contour work. Use `--finalize-postcompute-backend
 serial` only when debugging the historical in-process path.
 
 By default, refined subject-mask finalization omits dense

@@ -445,11 +445,17 @@ def test_indexed_collection_slice_allocates_only_requested_positions(monkeypatch
     np.testing.assert_array_equal(view[50:55, :], values[50:55, :])
 
 
-def test_cli_defaults_to_complete_derived_surfaces() -> None:
+def test_cli_defaults_to_sampled_contours_with_full_ragged_opt_in() -> None:
     defaults = mod._build_parser().parse_args(["/tmp/analysis.zarr"])
     assert defaults.write_eye_geometry is True
-    assert defaults.write_component_contours is True
+    assert defaults.write_component_contours is False
     assert defaults.write_sampled_component_contours is True
+
+    full = mod._build_parser().parse_args(
+        ["/tmp/analysis.zarr", "--write-component-contours"]
+    )
+    assert full.write_component_contours is True
+    assert full.write_sampled_component_contours is True
 
     disabled = mod._build_parser().parse_args(
         [

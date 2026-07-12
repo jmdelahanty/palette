@@ -32,7 +32,7 @@ METRIC_LEVEL="cheap"
 MASK_STORAGE="dense_uint8"
 MASK_RLE_VALIDATION_MODE="invariants"
 WRITE_EYE_GEOMETRY=1
-WRITE_COMPONENT_CONTOURS=1
+WRITE_COMPONENT_CONTOURS=0
 WRITE_SAMPLED_COMPONENT_CONTOURS=1
 RETAIN_SOURCE_SEEDS=0
 PROFILE_TIMINGS=1
@@ -77,9 +77,9 @@ Finalizer:
                             full|invariants|none (default: invariants)
   --no-write-eye-geometry   Do not write eye geometry
   --write-component-contours
-                            Write full ragged contours (default)
+                            Opt in to full ragged contours
   --no-write-component-contours
-                            Disable default full ragged contours
+                            Keep full ragged contours disabled (default)
   --write-sampled-component-contours
                             Write the fixed-K sampled contour cache (default)
   --no-write-sampled-component-contours

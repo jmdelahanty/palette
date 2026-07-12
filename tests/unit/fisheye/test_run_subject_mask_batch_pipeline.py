@@ -15,7 +15,7 @@ from fisheye.shared.zarr_run_completion import RUN_COMPLETION_STATUS_ATTR
 from fisheye.utils import run_subject_mask_batch_pipeline as mod
 
 
-def test_parser_defaults_to_sharded_postcompute_for_batch_workflow() -> None:
+def test_parser_defaults_to_sampled_contours_and_sharded_postcompute() -> None:
     args = mod._build_parser().parse_args(["/recordings"])
 
     assert args.finalize_postcompute_backend == "process_shards"
@@ -25,8 +25,15 @@ def test_parser_defaults_to_sharded_postcompute_for_batch_workflow() -> None:
     assert args.subject_output_parent == mod.SUBJECT_MASK_CANONICAL_OUTPUT_PARENT
     assert args.write_eye_geometry is True
     assert args.write_sampled_component_contours is True
-    assert args.write_component_contours is True
+    assert args.write_component_contours is False
     assert args.mask_probs_shard_rois == mod.DEFAULT_MASK_PROBS_SHARD_ROIS
+
+
+def test_parser_accepts_full_ragged_contour_opt_in() -> None:
+    args = mod._build_parser().parse_args(["/recordings", "--write-component-contours"])
+
+    assert args.write_component_contours is True
+    assert args.write_sampled_component_contours is True
 
 
 def test_parser_accepts_regular_probability_chunk_override() -> None:

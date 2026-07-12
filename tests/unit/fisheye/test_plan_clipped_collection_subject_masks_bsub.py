@@ -146,9 +146,15 @@ def test_parser_defaults_to_probability_shards_and_accepts_regular_override() ->
 
     default_args = build_arg_parser().parse_args(required)
     regular_args = build_arg_parser().parse_args([*required, "--no-mask-probs-sharding"])
+    full_contour_args = build_arg_parser().parse_args(
+        [*required, "--write-component-contours"]
+    )
 
     assert default_args.mask_probs_shard_rois == DEFAULT_MASK_PROBS_SHARD_ROIS
+    assert default_args.write_component_contours is False
+    assert default_args.write_sampled_component_contours is True
     assert regular_args.mask_probs_shard_rois is None
+    assert full_contour_args.write_component_contours is True
 
 
 def test_build_plan_resolves_subject_mask_shard_commands(tmp_path: Path) -> None:

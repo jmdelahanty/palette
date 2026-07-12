@@ -21,7 +21,7 @@ POSTCOMPUTE_BACKEND="process_shards"
 POSTCOMPUTE_CHUNK_SIZE=256
 POSTCOMPUTE_NUM_WORKERS=""
 WRITE_EYE_GEOMETRY=1
-WRITE_COMPONENT_CONTOURS=1
+WRITE_COMPONENT_CONTOURS=0
 WRITE_SAMPLED_COMPONENT_CONTOURS=1
 DRY_RUN=0
 VARIANTS=()
@@ -59,8 +59,8 @@ Options:
   --postcompute-chunk-size N       Rows per postcompute shard (default: 256).
   --postcompute-num-workers N      Postcompute workers (default: variant worker count).
   --no-write-eye-geometry          Disable eye geometry output.
-  --write-component-contours       Write full ragged component contours (default).
-  --no-write-component-contours    Disable default full ragged component contours.
+  --write-component-contours       Opt in to full ragged component contours.
+  --no-write-component-contours    Keep full ragged contours disabled (default).
   --no-write-sampled-component-contours
                                    Disable the default fixed-K sampled contour cache.
   --variant SPEC                   Add process_shards variant workers[:chunk_size].
