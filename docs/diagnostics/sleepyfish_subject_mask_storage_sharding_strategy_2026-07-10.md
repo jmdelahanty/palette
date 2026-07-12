@@ -3,9 +3,10 @@
 **Date:** 2026-07-10
 **Last updated:** 2026-07-12
 **Status:** diagnostic, implementation, finalizer parity, full-collection
-finalizer, and full-clip sharded-inference canaries complete; the `2,048`-row
-layout remains opt-in pending post-pack validation optimization, and no
-canonical storage migration has been approved or applied
+finalizer, post-pack inference, and double-buffered direct-write canaries
+complete; the `2,048`-row layout remains opt-in pending an explicit default
+rollout decision, and no canonical storage migration has been approved or
+applied
 
 ## Scope
 
@@ -522,9 +523,10 @@ This removes the full ordinary-chunk working array, the separate pack phase,
 and the redundant source validation pass while preserving a full decoded-byte
 storage check.
 
-The direct writer remains opt-in pending a repeated `54,000`-row canary using
-the same model, crop proxy, cache, cluster queue, staging path, and publication
-gates as job `153064680`.
+The repeated `54,000`-row canary using the same model, crop proxy, cache,
+cluster queue, staging path, and publication gates as job `153064680` passed.
+The measured result is recorded below. The direct writer remains opt-in until
+the production default is changed explicitly.
 
 ## Full-Clip Sharded-Inference Canary
 
@@ -591,6 +593,75 @@ post-write destination digest as the fail-closed storage check. This removes
 one redundant decoded source pass without weakening exact validation. Repeat
 the full-clip inference canary after that change before promoting sharding to a
 production default.
+
+## Double-Buffered Direct-Write Canary
+
+LSF job `153064710` repeated the complete `54,000`-row `clip_000000` inference
+on `h08u16.int.janelia.org`. It reused the same durable `14.2 GB` flat ROI
+cache built by job `152007051`, staged that cache to compute-node scratch, and
+used the same model, crop proxy, `gpu_l4` queue, batch size, node-local output
+staging, and atomic PRFS publisher as the post-pack canary. It did not rebuild
+the ROI cache and did not run inference on the login node.
+
+Published run:
+
+```text
+subject_mask_shard_runs/
+  subject_masks_unet_registry_sleepyfish_prob_shard_doublebuf_clip000000_20260712_01
+```
+
+Evidence:
+
+```text
+/groups/johnson/johnsonlab/jeremy/recordings/logs/
+  subject_mask_probability_sharded_inference_canary/
+  sm_sleepyfish_prob_shard_doublebuf_clip000000_20260712_01/
+```
+
+The writer reserved exactly two `[3,2048,512,512]` `uint8` buffers: `1.5 GiB`
+each and `3.0 GiB` total. It wrote `26` complete row shards plus one partial
+row shard. The run completed without creating `_mask_probs_roi_working`; LSF
+maximum accounted memory was `4 GiB`, with no growth as successive buffers
+were reused.
+
+Integrity and contract gates passed:
+
+- completion status is `complete` and publication validation is `ok`;
+- the source and destination per-channel SHA-256 values are identical, and the
+  aggregate `sha256_per_channel_then_sha256_v1` digest matches exactly:
+  `e2db8728d79fae65fed2d3b552a61b3daad6c61ef317d604870796047f7641fc`;
+- all eight row-lineage arrays and all seven metric arrays match the prior
+  post-pack canary exactly;
+- sampled probabilities on rows crossing `32`-row inner-chunk and `2,048`-row
+  outer-shard boundaries match the prior run exactly, contain `37,051` nonzero
+  values, and span the stored range `0..255`;
+- all `54,000` rows report at least one nonempty component.
+
+Storage and publication were unchanged from the successful post-pack layout:
+the run occupies `172 MiB`, `mask_probs_roi` has `81` payload shard files plus
+one metadata file, and the complete run has `1,663` files. The publisher copied
+`179,538,078` apparent bytes in `17.25 s` and completed its publish phase in
+`22.84 s`.
+
+| Raw inference writer | Duration | Delta from regular | LSF max memory |
+| --- | ---: | ---: | ---: |
+| Prior regular chunks | `509.2 s` | baseline | not remeasured |
+| Separate post-pack | `883.9 s` | `+374.7 s` (`+73.6%`) | `2.0 GiB` |
+| Direct two-buffer shards | `628.2 s` | `+119.0 s` (`+23.4%`) | `4.0 GiB` |
+
+Direct double-buffering recovered `255.7 s` (`28.9%`) versus post-pack. Its
+full destination reread and digest took `150.5 s`; subtracting that terminal
+validation leaves `477.7 s` for inference plus overlapped shard output, below
+the `509.2 s` regular baseline. Thus direct shard construction itself is not
+the remaining slowdown. The explicit fail-closed full reread is now the only
+material premium and is responsible for more than the total `119.0 s` net
+regression.
+
+This canary clears the implementation, memory, exact-write, content,
+lineage, storage-object, and atomic-publication gates. Enabling `2,048`-row
+shards by default for new immutable raw-probability shard runs is now a rollout
+choice, not a correctness blocker. Existing completed runs must remain
+unchanged.
 
 ## Initial 8,192-Row Benchmark Set
 
@@ -1235,9 +1306,12 @@ scripts/submit_subject_mask_complete_finalizer_matrix_bsub.sh \
   read-only probability-mask stores.
 - The full-clip inference canary also passed exactness, lineage, content,
   completion, object-count, and atomic-publication gates, reducing probability
-  files `61.8x`. Keep the writer opt-in for now because exhaustive post-pack
-  validation increased the raw stage from `509.2 s` to `883.9 s`; eliminate
-  the redundant source digest pass and repeat this canary before defaulting it.
+  files `61.8x`. The direct two-buffer writer then reduced raw-stage time from
+  `883.9 s` to `628.2 s` at `4 GiB` maximum accounted memory, with exact
+  source/destination digests and no working array. The remaining `150.5 s`
+  full destination validation is the material premium over ordinary chunks.
+  Keep the option explicit until the production-default rollout is approved;
+  no additional correctness canary is required before that decision.
 - Finalized runs include eye geometry, full ragged component contours, and
   sampled component contours by default. The historical `335 s` layout A/B
   excluded those surfaces and must not be quoted as complete production time.
