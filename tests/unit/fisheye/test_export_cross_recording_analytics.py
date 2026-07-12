@@ -8,6 +8,9 @@ import pyarrow.parquet as pq
 import zarr
 
 from fisheye.analytics_exports.contracts import (
+    BASELINE_BEHAVIOR_SUMMARY_TABLE,
+    BASELINE_BEHAVIOR_TIME_BINS_TABLE,
+    BASELINE_KINEMATIC_SAMPLES_TABLE,
     EXPORT_SCHEMA_ID,
     EXPORT_SCHEMA_VERSION,
     TABLE_CONTRACTS,
@@ -749,6 +752,9 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
         output_root=output,
         export_run_id="goodcopbadcop_export",
         tables=(
+            BASELINE_BEHAVIOR_SUMMARY_TABLE,
+            BASELINE_BEHAVIOR_TIME_BINS_TABLE,
+            BASELINE_KINEMATIC_SAMPLES_TABLE,
             "position_occupancy_histogram_2d",
             "chaser_epoch_spatial_occupancy_zones",
             "chaser_epoch_distance_summary",
@@ -770,8 +776,13 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
             "chaser_egocentric_distance_bearing_histogram",
         ),
         jobs=1,
+        baseline_time_bin_s=0.1,
+        baseline_sample_rate_hz=5.0,
     )
 
+    assert manifest["row_counts_by_table"][BASELINE_BEHAVIOR_SUMMARY_TABLE] == 1
+    assert manifest["row_counts_by_table"][BASELINE_BEHAVIOR_TIME_BINS_TABLE] == 3
+    assert manifest["row_counts_by_table"][BASELINE_KINEMATIC_SAMPLES_TABLE] == 2
     assert manifest["row_counts_by_table"]["position_occupancy_histogram_2d"] == 12
     assert manifest["row_counts_by_table"]["chaser_epoch_spatial_occupancy_zones"] == 12
     assert manifest["row_counts_by_table"]["chaser_epoch_distance_summary"] == 6
@@ -797,6 +808,9 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
     assert "position.epoch.occupancy_histogram_2d" in manifest["capabilities"]
     assert "chaser.cra.primary" in manifest["capabilities"]
     assert "chaser.egocentric" in manifest["capabilities"]
+    assert "core.baseline.behavior_summary" in manifest["capabilities"]
+    assert "core.baseline.behavior_time_bins" in manifest["capabilities"]
+    assert "core.baseline.kinematic_samples" in manifest["capabilities"]
     assert set(manifest["table_contracts"]) == set(manifest["tables_requested"])
 
     first_part = Path(
@@ -833,6 +847,23 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
     assert pre_position_top_left["image_width_px"] == 20.0
     assert pre_position_top_left["image_height_px"] == 20.0
     assert len(pre_position_top_left["normalized_grid_id"]) == 16
+
+    baseline_summary = _read_dataset(
+        output,
+        BASELINE_BEHAVIOR_SUMMARY_TABLE,
+        "goodcopbadcop_export",
+    )
+    assert baseline_summary[0]["baseline_window_label"] == "pre_event"
+    assert baseline_summary[0]["coordinate_frame"] == "arena_centered_mm"
+    assert baseline_summary[0]["spatial_grid_size"] == 12
+
+    baseline_samples = _read_dataset(
+        output,
+        BASELINE_KINEMATIC_SAMPLES_TABLE,
+        "goodcopbadcop_export",
+    )
+    assert [row["source_frame"] for row in baseline_samples] == [0, 2]
+    assert all(row["sampling_stride_frames"] == 2 for row in baseline_samples)
 
     spatial_rows = _read_dataset(
         output,

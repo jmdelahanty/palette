@@ -20,6 +20,9 @@ palette_analytics/
 ├── logs/lsf/
 └── v1/
     ├── manifests/
+    ├── baseline_behavior_summary/
+    ├── baseline_behavior_time_bins/
+    ├── baseline_kinematic_samples/     # optional
     ├── chaser_epoch_behavior_summary/
     ├── chaser_epoch_bout_events/
     ├── ...
@@ -100,6 +103,50 @@ job script, parsed LSF job ID, validation JSON, and completion status are retain
 Registry indexing is optional and occurs only after the base exporter has
 successfully written its manifest. Use `--index-registry` when the shared
 registry should advertise the completed export.
+
+## Baseline behavior products
+
+Chaser collection exports include two stimulus-independent pre-period tables
+by default:
+
+- `baseline_behavior_summary`: one row per recording, track, and canonical
+  baseline window. It includes activity, bouts, tracking coverage, arena and
+  wall affinity, and normalized spatial/quadrant entropy on a declared grid.
+- `baseline_behavior_time_bins`: fixed-duration rows from the start of the
+  baseline. The default is 5 seconds and records speed, travelled distance,
+  representative arena position, center distance, wall occupancy, bouts, and
+  validity.
+
+Both use arena-centered millimetres with image-style axes (`x` right, `y`
+down). The exporter resolves the exact epoch-behavior, track-kinematics,
+swim-bout, chaser-distance position, and circular arena-geometry sources and
+records those paths in every row. It does not independently choose unrelated
+latest runs.
+
+`baseline_kinematic_samples` is opt-in because it is much larger. Enable the
+portable default 10 Hz representation with:
+
+```bash
+scripts/submit_analytics_export_bsub.sh \
+  --collection-manifest /groups/johnson/johnsonlab/palette_analytics/collections/example.manifest.json \
+  --export-run-id chaser_v2_example_with_baseline_samples \
+  --include-baseline-samples
+```
+
+Use `--baseline-sample-rate-hz 5` or another positive rate to change the
+deterministic integer-frame sampling stride. Use
+`--baseline-full-resolution-samples` when every source kinematic sample is
+required. The requested rate, effective rate, stride, and sampling policy are
+stored in both rows and the export manifest.
+
+Other controls are `--baseline-time-bin-s` and
+`--baseline-spatial-grid-size`. Changing any of these settings creates a new
+immutable export run; existing exports are not patched.
+
+The sample table is a derived kinematic surface, not raw video. Source Zarr
+arrays remain authoritative. Cohort-dependent strategy/cluster assignments do
+not belong in these base tables and should be written as a separately versioned
+derived analysis that references the immutable export manifest.
 
 ## Viewer and deployment
 

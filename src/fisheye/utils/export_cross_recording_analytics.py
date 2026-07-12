@@ -27,6 +27,9 @@ import numpy as np
 from fisheye.analytics_exports.capabilities import resolve_capabilities
 from fisheye.analytics_exports.contracts import (
     ALL_TABLES,
+    BASELINE_BEHAVIOR_SUMMARY_TABLE,
+    BASELINE_BEHAVIOR_TIME_BINS_TABLE,
+    BASELINE_KINEMATIC_SAMPLES_TABLE,
     CHASER_BOUT_EVENTS_TABLE,
     CHASER_BOUT_HISTOGRAM_TABLE,
     CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
@@ -55,6 +58,14 @@ from fisheye.analytics_exports.contracts import (
     contract_snapshot,
     validate_table_columns,
 )
+from fisheye.analytics_exports.baseline import (
+    BaselineArrays,
+    BaselineWindow,
+    build_sample_metrics,
+    build_summary_metrics,
+    build_time_bin_metrics,
+    is_baseline_label,
+)
 from fisheye.analysis.bout_kinematics import resolve_bout_kinematics_tables
 from fisheye.analysis.chaser_behavior import canonical_behavior_label
 from fisheye.analysis.cra_primary_endpoint import QUADRANT_LABELS, quadrant_code_for_xy
@@ -65,6 +76,7 @@ from fisheye.analysis.swim_bout_io import (
     structured_records_to_dicts,
 )
 from fisheye.analysis.stimulus_response_io import resolve_stimulus_response_tables
+from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe, strict_json_dumps
 from fisheye.shared.zarr_helpers import resolve_zarr_run
@@ -1880,6 +1892,356 @@ def _latest_epoch_behavior_component(
         selected,
         f"analysis/chaser_distance_runs/{run_name}/{EPOCH_BEHAVIOR_COMPONENT_PARENT}/{selected}",
     )
+
+
+def _group_at_path(root: Any, path: str | None) -> Any | None:
+    normalized = "/".join(part for part in str(path or "").strip("/").split("/") if part)
+    if not normalized:
+        return root
+    current = root
+    for part in normalized.split("/"):
+        if not _has_child(current, part):
+            return None
+        current = current[part]
+    return current
+
+
+def _baseline_arena_geometry(root: Any, chaser_run: Any) -> dict[str, float] | None:
+    """Resolve the arena-relative coordinate geometry used by chaser positions."""
+
+    candidates: list[Any] = []
+    source_stimulus_path = str(_attrs_dict(chaser_run).get("source_stimulus_path") or "").strip()
+    if source_stimulus_path:
+        source_geometry = _group_at_path(
+            root,
+            f"{source_stimulus_path}/calibration/arena_geometry",
+        )
+        if source_geometry is not None:
+            candidates.append(source_geometry)
+    analysis_calibration = _group_at_path(root, "analysis/calibration")
+    if analysis_calibration is not None:
+        candidates.append(analysis_calibration)
+
+    pixels_per_mm = _safe_float(_attrs_dict(chaser_run).get("pixels_per_mm_projector"))
+    if pixels_per_mm is None or pixels_per_mm <= 0:
+        return None
+    for group in candidates:
+        attrs = _attrs_dict(group)
+        shape = str(
+            attrs.get("experimental_area_shape") or attrs.get("arena_shape") or ""
+        ).strip().lower()
+        center_x = _safe_float(attrs.get("experimental_area_center_x_px"))
+        center_y = _safe_float(attrs.get("experimental_area_center_y_px"))
+        radius_px = _safe_float(attrs.get("experimental_area_radius_px"))
+        if radius_px is None:
+            radius_mm = _safe_float(attrs.get("experimental_area_radius_mm"))
+            if radius_mm is not None:
+                radius_px = radius_mm * pixels_per_mm
+        if (
+            shape == "circle"
+            and center_x is not None
+            and center_y is not None
+            and radius_px is not None
+            and radius_px > 0
+        ):
+            return {
+                "center_x_px": center_x,
+                "center_y_px": center_y,
+                "radius_px": radius_px,
+                "pixels_per_mm": pixels_per_mm,
+            }
+    return None
+
+
+def _load_baseline_tables(
+    root: Any,
+    *,
+    export_run_id: str,
+    zarr_path: Path,
+    recording_id: str,
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+    time_bin_s: float,
+    sample_rate_hz: float,
+    full_resolution_samples: bool,
+    spatial_grid_size: int,
+) -> dict[str, list[dict[str, Any]]]:
+    requested = {
+        BASELINE_BEHAVIOR_SUMMARY_TABLE,
+        BASELINE_BEHAVIOR_TIME_BINS_TABLE,
+        BASELINE_KINEMATIC_SAMPLES_TABLE,
+    } & tables
+    output = {table: [] for table in requested}
+    if not requested:
+        return output
+
+    chaser_run, chaser_run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
+    if chaser_run is None or chaser_run_name is None:
+        for table in sorted(requested):
+            diagnostics.append({"table": table, "status": "skipped", "reason": error})
+        return output
+    component, component_name, component_path_or_error = _latest_epoch_behavior_component(
+        chaser_run,
+        run_name=chaser_run_name,
+    )
+    if component is None or component_name is None:
+        for table in sorted(requested):
+            diagnostics.append(
+                {
+                    "table": table,
+                    "status": "skipped",
+                    "reason": component_path_or_error,
+                }
+            )
+        return output
+    component_path = str(component_path_or_error)
+    try:
+        summary_records, _summary_attrs = load_structured_dataset(component, "per_epoch_fish")
+    except Exception as exc:
+        for table in sorted(requested):
+            diagnostics.append(
+                {
+                    "table": table,
+                    "status": "skipped",
+                    "reason": f"failed to load per_epoch_fish: {exc}",
+                }
+            )
+        return output
+    summary_rows = [
+        {name: _scalar_for_parquet(record[name]) for name in summary_records.dtype.names or ()}
+        for record in summary_records
+    ]
+    baseline_rows = [row for row in summary_rows if is_baseline_label(row.get("window_label"))]
+    if not baseline_rows:
+        for table in sorted(requested):
+            diagnostics.append(
+                {
+                    "table": table,
+                    "status": "skipped",
+                    "reason": "no canonical baseline window in per_epoch_fish",
+                }
+            )
+        return output
+
+    component_attrs = _attrs_dict(component)
+    component_source_refs = _json_mapping_attr(component_attrs, "source_refs")
+    component_parameters = _json_mapping_attr(component_attrs, "parameters")
+    track_run_name = str(
+        component_source_refs.get("source_track_kinematics_run") or ""
+    ).strip()
+    track_scope = str(
+        component_source_refs.get("source_track_kinematics_scope") or "offline"
+    ).strip()
+    track_id = _safe_int(component_source_refs.get("source_track_kinematics_track_id"))
+    if track_id is None:
+        track_id = 0
+    speed_level = str(component_parameters.get("speed_level") or "filtered").strip()
+    try:
+        track = load_track_kinematics_track(
+            root,
+            run_name=track_run_name or "latest",
+            scope=track_scope or "offline",
+            track_id=track_id,
+            required_speed_levels=(speed_level,),
+        )
+    except Exception as exc:
+        for table in sorted(requested):
+            diagnostics.append(
+                {
+                    "table": table,
+                    "status": "skipped",
+                    "reason": f"failed to load source track kinematics: {exc}",
+                }
+            )
+        return output
+
+    if not _has_child(chaser_run, "positions"):
+        reason = "chaser-distance run has no positions group"
+        for table in sorted(requested):
+            diagnostics.append({"table": table, "status": "skipped", "reason": reason})
+        return output
+    positions = chaser_run["positions"]
+    arena_xy = _read_array(positions, "fish_centroid_arena_xy")
+    position_valid = _read_array(positions, "fish_valid")
+    geometry = _baseline_arena_geometry(root, chaser_run)
+    if arena_xy is None or position_valid is None or geometry is None:
+        reason = "missing arena-relative fish positions, validity, or circular arena geometry"
+        for table in sorted(requested):
+            diagnostics.append({"table": table, "status": "skipped", "reason": reason})
+        return output
+
+    fps = _safe_float(_attrs_dict(chaser_run).get("fps"))
+    if fps is None:
+        fps = _safe_float(track.run_attrs.get("fps"))
+    if fps is None or fps <= 0:
+        reason = "missing positive fps"
+        for table in sorted(requested):
+            diagnostics.append({"table": table, "status": "skipped", "reason": reason})
+        return output
+
+    speed_values = track.speed_mm_by_level.get(speed_level)
+    if speed_values is None:
+        speed_values = track.speed_mm_by_level.get("filtered")
+    path_values = track.frame_path_distance_mm_by_level.get(speed_level)
+    if path_values is None:
+        path_values = track.frame_path_distance_mm_by_level.get("filtered")
+    heading_values = (
+        track.smoothed_heading_degrees
+        if track.smoothed_heading_degrees is not None
+        else track.heading_degrees
+    )
+    bout_event_frames: np.ndarray | None = None
+    try:
+        bout_records, _bout_attrs = load_structured_dataset(component, "per_epoch_bouts")
+        if bout_records.dtype.names:
+            for field_name in ("bout_event_frame", "bout_start_frame", "bout_source_row"):
+                if field_name in bout_records.dtype.names:
+                    bout_event_frames = np.asarray(bout_records[field_name], dtype=np.int64)
+                    break
+    except Exception:
+        bout_event_frames = None
+
+    wall_band_mm = _safe_float(component_parameters.get("wall_band_mm"))
+    if wall_band_mm is None:
+        wall_band_mm = _safe_float(baseline_rows[0].get("wall_band_mm"))
+    if wall_band_mm is None:
+        wall_band_mm = 5.0
+    arrays = BaselineArrays(
+        fps=fps,
+        arena_xy_px=np.asarray(arena_xy),
+        position_valid=np.asarray(position_valid),
+        arena_center_x_px=geometry["center_x_px"],
+        arena_center_y_px=geometry["center_y_px"],
+        arena_radius_px=geometry["radius_px"],
+        pixels_per_mm=geometry["pixels_per_mm"],
+        wall_band_mm=wall_band_mm,
+        track_frames=np.asarray(track.frame_indices),
+        track_time_s=track.time_seconds,
+        speed_mm_s=speed_values,
+        frame_path_distance_mm=path_values,
+        heading_deg=heading_values,
+        sample_valid=track.sample_valid,
+        bout_event_frames=bout_event_frames,
+    )
+
+    run_common, chaser_source_refs, _chaser_parameters = _chaser_common_run_fields(
+        chaser_run,
+        chaser_run_name,
+    )
+    source_epoch_run = component_source_refs.get("source_stimulus_epoch_run") or chaser_source_refs.get(
+        "source_stimulus_epoch_run"
+    )
+    source_epoch_path = component_source_refs.get("source_stimulus_epoch_path") or chaser_source_refs.get(
+        "source_stimulus_epoch_path"
+    )
+    common_source = {
+        **run_common,
+        "source_chaser_distance_run": chaser_run_name,
+        "source_chaser_distance_path": f"analysis/chaser_distance_runs/{chaser_run_name}",
+        "source_epoch_behavior_component": component_name,
+        "source_epoch_behavior_path": component_path,
+        "source_stimulus_epoch_run": source_epoch_run,
+        "source_stimulus_epoch_path": source_epoch_path,
+        "source_track_kinematics_run": track.run_name,
+        "source_track_kinematics_scope": track.scope,
+        "source_track_kinematics_path": track.run_path,
+        "source_track_kinematics_track_path": track.track_path,
+        "source_speed_level": speed_level,
+        "source_swim_bout_run": component_source_refs.get("source_swim_bout_run"),
+        "source_swim_bout_path": component_source_refs.get("source_swim_bout_path"),
+        "track_id": track_id,
+        "arena_center_x_px": geometry["center_x_px"],
+        "arena_center_y_px": geometry["center_y_px"],
+        "arena_radius_px": geometry["radius_px"],
+        "pixels_per_mm_projector": geometry["pixels_per_mm"],
+    }
+
+    for source_summary in baseline_rows:
+        start_frame = _safe_int(source_summary.get("start_frame"))
+        end_frame = _safe_int(source_summary.get("end_frame"))
+        window_id = _safe_int(source_summary.get("window_id"))
+        if start_frame is None or end_frame is None or window_id is None:
+            continue
+        start_time_s = _safe_float(source_summary.get("start_time_s"))
+        end_time_s = _safe_float(source_summary.get("end_time_s"))
+        duration_s = _safe_float(source_summary.get("duration_s"))
+        if start_time_s is None:
+            start_time_s = start_frame / fps
+        if end_time_s is None:
+            end_time_s = (end_frame + 1) / fps
+        if duration_s is None:
+            duration_s = max(0.0, end_time_s - start_time_s)
+        window = BaselineWindow(
+            window_id=window_id,
+            label=str(source_summary.get("window_label") or "baseline"),
+            start_frame=start_frame,
+            end_frame=end_frame,
+            start_time_s=start_time_s,
+            end_time_s=end_time_s,
+            duration_s=duration_s,
+        )
+        builders: list[tuple[str, list[dict[str, Any]]]] = []
+        if BASELINE_BEHAVIOR_SUMMARY_TABLE in requested:
+            builders.append(
+                (
+                    BASELINE_BEHAVIOR_SUMMARY_TABLE,
+                    [
+                        build_summary_metrics(
+                            arrays,
+                            window,
+                            spatial_grid_size=spatial_grid_size,
+                            source_summary=source_summary,
+                        )
+                    ],
+                )
+            )
+        if BASELINE_BEHAVIOR_TIME_BINS_TABLE in requested:
+            builders.append(
+                (
+                    BASELINE_BEHAVIOR_TIME_BINS_TABLE,
+                    build_time_bin_metrics(arrays, window, time_bin_s=time_bin_s),
+                )
+            )
+        if BASELINE_KINEMATIC_SAMPLES_TABLE in requested:
+            builders.append(
+                (
+                    BASELINE_KINEMATIC_SAMPLES_TABLE,
+                    build_sample_metrics(
+                        arrays,
+                        window,
+                        target_sample_rate_hz=sample_rate_hz,
+                        full_resolution=full_resolution_samples,
+                    ),
+                )
+            )
+        for table, metric_rows in builders:
+            for metrics in metric_rows:
+                lineage = {
+                    "zarr_path": str(zarr_path),
+                    "source_chaser_distance_run": chaser_run_name,
+                    "source_epoch_behavior_component": component_name,
+                    "source_track_kinematics_run": track.run_name,
+                    "source_track_kinematics_scope": track.scope,
+                    "track_id": track_id,
+                    "baseline_window_id": window.window_id,
+                    "time_bin_index": metrics.get("time_bin_index"),
+                    "source_sample_index": metrics.get("source_sample_index"),
+                    "time_bin_s": time_bin_s,
+                    "sample_rate_hz": None if full_resolution_samples else sample_rate_hz,
+                    "full_resolution_samples": full_resolution_samples,
+                    "spatial_grid_size": spatial_grid_size,
+                }
+                row = _common_row(
+                    export_run_id=export_run_id,
+                    zarr_path=zarr_path,
+                    recording_id=recording_id,
+                    table=table,
+                    lineage=lineage,
+                )
+                row.update(common_source)
+                row.update(metrics)
+                output[table].append(row)
+    return output
 
 
 def _load_goodcopbadcop_epoch_behavior_summary(
@@ -4419,7 +4781,16 @@ def _load_goodcopbadcop_egocentric_distance_bearing_histogram(
     return rows
 
 
-def export_one_zarr(zarr_path: str | Path, *, tables: Sequence[str], export_run_id: str) -> SourceExportResult:
+def export_one_zarr(
+    zarr_path: str | Path,
+    *,
+    tables: Sequence[str],
+    export_run_id: str,
+    baseline_time_bin_s: float = 5.0,
+    baseline_sample_rate_hz: float = 10.0,
+    baseline_full_resolution_samples: bool = False,
+    baseline_spatial_grid_size: int = 12,
+) -> SourceExportResult:
     zarr_path = Path(zarr_path).expanduser().resolve()
     recording_id = _recording_id_from_path(zarr_path)
     result = SourceExportResult(zarr_path=str(zarr_path), recording_id=recording_id)
@@ -4512,6 +4883,22 @@ def export_one_zarr(zarr_path: str | Path, *, tables: Sequence[str], export_run_
             POSITION_OCCUPANCY_HISTOGRAM_TABLE,
             [],
         ).extend(position_occupancy_rows)
+
+    baseline_rows_by_table = _load_baseline_tables(
+        root,
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+        time_bin_s=baseline_time_bin_s,
+        sample_rate_hz=baseline_sample_rate_hz,
+        full_resolution_samples=baseline_full_resolution_samples,
+        spatial_grid_size=baseline_spatial_grid_size,
+    )
+    for baseline_table, baseline_rows in baseline_rows_by_table.items():
+        if baseline_rows:
+            result.rows_by_table.setdefault(baseline_table, []).extend(baseline_rows)
 
     goodcopbadcop_spatial_rows = _load_goodcopbadcop_spatial_occupancy_zones(
         root,
@@ -4911,6 +5298,10 @@ def export_sources(
     export_run_id: str | None = None,
     overwrite: bool = False,
     collection_manifest_path: Path | None = None,
+    baseline_time_bin_s: float = 5.0,
+    baseline_sample_rate_hz: float = 10.0,
+    baseline_full_resolution_samples: bool = False,
+    baseline_spatial_grid_size: int = 12,
 ) -> dict[str, Any]:
     tables = _parse_tables(tables)
     output_root = Path(output_root).expanduser().resolve()
@@ -4918,6 +5309,18 @@ def export_sources(
     zarr_paths = [Path(path).expanduser().resolve() for path in zarr_paths]
     if not zarr_paths:
         raise ValueError("No analysis Zarr sources were provided or discovered.")
+    if not math.isfinite(float(baseline_time_bin_s)) or float(baseline_time_bin_s) <= 0:
+        raise ValueError("baseline_time_bin_s must be positive and finite")
+    if (
+        not baseline_full_resolution_samples
+        and (
+            not math.isfinite(float(baseline_sample_rate_hz))
+            or float(baseline_sample_rate_hz) <= 0
+        )
+    ):
+        raise ValueError("baseline_sample_rate_hz must be positive and finite")
+    if int(baseline_spatial_grid_size) < 2:
+        raise ValueError("baseline_spatial_grid_size must be at least 2")
     collection_summary = (
         _collection_manifest_summary(Path(collection_manifest_path))
         if collection_manifest_path is not None
@@ -4927,11 +5330,30 @@ def export_sources(
     results: list[SourceExportResult] = []
     if jobs <= 1:
         for path in zarr_paths:
-            results.append(export_one_zarr(path, tables=tables, export_run_id=export_run_id))
+            results.append(
+                export_one_zarr(
+                    path,
+                    tables=tables,
+                    export_run_id=export_run_id,
+                    baseline_time_bin_s=baseline_time_bin_s,
+                    baseline_sample_rate_hz=baseline_sample_rate_hz,
+                    baseline_full_resolution_samples=baseline_full_resolution_samples,
+                    baseline_spatial_grid_size=baseline_spatial_grid_size,
+                )
+            )
     else:
         with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as pool:
             futures = [
-                pool.submit(export_one_zarr, path, tables=tables, export_run_id=export_run_id)
+                pool.submit(
+                    export_one_zarr,
+                    path,
+                    tables=tables,
+                    export_run_id=export_run_id,
+                    baseline_time_bin_s=baseline_time_bin_s,
+                    baseline_sample_rate_hz=baseline_sample_rate_hz,
+                    baseline_full_resolution_samples=baseline_full_resolution_samples,
+                    baseline_spatial_grid_size=baseline_spatial_grid_size,
+                )
                 for path in zarr_paths
             ]
             for future in concurrent.futures.as_completed(futures):
@@ -5025,6 +5447,17 @@ def export_sources(
             "collection_manifest_path": (
                 collection_summary.path if collection_summary is not None else None
             ),
+            "baseline": {
+                "time_bin_s": float(baseline_time_bin_s),
+                "spatial_grid_size": int(baseline_spatial_grid_size),
+                "kinematic_samples_requested": BASELINE_KINEMATIC_SAMPLES_TABLE in tables,
+                "sample_rate_hz": (
+                    None
+                    if baseline_full_resolution_samples
+                    else float(baseline_sample_rate_hz)
+                ),
+                "full_resolution_samples": bool(baseline_full_resolution_samples),
+            },
         },
     }
     manifest_dir = output_root / "v1" / "manifests"
@@ -5065,6 +5498,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=f"Comma-separated table list. Available: {', '.join(AVAILABLE_TABLES)}.",
     )
     parser.add_argument("--jobs", type=int, default=1, help="Parallel extraction workers by recording.")
+    parser.add_argument(
+        "--baseline-time-bin-s",
+        type=float,
+        default=5.0,
+        help="Fixed baseline behavior time-bin width in seconds (default: 5).",
+    )
+    parser.add_argument(
+        "--baseline-sample-rate-hz",
+        type=float,
+        default=10.0,
+        help=(
+            "Requested rate for optional baseline_kinematic_samples (default: 10 Hz). "
+            "The effective rate is recorded after integer-frame stride selection."
+        ),
+    )
+    parser.add_argument(
+        "--baseline-full-resolution-samples",
+        action="store_true",
+        help="Export every source kinematic sample when baseline_kinematic_samples is selected.",
+    )
+    parser.add_argument(
+        "--baseline-spatial-grid-size",
+        type=int,
+        default=12,
+        help="Per-axis grid size used for normalized baseline spatial entropy (default: 12).",
+    )
     parser.add_argument("--limit", type=int, help="Limit discovered sources, useful for canaries.")
     parser.add_argument("--export-run-id", help="Explicit export run id. Defaults to current UTC timestamp.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite an existing export_run_id directory/manifest.")
@@ -5090,6 +5549,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         export_run_id=args.export_run_id,
         overwrite=bool(args.overwrite),
         collection_manifest_path=args.collection_manifest,
+        baseline_time_bin_s=float(args.baseline_time_bin_s),
+        baseline_sample_rate_hz=float(args.baseline_sample_rate_hz),
+        baseline_full_resolution_samples=bool(args.baseline_full_resolution_samples),
+        baseline_spatial_grid_size=int(args.baseline_spatial_grid_size),
     )
     print(f"export_run_id\t{manifest['export_run_id']}")
     print(f"manifest\t{manifest['manifest_path']}")

@@ -17,7 +17,12 @@ WALLTIME="2:00"
 RUN_STATISTICS=1
 INDEX_REGISTRY=0
 SUBMIT=0
-TABLES="position_occupancy_histogram_2d,chaser_epoch_spatial_occupancy_zones,chaser_epoch_distance_summary,chaser_epoch_behavior_summary,chaser_epoch_bout_events,chaser_epoch_bout_histogram,chaser_epoch_inter_bout_interval_histogram,chaser_epoch_center_distance_histogram,chaser_speed_distance_bins,chaser_epoch_distance_histogram,chaser_cra_primary_endpoint_summary,chaser_cra_primary_endpoint_object_phase,chaser_cra_quadrant_occupancy,chaser_cra_near_field_summary,chaser_cra_near_field_object_phase,chaser_cra_near_field_radial_density,chaser_cra_near_field_distance_cdf,chaser_egocentric_epoch_summary,chaser_egocentric_distance_bearing_histogram"
+BASELINE_TIME_BIN_S=5
+BASELINE_SAMPLE_RATE_HZ=10
+BASELINE_FULL_RESOLUTION_SAMPLES=0
+BASELINE_SPATIAL_GRID_SIZE=12
+INCLUDE_BASELINE_SAMPLES=0
+TABLES="baseline_behavior_summary,baseline_behavior_time_bins,position_occupancy_histogram_2d,chaser_epoch_spatial_occupancy_zones,chaser_epoch_distance_summary,chaser_epoch_behavior_summary,chaser_epoch_bout_events,chaser_epoch_bout_histogram,chaser_epoch_inter_bout_interval_histogram,chaser_epoch_center_distance_histogram,chaser_speed_distance_bins,chaser_epoch_distance_histogram,chaser_cra_primary_endpoint_summary,chaser_cra_primary_endpoint_object_phase,chaser_cra_quadrant_occupancy,chaser_cra_near_field_summary,chaser_cra_near_field_object_phase,chaser_cra_near_field_radial_density,chaser_cra_near_field_distance_cdf,chaser_egocentric_epoch_summary,chaser_egocentric_distance_bearing_histogram"
 
 usage() {
   cat <<'USAGE'
@@ -40,6 +45,13 @@ Options:
   --submit-host HOST           SSH host used when bsub is unavailable locally
                                (default: login1-citrus-poller)
   --tables CSV                 V2 tables (default: all chaser tables)
+  --baseline-time-bin-s S      Baseline behavior bin width (default: 5)
+  --include-baseline-samples   Add optional baseline_kinematic_samples table
+  --baseline-sample-rate-hz HZ Requested baseline sample rate (default: 10)
+  --baseline-full-resolution-samples
+                               Export every baseline source sample; also enables table
+  --baseline-spatial-grid-size N
+                               Per-axis entropy grid size (default: 12)
   --skip-statistics            Do not compute the linked chaser statistics export
   --index-registry             Index the completed base export in the shared registry
   --registry PATH              Registry path used with --index-registry
@@ -72,6 +84,12 @@ while [[ $# -gt 0 ]]; do
     --palette-repo) PALETTE_REPO="$2"; shift 2;;
     --submit-host) SUBMIT_HOST="$2"; shift 2;;
     --tables) TABLES="$2"; shift 2;;
+    --baseline-time-bin-s) BASELINE_TIME_BIN_S="$2"; shift 2;;
+    --include-baseline-samples) INCLUDE_BASELINE_SAMPLES=1; shift;;
+    --baseline-sample-rate-hz) BASELINE_SAMPLE_RATE_HZ="$2"; shift 2;;
+    --baseline-full-resolution-samples)
+      BASELINE_FULL_RESOLUTION_SAMPLES=1; INCLUDE_BASELINE_SAMPLES=1; shift;;
+    --baseline-spatial-grid-size) BASELINE_SPATIAL_GRID_SIZE="$2"; shift 2;;
     --skip-statistics) RUN_STATISTICS=0; shift;;
     --index-registry) INDEX_REGISTRY=1; shift;;
     --registry) REGISTRY="$2"; shift 2;;
@@ -93,6 +111,13 @@ if [[ -z "$STATS_RUN_ID" ]]; then STATS_RUN_ID="${EXPORT_RUN_ID}_stats"; fi
 [[ "$STATS_RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || fail "Unsafe --stats-run-id: $STATS_RUN_ID"
 [[ "$NCORES" =~ ^[1-9][0-9]*$ ]] || fail "--ncores must be a positive integer"
 [[ "$MEM_GB" =~ ^[1-9][0-9]*$ ]] || fail "--mem-gb must be a positive integer"
+[[ "$BASELINE_SPATIAL_GRID_SIZE" =~ ^[0-9]+$ ]] || \
+  fail "--baseline-spatial-grid-size must be an integer >= 2"
+(( BASELINE_SPATIAL_GRID_SIZE >= 2 )) || \
+  fail "--baseline-spatial-grid-size must be an integer >= 2"
+if [[ "$INCLUDE_BASELINE_SAMPLES" == "1" && ",$TABLES," != *,baseline_kinematic_samples,* ]]; then
+  TABLES="${TABLES},baseline_kinematic_samples"
+fi
 [[ -f "$COLLECTION_MANIFEST" ]] || fail "Collection manifest not found: $COLLECTION_MANIFEST"
 [[ -d "$PALETTE_REPO/.git" ]] || fail "Palette checkout not found: $PALETTE_REPO"
 [[ -x "$PALETTE_REPO/scripts/py" ]] || fail "Palette scripts/py is not executable: $PALETTE_REPO"
@@ -127,6 +152,9 @@ q_registry="$(printf '%q' "$REGISTRY")"
 q_commit="$(printf '%q' "$EXPECTED_COMMIT")"
 q_validation="$(printf '%q' "$VALIDATION_JSON")"
 q_status="$(printf '%q' "$STATUS_FILE")"
+q_baseline_time_bin_s="$(printf '%q' "$BASELINE_TIME_BIN_S")"
+q_baseline_sample_rate_hz="$(printf '%q' "$BASELINE_SAMPLE_RATE_HZ")"
+q_baseline_spatial_grid_size="$(printf '%q' "$BASELINE_SPATIAL_GRID_SIZE")"
 
 cat >"$JOB_SCRIPT" <<JOBSCRIPT
 #!/usr/bin/env bash
@@ -146,6 +174,10 @@ STATUS_FILE=${q_status}
 NCORES=${NCORES}
 RUN_STATISTICS=${RUN_STATISTICS}
 INDEX_REGISTRY=${INDEX_REGISTRY}
+BASELINE_TIME_BIN_S=${q_baseline_time_bin_s}
+BASELINE_SAMPLE_RATE_HZ=${q_baseline_sample_rate_hz}
+BASELINE_FULL_RESOLUTION_SAMPLES=${BASELINE_FULL_RESOLUTION_SAMPLES}
+BASELINE_SPATIAL_GRID_SIZE=${q_baseline_spatial_grid_size}
 
 cd "\${PALETTE_REPO}"
 ACTUAL_COMMIT="\$(git rev-parse HEAD)"
@@ -163,7 +195,13 @@ export_cmd=(
   --tables "\${TABLES}"
   --jobs "\${NCORES}"
   --export-run-id "\${EXPORT_RUN_ID}"
+  --baseline-time-bin-s "\${BASELINE_TIME_BIN_S}"
+  --baseline-sample-rate-hz "\${BASELINE_SAMPLE_RATE_HZ}"
+  --baseline-spatial-grid-size "\${BASELINE_SPATIAL_GRID_SIZE}"
 )
+if [[ "\${BASELINE_FULL_RESOLUTION_SAMPLES}" == "1" ]]; then
+  export_cmd+=(--baseline-full-resolution-samples)
+fi
 if [[ "\${INDEX_REGISTRY}" == "1" ]]; then
   export_cmd+=(--index-registry --registry "\${REGISTRY}")
 fi

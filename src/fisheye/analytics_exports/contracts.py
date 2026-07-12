@@ -21,6 +21,9 @@ STIMULUS_RESPONSE_TABLE = "stimulus_response_per_fish_step"
 SWIM_BOUT_METRICS_TABLE = "swim_bout_metrics"
 BOUT_KINEMATICS_METRICS_TABLE = "bout_kinematics_metrics"
 POSITION_OCCUPANCY_HISTOGRAM_TABLE = "position_occupancy_histogram_2d"
+BASELINE_BEHAVIOR_SUMMARY_TABLE = "baseline_behavior_summary"
+BASELINE_BEHAVIOR_TIME_BINS_TABLE = "baseline_behavior_time_bins"
+BASELINE_KINEMATIC_SAMPLES_TABLE = "baseline_kinematic_samples"
 
 CHASER_SPATIAL_TABLE = "chaser_epoch_spatial_occupancy_zones"
 CHASER_DISTANCE_SUMMARY_TABLE = "chaser_epoch_distance_summary"
@@ -157,6 +160,123 @@ TABLE_CONTRACTS: dict[str, TableContract] = {
             "x_bin_right_fraction": "arena_width_fraction",
             "y_bin_left_fraction": "arena_height_fraction",
             "y_bin_right_fraction": "arena_height_fraction",
+        },
+    ),
+    BASELINE_BEHAVIOR_SUMMARY_TABLE: _contract(
+        BASELINE_BEHAVIOR_SUMMARY_TABLE,
+        "recording_x_track_x_baseline_window",
+        ("recording_id", "track_id", "baseline_window_id"),
+        (
+            "track_id",
+            "baseline_window_id",
+            "baseline_window_label",
+            "start_frame",
+            "end_frame",
+            "duration_s",
+            "valid_frame_count",
+            "tracking_dropout_fraction",
+            "mean_speed_mm_s",
+            "total_path_mm",
+            "bout_count",
+            "bout_rate_per_min",
+            "wall_fraction",
+            "mean_center_distance_norm",
+            "spatial_entropy_normalized",
+            "quadrant_entropy_normalized",
+            "spatial_grid_size",
+            "coordinate_frame",
+            "coordinate_origin",
+        ),
+        {
+            "duration_s": "s",
+            "mean_speed_mm_s": "mm/s",
+            "median_speed_mm_s": "mm/s",
+            "p95_speed_mm_s": "mm/s",
+            "total_path_mm": "mm",
+            "arena_radius_mm": "mm",
+            "wall_band_mm": "mm",
+            "mean_distance_from_arena_center_mm": "mm",
+            "median_distance_from_arena_center_mm": "mm",
+        },
+    ),
+    BASELINE_BEHAVIOR_TIME_BINS_TABLE: _contract(
+        BASELINE_BEHAVIOR_TIME_BINS_TABLE,
+        "recording_x_track_x_baseline_window_x_time_bin",
+        ("recording_id", "track_id", "baseline_window_id", "time_bin_index"),
+        (
+            "track_id",
+            "baseline_window_id",
+            "baseline_window_label",
+            "time_bin_index",
+            "relative_start_s",
+            "relative_end_s",
+            "time_bin_duration_s",
+            "source_start_frame",
+            "source_end_frame",
+            "valid_position_fraction",
+            "mean_speed_mm_s",
+            "distance_travelled_mm",
+            "wall_fraction",
+            "mean_center_distance_mm",
+            "representative_x_mm",
+            "representative_y_mm",
+            "bout_count",
+            "coordinate_frame",
+            "coordinate_origin",
+            "time_bin_policy",
+        ),
+        {
+            "relative_start_s": "s",
+            "relative_end_s": "s",
+            "time_bin_duration_s": "s",
+            "mean_speed_mm_s": "mm/s",
+            "median_speed_mm_s": "mm/s",
+            "p95_speed_mm_s": "mm/s",
+            "distance_travelled_mm": "mm",
+            "mean_center_distance_mm": "mm",
+            "representative_x_mm": "mm",
+            "representative_y_mm": "mm",
+        },
+    ),
+    BASELINE_KINEMATIC_SAMPLES_TABLE: _contract(
+        BASELINE_KINEMATIC_SAMPLES_TABLE,
+        "recording_x_track_x_baseline_window_x_kinematic_sample",
+        ("recording_id", "track_id", "baseline_window_id", "source_sample_index"),
+        (
+            "track_id",
+            "baseline_window_id",
+            "baseline_window_label",
+            "source_sample_index",
+            "source_frame",
+            "source_time_s",
+            "relative_time_s",
+            "x_arena_mm",
+            "y_arena_mm",
+            "speed_mm_s",
+            "heading_deg",
+            "frame_path_distance_mm",
+            "center_distance_mm",
+            "position_valid",
+            "sample_valid",
+            "sampling_policy",
+            "sampling_stride_frames",
+            "source_sample_rate_hz",
+            "effective_sample_rate_hz",
+            "coordinate_frame",
+            "coordinate_origin",
+        ),
+        {
+            "source_time_s": "s",
+            "relative_time_s": "s",
+            "x_arena_mm": "mm",
+            "y_arena_mm": "mm",
+            "speed_mm_s": "mm/s",
+            "heading_deg": "deg",
+            "frame_path_distance_mm": "mm",
+            "center_distance_mm": "mm",
+            "source_sample_rate_hz": "Hz",
+            "nominal_sample_rate_hz": "Hz",
+            "effective_sample_rate_hz": "Hz",
         },
     ),
     CHASER_SPATIAL_TABLE: _contract(
@@ -373,6 +493,12 @@ DEFAULT_TABLES = (
     BOUT_KINEMATICS_METRICS_TABLE,
 )
 
+BASELINE_TABLES = (
+    BASELINE_BEHAVIOR_SUMMARY_TABLE,
+    BASELINE_BEHAVIOR_TIME_BINS_TABLE,
+    BASELINE_KINEMATIC_SAMPLES_TABLE,
+)
+
 CHASER_TABLES = (
     POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     CHASER_SPATIAL_TABLE,
@@ -395,7 +521,7 @@ CHASER_TABLES = (
     CHASER_EGOCENTRIC_HISTOGRAM_TABLE,
 )
 
-ALL_TABLES = DEFAULT_TABLES + CHASER_TABLES
+ALL_TABLES = DEFAULT_TABLES + BASELINE_TABLES + CHASER_TABLES
 
 
 def contract_snapshot(table_names: Sequence[str]) -> dict[str, dict[str, Any]]:

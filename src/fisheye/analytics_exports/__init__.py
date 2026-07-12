@@ -3,6 +3,7 @@
 from .capabilities import CapabilityStatus, resolve_capabilities
 from .contracts import (
     ALL_TABLES,
+    BASELINE_TABLES,
     CHASER_TABLES,
     DESCRIPTIVE_TABLE,
     EXPORT_SCHEMA_ID,
@@ -17,6 +18,7 @@ from .validation import ExportValidationError, validate_export_run, validate_exp
 
 __all__ = [
     "ALL_TABLES",
+    "BASELINE_TABLES",
     "CHASER_TABLES",
     "DESCRIPTIVE_TABLE",
     "EXPORT_SCHEMA_ID",

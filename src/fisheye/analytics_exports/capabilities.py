@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 from .contracts import (
+    BASELINE_BEHAVIOR_SUMMARY_TABLE,
+    BASELINE_BEHAVIOR_TIME_BINS_TABLE,
+    BASELINE_KINEMATIC_SAMPLES_TABLE,
     CHASER_BOUT_EVENTS_TABLE,
     CHASER_BOUT_HISTOGRAM_TABLE,
     CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
@@ -60,6 +63,18 @@ class CapabilityStatus:
 
 
 CAPABILITY_DEFINITIONS = (
+    CapabilityDefinition(
+        "core.baseline.behavior_summary",
+        (BASELINE_BEHAVIOR_SUMMARY_TABLE,),
+    ),
+    CapabilityDefinition(
+        "core.baseline.behavior_time_bins",
+        (BASELINE_BEHAVIOR_TIME_BINS_TABLE,),
+    ),
+    CapabilityDefinition(
+        "core.baseline.kinematic_samples",
+        (BASELINE_KINEMATIC_SAMPLES_TABLE,),
+    ),
     CapabilityDefinition(
         "position.epoch.occupancy_histogram_2d",
         (POSITION_OCCUPANCY_HISTOGRAM_TABLE,),
