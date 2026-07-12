@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Marimo app for Palette group analytics exports.
+"""Read-only Marimo explorer for immutable Palette analytics exports.
 
 Run with:
 
@@ -22,17 +22,30 @@ def _():
 
     import marimo as mo
     import pandas as pd
-    import plotly.graph_objects as go
 
+    from apps.marimo.components.group_analytics import (
+        available_group_panels,
+        egocentric_heatmap_figure,
+        grouped_bar_figure,
+        line_figure,
+        sample_grain_status_rows,
+    )
     from fisheye.group_analytics_viewer.catalog import (
         discover_export_catalog,
         select_export_run_id,
     )
     from fisheye.group_analytics_viewer.query import (
-        CHASER_SUMMARY_TABLE,
-        SPATIAL_TABLE,
         build_context,
         build_health_report,
+        query_chaser_histogram,
+        query_chaser_summary,
+        query_cra_near_field_curves,
+        query_cra_near_field_object_phase,
+        query_cra_near_field_summary,
+        query_cra_object_phase,
+        query_cra_summary,
+        query_egocentric_histogram,
+        query_egocentric_summary,
         query_epoch_bout_histogram,
         query_epoch_inter_bout_interval_histogram,
         query_epoch_speed_summary,
@@ -40,92 +53,31 @@ def _():
         query_group_statistics,
         query_options,
         query_recordings,
+        query_spatial_occupancy,
+        query_speed_distance_bins,
     )
-
-    def build_histogram_figure(rows, *, title, xaxis_title):
-        frame = pd.DataFrame(rows)
-        if frame.empty:
-            return None
-        fig = go.Figure()
-        for label, group in frame.groupby("window_label", sort=False):
-            group = group.sort_values("bin_center")
-            fig.add_trace(
-                go.Bar(
-                    x=group["bin_center"],
-                    y=group["pooled_count"],
-                    width=group["bin_width"] * 0.92,
-                    name=str(label),
-                    opacity=0.62,
-                    customdata=group[
-                        [
-                            "bin_left",
-                            "bin_right",
-                            "pooled_fraction",
-                            "pooled_density",
-                            "recording_count",
-                        ]
-                    ],
-                    hovertemplate=(
-                        "Epoch=%{fullData.name}<br>"
-                        "Bin=%{customdata[0]:.3g} to %{customdata[1]:.3g}<br>"
-                        "Count=%{y}<br>"
-                        "Fraction=%{customdata[2]:.3g}<br>"
-                        "Density=%{customdata[3]:.3g}<br>"
-                        "Recordings=%{customdata[4]}"
-                        "<extra></extra>"
-                    ),
-                )
-            )
-        fig.update_layout(
-            title=title,
-            xaxis_title=xaxis_title,
-            yaxis_title="Count",
-            barmode="overlay",
-            bargap=0.05,
-            margin=dict(l=50, r=30, t=55, b=50),
-        )
-        return fig
-
-    def build_bar_figure(rows, *, title, yaxis_title):
-        frame = pd.DataFrame(rows)
-        if frame.empty:
-            return None
-        fig = go.Figure()
-        fig.add_trace(
-            go.Bar(
-                x=frame["window_label"],
-                y=frame["value"],
-                customdata=frame[["recording_count", "mean", "median", "sem"]],
-                marker_color="#2563eb",
-                hovertemplate=(
-                    "Epoch=%{x}<br>"
-                    "Value=%{y:.3g}<br>"
-                    "Recordings=%{customdata[0]}<br>"
-                    "Mean=%{customdata[1]:.3g}<br>"
-                    "Median=%{customdata[2]:.3g}<br>"
-                    "SEM=%{customdata[3]:.3g}"
-                    "<extra></extra>"
-                ),
-            )
-        )
-        fig.update_layout(
-            title=title,
-            xaxis_title="Epoch",
-            yaxis_title=yaxis_title,
-            margin=dict(l=50, r=30, t=55, b=50),
-        )
-        return fig
 
     return (
         Path,
-        CHASER_SUMMARY_TABLE,
-        SPATIAL_TABLE,
+        available_group_panels,
         build_context,
         build_health_report,
         discover_export_catalog,
+        egocentric_heatmap_figure,
+        grouped_bar_figure,
+        line_figure,
         mo,
         os,
         pd,
+        query_chaser_histogram,
+        query_chaser_summary,
+        query_cra_near_field_curves,
+        query_cra_near_field_object_phase,
+        query_cra_near_field_summary,
+        query_cra_object_phase,
+        query_cra_summary,
+        query_egocentric_histogram,
+        query_egocentric_summary,
         query_epoch_bout_histogram,
         query_epoch_inter_bout_interval_histogram,
         query_epoch_speed_summary,
@@ -133,9 +85,10 @@ def _():
         query_group_statistics,
         query_options,
         query_recordings,
+        query_spatial_occupancy,
+        query_speed_distance_bins,
+        sample_grain_status_rows,
         select_export_run_id,
-        build_bar_figure,
-        build_histogram_figure,
     )
 
 
@@ -148,19 +101,19 @@ def _(Path, discover_export_catalog, mo, os, pd, select_export_run_id):
     )
     export_root = Path(str(cli_args.get("export-root", default_export_root)))
     requested_export_run_id = str(cli_args.get("export-run-id", "latest"))
+    requested_panel_id = str(cli_args.get("panel", "behavior"))
     stats_run_id_raw = cli_args.get("stats-run-id", "auto")
-    stats_run_id = None if stats_run_id_raw in (None, "", "none", "None") else str(stats_run_id_raw)
+    stats_run_id = (
+        None
+        if stats_run_id_raw in (None, "", "none", "None")
+        else str(stats_run_id_raw)
+    )
 
     export_catalog = discover_export_catalog(export_root)
     catalog_diagnostics = pd.DataFrame(
         [diagnostic.to_dict() for diagnostic in export_catalog.diagnostics]
     )
     if not export_catalog.entries:
-        details = (
-            mo.ui.table(catalog_diagnostics, selection=None, page_size=10)
-            if not catalog_diagnostics.empty
-            else mo.md("No manifest diagnostics were produced.")
-        )
         mo.stop(
             True,
             mo.vstack(
@@ -168,12 +121,16 @@ def _(Path, discover_export_catalog, mo, os, pd, select_export_run_id):
                     mo.md("# Palette Group Analytics"),
                     mo.callout(
                         mo.md(
-                            f"No selectable analytics exports were found under `{export_catalog.export_root}`. "
-                            "The app expects export manifests in `v1/manifests`."
+                            f"No selectable V2 analytics exports were found under "
+                            f"`{export_catalog.export_root}`."
                         ),
                         kind="warn",
                     ),
-                    details,
+                    (
+                        mo.ui.table(catalog_diagnostics, selection=None, page_size=10)
+                        if not catalog_diagnostics.empty
+                        else mo.md("No manifest diagnostics were produced.")
+                    ),
                 ]
             ),
         )
@@ -202,7 +159,6 @@ def _(Path, discover_export_catalog, mo, os, pd, select_export_run_id):
         label="Export dataset",
         searchable=True,
     )
-    catalog_rows = pd.DataFrame([entry.to_dict() for entry in export_catalog.entries])
     selector_parts = [
         mo.md("# Palette Group Analytics"),
         mo.md(f"Authorized export root: `{export_catalog.export_root}`"),
@@ -219,7 +175,7 @@ def _(Path, discover_export_catalog, mo, os, pd, select_export_run_id):
         mo.accordion(
             {
                 "Available exports": mo.ui.table(
-                    catalog_rows,
+                    pd.DataFrame([entry.to_dict() for entry in export_catalog.entries]),
                     selection=None,
                     page_size=10,
                 ),
@@ -237,6 +193,7 @@ def _(Path, discover_export_catalog, mo, os, pd, select_export_run_id):
         export_picker,
         export_root,
         label_to_export_run_id,
+        requested_panel_id,
         stats_run_id,
     )
 
@@ -260,13 +217,14 @@ def _(
 
 @app.cell
 def _(
-    CHASER_SUMMARY_TABLE,
-    SPATIAL_TABLE,
+    available_group_panels,
     build_health_report,
     context,
     export_catalog,
     mo,
+    pd,
     query_export_summary,
+    sample_grain_status_rows,
     selected_export_run_id,
 ):
     health = build_health_report(context)
@@ -274,12 +232,18 @@ def _(
     selected_entry = export_catalog.entry(selected_export_run_id)
     collection = summary.get("collection") or {}
     source_recording_count = summary.get("source_recording_count")
-    available_tables = set(selected_entry.table_names if selected_entry else ())
-    supports_current_panels = {
-        SPATIAL_TABLE,
-        CHASER_SUMMARY_TABLE,
-    }.issubset(available_tables)
-    overview = mo.vstack(
+    selected_capabilities = set(selected_entry.capabilities if selected_entry else ())
+    if summary["statistics"].get("available"):
+        selected_capabilities.add("group.statistics")
+        if summary["statistics"].get("descriptive_row_count") is not None:
+            selected_capabilities.add("group.descriptive_statistics")
+    panel_definitions = available_group_panels(
+        selected_capabilities,
+        statistics_available=bool(summary["statistics"].get("available")),
+    )
+    sample_grain_rows = sample_grain_status_rows(selected_capabilities)
+
+    mo.vstack(
         [
             mo.md(f"## Dataset overview\n\nManifest: `{summary['manifest_path']}`"),
             mo.hstack(
@@ -293,7 +257,7 @@ def _(
                             else "unknown"
                         ),
                     ),
-                    mo.stat(label="Tables", value=f"{len(available_tables):,}"),
+                    mo.stat(label="Tables", value=f"{len(selected_entry.table_names):,}"),
                     mo.stat(
                         label="Stats rows",
                         value=(
@@ -306,68 +270,86 @@ def _(
                 ]
             ),
             mo.md(f"Collection: `{collection.get('collection_id', 'none')}`"),
+            mo.accordion(
+                {
+                    "Dense/sample-grain availability": mo.vstack(
+                        [
+                            mo.md(
+                                "These statuses describe the selected immutable export only; "
+                                "they do not assert that a source-Zarr analysis is unsupported "
+                                "or absent."
+                            ),
+                            mo.ui.table(
+                                pd.DataFrame(sample_grain_rows),
+                                selection=None,
+                                page_size=8,
+                            ),
+                        ]
+                    )
+                }
+            ),
         ]
     )
-    overview
     mo.stop(
         selected_entry is not None and not selected_entry.ready,
         mo.callout(
             mo.md(
-                "This export has missing Parquet parts. Its manifest remains visible for "
-                "diagnosis, but analysis panels are disabled so they cannot present a partial "
-                "dataset as complete."
+                "This manifest references missing Parquet parts. Analysis panels are disabled "
+                "so a partial export cannot be presented as complete."
             ),
             kind="warn",
         ),
     )
-    mo.stop(
-        not supports_current_panels,
-        mo.callout(
-            mo.md(
-                "This export is discoverable and its provenance is available, but it does not "
-                "contain the chaser tables required by the currently implemented panels. "
-                "A provider-specific panel can be added without changing dataset discovery."
-            ),
-            kind="info",
-        ),
-    )
     analysis_context = context
-    return analysis_context, health, summary
+    return (
+        analysis_context,
+        health,
+        panel_definitions,
+        sample_grain_rows,
+        selected_capabilities,
+        summary,
+    )
 
 
 @app.cell
-def _(analysis_context, mo, query_options):
+def _(
+    analysis_context,
+    mo,
+    panel_definitions,
+    query_options,
+    requested_panel_id,
+):
     options = query_options(analysis_context)
-    window_labels = ["All epochs"] + [item["window_label"] for item in options.get("windows", [])]
-    bout_metric_items = options.get("epoch_bout_histogram_metrics", [])
-    bout_metric_labels = {
-        f"{item['label']} [{item['metric']}]": item["metric"]
-        for item in bout_metric_items
-    }
-    default_bout_label = next(iter(bout_metric_labels), "")
+    panel_labels = {definition.label: definition.panel_id for definition in panel_definitions}
+    initial_panel_label = next(
+        (
+            label
+            for label, panel_id in panel_labels.items()
+            if panel_id == requested_panel_id
+        ),
+        next(iter(panel_labels)),
+    )
+    panel_picker = mo.ui.dropdown(
+        options=list(panel_labels),
+        value=initial_panel_label,
+        label="Visualization",
+    )
+    window_labels = ["All epochs"] + [
+        item["window_label"] for item in options.get("windows", [])
+    ]
     window_picker = mo.ui.dropdown(
         options=window_labels,
         value=window_labels[0],
         label="Epoch",
     )
-    bout_metric_picker = mo.ui.dropdown(
-        options=list(bout_metric_labels),
-        value=default_bout_label,
-        label="Bout distribution metric",
+    chaser_labels = {"All chasers": None}
+    chaser_labels.update(
+        {f"Chaser {value}": value for value in options.get("chasers", [])}
     )
-    mean_metric_labels = {
-        "Bout rate (/min)": "bout_rate_per_min",
-        "Mean bout duration (s)": "mean_bout_duration_s",
-        "Mean bout distance (mm)": "mean_bout_path_length_mm",
-        "Mean inter-bout interval (s)": "mean_inter_bout_interval_s",
-        "Mean net heading change (deg)": "mean_bout_net_heading_change_deg",
-        "Mean abs heading change (deg)": "mean_abs_bout_net_heading_change_deg",
-        "Mean heading path (deg)": "mean_bout_heading_path_deg",
-    }
-    mean_metric_picker = mo.ui.dropdown(
-        options=list(mean_metric_labels),
-        value="Bout rate (/min)",
-        label="Epoch summary metric",
+    chaser_picker = mo.ui.dropdown(
+        options=list(chaser_labels),
+        value="All chasers",
+        label="Chaser",
     )
     stat_labels = {"Mean": "mean", "Median": "median"}
     stat_picker = mo.ui.dropdown(
@@ -375,13 +357,95 @@ def _(analysis_context, mo, query_options):
         value="Mean",
         label="Summary statistic",
     )
-    mo.hstack([window_picker, bout_metric_picker, mean_metric_picker, stat_picker])
+
+    def _metric_control(items, *, label, preferred):
+        mapping = {
+            f"{item['label']} [{item['metric']}]": item["metric"] for item in items
+        }
+        selected = next(
+            (key for key, value in mapping.items() if value == preferred),
+            next(iter(mapping)),
+        )
+        return mapping, mo.ui.dropdown(
+            options=list(mapping),
+            value=selected,
+            label=label,
+        )
+
+    behavior_metric_labels, behavior_metric_picker = _metric_control(
+        options["epoch_speed_metrics"],
+        label="Behavior metric",
+        preferred="bout_rate_per_min",
+    )
+    bout_metric_labels, bout_metric_picker = _metric_control(
+        options["epoch_bout_histogram_metrics"],
+        label="Bout distribution",
+        preferred="bout_path_length_mm",
+    )
+    spatial_metric_labels, spatial_metric_picker = _metric_control(
+        options["spatial_metrics"],
+        label="Spatial metric",
+        preferred="fraction_of_epoch",
+    )
+    chaser_metric_labels, chaser_metric_picker = _metric_control(
+        options["chaser_metrics"],
+        label="Chaser-distance metric",
+        preferred="p50_distance_mm",
+    )
+    cra_metric_labels, cra_metric_picker = _metric_control(
+        options["cra_object_phase_metrics"],
+        label="CRA phase metric",
+        preferred="median_distance_mm",
+    )
+    near_metric_labels, near_metric_picker = _metric_control(
+        options["cra_near_field_object_phase_metrics"],
+        label="Near-field metric",
+        preferred="near_zone_occupancy_fraction",
+    )
+    egocentric_metric_labels, egocentric_metric_picker = _metric_control(
+        options["egocentric_metrics"],
+        label="Egocentric metric",
+        preferred="mean_alignment_cos",
+    )
+    mo.vstack(
+        [
+            mo.hstack([panel_picker, window_picker, chaser_picker, stat_picker]),
+            mo.accordion(
+                {
+                    "Panel metrics": mo.vstack(
+                        [
+                            mo.hstack(
+                                [behavior_metric_picker, bout_metric_picker, spatial_metric_picker]
+                            ),
+                            mo.hstack(
+                                [chaser_metric_picker, cra_metric_picker, near_metric_picker]
+                            ),
+                            egocentric_metric_picker,
+                        ]
+                    )
+                }
+            ),
+        ]
+    )
     return (
+        behavior_metric_labels,
+        behavior_metric_picker,
         bout_metric_labels,
         bout_metric_picker,
-        mean_metric_labels,
-        mean_metric_picker,
-        options,
+        chaser_labels,
+        chaser_metric_labels,
+        chaser_metric_picker,
+        chaser_picker,
+        cra_metric_labels,
+        cra_metric_picker,
+        egocentric_metric_labels,
+        egocentric_metric_picker,
+        near_metric_labels,
+        near_metric_picker,
+        panel_labels,
+        panel_picker,
+        spatial_metric_labels,
+        spatial_metric_picker,
         stat_labels,
         stat_picker,
         window_picker,
@@ -389,162 +453,390 @@ def _(analysis_context, mo, query_options):
 
 
 @app.cell
-def _(analysis_context, bout_metric_labels, bout_metric_picker, query_epoch_bout_histogram, window_picker):
-    selected_window = None if window_picker.value == "All epochs" else str(window_picker.value)
-    selected_bout_metric = bout_metric_labels.get(bout_metric_picker.value, "bout_path_length_mm")
-    bout_histogram = query_epoch_bout_histogram(
-        analysis_context,
-        metric=selected_bout_metric,
-        window_label=selected_window,
+def _(
+    analysis_context,
+    behavior_metric_labels,
+    behavior_metric_picker,
+    bout_metric_labels,
+    bout_metric_picker,
+    chaser_labels,
+    chaser_metric_labels,
+    chaser_metric_picker,
+    chaser_picker,
+    cra_metric_labels,
+    cra_metric_picker,
+    egocentric_metric_labels,
+    egocentric_metric_picker,
+    near_metric_labels,
+    near_metric_picker,
+    query_chaser_histogram,
+    query_chaser_summary,
+    query_cra_near_field_curves,
+    query_cra_near_field_object_phase,
+    query_cra_near_field_summary,
+    query_cra_object_phase,
+    query_cra_summary,
+    query_egocentric_histogram,
+    query_egocentric_summary,
+    query_epoch_bout_histogram,
+    query_epoch_inter_bout_interval_histogram,
+    query_epoch_speed_summary,
+    query_group_statistics,
+    query_recordings,
+    query_spatial_occupancy,
+    query_speed_distance_bins,
+    selected_capabilities,
+    spatial_metric_labels,
+    spatial_metric_picker,
+    stat_labels,
+    stat_picker,
+    window_picker,
+):
+    selected_window = (
+        None if window_picker.value == "All epochs" else str(window_picker.value)
     )
-    return bout_histogram, selected_bout_metric, selected_window
+    selected_chaser = chaser_labels[chaser_picker.value]
+    selected_stat = stat_labels[stat_picker.value]
+    payloads = {}
+    if "chaser.epoch.behavior_summary" in selected_capabilities:
+        payloads["behavior"] = query_epoch_speed_summary(
+            analysis_context,
+            metric=behavior_metric_labels[behavior_metric_picker.value],
+            stat=selected_stat,
+        )
+    if "chaser.epoch.bout_histogram" in selected_capabilities:
+        payloads["bout_histogram"] = query_epoch_bout_histogram(
+            analysis_context,
+            metric=bout_metric_labels[bout_metric_picker.value],
+            window_label=selected_window,
+        )
+    if "chaser.epoch.inter_bout_interval_histogram" in selected_capabilities:
+        payloads["ibi_histogram"] = query_epoch_inter_bout_interval_histogram(
+            analysis_context,
+            window_label=selected_window,
+        )
+    if "chaser.epoch.spatial_occupancy" in selected_capabilities:
+        payloads["spatial"] = query_spatial_occupancy(
+            analysis_context,
+            metric=spatial_metric_labels[spatial_metric_picker.value],
+        )
+    if "chaser.distance.summary" in selected_capabilities:
+        payloads["chaser_summary"] = query_chaser_summary(
+            analysis_context,
+            metric=chaser_metric_labels[chaser_metric_picker.value],
+            stat=selected_stat,
+        )
+    if "chaser.distance.histogram" in selected_capabilities:
+        payloads["chaser_histogram"] = query_chaser_histogram(
+            analysis_context,
+            window_label=selected_window,
+            chaser_index=selected_chaser,
+        )
+    if "chaser.distance.speed_relationship" in selected_capabilities:
+        payloads["speed_distance"] = query_speed_distance_bins(
+            analysis_context,
+            window_label=selected_window,
+            chaser_index=selected_chaser,
+        )
+    if "chaser.cra.primary" in selected_capabilities:
+        payloads["cra_phase"] = query_cra_object_phase(
+            analysis_context,
+            metric=cra_metric_labels[cra_metric_picker.value],
+            stat=selected_stat,
+        )
+        payloads["cra_summary"] = query_cra_summary(analysis_context)
+    if "chaser.cra.near_field" in selected_capabilities:
+        payloads["near_phase"] = query_cra_near_field_object_phase(
+            analysis_context,
+            metric=near_metric_labels[near_metric_picker.value],
+            stat=selected_stat,
+        )
+        payloads["near_summary"] = query_cra_near_field_summary(analysis_context)
+        payloads["near_curves"] = query_cra_near_field_curves(analysis_context)
+    if "chaser.egocentric" in selected_capabilities:
+        payloads["egocentric_summary"] = query_egocentric_summary(
+            analysis_context,
+            metric=egocentric_metric_labels[egocentric_metric_picker.value],
+            stat=selected_stat,
+        )
+        if selected_window is not None and selected_chaser is not None:
+            payloads["egocentric_histogram"] = query_egocentric_histogram(
+                analysis_context,
+                window_label=selected_window,
+                chaser_index=selected_chaser,
+            )
+    if "group.statistics" in selected_capabilities:
+        payloads["statistics"] = query_group_statistics(analysis_context)
+    payloads["recordings"] = query_recordings(analysis_context)
+    return payloads, selected_window
 
 
 @app.cell
 def _(
-    build_histogram_figure,
-    bout_histogram,
+    egocentric_heatmap_figure,
+    grouped_bar_figure,
+    health,
+    line_figure,
     mo,
+    panel_labels,
+    panel_picker,
+    payloads,
     pd,
+    sample_grain_rows,
+    selected_window,
+    summary,
 ):
-    if not bout_histogram.get("available"):
-        _output = mo.md(f"## Bout Metric Distribution\n\n{bout_histogram.get('message', 'No rows.')}")
-    else:
-        bout_fig = build_histogram_figure(
-            bout_histogram["rows"],
-            title=f"Bout Metric Distribution: {bout_histogram['metric_label']}",
-            xaxis_title=bout_histogram["metric_label"],
+    selected_panel = panel_labels[panel_picker.value]
+
+    def _rows_table(rows, page_size=12):
+        frame = pd.DataFrame(rows)
+        return (
+            mo.ui.table(frame, selection=None, page_size=page_size)
+            if not frame.empty
+            else mo.md("No rows are available for the selected filters.")
         )
-        bout_table = pd.DataFrame(bout_histogram["rows"])
-        _output = mo.vstack(
+
+    def _figure_or_message(figure, message="No plottable rows are available."):
+        return figure if figure is not None else mo.md(message)
+
+    if selected_panel == "behavior":
+        _data = payloads.get("behavior", {})
+        _figure = grouped_bar_figure(
+            _data.get("rows", []),
+            title=f"Epoch behavior · {_data.get('metric_label', 'metric')}",
+            x_key="window_label",
+            y_key="value",
+            series_key="stat",
+            yaxis_title=_data.get("metric_label", "Value"),
+        )
+        panel_output = mo.vstack(
+            [mo.md("## Core behavior"), _figure_or_message(_figure), _rows_table(_data.get("rows", []))]
+        )
+    elif selected_panel == "bout_distributions":
+        _bout = payloads.get("bout_histogram", {})
+        _ibi = payloads.get("ibi_histogram", {})
+        _bout_figure = line_figure(
+            _bout.get("rows", []),
+            title=f"Bout distribution · {_bout.get('metric_label', 'metric')}",
+            x_key="bin_center",
+            y_key="pooled_density",
+            series_keys=("window_label",),
+            xaxis_title=_bout.get("metric_label", "Bout metric"),
+            yaxis_title="Pooled density",
+        )
+        _ibi_figure = line_figure(
+            _ibi.get("rows", []),
+            title="Inter-bout interval distribution",
+            x_key="bin_center",
+            y_key="pooled_density",
+            series_keys=("window_label",),
+            xaxis_title="Inter-bout interval (s)",
+            yaxis_title="Pooled density",
+        )
+        panel_output = mo.vstack(
             [
-                mo.md("## Bout Metric Distribution"),
-                bout_fig,
-                mo.ui.table(
-                    bout_table[bout_table["pooled_count"] > 0],
-                    selection=None,
-                    page_size=12,
+                mo.md("## Bout distributions"),
+                mo.hstack([_figure_or_message(_bout_figure), _figure_or_message(_ibi_figure)]),
+                mo.accordion(
+                    {
+                        "Bout bins": _rows_table(_bout.get("rows", [])),
+                        "Inter-bout interval bins": _rows_table(_ibi.get("rows", [])),
+                    }
                 ),
             ]
         )
-    _output
-    return
-
-
-@app.cell
-def _(analysis_context, query_epoch_inter_bout_interval_histogram, selected_window):
-    ibi_histogram = query_epoch_inter_bout_interval_histogram(
-        analysis_context,
-        window_label=selected_window,
-    )
-    return (ibi_histogram,)
-
-
-@app.cell
-def _(build_histogram_figure, ibi_histogram, mo, pd):
-    if not ibi_histogram.get("available"):
-        _output = mo.md(f"## Inter-Bout Interval Distribution\n\n{ibi_histogram.get('message', 'No rows.')}")
-    else:
-        ibi_fig = build_histogram_figure(
-            ibi_histogram["rows"],
-            title="Inter-Bout Interval Distribution",
-            xaxis_title="Interval (s)",
+    elif selected_panel == "spatial":
+        _data = payloads.get("spatial", {})
+        _figure = grouped_bar_figure(
+            _data.get("rows", []),
+            title=f"Spatial occupancy · {_data.get('metric_label', 'metric')}",
+            x_key="window_label",
+            y_key="value",
+            series_key="zone_label",
+            yaxis_title=_data.get("metric_label", "Value"),
         )
-        ibi_table = pd.DataFrame(ibi_histogram["rows"])
-        _output = mo.vstack(
-            [
-                mo.md("## Inter-Bout Interval Distribution"),
-                ibi_fig,
-                mo.ui.table(
-                    ibi_table[ibi_table["pooled_count"] > 0],
-                    selection=None,
-                    page_size=12,
-                ),
-            ]
+        panel_output = mo.vstack(
+            [mo.md("## Spatial occupancy"), _figure_or_message(_figure), _rows_table(_data.get("rows", []))]
         )
-    _output
-    return
-
-
-@app.cell
-def _(analysis_context, mean_metric_labels, mean_metric_picker, query_epoch_speed_summary, stat_labels, stat_picker):
-    epoch_summary_metric = query_epoch_speed_summary(
-        analysis_context,
-        metric=str(mean_metric_labels.get(mean_metric_picker.value, "bout_rate_per_min")),
-        stat=str(stat_labels.get(stat_picker.value, "mean")),
-    )
-    return (epoch_summary_metric,)
-
-
-@app.cell
-def _(build_bar_figure, epoch_summary_metric, mo, pd):
-    if not epoch_summary_metric.get("available"):
-        _output = mo.md(f"## Epoch Summary\n\n{epoch_summary_metric.get('message', 'No rows.')}")
-    else:
-        metric_fig = build_bar_figure(
-            epoch_summary_metric["rows"],
-            title=f"Epoch Summary: {epoch_summary_metric['metric_label']}",
-            yaxis_title=epoch_summary_metric["metric_label"],
-        )
-        _output = mo.vstack(
-            [
-                mo.md("## Epoch Summary"),
-                metric_fig,
-                mo.ui.table(pd.DataFrame(epoch_summary_metric["rows"]), selection=None, page_size=12),
-            ]
-        )
-    _output
-    return
-
-
-@app.cell
-def _(analysis_context, mo, pd, query_group_statistics):
-    stats = query_group_statistics(analysis_context, metric_family="epoch_behavior")
-    if not stats.get("available"):
-        _output = mo.md(f"## Epoch Behavior Statistics\n\n{stats.get('message', 'No statistics export found.')}")
-    else:
-        stats_rows = pd.DataFrame(stats["rows"])
-        display_columns = [
-            column
-            for column in (
-                "metric_name",
-                "condition_a",
-                "condition_b",
-                "group",
-                "paired_unit_count",
-                "mean_difference",
-                "median_difference",
-                "p_value",
-                "rank_biserial",
-                "status",
-            )
-            if column in stats_rows.columns
+    elif selected_panel == "chaser_distance":
+        _summary_data = payloads.get("chaser_summary", {})
+        _summary_rows = [
+            {**row, "series": f"{row.get('behavior_class', 'unknown')} · chaser {row.get('chaser_index')}"}
+            for row in _summary_data.get("rows", [])
         ]
-        _output = mo.vstack(
+        _summary_figure = grouped_bar_figure(
+            _summary_rows,
+            title=f"Chaser distance · {_summary_data.get('metric_label', 'metric')}",
+            x_key="window_label",
+            y_key="value",
+            series_key="series",
+            yaxis_title=_summary_data.get("metric_label", "Value"),
+        )
+        _hist = payloads.get("chaser_histogram", {})
+        _hist_figure = line_figure(
+            _hist.get("rows", []),
+            title="Distance distribution",
+            x_key="bin_center_mm",
+            y_key="pooled_density",
+            series_keys=("window_label", "chaser_index"),
+            xaxis_title="Distance to chaser (mm)",
+            yaxis_title="Pooled density",
+        )
+        _speed = payloads.get("speed_distance", {})
+        _speed_figure = line_figure(
+            _speed.get("rows", []),
+            title="Speed versus chaser distance",
+            x_key="distance_bin_center_mm",
+            y_key="pooled_mean_speed_mm_s",
+            series_keys=("window_label", "chaser_index"),
+            xaxis_title="Distance to chaser (mm)",
+            yaxis_title="Pooled mean speed (mm/s)",
+        )
+        panel_output = mo.vstack(
             [
-                mo.md("## Epoch Behavior Statistics"),
-                mo.ui.table(
-                    stats_rows[display_columns] if display_columns else stats_rows,
-                    selection=None,
-                    page_size=12,
+                mo.md("## Chaser distance"),
+                _figure_or_message(_summary_figure),
+                mo.hstack([_figure_or_message(_hist_figure), _figure_or_message(_speed_figure)]),
+                mo.accordion(
+                    {
+                        "Distance summary": _rows_table(_summary_rows),
+                        "Distance bins": _rows_table(_hist.get("rows", [])),
+                        "Speed-distance bins": _rows_table(_speed.get("rows", [])),
+                    }
                 ),
             ]
         )
-    _output
-    return
-
-
-@app.cell
-def _(analysis_context, mo, pd, query_recordings, summary):
-    recordings = query_recordings(analysis_context)
-    recording_rows = pd.DataFrame(recordings.get("rows", []))
-    table_counts = pd.DataFrame(summary.get("tables", []))
-    mo.accordion(
-        {
-            "Recordings": mo.ui.table(recording_rows, selection=None, page_size=12),
-            "Export tables": mo.ui.table(table_counts, selection=None, page_size=16),
-        }
-    )
+    elif selected_panel == "cra":
+        _phase = payloads.get("cra_phase", {})
+        _figure = grouped_bar_figure(
+            _phase.get("rows", []),
+            title=f"CRA object phases · {_phase.get('metric_label', 'metric')}",
+            x_key="phase_label",
+            y_key="value",
+            series_key="object_role",
+            yaxis_title=_phase.get("metric_label", "Value"),
+        )
+        _summary_data = payloads.get("cra_summary", {})
+        panel_output = mo.vstack(
+            [
+                mo.md("## CRA primary endpoints"),
+                _figure_or_message(_figure),
+                mo.accordion(
+                    {
+                        "Endpoint summaries": _rows_table(_summary_data.get("metrics", [])),
+                        "Per-recording endpoints": _rows_table(_summary_data.get("rows", [])),
+                        "Object phases": _rows_table(_phase.get("rows", [])),
+                    }
+                ),
+            ]
+        )
+    elif selected_panel == "near_field":
+        _phase = payloads.get("near_phase", {})
+        _phase_figure = grouped_bar_figure(
+            _phase.get("rows", []),
+            title=f"CRA near field · {_phase.get('metric_label', 'metric')}",
+            x_key="phase_label",
+            y_key="value",
+            series_key="object_role",
+            yaxis_title=_phase.get("metric_label", "Value"),
+        )
+        _curves = payloads.get("near_curves", {})
+        _radial_figure = line_figure(
+            _curves.get("radial_rows", []),
+            title="Near-field radial density",
+            x_key="radial_bin_center_mm",
+            y_key="mean",
+            series_keys=("phase_label", "object_role"),
+            xaxis_title="Radial distance (mm)",
+            yaxis_title="Mean density (/mm²)",
+        )
+        _cdf_figure = line_figure(
+            _curves.get("cdf_rows", []),
+            title="Near-field distance CDF",
+            x_key="distance_threshold_mm",
+            y_key="mean",
+            series_keys=("phase_label", "object_role"),
+            xaxis_title="Distance threshold (mm)",
+            yaxis_title="Mean cumulative fraction",
+        )
+        _summary_data = payloads.get("near_summary", {})
+        panel_output = mo.vstack(
+            [
+                mo.md("## CRA near field"),
+                _figure_or_message(_phase_figure),
+                mo.hstack([_figure_or_message(_radial_figure), _figure_or_message(_cdf_figure)]),
+                mo.accordion(
+                    {
+                        "Endpoint summaries": _rows_table(_summary_data.get("metrics", [])),
+                        "Per-recording endpoints": _rows_table(_summary_data.get("rows", [])),
+                        "Object phases": _rows_table(_phase.get("rows", [])),
+                    }
+                ),
+            ]
+        )
+    elif selected_panel == "egocentric":
+        _summary_data = payloads.get("egocentric_summary", {})
+        _summary_rows = [
+            {**row, "series": f"{row.get('behavior_class', 'unknown')} · chaser {row.get('chaser_index')}"}
+            for row in _summary_data.get("rows", [])
+        ]
+        _summary_figure = grouped_bar_figure(
+            _summary_rows,
+            title=f"Egocentric bearing · {_summary_data.get('metric_label', 'metric')}",
+            x_key="window_label",
+            y_key="value",
+            series_key="series",
+            yaxis_title=_summary_data.get("metric_label", "Value"),
+        )
+        _hist = payloads.get("egocentric_histogram", {})
+        _heatmap = egocentric_heatmap_figure(
+            _hist.get("rows", []),
+            title=f"Distance × bearing · {selected_window}",
+        )
+        _heatmap_message = (
+            "Select one epoch and one chaser to avoid pooling distinct conditions or objects "
+            "in the distance-by-bearing heatmap."
+            if selected_window is None or _hist == {}
+            else "No egocentric histogram rows are available for these filters."
+        )
+        panel_output = mo.vstack(
+            [
+                mo.md("## Egocentric bearing"),
+                _figure_or_message(_summary_figure),
+                _figure_or_message(_heatmap, _heatmap_message),
+                mo.accordion(
+                    {
+                        "Summary rows": _rows_table(_summary_rows),
+                        "Histogram bins": _rows_table(_hist.get("rows", [])),
+                    }
+                ),
+            ]
+        )
+    elif selected_panel == "statistics":
+        _stats = payloads.get("statistics", {})
+        panel_output = mo.vstack(
+            [
+                mo.md("## Linked statistics"),
+                mo.md("Rows come from the statistics export linked to this immutable base export."),
+                _rows_table(_stats.get("rows", [])),
+            ]
+        )
+    else:
+        _recordings = payloads.get("recordings", {})
+        panel_output = mo.vstack(
+            [
+                mo.md("## Recordings and provenance"),
+                mo.accordion(
+                    {
+                        "Recordings": _rows_table(_recordings.get("rows", [])),
+                        "Export tables": _rows_table(summary.get("tables", []), 18),
+                        "Dense/sample-grain availability": _rows_table(sample_grain_rows),
+                        "Health details": _rows_table([health.to_dict()]),
+                    }
+                ),
+            ]
+        )
+    panel_output
     return
 
 

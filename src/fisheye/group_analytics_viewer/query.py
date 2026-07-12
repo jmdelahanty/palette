@@ -575,14 +575,14 @@ def canonical_condition(label: Any) -> str | None:
 
 
 def query_options(context: ViewerContext) -> dict[str, Any]:
-    spatial = load_table_rows(context, SPATIAL_TABLE)
-    chaser = load_table_rows(context, CHASER_SUMMARY_TABLE)
+    spatial = load_optional_table_rows(context, SPATIAL_TABLE)
+    chaser = load_optional_table_rows(context, CHASER_SUMMARY_TABLE)
     speed = load_optional_table_rows(context, EPOCH_BEHAVIOR_TABLE)
     bout_histogram = load_optional_table_rows(context, EPOCH_BOUT_HISTOGRAM_TABLE)
     ibi_histogram = load_optional_table_rows(context, EPOCH_INTER_BOUT_INTERVAL_HISTOGRAM_TABLE)
-    cra_object_phase = load_table_rows(context, CRA_OBJECT_PHASE_TABLE)
+    cra_object_phase = load_optional_table_rows(context, CRA_OBJECT_PHASE_TABLE)
     cra_near_field_object_phase = load_optional_table_rows(context, CRA_NEAR_FIELD_OBJECT_PHASE_TABLE)
-    egocentric = load_table_rows(context, EGOCENTRIC_SUMMARY_TABLE)
+    egocentric = load_optional_table_rows(context, EGOCENTRIC_SUMMARY_TABLE)
     windows = sorted(
         {
             (
@@ -2715,12 +2715,12 @@ def query_egocentric_histogram(
 
 
 def query_recordings(context: ViewerContext) -> dict[str, Any]:
-    spatial = load_table_rows(context, SPATIAL_TABLE)
-    chaser = load_table_rows(context, CHASER_SUMMARY_TABLE)
+    spatial = load_optional_table_rows(context, SPATIAL_TABLE)
+    chaser = load_optional_table_rows(context, CHASER_SUMMARY_TABLE)
     speed = load_optional_table_rows(context, EPOCH_BEHAVIOR_TABLE)
-    cra_summary = load_table_rows(context, CRA_SUMMARY_TABLE)
+    cra_summary = load_optional_table_rows(context, CRA_SUMMARY_TABLE)
     cra_near_field_summary = load_optional_table_rows(context, CRA_NEAR_FIELD_SUMMARY_TABLE)
-    egocentric = load_table_rows(context, EGOCENTRIC_SUMMARY_TABLE)
+    egocentric = load_optional_table_rows(context, EGOCENTRIC_SUMMARY_TABLE)
     records: dict[str, dict[str, Any]] = {}
 
     for row in spatial:
