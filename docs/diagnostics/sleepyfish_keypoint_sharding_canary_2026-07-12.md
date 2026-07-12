@@ -161,6 +161,46 @@ runtime regression, and its measured write-plus-validation cost was only
 | Apparent bytes | 8,832,358 | 8,865,645 | `+0.38%` |
 | Allocated bytes | 9,102,848 | 8,881,152 | `-2.44%` |
 
+## Default-Path And Refinement Canary
+
+After indexed sharding became the serial YOLO writer default in commit
+`e6d25940`, an end-to-end canary exercised the registry wrapper without
+`--keypoint-roi-shard-rows`, `--keypoint-frame-shard-rows`, or the opt-out flag.
+The canary used an isolated analysis Zarr and a copied registry so canonical
+`keypoints_runs`/`refined_keypoints_runs` publication could be tested without
+changing production `latest` pointers or registry rows.
+
+LSF inference job `153065020` ran on `h08u12` in `gpu_l4`. It staged the
+existing `14,155,776,000`-byte flat ROI cache to node scratch in `23.30 s`,
+completed 54,000-row inference in `201.3 s` at `268.3 poses/s`, and used
+1,856 MB maximum accounted memory. Both stderr logs were empty.
+
+The default-path validation confirmed:
+
+- `keypoint_storage_policy=default_indexed_sharding_v1`
+- ROI-domain arrays use `65,536` outer rows and frame-domain arrays use
+  `262,144` outer rows
+- `53,993 / 54,000` predictions succeeded; coordinates contained `539,930`
+  nonzero values and confidences contained `269,965` positive values
+- parent `latest` and `latest_complete`, run completion, provenance validation,
+  stage-array validation, model-resolution provenance, and copied-registry
+  keypoint status all passed
+
+LSF refinement job `153065029` then ran on `h07u18` in `short`, reading that
+indexed-sharded canonical source through the normal `refine_keypoints` path.
+Refinement took `23.38 s`, retained all `53,993` source-success rows, marked
+`53,984` rows usable, and used 369 MB maximum accounted memory. Its validation
+confirmed all 46 refined arrays had `shards=null`; the refined run was complete,
+nonempty, linked to the exact source run, and recorded `ok` in the copied
+registry.
+
+Canary archive, scripts, LSF logs, and machine-readable validation reports:
+
+```text
+/groups/johnson/johnsonlab/jeremy/recordings/logs/keypoint_default_path_canary/
+  sleepyfish_clip000000_20260712_01/
+```
+
 ## Decision And Next Step
 
 The direct YOLO-writer candidate passed output parity, completion/publication,
