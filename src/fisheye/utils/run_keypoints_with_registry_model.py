@@ -17,6 +17,7 @@ from typing import Any, Mapping, Optional
 import zarr
 
 from fisheye.detection.detect_keypoints_yolo import (
+    DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
     DEFAULT_KEYPOINT_OUTPUT_PARENT,
     DEFAULT_POSE_SCHEMA_NAME,
     KEYPOINT_OUTPUT_PARENTS,
@@ -533,6 +534,8 @@ def run_keypoints_with_registry_model(
     progress_jsonl: Optional[Path] = None,
     progress_every_batches: int = 1,
     input_mode: str = "numpy-list",
+    keypoint_roi_shard_rows: Optional[int] = None,
+    keypoint_frame_shard_rows: int = DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
     cpu: bool = False,
     verbose: bool = False,
     argv: Optional[list[str]] = None,
@@ -572,6 +575,8 @@ def run_keypoints_with_registry_model(
         progress_jsonl=progress_jsonl,
         progress_every_batches=int(progress_every_batches),
         input_mode=input_mode,
+        keypoint_roi_shard_rows=keypoint_roi_shard_rows,
+        keypoint_frame_shard_rows=int(keypoint_frame_shard_rows),
         cpu=bool(cpu),
         verbose=bool(verbose),
     )
@@ -716,6 +721,8 @@ def run_keypoints_with_registry_model(
             roi_cache_staged_to_node_scratch=bool(roi_cache_staging_details.get("staged", False)),
             roi_cache_staging_details=roi_cache_staging_details or None,
             input_mode=input_mode,
+            keypoint_roi_shard_rows=keypoint_roi_shard_rows,
+            keypoint_frame_shard_rows=int(keypoint_frame_shard_rows),
             profile_timings=bool(profile_timings),
             progress_jsonl=progress_jsonl,
             progress_every_batches=progress_every_batches,
@@ -795,6 +802,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument("--batch-size", type=int, default=256, help="Optional keypoint batch size override.")
+    parser.add_argument(
+        "--keypoint-roi-shard-rows",
+        type=int,
+        default=None,
+        help="Opt-in aligned outer shard rows for ROI-domain YOLO keypoint arrays.",
+    )
+    parser.add_argument(
+        "--keypoint-frame-shard-rows",
+        type=int,
+        default=DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
+        help=(
+            "Aligned outer shard rows for frame-domain arrays when keypoint sharding is enabled "
+            f"(default: {DEFAULT_KEYPOINT_FRAME_SHARD_ROWS})."
+        ),
+    )
     parser.add_argument("--device", type=str, default=None, help="Optional torch device override.")
     parser.add_argument("--imgsz", type=int, default=None, help="Optional pose inference image size override.")
     parser.add_argument("--conf", type=float, default=0.25, help="Optional confidence threshold override.")
@@ -887,6 +909,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         progress_jsonl=args.progress_jsonl,
         progress_every_batches=args.progress_every_batches,
         input_mode=args.input_mode,
+        keypoint_roi_shard_rows=args.keypoint_roi_shard_rows,
+        keypoint_frame_shard_rows=args.keypoint_frame_shard_rows,
         cpu=bool(args.cpu),
         verbose=bool(args.verbose),
         argv=argv,
