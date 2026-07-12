@@ -26,8 +26,10 @@ def _():
     from apps.marimo.components.group_analytics import (
         available_group_panels,
         chaser_selection_options,
+        epoch_selection_options,
         egocentric_heatmap_figure,
         filter_rows_by_chasers,
+        filter_rows_by_windows,
         grouped_bar_figure,
         line_figure,
         panel_control_spec,
@@ -67,8 +69,10 @@ def _():
         build_health_report,
         chaser_selection_options,
         discover_export_catalog,
+        epoch_selection_options,
         egocentric_heatmap_figure,
         filter_rows_by_chasers,
+        filter_rows_by_windows,
         grouped_bar_figure,
         line_figure,
         mo,
@@ -321,6 +325,7 @@ def _(
 def _(
     analysis_context,
     chaser_selection_options,
+    epoch_selection_options,
     mo,
     panel_control_spec,
     panel_definitions,
@@ -342,13 +347,13 @@ def _(
         value=initial_panel_label,
         label="Visualization class",
     )
-    window_labels = ["All epochs"] + [
+    window_labels, default_window_labels = epoch_selection_options(
         item["window_label"] for item in options.get("windows", [])
-    ]
-    window_picker = mo.ui.dropdown(
+    )
+    window_picker = mo.ui.multiselect(
         options=window_labels,
-        value=window_labels[0],
-        label="Epoch",
+        value=default_window_labels,
+        label="Epochs",
     )
     chaser_labels, default_chaser_labels = chaser_selection_options(
         options.get("chasers", [])
@@ -509,6 +514,7 @@ def _(
     egocentric_metric_labels,
     egocentric_metric_picker,
     filter_rows_by_chasers,
+    filter_rows_by_windows,
     near_metric_labels,
     near_metric_picker,
     query_chaser_histogram,
@@ -535,9 +541,7 @@ def _(
     stat_picker,
     window_picker,
 ):
-    selected_window = (
-        None if window_picker.value == "All epochs" else str(window_picker.value)
-    )
+    selected_windows = tuple(str(label) for label in window_picker.value)
     selected_chasers = tuple(
         chaser_labels[label]
         for label in chaser_picker.value
@@ -549,36 +553,56 @@ def _(
         selected_panel_id == "behavior"
         and "chaser.epoch.behavior_summary" in selected_capabilities
     ):
-        payloads["behavior"] = query_epoch_speed_summary(
+        _behavior = query_epoch_speed_summary(
             analysis_context,
             metric=behavior_metric_labels[behavior_metric_picker.value],
             stat=selected_stat,
         )
+        _behavior["rows"] = filter_rows_by_windows(
+            _behavior.get("rows", []),
+            selected_windows,
+        )
+        payloads["behavior"] = _behavior
     if (
         selected_panel_id == "bout_distributions"
         and "chaser.epoch.bout_histogram" in selected_capabilities
     ):
-        payloads["bout_histogram"] = query_epoch_bout_histogram(
+        _bout_histogram = query_epoch_bout_histogram(
             analysis_context,
             metric=bout_metric_labels[bout_metric_picker.value],
-            window_label=selected_window,
+            window_label=None,
         )
+        _bout_histogram["rows"] = filter_rows_by_windows(
+            _bout_histogram.get("rows", []),
+            selected_windows,
+        )
+        payloads["bout_histogram"] = _bout_histogram
     if (
         selected_panel_id == "bout_distributions"
         and "chaser.epoch.inter_bout_interval_histogram" in selected_capabilities
     ):
-        payloads["ibi_histogram"] = query_epoch_inter_bout_interval_histogram(
+        _ibi_histogram = query_epoch_inter_bout_interval_histogram(
             analysis_context,
-            window_label=selected_window,
+            window_label=None,
         )
+        _ibi_histogram["rows"] = filter_rows_by_windows(
+            _ibi_histogram.get("rows", []),
+            selected_windows,
+        )
+        payloads["ibi_histogram"] = _ibi_histogram
     if (
         selected_panel_id == "spatial"
         and "chaser.epoch.spatial_occupancy" in selected_capabilities
     ):
-        payloads["spatial"] = query_spatial_occupancy(
+        _spatial = query_spatial_occupancy(
             analysis_context,
             metric=spatial_metric_labels[spatial_metric_picker.value],
         )
+        _spatial["rows"] = filter_rows_by_windows(
+            _spatial.get("rows", []),
+            selected_windows,
+        )
+        payloads["spatial"] = _spatial
     if (
         selected_panel_id == "chaser_distance"
         and "chaser.distance.summary" in selected_capabilities
@@ -588,14 +612,13 @@ def _(
             metric=chaser_metric_labels[chaser_metric_picker.value],
             stat=selected_stat,
         )
-        _chaser_summary["rows"] = [
-            row
-            for row in filter_rows_by_chasers(
+        _chaser_summary["rows"] = filter_rows_by_windows(
+            filter_rows_by_chasers(
                 _chaser_summary.get("rows", []),
                 selected_chasers,
-            )
-            if (selected_window is None or row.get("window_label") == selected_window)
-        ]
+            ),
+            selected_windows,
+        )
         payloads["chaser_summary"] = _chaser_summary
     if (
         selected_panel_id == "chaser_distance"
@@ -603,12 +626,15 @@ def _(
     ):
         _chaser_histogram = query_chaser_histogram(
             analysis_context,
-            window_label=selected_window,
+            window_label=None,
             chaser_index=None,
         )
-        _chaser_histogram["rows"] = filter_rows_by_chasers(
-            _chaser_histogram.get("rows", []),
-            selected_chasers,
+        _chaser_histogram["rows"] = filter_rows_by_windows(
+            filter_rows_by_chasers(
+                _chaser_histogram.get("rows", []),
+                selected_chasers,
+            ),
+            selected_windows,
         )
         payloads["chaser_histogram"] = _chaser_histogram
     if (
@@ -617,12 +643,15 @@ def _(
     ):
         _speed_distance = query_speed_distance_bins(
             analysis_context,
-            window_label=selected_window,
+            window_label=None,
             chaser_index=None,
         )
-        _speed_distance["rows"] = filter_rows_by_chasers(
-            _speed_distance.get("rows", []),
-            selected_chasers,
+        _speed_distance["rows"] = filter_rows_by_windows(
+            filter_rows_by_chasers(
+                _speed_distance.get("rows", []),
+                selected_chasers,
+            ),
+            selected_windows,
         )
         payloads["speed_distance"] = _speed_distance
     if selected_panel_id == "cra" and "chaser.cra.primary" in selected_capabilities:
@@ -652,26 +681,25 @@ def _(
             metric=egocentric_metric_labels[egocentric_metric_picker.value],
             stat=selected_stat,
         )
-        _egocentric_summary["rows"] = [
-            row
-            for row in filter_rows_by_chasers(
+        _egocentric_summary["rows"] = filter_rows_by_windows(
+            filter_rows_by_chasers(
                 _egocentric_summary.get("rows", []),
                 selected_chasers,
-            )
-            if (selected_window is None or row.get("window_label") == selected_window)
-        ]
+            ),
+            selected_windows,
+        )
         payloads["egocentric_summary"] = _egocentric_summary
-        if selected_window is not None and len(selected_chasers) == 1:
+        if len(selected_windows) == 1 and len(selected_chasers) == 1:
             payloads["egocentric_histogram"] = query_egocentric_histogram(
                 analysis_context,
-                window_label=selected_window,
+                window_label=selected_windows[0],
                 chaser_index=selected_chasers[0],
             )
     if selected_panel_id == "statistics" and "group.statistics" in selected_capabilities:
         payloads["statistics"] = query_group_statistics(analysis_context)
     if selected_panel_id == "inventory":
         payloads["recordings"] = query_recordings(analysis_context)
-    return payloads, selected_chasers, selected_window
+    return payloads, selected_chasers, selected_windows
 
 
 @app.cell
@@ -687,7 +715,7 @@ def _(
     pd,
     sample_grain_rows,
     selected_chasers,
-    selected_window,
+    selected_windows,
     summary,
 ):
     selected_panel = panel_labels[panel_picker.value]
@@ -901,12 +929,16 @@ def _(
         _hist = payloads.get("egocentric_histogram", {})
         _heatmap = egocentric_heatmap_figure(
             _hist.get("rows", []),
-            title=f"Distance × bearing · {selected_window}",
+            title=(
+                f"Distance × bearing · {selected_windows[0]}"
+                if len(selected_windows) == 1
+                else "Distance × bearing"
+            ),
         )
         _heatmap_message = (
-            "Select one epoch and exactly one chaser to avoid pooling distinct conditions or objects "
+            "Select exactly one epoch and exactly one chaser to avoid pooling distinct conditions or objects "
             "in the distance-by-bearing heatmap."
-            if selected_window is None or len(selected_chasers) != 1
+            if len(selected_windows) != 1 or len(selected_chasers) != 1
             else "No egocentric histogram rows are available for these filters."
         )
         panel_output = mo.vstack(

@@ -3,8 +3,10 @@ from __future__ import annotations
 from apps.marimo.components.group_analytics import (
     available_group_panels,
     chaser_selection_options,
+    epoch_selection_options,
     egocentric_heatmap_figure,
     filter_rows_by_chasers,
+    filter_rows_by_windows,
     grouped_bar_figure,
     line_figure,
     panel_control_spec,
@@ -46,7 +48,7 @@ def test_panel_controls_only_expose_relevant_filters() -> None:
     behavior = panel_control_spec("behavior")
     assert behavior.analysis_options_key == "epoch_speed_metrics"
     assert behavior.show_statistic is True
-    assert behavior.show_window is False
+    assert behavior.show_window is True
     assert behavior.show_chaser is False
 
     bouts = panel_control_spec("bout_distributions")
@@ -54,6 +56,9 @@ def test_panel_controls_only_expose_relevant_filters() -> None:
     assert bouts.show_window is True
     assert bouts.show_chaser is False
     assert bouts.show_statistic is False
+
+    spatial = panel_control_spec("spatial")
+    assert spatial.show_window is True
 
     egocentric = panel_control_spec("egocentric")
     assert egocentric.analysis_options_key == "egocentric_metrics"
@@ -84,6 +89,34 @@ def test_every_available_chaser_is_selected_by_default() -> None:
 
     assert options == {"Chaser 0": 0, "Chaser 1": 1}
     assert defaults == ["Chaser 0", "Chaser 1"]
+
+
+def test_every_available_epoch_is_selected_by_default() -> None:
+    options, defaults = epoch_selection_options(
+        ("pre_event", "training_event", "post_event", "pre_event")
+    )
+
+    assert options == ["pre_event", "training_event", "post_event"]
+    assert defaults == options
+
+
+def test_epoch_row_filter_supports_one_two_or_all_epochs() -> None:
+    rows = [
+        {"window_label": "pre_event", "value": 1.0},
+        {"window_label": "training_event", "value": 2.0},
+        {"window_label": "post_event", "value": 3.0},
+        {"value": 4.0},
+    ]
+
+    assert filter_rows_by_windows(rows, ("pre_event",)) == rows[:1]
+    assert filter_rows_by_windows(rows, ("pre_event", "post_event")) == [
+        rows[0],
+        rows[2],
+    ]
+    assert filter_rows_by_windows(
+        rows,
+        ("pre_event", "training_event", "post_event"),
+    ) == rows[:3]
 
 
 def test_grouped_bar_places_selected_chasers_side_by_side() -> None:

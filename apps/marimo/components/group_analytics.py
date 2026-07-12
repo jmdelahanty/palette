@@ -131,6 +131,7 @@ PANEL_CONTROL_SPECS = {
         analysis_options_key="epoch_speed_metrics",
         analysis_label="Behavior analysis",
         preferred_analysis="bout_rate_per_min",
+        show_window=True,
         show_statistic=True,
     ),
     "bout_distributions": PanelControlSpec(
@@ -145,6 +146,7 @@ PANEL_CONTROL_SPECS = {
         analysis_options_key="spatial_metrics",
         analysis_label="Spatial analysis",
         preferred_analysis="fraction_of_epoch",
+        show_window=True,
     ),
     "chaser_distance": PanelControlSpec(
         "chaser_distance",
@@ -281,6 +283,30 @@ def chaser_selection_options(
         for chaser_index in chaser_indices
     }
     return options, list(options)
+
+
+def epoch_selection_options(
+    window_labels: Iterable[str],
+) -> tuple[list[str], list[str]]:
+    """Return unique epoch labels with every available epoch selected by default."""
+
+    options = list(dict.fromkeys(str(label) for label in window_labels))
+    return options, list(options)
+
+
+def filter_rows_by_windows(
+    rows: Sequence[Mapping[str, Any]],
+    selected_windows: Iterable[str],
+) -> list[dict[str, Any]]:
+    """Keep rows for the explicitly selected epochs, preserving row order."""
+
+    selected = {str(value) for value in selected_windows}
+    return [
+        dict(row)
+        for row in rows
+        if row.get("window_label") is not None
+        and str(row["window_label"]) in selected
+    ]
 
 
 def grouped_bar_figure(
@@ -466,8 +492,10 @@ __all__ = [
     "available_group_panels",
     "capability_inventory_rows",
     "chaser_selection_options",
+    "epoch_selection_options",
     "egocentric_heatmap_figure",
     "filter_rows_by_chasers",
+    "filter_rows_by_windows",
     "grouped_bar_figure",
     "line_figure",
     "panel_control_spec",
