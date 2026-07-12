@@ -432,14 +432,44 @@ class _IndexedCollectionArray:
                 positions = np.where(positions < 0, positions + int(self.shape[0]), positions)
                 if bool(np.any((positions < 0) | (positions >= int(self.shape[0])))):
                     raise IndexError("collection row index is out of bounds")
-        rows: list[np.ndarray] = []
-        for position in positions.reshape(-1):
-            source_idx = int(self._source_indices[int(position)])
-            local_idx = int(self._local_indices[int(position)])
-            rows.append(np.asarray(self._arrays[source_idx][(local_idx, *rest)]))
-        if not rows:
+        flat_positions = np.asarray(positions, dtype=np.int64).reshape(-1)
+        if flat_positions.size == 0:
             return np.empty((0, *self.shape[1 + len(rest):]), dtype=self.dtype)
-        result = np.stack(rows, axis=0)
+
+        # Collection rows are normally contiguous within one source shard. Read
+        # each contiguous local-row run as one slice instead of issuing one Zarr
+        # request per logical row. This keeps full collection lineage copies to
+        # roughly one read per source shard and worker mask reads to one or two
+        # requests per chunk.
+        runs: list[np.ndarray] = []
+        run_start = 0
+        for offset in range(1, int(flat_positions.size) + 1):
+            at_end = offset == int(flat_positions.size)
+            if not at_end:
+                previous_position = int(flat_positions[offset - 1])
+                current_position = int(flat_positions[offset])
+                same_source = int(self._source_indices[current_position]) == int(
+                    self._source_indices[previous_position]
+                )
+                next_local_row = int(self._local_indices[current_position]) == int(
+                    self._local_indices[previous_position]
+                ) + 1
+                if same_source and next_local_row:
+                    continue
+
+            first_position = int(flat_positions[run_start])
+            last_position = int(flat_positions[offset - 1])
+            source_idx = int(self._source_indices[first_position])
+            local_start = int(self._local_indices[first_position])
+            local_stop = int(self._local_indices[last_position]) + 1
+            runs.append(
+                np.asarray(
+                    self._arrays[source_idx][(slice(local_start, local_stop), *rest)]
+                )
+            )
+            run_start = offset
+
+        result = np.concatenate(runs, axis=0)
         return result[0] if scalar_row else result
 
 

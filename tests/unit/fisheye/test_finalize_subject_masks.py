@@ -66,6 +66,67 @@ def test_load_shard_names_from_file_accepts_documented_mapping_keys(tmp_path: Pa
     assert mod._load_shard_names_from_file(path) == ["clip_a", "clip_b"]
 
 
+def test_indexed_collection_array_batches_contiguous_source_rows() -> None:
+    class RecordingArray:
+        def __init__(self, data: np.ndarray) -> None:
+            self.data = np.asarray(data)
+            self.shape = self.data.shape
+            self.dtype = self.data.dtype
+            self.chunks = (2, *self.data.shape[1:])
+            self.keys: list[object] = []
+
+        def __getitem__(self, key: object) -> np.ndarray:
+            self.keys.append(key)
+            return np.asarray(self.data[key])
+
+    first = RecordingArray(np.arange(10, dtype=np.int64).reshape(5, 2))
+    second = RecordingArray(100 + np.arange(10, dtype=np.int64).reshape(5, 2))
+    source_indices = np.asarray([0, 0, 0, 1, 1, 1, 0], dtype=np.uint8)
+    local_indices = np.asarray([0, 1, 2, 0, 1, 2, 4], dtype=np.uint16)
+    collection = mod._IndexedCollectionArray(
+        [first, second],
+        source_indices=source_indices,
+        local_indices=local_indices,
+    )
+
+    actual = collection[:]
+
+    expected = np.vstack([first.data[0:3], second.data[0:3], first.data[4:5]])
+    np.testing.assert_array_equal(actual, expected)
+    assert first.keys == [(slice(0, 3),), (slice(4, 5),)]
+    assert second.keys == [(slice(0, 3),)]
+
+
+def test_indexed_collection_array_preserves_component_and_scalar_indexing() -> None:
+    class RecordingArray:
+        def __init__(self, data: np.ndarray) -> None:
+            self.data = np.asarray(data)
+            self.shape = self.data.shape
+            self.dtype = self.data.dtype
+            self.chunks = (2, *self.data.shape[1:])
+            self.keys: list[object] = []
+
+        def __getitem__(self, key: object) -> np.ndarray:
+            self.keys.append(key)
+            return np.asarray(self.data[key])
+
+    first = RecordingArray(np.arange(24, dtype=np.int64).reshape(3, 2, 4))
+    second = RecordingArray(100 + np.arange(24, dtype=np.int64).reshape(3, 2, 4))
+    collection = mod._IndexedCollectionArray(
+        [first, second],
+        source_indices=np.asarray([0, 0, 1, 1], dtype=np.uint8),
+        local_indices=np.asarray([1, 2, 0, 1], dtype=np.uint16),
+    )
+
+    np.testing.assert_array_equal(
+        collection[:, 1],
+        np.vstack([first.data[1:3, 1], second.data[0:2, 1]]),
+    )
+    np.testing.assert_array_equal(collection[2, 0], second.data[0, 0])
+    assert first.keys == [(slice(1, 3), 1)]
+    assert second.keys == [(slice(0, 2), 1), (slice(0, 1), 0)]
+
+
 def _build_probability_root(
     store_path: Path | None = None,
     *,
