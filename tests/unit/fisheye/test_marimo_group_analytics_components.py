@@ -110,6 +110,54 @@ def test_grouped_bar_places_selected_chasers_side_by_side() -> None:
     ]
 
 
+def test_grouped_bar_uses_stimulus_colors_and_patterns_duplicate_colors() -> None:
+    figure = grouped_bar_figure(
+        [
+            {
+                "window_label": "pre",
+                "value": 1.0,
+                "series": "aggressive · chaser 0",
+                "raw_color_hex": "#ff0000",
+            },
+            {
+                "window_label": "pre",
+                "value": 2.0,
+                "series": "inert · chaser 1",
+                "raw_color_hex": "#ff0000",
+            },
+        ],
+        title="RedScare",
+        x_key="window_label",
+        y_key="value",
+        series_key="series",
+        yaxis_title="Value",
+        color_key="raw_color_hex",
+    )
+
+    assert figure is not None
+    assert [trace.marker.color for trace in figure.data] == ["#ff0000", "#ff0000"]
+    assert figure.data[0].marker.pattern.shape != figure.data[1].marker.pattern.shape
+
+
+def test_line_figure_uses_distinct_stimulus_colors() -> None:
+    figure = line_figure(
+        [
+            {"x": 1.0, "y": 2.0, "chaser": 0, "raw_color_hex": "#ff0000"},
+            {"x": 1.0, "y": 3.0, "chaser": 1, "raw_color_hex": "#1600ff"},
+        ],
+        title="GoodCopBadCop",
+        x_key="x",
+        y_key="y",
+        series_keys=("chaser",),
+        xaxis_title="X",
+        yaxis_title="Y",
+        color_key="raw_color_hex",
+    )
+
+    assert figure is not None
+    assert [trace.line.color for trace in figure.data] == ["#ff0000", "#1600ff"]
+
+
 def test_plot_helpers_return_none_for_missing_required_columns() -> None:
     assert grouped_bar_figure(
         [],

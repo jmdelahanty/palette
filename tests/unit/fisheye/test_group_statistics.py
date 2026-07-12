@@ -57,6 +57,8 @@ def _make_goodcopbadcop_export(root: Path, export_run_id: str = "source_export")
                         "recording_id": recording_id,
                         "window_label": label_by_condition[condition],
                         "chaser_index": chaser_index,
+                        "chaser_column_index": chaser_index,
+                        "behavior_class": "unknown",
                         "mean_distance_mm": value + offset,
                         "p50_distance_mm": value + offset,
                         "fraction_within_threshold": (value + offset) / 10.0,
@@ -68,12 +70,41 @@ def _make_goodcopbadcop_export(root: Path, export_run_id: str = "source_export")
         export_root / "v1" / "chaser_epoch_distance_summary" / f"export_run_id={export_run_id}",
         rows,
     )
+    role_by_recording = {
+        "r1": ("aggressive", "inert"),
+        "r2": ("inert", "aggressive"),
+        "r3": ("aggressive", "inert"),
+    }
+    object_phase_rows = [
+        {
+            "recording_id": recording_id,
+            "object_column_index": object_column_index,
+            "object_role": role,
+        }
+        for recording_id, roles in role_by_recording.items()
+        for object_column_index, role in enumerate(roles)
+    ]
+    _write_rows(
+        export_root
+        / "v1"
+        / "chaser_cra_primary_endpoint_object_phase"
+        / f"export_run_id={export_run_id}",
+        object_phase_rows,
+    )
     manifest = {
         "export_run_id": export_run_id,
         "schema_id": EXPORT_SCHEMA_ID,
         "schema_version": EXPORT_SCHEMA_VERSION,
-        "table_contracts": contract_snapshot(["chaser_epoch_distance_summary"]),
-        "row_counts_by_table": {"chaser_epoch_distance_summary": len(rows)},
+        "table_contracts": contract_snapshot(
+            [
+                "chaser_epoch_distance_summary",
+                "chaser_cra_primary_endpoint_object_phase",
+            ]
+        ),
+        "row_counts_by_table": {
+            "chaser_epoch_distance_summary": len(rows),
+            "chaser_cra_primary_endpoint_object_phase": len(object_phase_rows),
+        },
         "collection_manifest": {
             "collection_id": "collection_test",
             "manifest_sha256": "abc123",
@@ -276,6 +307,13 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
     descriptive_rows = compute_goodcopbadcop_descriptive_summaries(config)
 
     assert manifest["status_counts"] == {"computed": 18}
+    assert manifest["input_tables"] == [
+        "chaser_cra_primary_endpoint_object_phase",
+        "chaser_epoch_distance_summary",
+    ]
+    assert manifest["parameters"]["role_mapping_table"] == (
+        "chaser_cra_primary_endpoint_object_phase"
+    )
     assert manifest["row_counts_by_table"][SUMMARY_TABLE] == 18
     assert len(descriptive_rows) == 18
     descriptive_target = next(
@@ -283,23 +321,23 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
         for row in descriptive_rows
         if row["metric_name"] == "p50_distance_mm"
         and row["condition_name"] == "training"
-        and json.loads(row["group_key_json"])["chaser_index"] == 0
+        and json.loads(row["group_key_json"])["behavior_class"] == "aggressive"
     )
-    assert descriptive_target["mean"] == pytest.approx(4.0)
-    assert descriptive_target["std_dev"] == pytest.approx(2.0)
-    assert descriptive_target["sem"] == pytest.approx(2.0 / (3.0 ** 0.5))
+    assert descriptive_target["mean"] == pytest.approx(13.0 / 3.0)
+    assert descriptive_target["std_dev"] == pytest.approx(2.081665999)
+    assert descriptive_target["sem"] == pytest.approx(2.081665999 / (3.0 ** 0.5))
     target = next(
         row
         for row in rows
         if row["metric_name"] == "p50_distance_mm"
         and row["contrast_name"] == "training-pre"
-        and json.loads(row["group_key_json"])["chaser_index"] == 0
+        and json.loads(row["group_key_json"])["behavior_class"] == "aggressive"
     )
     assert target["source_export_run_id"] == "source_export"
     assert target["collection_id"] == "collection_test"
     assert target["paired_unit_count"] == 3
-    assert target["mean_a"] == pytest.approx(2.0)
-    assert target["mean_b"] == pytest.approx(4.0)
+    assert target["mean_a"] == pytest.approx(7.0 / 3.0)
+    assert target["mean_b"] == pytest.approx(13.0 / 3.0)
     assert target["mean_difference"] == pytest.approx(2.0)
     assert target["p_value"] == pytest.approx(0.25)
     assert target["q_value"] is not None

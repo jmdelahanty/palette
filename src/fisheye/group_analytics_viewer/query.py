@@ -672,6 +672,8 @@ def _group_label(group_key_json: Any) -> str:
         return str(group_key_json)
     if not isinstance(group_key, Mapping):
         return str(group_key)
+    if group_key.get("behavior_class"):
+        return str(group_key.get("behavior_class"))
     if "chaser_index" in group_key:
         return f"chaser {group_key.get('chaser_index')}"
     if group_key.get("zone_label"):
@@ -954,13 +956,17 @@ def _enrich_chaser_behavior_rows(
 ) -> list[dict[str, Any]]:
     """Fill unknown chaser roles from the exported CRA object-column mapping."""
 
-    role_by_recording_column: dict[tuple[str, int], str] = {}
+    metadata_by_recording_column: dict[tuple[str, int], tuple[str, str | None]] = {}
     for row in object_phase_rows:
         recording_id = str(row.get("recording_id") or "")
         object_column = _safe_int(row.get("object_column_index"))
         role = str(row.get("object_role") or row.get("behavior_class") or "").strip()
+        raw_color = str(row.get("raw_color_hex") or "").strip() or None
         if recording_id and object_column is not None and role and role != "unknown":
-            role_by_recording_column[(recording_id, object_column)] = role
+            metadata_by_recording_column[(recording_id, object_column)] = (
+                role,
+                raw_color,
+            )
 
     enriched: list[dict[str, Any]] = []
     for source_row in rows:
@@ -970,13 +976,39 @@ def _enrich_chaser_behavior_rows(
             recording_id = str(row.get("recording_id") or "")
             chaser_column = _safe_int(row.get("chaser_column_index"))
             if recording_id and chaser_column is not None:
-                resolved_role = role_by_recording_column.get(
+                resolved = metadata_by_recording_column.get(
                     (recording_id, chaser_column)
                 )
-                if resolved_role:
-                    row["behavior_class"] = resolved_role
+                if resolved:
+                    row["behavior_class"] = resolved[0]
+        recording_id = str(row.get("recording_id") or "")
+        chaser_column = _safe_int(row.get("chaser_column_index"))
+        resolved = (
+            metadata_by_recording_column.get((recording_id, chaser_column))
+            if recording_id and chaser_column is not None
+            else None
+        )
+        if resolved and resolved[1]:
+            row["raw_color_hex"] = resolved[1]
         enriched.append(row)
     return enriched
+
+
+def _consistent_raw_color(
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[str | None, str]:
+    colors = sorted(
+        {
+            str(row.get("raw_color_hex") or "").strip().lower()
+            for row in rows
+            if str(row.get("raw_color_hex") or "").strip()
+        }
+    )
+    if not colors:
+        return None, "missing"
+    if len(colors) == 1:
+        return colors[0], "consistent"
+    return None, "mixed"
 
 
 def query_chaser_summary(
@@ -1008,17 +1040,23 @@ def query_chaser_summary(
     for key, group_rows in grouped.items():
         window_index, window_label, chaser_index, behavior_class = key
         condition_name = canonical_condition(window_label)
-        descriptive = (
-            _descriptive_row_for(
+        descriptive = None
+        if condition_name and behavior_class and behavior_class != "unknown":
+            descriptive = _descriptive_row_for(
                 descriptive_rows,
                 metric_family="chaser_distance",
                 metric_name=metric,
                 condition_name=condition_name or "",
+                group_key={"behavior_class": behavior_class},
+            )
+        if descriptive is None and condition_name and chaser_index is not None:
+            descriptive = _descriptive_row_for(
+                descriptive_rows,
+                metric_family="chaser_distance",
+                metric_name=metric,
+                condition_name=condition_name,
                 group_key={"chaser_index": chaser_index},
             )
-            if condition_name and chaser_index is not None
-            else None
-        )
         if descriptive is not None:
             stats = _summary_from_descriptive_row(descriptive)
             summary_source = "persisted_descriptive_summary"
@@ -1028,12 +1066,15 @@ def query_chaser_summary(
             summary_source = "computed_from_export_rows"
         value = stats["median"] if stat == "median" else stats["mean"]
         recording_ids = sorted({str(row.get("recording_id")) for row in group_rows if row.get("recording_id")})
+        raw_color_hex, color_status = _consistent_raw_color(group_rows)
         out_rows.append(
             {
                 "window_index": window_index,
                 "window_label": window_label,
                 "chaser_index": chaser_index,
                 "behavior_class": behavior_class,
+                "raw_color_hex": raw_color_hex,
+                "color_status": color_status,
                 "value": value,
                 "stat": stat,
                 "recording_count": stats["n"] if descriptive is not None else len(recording_ids),
@@ -1419,7 +1460,10 @@ def query_speed_distance_bins(
     window_label: str | None = None,
     chaser_index: int | None = None,
 ) -> dict[str, Any]:
-    rows = load_optional_table_rows(context, SPEED_DISTANCE_TABLE)
+    rows = _enrich_chaser_behavior_rows(
+        load_optional_table_rows(context, SPEED_DISTANCE_TABLE),
+        load_optional_table_rows(context, CRA_OBJECT_PHASE_TABLE),
+    )
     if window_label:
         rows = [row for row in rows if row.get("window_label") == window_label]
     if chaser_index is not None:
@@ -1463,11 +1507,14 @@ def query_speed_distance_bins(
         stats = _summary(values)
         recording_ids = sorted({str(row.get("recording_id")) for row in group_rows if row.get("recording_id")})
         pooled_mean = speed_sum / float(count) if count > 0 else None
+        raw_color_hex, color_status = _consistent_raw_color(group_rows)
         out_rows.append(
             {
                 "window_index": window_index,
                 "window_label": label,
                 "chaser_index": chaser,
+                "raw_color_hex": raw_color_hex,
+                "color_status": color_status,
                 "distance_bin_index": bin_index,
                 "distance_bin_left_mm": bin_left,
                 "distance_bin_right_mm": bin_right,
@@ -1505,7 +1552,10 @@ def query_chaser_histogram(
     window_label: str | None = None,
     chaser_index: int | None = None,
 ) -> dict[str, Any]:
-    rows = load_table_rows(context, CHASER_HISTOGRAM_TABLE)
+    rows = _enrich_chaser_behavior_rows(
+        load_table_rows(context, CHASER_HISTOGRAM_TABLE),
+        load_optional_table_rows(context, CRA_OBJECT_PHASE_TABLE),
+    )
     if window_label:
         rows = [row for row in rows if row.get("window_label") == window_label]
     if chaser_index is not None:
@@ -1513,6 +1563,7 @@ def query_chaser_histogram(
 
     grouped: dict[tuple[Any, ...], int] = defaultdict(int)
     meta: dict[tuple[Any, ...], dict[str, Any]] = {}
+    raw_colors: dict[tuple[Any, ...], set[str]] = defaultdict(set)
     for row in rows:
         key = (
             _safe_int(row.get("window_index")),
@@ -1525,6 +1576,8 @@ def query_chaser_histogram(
             _safe_float(row.get("bin_width_mm")),
         )
         grouped[key] += int(_safe_int(row.get("hist_count")) or 0)
+        if row.get("raw_color_hex"):
+            raw_colors[key].add(str(row["raw_color_hex"]).strip().lower())
         meta.setdefault(
             key,
             {
@@ -1547,6 +1600,11 @@ def query_chaser_histogram(
     out_rows: list[dict[str, Any]] = []
     for key, count in grouped.items():
         item = dict(meta[key])
+        colors = sorted(raw_colors.get(key, set()))
+        item["raw_color_hex"] = colors[0] if len(colors) == 1 else None
+        item["color_status"] = (
+            "consistent" if len(colors) == 1 else "mixed" if colors else "missing"
+        )
         total = totals[(key[1], key[2])]
         bin_width = _safe_float(item.get("bin_width_mm")) or 1.0
         density = float(count) / float(total * bin_width) if total > 0 and bin_width > 0 else None
@@ -2640,12 +2698,15 @@ def query_egocentric_summary(
         stats = _summary(values)
         value = stats["median"] if stat == "median" else stats["mean"]
         recording_ids = sorted({str(row.get("recording_id")) for row in group_rows if row.get("recording_id")})
+        raw_color_hex, color_status = _consistent_raw_color(group_rows)
         out_rows.append(
             {
                 "window_index": window_index,
                 "window_label": window_label,
                 "chaser_index": chaser_index,
                 "behavior_class": behavior_class,
+                "raw_color_hex": raw_color_hex,
+                "color_status": color_status,
                 "value": value,
                 "stat": stat,
                 "recording_count": len(recording_ids),

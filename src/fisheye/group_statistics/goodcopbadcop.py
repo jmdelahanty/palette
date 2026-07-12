@@ -18,6 +18,7 @@ import polars as pl
 from fisheye.analytics_exports.capabilities import resolve_capabilities
 from fisheye.analytics_exports.contracts import (
     CHASER_CRA_NEAR_FIELD_SUMMARY_TABLE,
+    CHASER_CRA_OBJECT_PHASE_TABLE,
     CHASER_CRA_SUMMARY_TABLE,
     CHASER_DISTANCE_SUMMARY_TABLE,
     CHASER_EGOCENTRIC_SUMMARY_TABLE,
@@ -45,6 +46,7 @@ from .paired import (
 
 SUMMARY_TABLE = STATISTICS_TABLE
 CRA_SUMMARY_TABLE = CHASER_CRA_SUMMARY_TABLE
+CRA_OBJECT_PHASE_TABLE = CHASER_CRA_OBJECT_PHASE_TABLE
 CRA_NEAR_FIELD_SUMMARY_TABLE = CHASER_CRA_NEAR_FIELD_SUMMARY_TABLE
 EPOCH_BEHAVIOR_TABLE = CHASER_EPOCH_BEHAVIOR_TABLE
 SCHEMA_VERSION = EXPORT_SCHEMA_VERSION
@@ -70,19 +72,19 @@ DEFAULT_METRICS: tuple[MetricSpec, ...] = (
         metric_family="chaser_distance",
         source_table=CHASER_DISTANCE_SUMMARY_TABLE,
         metric_name="mean_distance_mm",
-        group_keys=("chaser_index",),
+        group_keys=("behavior_class",),
     ),
     MetricSpec(
         metric_family="chaser_distance",
         source_table=CHASER_DISTANCE_SUMMARY_TABLE,
         metric_name="p50_distance_mm",
-        group_keys=("chaser_index",),
+        group_keys=("behavior_class",),
     ),
     MetricSpec(
         metric_family="chaser_distance",
         source_table=CHASER_DISTANCE_SUMMARY_TABLE,
         metric_name="fraction_within_threshold",
-        group_keys=("chaser_index",),
+        group_keys=("behavior_class",),
     ),
     MetricSpec(
         metric_family="spatial_occupancy",
@@ -300,31 +302,31 @@ DEFAULT_METRICS: tuple[MetricSpec, ...] = (
         metric_family="egocentric_alignment",
         source_table=CHASER_EGOCENTRIC_SUMMARY_TABLE,
         metric_name="mean_alignment_cos",
-        group_keys=("chaser_index",),
+        group_keys=("behavior_class",),
     ),
     MetricSpec(
         metric_family="egocentric_alignment",
         source_table=CHASER_EGOCENTRIC_SUMMARY_TABLE,
         metric_name="mean_lateral_sin",
-        group_keys=("chaser_index",),
+        group_keys=("behavior_class",),
     ),
     MetricSpec(
         metric_family="egocentric_alignment",
         source_table=CHASER_EGOCENTRIC_SUMMARY_TABLE,
         metric_name="fraction_front_45",
-        group_keys=("chaser_index",),
+        group_keys=("behavior_class",),
     ),
     MetricSpec(
         metric_family="egocentric_alignment",
         source_table=CHASER_EGOCENTRIC_SUMMARY_TABLE,
         metric_name="fraction_lateral_45",
-        group_keys=("chaser_index",),
+        group_keys=("behavior_class",),
     ),
     MetricSpec(
         metric_family="egocentric_alignment",
         source_table=CHASER_EGOCENTRIC_SUMMARY_TABLE,
         metric_name="fraction_behind_45",
-        group_keys=("chaser_index",),
+        group_keys=("behavior_class",),
     ),
 )
 
@@ -394,6 +396,131 @@ def _read_export_table(export_root: Path, source_export_run_id: str, table: str)
     if not files:
         raise FileNotFoundError(f"No Parquet parts found for {table}: {table_dir}")
     return pl.scan_parquet([str(path) for path in files]).collect()
+
+
+ROLE_GROUPED_SOURCE_TABLES = {
+    CHASER_DISTANCE_SUMMARY_TABLE,
+    CHASER_EGOCENTRIC_SUMMARY_TABLE,
+}
+
+
+def _statistics_input_tables(metrics: Sequence[MetricSpec]) -> list[str]:
+    tables = {spec.source_table for spec in metrics}
+    if any(
+        spec.source_table in ROLE_GROUPED_SOURCE_TABLES
+        and "behavior_class" in spec.group_keys
+        for spec in metrics
+    ):
+        tables.add(CRA_OBJECT_PHASE_TABLE)
+    return sorted(tables)
+
+
+def _enrich_role_grouped_frames(
+    frames: dict[str, pl.DataFrame],
+    metrics: Sequence[MetricSpec],
+) -> None:
+    role_grouped_tables = {
+        spec.source_table
+        for spec in metrics
+        if spec.source_table in ROLE_GROUPED_SOURCE_TABLES
+        and "behavior_class" in spec.group_keys
+    }
+    if not role_grouped_tables:
+        return
+    role_frame = frames.get(CRA_OBJECT_PHASE_TABLE)
+    if role_frame is None:
+        raise ValueError(
+            f"Role-grouped statistics require {CRA_OBJECT_PHASE_TABLE}"
+        )
+    required_role_columns = {
+        "recording_id",
+        "object_column_index",
+        "object_role",
+    }
+    missing_role_columns = sorted(required_role_columns - set(role_frame.columns))
+    if missing_role_columns:
+        raise ValueError(
+            f"{CRA_OBJECT_PHASE_TABLE} is missing role mapping columns: "
+            f"{missing_role_columns}"
+        )
+    role_rows = (
+        role_frame.select(
+            [
+                "recording_id",
+                pl.col("object_column_index").alias("chaser_column_index"),
+                pl.col("object_role")
+                .cast(pl.String)
+                .str.strip_chars()
+                .str.to_lowercase()
+                .alias("_resolved_behavior_class"),
+            ]
+        )
+        .drop_nulls(
+            [
+                "recording_id",
+                "chaser_column_index",
+                "_resolved_behavior_class",
+            ]
+        )
+        .unique()
+    )
+    conflicts = (
+        role_rows.group_by(["recording_id", "chaser_column_index"])
+        .agg(pl.col("_resolved_behavior_class").n_unique().alias("role_count"))
+        .filter(pl.col("role_count") > 1)
+    )
+    if conflicts.height:
+        raise ValueError(
+            "CRA object-role mapping is not unique by recording and object column"
+        )
+    role_map = role_rows.group_by(
+        ["recording_id", "chaser_column_index"]
+    ).agg(pl.col("_resolved_behavior_class").first())
+
+    for table in role_grouped_tables:
+        frame = frames[table]
+        required = {"recording_id", "chaser_column_index", "behavior_class"}
+        missing = sorted(required - set(frame.columns))
+        if missing:
+            raise ValueError(f"{table} is missing role-grouping columns: {missing}")
+        joined = frame.join(
+            role_map,
+            on=["recording_id", "chaser_column_index"],
+            how="left",
+        ).with_columns(
+            pl.col("behavior_class")
+            .cast(pl.String)
+            .str.strip_chars()
+            .str.to_lowercase()
+        )
+        disagreements = joined.filter(
+            pl.col("behavior_class").is_not_null()
+            & (pl.col("behavior_class") != "unknown")
+            & pl.col("_resolved_behavior_class").is_not_null()
+            & (pl.col("behavior_class") != pl.col("_resolved_behavior_class"))
+        )
+        if disagreements.height:
+            raise ValueError(
+                f"{table} behavior_class conflicts with CRA object-role mapping"
+            )
+        joined = joined.with_columns(
+            pl.when(
+                pl.col("behavior_class").is_null()
+                | (pl.col("behavior_class") == "unknown")
+            )
+            .then(pl.col("_resolved_behavior_class"))
+            .otherwise(pl.col("behavior_class"))
+            .alias("behavior_class")
+        )
+        unresolved = joined.filter(
+            pl.col("behavior_class").is_null()
+            | (pl.col("behavior_class") == "unknown")
+        )
+        if unresolved.height:
+            raise ValueError(
+                f"{table} contains chaser rows without a resolvable behavior role"
+            )
+        frames[table] = joined.drop("_resolved_behavior_class")
 
 
 def _require_v2_source_manifest(manifest: Mapping[str, Any], *, path: Path) -> None:
@@ -856,11 +983,12 @@ def compute_goodcopbadcop_statistics(config: GoodCopBadCopStatisticsConfig) -> t
     _require_v2_source_manifest(source_manifest, path=source_manifest_file)
     source_manifest_sha256 = _sha256_file(source_manifest_file)
     rng = np.random.default_rng(int(config.random_seed))
-    tables = sorted({spec.source_table for spec in config.metrics})
+    tables = _statistics_input_tables(config.metrics)
     frames = {
         table: _read_export_table(export_root, config.source_export_run_id, table)
         for table in tables
     }
+    _enrich_role_grouped_frames(frames, config.metrics)
 
     rows: list[dict[str, Any]] = []
     for spec in config.metrics:
@@ -929,11 +1057,12 @@ def compute_goodcopbadcop_descriptive_summaries(config: GoodCopBadCopStatisticsC
     source_manifest = _json_file(source_manifest_file)
     _require_v2_source_manifest(source_manifest, path=source_manifest_file)
     source_manifest_sha256 = _sha256_file(source_manifest_file)
-    tables = sorted({spec.source_table for spec in config.metrics})
+    tables = _statistics_input_tables(config.metrics)
     frames = {
         table: _read_export_table(export_root, config.source_export_run_id, table)
         for table in tables
     }
+    _enrich_role_grouped_frames(frames, config.metrics)
 
     rows: list[dict[str, Any]] = []
     for spec in config.metrics:
@@ -1007,7 +1136,7 @@ def _build_stats_manifest(
         "source_export_manifest_path": str(source_manifest_path(config.export_root, config.source_export_run_id)),
         "source_export_manifest_sha256": source_manifest_sha256,
         "source_collection_manifest": source_manifest.get("collection_manifest"),
-        "input_tables": sorted({spec.source_table for spec in config.metrics}),
+        "input_tables": _statistics_input_tables(config.metrics),
         "source_row_counts_by_table": source_manifest.get("row_counts_by_table"),
         "output_tables": output_tables,
         "table_contracts": contract_snapshot(output_tables),
@@ -1039,6 +1168,11 @@ def _build_stats_manifest(
             "minimum_recordings": int(config.minimum_recordings),
             "random_seed": int(config.random_seed),
             "fdr_method": "benjamini_hochberg",
+            "role_mapping_table": (
+                CRA_OBJECT_PHASE_TABLE
+                if CRA_OBJECT_PHASE_TABLE in _statistics_input_tables(config.metrics)
+                else None
+            ),
         },
     }
 

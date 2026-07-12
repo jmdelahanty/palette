@@ -90,17 +90,20 @@ def test_unknown_chaser_roles_are_resolved_by_recording_and_object_column() -> N
             "recording_id": "recording-a",
             "object_column_index": 0,
             "object_role": "aggressive",
+            "raw_color_hex": "#ff0000",
         },
         {
             "recording_id": "recording-a",
             "object_column_index": 1,
             "object_role": "inert",
+            "raw_color_hex": "#1600ff",
         },
     ]
 
     enriched = _enrich_chaser_behavior_rows(distance_rows, object_phase_rows)
 
     assert [row["behavior_class"] for row in enriched] == ["aggressive", "inert"]
+    assert [row["raw_color_hex"] for row in enriched] == ["#ff0000", "#1600ff"]
 
 
 def _make_goodcopbadcop_export(tmp_path: Path):
@@ -257,6 +260,7 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(tmp_path: Path) -> 
     )
     assert post_chaser_1["value"] == pytest.approx(6.0)
     assert post_chaser_1["behavior_class"] == "inert"
+    assert post_chaser_1["raw_color_hex"] == "#0000ff"
     assert post_chaser_1["std_dev"] is None
     assert post_chaser_1["sem"] is None
 
@@ -473,7 +477,7 @@ def test_group_analytics_viewer_queries_matching_statistics_export(tmp_path: Pat
     assert statistics["row_count"] == 6
     first = statistics["rows"][0]
     assert first["metric_family"] == "chaser_distance"
-    assert first["group"] in {"chaser 0", "chaser 1"}
+    assert first["group"] in {"aggressive", "inert"}
     assert first["paired_unit_count"] == 1
     assert first["mean_difference"] is not None
     assert "p_value" in first

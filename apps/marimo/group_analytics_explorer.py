@@ -775,6 +775,7 @@ def _(
             y_key="value",
             series_key="series",
             yaxis_title=_summary_data.get("metric_label", "Value"),
+            color_key="raw_color_hex",
         )
         _hist = payloads.get("chaser_histogram", {})
         _hist_figure = line_figure(
@@ -785,6 +786,7 @@ def _(
             series_keys=("window_label", "chaser_index"),
             xaxis_title="Distance to chaser (mm)",
             yaxis_title="Pooled density",
+            color_key="raw_color_hex",
         )
         _speed = payloads.get("speed_distance", {})
         _speed_figure = line_figure(
@@ -795,6 +797,7 @@ def _(
             series_keys=("window_label", "chaser_index"),
             xaxis_title="Distance to chaser (mm)",
             yaxis_title="Pooled mean speed (mm/s)",
+            color_key="raw_color_hex",
         )
         panel_output = mo.vstack(
             [
@@ -819,6 +822,7 @@ def _(
             y_key="value",
             series_key="object_role",
             yaxis_title=_phase.get("metric_label", "Value"),
+            color_key="raw_color_hex",
         )
         _summary_data = payloads.get("cra_summary", {})
         panel_output = mo.vstack(
@@ -843,6 +847,7 @@ def _(
             y_key="value",
             series_key="object_role",
             yaxis_title=_phase.get("metric_label", "Value"),
+            color_key="raw_color_hex",
         )
         _curves = payloads.get("near_curves", {})
         _radial_figure = line_figure(
@@ -891,6 +896,7 @@ def _(
             y_key="value",
             series_key="series",
             yaxis_title=_summary_data.get("metric_label", "Value"),
+            color_key="raw_color_hex",
         )
         _hist = payloads.get("egocentric_histogram", {})
         _heatmap = egocentric_heatmap_figure(

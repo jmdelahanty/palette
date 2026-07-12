@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -290,6 +291,7 @@ def grouped_bar_figure(
     y_key: str,
     series_key: str,
     yaxis_title: str,
+    color_key: str | None = None,
 ) -> go.Figure | None:
     frame = pd.DataFrame(rows)
     if frame.empty or x_key not in frame or y_key not in frame:
@@ -297,18 +299,43 @@ def grouped_bar_figure(
     fig = go.Figure()
     if series_key not in frame:
         frame[series_key] = "all"
-    for series, group in frame.groupby(series_key, sort=False, dropna=False):
+    grouped = list(frame.groupby(series_key, sort=False, dropna=False))
+    colors = []
+    for _series, group in grouped:
+        values = (
+            sorted(
+                {
+                    str(value).strip().lower()
+                    for value in group[color_key].dropna().tolist()
+                    if str(value).strip()
+                }
+            )
+            if color_key and color_key in group
+            else []
+        )
+        colors.append(values[0] if len(values) == 1 else None)
+    color_counts = Counter(color for color in colors if color)
+    pattern_shapes = ("", "/", "\\", "x", ".", "+")
+    for series_index, ((series, group), series_color) in enumerate(zip(grouped, colors)):
         custom_columns = [
             column
             for column in ("recording_count", "mean", "median", "sem", "n")
             if column in group
         ]
+        marker: dict[str, Any] | None = None
+        if series_color:
+            marker = {"color": series_color}
+            if color_counts[series_color] > 1:
+                marker["pattern"] = {
+                    "shape": pattern_shapes[series_index % len(pattern_shapes)]
+                }
         fig.add_trace(
             go.Bar(
                 x=group[x_key],
                 y=group[y_key],
                 name=str(series),
                 customdata=group[custom_columns] if custom_columns else None,
+                marker=marker,
             )
         )
     fig.update_layout(
@@ -331,6 +358,7 @@ def line_figure(
     series_keys: Sequence[str],
     xaxis_title: str,
     yaxis_title: str,
+    color_key: str | None = None,
 ) -> go.Figure | None:
     frame = pd.DataFrame(rows)
     if frame.empty or x_key not in frame or y_key not in frame:
@@ -338,19 +366,47 @@ def line_figure(
     fig = go.Figure()
     keys = [key for key in series_keys if key in frame]
     if keys:
-        grouped = frame.groupby(keys[0] if len(keys) == 1 else keys, sort=False, dropna=False)
+        grouped = list(
+            frame.groupby(
+                keys[0] if len(keys) == 1 else keys,
+                sort=False,
+                dropna=False,
+            )
+        )
     else:
         grouped = [("all", frame)]
-    for raw_series, group in grouped:
+    colors = []
+    for _raw_series, group in grouped:
+        values = (
+            sorted(
+                {
+                    str(value).strip().lower()
+                    for value in group[color_key].dropna().tolist()
+                    if str(value).strip()
+                }
+            )
+            if color_key and color_key in group
+            else []
+        )
+        colors.append(values[0] if len(values) == 1 else None)
+    color_counts = Counter(color for color in colors if color)
+    dash_styles = ("solid", "dash", "dot", "dashdot")
+    for series_index, ((raw_series, group), series_color) in enumerate(zip(grouped, colors)):
         values = raw_series if isinstance(raw_series, tuple) else (raw_series,)
         label = " · ".join(str(value) for value in values)
         group = group.sort_values(x_key)
+        line: dict[str, Any] | None = None
+        if series_color:
+            line = {"color": series_color}
+            if color_counts[series_color] > 1:
+                line["dash"] = dash_styles[series_index % len(dash_styles)]
         fig.add_trace(
             go.Scatter(
                 x=group[x_key],
                 y=group[y_key],
                 mode="lines",
                 name=label,
+                line=line,
             )
         )
     fig.update_layout(
