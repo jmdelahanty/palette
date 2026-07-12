@@ -20,7 +20,6 @@ from fisheye.registry.model_resolution import (
 from fisheye.shared.flat_roi_cache import (
     crop_run_name_from_manifest,
     load_flat_roi_cache_manifest,
-    open_flat_roi_cache,
 )
 from fisheye.shared.run_provenance import json_ready
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
@@ -313,17 +312,44 @@ def validate_flat_roi_cache_binding(
             f"target is {resolved_zarr}."
         )
 
-    cache = open_flat_roi_cache(
-        resolved_manifest,
-        expected_archive_path=resolved_zarr,
-        expected_crop_run=requested_crop_run,
-    )
-    try:
-        shape = tuple(int(value) for value in cache.shape)
-        payload_path = cache.bin_path.expanduser().resolve()
-    finally:
-        cache.close()
     array = _mapping(manifest.get("array"), field="array")
+    raw_shape = array.get("shape")
+    if not isinstance(raw_shape, list) or len(raw_shape) != 3:
+        raise ValueError("Flat ROI cache manifest array.shape must be [N, H, W].")
+    try:
+        shape = tuple(int(value) for value in raw_shape)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Flat ROI cache manifest array.shape must contain integers."
+        ) from exc
+    if any(value <= 0 for value in shape):
+        raise ValueError("Flat ROI cache manifest array.shape values must be positive.")
+    dtype_name = str(array.get("dtype") or "")
+    if dtype_name != "uint8":
+        raise ValueError(
+            f"Unsupported flat ROI cache dtype {dtype_name!r}. Expected uint8."
+        )
+    order = str(array.get("order") or "C")
+    if order != "C":
+        raise ValueError(
+            f"Unsupported flat ROI cache order {order!r}. Expected C."
+        )
+    raw_payload_path = str(array.get("bin_path") or "").strip()
+    if not raw_payload_path:
+        raise ValueError("Flat ROI cache manifest is missing array.bin_path.")
+    payload_path = Path(raw_payload_path).expanduser()
+    if not payload_path.is_absolute():
+        payload_path = resolved_manifest.parent / payload_path
+    payload_path = payload_path.resolve()
+    if not payload_path.is_file():
+        raise FileNotFoundError(f"Flat ROI cache payload not found: {payload_path}")
+    expected_bytes = int(shape[0]) * int(shape[1]) * int(shape[2])
+    actual_bytes = payload_path.stat().st_size
+    if actual_bytes != expected_bytes:
+        raise ValueError(
+            "Flat ROI cache payload size mismatch: "
+            f"expected {expected_bytes} bytes, got {actual_bytes}."
+        )
     cache_key = str(manifest.get("cache_key") or "").strip()
     crop_signature = source.get("crop_signature")
     crop_revision = source.get("crop_revision")
@@ -344,11 +370,11 @@ def validate_flat_roi_cache_binding(
             f"Flat ROI cache is {shape[2]}x{shape[1]}, but zebrafish keypoint "
             f"inference requires at least {int(min_roi_size)}x{int(min_roi_size)}."
         )
-    total_bytes = int(array.get("total_bytes") or payload_path.stat().st_size)
-    if payload_path.stat().st_size != total_bytes:
+    total_bytes = int(array.get("total_bytes") or actual_bytes)
+    if actual_bytes != total_bytes:
         raise ValueError(
             f"Flat ROI cache total_bytes mismatch: manifest has {total_bytes}, "
-            f"payload has {payload_path.stat().st_size}."
+            f"payload has {actual_bytes}."
         )
     return FlatRoiCacheBinding(
         manifest_path=resolved_manifest,

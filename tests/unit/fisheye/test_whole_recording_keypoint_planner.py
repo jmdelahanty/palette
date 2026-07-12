@@ -210,6 +210,29 @@ def test_flat_cache_binding_rejects_small_zebrafish_surface(tmp_path: Path) -> N
         )
 
 
+def test_flat_cache_binding_validates_metadata_without_memmap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    target = _make_target(tmp_path, "metadata_only_cache")
+
+    def reject_memmap(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("planner preflight must not memory-map the cache payload")
+
+    import fisheye.shared.flat_roi_cache as flat_roi_cache_mod
+
+    monkeypatch.setattr(flat_roi_cache_mod.np, "memmap", reject_memmap)
+    binding = common_mod.validate_flat_roi_cache_binding(
+        manifest_path=Path(target["roi_cache_manifest"]),
+        analysis_zarr=Path(target["analysis_zarr"]),
+        crop_run="crop_001",
+        min_roi_size=348,
+    )
+
+    assert binding.shape == (2, 348, 348)
+    assert binding.total_bytes == 2 * 348 * 348
+
+
 def test_whole_recording_plan_builds_independent_chains_and_serial_fanin(
     tmp_path: Path,
     monkeypatch,
