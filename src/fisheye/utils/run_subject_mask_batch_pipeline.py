@@ -377,6 +377,8 @@ def build_archive_plan(
     subject_output_parent: str = SUBJECT_MASK_CANONICAL_OUTPUT_PARENT,
     crop_run_name: str | None = None,
     resolve_assignment_keypoints: bool = True,
+    assignment_keypoint_group: str | None = None,
+    assignment_keypoint_run: str | None = None,
 ) -> ArchivePlan:
     if workflow_stage not in {"all", "inference", "finalization"}:
         raise ValueError(f"workflow_stage must be all, inference, or finalization; got {workflow_stage!r}.")
@@ -397,7 +399,28 @@ def build_archive_plan(
             if requested_crop_run and (zarr_path / "crop_runs" / requested_crop_run).is_dir()
             else None
         )
-    if resolve_assignment_keypoints:
+    explicit_assignment = assignment_keypoint_group is not None or assignment_keypoint_run is not None
+    if explicit_assignment:
+        if not assignment_keypoint_group or not assignment_keypoint_run:
+            raise ValueError(
+                "Explicit assignment keypoints require both assignment_keypoint_group "
+                "and assignment_keypoint_run."
+            )
+        keypoint_group = str(assignment_keypoint_group)
+        keypoint_run = str(assignment_keypoint_run)
+        keypoint_path = zarr_path / keypoint_group / keypoint_run
+        if not keypoint_path.is_dir():
+            raise FileNotFoundError(
+                "Explicit assignment-keypoint run is missing: "
+                f"{keypoint_path}"
+            )
+        completion_status = _attrs(keypoint_path).get("palette_run_completion_status")
+        if completion_status != "complete":
+            raise RuntimeError(
+                "Explicit assignment-keypoint run is not complete: "
+                f"{keypoint_path} (status={completion_status!r})"
+            )
+    elif resolve_assignment_keypoints:
         keypoint_group, keypoint_run = _resolve_assignment_keypoints(zarr_path)
     else:
         keypoint_group, keypoint_run = None, None
@@ -1010,6 +1033,7 @@ def _publish_staged_outputs(
     overwrite: bool,
     handoff_package_dir: Optional[Path] = None,
     registry_path: Optional[Path] = None,
+    defer_registry_status: bool = False,
 ) -> dict[str, Any]:
     root = _open_group_mutable(ctx.source_zarr_path)
     if plan.run_inference:
@@ -1093,7 +1117,10 @@ def _publish_staged_outputs(
             )
             subject_group.attrs["cluster_run_package"] = dict(package_payload)
             handoff_packages.append(dict(package_payload))
-        if plan.subject_output_parent == SUBJECT_MASK_CANONICAL_OUTPUT_PARENT:
+        if (
+            plan.subject_output_parent == SUBJECT_MASK_CANONICAL_OUTPUT_PARENT
+            and not defer_registry_status
+        ):
             if not emit_subject_mask_stage_completion(
                 root,
                 ctx.source_zarr_path,
@@ -1130,7 +1157,7 @@ def _publish_staged_outputs(
             run_provenance=refined_run_provenance,
         )
         refined_parent.attrs["refined_subject_mask_review_status_latest"] = plan.refined_run
-        if not emit_refined_subject_mask_stage_completion(
+        if not defer_registry_status and not emit_refined_subject_mask_stage_completion(
             root,
             ctx.source_zarr_path,
             run_group=refined_group,
@@ -1141,7 +1168,12 @@ def _publish_staged_outputs(
             raise RuntimeError(
                 f"Failed to emit registry status for refined_subject_masks_runs/{plan.refined_run}"
             )
-    if plan.subject_output_parent == SUBJECT_MASK_CANONICAL_OUTPUT_PARENT:
+    if defer_registry_status:
+        registry_refresh = {
+            "registry_refresh_status": "deferred",
+            "reason": "serial_workflow_registry_finalizer",
+        }
+    elif plan.subject_output_parent == SUBJECT_MASK_CANONICAL_OUTPUT_PARENT:
         registry_refresh = _refresh_subject_mask_registry_views(
             registry_path=registry_path,
             zarr_path=ctx.source_zarr_path,
@@ -1340,6 +1372,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Do not attach an assignment-keypoint run to inference-only raw subject masks.",
     )
     parser.add_argument(
+        "--assignment-keypoint-group",
+        choices=("keypoints_runs", "refined_keypoints_runs"),
+        help=(
+            "Exact keypoint parent to bind for eye assignment. Must be paired with "
+            "--assignment-keypoints-run; finalization does not fall back to latest."
+        ),
+    )
+    parser.add_argument(
+        "--assignment-keypoints-run",
+        help=(
+            "Exact keypoint run to bind for eye assignment. Must be paired with "
+            "--assignment-keypoint-group."
+        ),
+    )
+    parser.add_argument(
         "--subject-output-parent",
         choices=SUBJECT_MASK_OUTPUT_PARENTS,
         default=SUBJECT_MASK_CANONICAL_OUTPUT_PARENT,
@@ -1504,6 +1551,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force-finalization", action="store_true", help="Run finalization even if refined_subject_masks_runs already exists.")
     parser.add_argument("--overwrite", action="store_true", help="Pass overwrite through to child stages.")
     parser.add_argument(
+        "--defer-registry-status",
+        action="store_true",
+        help=(
+            "Complete and publish run groups without registry mutation. Use only "
+            "when a serial workflow finalizer will reconcile the exact runs."
+        ),
+    )
+    parser.add_argument(
         "--stage-output-to-scratch",
         action="store_true",
         help=(
@@ -1591,6 +1646,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         discovered_zarrs = _discover_analysis_zarrs(args.roots, include_smoke=bool(args.include_smoke))
 
+    explicit_assignment = bool(args.assignment_keypoint_group or args.assignment_keypoints_run)
+    if bool(args.assignment_keypoint_group) != bool(args.assignment_keypoints_run):
+        print(
+            "--assignment-keypoint-group and --assignment-keypoints-run must be provided together.",
+            file=sys.stderr,
+        )
+        return 2
+    if args.no_assignment_keypoints and explicit_assignment:
+        print(
+            "--no-assignment-keypoints cannot be combined with an explicit assignment-keypoint run.",
+            file=sys.stderr,
+        )
+        return 2
+
     all_plans = [
         build_archive_plan(
             zarr_path,
@@ -1602,6 +1671,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             subject_output_parent=str(args.subject_output_parent),
             crop_run_name=args.crop_run,
             resolve_assignment_keypoints=not bool(args.no_assignment_keypoints),
+            assignment_keypoint_group=args.assignment_keypoint_group,
+            assignment_keypoint_run=args.assignment_keypoints_run,
         )
         for zarr_path in discovered_zarrs
     ]
@@ -1696,7 +1767,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 cmd = _inference_command(
                     args,
                     effective_plan,
-                    defer_registry_status=staged_ctx is not None,
+                    defer_registry_status=(
+                        staged_ctx is not None or bool(args.defer_registry_status)
+                    ),
                     roi_cache_expected_archive_path=plan.zarr_path if staged_ctx is not None else None,
                 )
                 with profiler.phase(
@@ -1713,7 +1786,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 cmd = _finalization_command(
                     args,
                     effective_plan,
-                    defer_registry_status=staged_ctx is not None,
+                    defer_registry_status=(
+                        staged_ctx is not None or bool(args.defer_registry_status)
+                    ),
                 )
                 with profiler.phase(
                     "finalization_subprocess",
@@ -1763,6 +1838,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             overwrite=bool(args.overwrite),
                             handoff_package_dir=args.handoff_package_dir,
                             registry_path=args.registry,
+                            defer_registry_status=bool(args.defer_registry_status),
                         ))
                         result.registry_refresh_status = str(
                             phase.get("registry_refresh_status", "not_requested")

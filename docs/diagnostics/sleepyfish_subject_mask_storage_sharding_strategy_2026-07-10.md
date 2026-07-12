@@ -1326,9 +1326,10 @@ scripts/submit_subject_mask_complete_finalizer_matrix_bsub.sh \
   full destination validation is the material premium over ordinary chunks.
   The production default is now the `2,048`-row double-buffered layout;
   ordinary chunks require the explicit `--no-mask-probs-sharding` override.
-- Finalized runs include eye geometry, full ragged component contours, and
-  sampled component contours by default. The historical `335 s` layout A/B
-  excluded those surfaces and must not be quoted as complete production time.
+- Finalized runs include eye geometry and sampled component contours by
+  default. Full ragged component contours are now an explicit compatibility or
+  analysis opt-in. The historical `335 s` layout A/B excluded the required
+  derived surfaces and must not be quoted as complete production time.
 - The full `22`-shard canary exercised the compact parent identity plan,
   finalizer completion/publication behavior, exhaustive array parity, and
   independent dense-content validation at the complete `1,169,010`-row scale.

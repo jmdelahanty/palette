@@ -10,6 +10,7 @@ from fisheye.cluster.keypoints import common as common_mod
 from fisheye.cluster.keypoints.common import KeypointInputCapability, PoseModelBinding
 from fisheye.cluster.keypoints import registry_finalize as registry_finalize_mod
 from fisheye.cluster.keypoints import whole_recording as planner
+from fisheye.cluster import whole_recording_analysis as analysis_planner
 from fisheye.cluster.lsf import LsfResources
 
 
@@ -293,6 +294,65 @@ def test_whole_recording_plan_builds_independent_chains_and_serial_fanin(
     assert "--keypoint-run" in refinement_command
     assert "keypoints_goodcopbadcop_20260710" in refinement_command
     assert "refined_keypoints_goodcopbadcop_20260710" in refinement_command
+
+
+def test_whole_recording_analysis_plan_forks_inference_and_joins_finalization(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    keypoint_plan = _build_plan(tmp_path, monkeypatch, target_count=2)
+    plan = analysis_planner.build_plan(
+        keypoint_plan=keypoint_plan,
+        run_root=tmp_path / "combined",
+        mask_run_label="goodcopbadcop_masks_20260712",
+        mask_inference_resources=LsfResources(
+            queue="gpu_l4", ncores=8, mem_gb=48, gpus=1
+        ),
+        mask_finalization_resources=LsfResources(
+            queue="short", ncores=16, mem_gb=32
+        ),
+        handoff_package_dir=tmp_path / "handoff",
+    )
+
+    jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
+    assert plan.to_json()["schema"] == analysis_planner.PLAN_SCHEMA
+    assert jobs["predict:target_0"].dependency is None
+    assert jobs["mask_infer:target_0"].dependency is None
+    assert jobs["refine:target_0"].dependency.upstream_job_keys == (
+        "predict:target_0",
+    )
+    assert jobs["mask_finalize:target_0"].dependency.upstream_job_keys == (
+        "mask_infer:target_0",
+        "refine:target_0",
+    )
+    assert jobs["registry_finalize"].dependency.upstream_job_keys == (
+        "mask_finalize:target_0",
+        "mask_finalize:target_1",
+    )
+    assert "fisheye.cluster.whole_recording_analysis_registry_finalize" in (
+        jobs["registry_finalize"].command
+    )
+
+    inference_command = jobs["mask_infer:target_0"].command
+    assert "inference" in inference_command
+    assert "--refined-keypoint-run" not in inference_command
+    assert "--roi-cache-manifest" in inference_command
+    assert "--roi-cache-staging-dir" in inference_command
+
+    finalization_command = jobs["mask_finalize:target_0"].command
+    assert "finalization" in finalization_command
+    exact_index = finalization_command.index("--refined-keypoint-run") + 1
+    assert (
+        finalization_command[exact_index]
+        == "refined_keypoints_goodcopbadcop_20260710"
+    )
+    assert all("latest" not in argument for argument in finalization_command)
+    assert jobs["mask_finalize:target_0"].metadata[
+        "sampled_component_contours_requested"
+    ] is True
+    assert jobs["mask_finalize:target_0"].metadata[
+        "component_contours_requested"
+    ] is False
 
 
 def test_whole_recording_plan_supports_regular_chunk_opt_out(

@@ -532,6 +532,73 @@ def test_inference_only_plan_can_omit_assignment_keypoints(tmp_path: Path) -> No
     assert plan.run_inference is True
 
 
+def test_finalization_plan_binds_explicit_assignment_keypoint_run(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    _seed_subject_mask_batch_prereqs(zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    exact = root["refined_keypoints_runs"].create_group("refined_keypoints_exact")
+    exact.attrs["palette_run_completion_status"] = "complete"
+    root.require_group("subject_mask_runs").create_group("target_subject_run")
+
+    plan = mod.build_archive_plan(
+        zarr_path,
+        subject_run_name="target_subject_run",
+        refined_run_name="target_refined_run",
+        force_inference=False,
+        force_finalization=False,
+        workflow_stage="finalization",
+        assignment_keypoint_group="refined_keypoints_runs",
+        assignment_keypoint_run="refined_keypoints_exact",
+    )
+
+    assert plan.assignment_keypoint_group == "refined_keypoints_runs"
+    assert plan.assignment_keypoint_run == "refined_keypoints_exact"
+    assert plan.run_finalization is True
+
+
+def test_finalization_plan_fails_closed_when_explicit_keypoints_are_missing(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    _seed_subject_mask_batch_prereqs(zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    root.require_group("subject_mask_runs").create_group("target_subject_run")
+
+    with pytest.raises(FileNotFoundError, match="missing_exact_run"):
+        mod.build_archive_plan(
+            zarr_path,
+            subject_run_name="target_subject_run",
+            refined_run_name="target_refined_run",
+            force_inference=False,
+            force_finalization=False,
+            workflow_stage="finalization",
+            assignment_keypoint_group="refined_keypoints_runs",
+            assignment_keypoint_run="missing_exact_run",
+        )
+
+
+def test_finalization_plan_fails_closed_when_explicit_keypoints_are_incomplete(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    _seed_subject_mask_batch_prereqs(zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    root["refined_keypoints_runs"].create_group("refined_keypoints_incomplete")
+    root.require_group("subject_mask_runs").create_group("target_subject_run")
+
+    with pytest.raises(RuntimeError, match="not complete"):
+        mod.build_archive_plan(
+            zarr_path,
+            subject_run_name="target_subject_run",
+            refined_run_name="target_refined_run",
+            force_inference=False,
+            force_finalization=False,
+            workflow_stage="finalization",
+            assignment_keypoint_group="refined_keypoints_runs",
+            assignment_keypoint_run="refined_keypoints_incomplete",
+        )
+
+
 def test_build_archive_plan_finalization_mode_uses_latest_existing_subject_run(tmp_path: Path) -> None:
     zarr_path = tmp_path / "recording_analysis.zarr"
     _seed_subject_mask_batch_prereqs(zarr_path)

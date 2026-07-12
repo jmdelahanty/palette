@@ -804,6 +804,34 @@ worker commands carry the effective shard rows explicitly. Use
 `--no-keypoint-sharding` only for compatibility or benchmark comparisons;
 refined keypoint outputs remain ordinarily chunked regardless of source layout.
 
+### Concurrent whole-recording keypoints and subject masks
+
+When a reviewed whole-recording target manifest already binds each recording
+to one complete flat ROI cache, the combined planner can overlap keypoint and
+subject-mask inference:
+
+```bash
+scripts/submit_whole_recording_analysis_bsub.sh \
+  --manifest /path/to/reviewed_targets.json \
+  --run-label combined_YYYYMMDD_canary \
+  --run-root /groups/.../logs/whole_recording_analysis/combined_YYYYMMDD_canary \
+  --model-set-id <exact_pose_model_set> \
+  --model-run-id <exact_pose_model_run> \
+  --dry-run
+```
+
+The two GPU jobs are independent roots. Keypoint refinement depends only on
+keypoint inference. Refined subject-mask finalization depends on both subject-
+mask inference and the target's exact keypoint-refinement job. Raw mask
+inference intentionally carries no keypoint binding; finalization receives the
+deterministic refined-keypoint run explicitly and never resolves `latest`.
+Both inference jobs stage private copies of the same immutable cache. Inspect
+`plan.json` and `lsf_plan.json` before replacing `--dry-run` with `--apply`.
+Workers defer registry mutation; a single final fan-in job reconciles exact
+keypoint and mask runs serially and checks registry integrity.
+The completed GoodCopBadCop baseline and validation gates are recorded in
+`docs/diagnostics/goodcopbadcop_subject_mask_concurrent_dag_2026-07-12.md`.
+
 For GPU keypoint jobs, pass `--queue gpu_l4 --gpus 1`. The submitter will request
 `-gpu num=1` from LSF and, unless `--device` is already supplied, will pass
 `--device 0` into the per-recording keypoint command. Keypoint runs record the
