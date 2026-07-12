@@ -75,7 +75,13 @@ def test_write_model_resolution_provenance_updates_keypoint_run_attrs(
     keypoint_run.attrs["provenance"] = {"stage": "keypoints_detect"}
     keypoint_parent["keypoints_20260209_000000"] = keypoint_run
     root["keypoints_runs"] = keypoint_parent
-    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: root)
+    open_kwargs: dict[str, object] = {}
+
+    def _open_group(*_args: object, **kwargs: object) -> _Group:
+        open_kwargs.update(kwargs)
+        return root
+
+    monkeypatch.setattr(mod.zarr, "open_group", _open_group)
 
     payload = {
         "mode": "registry",
@@ -103,6 +109,7 @@ def test_write_model_resolution_provenance_updates_keypoint_run_attrs(
     assert keypoint_run.attrs.get("model_resolution_task") == "pose"
     assert keypoint_run.attrs.get("model_resolution_selected_run_id") == "pose_run_001"
     assert keypoint_run.attrs.get("model_resolution_selected_set_id") == "pose_set_001"
+    assert open_kwargs.get("use_consolidated") is False
     provenance = keypoint_run.attrs.get("provenance")
     assert isinstance(provenance, dict)
     assert "model_resolution" in provenance

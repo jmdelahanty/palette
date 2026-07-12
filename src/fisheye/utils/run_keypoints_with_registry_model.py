@@ -386,7 +386,7 @@ def write_keypoint_model_resolution_provenance(
     payload: dict[str, Any],
     output_parent: str = DEFAULT_KEYPOINT_OUTPUT_PARENT,
 ) -> None:
-    root = zarr.open_group(str(zarr_path), mode="r+")
+    root = zarr.open_group(str(zarr_path), mode="r+", use_consolidated=False)
     keypoint_parent = root.get(output_parent)
     if keypoint_parent is None or run_name not in keypoint_parent:
         raise RuntimeError(f"keypoint run not found for provenance annotation: {output_parent}/{run_name}")
