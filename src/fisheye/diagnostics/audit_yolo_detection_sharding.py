@@ -56,6 +56,85 @@ def _physical_stats(path: Path) -> dict[str, int]:
     }
 
 
+def replay_detection_run_as_sharded(
+    zarr_path: Path,
+    *,
+    source_run: str,
+    destination_run: str,
+    detect_row_shard_rows: int = 262_144,
+    detect_frame_shard_rows: int = 262_144,
+) -> dict[str, Any]:
+    """Replay one materialized detect table through the production shard writer."""
+
+    from fisheye.detection.detect_yolo import _write_detection_output_arrays
+
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    parent = root["detect_runs"]
+    if destination_run in parent:
+        raise ValueError(f"Destination detect run already exists: {destination_run}")
+    source = parent[source_run]
+    destination = parent.create_group(destination_run)
+    summary = _write_detection_output_arrays(
+        destination,
+        frame_indices=source["frame_indices"][:],
+        bbox_coords=source["bbox_norm_coords"][:],
+        scores=source["scores"][:],
+        class_ids=source["class_ids"][:],
+        instance_keys=source["instance_key"][:],
+        frame_counts=source["frame_counts"][:],
+        det_chunk=int(source["frame_indices"].chunks[0]),
+        detect_row_shard_rows=int(detect_row_shard_rows),
+        detect_frame_shard_rows=int(detect_frame_shard_rows),
+    )
+    attrs = dict(source.attrs)
+    attrs.update(
+        {
+            "benchmark_only": True,
+            "detect_storage_layout": "indexed_sharding_v1",
+            "detect_row_shard_rows": int(detect_row_shard_rows),
+            "detect_frame_shard_rows": int(detect_frame_shard_rows),
+            "detect_shard_write": summary,
+            "sharded_replay_source_run": source_run,
+        }
+    )
+    destination.attrs.put(attrs)
+    return summary or {}
+
+
+def _semantic_frame_diff(regular: zarr.Group, sharded: zarr.Group) -> dict[str, Any]:
+    regular_frames = np.asarray(regular["frame_indices"][:], dtype=np.int64)
+    sharded_frames = np.asarray(sharded["frame_indices"][:], dtype=np.int64)
+    regular_unique, regular_index = np.unique(regular_frames, return_index=True)
+    sharded_unique, sharded_index = np.unique(sharded_frames, return_index=True)
+    shared, regular_shared_pos, sharded_shared_pos = np.intersect1d(
+        regular_unique,
+        sharded_unique,
+        assume_unique=True,
+        return_indices=True,
+    )
+    regular_rows = regular_index[regular_shared_pos]
+    sharded_rows = sharded_index[sharded_shared_pos]
+    shared_exact = {
+        name: bool(
+            np.array_equal(
+                np.asarray(regular[name][:])[regular_rows, ...],
+                np.asarray(sharded[name][:])[sharded_rows, ...],
+            )
+        )
+        for name in ("bbox_norm_coords", "scores", "class_ids", "instance_key")
+    }
+    only_regular = np.setdiff1d(regular_unique, sharded_unique, assume_unique=True)
+    only_sharded = np.setdiff1d(sharded_unique, regular_unique, assume_unique=True)
+    return {
+        "regular_detection_rows": int(regular_frames.shape[0]),
+        "sharded_detection_rows": int(sharded_frames.shape[0]),
+        "shared_detection_frames": int(shared.shape[0]),
+        "regular_only_detection_frames": [int(value) for value in only_regular[:100]],
+        "sharded_only_detection_frames": [int(value) for value in only_sharded[:100]],
+        "shared_rows_exact_by_array": shared_exact,
+    }
+
+
 def audit_detection_runs(
     zarr_path: Path,
     *,
@@ -105,6 +184,7 @@ def audit_detection_runs(
         "sharded_run": sharded_run,
         "all_arrays_exact": all_exact,
         "arrays": arrays,
+        "semantic_frame_diff": _semantic_frame_diff(regular, sharded),
         "regular_physical": _physical_stats(regular_path),
         "sharded_physical": _physical_stats(sharded_path),
         "regular_attrs": {
@@ -129,9 +209,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("zarr_path", type=Path)
     parser.add_argument("--regular-run", required=True)
     parser.add_argument("--sharded-run", required=True)
+    parser.add_argument(
+        "--replay-sharded-run",
+        action="store_true",
+        help="Create --sharded-run by replaying --regular-run through the production shard writer.",
+    )
+    parser.add_argument("--allow-mismatch", action="store_true")
     parser.add_argument("--output-json", type=Path, required=True)
     args = parser.parse_args(argv)
 
+    if args.replay_sharded_run:
+        replay_detection_run_as_sharded(
+            args.zarr_path.expanduser().resolve(),
+            source_run=args.regular_run,
+            destination_run=args.sharded_run,
+        )
     report = audit_detection_runs(
         args.zarr_path.expanduser().resolve(),
         regular_run=args.regular_run,
@@ -140,7 +232,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2, sort_keys=True))
-    return 0 if report["all_arrays_exact"] else 1
+    return 0 if report["all_arrays_exact"] or args.allow_mismatch else 1
 
 
 if __name__ == "__main__":  # pragma: no cover

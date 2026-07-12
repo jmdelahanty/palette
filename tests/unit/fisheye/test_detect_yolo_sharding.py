@@ -4,7 +4,10 @@ import numpy as np
 import zarr
 
 from fisheye.detection import detect_yolo as mod
-from fisheye.diagnostics.audit_yolo_detection_sharding import audit_detection_runs
+from fisheye.diagnostics.audit_yolo_detection_sharding import (
+    audit_detection_runs,
+    replay_detection_run_as_sharded,
+)
 
 
 def _detection_values() -> dict[str, np.ndarray]:
@@ -109,3 +112,32 @@ def test_audit_detection_runs_reports_exact_parity_and_physical_counts(tmp_path)
     assert report["all_arrays_exact"] is True
     assert all(item["exact"] for item in report["arrays"].values())
     assert report["regular_physical"]["payload_files"] > report["sharded_physical"]["payload_files"]
+
+
+def test_replay_detection_run_as_sharded_uses_production_writer(tmp_path) -> None:
+    zarr_path = tmp_path / "detect_replay.zarr"
+    root = zarr.open_group(zarr_path, mode="w")
+    parent = root.create_group("detect_runs")
+    regular = parent.create_group("regular")
+    values = _detection_values()
+    mod._write_detection_output_arrays(  # noqa: SLF001
+        regular,
+        **values,
+        det_chunk=4,
+        detect_row_shard_rows=None,
+        detect_frame_shard_rows=32_768,
+    )
+
+    summary = replay_detection_run_as_sharded(
+        zarr_path,
+        source_run="regular",
+        destination_run="replay",
+        detect_row_shard_rows=8,
+        detect_frame_shard_rows=32_768,
+    )
+    report = audit_detection_runs(zarr_path, regular_run="regular", sharded_run="replay")
+
+    assert summary["exact_match"] is True
+    assert report["all_arrays_exact"] is True
+    assert root["detect_runs/replay"].attrs["benchmark_only"] is True
+    assert root["detect_runs/replay/bbox_norm_coords"].shards == (8, 4)

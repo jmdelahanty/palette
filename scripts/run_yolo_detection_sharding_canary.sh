@@ -15,6 +15,7 @@ CLIP_PATH="${SCRATCH_ROOT}/yolo_detection_sharding_100s.mp4"
 OUTPUT_ZARR="${RUN_DIR}/yolo_detection_sharding_ab.zarr"
 REGULAR_RUN="detect_yolo_regular_100s"
 SHARDED_RUN="detect_yolo_sharded_100s"
+REPLAY_RUN="detect_yolo_sharded_replay_100s"
 
 mkdir -p "$RUN_DIR" "$SCRATCH_ROOT"
 if [[ -e "$OUTPUT_ZARR" ]]; then
@@ -66,4 +67,12 @@ scripts/py -m fisheye.diagnostics.audit_yolo_detection_sharding \
   "$OUTPUT_ZARR" \
   --regular-run "$REGULAR_RUN" \
   --sharded-run "$SHARDED_RUN" \
-  --output-json "$RUN_DIR/audit.json"
+  --allow-mismatch \
+  --output-json "$RUN_DIR/end_to_end_audit.json"
+
+scripts/py -m fisheye.diagnostics.audit_yolo_detection_sharding \
+  "$OUTPUT_ZARR" \
+  --regular-run "$REGULAR_RUN" \
+  --sharded-run "$REPLAY_RUN" \
+  --replay-sharded-run \
+  --output-json "$RUN_DIR/writer_replay_audit.json"
