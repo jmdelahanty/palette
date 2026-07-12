@@ -17,6 +17,7 @@ import numpy as np
 from fisheye.analysis.chaser_behavior import canonical_behavior_label
 from fisheye.group_statistics.paired import bootstrap_median_ci, wilcoxon_signed_rank_p_value
 
+from .catalog import discover_export_catalog, select_export_run_id
 from .models import HealthReport
 
 
@@ -265,17 +266,31 @@ def _json_file(path: Path) -> dict[str, Any]:
 
 
 def _manifest_path(export_root: Path, export_run_id: str) -> Path:
-    return export_root / "v1" / "manifests" / f"export_run_id={export_run_id}.json"
+    safe_run_id = _validate_path_component(export_run_id, label="export run ID")
+    path = export_root / "v1" / "manifests" / f"export_run_id={safe_run_id}.json"
+    if not _is_within(path.resolve(), export_root.resolve()):
+        raise PermissionError(f"Export manifest resolves outside the authorized root: {path}")
+    return path
+
+
+def _validate_path_component(value: str, *, label: str) -> str:
+    value = str(value).strip()
+    if not value or Path(value).name != value or value in {".", ".."}:
+        raise ValueError(f"Invalid {label}: {value!r}")
+    return value
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def resolve_export_run_id(export_root: Path, export_run_id: str) -> str:
-    export_root = export_root.expanduser().resolve()
-    if export_run_id != "latest":
-        return export_run_id
-    manifests = sorted((export_root / "v1" / "manifests").glob("export_run_id=*.json"))
-    if not manifests:
-        raise FileNotFoundError(f"No export manifests found under {export_root / 'v1' / 'manifests'}")
-    return manifests[-1].name.removeprefix("export_run_id=").removesuffix(".json")
+    catalog = discover_export_catalog(export_root)
+    return select_export_run_id(catalog, export_run_id)
 
 
 def build_context(*, export_root: Path, export_run_id: str, stats_run_id: str | None = None) -> ViewerContext:
@@ -287,20 +302,33 @@ def build_context(*, export_root: Path, export_run_id: str, stats_run_id: str | 
     resolved_stats = str(stats_run_id).strip() if stats_run_id else None
     if resolved_stats in {"", "auto", "latest"}:
         resolved_stats = None
+    if resolved_stats is not None:
+        resolved_stats = _validate_path_component(resolved_stats, label="statistics run ID")
     return ViewerContext(export_root=resolved_root, export_run_id=resolved_run, stats_run_id=resolved_stats)
 
 
 def table_dir(context: ViewerContext, table_name: str, *, export_run_id: str | None = None) -> Path:
-    return context.export_root / "v1" / table_name / f"export_run_id={export_run_id or context.export_run_id}"
+    safe_table_name = _validate_path_component(table_name, label="table name")
+    safe_run_id = _validate_path_component(
+        export_run_id or context.export_run_id,
+        label="export run ID",
+    )
+    return context.export_root / "v1" / safe_table_name / f"export_run_id={safe_run_id}"
 
 
 def parquet_files(context: ViewerContext, table_name: str, *, export_run_id: str | None = None) -> tuple[Path, ...]:
     root = table_dir(context, table_name, export_run_id=export_run_id)
+    authorized_root = context.export_root.resolve()
+    if not _is_within(root.resolve(), authorized_root):
+        raise PermissionError(f"Export table resolves outside the authorized root: {root}")
     if not root.is_dir():
         raise FileNotFoundError(f"Export table directory not found: {root}")
     files = tuple(sorted(root.glob("*.parquet")))
     if not files:
         raise FileNotFoundError(f"No parquet parts found under {root}")
+    unsafe = next((path for path in files if not _is_within(path.resolve(), authorized_root)), None)
+    if unsafe is not None:
+        raise PermissionError(f"Parquet part resolves outside the authorized root: {unsafe}")
     return files
 
 
@@ -361,6 +389,8 @@ def _stats_manifest_candidates(context: ViewerContext) -> list[tuple[str, dict[s
     manifest_dir = context.export_root / "v1" / "manifests"
     candidates: list[tuple[str, dict[str, Any]]] = []
     for manifest_path in sorted(manifest_dir.glob("export_run_id=*.json")):
+        if not _is_within(manifest_path.resolve(), context.export_root.resolve()):
+            continue
         try:
             manifest = _json_file(manifest_path)
         except Exception:

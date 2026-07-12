@@ -23,7 +23,13 @@ def _():
     import pandas as pd
     import plotly.graph_objects as go
 
+    from fisheye.group_analytics_viewer.catalog import (
+        discover_export_catalog,
+        select_export_run_id,
+    )
     from fisheye.group_analytics_viewer.query import (
+        CHASER_SUMMARY_TABLE,
+        SPATIAL_TABLE,
         build_context,
         build_health_report,
         query_epoch_bout_histogram,
@@ -111,8 +117,11 @@ def _():
 
     return (
         Path,
+        CHASER_SUMMARY_TABLE,
+        SPATIAL_TABLE,
         build_context,
         build_health_report,
+        discover_export_catalog,
         mo,
         pd,
         query_epoch_bout_histogram,
@@ -122,39 +131,163 @@ def _():
         query_group_statistics,
         query_options,
         query_recordings,
+        select_export_run_id,
         build_bar_figure,
         build_histogram_figure,
     )
 
 
 @app.cell
-def _(Path, build_context, mo):
+def _(Path, discover_export_catalog, mo, pd, select_export_run_id):
     cli_args = mo.cli_args()
     export_root = Path(str(cli_args.get("export-root", "/nvme1/exports/palette_analytics")))
-    export_run_id = str(cli_args.get("export-run-id", "latest"))
+    requested_export_run_id = str(cli_args.get("export-run-id", "latest"))
     stats_run_id_raw = cli_args.get("stats-run-id", "auto")
     stats_run_id = None if stats_run_id_raw in (None, "", "none", "None") else str(stats_run_id_raw)
-    context = build_context(
-        export_root=export_root,
-        export_run_id=export_run_id,
-        stats_run_id=stats_run_id,
+
+    export_catalog = discover_export_catalog(export_root)
+    catalog_diagnostics = pd.DataFrame(
+        [diagnostic.to_dict() for diagnostic in export_catalog.diagnostics]
     )
-    return context, export_root, export_run_id, stats_run_id
+    if not export_catalog.entries:
+        details = (
+            mo.ui.table(catalog_diagnostics, selection=None, page_size=10)
+            if not catalog_diagnostics.empty
+            else mo.md("No manifest diagnostics were produced.")
+        )
+        mo.stop(
+            True,
+            mo.vstack(
+                [
+                    mo.md("# Palette Group Analytics"),
+                    mo.callout(
+                        mo.md(
+                            f"No selectable analytics exports were found under `{export_catalog.export_root}`. "
+                            "The app expects export manifests in `v1/manifests`."
+                        ),
+                        kind="warn",
+                    ),
+                    details,
+                ]
+            ),
+        )
+
+    selection_warning = None
+    try:
+        initial_export_run_id = select_export_run_id(
+            export_catalog,
+            requested_export_run_id,
+        )
+    except ValueError as exc:
+        initial_export_run_id = select_export_run_id(export_catalog, "latest")
+        selection_warning = str(exc)
+
+    label_to_export_run_id = {
+        entry.label: entry.export_run_id for entry in export_catalog.entries
+    }
+    initial_label = next(
+        label
+        for label, run_id in label_to_export_run_id.items()
+        if run_id == initial_export_run_id
+    )
+    export_picker = mo.ui.dropdown(
+        options=list(label_to_export_run_id),
+        value=initial_label,
+        label="Export dataset",
+        searchable=True,
+    )
+    catalog_rows = pd.DataFrame([entry.to_dict() for entry in export_catalog.entries])
+    selector_parts = [
+        mo.md("# Palette Group Analytics"),
+        mo.md(f"Authorized export root: `{export_catalog.export_root}`"),
+        export_picker,
+    ]
+    if selection_warning:
+        selector_parts.append(
+            mo.callout(
+                mo.md(f"{selection_warning} The newest export was selected instead."),
+                kind="warn",
+            )
+        )
+    selector_parts.append(
+        mo.accordion(
+            {
+                "Available exports": mo.ui.table(
+                    catalog_rows,
+                    selection=None,
+                    page_size=10,
+                ),
+                "Rejected manifests": (
+                    mo.ui.table(catalog_diagnostics, selection=None, page_size=10)
+                    if not catalog_diagnostics.empty
+                    else mo.md("No manifests were rejected.")
+                ),
+            }
+        )
+    )
+    mo.vstack(selector_parts)
+    return (
+        export_catalog,
+        export_picker,
+        export_root,
+        label_to_export_run_id,
+        stats_run_id,
+    )
 
 
 @app.cell
-def _(build_health_report, context, mo, query_export_summary):
+def _(
+    build_context,
+    export_picker,
+    export_root,
+    label_to_export_run_id,
+    stats_run_id,
+):
+    selected_export_run_id = label_to_export_run_id[export_picker.value]
+    context = build_context(
+        export_root=export_root,
+        export_run_id=selected_export_run_id,
+        stats_run_id=stats_run_id,
+    )
+    return context, selected_export_run_id
+
+
+@app.cell
+def _(
+    CHASER_SUMMARY_TABLE,
+    SPATIAL_TABLE,
+    build_health_report,
+    context,
+    export_catalog,
+    mo,
+    query_export_summary,
+    selected_export_run_id,
+):
     health = build_health_report(context)
     summary = query_export_summary(context)
+    selected_entry = export_catalog.entry(selected_export_run_id)
     collection = summary.get("collection") or {}
-    mo.vstack(
+    source_recording_count = summary.get("source_recording_count")
+    available_tables = set(selected_entry.table_names if selected_entry else ())
+    supports_current_panels = {
+        SPATIAL_TABLE,
+        CHASER_SUMMARY_TABLE,
+    }.issubset(available_tables)
+    overview = mo.vstack(
         [
-            mo.md(f"# Palette Group Analytics\n\n`{summary['manifest_path']}`"),
+            mo.md(f"## Dataset overview\n\nManifest: `{summary['manifest_path']}`"),
             mo.hstack(
                 [
                     mo.stat(label="Export run", value=summary["export_run_id"]),
-                    mo.stat(label="Recordings", value=f"{summary['source_recording_count']:,}"),
-                    mo.stat(label="Tables", value=f"{len(summary['tables']):,}"),
+                    mo.stat(
+                        label="Recordings",
+                        value=(
+                            f"{source_recording_count:,}"
+                            if source_recording_count is not None
+                            else "unknown"
+                        ),
+                    ),
+                    mo.stat(label="Tables", value=f"{len(available_tables):,}"),
                     mo.stat(
                         label="Stats rows",
                         value=(
@@ -169,12 +302,36 @@ def _(build_health_report, context, mo, query_export_summary):
             mo.md(f"Collection: `{collection.get('collection_id', 'none')}`"),
         ]
     )
-    return health, summary
+    overview
+    mo.stop(
+        selected_entry is not None and not selected_entry.ready,
+        mo.callout(
+            mo.md(
+                "This export has missing Parquet parts. Its manifest remains visible for "
+                "diagnosis, but analysis panels are disabled so they cannot present a partial "
+                "dataset as complete."
+            ),
+            kind="warn",
+        ),
+    )
+    mo.stop(
+        not supports_current_panels,
+        mo.callout(
+            mo.md(
+                "This export is discoverable and its provenance is available, but it does not "
+                "contain the GoodCopBadCop tables required by the currently implemented panels. "
+                "A provider-specific panel can be added without changing dataset discovery."
+            ),
+            kind="info",
+        ),
+    )
+    analysis_context = context
+    return analysis_context, health, summary
 
 
 @app.cell
-def _(context, mo, query_options):
-    options = query_options(context)
+def _(analysis_context, mo, query_options):
+    options = query_options(analysis_context)
     window_labels = ["All epochs"] + [item["window_label"] for item in options.get("windows", [])]
     bout_metric_items = options.get("epoch_bout_histogram_metrics", [])
     bout_metric_labels = {
@@ -226,11 +383,11 @@ def _(context, mo, query_options):
 
 
 @app.cell
-def _(bout_metric_labels, bout_metric_picker, context, query_epoch_bout_histogram, window_picker):
+def _(analysis_context, bout_metric_labels, bout_metric_picker, query_epoch_bout_histogram, window_picker):
     selected_window = None if window_picker.value == "All epochs" else str(window_picker.value)
     selected_bout_metric = bout_metric_labels.get(bout_metric_picker.value, "bout_path_length_mm")
     bout_histogram = query_epoch_bout_histogram(
-        context,
+        analysis_context,
         metric=selected_bout_metric,
         window_label=selected_window,
     )
@@ -269,9 +426,9 @@ def _(
 
 
 @app.cell
-def _(context, query_epoch_inter_bout_interval_histogram, selected_window):
+def _(analysis_context, query_epoch_inter_bout_interval_histogram, selected_window):
     ibi_histogram = query_epoch_inter_bout_interval_histogram(
-        context,
+        analysis_context,
         window_label=selected_window,
     )
     return (ibi_histogram,)
@@ -304,9 +461,9 @@ def _(build_histogram_figure, ibi_histogram, mo, pd):
 
 
 @app.cell
-def _(context, mean_metric_labels, mean_metric_picker, query_epoch_speed_summary, stat_labels, stat_picker):
+def _(analysis_context, mean_metric_labels, mean_metric_picker, query_epoch_speed_summary, stat_labels, stat_picker):
     epoch_summary_metric = query_epoch_speed_summary(
-        context,
+        analysis_context,
         metric=str(mean_metric_labels.get(mean_metric_picker.value, "bout_rate_per_min")),
         stat=str(stat_labels.get(stat_picker.value, "mean")),
     )
@@ -335,8 +492,8 @@ def _(build_bar_figure, epoch_summary_metric, mo, pd):
 
 
 @app.cell
-def _(context, mo, pd, query_group_statistics):
-    stats = query_group_statistics(context, metric_family="epoch_behavior")
+def _(analysis_context, mo, pd, query_group_statistics):
+    stats = query_group_statistics(analysis_context, metric_family="epoch_behavior")
     if not stats.get("available"):
         _output = mo.md(f"## Epoch Behavior Statistics\n\n{stats.get('message', 'No statistics export found.')}")
     else:
@@ -372,8 +529,8 @@ def _(context, mo, pd, query_group_statistics):
 
 
 @app.cell
-def _(context, mo, pd, query_recordings, summary):
-    recordings = query_recordings(context)
+def _(analysis_context, mo, pd, query_recordings, summary):
+    recordings = query_recordings(analysis_context)
     recording_rows = pd.DataFrame(recordings.get("rows", []))
     table_counts = pd.DataFrame(summary.get("tables", []))
     mo.accordion(
