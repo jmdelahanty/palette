@@ -13,6 +13,7 @@ from .contracts import (
     canonicalize_export_row,
     contract_snapshot,
 )
+from .validation import ExportValidationError, validate_export_run, validate_export_runs
 
 __all__ = [
     "ALL_TABLES",
@@ -23,8 +24,11 @@ __all__ = [
     "STATISTICS_TABLE",
     "TABLE_CONTRACTS",
     "CapabilityStatus",
+    "ExportValidationError",
     "TableContract",
     "canonicalize_export_row",
     "contract_snapshot",
     "resolve_capabilities",
+    "validate_export_run",
+    "validate_export_runs",
 ]

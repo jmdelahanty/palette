@@ -252,4 +252,6 @@ before freezing the application into an image.
   data in the image?
 - Where should image build attestations, SBOMs, and vulnerability results be
   retained?
-- What shared export and registry paths will FileGlancer mount in production?
+- FileGlancer should mount `/groups/johnson/johnsonlab/palette_analytics`
+  read-only as the authoritative analytics export root. The shared Palette
+  registry remains `/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite`.

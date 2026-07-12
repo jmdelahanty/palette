@@ -4,7 +4,7 @@
 Run with:
 
     scripts/py -m marimo run apps/marimo/group_analytics_explorer.py -- \
-      --export-root /nvme1/exports/palette_analytics \
+      --export-root /groups/johnson/johnsonlab/palette_analytics \
       --export-run-id latest \
       --stats-run-id auto
 """
@@ -17,6 +17,7 @@ app = marimo.App(width="full")
 
 @app.cell
 def _():
+    import os
     from pathlib import Path
 
     import marimo as mo
@@ -123,6 +124,7 @@ def _():
         build_health_report,
         discover_export_catalog,
         mo,
+        os,
         pd,
         query_epoch_bout_histogram,
         query_epoch_inter_bout_interval_histogram,
@@ -138,9 +140,13 @@ def _():
 
 
 @app.cell
-def _(Path, discover_export_catalog, mo, pd, select_export_run_id):
+def _(Path, discover_export_catalog, mo, os, pd, select_export_run_id):
     cli_args = mo.cli_args()
-    export_root = Path(str(cli_args.get("export-root", "/nvme1/exports/palette_analytics")))
+    default_export_root = os.environ.get(
+        "PALETTE_ANALYTICS_EXPORT_ROOT",
+        "/groups/johnson/johnsonlab/palette_analytics",
+    )
+    export_root = Path(str(cli_args.get("export-root", default_export_root)))
     requested_export_run_id = str(cli_args.get("export-run-id", "latest"))
     stats_run_id_raw = cli_args.get("stats-run-id", "auto")
     stats_run_id = None if stats_run_id_raw in (None, "", "none", "None") else str(stats_run_id_raw)
