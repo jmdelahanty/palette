@@ -35,6 +35,7 @@ def _():
         grouped_bar_figure,
         line_figure,
         panel_control_spec,
+        position_occupancy_heatmap_figure,
         sample_grain_status_rows,
     )
     from fisheye.group_analytics_viewer.catalog import (
@@ -45,12 +46,14 @@ def _():
         build_context,
         build_health_report,
         egocentric_rebin_options,
+        position_occupancy_rebin_options,
         query_chaser_histogram,
         query_chaser_summary,
         query_cra_near_field_curves,
         query_cra_near_field_object_phase,
         query_cra_near_field_summary,
         query_cra_object_phase,
+        query_cra_quadrant_occupancy_density,
         query_cra_summary,
         query_egocentric_histogram,
         query_egocentric_summary,
@@ -60,10 +63,12 @@ def _():
         query_export_summary,
         query_group_statistics,
         query_options,
+        query_position_occupancy_histogram,
         query_recordings,
         query_spatial_occupancy,
         query_speed_distance_bins,
         rebin_egocentric_histogram_rows,
+        rebin_position_occupancy_rows,
     )
 
     return (
@@ -86,12 +91,15 @@ def _():
         os,
         panel_control_spec,
         pd,
+        position_occupancy_heatmap_figure,
+        position_occupancy_rebin_options,
         query_chaser_histogram,
         query_chaser_summary,
         query_cra_near_field_curves,
         query_cra_near_field_object_phase,
         query_cra_near_field_summary,
         query_cra_object_phase,
+        query_cra_quadrant_occupancy_density,
         query_cra_summary,
         query_egocentric_histogram,
         query_egocentric_summary,
@@ -101,10 +109,12 @@ def _():
         query_export_summary,
         query_group_statistics,
         query_options,
+        query_position_occupancy_histogram,
         query_recordings,
         query_spatial_occupancy,
         query_speed_distance_bins,
         rebin_egocentric_histogram_rows,
+        rebin_position_occupancy_rows,
         sample_grain_status_rows,
         select_export_run_id,
     )
@@ -471,7 +481,9 @@ def _(
     analysis_context,
     egocentric_rebin_options,
     mo,
+    position_occupancy_rebin_options,
     query_egocentric_histogram,
+    query_position_occupancy_histogram,
     selected_capabilities,
     selected_panel_id,
 ):
@@ -506,12 +518,44 @@ def _(
         value=next(iter(egocentric_bearing_bin_labels)),
         label="Bearing bins",
     )
+    position_native_histogram = (
+        query_position_occupancy_histogram(analysis_context)
+        if selected_panel_id == "spatial"
+        and "position.epoch.occupancy_histogram_2d" in selected_capabilities
+        else {"rows": []}
+    )
+    _position_rebin_options = position_occupancy_rebin_options(
+        position_native_histogram.get("rows", [])
+    )
+    position_x_bin_labels = {
+        str(item["label"]): int(item["factor"])
+        for item in _position_rebin_options["x"]
+    }
+    position_y_bin_labels = {
+        str(item["label"]): int(item["factor"])
+        for item in _position_rebin_options["y"]
+    }
+    position_x_bin_picker = mo.ui.dropdown(
+        options=list(position_x_bin_labels),
+        value=next(iter(position_x_bin_labels)),
+        label="Position X bins",
+    )
+    position_y_bin_picker = mo.ui.dropdown(
+        options=list(position_y_bin_labels),
+        value=next(iter(position_y_bin_labels)),
+        label="Position Y bins",
+    )
     return (
         egocentric_bearing_bin_labels,
         egocentric_bearing_bin_picker,
         egocentric_distance_bin_labels,
         egocentric_distance_bin_picker,
         egocentric_native_histogram,
+        position_native_histogram,
+        position_x_bin_labels,
+        position_x_bin_picker,
+        position_y_bin_labels,
+        position_y_bin_picker,
     )
 
 
@@ -530,6 +574,9 @@ def _(
     panel_control_spec,
     panel_labels,
     panel_picker,
+    position_x_bin_picker,
+    position_y_bin_picker,
+    selected_capabilities,
     selected_panel_id,
     spatial_metric_picker,
     stat_picker,
@@ -561,6 +608,11 @@ def _(
         _controls.extend(
             [egocentric_distance_bin_picker, egocentric_bearing_bin_picker]
         )
+    if (
+        control_spec.show_position_bins
+        and "position.epoch.occupancy_histogram_2d" in selected_capabilities
+    ):
+        _controls.extend([position_x_bin_picker, position_y_bin_picker])
     mo.hstack(_controls) if _controls else mo.md(
         f"**{panel_picker.value}** has no additional analysis controls."
     )
@@ -590,12 +642,18 @@ def _(
     filter_rows_by_windows,
     near_metric_labels,
     near_metric_picker,
+    position_native_histogram,
+    position_x_bin_labels,
+    position_x_bin_picker,
+    position_y_bin_labels,
+    position_y_bin_picker,
     query_chaser_histogram,
     query_chaser_summary,
     query_cra_near_field_curves,
     query_cra_near_field_object_phase,
     query_cra_near_field_summary,
     query_cra_object_phase,
+    query_cra_quadrant_occupancy_density,
     query_cra_summary,
     query_egocentric_summary,
     query_epoch_bout_histogram,
@@ -606,6 +664,7 @@ def _(
     query_spatial_occupancy,
     query_speed_distance_bins,
     rebin_egocentric_histogram_rows,
+    rebin_position_occupancy_rows,
     selected_capabilities,
     selected_panel_id,
     spatial_metric_labels,
@@ -677,6 +736,29 @@ def _(
         )
         payloads["spatial"] = _spatial
     if (
+        selected_panel_id == "spatial"
+        and "position.epoch.occupancy_histogram_2d" in selected_capabilities
+    ):
+        _position_rows = filter_rows_by_windows(
+            position_native_histogram.get("rows", []),
+            selected_windows,
+        )
+        _x_factor = position_x_bin_labels[position_x_bin_picker.value]
+        _y_factor = position_y_bin_labels[position_y_bin_picker.value]
+        payloads["position_occupancy"] = {
+            **position_native_histogram,
+            "rows": rebin_position_occupancy_rows(
+                _position_rows,
+                x_bin_factor=_x_factor,
+                y_bin_factor=_y_factor,
+            ),
+            "x_bin_factor": _x_factor,
+            "y_bin_factor": _y_factor,
+            "x_bin_label": position_x_bin_picker.value,
+            "y_bin_label": position_y_bin_picker.value,
+            "rebin_method": "exact_aligned_count_sum",
+        }
+    if (
         selected_panel_id == "chaser_distance"
         and "chaser.distance.summary" in selected_capabilities
     ):
@@ -734,6 +816,10 @@ def _(
             stat=selected_stat,
         )
         payloads["cra_summary"] = query_cra_summary(analysis_context)
+        payloads["cra_quadrants"] = query_cra_quadrant_occupancy_density(
+            analysis_context,
+            bootstrap_iterations=0,
+        )
     if (
         selected_panel_id == "near_field"
         and "chaser.cra.near_field" in selected_capabilities
@@ -808,6 +894,7 @@ def _(
     panel_picker,
     payloads,
     pd,
+    position_occupancy_heatmap_figure,
     sample_grain_rows,
     selected_chasers,
     selected_windows,
@@ -882,8 +969,58 @@ def _(
             series_key="zone_label",
             yaxis_title=_data.get("metric_label", "Value"),
         )
+        _position = payloads.get("position_occupancy", {})
+        _position_rows = _position.get("rows", [])
+        _position_color_max = egocentric_probability_color_max(_position_rows)
+        _position_windows = [
+            _window_label
+            for _window_label in selected_windows
+            if any(row.get("window_label") == _window_label for row in _position_rows)
+        ]
+        _position_panels = []
+        for _window_index, _window_label in enumerate(_position_windows):
+            _window_rows = [
+                row for row in _position_rows if row.get("window_label") == _window_label
+            ]
+            _position_panels.append(
+                _figure_or_message(
+                    position_occupancy_heatmap_figure(
+                        _window_rows,
+                        title=f"Position occupancy · {_window_label}",
+                        color_max=_position_color_max,
+                        show_colorbar=_window_index == len(_position_windows) - 1,
+                    ),
+                    f"No positional heatmap bins for {_window_label}.",
+                )
+            )
+        _position_output = (
+            mo.hstack(_position_panels)
+            if _position_panels
+            else mo.md(
+                _position.get(
+                    "message",
+                    "No positional heatmap table is available for the selected export.",
+                )
+            )
+        )
         panel_output = mo.vstack(
-            [mo.md("## Spatial occupancy"), _figure_or_message(_figure), _rows_table(_data.get("rows", []))]
+            [
+                mo.md("## Spatial occupancy"),
+                mo.md(
+                    "### Positional heatmaps\n\n"
+                    f"Bins: `{_position.get('x_bin_label', 'native')}` × "
+                    f"`{_position.get('y_bin_label', 'native')}`."
+                ),
+                _position_output,
+                mo.md("### Named spatial zones"),
+                _figure_or_message(_figure),
+                mo.accordion(
+                    {
+                        "Position bins": _rows_table(_position_rows),
+                        "Zone summaries": _rows_table(_data.get("rows", [])),
+                    }
+                ),
+            ]
         )
     elif selected_panel == "chaser_distance":
         _summary_data = payloads.get("chaser_summary", {})
@@ -948,15 +1085,45 @@ def _(
             color_key="raw_color_hex",
         )
         _summary_data = payloads.get("cra_summary", {})
+        _quadrants = payloads.get("cra_quadrants", {})
+        _quadrant_figure = grouped_bar_figure(
+            _quadrants.get("quadrant_rows", []),
+            title="CRA occupancy by arena quadrant",
+            x_key="phase_label",
+            y_key="mean",
+            series_key="quadrant_label",
+            yaxis_title="Mean occupancy fraction",
+        )
+        _quadrant_density_figure = line_figure(
+            _quadrants.get("density_rows", []),
+            title="Chaser vs non-chaser quadrant occupancy",
+            x_key="x",
+            y_key="density",
+            series_keys=("phase_label", "series_role"),
+            xaxis_title="Occupancy fraction",
+            yaxis_title="Density",
+        )
         panel_output = mo.vstack(
             [
                 mo.md("## CRA primary endpoints"),
                 _figure_or_message(_figure),
+                mo.md("### Quadrant occupancy"),
+                _figure_or_message(_quadrant_figure),
+                _figure_or_message(_quadrant_density_figure),
                 mo.accordion(
                     {
                         "Endpoint summaries": _rows_table(_summary_data.get("metrics", [])),
                         "Per-recording endpoints": _rows_table(_summary_data.get("rows", [])),
                         "Object phases": _rows_table(_phase.get("rows", [])),
+                        "Quadrant summaries": _rows_table(
+                            _quadrants.get("quadrant_rows", [])
+                        ),
+                        "Per-recording quadrants": _rows_table(
+                            _quadrants.get("rows", [])
+                        ),
+                        "Paired quadrant changes": _rows_table(
+                            _quadrants.get("paired_rows", [])
+                        ),
                     }
                 ),
             ]

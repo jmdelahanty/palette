@@ -36,6 +36,7 @@ from fisheye.analytics_exports.contracts import (
     DESCRIPTIVE_TABLE,
     EXPORT_SCHEMA_ID,
     EXPORT_SCHEMA_VERSION,
+    POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     STATISTICS_TABLE,
 )
 from fisheye.group_statistics.paired import bootstrap_median_ci, wilcoxon_signed_rank_p_value
@@ -62,6 +63,7 @@ CRA_NEAR_FIELD_RADIAL_TABLE = CHASER_CRA_NEAR_FIELD_RADIAL_TABLE
 CRA_NEAR_FIELD_CDF_TABLE = CHASER_CRA_NEAR_FIELD_CDF_TABLE
 EGOCENTRIC_SUMMARY_TABLE = CHASER_EGOCENTRIC_SUMMARY_TABLE
 EGOCENTRIC_HISTOGRAM_TABLE = CHASER_EGOCENTRIC_HISTOGRAM_TABLE
+POSITION_OCCUPANCY_TABLE = POSITION_OCCUPANCY_HISTOGRAM_TABLE
 CORE_CHASER_TABLES = (
     SPATIAL_TABLE,
     CHASER_SUMMARY_TABLE,
@@ -72,6 +74,7 @@ CORE_CHASER_TABLES = (
     EGOCENTRIC_HISTOGRAM_TABLE,
 )
 OPTIONAL_CHASER_TABLES = (
+    POSITION_OCCUPANCY_TABLE,
     EPOCH_BEHAVIOR_TABLE,
     EPOCH_BOUT_DISTRIBUTION_TABLE,
     EPOCH_BOUT_HISTOGRAM_TABLE,
@@ -948,6 +951,300 @@ def query_spatial_occupancy(
             for row in rows
         ]
     return response
+
+
+def query_position_occupancy_histogram(
+    context: ViewerContext,
+    *,
+    grid_id: str | None = None,
+) -> dict[str, Any]:
+    """Pool count-first 2D occupancy bins across recordings on one exact grid."""
+
+    rows = load_optional_table_rows(context, POSITION_OCCUPANCY_TABLE)
+    if not rows:
+        return {
+            "available": False,
+            "message": "No position occupancy histogram table is present in this export.",
+            "rows": [],
+            "grid_ids": [],
+        }
+    grid_ids = sorted(
+        {str(row.get("normalized_grid_id")) for row in rows if row.get("normalized_grid_id")}
+    )
+    if not grid_ids:
+        return {
+            "available": False,
+            "message": "Position occupancy rows do not declare a normalized grid.",
+            "rows": [],
+            "grid_ids": [],
+        }
+    selected_grid_id = str(grid_id) if grid_id is not None else grid_ids[0]
+    if selected_grid_id not in grid_ids:
+        raise ValueError(f"Unknown position occupancy grid: {selected_grid_id}")
+    if grid_id is None and len(grid_ids) > 1:
+        return {
+            "available": False,
+            "message": (
+                "This export contains incompatible normalized occupancy grids; "
+                "select an explicit grid before pooling recordings."
+            ),
+            "rows": [],
+            "grid_ids": grid_ids,
+        }
+    selected = [
+        row for row in rows if str(row.get("normalized_grid_id")) == selected_grid_id
+    ]
+    grid_shapes = {
+        (
+            _safe_int(row.get("x_bin_count")),
+            _safe_int(row.get("y_bin_count")),
+        )
+        for row in selected
+    }
+    if len(grid_shapes) != 1 or None in next(iter(grid_shapes), (None, None)):
+        return {
+            "available": False,
+            "message": "Position occupancy rows disagree on normalized grid shape.",
+            "rows": [],
+            "grid_ids": grid_ids,
+        }
+    x_bin_count, y_bin_count = next(iter(grid_shapes))
+    if not all(bool(row.get("normalized_grid_uniform")) for row in selected):
+        return {
+            "available": False,
+            "message": "Sparse position occupancy rows require a declared uniform normalized grid.",
+            "rows": [],
+            "grid_ids": grid_ids,
+        }
+    windows = sorted(
+        {
+            (
+                _safe_int(row.get("window_index")),
+                row.get("window_label"),
+            )
+            for row in selected
+        },
+        key=lambda item: (_sort_int(item[0]), str(item[1] or "")),
+    )
+    grouped: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for window_index, window_label in windows:
+        for y_bin_index in range(int(y_bin_count)):
+            for x_bin_index in range(int(x_bin_count)):
+                key = (window_index, window_label, y_bin_index, x_bin_index)
+                grouped[key] = {
+                    "window_index": window_index,
+                    "window_label": window_label,
+                    "y_bin_index": y_bin_index,
+                    "x_bin_index": x_bin_index,
+                    "x_bin_left_fraction": x_bin_index / float(x_bin_count),
+                    "x_bin_right_fraction": (x_bin_index + 1) / float(x_bin_count),
+                    "y_bin_left_fraction": y_bin_index / float(y_bin_count),
+                    "y_bin_right_fraction": (y_bin_index + 1) / float(y_bin_count),
+                    "pooled_count": 0,
+                    "normalized_grid_id": selected_grid_id,
+                    "coordinate_frame": "source_image_fraction",
+                    "coordinate_origin": "top_left",
+                    "x_axis_direction": "right",
+                    "y_axis_direction": "down",
+                }
+    recording_ids_by_window: dict[tuple[Any, Any], set[str]] = defaultdict(set)
+    for row in selected:
+        key = (
+            _safe_int(row.get("window_index")),
+            row.get("window_label"),
+            _safe_int(row.get("y_bin_index")),
+            _safe_int(row.get("x_bin_index")),
+        )
+        if key not in grouped:
+            raise ValueError("Position occupancy row falls outside its declared grid")
+        item = grouped[key]
+        item["pooled_count"] += int(_safe_int(row.get("hist_count")) or 0)
+        recording_id = str(row.get("recording_id") or "")
+        if recording_id:
+            recording_ids_by_window[(key[0], key[1])].add(recording_id)
+
+    totals: dict[tuple[Any, Any], int] = defaultdict(int)
+    for item in grouped.values():
+        totals[(item["window_index"], item["window_label"])] += int(
+            item["pooled_count"]
+        )
+    out_rows: list[dict[str, Any]] = []
+    for item in grouped.values():
+        x_left = float(item["x_bin_left_fraction"])
+        x_right = float(item["x_bin_right_fraction"])
+        y_left = float(item["y_bin_left_fraction"])
+        y_right = float(item["y_bin_right_fraction"])
+        window_key = (item["window_index"], item["window_label"])
+        total = totals[window_key]
+        count = int(item["pooled_count"])
+        out_rows.append(
+            {
+                **item,
+                "x_bin_center_fraction": (x_left + x_right) / 2.0,
+                "x_bin_width_fraction": x_right - x_left,
+                "y_bin_center_fraction": (y_left + y_right) / 2.0,
+                "y_bin_width_fraction": y_right - y_left,
+                "pooled_total_count": total,
+                "pooled_probability": _round(count / total if total > 0 else None),
+                "recording_count": len(recording_ids_by_window[window_key]),
+            }
+        )
+    out_rows.sort(
+        key=lambda row: (
+            _sort_int(row.get("window_index")),
+            _sort_int(row.get("y_bin_index"), 0),
+            _sort_int(row.get("x_bin_index"), 0),
+        )
+    )
+    return {
+        "available": True,
+        "rows": out_rows,
+        "grid_id": selected_grid_id,
+        "grid_ids": grid_ids,
+        "recording_count": len(
+            {str(row.get("recording_id")) for row in selected if row.get("recording_id")}
+        ),
+        "pooling_method": "sum_counts_then_normalize_within_epoch",
+    }
+
+
+def position_occupancy_rebin_options(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Return exact index-aligned x/y coarsenings for a pooled occupancy grid."""
+
+    if not rows:
+        native = [{"factor": 1, "label": "Native"}]
+        return {"x": native, "y": native}
+
+    def _axis_options(axis: str) -> list[dict[str, Any]]:
+        index_key = f"{axis}_bin_index"
+        width_key = f"{axis}_bin_width_fraction"
+        indices = sorted(
+            {
+                int(index)
+                for row in rows
+                if (index := _safe_int(row.get(index_key))) is not None
+            }
+        )
+        widths = {
+            round(float(width), 12)
+            for row in rows
+            if (width := _safe_float(row.get(width_key))) is not None and width > 0.0
+        }
+        if not indices or indices != list(range(len(indices))) or len(widths) != 1:
+            raise ValueError(f"Cannot re-bin a non-uniform or discontinuous {axis} grid")
+        native_width = float(next(iter(widths)))
+        return [
+            {
+                "factor": factor,
+                "width_fraction": native_width * factor,
+                "label": (
+                    f"{native_width:.3g} arena fraction (native)"
+                    if factor == 1
+                    else f"{native_width * factor:.3g} arena fraction ({factor}× native)"
+                ),
+            }
+            for factor in range(1, min(len(indices), 10) + 1)
+        ]
+
+    return {"x": _axis_options("x"), "y": _axis_options("y")}
+
+
+def rebin_position_occupancy_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    x_bin_factor: int = 1,
+    y_bin_factor: int = 1,
+) -> list[dict[str, Any]]:
+    """Exactly coarsen pooled 2D occupancy bins by summing native counts."""
+
+    x_factor = int(x_bin_factor)
+    y_factor = int(y_bin_factor)
+    if x_factor < 1 or y_factor < 1:
+        raise ValueError("Position occupancy re-bin factors must be positive integers")
+    if not rows:
+        return []
+    options = position_occupancy_rebin_options(rows)
+    max_x_factor = len(options["x"])
+    max_y_factor = len(options["y"])
+    if x_factor > max_x_factor or y_factor > max_y_factor:
+        raise ValueError("Position occupancy re-bin factor exceeds the supported grid")
+
+    grouped: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        x_index = int(_safe_int(row.get("x_bin_index")) or 0)
+        y_index = int(_safe_int(row.get("y_bin_index")) or 0)
+        key = (
+            _safe_int(row.get("window_index")),
+            row.get("window_label"),
+            y_index // y_factor,
+            x_index // x_factor,
+        )
+        x_left = _safe_float(row.get("x_bin_left_fraction"))
+        x_right = _safe_float(row.get("x_bin_right_fraction"))
+        y_left = _safe_float(row.get("y_bin_left_fraction"))
+        y_right = _safe_float(row.get("y_bin_right_fraction"))
+        if None in (x_left, x_right, y_left, y_right):
+            raise ValueError("Position occupancy row has incomplete bin geometry")
+        item = grouped.setdefault(
+            key,
+            {
+                "window_index": key[0],
+                "window_label": key[1],
+                "y_bin_index": key[2],
+                "x_bin_index": key[3],
+                "x_bin_left_fraction": float(x_left),
+                "x_bin_right_fraction": float(x_right),
+                "y_bin_left_fraction": float(y_left),
+                "y_bin_right_fraction": float(y_right),
+                "pooled_count": 0,
+                "recording_count": _safe_int(row.get("recording_count")),
+                "normalized_grid_id": row.get("normalized_grid_id"),
+                "coordinate_frame": row.get("coordinate_frame"),
+                "coordinate_origin": row.get("coordinate_origin"),
+                "x_axis_direction": row.get("x_axis_direction"),
+                "y_axis_direction": row.get("y_axis_direction"),
+            },
+        )
+        item["x_bin_left_fraction"] = min(float(item["x_bin_left_fraction"]), float(x_left))
+        item["x_bin_right_fraction"] = max(float(item["x_bin_right_fraction"]), float(x_right))
+        item["y_bin_left_fraction"] = min(float(item["y_bin_left_fraction"]), float(y_left))
+        item["y_bin_right_fraction"] = max(float(item["y_bin_right_fraction"]), float(y_right))
+        item["pooled_count"] += int(_safe_int(row.get("pooled_count")) or 0)
+
+    totals: dict[tuple[Any, Any], int] = defaultdict(int)
+    for item in grouped.values():
+        totals[(item["window_index"], item["window_label"])] += int(item["pooled_count"])
+    output: list[dict[str, Any]] = []
+    for item in grouped.values():
+        x_left = float(item["x_bin_left_fraction"])
+        x_right = float(item["x_bin_right_fraction"])
+        y_left = float(item["y_bin_left_fraction"])
+        y_right = float(item["y_bin_right_fraction"])
+        total = totals[(item["window_index"], item["window_label"])]
+        count = int(item["pooled_count"])
+        output.append(
+            {
+                **item,
+                "x_bin_center_fraction": (x_left + x_right) / 2.0,
+                "x_bin_width_fraction": x_right - x_left,
+                "y_bin_center_fraction": (y_left + y_right) / 2.0,
+                "y_bin_width_fraction": y_right - y_left,
+                "pooled_total_count": total,
+                "pooled_probability": _round(count / total if total > 0 else None),
+                "x_bin_factor": x_factor,
+                "y_bin_factor": y_factor,
+            }
+        )
+    output.sort(
+        key=lambda row: (
+            _sort_int(row.get("window_index")),
+            _sort_int(row.get("y_bin_index"), 0),
+            _sort_int(row.get("x_bin_index"), 0),
+        )
+    )
+    return output
 
 
 def _enrich_chaser_behavior_rows(

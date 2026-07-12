@@ -25,6 +25,7 @@ from .contracts import (
     CHASER_SPATIAL_TABLE,
     CHASER_SPEED_DISTANCE_TABLE,
     DESCRIPTIVE_TABLE,
+    POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     STATISTICS_TABLE,
     TABLE_CONTRACTS,
     validate_table_columns,
@@ -59,6 +60,10 @@ class CapabilityStatus:
 
 
 CAPABILITY_DEFINITIONS = (
+    CapabilityDefinition(
+        "position.epoch.occupancy_histogram_2d",
+        (POSITION_OCCUPANCY_HISTOGRAM_TABLE,),
+    ),
     CapabilityDefinition("chaser.epoch.behavior_summary", (CHASER_EPOCH_BEHAVIOR_TABLE,)),
     CapabilityDefinition("chaser.epoch.bout_events", (CHASER_BOUT_EVENTS_TABLE,)),
     CapabilityDefinition("chaser.epoch.bout_histogram", (CHASER_BOUT_HISTOGRAM_TABLE,)),

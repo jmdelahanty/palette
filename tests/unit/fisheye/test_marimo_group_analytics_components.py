@@ -13,6 +13,7 @@ from apps.marimo.components.group_analytics import (
     grouped_bar_figure,
     line_figure,
     panel_control_spec,
+    position_occupancy_heatmap_figure,
     sample_grain_status_rows,
 )
 from fisheye.group_analytics_viewer.query import (
@@ -66,6 +67,7 @@ def test_panel_controls_only_expose_relevant_filters() -> None:
 
     spatial = panel_control_spec("spatial")
     assert spatial.show_window is True
+    assert spatial.show_position_bins is True
 
     egocentric = panel_control_spec("egocentric")
     assert egocentric.analysis_options_key == "egocentric_metrics"
@@ -80,6 +82,7 @@ def test_panel_controls_only_expose_relevant_filters() -> None:
     assert inventory.show_chaser is False
     assert inventory.show_statistic is False
     assert inventory.show_egocentric_bins is False
+    assert inventory.show_position_bins is False
 
 
 def test_chaser_row_filter_supports_multiple_selected_chasers() -> None:
@@ -307,6 +310,33 @@ def test_egocentric_probability_scale_is_robust_across_panels() -> None:
     ]
 
     assert egocentric_probability_color_max(rows, quantile=0.5) == 0.2
+
+
+def test_position_occupancy_heatmap_preserves_source_image_orientation() -> None:
+    figure = position_occupancy_heatmap_figure(
+        [
+            {
+                "x_bin_center_fraction": 0.25,
+                "y_bin_center_fraction": 0.25,
+                "pooled_probability": 0.4,
+            },
+            {
+                "x_bin_center_fraction": 0.75,
+                "y_bin_center_fraction": 0.25,
+                "pooled_probability": 0.6,
+            },
+        ],
+        title="pre position occupancy",
+        color_max=0.7,
+    )
+
+    assert figure is not None
+    assert list(figure.data[0].x) == [0.25, 0.75]
+    assert list(figure.data[0].y) == [0.25]
+    assert list(figure.data[0].z[0]) == [0.4, 0.6]
+    assert figure.data[0].zmax == 0.7
+    assert figure.layout.yaxis.autorange == "reversed"
+    assert figure.layout.yaxis.scaleanchor == "x"
 
 
 def _native_egocentric_histogram_rows() -> list[dict[str, object]]:

@@ -38,9 +38,11 @@ from fisheye.group_analytics_viewer.query import (
     query_export_summary,
     query_group_statistics,
     query_options,
+    query_position_occupancy_histogram,
     query_recordings,
     query_speed_distance_bins,
     query_spatial_occupancy,
+    rebin_position_occupancy_rows,
 )
 from fisheye.group_statistics.goodcopbadcop import (
     GoodCopBadCopStatisticsConfig,
@@ -147,6 +149,7 @@ def _make_goodcopbadcop_export(tmp_path: Path):
         output_root=output,
         export_run_id="viewer_export",
         tables=(
+            "position_occupancy_histogram_2d",
             "chaser_epoch_spatial_occupancy_zones",
             "chaser_epoch_distance_summary",
             "chaser_epoch_behavior_summary",
@@ -199,6 +202,7 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(tmp_path: Path) -> 
 
     summary = query_export_summary(context)
     assert summary["source_recording_count"] == 1
+    assert summary["row_counts_by_table"]["position_occupancy_histogram_2d"] == 12
     assert summary["row_counts_by_table"]["chaser_epoch_spatial_occupancy_zones"] == 12
     assert summary["row_counts_by_table"]["chaser_epoch_distance_summary"] == 6
     assert summary["row_counts_by_table"]["chaser_epoch_behavior_summary"] == 3
@@ -238,6 +242,24 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(tmp_path: Path) -> 
     assert options["epoch_inter_bout_interval_histogram_metrics"][0]["metric"] == "inter_bout_interval_s"
     assert options["cra_near_field_object_phase_metrics"][0]["metric"] == "approach_p05_mm"
     assert options["egocentric_metrics"][0]["metric"] == "mean_alignment_cos"
+
+    position = query_position_occupancy_histogram(context)
+    assert position["available"] is True
+    assert position["recording_count"] == 1
+    assert len(position["rows"]) == 12
+    pre_position = [
+        row for row in position["rows"] if row["window_label"] == "pre_event"
+    ]
+    assert len(pre_position) == 4
+    assert sum(row["pooled_count"] for row in pre_position) == 4
+    assert sum(row["pooled_probability"] for row in pre_position) == pytest.approx(1.0)
+    rebinned_position = rebin_position_occupancy_rows(
+        position["rows"],
+        x_bin_factor=2,
+        y_bin_factor=2,
+    )
+    assert len(rebinned_position) == 3
+    assert all(row["pooled_probability"] == pytest.approx(1.0) for row in rebinned_position)
 
     spatial = query_spatial_occupancy(context, metric="time_s", value_mode="total")
     pre_top_left = next(

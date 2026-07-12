@@ -49,6 +49,7 @@ from fisheye.analytics_exports.contracts import (
     DEFAULT_TABLES,
     EXPORT_SCHEMA_ID,
     EXPORT_SCHEMA_VERSION,
+    POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     TABLE_CONTRACTS,
     canonicalize_export_row,
     contract_snapshot,
@@ -1200,6 +1201,247 @@ def _load_bout_kinematics_metrics(
             row.update(_protocol_signature_row(protocol_signature))
             row.update(metric)
             rows.append(row)
+    return rows
+
+
+def _load_position_occupancy_histogram_2d(
+    root: Any,
+    *,
+    export_run_id: str,
+    zarr_path: Path,
+    recording_id: str,
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    table = POSITION_OCCUPANCY_HISTOGRAM_TABLE
+    if table not in tables:
+        return []
+
+    run_group, run_name, error = _latest_run(
+        root,
+        "analysis/detection_occupancy_runs",
+    )
+    if run_group is None or run_name is None:
+        diagnostics.append({"table": table, "status": "skipped", "reason": error})
+        return []
+    if not _has_child(run_group, "heatmaps"):
+        diagnostics.append(
+            {
+                "table": table,
+                "status": "skipped",
+                "reason": "detection occupancy run has no heatmaps group",
+                "position_occupancy_run": run_name,
+            }
+        )
+        return []
+
+    heatmaps = run_group["heatmaps"]
+    counts = _read_array(heatmaps, "counts")
+    x_edges = _read_1d_array(heatmaps, "x_edges")
+    y_edges = _read_1d_array(heatmaps, "y_edges")
+    if counts is None or np.asarray(counts).ndim != 3:
+        diagnostics.append(
+            {
+                "table": table,
+                "status": "skipped",
+                "reason": "heatmaps/counts is missing or not 3D",
+                "position_occupancy_run": run_name,
+            }
+        )
+        return []
+    counts = np.asarray(counts)
+    if x_edges is None or y_edges is None:
+        diagnostics.append(
+            {
+                "table": table,
+                "status": "skipped",
+                "reason": "heatmap x_edges or y_edges is missing",
+                "position_occupancy_run": run_name,
+            }
+        )
+        return []
+    x_edges = np.asarray(x_edges, dtype=np.float64).reshape(-1)
+    y_edges = np.asarray(y_edges, dtype=np.float64).reshape(-1)
+    n_windows, n_y_bins, n_x_bins = map(int, counts.shape)
+    if x_edges.size != n_x_bins + 1 or y_edges.size != n_y_bins + 1:
+        diagnostics.append(
+            {
+                "table": table,
+                "status": "skipped",
+                "reason": "heatmap edge lengths disagree with counts shape",
+                "position_occupancy_run": run_name,
+                "counts_shape": list(counts.shape),
+                "x_edge_count": int(x_edges.size),
+                "y_edge_count": int(y_edges.size),
+            }
+        )
+        return []
+
+    run_attrs = _attrs_dict(run_group)
+    heatmap_attrs = _attrs_dict(heatmaps)
+    windows = _window_rows_from_group(run_group)
+    coverage = run_group["coverage"] if _has_child(run_group, "coverage") else None
+    detection_count = _read_1d_array(coverage, "detection_count") if coverage is not None else None
+    covered_frame_count = (
+        _read_1d_array(coverage, "covered_frame_count") if coverage is not None else None
+    )
+    total_span_frames = (
+        _read_1d_array(coverage, "total_span_frames") if coverage is not None else None
+    )
+    coverage_pct = _read_1d_array(coverage, "coverage_pct") if coverage is not None else None
+    image_width = _safe_float(run_attrs.get("width"))
+    image_height = _safe_float(run_attrs.get("height"))
+    if image_width is None or image_width <= 0.0:
+        image_width = float(x_edges[-1])
+    if image_height is None or image_height <= 0.0:
+        image_height = float(y_edges[-1])
+    if image_width <= 0.0 or image_height <= 0.0:
+        diagnostics.append(
+            {
+                "table": table,
+                "status": "skipped",
+                "reason": "source image width or height is not positive",
+                "position_occupancy_run": run_name,
+            }
+        )
+        return []
+
+    x_fraction_edges = x_edges / float(image_width)
+    y_fraction_edges = y_edges / float(image_height)
+    normalized_grid_id = _hash_payload(
+        {
+            "coordinate_frame": "source_image_fraction",
+            "x_edges": [round(float(value), 12) for value in x_fraction_edges],
+            "y_edges": [round(float(value), 12) for value in y_fraction_edges],
+        }
+    )[:16]
+    source_refs = _json_mapping_attr(run_attrs, "source_refs")
+    run_path = f"analysis/detection_occupancy_runs/{run_name}"
+    rows: list[dict[str, Any]] = []
+    for window_index in range(n_windows):
+        window = (
+            windows[window_index]
+            if window_index < len(windows)
+            else {
+                "window_index": window_index,
+                "window_id": window_index,
+                "window_label": f"window_{window_index}",
+                "start_frame": None,
+                "end_frame": None,
+                "start_time_s": None,
+                "end_time_s": None,
+                "duration_s": None,
+            }
+        )
+        window_has_counts = bool(np.any(counts[window_index] > 0))
+        for y_bin_index in range(n_y_bins):
+            for x_bin_index in range(n_x_bins):
+                hist_count = int(counts[window_index, y_bin_index, x_bin_index])
+                if hist_count <= 0 and (
+                    window_has_counts or y_bin_index != 0 or x_bin_index != 0
+                ):
+                    continue
+                lineage = {
+                    "zarr_path": str(zarr_path),
+                    "position_occupancy_run": run_name,
+                    "window_id": window.get("window_id"),
+                    "y_bin_index": y_bin_index,
+                    "x_bin_index": x_bin_index,
+                }
+                row = _common_row(
+                    export_run_id=export_run_id,
+                    zarr_path=zarr_path,
+                    recording_id=recording_id,
+                    table=table,
+                    lineage=lineage,
+                )
+                x_left_px = float(x_edges[x_bin_index])
+                x_right_px = float(x_edges[x_bin_index + 1])
+                y_left_px = float(y_edges[y_bin_index])
+                y_right_px = float(y_edges[y_bin_index + 1])
+                row.update(
+                    {
+                        "position_occupancy_run": run_name,
+                        "position_occupancy_path": run_path,
+                        "position_occupancy_schema_id": run_attrs.get("schema_id"),
+                        "position_occupancy_schema_version": _safe_int(
+                            run_attrs.get("schema_version")
+                        ),
+                        "source_detection_path": run_attrs.get("source_detection_path"),
+                        "source_detection_kind": run_attrs.get("source_detection_kind"),
+                        "source_segment_kind": run_attrs.get("source_segment_kind"),
+                        "source_segment_path": run_attrs.get("source_segment_path"),
+                        "source_refs_json": _source_refs_json(source_refs),
+                        "window_index": window_index,
+                        "window_id": _safe_int(window.get("window_id")),
+                        "window_label": window.get("window_label"),
+                        "start_frame": _safe_int(window.get("start_frame")),
+                        "end_frame": _safe_int(window.get("end_frame")),
+                        "start_time_s": _safe_float(window.get("start_time_s")),
+                        "end_time_s": _safe_float(window.get("end_time_s")),
+                        "duration_s": _safe_float(window.get("duration_s")),
+                        "coordinate_frame": "source_image_fraction",
+                        "source_coordinate_frame": run_attrs.get("coordinate_space")
+                        or "source_image_pixels",
+                        "coordinate_origin": "top_left",
+                        "x_axis_direction": "right",
+                        "y_axis_direction": "down",
+                        "image_width_px": float(image_width),
+                        "image_height_px": float(image_height),
+                        "normalized_grid_id": normalized_grid_id,
+                        "normalized_grid_uniform": True,
+                        "sparse_zero_bins_omitted": True,
+                        "x_bin_count": n_x_bins,
+                        "y_bin_count": n_y_bins,
+                        "x_bin_index": x_bin_index,
+                        "x_bin_left_px": x_left_px,
+                        "x_bin_right_px": x_right_px,
+                        "x_bin_center_px": (x_left_px + x_right_px) / 2.0,
+                        "x_bin_width_px": x_right_px - x_left_px,
+                        "x_bin_left_fraction": float(x_fraction_edges[x_bin_index]),
+                        "x_bin_right_fraction": float(x_fraction_edges[x_bin_index + 1]),
+                        "x_bin_center_fraction": float(
+                            (x_fraction_edges[x_bin_index] + x_fraction_edges[x_bin_index + 1])
+                            / 2.0
+                        ),
+                        "x_bin_width_fraction": float(
+                            x_fraction_edges[x_bin_index + 1]
+                            - x_fraction_edges[x_bin_index]
+                        ),
+                        "y_bin_index": y_bin_index,
+                        "y_bin_left_px": y_left_px,
+                        "y_bin_right_px": y_right_px,
+                        "y_bin_center_px": (y_left_px + y_right_px) / 2.0,
+                        "y_bin_width_px": y_right_px - y_left_px,
+                        "y_bin_left_fraction": float(y_fraction_edges[y_bin_index]),
+                        "y_bin_right_fraction": float(y_fraction_edges[y_bin_index + 1]),
+                        "y_bin_center_fraction": float(
+                            (y_fraction_edges[y_bin_index] + y_fraction_edges[y_bin_index + 1])
+                            / 2.0
+                        ),
+                        "y_bin_width_fraction": float(
+                            y_fraction_edges[y_bin_index + 1]
+                            - y_fraction_edges[y_bin_index]
+                        ),
+                        "hist_count": hist_count,
+                        "window_detection_count": _array_int(
+                            detection_count, window_index
+                        ),
+                        "covered_frame_count": _array_int(
+                            covered_frame_count, window_index
+                        ),
+                        "total_span_frames": _array_int(
+                            total_span_frames, window_index
+                        ),
+                        "coverage_pct": _array_float(coverage_pct, window_index),
+                        "axis_order": heatmap_attrs.get("axis_order")
+                        or ["window", "y_bin", "x_bin"],
+                        "source_bin_size_px": _safe_float(
+                            heatmap_attrs.get("bin_size_px")
+                        ),
+                    }
+                )
+                rows.append(row)
     return rows
 
 
@@ -4256,6 +4498,20 @@ def export_one_zarr(zarr_path: str | Path, *, tables: Sequence[str], export_run_
     )
     if bout_kinematics_rows:
         result.rows_by_table.setdefault("bout_kinematics_metrics", []).extend(bout_kinematics_rows)
+
+    position_occupancy_rows = _load_position_occupancy_histogram_2d(
+        root,
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+    )
+    if position_occupancy_rows:
+        result.rows_by_table.setdefault(
+            POSITION_OCCUPANCY_HISTOGRAM_TABLE,
+            [],
+        ).extend(position_occupancy_rows)
 
     goodcopbadcop_spatial_rows = _load_goodcopbadcop_spatial_occupancy_zones(
         root,

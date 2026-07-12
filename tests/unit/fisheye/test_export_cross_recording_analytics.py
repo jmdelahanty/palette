@@ -749,6 +749,7 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
         output_root=output,
         export_run_id="goodcopbadcop_export",
         tables=(
+            "position_occupancy_histogram_2d",
             "chaser_epoch_spatial_occupancy_zones",
             "chaser_epoch_distance_summary",
             "chaser_epoch_behavior_summary",
@@ -771,6 +772,7 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
         jobs=1,
     )
 
+    assert manifest["row_counts_by_table"]["position_occupancy_histogram_2d"] == 12
     assert manifest["row_counts_by_table"]["chaser_epoch_spatial_occupancy_zones"] == 12
     assert manifest["row_counts_by_table"]["chaser_epoch_distance_summary"] == 6
     assert manifest["row_counts_by_table"]["chaser_epoch_behavior_summary"] == 3
@@ -792,6 +794,7 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
     assert manifest["schema_id"] == EXPORT_SCHEMA_ID
     assert manifest["schema_version"] == EXPORT_SCHEMA_VERSION
     assert "chaser.epoch.behavior_summary" in manifest["capabilities"]
+    assert "position.epoch.occupancy_histogram_2d" in manifest["capabilities"]
     assert "chaser.cra.primary" in manifest["capabilities"]
     assert "chaser.egocentric" in manifest["capabilities"]
     assert set(manifest["table_contracts"]) == set(manifest["tables_requested"])
@@ -807,6 +810,29 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
     assert json.loads(schema_metadata[b"palette.table_contract"]) == TABLE_CONTRACTS[
         "chaser_epoch_behavior_summary"
     ].to_dict()
+
+    position_rows = _read_dataset(
+        output,
+        "position_occupancy_histogram_2d",
+        "goodcopbadcop_export",
+    )
+    pre_position_top_left = next(
+        row
+        for row in position_rows
+        if row["window_label"] == "pre_event"
+        and row["y_bin_index"] == 0
+        and row["x_bin_index"] == 0
+    )
+    assert pre_position_top_left["hist_count"] == 1
+    assert pre_position_top_left["coordinate_frame"] == "source_image_fraction"
+    assert pre_position_top_left["coordinate_origin"] == "top_left"
+    assert pre_position_top_left["x_bin_left_fraction"] == 0.0
+    assert pre_position_top_left["x_bin_right_fraction"] == 0.5
+    assert pre_position_top_left["y_bin_left_fraction"] == 0.0
+    assert pre_position_top_left["y_bin_right_fraction"] == 0.5
+    assert pre_position_top_left["image_width_px"] == 20.0
+    assert pre_position_top_left["image_height_px"] == 20.0
+    assert len(pre_position_top_left["normalized_grid_id"]) == 16
 
     spatial_rows = _read_dataset(
         output,

@@ -39,6 +39,7 @@ class PanelControlSpec:
     show_chaser: bool = False
     show_statistic: bool = False
     show_egocentric_bins: bool = False
+    show_position_bins: bool = False
 
 
 GROUP_PANEL_DEFINITIONS = (
@@ -60,8 +61,11 @@ GROUP_PANEL_DEFINITIONS = (
     GroupPanelDefinition(
         "spatial",
         "Spatial occupancy",
-        "Recording-weighted or count-first occupancy summaries across persisted spatial zones.",
-        all_capabilities=("chaser.epoch.spatial_occupancy",),
+        "Position-density heatmaps and recording-weighted occupancy summaries across spatial zones.",
+        any_capabilities=(
+            "position.epoch.occupancy_histogram_2d",
+            "chaser.epoch.spatial_occupancy",
+        ),
     ),
     GroupPanelDefinition(
         "chaser_distance",
@@ -148,6 +152,7 @@ PANEL_CONTROL_SPECS = {
         analysis_label="Spatial analysis",
         preferred_analysis="fraction_of_epoch",
         show_window=True,
+        show_position_bins=True,
     ),
     "chaser_distance": PanelControlSpec(
         "chaser_distance",
@@ -524,6 +529,66 @@ def egocentric_heatmap_figure(
     return fig
 
 
+def position_occupancy_heatmap_figure(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    title: str,
+    color_max: float | None = None,
+    show_colorbar: bool = True,
+) -> go.Figure | None:
+    """Render pooled normalized position-occupancy bins in source-image orientation."""
+
+    frame = pd.DataFrame(rows)
+    required = {
+        "x_bin_center_fraction",
+        "y_bin_center_fraction",
+        "pooled_probability",
+    }
+    if frame.empty or not required.issubset(frame.columns):
+        return None
+    for column in required:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame = frame.dropna(subset=sorted(required))
+    if frame.empty:
+        return None
+    pivot = frame.pivot_table(
+        index="y_bin_center_fraction",
+        columns="x_bin_center_fraction",
+        values="pooled_probability",
+        aggfunc="sum",
+        fill_value=0.0,
+    ).sort_index()
+    effective_color_max = (
+        float(color_max)
+        if color_max is not None and float(color_max) > 0.0
+        else egocentric_probability_color_max(frame.to_dict("records"))
+    )
+    fig = go.Figure(
+        data=go.Heatmap(
+            x=list(pivot.columns),
+            y=list(pivot.index),
+            z=pivot.to_numpy(),
+            colorscale="Inferno",
+            zmin=0.0,
+            zmax=effective_color_max,
+            showscale=bool(show_colorbar),
+            colorbar=dict(title="Probability"),
+            hovertemplate=(
+                "x=%{x:.3f}<br>y=%{y:.3f}<br>probability=%{z:.4f}<extra></extra>"
+            ),
+        )
+    )
+    fig.update_layout(
+        title=title,
+        height=480,
+        margin=dict(l=55, r=70 if show_colorbar else 30, t=55, b=55),
+        xaxis_title="Normalized arena X (right)",
+        yaxis_title="Normalized arena Y (down)",
+    )
+    fig.update_yaxes(autorange="reversed", scaleanchor="x", scaleratio=1)
+    return fig
+
+
 def egocentric_polar_figure(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -644,5 +709,6 @@ __all__ = [
     "grouped_bar_figure",
     "line_figure",
     "panel_control_spec",
+    "position_occupancy_heatmap_figure",
     "sample_grain_status_rows",
 ]

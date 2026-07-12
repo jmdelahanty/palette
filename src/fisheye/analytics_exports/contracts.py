@@ -20,6 +20,7 @@ STIMULUS_STEP_SUMMARY_TABLE = "stimulus_step_summary"
 STIMULUS_RESPONSE_TABLE = "stimulus_response_per_fish_step"
 SWIM_BOUT_METRICS_TABLE = "swim_bout_metrics"
 BOUT_KINEMATICS_METRICS_TABLE = "bout_kinematics_metrics"
+POSITION_OCCUPANCY_HISTOGRAM_TABLE = "position_occupancy_histogram_2d"
 
 CHASER_SPATIAL_TABLE = "chaser_epoch_spatial_occupancy_zones"
 CHASER_DISTANCE_SUMMARY_TABLE = "chaser_epoch_distance_summary"
@@ -124,6 +125,39 @@ TABLE_CONTRACTS: dict[str, TableContract] = {
         "recording_x_swim_bout_kinematics",
         ("recording_id", "bout_id"),
         ("bout_id",),
+    ),
+    POSITION_OCCUPANCY_HISTOGRAM_TABLE: _contract(
+        POSITION_OCCUPANCY_HISTOGRAM_TABLE,
+        "recording_x_epoch_x_y_bin_x_x_bin",
+        ("recording_id", "window_id", "y_bin_index", "x_bin_index"),
+        (
+            "window_id",
+            "window_label",
+            "y_bin_index",
+            "x_bin_index",
+            "hist_count",
+            "x_bin_left_fraction",
+            "x_bin_right_fraction",
+            "y_bin_left_fraction",
+            "y_bin_right_fraction",
+            "coordinate_frame",
+            "coordinate_origin",
+            "normalized_grid_id",
+            "normalized_grid_uniform",
+            "x_bin_count",
+            "y_bin_count",
+            "sparse_zero_bins_omitted",
+        ),
+        {
+            "x_bin_left_px": "px",
+            "x_bin_right_px": "px",
+            "y_bin_left_px": "px",
+            "y_bin_right_px": "px",
+            "x_bin_left_fraction": "arena_width_fraction",
+            "x_bin_right_fraction": "arena_width_fraction",
+            "y_bin_left_fraction": "arena_height_fraction",
+            "y_bin_right_fraction": "arena_height_fraction",
+        },
     ),
     CHASER_SPATIAL_TABLE: _contract(
         CHASER_SPATIAL_TABLE,
@@ -340,6 +374,7 @@ DEFAULT_TABLES = (
 )
 
 CHASER_TABLES = (
+    POSITION_OCCUPANCY_HISTOGRAM_TABLE,
     CHASER_SPATIAL_TABLE,
     CHASER_DISTANCE_SUMMARY_TABLE,
     CHASER_EPOCH_BEHAVIOR_TABLE,
