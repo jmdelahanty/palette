@@ -31,6 +31,9 @@ def test_write_png_visualization_artifact_stores_png_bytes_and_manifest(tmp_path
         payload,
         description="Example summary",
         created_by="test_plot_artifacts",
+        visualization_contract_id="palette.example.summary.v3",
+        renderer="tests.example_renderer",
+        renderer_version="3",
         artifact_signature="sig-1",
         created_at_utc="2026-04-26T00:00:00+00:00",
         source_paths={"speed": "tracks/id_0/speed_smoothed_mm"},
@@ -47,6 +50,9 @@ def test_write_png_visualization_artifact_stores_png_bytes_and_manifest(tmp_path
     assert artifact.attrs["artifact_role"] == "snapshot"
     assert artifact.attrs["mime"] == "image/png"
     assert artifact.attrs["content_sha256"] == hashlib.sha256(payload).hexdigest()
+    assert artifact.attrs["visualization_contract_id"] == "palette.example.summary.v3"
+    assert artifact.attrs["renderer"] == "tests.example_renderer"
+    assert artifact.attrs["renderer_version"] == "3"
     assert artifact.attrs["source_paths"]["speed"] == "tracks/id_0/speed_smoothed_mm"
     assert artifact.attrs["parameters"]["dpi"] == 150
     assert artifact.attrs["parameters"]["missing_threshold"] is None
@@ -61,6 +67,7 @@ def test_write_png_visualization_artifact_stores_png_bytes_and_manifest(tmp_path
     assert entry["artifact_schema_id"] == PNG_ARTIFACT_SCHEMA_ID
     assert entry["artifact_role"] == "snapshot"
     assert entry["content_sha256"] == hashlib.sha256(payload).hexdigest()
+    assert entry["visualization_contract_id"] == "palette.example.summary.v3"
 
 
 def test_write_interactive_plot_spec_artifact_stores_spec_group_and_manifest(tmp_path: Path) -> None:

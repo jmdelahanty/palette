@@ -40,6 +40,11 @@ from fisheye.shared.zarr_io import open_zarr_root
 
 STIMULUS_RESPONSE_OMR_PLOT_SCHEMA_ID = "palette.stimulus_response.omr_summary_plot.v1"
 STIMULUS_RESPONSE_OMR_PLOT_RENDERER = "palette-stimulus-response-omr-summary-v1"
+STIMULUS_RESPONSE_OMR_RENDERER_VERSION = "1"
+OMR_SUMMARY_VISUALIZATION_CONTRACT_ID = "palette.stimulus.moving_grating.omr_summary.v1"
+OMR_BOUT_TRAJECTORY_VISUALIZATION_CONTRACT_ID = (
+    "palette.stimulus.moving_grating.omr_bout_trajectory.v1"
+)
 OMR_SUMMARY_PNG_ARTIFACT_NAME = "stimulus_response_omr_summary_png"
 OMR_SUMMARY_INTERACTIVE_ARTIFACT_NAME = "stimulus_response_omr_summary_interactive"
 OMR_BOUT_TRAJECTORY_PNG_ARTIFACT_NAME = "stimulus_response_omr_bout_trajectory_png"
@@ -848,6 +853,9 @@ def write_omr_summary_visualization(
     signature = _artifact_signature(
         {
             "schema_id": STIMULUS_RESPONSE_OMR_PLOT_SCHEMA_ID,
+            "visualization_contract_id": OMR_SUMMARY_VISUALIZATION_CONTRACT_ID,
+            "renderer": STIMULUS_RESPONSE_OMR_PLOT_RENDERER,
+            "renderer_version": STIMULUS_RESPONSE_OMR_RENDERER_VERSION,
             "run_name": resolved_run,
             "layout": layout,
             "source_paths": source_paths,
@@ -890,6 +898,9 @@ def write_omr_summary_visualization(
         png_bytes,
         description="OMR stimulus-response summary PNG",
         created_by="fisheye.analysis.plot_stimulus_response_omr",
+        visualization_contract_id=OMR_SUMMARY_VISUALIZATION_CONTRACT_ID,
+        renderer=STIMULUS_RESPONSE_OMR_PLOT_RENDERER,
+        renderer_version=STIMULUS_RESPONSE_OMR_RENDERER_VERSION,
         artifact_signature=signature,
         created_at_utc=created_at_utc,
         source_paths=source_paths,
@@ -986,6 +997,11 @@ def write_omr_summary_visualization(
             trajectory_signature = _artifact_signature(
                 {
                     "schema_id": STIMULUS_RESPONSE_OMR_PLOT_SCHEMA_ID,
+                    "visualization_contract_id": (
+                        OMR_BOUT_TRAJECTORY_VISUALIZATION_CONTRACT_ID
+                    ),
+                    "renderer": STIMULUS_RESPONSE_OMR_PLOT_RENDERER,
+                    "renderer_version": STIMULUS_RESPONSE_OMR_RENDERER_VERSION,
                     "artifact_family": "stimulus_response_omr_bout_trajectory",
                     "run_name": resolved_run,
                     "layout": layout,
@@ -1024,6 +1040,11 @@ def write_omr_summary_visualization(
                 trajectory_png,
                 description="OMR bout trajectory summary PNG",
                 created_by="fisheye.analysis.plot_stimulus_response_omr",
+                visualization_contract_id=(
+                    OMR_BOUT_TRAJECTORY_VISUALIZATION_CONTRACT_ID
+                ),
+                renderer=STIMULUS_RESPONSE_OMR_PLOT_RENDERER,
+                renderer_version=STIMULUS_RESPONSE_OMR_RENDERER_VERSION,
                 artifact_signature=trajectory_signature,
                 created_at_utc=created_at_utc,
                 source_paths=trajectory_source_paths,

@@ -30,7 +30,9 @@ from fisheye.group_analytics_viewer.query import (
     query_cra_summary,
     query_egocentric_histogram,
     query_egocentric_summary,
+    query_epoch_bout_histogram,
     query_epoch_center_distance_histogram,
+    query_epoch_inter_bout_interval_histogram,
     query_epoch_speed_summary,
     query_export_summary,
     query_group_statistics,
@@ -113,6 +115,8 @@ def _make_goodcopbadcop_export(tmp_path: Path):
             "goodcopbadcop_spatial_occupancy_zones",
             "goodcopbadcop_chaser_epoch_summary",
             "goodcopbadcop_epoch_behavior_summary",
+            "goodcopbadcop_epoch_bout_histogram",
+            "goodcopbadcop_epoch_inter_bout_interval_histogram",
             "goodcopbadcop_epoch_center_distance_histogram",
             "goodcopbadcop_epoch_speed_summary",
             "goodcopbadcop_speed_distance_bins",
@@ -164,6 +168,8 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(tmp_path: Path) -> 
     assert summary["row_counts_by_table"]["goodcopbadcop_spatial_occupancy_zones"] == 12
     assert summary["row_counts_by_table"]["goodcopbadcop_chaser_epoch_summary"] == 6
     assert summary["row_counts_by_table"]["goodcopbadcop_epoch_behavior_summary"] == 3
+    assert summary["row_counts_by_table"]["goodcopbadcop_epoch_bout_histogram"] == 183
+    assert summary["row_counts_by_table"]["goodcopbadcop_epoch_inter_bout_interval_histogram"] == 3
     assert summary["row_counts_by_table"]["goodcopbadcop_epoch_center_distance_histogram"] == 9
     assert summary["row_counts_by_table"]["goodcopbadcop_epoch_speed_summary"] == 3
     assert summary["row_counts_by_table"]["goodcopbadcop_speed_distance_bins"] == 18
@@ -190,11 +196,13 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(tmp_path: Path) -> 
         {"phase_axis_index": 0, "phase_label": "pre_static"},
         {"phase_axis_index": 1, "phase_label": "post_static"},
     ]
-    assert options["cra_object_roles"] == ["aggressive", "benign"]
+    assert options["cra_object_roles"] == ["aggressive", "inert"]
     assert options["cra_object_phase_metrics"][0]["metric"] == "median_distance_mm"
     assert options["epoch_speed_metrics"][0]["metric"] == "mean_speed_mm_s"
     assert "mean_inter_bout_interval_s" in {item["metric"] for item in options["epoch_speed_metrics"]}
     assert "mean_bout_net_heading_change_deg" in {item["metric"] for item in options["epoch_speed_metrics"]}
+    assert options["epoch_bout_histogram_metrics"][0]["metric"] == "bout_path_length_mm"
+    assert options["epoch_inter_bout_interval_histogram_metrics"][0]["metric"] == "inter_bout_interval_s"
     assert options["cra_near_field_object_phase_metrics"][0]["metric"] == "approach_p05_mm"
     assert options["egocentric_metrics"][0]["metric"] == "mean_alignment_cos"
 
@@ -244,6 +252,24 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(tmp_path: Path) -> 
     pre_heading = next(row for row in epoch_heading["rows"] if row["window_label"] == "pre_event")
     assert epoch_heading["metric_label"] == "Mean net bout heading change (deg)"
     assert pre_heading["value"] == pytest.approx(0.0)
+
+    bout_hist = query_epoch_bout_histogram(context, metric="bout_duration_s", window_label="pre_event")
+    assert bout_hist["available"] is True
+    assert bout_hist["source_table"] == "goodcopbadcop_epoch_bout_histogram"
+    assert bout_hist["metric_label"] == "Bout duration (s)"
+    assert sum(row["pooled_count"] for row in bout_hist["rows"]) == 2
+    assert sum(row["pooled_fraction"] for row in bout_hist["rows"]) == pytest.approx(1.0)
+    first_bout_bin = bout_hist["rows"][0]
+    assert first_bout_bin["bin_left"] is not None
+    assert first_bout_bin["bin_right"] is not None
+    assert first_bout_bin["recording_count"] == 1
+
+    ibi_hist = query_epoch_inter_bout_interval_histogram(context, window_label="pre_event")
+    assert ibi_hist["available"] is True
+    assert ibi_hist["source_table"] == "goodcopbadcop_epoch_inter_bout_interval_histogram"
+    assert ibi_hist["metric_label"] == "Inter-bout interval (s)"
+    assert sum(row["pooled_count"] for row in ibi_hist["rows"]) == 1
+    assert sum(row["pooled_fraction"] for row in ibi_hist["rows"]) == pytest.approx(1.0)
 
     speed_distance = query_speed_distance_bins(context, window_label="pre_event", chaser_index=0)
     speed_bin = next(row for row in speed_distance["rows"] if row["distance_bin_index"] == 0)
@@ -441,6 +467,16 @@ def test_group_analytics_viewer_prefers_epoch_behavior_descriptive_summary(tmp_p
     assert center_hist["source_table"] == "goodcopbadcop_epoch_center_distance_histogram"
     assert sum(row["pooled_count"] for row in center_hist["rows"]) == 3
 
+    bout_hist = query_epoch_bout_histogram(context, metric="bout_path_length_mm", window_label="pre_event")
+    assert bout_hist["available"] is True
+    assert bout_hist["source_table"] == "goodcopbadcop_epoch_bout_histogram"
+    assert sum(row["pooled_count"] for row in bout_hist["rows"]) == 2
+
+    ibi_hist = query_epoch_inter_bout_interval_histogram(context, window_label="pre_event")
+    assert ibi_hist["available"] is True
+    assert ibi_hist["source_table"] == "goodcopbadcop_epoch_inter_bout_interval_histogram"
+    assert sum(row["pooled_count"] for row in ibi_hist["rows"]) == 1
+
 
 def test_group_analytics_viewer_queries_cra_primary_endpoint_statistics(tmp_path: Path) -> None:
     context = _make_goodcopbadcop_export(tmp_path)
@@ -461,7 +497,7 @@ def test_group_analytics_viewer_queries_cra_primary_endpoint_statistics(tmp_path
     assert by_metric["specificity_distance"]["primary"] is True
     assert by_metric["specificity_occupancy"]["primary"] is False
     assert by_metric["delta_agg"]["primary"] is False
-    assert by_metric["delta_benign"]["primary"] is False
+    assert by_metric["delta_inert"]["primary"] is False
     assert by_metric["delta_occ_agg"]["paired_unit_count"] == 1
 
 
@@ -481,7 +517,7 @@ def test_group_analytics_viewer_queries_cra_near_field_statistics(tmp_path: Path
     by_metric = {row["metric_name"]: row for row in statistics["rows"]}
     assert by_metric["nearzone_occ_specificity"]["test_method"].startswith("wilcoxon_signed_rank")
     assert by_metric["approach_p05_specificity"]["contrast_name"] == "vs-zero"
-    assert by_metric["nearzone_occ_delta_benign"]["primary"] is False
+    assert by_metric["nearzone_occ_delta_inert"]["primary"] is False
     assert by_metric["nearzone_occ_specificity"]["paired_unit_count"] == 1
 
 
@@ -494,6 +530,10 @@ def test_group_analytics_viewer_rejects_unknown_metric(tmp_path: Path) -> None:
         query_chaser_summary(context, metric="not_a_metric")
     with pytest.raises(ValueError, match="Unsupported epoch behavior metric"):
         query_epoch_speed_summary(context, metric="not_a_metric")
+    with pytest.raises(ValueError, match="Unsupported epoch metric histogram metric"):
+        query_epoch_bout_histogram(context, metric="not_a_metric")
+    with pytest.raises(ValueError, match="Unsupported epoch metric histogram metric"):
+        query_epoch_inter_bout_interval_histogram(context, metric="not_a_metric")
     with pytest.raises(ValueError, match="Unsupported CRA object-phase metric"):
         query_cra_object_phase(context, metric="not_a_metric")
     with pytest.raises(ValueError, match="Unsupported CRA summary metric"):

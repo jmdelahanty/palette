@@ -9,6 +9,10 @@ import zarr
 from fisheye.analysis.chaser_distance_runs import (
     ChaserDistanceResult,
     ChaserDistanceWindow,
+    EPOCH_DISTRIBUTION_PNG_ARTIFACT_NAME,
+    EPOCH_DISTRIBUTION_VISUALIZATION_CONTRACT_ID,
+    TIMESERIES_PNG_ARTIFACT_NAME,
+    TIMESERIES_VISUALIZATION_CONTRACT_ID,
     write_chaser_distance_run,
 )
 from fisheye.shared.plot_artifacts import INTERACTIVE_SPEC_SCHEMA_ID
@@ -54,8 +58,22 @@ def _make_archive_with_detection_occupancy(tmp_path: Path) -> Path:
                 {
                     "parameters": {
                         "chasers": [
-                            {"color_r": 1.0, "color_g": 0.0, "color_b": 0.0, "color_a": 1.0},
-                            {"color_r": 0.0, "color_g": 0.0, "color_b": 1.0, "color_a": 1.0},
+                            {
+                                "color_r": 1.0,
+                                "color_g": 0.0,
+                                "color_b": 0.0,
+                                "color_a": 1.0,
+                                "enable_chase": True,
+                                "enable_random_movement": False,
+                            },
+                            {
+                                "color_r": 0.0,
+                                "color_g": 0.0,
+                                "color_b": 1.0,
+                                "color_a": 1.0,
+                                "enable_chase": False,
+                                "enable_random_movement": False,
+                            },
                         ]
                     }
                 }
@@ -208,6 +226,8 @@ def _make_chaser_result(zarr_path: Path) -> ChaserDistanceResult:
         coordinate_origin="top_left_of_active_arena",
         arena_origin_in_canvas_xy=(0.0, 0.0),
         chaser_indices=chasers,
+        chaser_behavior_class_id=np.asarray([1, 3], dtype=np.int8),
+        chaser_behavior_labels=("aggressive", "inert"),
         camera_frame_id=camera_frame_id,
         stimulus_frame_num=camera_frame_id,
         timestamp_ns=np.arange(n, dtype=np.int64),
@@ -256,6 +276,18 @@ def test_chaser_distance_writer_adds_chaser_protocol_interactive_spec(tmp_path: 
     assert run["positions"].attrs["y_axis_direction"] == "down"
     assert run["positions"].attrs["fish_centroid_arena_xy_coordinate_origin"] == "top_left_of_active_arena"
     visualizations = run["visualizations"]
+    assert (
+        visualizations[TIMESERIES_PNG_ARTIFACT_NAME].attrs[
+            "visualization_contract_id"
+        ]
+        == TIMESERIES_VISUALIZATION_CONTRACT_ID
+    )
+    assert (
+        visualizations[EPOCH_DISTRIBUTION_PNG_ARTIFACT_NAME].attrs[
+            "visualization_contract_id"
+        ]
+        == EPOCH_DISTRIBUTION_VISUALIZATION_CONTRACT_ID
+    )
     spec_group = visualizations[DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT]
     assert spec_group.attrs["artifact_schema_id"] == INTERACTIVE_SPEC_SCHEMA_ID
     assert spec_group.attrs["snapshot_artifact"] == "chaser_distance_timeseries_png"

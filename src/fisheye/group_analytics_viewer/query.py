@@ -14,6 +14,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
+from fisheye.analysis.chaser_behavior import canonical_behavior_label
 from fisheye.group_statistics.paired import bootstrap_median_ci, wilcoxon_signed_rank_p_value
 
 from .models import HealthReport
@@ -23,6 +24,8 @@ SPATIAL_TABLE = "goodcopbadcop_spatial_occupancy_zones"
 CHASER_SUMMARY_TABLE = "goodcopbadcop_chaser_epoch_summary"
 EPOCH_BEHAVIOR_TABLE = "goodcopbadcop_epoch_behavior_summary"
 EPOCH_BOUT_DISTRIBUTION_TABLE = "goodcopbadcop_epoch_bout_distribution"
+EPOCH_BOUT_HISTOGRAM_TABLE = "goodcopbadcop_epoch_bout_histogram"
+EPOCH_INTER_BOUT_INTERVAL_HISTOGRAM_TABLE = "goodcopbadcop_epoch_inter_bout_interval_histogram"
 EPOCH_CENTER_DISTANCE_HISTOGRAM_TABLE = "goodcopbadcop_epoch_center_distance_histogram"
 EPOCH_SPEED_TABLE = "goodcopbadcop_epoch_speed_summary"
 SPEED_DISTANCE_TABLE = "goodcopbadcop_speed_distance_bins"
@@ -50,6 +53,8 @@ CORE_GOODCOPBADCOP_TABLES = (
 OPTIONAL_GOODCOPBADCOP_TABLES = (
     EPOCH_BEHAVIOR_TABLE,
     EPOCH_BOUT_DISTRIBUTION_TABLE,
+    EPOCH_BOUT_HISTOGRAM_TABLE,
+    EPOCH_INTER_BOUT_INTERVAL_HISTOGRAM_TABLE,
     EPOCH_CENTER_DISTANCE_HISTOGRAM_TABLE,
     EPOCH_SPEED_TABLE,
     SPEED_DISTANCE_TABLE,
@@ -106,6 +111,16 @@ EPOCH_BEHAVIOR_METRICS = {
     "wall_fraction": "Wall fraction",
     "wall_time_s": "Wall time (s)",
 }
+EPOCH_BOUT_HISTOGRAM_METRICS = {
+    "bout_path_length_mm": "Bout distance (mm)",
+    "bout_duration_s": "Bout duration (s)",
+    "bout_net_heading_change_deg": "Net bout heading change (deg)",
+    "abs_bout_net_heading_change_deg": "Abs net bout heading change (deg)",
+    "bout_heading_path_deg": "Bout heading path (deg)",
+}
+EPOCH_INTER_BOUT_INTERVAL_HISTOGRAM_METRICS = {
+    "inter_bout_interval_s": "Inter-bout interval (s)",
+}
 EGOCENTRIC_METRICS = {
     "mean_alignment_cos": "Mean heading alignment",
     "mean_lateral_sin": "Mean lateral component",
@@ -125,10 +140,10 @@ CRA_OBJECT_PHASE_METRICS = {
 }
 CRA_SUMMARY_METRICS = {
     "delta_agg": "Aggressive distance delta (post - pre)",
-    "delta_benign": "Benign distance delta (post - pre)",
+    "delta_inert": "Inert distance delta (post - pre)",
     "specificity_distance": "Distance specificity",
     "delta_occ_agg": "Aggressive occupancy delta (post - pre)",
-    "delta_occ_benign": "Benign occupancy delta (post - pre)",
+    "delta_occ_inert": "Inert occupancy delta (post - pre)",
     "specificity_occupancy": "Occupancy specificity",
 }
 CRA_NEAR_FIELD_OBJECT_PHASE_METRICS = {
@@ -143,16 +158,16 @@ CRA_NEAR_FIELD_OBJECT_PHASE_METRICS = {
 }
 CRA_NEAR_FIELD_SUMMARY_METRICS = {
     "approach_p05_delta_agg": "Aggressive p05 approach delta",
-    "approach_p05_delta_benign": "Benign p05 approach delta",
+    "approach_p05_delta_inert": "Inert p05 approach delta",
     "approach_p05_specificity": "P05 approach specificity",
     "approach_p10_delta_agg": "Aggressive p10 approach delta",
-    "approach_p10_delta_benign": "Benign p10 approach delta",
+    "approach_p10_delta_inert": "Inert p10 approach delta",
     "approach_p10_specificity": "P10 approach specificity",
     "nearzone_occ_delta_agg": "Aggressive near-zone occupancy delta",
-    "nearzone_occ_delta_benign": "Benign near-zone occupancy delta",
+    "nearzone_occ_delta_inert": "Inert near-zone occupancy delta",
     "nearzone_occ_specificity": "Near-zone occupancy specificity",
     "nearzone_entry_rate_delta_agg": "Aggressive entry-rate delta",
-    "nearzone_entry_rate_delta_benign": "Benign entry-rate delta",
+    "nearzone_entry_rate_delta_inert": "Inert entry-rate delta",
     "nearzone_entry_rate_specificity": "Entry-rate specificity",
     "thigmotaxis_frac_pre": "Thigmotaxis pre fraction",
     "thigmotaxis_frac_post": "Thigmotaxis post fraction",
@@ -300,8 +315,24 @@ def _load_table_rows(export_root: str, export_run_id: str, table_name: str) -> t
     return tuple(rows)
 
 
+def _canonicalize_behavior_row(raw_row: Mapping[str, Any]) -> dict[str, Any]:
+    row = dict(raw_row)
+    role = row.get("behavior_class") or row.get("object_role")
+    if role is not None:
+        canonical = canonical_behavior_label(role)
+        row["behavior_class"] = canonical
+        row["object_role"] = canonical
+    for key, value in list(row.items()):
+        if "benign" in key:
+            row.setdefault(key.replace("benign", "inert"), value)
+    return row
+
+
 def load_table_rows(context: ViewerContext, table_name: str) -> list[dict[str, Any]]:
-    return [dict(row) for row in _load_table_rows(str(context.export_root), context.export_run_id, table_name)]
+    return [
+        _canonicalize_behavior_row(row)
+        for row in _load_table_rows(str(context.export_root), context.export_run_id, table_name)
+    ]
 
 
 def load_optional_table_rows(context: ViewerContext, table_name: str) -> list[dict[str, Any]]:
@@ -312,7 +343,10 @@ def load_optional_table_rows(context: ViewerContext, table_name: str) -> list[di
 
 
 def _load_table_rows_for_run(context: ViewerContext, table_name: str, export_run_id: str) -> list[dict[str, Any]]:
-    return [dict(row) for row in _load_table_rows(str(context.export_root), export_run_id, table_name)]
+    return [
+        _canonicalize_behavior_row(row)
+        for row in _load_table_rows(str(context.export_root), export_run_id, table_name)
+    ]
 
 
 def _table_schema(context: ViewerContext, table_name: str, *, export_run_id: str | None = None) -> list[dict[str, str]]:
@@ -501,7 +535,12 @@ def canonical_condition(label: Any) -> str | None:
 def query_options(context: ViewerContext) -> dict[str, Any]:
     spatial = load_table_rows(context, SPATIAL_TABLE)
     chaser = load_table_rows(context, CHASER_SUMMARY_TABLE)
-    speed = load_optional_table_rows(context, EPOCH_BEHAVIOR_TABLE) + load_optional_table_rows(context, EPOCH_SPEED_TABLE)
+    speed = load_optional_table_rows(context, EPOCH_BEHAVIOR_TABLE) + load_optional_table_rows(
+        context,
+        EPOCH_SPEED_TABLE,
+    )
+    bout_histogram = load_optional_table_rows(context, EPOCH_BOUT_HISTOGRAM_TABLE)
+    ibi_histogram = load_optional_table_rows(context, EPOCH_INTER_BOUT_INTERVAL_HISTOGRAM_TABLE)
     cra_object_phase = load_table_rows(context, CRA_OBJECT_PHASE_TABLE)
     cra_near_field_object_phase = load_optional_table_rows(context, CRA_NEAR_FIELD_OBJECT_PHASE_TABLE)
     egocentric = load_table_rows(context, EGOCENTRIC_SUMMARY_TABLE)
@@ -511,7 +550,7 @@ def query_options(context: ViewerContext) -> dict[str, Any]:
                 _safe_int(row.get("window_index")) if _safe_int(row.get("window_index")) is not None else 999,
                 str(row.get("window_label") or ""),
             )
-            for row in spatial + chaser + speed + egocentric
+            for row in spatial + chaser + speed + bout_histogram + ibi_histogram + egocentric
             if row.get("window_label") is not None
         }
     )
@@ -564,6 +603,13 @@ def query_options(context: ViewerContext) -> dict[str, Any]:
         "spatial_metrics": [{"metric": key, "label": label} for key, label in SPATIAL_METRICS.items()],
         "chaser_metrics": [{"metric": key, "label": label} for key, label in CHASER_METRICS.items()],
         "epoch_speed_metrics": [{"metric": key, "label": label} for key, label in EPOCH_BEHAVIOR_METRICS.items()],
+        "epoch_bout_histogram_metrics": [
+            {"metric": key, "label": label} for key, label in EPOCH_BOUT_HISTOGRAM_METRICS.items()
+        ],
+        "epoch_inter_bout_interval_histogram_metrics": [
+            {"metric": key, "label": label}
+            for key, label in EPOCH_INTER_BOUT_INTERVAL_HISTOGRAM_METRICS.items()
+        ],
         "cra_object_phase_metrics": [{"metric": key, "label": label} for key, label in CRA_OBJECT_PHASE_METRICS.items()],
         "cra_summary_metrics": [{"metric": key, "label": label} for key, label in CRA_SUMMARY_METRICS.items()],
         "cra_near_field_object_phase_metrics": [
@@ -809,7 +855,9 @@ def query_spatial_occupancy(
             values = _values(group_rows, metric)
             stats = _summary(values)
             summary_source = "computed_from_export_rows"
-        recording_ids = sorted({str(row.get("recording_id")) for row in group_rows if row.get("recording_id")})
+        recording_ids = sorted(
+            {str(row.get("recording_id")) for row in group_rows if row.get("recording_id")}
+        )
         value = stats["sum"] if effective_mode == "total" else stats["mean"]
         out_rows.append(
             {
@@ -880,11 +928,12 @@ def query_chaser_summary(
             _safe_int(row.get("window_index")),
             row.get("window_label"),
             _safe_int(row.get("chaser_index")),
+            row.get("behavior_class"),
         )].append(row)
 
     out_rows: list[dict[str, Any]] = []
     for key, group_rows in grouped.items():
-        window_index, window_label, chaser_index = key
+        window_index, window_label, chaser_index, behavior_class = key
         condition_name = canonical_condition(window_label)
         descriptive = (
             _descriptive_row_for(
@@ -911,6 +960,7 @@ def query_chaser_summary(
                 "window_index": window_index,
                 "window_label": window_label,
                 "chaser_index": chaser_index,
+                "behavior_class": behavior_class,
                 "value": value,
                 "stat": stat,
                 "recording_count": stats["n"] if descriptive is not None else len(recording_ids),
@@ -936,6 +986,7 @@ def query_chaser_summary(
                 "window_index": _safe_int(row.get("window_index")),
                 "window_label": row.get("window_label"),
                 "chaser_index": _safe_int(row.get("chaser_index")),
+                "behavior_class": row.get("behavior_class"),
                 "value": _safe_float(row.get(metric)),
             }
             for row in rows
@@ -1148,13 +1199,149 @@ def query_epoch_center_distance_histogram(
                 "recording_count": len(recording_ids),
             }
         )
-    out_rows.sort(key=lambda row: (_sort_int(row.get("window_index")), _sort_int(row.get("bin_index"))))
+    out_rows.sort(
+        key=lambda row: (_sort_int(row.get("window_index")), _sort_int(row.get("bin_index")))
+    )
     return {
         "available": True,
         "rows": out_rows,
         "source_table": EPOCH_CENTER_DISTANCE_HISTOGRAM_TABLE,
         "summary_source": "pooled_export_counts",
     }
+
+
+def _query_epoch_metric_histogram(
+    context: ViewerContext,
+    *,
+    table_name: str,
+    metric: str,
+    metrics: Mapping[str, str],
+    window_label: str | None = None,
+) -> dict[str, Any]:
+    if metric not in metrics:
+        raise ValueError(f"Unsupported epoch metric histogram metric: {metric}")
+    rows = load_optional_table_rows(context, table_name)
+    rows = [row for row in rows if row.get("metric_name") == metric]
+    if window_label:
+        rows = [row for row in rows if row.get("window_label") == window_label]
+    if not rows:
+        return {
+            "available": False,
+            "metric": metric,
+            "metric_label": metrics[metric],
+            "rows": [],
+            "source_table": table_name,
+            "message": "No epoch metric histogram export found for this cohort.",
+        }
+
+    grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        bin_left = _safe_float(row.get("bin_left"))
+        bin_right = _safe_float(row.get("bin_right"))
+        bin_center = _safe_float(row.get("bin_center"))
+        bin_width = _safe_float(row.get("bin_width"))
+        if bin_width is None and bin_left is not None and bin_right is not None:
+            bin_width = bin_right - bin_left
+        key = (
+            _safe_int(row.get("window_index")),
+            row.get("window_label"),
+            row.get("metric_name"),
+            row.get("units"),
+            _safe_int(row.get("bin_index")),
+            bin_left,
+            bin_right,
+            bin_center,
+            bin_width,
+        )
+        grouped[key].append(row)
+
+    totals_by_window: dict[tuple[Any, ...], int] = {}
+    for key, group_rows in grouped.items():
+        window_key = key[:4]
+        totals_by_window[window_key] = totals_by_window.get(window_key, 0) + sum(
+            _safe_int(row.get("hist_count")) or 0 for row in group_rows
+        )
+
+    out_rows: list[dict[str, Any]] = []
+    for key, group_rows in grouped.items():
+        (
+            window_index,
+            label,
+            metric_name,
+            units,
+            bin_index,
+            bin_left,
+            bin_right,
+            bin_center,
+            bin_width,
+        ) = key
+        pooled_count = sum(_safe_int(row.get("hist_count")) or 0 for row in group_rows)
+        pooled_total = totals_by_window.get((window_index, label, metric_name, units), 0)
+        pooled_fraction = float(pooled_count) / float(pooled_total) if pooled_total > 0 else None
+        pooled_density = (
+            pooled_fraction / bin_width
+            if pooled_fraction is not None and bin_width is not None and bin_width > 0
+            else None
+        )
+        recording_ids = sorted({str(row.get("recording_id")) for row in group_rows if row.get("recording_id")})
+        out_rows.append(
+            {
+                "window_index": window_index,
+                "window_label": label,
+                "metric_name": metric_name,
+                "metric_label": metrics[metric],
+                "units": units,
+                "bin_index": bin_index,
+                "bin_left": bin_left,
+                "bin_right": bin_right,
+                "bin_center": bin_center,
+                "bin_width": bin_width,
+                "pooled_count": pooled_count,
+                "pooled_total_count": pooled_total,
+                "pooled_fraction": _round(pooled_fraction),
+                "pooled_density": _round(pooled_density),
+                "recording_count": len(recording_ids),
+            }
+        )
+    out_rows.sort(key=lambda row: (_sort_int(row.get("window_index")), _sort_int(row.get("bin_index"))))
+    return {
+        "available": True,
+        "metric": metric,
+        "metric_label": metrics[metric],
+        "rows": out_rows,
+        "source_table": table_name,
+        "summary_source": "pooled_export_counts",
+    }
+
+
+def query_epoch_bout_histogram(
+    context: ViewerContext,
+    *,
+    metric: str = "bout_path_length_mm",
+    window_label: str | None = None,
+) -> dict[str, Any]:
+    return _query_epoch_metric_histogram(
+        context,
+        table_name=EPOCH_BOUT_HISTOGRAM_TABLE,
+        metric=metric,
+        metrics=EPOCH_BOUT_HISTOGRAM_METRICS,
+        window_label=window_label,
+    )
+
+
+def query_epoch_inter_bout_interval_histogram(
+    context: ViewerContext,
+    *,
+    metric: str = "inter_bout_interval_s",
+    window_label: str | None = None,
+) -> dict[str, Any]:
+    return _query_epoch_metric_histogram(
+        context,
+        table_name=EPOCH_INTER_BOUT_INTERVAL_HISTOGRAM_TABLE,
+        metric=metric,
+        metrics=EPOCH_INTER_BOUT_INTERVAL_HISTOGRAM_METRICS,
+        window_label=window_label,
+    )
 
 
 def query_speed_distance_bins(
@@ -1275,6 +1462,7 @@ def query_chaser_histogram(
                 "window_index": key[0],
                 "window_label": key[1],
                 "chaser_index": key[2],
+                "behavior_class": row.get("behavior_class"),
                 "distance_bin_index": key[3],
                 "bin_left_mm": key[4],
                 "bin_right_mm": key[5],
@@ -1357,7 +1545,7 @@ def query_cra_object_phase(
                 **stats,
             }
         )
-    role_order = {"aggressive": 0, "benign": 1}
+    role_order = {"aggressive": 0, "inert": 1, "random_non_chasing": 2, "unknown": 3}
     out_rows.sort(
         key=lambda row: (
             _sort_int(row.get("phase_axis_index")),
@@ -1429,27 +1617,27 @@ def query_cra_summary(
                 "fish_id": row.get("fish_id"),
                 "endpoint_status": row.get("endpoint_status"),
                 "aggressive_color": row.get("aggressive_color"),
-                "benign_color": row.get("benign_color"),
+                "inert_color": row.get("inert_color"),
                 "d_pre_agg": _safe_float(row.get("d_pre_agg")),
                 "d_post_agg": _safe_float(row.get("d_post_agg")),
                 "delta_agg": _safe_float(row.get("delta_agg")),
-                "d_pre_benign": _safe_float(row.get("d_pre_benign")),
-                "d_post_benign": _safe_float(row.get("d_post_benign")),
-                "delta_benign": _safe_float(row.get("delta_benign")),
+                "d_pre_inert": _safe_float(row.get("d_pre_inert")),
+                "d_post_inert": _safe_float(row.get("d_post_inert")),
+                "delta_inert": _safe_float(row.get("delta_inert")),
                 "specificity_distance": _safe_float(row.get("specificity_distance")),
                 "occ_pre_agg": _safe_float(row.get("occ_pre_agg")),
                 "occ_post_agg": _safe_float(row.get("occ_post_agg")),
                 "delta_occ_agg": _safe_float(row.get("delta_occ_agg")),
-                "occ_pre_benign": _safe_float(row.get("occ_pre_benign")),
-                "occ_post_benign": _safe_float(row.get("occ_post_benign")),
-                "delta_occ_benign": _safe_float(row.get("delta_occ_benign")),
+                "occ_pre_inert": _safe_float(row.get("occ_pre_inert")),
+                "occ_post_inert": _safe_float(row.get("occ_post_inert")),
+                "delta_occ_inert": _safe_float(row.get("delta_occ_inert")),
                 "specificity_occupancy": _safe_float(row.get("specificity_occupancy")),
                 "frac_tracking_dropout_pre": _safe_float(row.get("frac_tracking_dropout_pre")),
                 "frac_tracking_dropout_post": _safe_float(row.get("frac_tracking_dropout_post")),
                 "pre_aggressive_quadrant": row.get("pre_aggressive_quadrant"),
                 "post_aggressive_quadrant": row.get("post_aggressive_quadrant"),
-                "pre_benign_quadrant": row.get("pre_benign_quadrant"),
-                "post_benign_quadrant": row.get("post_benign_quadrant"),
+                "pre_inert_quadrant": row.get("pre_inert_quadrant"),
+                "post_inert_quadrant": row.get("post_inert_quadrant"),
                 "source_cra_primary_endpoint_path": row.get("source_cra_primary_endpoint_path"),
                 "source_component_fingerprint": row.get("source_component_fingerprint"),
             }
@@ -1635,7 +1823,7 @@ def query_cra_specificity(
         fish_id = row.get("fish_id")
         role_specs = (
             ("aggressive", "agg", row.get("pre_aggressive_quadrant"), row.get("post_aggressive_quadrant")),
-            ("benign", "benign", row.get("pre_benign_quadrant"), row.get("post_benign_quadrant")),
+            ("inert", "inert", row.get("pre_inert_quadrant"), row.get("post_inert_quadrant")),
         )
         for role, suffix, pre_quadrant, post_quadrant in role_specs:
             pre_value = _safe_float(row.get(f"d_pre_{suffix}"))
@@ -1672,7 +1860,7 @@ def query_cra_specificity(
                     "fish_id": fish_id,
                     "specificity_distance": _round(specificity),
                     "delta_agg": _round(_safe_float(row.get("delta_agg"))),
-                    "delta_benign": _round(_safe_float(row.get("delta_benign"))),
+                    "delta_inert": _round(_safe_float(row.get("delta_inert"))),
                 }
             )
 
@@ -1694,7 +1882,7 @@ def query_cra_specificity(
     occupancy_index_phase_rows: list[dict[str, Any]] = []
     for row in object_phase_rows:
         role = str(row.get("object_role") or "")
-        if role not in {"aggressive", "benign"}:
+        if role not in {"aggressive", "inert"}:
             continue
         recording_id = str(row.get("recording_id") or "")
         phase_label = str(row.get("phase_label") or "")
@@ -1739,16 +1927,16 @@ def query_cra_specificity(
     occupancy_index_specificity_rows: list[dict[str, Any]] = []
     for recording_id, role_rows in sorted(slopes_by_recording.items()):
         agg = _safe_float(role_rows.get("aggressive", {}).get("delta"))
-        benign = _safe_float(role_rows.get("benign", {}).get("delta"))
-        if agg is None or benign is None:
+        inert = _safe_float(role_rows.get("inert", {}).get("delta"))
+        if agg is None or inert is None:
             continue
         occupancy_index_specificity_rows.append(
             {
                 "recording_id": recording_id,
-                "fish_id": role_rows["aggressive"].get("fish_id") or role_rows["benign"].get("fish_id"),
+                "fish_id": role_rows["aggressive"].get("fish_id") or role_rows["inert"].get("fish_id"),
                 "delta_index_agg": _round(agg),
-                "delta_index_benign": _round(benign),
-                "occupancy_index_specificity": _round(float(agg) - float(benign)),
+                "delta_index_inert": _round(inert),
+                "occupancy_index_specificity": _round(float(agg) - float(inert)),
             }
         )
 
@@ -1763,7 +1951,7 @@ def query_cra_specificity(
             [row["specificity_distance"] for row in distance_specificity_rows],
             bootstrap_iterations=int(bootstrap_iterations),
             confidence_level=float(confidence_level),
-            difference_definition="specificity_distance = delta_agg - delta_benign; tested against zero",
+            difference_definition="specificity_distance = delta_agg - delta_inert; tested against zero",
         ),
         "occupancy_index_phase_rows": occupancy_index_phase_rows,
         "occupancy_index_slope_rows": occupancy_index_slope_rows,
@@ -1772,7 +1960,7 @@ def query_cra_specificity(
             [row["occupancy_index_specificity"] for row in occupancy_index_specificity_rows],
             bootstrap_iterations=int(bootstrap_iterations),
             confidence_level=float(confidence_level),
-            difference_definition="occupancy_index_specificity = delta_index_agg - delta_index_benign; tested against zero",
+            difference_definition="occupancy_index_specificity = delta_index_agg - delta_index_inert; tested against zero",
         ),
         "inference_note": (
             "Distance specificity is the primary CRA contrast. Occupancy index is object-quadrant occupancy "
@@ -2128,7 +2316,7 @@ def query_cra_near_field_object_phase(
                 **stats,
             }
         )
-    role_order = {"aggressive": 0, "benign": 1}
+    role_order = {"aggressive": 0, "inert": 1, "random_non_chasing": 2, "unknown": 3}
     out_rows.sort(
         key=lambda row: (
             _sort_int(row.get("phase_axis_index")),
@@ -2204,18 +2392,18 @@ def query_cra_near_field_summary(
                 "fish_id": row.get("fish_id"),
                 "endpoint_status": row.get("endpoint_status"),
                 "aggressive_color": row.get("aggressive_color"),
-                "benign_color": row.get("benign_color"),
+                "inert_color": row.get("inert_color"),
                 "approach_p05_delta_agg": _safe_float(row.get("approach_p05_delta_agg")),
-                "approach_p05_delta_benign": _safe_float(row.get("approach_p05_delta_benign")),
+                "approach_p05_delta_inert": _safe_float(row.get("approach_p05_delta_inert")),
                 "approach_p05_specificity": _safe_float(row.get("approach_p05_specificity")),
                 "approach_p10_delta_agg": _safe_float(row.get("approach_p10_delta_agg")),
-                "approach_p10_delta_benign": _safe_float(row.get("approach_p10_delta_benign")),
+                "approach_p10_delta_inert": _safe_float(row.get("approach_p10_delta_inert")),
                 "approach_p10_specificity": _safe_float(row.get("approach_p10_specificity")),
                 "nearzone_occ_delta_agg": _safe_float(row.get("nearzone_occ_delta_agg")),
-                "nearzone_occ_delta_benign": _safe_float(row.get("nearzone_occ_delta_benign")),
+                "nearzone_occ_delta_inert": _safe_float(row.get("nearzone_occ_delta_inert")),
                 "nearzone_occ_specificity": _safe_float(row.get("nearzone_occ_specificity")),
                 "nearzone_entry_rate_delta_agg": _safe_float(row.get("nearzone_entry_rate_delta_agg")),
-                "nearzone_entry_rate_delta_benign": _safe_float(row.get("nearzone_entry_rate_delta_benign")),
+                "nearzone_entry_rate_delta_inert": _safe_float(row.get("nearzone_entry_rate_delta_inert")),
                 "nearzone_entry_rate_specificity": _safe_float(row.get("nearzone_entry_rate_specificity")),
                 "thigmotaxis_frac_pre": _safe_float(row.get("thigmotaxis_frac_pre")),
                 "thigmotaxis_frac_post": _safe_float(row.get("thigmotaxis_frac_post")),
@@ -2370,11 +2558,12 @@ def query_egocentric_summary(
             _safe_int(row.get("window_index")),
             row.get("window_label"),
             _safe_int(row.get("chaser_index")),
+            row.get("behavior_class"),
         )].append(row)
 
     out_rows: list[dict[str, Any]] = []
     for key, group_rows in grouped.items():
-        window_index, window_label, chaser_index = key
+        window_index, window_label, chaser_index, behavior_class = key
         values = _values(group_rows, metric)
         stats = _summary(values)
         value = stats["median"] if stat == "median" else stats["mean"]
@@ -2384,6 +2573,7 @@ def query_egocentric_summary(
                 "window_index": window_index,
                 "window_label": window_label,
                 "chaser_index": chaser_index,
+                "behavior_class": behavior_class,
                 "value": value,
                 "stat": stat,
                 "recording_count": len(recording_ids),
@@ -2404,6 +2594,7 @@ def query_egocentric_summary(
                 "window_index": _safe_int(row.get("window_index")),
                 "window_label": row.get("window_label"),
                 "chaser_index": _safe_int(row.get("chaser_index")),
+                "behavior_class": row.get("behavior_class"),
                 "value": _safe_float(row.get(metric)),
                 "egocentric_component_name": row.get("egocentric_component_name"),
             }
@@ -2562,10 +2753,10 @@ def query_recordings(context: ViewerContext) -> dict[str, Any]:
         )
         record["cra_endpoint_status"] = row.get("endpoint_status")
         record["cra_delta_agg_mm"] = _round(_safe_float(row.get("delta_agg")), 4)
-        record["cra_delta_benign_mm"] = _round(_safe_float(row.get("delta_benign")), 4)
+        record["cra_delta_inert_mm"] = _round(_safe_float(row.get("delta_inert")), 4)
         record["cra_specificity_distance_mm"] = _round(_safe_float(row.get("specificity_distance")), 4)
         record["cra_delta_occ_agg"] = _round(_safe_float(row.get("delta_occ_agg")), 4)
-        record["cra_delta_occ_benign"] = _round(_safe_float(row.get("delta_occ_benign")), 4)
+        record["cra_delta_occ_inert"] = _round(_safe_float(row.get("delta_occ_inert")), 4)
         record["cra_specificity_occupancy"] = _round(_safe_float(row.get("specificity_occupancy")), 4)
         record["cra_post_aggressive_quadrant"] = row.get("post_aggressive_quadrant")
 

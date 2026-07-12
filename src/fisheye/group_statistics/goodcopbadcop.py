@@ -221,14 +221,14 @@ DEFAULT_METRICS: tuple[MetricSpec, ...] = (
     MetricSpec(
         metric_family="cra_primary_endpoint",
         source_table=CRA_SUMMARY_TABLE,
-        metric_name="delta_benign",
+        metric_name="delta_inert",
         group_keys=(),
         primary=False,
     ),
     MetricSpec(
         metric_family="cra_primary_endpoint",
         source_table=CRA_SUMMARY_TABLE,
-        metric_name="delta_occ_benign",
+        metric_name="delta_occ_inert",
         group_keys=(),
         primary=False,
     ),
@@ -271,21 +271,21 @@ DEFAULT_METRICS: tuple[MetricSpec, ...] = (
     MetricSpec(
         metric_family="cra_near_field",
         source_table=CRA_NEAR_FIELD_SUMMARY_TABLE,
-        metric_name="approach_p05_delta_benign",
+        metric_name="approach_p05_delta_inert",
         group_keys=(),
         primary=False,
     ),
     MetricSpec(
         metric_family="cra_near_field",
         source_table=CRA_NEAR_FIELD_SUMMARY_TABLE,
-        metric_name="nearzone_occ_delta_benign",
+        metric_name="nearzone_occ_delta_inert",
         group_keys=(),
         primary=False,
     ),
     MetricSpec(
         metric_family="cra_near_field",
         source_table=CRA_NEAR_FIELD_SUMMARY_TABLE,
-        metric_name="nearzone_entry_rate_delta_benign",
+        metric_name="nearzone_entry_rate_delta_inert",
         group_keys=(),
         primary=False,
     ),
@@ -386,7 +386,13 @@ def _read_export_table(export_root: Path, source_export_run_id: str, table: str)
     files = sorted(table_dir.glob("*.parquet"))
     if not files:
         raise FileNotFoundError(f"No Parquet parts found for {table}: {table_dir}")
-    return pl.scan_parquet([str(path) for path in files]).collect()
+    frame = pl.scan_parquet([str(path) for path in files]).collect()
+    aliases = [
+        pl.col(name).alias(name.replace("benign", "inert"))
+        for name in frame.columns
+        if "benign" in name and name.replace("benign", "inert") not in frame.columns
+    ]
+    return frame.with_columns(aliases) if aliases else frame
 
 
 def _safe_float(value: Any) -> float | None:

@@ -49,6 +49,16 @@ METHOD = "detection_centroid_epoch_occupancy"
 METHOD_VERSION = "1"
 PARENT_NAME = "detection_occupancy_runs"
 PNG_ARTIFACT_NAME = "detection_occupancy_overview_png"
+DETECTION_OCCUPANCY_VISUALIZATION_CONTRACT_ID = (
+    "palette.stimulus.detection_occupancy.overview.v1"
+)
+SESSION_SCHEMA_ID = "palette.session_occupancy.v1"
+SESSION_METHOD = "detection_centroid_full_session_occupancy"
+SESSION_PARENT_NAME = "session_occupancy_runs"
+SESSION_PNG_ARTIFACT_NAME = "session_occupancy_overview_png"
+SESSION_VISUALIZATION_CONTRACT_ID = "palette.core.position.session_occupancy.v1"
+OCCUPANCY_RENDERER = "fisheye.analysis.detection_occupancy_runs"
+OCCUPANCY_RENDERER_VERSION = "1"
 SPATIAL_OCCUPANCY_SCHEMA_ID = "palette.spatial_occupancy_zones.v1"
 SPATIAL_OCCUPANCY_SCHEMA_VERSION = 1
 IMAGE_QUADRANTS_ZONE_SET_ID = "image_quadrants_v1"
@@ -501,6 +511,58 @@ def build_detection_occupancy_result(
     )
 
 
+def build_session_occupancy_result(
+    zarr_path: Path,
+    *,
+    run_name: str,
+    source: str = "active",
+    detect_run: Optional[str] = None,
+    detection_path: Optional[str] = None,
+    bin_size: int = 128,
+    smooth_sigma: float = 1.0,
+    min_score: Optional[float] = None,
+) -> DetectionOccupancyResult:
+    """Build one neutral full-recording occupancy segment without stimulus data."""
+
+    root = _open_root(zarr_path, mode="r")
+    detect_group, _path, _kind = _resolve_detection_group(
+        root,
+        source=source,
+        detect_run=detect_run,
+        detection_path=detection_path,
+    )
+    _width, _height, fps, total_frames = _resolve_dimensions(root, detect_group)
+    end_frame = max(0, int(total_frames) - 1)
+    duration_s = float(total_frames) / float(fps) if fps > 0 else 0.0
+    window = OccupancyWindow(
+        window_id=0,
+        label="full_session",
+        start_frame=0,
+        end_frame=end_frame,
+        start_time_s=0.0,
+        end_time_s=duration_s,
+        duration_s=duration_s,
+    )
+    result = build_detection_occupancy_result(
+        zarr_path,
+        run_name=run_name,
+        stimulus_epoch_run="full_session",
+        epoch_windows=(window,),
+        source=source,
+        detect_run=detect_run,
+        detection_path=detection_path,
+        bin_size=bin_size,
+        smooth_sigma=smooth_sigma,
+        min_score=min_score,
+    )
+    return DetectionOccupancyResult(
+        **{
+            **result.__dict__,
+            "source_stimulus_epoch_path": "recording/full_session",
+        }
+    )
+
+
 def _bytes_array(values: Sequence[str], *, width: int = 96) -> np.ndarray:
     out = np.zeros((len(values), int(width)), dtype=np.uint8)
     for row_idx, value in enumerate(values):
@@ -529,6 +591,10 @@ def _write_array(group: zarr.Group, name: str, data: np.ndarray) -> None:
 def _write_spatial_occupancy(
     run: zarr.Group,
     result: DetectionOccupancyResult,
+    *,
+    row_axis: str = "stimulus_epoch_windows",
+    segment_description: str = "stimulus epoch window",
+    segment_source_kind: str = "stimulus_epoch",
 ) -> None:
     if not result.spatial_occupancy:
         return
@@ -536,10 +602,13 @@ def _write_spatial_occupancy(
     spatial_parent.attrs.update(
         json_attr_safe(
             {
-                "description": "Detection-derived spatial occupancy summaries by stimulus epoch window.",
+                "description": (
+                    "Detection-derived spatial occupancy summaries by "
+                    f"{segment_description}."
+                ),
                 "schema_id": SPATIAL_OCCUPANCY_SCHEMA_ID,
                 "schema_version": SPATIAL_OCCUPANCY_SCHEMA_VERSION,
-                "row_axis": "stimulus_epoch_windows",
+                "row_axis": row_axis,
                 "column_axis": "occupancy_zones",
             }
         )
@@ -561,7 +630,8 @@ def _write_spatial_occupancy(
                     "x_axis_direction": zone_set.x_axis_direction,
                     "y_axis_direction": zone_set.y_axis_direction,
                     "source_detection_path": result.source_detection_path,
-                    "source_stimulus_epoch_path": result.source_stimulus_epoch_path,
+                    "source_segment_kind": segment_source_kind,
+                    "source_segment_path": result.source_stimulus_epoch_path,
                     "detection_selection_policy": zone_set.detection_selection_policy,
                     "zone_overlap_policy": zone_set.zone_overlap_policy,
                     "time_basis": zone_set.time_basis,
@@ -602,7 +672,7 @@ def _write_spatial_occupancy(
                 {
                     "axis_order": ["window", "zone"],
                     "frame_count_description": "Selected valid detection frames per epoch window and zone.",
-                    "fraction_of_epoch_description": "frame_count divided by total epoch span frames.",
+                    "fraction_of_epoch_description": "frame_count divided by total analysis-segment span frames.",
                     "fraction_of_detected_description": "frame_count divided by selected detected frames.",
                 }
             )
@@ -663,18 +733,25 @@ def write_detection_occupancy_run(
     *,
     overwrite: bool = False,
     write_png: bool = True,
+    parent_name: str = PARENT_NAME,
+    schema_id: str = SCHEMA_ID,
+    method: str = METHOD,
+    row_axis: str = "stimulus_epoch_windows",
+    segment_source_kind: str = "stimulus_epoch",
+    png_artifact_name: str = PNG_ARTIFACT_NAME,
+    visualization_contract_id: str = DETECTION_OCCUPANCY_VISUALIZATION_CONTRACT_ID,
 ) -> str:
     root = _open_root(zarr_path, mode="a")
     analysis = root.require_group("analysis")
-    parent = require_runs_parent(analysis, PARENT_NAME)
+    parent = require_runs_parent(analysis, parent_name)
     run_name = result.run_name
     if run_name in parent:
         if not overwrite:
-            raise ValueError(f"Detection occupancy run already exists: analysis/{PARENT_NAME}/{run_name}")
+            raise ValueError(f"Detection occupancy run already exists: analysis/{parent_name}/{run_name}")
         del parent[run_name]
     run = parent.create_group(run_name)
     mark_run_pending(parent, run_name)
-    mark_run_started(run, run_name=run_name, stage="detection_occupancy")
+    mark_run_started(run, run_name=run_name, stage=method)
     try:
         windows = run.require_group("windows")
         _write_array(windows, "window_id", np.asarray([w.window_id for w in result.windows], dtype=np.int32))
@@ -686,9 +763,15 @@ def write_detection_occupancy_run(
         _write_array(windows, "duration_s", np.asarray([w.duration_s for w in result.windows], dtype=np.float64))
         _write_array(
             windows,
-            "source_stimulus_epoch_window_id",
+            "source_segment_id",
             np.asarray([w.window_id for w in result.windows], dtype=np.int32),
         )
+        if segment_source_kind == "stimulus_epoch":
+            _write_array(
+                windows,
+                "source_stimulus_epoch_window_id",
+                np.asarray([w.window_id for w in result.windows], dtype=np.int32),
+            )
         windows.attrs.update({"storage_layout": "columnar"})
 
         coverage = run.require_group("coverage")
@@ -696,7 +779,7 @@ def write_detection_occupancy_run(
         _write_array(coverage, "covered_frame_count", result.covered_frame_count)
         _write_array(coverage, "total_span_frames", result.total_span_frames)
         _write_array(coverage, "coverage_pct", result.coverage_pct)
-        coverage.attrs.update({"row_axis": "stimulus_epoch_windows"})
+        coverage.attrs.update({"row_axis": row_axis})
 
         heatmaps = run.require_group("heatmaps")
         _write_array(heatmaps, "counts", result.counts)
@@ -705,23 +788,41 @@ def write_detection_occupancy_run(
         _write_array(heatmaps, "y_edges", result.y_edges)
         heatmaps.attrs.update(
             {
-                "counts_description": "Raw detection-centroid counts per stimulus epoch window.",
-                "normalized_description": "Max-normalized smoothed occupancy per stimulus epoch window.",
+                "counts_description": "Raw detection-centroid counts per analysis segment.",
+                "normalized_description": "Max-normalized smoothed occupancy per analysis segment.",
                 "axis_order": ["window", "y_bin", "x_bin"],
                 "bin_size_px": int(result.bin_size),
                 "smooth_sigma_bins": float(result.smooth_sigma),
             }
         )
 
-        _write_spatial_occupancy(run, result)
+        _write_spatial_occupancy(
+            run,
+            result,
+            row_axis=row_axis,
+            segment_description=(
+                "full-recording segment"
+                if segment_source_kind == "full_session"
+                else "stimulus epoch window"
+            ),
+            segment_source_kind=segment_source_kind,
+        )
 
         git = get_git_info(Path(__file__).resolve().parents[3])
         source_refs = {
             "source_detection_path": result.source_detection_path,
             "source_detection_kind": result.source_detection_kind,
-            "source_stimulus_epoch_run": result.source_stimulus_epoch_run,
-            "source_stimulus_epoch_path": result.source_stimulus_epoch_path,
+            "source_segment_kind": segment_source_kind,
+            "source_segment_id": result.source_stimulus_epoch_run,
+            "source_segment_path": result.source_stimulus_epoch_path,
         }
+        if segment_source_kind == "stimulus_epoch":
+            source_refs.update(
+                {
+                    "source_stimulus_epoch_run": result.source_stimulus_epoch_run,
+                    "source_stimulus_epoch_path": result.source_stimulus_epoch_path,
+                }
+            )
         parameters = {
             "bin_size": int(result.bin_size),
             "smooth_sigma": float(result.smooth_sigma),
@@ -746,18 +847,19 @@ def write_detection_occupancy_run(
             },
         }
         attrs = {
-            "schema_id": SCHEMA_ID,
+            "schema_id": schema_id,
             "schema_version": SCHEMA_VERSION,
-            "method": METHOD,
+            "method": method,
             "method_version": METHOD_VERSION,
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
-            "row_axis": "stimulus_epoch_windows",
+            "row_axis": row_axis,
             "run_name": run_name,
             "recording_id": result.recording_id,
             "source_detection_path": result.source_detection_path,
             "source_detection_kind": result.source_detection_kind,
-            "source_stimulus_epoch_run": result.source_stimulus_epoch_run,
-            "source_stimulus_epoch_path": result.source_stimulus_epoch_path,
+            "source_segment_kind": segment_source_kind,
+            "source_segment_id": result.source_stimulus_epoch_run,
+            "source_segment_path": result.source_stimulus_epoch_path,
             "coordinate_space": "source_image_pixels",
             "width": int(result.width),
             "height": int(result.height),
@@ -770,21 +872,28 @@ def write_detection_occupancy_run(
             "git_branch": git.get("branch"),
             "git_dirty": git.get("is_dirty"),
             "provenance": {
-                "stage": "detection_occupancy",
+                "stage": method,
                 "created_by": "fisheye.analysis.detection_occupancy_runs",
                 "inputs": source_refs,
                 "parameters": parameters,
             },
         }
+        if segment_source_kind == "stimulus_epoch":
+            attrs.update(
+                {
+                    "source_stimulus_epoch_run": result.source_stimulus_epoch_run,
+                    "source_stimulus_epoch_path": result.source_stimulus_epoch_path,
+                }
+            )
         run.attrs.update(json_attr_safe(attrs))
         lineage_payload = build_run_lineage_payload(
-            run_family="analysis/detection_occupancy_runs",
+            run_family=f"analysis/{parent_name}",
             analysis_schema={
-                "schema_id": SCHEMA_ID,
+                "schema_id": schema_id,
                 "schema_version": SCHEMA_VERSION,
-                "row_axis": "stimulus_epoch_windows",
+                "row_axis": row_axis,
             },
-            method=METHOD,
+            method=method,
             method_version=METHOD_VERSION,
             source_refs=source_refs,
             parameters=parameters,
@@ -795,18 +904,28 @@ def write_detection_occupancy_run(
             png = render_occupancy_png(result)
             write_png_visualization_artifact(
                 run,
-                PNG_ARTIFACT_NAME,
+                png_artifact_name,
                 png,
-                description="Detection centroid occupancy by stimulus epoch window.",
+                description=(
+                    "Detection centroid occupancy for the full recording."
+                    if segment_source_kind == "full_session"
+                    else "Detection centroid occupancy by stimulus epoch window."
+                ),
                 created_by="fisheye.analysis.detection_occupancy_runs",
+                visualization_contract_id=visualization_contract_id,
+                renderer=OCCUPANCY_RENDERER,
+                renderer_version=OCCUPANCY_RENDERER_VERSION,
                 role="analysis_overview",
                 source_paths={
                     "detection": result.source_detection_path,
-                    "stimulus_epoch": result.source_stimulus_epoch_path,
+                    "segment": result.source_stimulus_epoch_path,
                 },
-                source_runs={"stimulus_epoch_run": result.source_stimulus_epoch_run},
+                source_runs={
+                    "segment_kind": segment_source_kind,
+                    "segment_id": result.source_stimulus_epoch_run,
+                },
                 parameters=parameters,
-                extra_attrs={"occupancy_schema_id": SCHEMA_ID, "summary": json_attr_safe(summary)},
+                extra_attrs={"occupancy_schema_id": schema_id, "summary": json_attr_safe(summary)},
                 overwrite=True,
             )
         mark_run_complete(
@@ -814,20 +933,43 @@ def write_detection_occupancy_run(
             parent_group=parent,
             run_name=run_name,
             run_provenance=build_writer_run_provenance(
-                command="fisheye.analysis.detection_occupancy_runs",
+                command=f"fisheye.analysis.detection_occupancy_runs:{method}",
                 params=parameters,
                 input_run_ids={
                     "source_detection_path": result.source_detection_path,
                     "source_detection_kind": result.source_detection_kind,
-                    "source_stimulus_epoch_run": result.source_stimulus_epoch_run,
-                    "source_stimulus_epoch_path": result.source_stimulus_epoch_path,
+                    "source_segment_kind": segment_source_kind,
+                    "source_segment_id": result.source_stimulus_epoch_run,
+                    "source_segment_path": result.source_stimulus_epoch_path,
                 },
             ),
         )
     except Exception as exc:
         mark_run_failed(run, error=str(exc))
         raise
-    return f"analysis/{PARENT_NAME}/{run_name}"
+    return f"analysis/{parent_name}/{run_name}"
+
+
+def write_session_occupancy_run(
+    zarr_path: Path,
+    result: DetectionOccupancyResult,
+    *,
+    overwrite: bool = False,
+    write_png: bool = True,
+) -> str:
+    return write_detection_occupancy_run(
+        zarr_path,
+        result,
+        overwrite=overwrite,
+        write_png=write_png,
+        parent_name=SESSION_PARENT_NAME,
+        schema_id=SESSION_SCHEMA_ID,
+        method=SESSION_METHOD,
+        row_axis="session_segments",
+        segment_source_kind="full_session",
+        png_artifact_name=SESSION_PNG_ARTIFACT_NAME,
+        visualization_contract_id=SESSION_VISUALIZATION_CONTRACT_ID,
+    )
 
 
 def _result_payload(result: DetectionOccupancyResult) -> dict[str, Any]:
@@ -883,6 +1025,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("zarr_path", type=Path, help="Analysis zarr archive.")
     parser.add_argument("--run-name", default=utc_run_name(), help="Detection occupancy run name.")
     parser.add_argument("--stimulus-epoch-run", help="Source stimulus epoch run name. Defaults to latest complete.")
+    parser.add_argument(
+        "--whole-recording",
+        action="store_true",
+        help="Analyze one neutral full-session segment without requiring stimulus metadata.",
+    )
     parser.add_argument("--source", choices=("active", "raw"), default="active")
     parser.add_argument("--detect-run", help="Raw detect run name when --source raw is used.")
     parser.add_argument("--detection-path", help="Explicit detection group path.")
@@ -898,20 +1045,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    result = build_detection_occupancy_result(
-        Path(args.zarr_path),
-        run_name=str(args.run_name),
-        stimulus_epoch_run=args.stimulus_epoch_run,
-        source=str(args.source),
-        detect_run=args.detect_run,
-        detection_path=args.detection_path,
-        bin_size=int(args.bin_size),
-        smooth_sigma=float(args.smooth_sigma),
-        min_score=args.min_score,
-    )
+    if args.whole_recording and args.stimulus_epoch_run:
+        raise ValueError("--whole-recording cannot be combined with --stimulus-epoch-run")
+    builder = build_session_occupancy_result if args.whole_recording else build_detection_occupancy_result
+    build_kwargs = {
+        "run_name": str(args.run_name),
+        "source": str(args.source),
+        "detect_run": args.detect_run,
+        "detection_path": args.detection_path,
+        "bin_size": int(args.bin_size),
+        "smooth_sigma": float(args.smooth_sigma),
+        "min_score": args.min_score,
+    }
+    if not args.whole_recording:
+        build_kwargs["stimulus_epoch_run"] = args.stimulus_epoch_run
+    result = builder(Path(args.zarr_path), **build_kwargs)
     path = None
     if args.apply:
-        path = write_detection_occupancy_run(
+        writer = write_session_occupancy_run if args.whole_recording else write_detection_occupancy_run
+        path = writer(
             Path(args.zarr_path),
             result,
             overwrite=bool(args.overwrite),

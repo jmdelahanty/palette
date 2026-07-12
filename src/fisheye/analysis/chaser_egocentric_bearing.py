@@ -18,12 +18,14 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
+from fisheye.analysis.chaser_behavior import resolve_configured_chaser_behaviors
 from fisheye.analysis.chaser_distance_runs import (
     ChaserDistanceWindow,
     _artifact_signature,
     _bytes_array,
     _display_epoch_label,
     _write_array,
+    write_chaser_dashboard_spec_artifact,
     write_goodcopbadcop_chaser_dashboard_spec_artifact,
 )
 from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
@@ -40,6 +42,14 @@ METHOD_VERSION = "1"
 COMPONENT_PARENT_NAME = "egocentric_bearing"
 PRE_POST_POLAR_PNG_ARTIFACT_NAME = "egocentric_bearing_pre_post_polar_png"
 PRE_POST_POLAR_POINT_CLOUD_PNG_ARTIFACT_NAME = "egocentric_bearing_pre_post_polar_point_cloud_png"
+PRE_POST_POLAR_VISUALIZATION_CONTRACT_ID = (
+    "palette.chaser_egocentric_bearing.pre_post_polar_density.v2"
+)
+PRE_POST_POLAR_POINT_CLOUD_VISUALIZATION_CONTRACT_ID = (
+    "palette.chaser_egocentric_bearing.pre_post_polar_point_cloud.v2"
+)
+STATIC_VISUALIZATION_RENDERER = "fisheye.analysis.chaser_egocentric_bearing"
+STATIC_VISUALIZATION_RENDERER_VERSION = "2"
 DEFAULT_HEADING_LEVEL = "smoothed"
 REQUIRED_TRACK_SCOPE = "offline"
 STATIC_POLAR_DISPLAY_DISTANCE_BIN_WIDTH_MM = 5.0
@@ -83,6 +93,7 @@ class ChaserEgocentricBearingResult:
     total_frames: int
     pixels_per_mm_projector: float
     chaser_indices: np.ndarray
+    chaser_behavior_labels: tuple[str, ...]
     chaser_color_hex: Mapping[int, str]
     camera_frame_id: np.ndarray
     stimulus_epoch_window_id: np.ndarray
@@ -220,6 +231,29 @@ def _load_chaser_color_hex(
         if color:
             out[int(chaser_index)] = color
     return out
+
+
+def _load_configured_chaser_behavior_labels(
+    root: zarr.Group,
+    run_group: zarr.Group,
+    chaser_indices: np.ndarray,
+) -> tuple[str, ...]:
+    stimulus_path = _source_stimulus_path_from_run_group(run_group)
+    if not stimulus_path:
+        return tuple("unknown" for _ in chaser_indices)
+    stimulus_group = root.get(stimulus_path)
+    if stimulus_group is None:
+        return tuple("unknown" for _ in chaser_indices)
+    protocol_json = getattr(stimulus_group, "attrs", {}).get("protocol_json")
+    if not protocol_json:
+        return tuple("unknown" for _ in chaser_indices)
+    try:
+        payload = json.loads(str(protocol_json))
+        configured = resolve_configured_chaser_behaviors(payload)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return tuple("unknown" for _ in chaser_indices)
+    by_index = {item.chaser_index: item.behavior_class for item in configured}
+    return tuple(by_index.get(int(index), "unknown") for index in chaser_indices)
 
 
 def compute_egocentric_chaser_bearing(
@@ -575,6 +609,18 @@ def build_chaser_egocentric_bearing_result(
     chaser_valid = np.asarray(positions["chaser_valid"][:], dtype=bool)
     distance_mm = np.asarray(distances["distance_mm"][:], dtype=np.float32)
     chaser_indices = np.asarray(run_group["chasers"]["chaser_index"][:], dtype=np.uint8)
+    chaser_group = run_group["chasers"]
+    if "behavior_class_label_bytes" in chaser_group:
+        chaser_behavior_labels = tuple(
+            decode_null_terminated_text(row).strip()
+            for row in np.asarray(chaser_group["behavior_class_label_bytes"][:])
+        )
+    else:
+        chaser_behavior_labels = _load_configured_chaser_behavior_labels(
+            root,
+            run_group,
+            chaser_indices,
+        )
     chaser_color_hex = _load_chaser_color_hex(root, run_group, chaser_indices)
     total_frames = int(camera_frame_id.shape[0])
     if total_frames_attr > 0 and total_frames_attr != total_frames:
@@ -657,6 +703,7 @@ def build_chaser_egocentric_bearing_result(
         total_frames=int(total_frames),
         pixels_per_mm_projector=float(pixels_per_mm_projector),
         chaser_indices=chaser_indices,
+        chaser_behavior_labels=chaser_behavior_labels,
         chaser_color_hex=chaser_color_hex,
         camera_frame_id=camera_frame_id,
         stimulus_epoch_window_id=stimulus_epoch_window_id,
@@ -712,6 +759,19 @@ def _chaser_column_index(result: ChaserEgocentricBearingResult, chaser_index: in
     if 0 <= int(chaser_index) < int(result.chaser_indices.shape[0]):
         return int(chaser_index)
     return None
+
+
+def _chaser_display_label(
+    result: ChaserEgocentricBearingResult,
+    chaser_index: int,
+    chaser_col_idx: int | None,
+) -> str:
+    behavior = (
+        result.chaser_behavior_labels[chaser_col_idx]
+        if chaser_col_idx is not None and chaser_col_idx < len(result.chaser_behavior_labels)
+        else "unknown"
+    )
+    return f"chaser {int(chaser_index)} — {behavior}"
 
 
 def _bearing_probability_for_panel(
@@ -980,7 +1040,12 @@ def render_egocentric_bearing_pre_post_polar_png(
             _setup_egocentric_polar_axis(ax, radial_limit_mm=radial_limit)
             title_window = _display_epoch_label(str(window_label))
             chaser_color = _chaser_plot_color(result, int(chaser_index), col_idx)
-            ax.set_title(f"{title_window} - chaser {chaser_index}", fontsize=10, pad=12, color=chaser_color)
+            ax.set_title(
+                f"{title_window} - {_chaser_display_label(result, chaser_index, chaser_col_idx)}",
+                fontsize=10,
+                pad=12,
+                color=chaser_color,
+            )
             if window_idx is None or chaser_col_idx is None:
                 ax.text(0.5, 0.5, "not available", ha="center", va="center", transform=ax.transAxes)
                 continue
@@ -1110,7 +1175,12 @@ def render_egocentric_bearing_pre_post_point_cloud_png(
             _setup_egocentric_polar_axis(ax, radial_limit_mm=radial_limit)
             title_window = _display_epoch_label(str(window_label))
             color = _chaser_plot_color(result, int(chaser_index), col_idx)
-            ax.set_title(f"{title_window} - chaser {chaser_index}", fontsize=10, pad=12, color=color)
+            ax.set_title(
+                f"{title_window} - {_chaser_display_label(result, chaser_index, chaser_col_idx)}",
+                fontsize=10,
+                pad=12,
+                color=color,
+            )
             if window_idx is None or chaser_col_idx is None:
                 ax.text(0.5, 0.5, "not available", ha="center", va="center", transform=ax.transAxes)
                 continue
@@ -1179,6 +1249,11 @@ def write_chaser_egocentric_bearing_component(
 
     per_chaser = component.require_group("per_chaser")
     _write_array(per_chaser, "chaser_index", result.chaser_indices)
+    _write_array(
+        per_chaser,
+        "behavior_class_label_bytes",
+        _bytes_array(result.chaser_behavior_labels, width=32),
+    )
     _write_array(per_chaser, "object_vector_arena_xy", result.object_vector_arena_xy)
     _write_array(per_chaser, "distance_mm", result.distance_mm)
     _write_array(per_chaser, "bearing_deg", result.bearing_deg)
@@ -1322,6 +1397,7 @@ def write_chaser_egocentric_bearing_component(
         artifact_specs = (
             (
                 PRE_POST_POLAR_PNG_ARTIFACT_NAME,
+                PRE_POST_POLAR_VISUALIZATION_CONTRACT_ID,
                 render_egocentric_bearing_pre_post_polar_png(result),
                 (
                     "Pre/post static polar density maps of egocentric chaser bearing and "
@@ -1339,6 +1415,7 @@ def write_chaser_egocentric_bearing_component(
             ),
             (
                 PRE_POST_POLAR_POINT_CLOUD_PNG_ARTIFACT_NAME,
+                PRE_POST_POLAR_POINT_CLOUD_VISUALIZATION_CONTRACT_ID,
                 render_egocentric_bearing_pre_post_point_cloud_png(result),
                 (
                     "Pre/post static polar point clouds of egocentric chaser bearing "
@@ -1352,18 +1429,24 @@ def write_chaser_egocentric_bearing_component(
                 },
             ),
         )
-        for artifact_name, png_bytes, description, source_paths in artifact_specs:
+        for artifact_name, visualization_contract_id, png_bytes, description, source_paths in artifact_specs:
             write_png_visualization_artifact(
                 component,
                 artifact_name,
                 png_bytes,
                 description=description,
                 created_by="fisheye.analysis.chaser_egocentric_bearing",
+                visualization_contract_id=visualization_contract_id,
+                renderer=STATIC_VISUALIZATION_RENDERER,
+                renderer_version=STATIC_VISUALIZATION_RENDERER_VERSION,
                 role="analysis_distribution",
                 artifact_signature=_artifact_signature(
                     {
                         "schema_id": SCHEMA_ID,
                         "artifact_name": artifact_name,
+                        "visualization_contract_id": visualization_contract_id,
+                        "renderer": STATIC_VISUALIZATION_RENDERER,
+                        "renderer_version": STATIC_VISUALIZATION_RENDERER_VERSION,
                         "component_name": component_name,
                         "source_refs": source_refs,
                         "parameters": parameters,
@@ -1377,6 +1460,18 @@ def write_chaser_egocentric_bearing_component(
             )
 
     if write_interactive_spec:
+        write_chaser_dashboard_spec_artifact(
+            root,
+            run_group,
+            run_name=result.chaser_distance_run_name,
+            run_path=result.chaser_distance_run_path,
+            source_refs=source_refs,
+            parameters=parameters,
+            summary=summary,
+            overwrite=True,
+        )
+        # Refresh the historical artifact too so existing readers see the
+        # newly written egocentric component during the compatibility window.
         write_goodcopbadcop_chaser_dashboard_spec_artifact(
             root,
             run_group,

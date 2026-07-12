@@ -222,6 +222,11 @@ def test_plot_track_kinematics_writes_png_and_interactive_spec_artifacts(tmp_pat
     png = visualizations["track_kinematics_summary_track_0_png"]
     assert bytes(np.asarray(png[:], dtype=np.uint8)[:8]) == b"\x89PNG\r\n\x1a\n"
     assert png.attrs["artifact_schema_id"] == PNG_ARTIFACT_SCHEMA_ID
+    assert png.attrs["visualization_contract_id"] == (
+        mod.TRACK_KINEMATICS_VISUALIZATION_CONTRACT_ID
+    )
+    assert png.attrs["renderer"] == mod.TRACK_KINEMATICS_PLOT_RENDERER
+    assert png.attrs["renderer_version"] == mod.TRACK_KINEMATICS_RENDERER_VERSION
     assert png.attrs["track_id"] == 0
     assert png.attrs["source_paths"]["time_seconds"].endswith("/tracks/id_0/time_seconds")
     assert png.attrs["parameters"]["bins"] == 8
@@ -267,8 +272,25 @@ def test_plot_track_kinematics_writes_png_and_interactive_spec_artifacts(tmp_pat
         "track_kinematics_summary_track_0_interactive"
     )
 
+    position_xy = visualizations["position_xy_trace_track_0_png"]
+    assert bytes(np.asarray(position_xy[:], dtype=np.uint8)[:8]) == b"\x89PNG\r\n\x1a\n"
+    assert position_xy.attrs["visualization_contract_id"] == (
+        mod.POSITION_XY_TRACE_VISUALIZATION_CONTRACT_ID
+    )
+    assert position_xy.attrs["renderer"] == mod.POSITION_XY_TRACE_RENDERER
+    assert position_xy.attrs["renderer_version"] == mod.POSITION_XY_TRACE_RENDERER_VERSION
+    assert position_xy.attrs["source_paths"]["positions_mm"].endswith(
+        "/tracks/id_0/positions_mm"
+    )
+
     manifest = run.attrs["visualizations"]
     assert manifest["track_kinematics_summary_track_0_png"]["artifact_schema_id"] == PNG_ARTIFACT_SCHEMA_ID
+    assert manifest["track_kinematics_summary_track_0_png"]["visualization_contract_id"] == (
+        mod.TRACK_KINEMATICS_VISUALIZATION_CONTRACT_ID
+    )
+    assert manifest["position_xy_trace_track_0_png"]["visualization_contract_id"] == (
+        mod.POSITION_XY_TRACE_VISUALIZATION_CONTRACT_ID
+    )
     assert (
         manifest["track_kinematics_summary_track_0_interactive"]["artifact_schema_id"]
         == INTERACTIVE_SPEC_SCHEMA_ID

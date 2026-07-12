@@ -19,6 +19,7 @@ import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
 from fisheye.analysis.chaser_distance_runs import _bytes_array, _write_array
+from fisheye.analysis.chaser_behavior import canonical_behavior_label
 from fisheye.analysis.cra_primary_endpoint import COMPONENT_PARENT_NAME as CRA_PRIMARY_ENDPOINT_PARENT
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
 from fisheye.shared.plot_artifacts import write_interactive_plot_spec_artifact, write_png_visualization_artifact
@@ -253,19 +254,20 @@ def _read_objects(component: zarr.Group) -> tuple[CRANearFieldObject, ...]:
         raise ValueError(f"CRA primary endpoint objects group missing array(s): {missing}")
     object_index = np.asarray(group["object_index"][:], dtype=np.int64).reshape(-1)
     role_code = np.asarray(group["object_role_code"][:], dtype=np.int16).reshape(-1)
-    role_labels = (
-        _decode_text_column(np.asarray(group["object_role_label_bytes"][:]))
-        if "object_role_label_bytes" in group
-        else []
-    )
+    if "behavior_class_label_bytes" in group:
+        role_labels = _decode_text_column(np.asarray(group["behavior_class_label_bytes"][:]))
+    elif "object_role_label_bytes" in group:
+        role_labels = _decode_text_column(np.asarray(group["object_role_label_bytes"][:]))
+    else:
+        role_labels = []
     color_rgba = np.asarray(group["raw_color_rgba"][:], dtype=np.float64)
     color_hex = _decode_text_column(np.asarray(group["raw_color_hex_bytes"][:]))
     n = min(object_index.shape[0], role_code.shape[0], color_rgba.shape[0], len(color_hex))
     objects: list[CRANearFieldObject] = []
     for idx in range(n):
-        role = str(role_labels[idx]).strip() if idx < len(role_labels) else ""
+        role = canonical_behavior_label(role_labels[idx]) if idx < len(role_labels) else ""
         if not role:
-            role = "aggressive" if int(role_code[idx]) == 1 else "benign"
+            role = "aggressive" if int(role_code[idx]) == 1 else "inert"
         rgba_values = color_rgba[idx].reshape(-1)
         rgba = tuple(float(rgba_values[i]) if i < rgba_values.shape[0] else 1.0 for i in range(4))
         objects.append(
@@ -277,11 +279,11 @@ def _read_objects(component: zarr.Group) -> tuple[CRANearFieldObject, ...]:
             )
         )
     n_aggressive = sum(1 for obj in objects if obj.object_role == "aggressive")
-    n_benign = sum(1 for obj in objects if obj.object_role == "benign")
-    if n_aggressive != 1 or n_benign != 1:
+    n_inert = sum(1 for obj in objects if obj.object_role == "inert")
+    if n_aggressive != 1 or n_inert != 1:
         raise ValueError(
-            "CRA near-field v1 requires exactly one aggressive and one benign object; "
-            f"found aggressive={n_aggressive}, benign={n_benign}."
+            "CRA near-field v1 requires exactly one aggressive and one inert object; "
+            f"found aggressive={n_aggressive}, inert={n_inert}."
         )
     return tuple(objects)
 
@@ -345,6 +347,13 @@ def _summary_scalar(component: zarr.Group, key: str) -> float | None:
         value = _safe_float(attrs_summary.get(key))
         return value if math.isfinite(value) else None
     return None
+
+
+def _summary_scalar_with_legacy_alias(component: zarr.Group, key: str) -> float | None:
+    value = _summary_scalar(component, key)
+    if value is not None or "inert" not in key:
+        return value
+    return _summary_scalar(component, key.replace("inert", "benign"))
 
 
 def _format_percentile_key(value: float) -> str:
@@ -1048,13 +1057,13 @@ def _build_summary(
     source_cra_component: zarr.Group,
 ) -> dict[str, Any]:
     aggressive = _role_index(objects, "aggressive")
-    benign = _role_index(objects, "benign")
+    inert = _role_index(objects, "inert")
     summary: dict[str, Any] = {
         "fish_id": "0",
         "recording_id": recording_id,
         "dpf": None,
         "aggressive_color": objects[aggressive].raw_color_hex,
-        "benign_color": objects[benign].raw_color_hex,
+        "inert_color": objects[inert].raw_color_hex,
         "n_valid_frames_pre": int(np.nanmax(valid_distance_count[0, :])) if valid_distance_count.shape[0] > 0 else 0,
         "n_valid_frames_post": int(np.nanmax(valid_distance_count[1, :])) if valid_distance_count.shape[0] > 1 else 0,
         "frac_tracking_dropout_pre": _value(tracking_dropout_fraction, 0, aggressive),
@@ -1066,7 +1075,7 @@ def _build_summary(
         "immobile_fraction_pre": float(immobile_fraction[0]) if immobile_fraction.shape[0] > 0 and math.isfinite(float(immobile_fraction[0])) else None,
         "immobile_fraction_post": float(immobile_fraction[1]) if immobile_fraction.shape[0] > 1 and math.isfinite(float(immobile_fraction[1])) else None,
         "delta_occ_agg": _summary_scalar(source_cra_component, "delta_occ_agg"),
-        "delta_occ_benign": _summary_scalar(source_cra_component, "delta_occ_benign"),
+        "delta_occ_inert": _summary_scalar_with_legacy_alias(source_cra_component, "delta_occ_inert"),
         "specificity_occupancy": _summary_scalar(source_cra_component, "specificity_occupancy"),
     }
     target_cdf = (np.asarray(percentile_values, dtype=np.float64).reshape(1, 1, -1) / 100.0).astype(np.float64)
@@ -1080,21 +1089,21 @@ def _build_summary(
         key = _format_percentile_key(float(percentile))
         pre_agg = _value(approach_percentile_mm[:, :, p_idx], 0, aggressive)
         post_agg = _value(approach_percentile_mm[:, :, p_idx], 1, aggressive)
-        pre_benign = _value(approach_percentile_mm[:, :, p_idx], 0, benign)
-        post_benign = _value(approach_percentile_mm[:, :, p_idx], 1, benign)
+        pre_inert = _value(approach_percentile_mm[:, :, p_idx], 0, inert)
+        post_inert = _value(approach_percentile_mm[:, :, p_idx], 1, inert)
         delta_agg = _delta(pre_agg, post_agg)
-        delta_benign = _delta(pre_benign, post_benign)
+        delta_inert = _delta(pre_inert, post_inert)
         summary[f"approach_{key}_pre_agg"] = pre_agg
         summary[f"approach_{key}_post_agg"] = post_agg
         summary[f"approach_{key}_delta_agg"] = delta_agg
-        summary[f"approach_{key}_pre_benign"] = pre_benign
-        summary[f"approach_{key}_post_benign"] = post_benign
-        summary[f"approach_{key}_delta_benign"] = delta_benign
-        summary[f"approach_{key}_specificity"] = None if delta_agg is None or delta_benign is None else delta_agg - delta_benign
+        summary[f"approach_{key}_pre_inert"] = pre_inert
+        summary[f"approach_{key}_post_inert"] = post_inert
+        summary[f"approach_{key}_delta_inert"] = delta_inert
+        summary[f"approach_{key}_specificity"] = None if delta_agg is None or delta_inert is None else delta_agg - delta_inert
         summary[f"approach_{key}_cdf_fraction_pre_agg"] = _value(approach_percentile_cdf_fraction[:, :, p_idx], 0, aggressive)
         summary[f"approach_{key}_cdf_fraction_post_agg"] = _value(approach_percentile_cdf_fraction[:, :, p_idx], 1, aggressive)
-        summary[f"approach_{key}_cdf_fraction_pre_benign"] = _value(approach_percentile_cdf_fraction[:, :, p_idx], 0, benign)
-        summary[f"approach_{key}_cdf_fraction_post_benign"] = _value(approach_percentile_cdf_fraction[:, :, p_idx], 1, benign)
+        summary[f"approach_{key}_cdf_fraction_pre_inert"] = _value(approach_percentile_cdf_fraction[:, :, p_idx], 0, inert)
+        summary[f"approach_{key}_cdf_fraction_post_inert"] = _value(approach_percentile_cdf_fraction[:, :, p_idx], 1, inert)
 
     for source, stem in (
         (near_zone_occupancy_fraction, "nearzone_occ"),
@@ -1102,17 +1111,20 @@ def _build_summary(
     ):
         pre_agg = _value(source, 0, aggressive)
         post_agg = _value(source, 1, aggressive)
-        pre_benign = _value(source, 0, benign)
-        post_benign = _value(source, 1, benign)
+        pre_inert = _value(source, 0, inert)
+        post_inert = _value(source, 1, inert)
         delta_agg = _delta(pre_agg, post_agg)
-        delta_benign = _delta(pre_benign, post_benign)
+        delta_inert = _delta(pre_inert, post_inert)
         summary[f"{stem}_pre_agg"] = pre_agg
         summary[f"{stem}_post_agg"] = post_agg
         summary[f"{stem}_delta_agg"] = delta_agg
-        summary[f"{stem}_pre_benign"] = pre_benign
-        summary[f"{stem}_post_benign"] = post_benign
-        summary[f"{stem}_delta_benign"] = delta_benign
-        summary[f"{stem}_specificity"] = None if delta_agg is None or delta_benign is None else delta_agg - delta_benign
+        summary[f"{stem}_pre_inert"] = pre_inert
+        summary[f"{stem}_post_inert"] = post_inert
+        summary[f"{stem}_delta_inert"] = delta_inert
+        summary[f"{stem}_specificity"] = None if delta_agg is None or delta_inert is None else delta_agg - delta_inert
+    for key, value in list(summary.items()):
+        if "inert" in key:
+            summary.setdefault(key.replace("inert", "benign"), value)
     return summary
 
 
@@ -1586,9 +1598,23 @@ def write_cra_near_field_component(
     _write_array(objects, "object_index", np.asarray([obj.object_index for obj in result.objects], dtype=np.int16))
     _write_array(objects, "object_role_code", np.asarray([1 if obj.object_role == "aggressive" else 0 for obj in result.objects], dtype=np.int8))
     _write_array(objects, "object_role_label_bytes", _bytes_array([obj.object_role for obj in result.objects], width=32))
+    _write_array(objects, "behavior_class_id", np.asarray([1 if obj.object_role == "aggressive" else 3 for obj in result.objects], dtype=np.int8))
+    _write_array(objects, "behavior_class_label_bytes", _bytes_array([obj.object_role for obj in result.objects], width=32))
     _write_array(objects, "raw_color_rgba", np.asarray([obj.raw_color_rgba for obj in result.objects], dtype=np.float32))
     _write_array(objects, "raw_color_hex_bytes", _bytes_array([obj.raw_color_hex for obj in result.objects], width=16))
-    objects.attrs.update({"row_axis": "objects", "object_role_code": {"0": "benign", "1": "aggressive"}})
+    objects.attrs.update(
+        {
+            "row_axis": "objects",
+            "object_role_code": {"0": "inert", "1": "aggressive"},
+            "behavior_class_vocabulary": {
+                "0": "unknown",
+                "1": "aggressive",
+                "2": "random_non_chasing",
+                "3": "inert",
+            },
+            "legacy_role_aliases": {"benign": "inert"},
+        }
+    )
 
     phases = component.require_group("phases")
     _write_array(phases, "phase_index", np.asarray([phase.phase_index for phase in result.phases], dtype=np.int16))

@@ -169,7 +169,7 @@ def test_build_and_write_cra_near_field_component_from_existing_cra_stack(tmp_pa
     assert component.attrs["geometry_status"] == "circle"
     assert component.attrs["arena_shape"] == "circle"
     assert component.attrs["source_refs"]["source_cra_primary_endpoint_path"] == cra_component_path
-    assert _decode_first(component["objects"]["object_role_label_bytes"]) == "aggressive"
+    assert _decode_first(component["objects"]["behavior_class_label_bytes"]) == "aggressive"
     assert component["per_object_phase"]["near_zone_occupancy_fraction"][:].tolist() == [[1.0, 0.0], [0.0, 0.0]]
     assert "approach_percentile_cdf_fraction" in component["per_object_phase"]
     assert "object_distance_to_wall_mm" in component["per_object_phase"]

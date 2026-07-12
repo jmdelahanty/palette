@@ -192,6 +192,56 @@ function histogramSvg(rows) {
   return svg;
 }
 
+function metricHistogramSvg(rows, xLabel) {
+  const width = 760;
+  const height = 250;
+  const margin = { top: 26, right: 24, bottom: 42, left: 58 };
+  const plotW = width - margin.left - margin.right;
+  const plotH = height - margin.top - margin.bottom;
+  const finiteRows = rows.filter((row) => row.bin_center !== null && row.pooled_density !== null);
+  if (!finiteRows.length) {
+    return '<div class="empty">No histogram rows.</div>';
+  }
+  const minX = Math.min(...finiteRows.map((row) => Number(row.bin_left)));
+  const maxX = Math.max(...finiteRows.map((row) => Number(row.bin_right)));
+  const maxY = Math.max(1e-9, ...finiteRows.map((row) => Number(row.pooled_density || 0)));
+  const x = (value) => margin.left + ((Number(value) - minX) / Math.max(1e-9, maxX - minX)) * plotW;
+  const y = (value) => margin.top + plotH - (Number(value || 0) / maxY) * plotH;
+
+  const series = new Map();
+  for (const row of finiteRows) {
+    const key = String(row.window_label || "epoch");
+    if (!series.has(key)) {
+      series.set(key, []);
+    }
+    series.get(key).push(row);
+  }
+
+  let svg = `<svg viewBox="0 0 ${width} ${height}" role="img">`;
+  svg += `<line x1="${margin.left}" y1="${margin.top + plotH}" x2="${width - margin.right}" y2="${margin.top + plotH}" stroke="#9aa5b1" />`;
+  svg += `<line x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${margin.top + plotH}" stroke="#9aa5b1" />`;
+  svg += `<text x="${margin.left}" y="${height - 8}" fill="#637080" font-size="11">${escapeHtml(xLabel || "Metric")}</text>`;
+  svg += `<text x="8" y="${margin.top + 10}" fill="#637080" font-size="11">Density</text>`;
+  let idx = 0;
+  for (const [label, points] of series.entries()) {
+    points.sort((a, b) => Number(a.bin_index) - Number(b.bin_index));
+    const path = points
+      .map((row, pointIndex) => {
+        const cmd = pointIndex === 0 ? "M" : "L";
+        return `${cmd}${x(row.bin_center).toFixed(2)},${y(row.pooled_density).toFixed(2)}`;
+      })
+      .join(" ");
+    const color = COLORS[idx % COLORS.length];
+    svg += `<path d="${path}" fill="none" stroke="${color}" stroke-width="2"><title>${escapeHtml(label)}</title></path>`;
+    const lx = margin.left + idx * 142;
+    svg += `<line x1="${lx}" y1="10" x2="${lx + 12}" y2="10" stroke="${color}" stroke-width="2" />`;
+    svg += `<text x="${lx + 17}" y="14" fill="#637080" font-size="11">${escapeHtml(label)}</text>`;
+    idx += 1;
+  }
+  svg += "</svg>";
+  return svg;
+}
+
 function speedDistanceSvg(rows) {
   const width = 900;
   const height = 300;
@@ -701,6 +751,14 @@ async function loadSummary() {
     summary.row_counts_by_table.goodcopbadcop_speed_distance_bins,
     0
   );
+  document.getElementById("summary-bout-histogram").textContent = fmt(
+    summary.row_counts_by_table.goodcopbadcop_epoch_bout_histogram,
+    0
+  );
+  document.getElementById("summary-ibi-histogram").textContent = fmt(
+    summary.row_counts_by_table.goodcopbadcop_epoch_inter_bout_interval_histogram,
+    0
+  );
   document.getElementById("summary-histogram").textContent = fmt(
     summary.row_counts_by_table.goodcopbadcop_chaser_distance_histogram,
     0
@@ -745,6 +803,7 @@ async function loadOptions() {
   populateSelect("spatial-metric", options.spatial_metrics, "metric", "label");
   populateSelect("chaser-metric", options.chaser_metrics, "metric", "label");
   populateSelect("epoch-speed-metric", options.epoch_speed_metrics || [], "metric", "label");
+  populateSelect("epoch-bout-hist-metric", options.epoch_bout_histogram_metrics || [], "metric", "label");
   populateSelect("cra-metric", options.cra_object_phase_metrics, "metric", "label");
   populateSelect("cra-near-field-metric", options.cra_near_field_object_phase_metrics || [], "metric", "label");
   populateSelect("egocentric-metric", options.egocentric_metrics, "metric", "label");
@@ -914,6 +973,78 @@ async function loadSpeedDistance() {
       { key: "recording_count", label: "N rec" },
       { key: "recording_mean_speed_mm_s", label: "Rec mean" },
       { key: "recording_sem", label: "Rec SEM" },
+    ]
+  );
+}
+
+async function loadEpochBoutHistogram() {
+  const metric = document.getElementById("epoch-bout-hist-metric").value || "bout_path_length_mm";
+  const windowLabel = document.getElementById("hist-window").value;
+  const params = new URLSearchParams();
+  params.set("metric", metric);
+  if (windowLabel) {
+    params.set("window_label", windowLabel);
+  }
+  const payload = await fetchJson(`/api/goodcopbadcop/epoch-bout-histogram?${params.toString()}`);
+  const data = payload.epoch_bout_histogram;
+  if (!data.available) {
+    document.getElementById("epoch-bout-hist-meta").textContent =
+      data.message || "No bout histogram export";
+    document.getElementById("epoch-bout-hist-chart").innerHTML =
+      '<div class="empty">No bout histogram export found for this cohort.</div>';
+    document.getElementById("epoch-bout-hist-table").innerHTML = "";
+    return;
+  }
+  const totalCount = data.rows.reduce((total, row) => total + Number(row.pooled_count || 0), 0);
+  document.getElementById("epoch-bout-hist-meta").textContent =
+    `${data.metric_label} | ${fmt(data.rows.length, 0)} bins | ${fmt(totalCount, 0)} bouts`;
+  document.getElementById("epoch-bout-hist-chart").innerHTML =
+    metricHistogramSvg(data.rows, data.metric_label);
+  document.getElementById("epoch-bout-hist-table").innerHTML = tableHtml(
+    data.rows.filter((row) => Number(row.pooled_count || 0) > 0).slice(0, 80),
+    [
+      { key: "window_label", label: "Epoch" },
+      { key: "bin_center", label: "Bin center" },
+      { key: "pooled_count", label: "Count" },
+      { key: "pooled_fraction", label: "Fraction" },
+      { key: "pooled_density", label: "Density" },
+      { key: "recording_count", label: "N rec" },
+    ]
+  );
+}
+
+async function loadEpochInterBoutIntervalHistogram() {
+  const windowLabel = document.getElementById("hist-window").value;
+  const params = new URLSearchParams();
+  if (windowLabel) {
+    params.set("window_label", windowLabel);
+  }
+  const payload = await fetchJson(
+    `/api/goodcopbadcop/epoch-inter-bout-interval-histogram?${params.toString()}`
+  );
+  const data = payload.epoch_inter_bout_interval_histogram;
+  if (!data.available) {
+    document.getElementById("epoch-ibi-hist-meta").textContent =
+      data.message || "No inter-bout interval histogram export";
+    document.getElementById("epoch-ibi-hist-chart").innerHTML =
+      '<div class="empty">No inter-bout interval histogram export found for this cohort.</div>';
+    document.getElementById("epoch-ibi-hist-table").innerHTML = "";
+    return;
+  }
+  const totalCount = data.rows.reduce((total, row) => total + Number(row.pooled_count || 0), 0);
+  document.getElementById("epoch-ibi-hist-meta").textContent =
+    `${data.metric_label} | ${fmt(data.rows.length, 0)} bins | ${fmt(totalCount, 0)} intervals`;
+  document.getElementById("epoch-ibi-hist-chart").innerHTML =
+    metricHistogramSvg(data.rows, data.metric_label);
+  document.getElementById("epoch-ibi-hist-table").innerHTML = tableHtml(
+    data.rows.filter((row) => Number(row.pooled_count || 0) > 0).slice(0, 80),
+    [
+      { key: "window_label", label: "Epoch" },
+      { key: "bin_center", label: "Bin center" },
+      { key: "pooled_count", label: "Count" },
+      { key: "pooled_fraction", label: "Fraction" },
+      { key: "pooled_density", label: "Density" },
+      { key: "recording_count", label: "N rec" },
     ]
   );
 }
@@ -1327,6 +1458,8 @@ async function refreshAll() {
     loadHistogram(),
     loadEpochSpeed(),
     loadSpeedDistance(),
+    loadEpochBoutHistogram(),
+    loadEpochInterBoutIntervalHistogram(),
     loadCraObjectPhase(),
     loadCraSummary(),
     loadCraSpecificity(),
@@ -1354,6 +1487,7 @@ function bindControls() {
   for (const id of ["epoch-speed-metric", "epoch-speed-stat"]) {
     document.getElementById(id).addEventListener("change", loadEpochSpeed);
   }
+  document.getElementById("epoch-bout-hist-metric").addEventListener("change", loadEpochBoutHistogram);
   for (const id of ["cra-metric", "cra-stat"]) {
     document.getElementById(id).addEventListener("change", loadCraObjectPhase);
   }
@@ -1366,6 +1500,8 @@ function bindControls() {
   document.getElementById("hist-window").addEventListener("change", () => {
     loadHistogram();
     loadSpeedDistance();
+    loadEpochBoutHistogram();
+    loadEpochInterBoutIntervalHistogram();
     loadEgocentricHistogram();
   });
   document.getElementById("speed-distance-chaser").addEventListener("change", loadSpeedDistance);

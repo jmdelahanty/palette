@@ -64,6 +64,9 @@ def write_png_visualization_artifact(
     *,
     description: str,
     created_by: str,
+    visualization_contract_id: Optional[str] = None,
+    renderer: Optional[str] = None,
+    renderer_version: Optional[str] = None,
     artifact_signature: Optional[str] = None,
     created_at_utc: Optional[str] = None,
     role: str = "snapshot",
@@ -83,6 +86,13 @@ def write_png_visualization_artifact(
         raise ValueError("artifact_name must not be empty")
     if not png_bytes:
         raise ValueError("png_bytes must not be empty")
+    renderer_contract_values = (visualization_contract_id, renderer, renderer_version)
+    if any(value is not None for value in renderer_contract_values) and not all(
+        value is not None and str(value).strip() for value in renderer_contract_values
+    ):
+        raise ValueError(
+            "visualization_contract_id, renderer, and renderer_version must be provided together"
+        )
 
     vis_group = _require_visualizations_group(run_group)
     if artifact_name in vis_group:
@@ -114,6 +124,14 @@ def write_png_visualization_artifact(
         "content_sha256": content_sha256,
         "byte_length": int(len(png_bytes)),
     }
+    if visualization_contract_id is not None:
+        attrs.update(
+            {
+                "visualization_contract_id": str(visualization_contract_id),
+                "renderer": str(renderer),
+                "renderer_version": str(renderer_version),
+            }
+        )
     if artifact_signature is not None:
         attrs["artifact_signature"] = str(artifact_signature)
     if source_paths is not None:
@@ -142,6 +160,15 @@ def write_png_visualization_artifact(
             "created_by": created_by,
             "content_sha256": content_sha256,
             "byte_length": int(len(png_bytes)),
+            **(
+                {
+                    "visualization_contract_id": str(visualization_contract_id),
+                    "renderer": str(renderer),
+                    "renderer_version": str(renderer_version),
+                }
+                if visualization_contract_id is not None
+                else {}
+            ),
         },
     )
     return PlotArtifactResult(

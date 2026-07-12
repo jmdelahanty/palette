@@ -25,6 +25,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 
 from fisheye.analysis.bout_kinematics import resolve_bout_kinematics_tables
+from fisheye.analysis.chaser_behavior import canonical_behavior_label
 from fisheye.analysis.cra_primary_endpoint import QUADRANT_LABELS, quadrant_code_for_xy
 from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
 from fisheye.analysis.swim_bout_io import (
@@ -56,6 +57,8 @@ GOODCOPBADCOP_TABLES = (
     "goodcopbadcop_chaser_epoch_summary",
     "goodcopbadcop_epoch_behavior_summary",
     "goodcopbadcop_epoch_bout_distribution",
+    "goodcopbadcop_epoch_bout_histogram",
+    "goodcopbadcop_epoch_inter_bout_interval_histogram",
     "goodcopbadcop_epoch_center_distance_histogram",
     "goodcopbadcop_epoch_speed_summary",
     "goodcopbadcop_speed_distance_bins",
@@ -347,6 +350,13 @@ def _decode_text_column(values: Any, *, fallback_count: int = 0) -> list[str | N
         return [decode_null_terminated_text(row, errors="ignore") for row in arr]
     flat = arr.reshape(-1)
     return [decode_null_terminated_text(value, errors="ignore") for value in flat]
+
+
+def _read_canonical_behavior_labels(objects: Any) -> list[str | None]:
+    values = _read_array(objects, "behavior_class_label_bytes")
+    if values is None:
+        values = _read_array(objects, "object_role_label_bytes")
+    return [canonical_behavior_label(value) if value else None for value in _decode_text_column(values)]
 
 
 def _array_scalar(values: np.ndarray | None, *indices: int) -> Any:
@@ -1356,6 +1366,41 @@ def _chaser_indices_for_run(run_group: Any, *, fallback_count: int) -> list[int]
     return list(range(int(fallback_count)))
 
 
+def _chaser_behaviors_for_run(
+    run_group: Any,
+    chaser_indices: Sequence[int],
+) -> list[tuple[int, str]]:
+    by_index: dict[int, tuple[int, str]] = {}
+    chasers = run_group.get("chasers") if _has_child(run_group, "chasers") else None
+    if chasers is not None:
+        indices = _read_1d_array(chasers, "chaser_index")
+        class_ids = _read_1d_array(chasers, "behavior_class_id")
+        labels = _decode_text_column(_read_array(chasers, "behavior_class_label_bytes"))
+        for column, raw_index in enumerate(indices if indices is not None else []):
+            index = _safe_int(raw_index)
+            if index is None:
+                continue
+            class_id = _array_int(class_ids, column) or 0
+            label = canonical_behavior_label(labels[column]) if column < len(labels) and labels[column] else "unknown"
+            by_index[index] = (class_id, label)
+    if not by_index:
+        component, _component_name, _error = _latest_cra_primary_endpoint_component(run_group)
+        if component is not None and _has_child(component, "objects"):
+            objects = component["objects"]
+            indices = _read_1d_array(objects, "object_index")
+            labels = _read_canonical_behavior_labels(objects)
+            class_ids = _read_1d_array(objects, "behavior_class_id")
+            label_to_id = {"unknown": 0, "aggressive": 1, "random_non_chasing": 2, "inert": 3}
+            for column, raw_index in enumerate(indices if indices is not None else []):
+                index = _safe_int(raw_index)
+                if index is None:
+                    continue
+                label = labels[column] if column < len(labels) and labels[column] else "unknown"
+                class_id = _array_int(class_ids, column)
+                by_index[index] = (label_to_id.get(label, 0) if class_id is None else class_id, label)
+    return [by_index.get(int(index), (0, "unknown")) for index in chaser_indices]
+
+
 def _chaser_common_run_fields(run_group: Any, run_name: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     attrs = _attrs_dict(run_group)
     source_refs = _json_mapping_attr(attrs, "source_refs")
@@ -1439,6 +1484,7 @@ def _load_goodcopbadcop_chaser_epoch_summary(
     valid_frame_count = np.asarray(valid_frame_count)
     n_windows, n_chasers = int(valid_frame_count.shape[0]), int(valid_frame_count.shape[1])
     chaser_indices = _chaser_indices_for_run(run_group, fallback_count=n_chasers)
+    chaser_behaviors = _chaser_behaviors_for_run(run_group, chaser_indices)
     windows = _epoch_summary_window_rows(run_group)
     fps = _safe_float(run_common.get("fps"))
     mean_distance = _read_array(summary, "mean_distance_mm")
@@ -1476,6 +1522,7 @@ def _load_goodcopbadcop_chaser_epoch_summary(
                 if chaser_column_index < len(chaser_indices)
                 else chaser_column_index
             )
+            behavior_class_id, behavior_class = chaser_behaviors[chaser_column_index]
             lineage = {
                 "zarr_path": str(zarr_path),
                 "chaser_distance_run": run_name,
@@ -1504,6 +1551,8 @@ def _load_goodcopbadcop_chaser_epoch_summary(
                 "duration_s": _safe_float(window.get("duration_s")),
                 "chaser_column_index": chaser_column_index,
                 "chaser_index": _safe_int(chaser_index),
+                "behavior_class_id": behavior_class_id,
+                "behavior_class": behavior_class,
                 "threshold_mm": threshold_mm,
                 "valid_frame_count": _array_int(valid_frame_count, window_index, chaser_column_index),
                 "mean_distance_mm": _array_float(mean_distance, window_index, chaser_column_index),
@@ -1876,6 +1925,120 @@ def _load_goodcopbadcop_epoch_center_distance_histogram(
             "epoch_behavior_parameters_json": _json_dumps_safe(component_parameters),
             "source_track_kinematics_run": component_source_refs.get("source_track_kinematics_run"),
             "source_swim_bout_run": component_source_refs.get("source_swim_bout_run"),
+        })
+        row.update(record_row)
+        rows.append(row)
+    return rows
+
+
+def _load_goodcopbadcop_epoch_behavior_structured_histogram(
+    root: Any,
+    *,
+    table: str,
+    dataset_name: str,
+    export_run_id: str,
+    zarr_path: Path,
+    recording_id: str,
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if table not in tables:
+        return []
+
+    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
+    if run_group is None or run_name is None:
+        diagnostics.append({"table": table, "status": "skipped", "reason": error})
+        return []
+
+    component, component_name, component_path_or_error = _latest_epoch_behavior_component(
+        run_group,
+        run_name=run_name,
+    )
+    if component is None or component_name is None:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": component_path_or_error,
+            "chaser_distance_run": run_name,
+        })
+        return []
+    component_path = str(component_path_or_error)
+    try:
+        records, records_attrs = load_structured_dataset(component, dataset_name)
+    except Exception as exc:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": f"failed to load {dataset_name}: {exc}",
+            "chaser_distance_run": run_name,
+            "epoch_behavior_component": component_name,
+        })
+        return []
+    if records.size == 0 or records.dtype.names is None:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": f"empty {dataset_name} table",
+            "chaser_distance_run": run_name,
+            "epoch_behavior_component": component_name,
+        })
+        return []
+
+    run_common, source_refs, _run_parameters = _chaser_common_run_fields(run_group, run_name)
+    component_attrs = _attrs_dict(component)
+    component_source_refs = _json_mapping_attr(component_attrs, "source_refs")
+    component_parameters = _json_mapping_attr(component_attrs, "parameters")
+    bin_contract = records_attrs.get("bin_contract")
+
+    rows: list[dict[str, Any]] = []
+    for record in records:
+        record_row = {
+            name: _scalar_for_parquet(record[name])
+            for name in records.dtype.names
+        }
+        lineage = {
+            "zarr_path": str(zarr_path),
+            "chaser_distance_run": run_name,
+            "epoch_behavior_component": component_name,
+            "source_detection_path": source_refs.get("source_detection_path"),
+            "source_stimulus_run": source_refs.get("source_stimulus_run"),
+            "source_stimulus_epoch_run": source_refs.get("source_stimulus_epoch_run"),
+            "window_id": record_row.get("window_id"),
+            "metric_name": record_row.get("metric_name"),
+            "bin_index": record_row.get("bin_index"),
+        }
+        row = _common_row(
+            export_run_id=export_run_id,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            table=table,
+            lineage=lineage,
+        )
+        row.update(run_common)
+        row.update({
+            "epoch_behavior_component": component_name,
+            "epoch_behavior_path": component_path,
+            "epoch_behavior_schema_id": component_attrs.get("schema_id"),
+            "epoch_behavior_schema_version": _safe_int(component_attrs.get("schema_version")),
+            "epoch_behavior_method": component_attrs.get("method"),
+            "epoch_behavior_method_version": component_attrs.get("method_version"),
+            "epoch_behavior_status": component_attrs.get("status"),
+            "epoch_behavior_created_at_utc": component_attrs.get("created_at_utc"),
+            "epoch_behavior_source_refs_json": _source_refs_json(component_source_refs),
+            "epoch_behavior_parameters_json": _json_dumps_safe(component_parameters),
+            "histogram_dataset": dataset_name,
+            "histogram_bin_contract_json": _json_dumps_safe(bin_contract),
+            "source_track_kinematics_run": component_source_refs.get("source_track_kinematics_run"),
+            "source_track_kinematics_scope": component_source_refs.get("source_track_kinematics_scope"),
+            "source_track_kinematics_track_id": _safe_int(
+                component_source_refs.get("source_track_kinematics_track_id")
+            ),
+            "source_track_kinematics_track_path": component_source_refs.get("source_track_kinematics_track_path"),
+            "source_swim_bout_run": component_source_refs.get("source_swim_bout_run"),
+            "source_swim_bout_path": component_source_refs.get("source_swim_bout_path"),
+            "source_swim_bout_level_path": component_source_refs.get("source_swim_bout_level_path"),
+            "source_speed_level": component_parameters.get("speed_level"),
+            "swim_bout_signal_level": component_parameters.get("swim_bout_signal_level"),
         })
         row.update(record_row)
         rows.append(row)
@@ -2273,6 +2436,7 @@ def _load_goodcopbadcop_chaser_distance_histogram(
         ]
     else:
         chaser_indices = _chaser_indices_for_run(run_group, fallback_count=n_chasers)
+    chaser_behaviors = _chaser_behaviors_for_run(run_group, chaser_indices)
     windows = _epoch_summary_window_rows(run_group)
     fps = _safe_float(run_common.get("fps"))
     dist_attrs = _attrs_dict(distributions)
@@ -2304,6 +2468,7 @@ def _load_goodcopbadcop_chaser_distance_histogram(
                 if chaser_column_index < len(chaser_indices)
                 else chaser_column_index
             )
+            behavior_class_id, behavior_class = chaser_behaviors[chaser_column_index]
             for bin_index in range(n_bins):
                 bin_left = _array_float(bin_edges, bin_index)
                 bin_right = _array_float(bin_edges, bin_index + 1)
@@ -2341,6 +2506,8 @@ def _load_goodcopbadcop_chaser_distance_histogram(
                     "duration_s": _safe_float(window.get("duration_s")),
                     "chaser_column_index": chaser_column_index,
                     "chaser_index": _safe_int(chaser_index),
+                    "behavior_class_id": behavior_class_id,
+                    "behavior_class": behavior_class,
                     "distance_bin_index": bin_index,
                     "bin_left_mm": bin_left,
                     "bin_right_mm": bin_right,
@@ -2737,7 +2904,7 @@ def _load_goodcopbadcop_cra_primary_endpoint_object_phase(
     per_object = component["per_object_phase"]
 
     object_indices = _read_1d_array(objects, "object_index")
-    object_roles = _decode_text_column(_read_array(objects, "object_role_label_bytes"))
+    object_roles = _read_canonical_behavior_labels(objects)
     raw_colors = _decode_text_column(_read_array(objects, "raw_color_hex_bytes"))
     enable_chase = _read_1d_array(objects, "enable_chase")
     behavior_mode = _read_1d_array(objects, "behavior_mode")
@@ -2806,6 +2973,7 @@ def _load_goodcopbadcop_cra_primary_endpoint_object_phase(
                 "phase_index": phase_idx,
                 "object_index": object_index,
                 "object_role": object_role,
+                "behavior_class": object_role,
             }
             row = _common_row(
                 export_run_id=export_run_id,
@@ -2833,6 +3001,7 @@ def _load_goodcopbadcop_cra_primary_endpoint_object_phase(
                 "object_column_index": object_col,
                 "object_index": object_index,
                 "object_role": object_role,
+                "behavior_class": object_role,
                 "raw_color_hex": raw_colors[object_col] if object_col < len(raw_colors) else None,
                 "enable_chase": _scalar_for_parquet(_array_scalar(enable_chase, object_col)),
                 "behavior_mode": _array_int(behavior_mode, object_col),
@@ -2936,7 +3105,7 @@ def _load_goodcopbadcop_cra_quadrant_occupancy(
     positions = run_group["positions"]
 
     object_indices = _read_1d_array(objects, "object_index")
-    object_roles = _decode_text_column(_read_array(objects, "object_role_label_bytes"))
+    object_roles = _read_canonical_behavior_labels(objects)
     raw_colors = _decode_text_column(_read_array(objects, "raw_color_hex_bytes"))
     aggressive_cols = [idx for idx, role in enumerate(object_roles) if role == "aggressive"]
     if len(aggressive_cols) != 1:
@@ -3066,6 +3235,7 @@ def _load_goodcopbadcop_cra_quadrant_occupancy(
                 "phase_index": phase_idx,
                 "quadrant_code": quadrant_code,
                 "object_role": "aggressive",
+                "behavior_class": "aggressive",
             }
             row = _common_row(
                 export_run_id=export_run_id,
@@ -3272,7 +3442,7 @@ def _load_goodcopbadcop_cra_near_field_object_phase(
     per_object = component["per_object_phase"]
 
     object_indices = _read_1d_array(objects, "object_index")
-    object_roles = _decode_text_column(_read_array(objects, "object_role_label_bytes"))
+    object_roles = _read_canonical_behavior_labels(objects)
     raw_colors = _decode_text_column(_read_array(objects, "raw_color_hex_bytes"))
     object_role_code = _read_1d_array(objects, "object_role_code")
 
@@ -3325,6 +3495,7 @@ def _load_goodcopbadcop_cra_near_field_object_phase(
                 "phase_index": phase_idx,
                 "object_index": object_index,
                 "object_role": object_role,
+                "behavior_class": object_role,
             }
             row = _common_row(
                 export_run_id=export_run_id,
@@ -3345,6 +3516,7 @@ def _load_goodcopbadcop_cra_near_field_object_phase(
                 "object_column_index": object_col,
                 "object_index": object_index,
                 "object_role": object_role,
+                "behavior_class": object_role,
                 "object_role_code": _array_int(object_role_code, object_col),
                 "raw_color_hex": raw_colors[object_col] if object_col < len(raw_colors) else None,
                 "near_zone_occupancy_fraction": _array_float(near_zone_occupancy, phase_idx, object_col),
@@ -3419,7 +3591,7 @@ def _load_goodcopbadcop_cra_near_field_radial_density(
     radial = component["radial_density"]
 
     object_indices = _read_1d_array(objects, "object_index")
-    object_roles = _decode_text_column(_read_array(objects, "object_role_label_bytes"))
+    object_roles = _read_canonical_behavior_labels(objects)
     raw_colors = _decode_text_column(_read_array(objects, "raw_color_hex_bytes"))
     phase_indices = _read_1d_array(phases, "phase_index")
     phase_labels = _decode_text_column(_read_array(phases, "phase_label_bytes"))
@@ -3474,6 +3646,7 @@ def _load_goodcopbadcop_cra_near_field_radial_density(
                     "phase_index": phase_idx,
                     "object_index": object_index,
                     "object_role": object_role,
+                    "behavior_class": object_role,
                     "radial_bin_index": bin_idx,
                 }
                 row = _common_row(
@@ -3495,6 +3668,7 @@ def _load_goodcopbadcop_cra_near_field_radial_density(
                     "object_column_index": object_col,
                     "object_index": object_index,
                     "object_role": object_role,
+                    "behavior_class": object_role,
                     "raw_color_hex": raw_colors[object_col] if object_col < len(raw_colors) else None,
                     "radial_bin_index": bin_idx,
                     "radial_bin_left_mm": left,
@@ -3567,7 +3741,7 @@ def _load_goodcopbadcop_cra_near_field_distance_cdf(
     cdf_group = component["distance_cdf"]
 
     object_indices = _read_1d_array(objects, "object_index")
-    object_roles = _decode_text_column(_read_array(objects, "object_role_label_bytes"))
+    object_roles = _read_canonical_behavior_labels(objects)
     raw_colors = _decode_text_column(_read_array(objects, "raw_color_hex_bytes"))
     phase_indices = _read_1d_array(phases, "phase_index")
     phase_labels = _decode_text_column(_read_array(phases, "phase_label_bytes"))
@@ -3608,6 +3782,7 @@ def _load_goodcopbadcop_cra_near_field_distance_cdf(
                     "phase_index": phase_idx,
                     "object_index": object_index,
                     "object_role": object_role,
+                    "behavior_class": object_role,
                     "cdf_threshold_index": threshold_idx,
                 }
                 row = _common_row(
@@ -3629,6 +3804,7 @@ def _load_goodcopbadcop_cra_near_field_distance_cdf(
                     "object_column_index": object_col,
                     "object_index": object_index,
                     "object_role": object_role,
+                    "behavior_class": object_role,
                     "raw_color_hex": raw_colors[object_col] if object_col < len(raw_colors) else None,
                     "cdf_threshold_index": threshold_idx,
                     "distance_threshold_mm": threshold,
@@ -3697,6 +3873,7 @@ def _load_goodcopbadcop_egocentric_epoch_summary(
     valid_frame_count = np.asarray(valid_frame_count)
     n_windows, n_chasers = int(valid_frame_count.shape[0]), int(valid_frame_count.shape[1])
     chaser_indices = _egocentric_chaser_indices(component, fallback_count=n_chasers)
+    chaser_behaviors = _chaser_behaviors_for_run(run_group, chaser_indices)
     windows = _epoch_summary_window_rows(component)
     fps = _safe_float(run_common.get("fps"))
     circular_mean = _read_array(summary, "circular_mean_bearing_deg")
@@ -3731,6 +3908,7 @@ def _load_goodcopbadcop_egocentric_epoch_summary(
                 if chaser_column_index < len(chaser_indices)
                 else chaser_column_index
             )
+            behavior_class_id, behavior_class = chaser_behaviors[chaser_column_index]
             lineage = {
                 "zarr_path": str(zarr_path),
                 "chaser_distance_run": run_name,
@@ -3764,6 +3942,8 @@ def _load_goodcopbadcop_egocentric_epoch_summary(
                 "duration_s": _safe_float(window.get("duration_s")),
                 "chaser_column_index": chaser_column_index,
                 "chaser_index": _safe_int(chaser_index),
+                "behavior_class_id": behavior_class_id,
+                "behavior_class": behavior_class,
                 "valid_frame_count": _array_int(valid_frame_count, window_index, chaser_column_index),
                 "circular_mean_bearing_deg": _array_float(circular_mean, window_index, chaser_column_index),
                 "circular_resultant_length": _array_float(resultant, window_index, chaser_column_index),
@@ -3848,6 +4028,7 @@ def _load_goodcopbadcop_egocentric_distance_bearing_histogram(
     if _has_child(component, "epoch_summary"):
         valid_frame_count = _read_array(component["epoch_summary"], "valid_frame_count")
     chaser_indices = _egocentric_chaser_indices(component, fallback_count=n_chasers)
+    chaser_behaviors = _chaser_behaviors_for_run(run_group, chaser_indices)
     windows = _epoch_summary_window_rows(component)
     fps = _safe_float(run_common.get("fps"))
     distance_edges = _read_1d_array(hist, "distance_bin_edges_mm")
@@ -3881,6 +4062,7 @@ def _load_goodcopbadcop_egocentric_distance_bearing_histogram(
                 if chaser_column_index < len(chaser_indices)
                 else chaser_column_index
             )
+            behavior_class_id, behavior_class = chaser_behaviors[chaser_column_index]
             valid_count = _array_int(valid_frame_count, window_index, chaser_column_index)
             for distance_bin_index in range(n_distance_bins):
                 distance_left = _array_float(distance_edges, distance_bin_index)
@@ -3935,6 +4117,8 @@ def _load_goodcopbadcop_egocentric_distance_bearing_histogram(
                         "duration_s": _safe_float(window.get("duration_s")),
                         "chaser_column_index": chaser_column_index,
                         "chaser_index": _safe_int(chaser_index),
+                        "behavior_class_id": behavior_class_id,
+                        "behavior_class": behavior_class,
                         "distance_bin_index": distance_bin_index,
                         "distance_bin_left_mm": distance_left,
                         "distance_bin_right_mm": distance_right,
@@ -4095,6 +4279,38 @@ def export_one_zarr(zarr_path: str | Path, *, tables: Sequence[str], export_run_
     if goodcopbadcop_epoch_bout_distribution_rows:
         result.rows_by_table.setdefault("goodcopbadcop_epoch_bout_distribution", []).extend(
             goodcopbadcop_epoch_bout_distribution_rows
+        )
+
+    goodcopbadcop_epoch_bout_histogram_rows = _load_goodcopbadcop_epoch_behavior_structured_histogram(
+        root,
+        table="goodcopbadcop_epoch_bout_histogram",
+        dataset_name="per_epoch_bout_histograms",
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+    )
+    if goodcopbadcop_epoch_bout_histogram_rows:
+        result.rows_by_table.setdefault("goodcopbadcop_epoch_bout_histogram", []).extend(
+            goodcopbadcop_epoch_bout_histogram_rows
+        )
+
+    goodcopbadcop_epoch_inter_bout_interval_histogram_rows = (
+        _load_goodcopbadcop_epoch_behavior_structured_histogram(
+            root,
+            table="goodcopbadcop_epoch_inter_bout_interval_histogram",
+            dataset_name="per_epoch_inter_bout_interval_histograms",
+            export_run_id=export_run_id,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            tables=table_set,
+            diagnostics=result.diagnostics,
+        )
+    )
+    if goodcopbadcop_epoch_inter_bout_interval_histogram_rows:
+        result.rows_by_table.setdefault("goodcopbadcop_epoch_inter_bout_interval_histogram", []).extend(
+            goodcopbadcop_epoch_inter_bout_interval_histogram_rows
         )
 
     goodcopbadcop_epoch_center_distance_histogram_rows = _load_goodcopbadcop_epoch_center_distance_histogram(

@@ -345,10 +345,10 @@ def test_goodcopbadcop_statistics_computes_cra_primary_endpoint_wilcoxon(tmp_pat
     assert target["p_value"] == pytest.approx(0.25)
     assert target["test_method"] == "wilcoxon_signed_rank_exact"
 
-    benign = next(row for row in rows if row["metric_name"] == "delta_benign")
-    assert benign["primary"] is False
-    assert benign["p_value"] == pytest.approx(1.0)
-    assert benign["effect_size"] == pytest.approx(0.0)
+    inert = next(row for row in rows if row["metric_name"] == "delta_inert")
+    assert inert["primary"] is False
+    assert inert["p_value"] == pytest.approx(1.0)
+    assert inert["effect_size"] == pytest.approx(0.0)
 
 
 def test_goodcopbadcop_statistics_computes_epoch_behavior_metrics(tmp_path: Path) -> None:

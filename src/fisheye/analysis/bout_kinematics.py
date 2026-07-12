@@ -55,6 +55,10 @@ BOUT_KINEMATICS_PLOT_SPEC_SCHEMA_ID = "palette.plot_spec.bout_kinematics_summary
 BOUT_EYE_GAZE_PLOT_SPEC_SCHEMA_ID = "palette.plot_spec.bout_eye_gaze_summary.v1"
 BOUT_MOVEMENT_PLOT_SPEC_SCHEMA_ID = "palette.plot_spec.bout_movement_summary.v1"
 BOUT_KINEMATICS_PLOT_RENDERER = "matplotlib_static_plotly_spec.v1"
+BOUT_KINEMATICS_RENDERER_VERSION = "1"
+BOUT_HEADING_VISUALIZATION_CONTRACT_ID = "palette.core.bout_kinematics.heading.v1"
+BOUT_MOVEMENT_VISUALIZATION_CONTRACT_ID = "palette.core.bout_kinematics.movement.v1"
+BOUT_EYE_GAZE_VISUALIZATION_CONTRACT_ID = "palette.core.bout_kinematics.eye_gaze.v1"
 BOUT_KINEMATICS_PNG_PREFIX = "bout_kinematics_summary"
 BOUT_EYE_GAZE_PNG_PREFIX = "bout_eye_gaze_summary"
 BOUT_MOVEMENT_PNG_PREFIX = "bout_movement_summary"
@@ -2376,6 +2380,9 @@ def write_bout_movement_visualization_artifacts(
     signature = _artifact_signature(
         {
             "schema_id": BOUT_MOVEMENT_PLOT_SPEC_SCHEMA_ID,
+            "visualization_contract_id": BOUT_MOVEMENT_VISUALIZATION_CONTRACT_ID,
+            "renderer": BOUT_KINEMATICS_PLOT_RENDERER,
+            "renderer_version": BOUT_KINEMATICS_RENDERER_VERSION,
             "run_name": run_name,
             "source_refs": source_refs,
             "parameters": plot_parameters,
@@ -2420,6 +2427,9 @@ def write_bout_movement_visualization_artifacts(
         png_bytes,
         description="Bout physical movement summary PNG",
         created_by="fisheye.analysis.bout_kinematics",
+        visualization_contract_id=BOUT_MOVEMENT_VISUALIZATION_CONTRACT_ID,
+        renderer=BOUT_KINEMATICS_PLOT_RENDERER,
+        renderer_version=BOUT_KINEMATICS_RENDERER_VERSION,
         artifact_signature=signature,
         created_at_utc=created_at_utc,
         source_paths=source_paths,
@@ -2498,6 +2508,9 @@ def write_bout_eye_gaze_visualization_artifacts(
     signature = _artifact_signature(
         {
             "schema_id": BOUT_EYE_GAZE_PLOT_SPEC_SCHEMA_ID,
+            "visualization_contract_id": BOUT_EYE_GAZE_VISUALIZATION_CONTRACT_ID,
+            "renderer": BOUT_KINEMATICS_PLOT_RENDERER,
+            "renderer_version": BOUT_KINEMATICS_RENDERER_VERSION,
             "run_name": run_name,
             "source_refs": source_refs,
             "parameters": plot_parameters,
@@ -2542,6 +2555,9 @@ def write_bout_eye_gaze_visualization_artifacts(
         png_bytes,
         description="Bout eye-gaze summary PNG",
         created_by="fisheye.analysis.bout_kinematics",
+        visualization_contract_id=BOUT_EYE_GAZE_VISUALIZATION_CONTRACT_ID,
+        renderer=BOUT_KINEMATICS_PLOT_RENDERER,
+        renderer_version=BOUT_KINEMATICS_RENDERER_VERSION,
         artifact_signature=signature,
         created_at_utc=created_at_utc,
         source_paths=source_paths,
@@ -2636,6 +2652,9 @@ def write_bout_kinematics_visualization_artifacts(
     signature = _artifact_signature(
         {
             "schema_id": BOUT_KINEMATICS_PLOT_SPEC_SCHEMA_ID,
+            "visualization_contract_id": BOUT_HEADING_VISUALIZATION_CONTRACT_ID,
+            "renderer": BOUT_KINEMATICS_PLOT_RENDERER,
+            "renderer_version": BOUT_KINEMATICS_RENDERER_VERSION,
             "run_name": run_name,
             "source_refs": source_refs,
             "parameters": plot_parameters,
@@ -2681,6 +2700,9 @@ def write_bout_kinematics_visualization_artifacts(
         png_bytes,
         description="Bout heading kinematics summary PNG",
         created_by="fisheye.analysis.bout_kinematics",
+        visualization_contract_id=BOUT_HEADING_VISUALIZATION_CONTRACT_ID,
+        renderer=BOUT_KINEMATICS_PLOT_RENDERER,
+        renderer_version=BOUT_KINEMATICS_RENDERER_VERSION,
         artifact_signature=signature,
         created_at_utc=created_at_utc,
         source_paths=source_paths,

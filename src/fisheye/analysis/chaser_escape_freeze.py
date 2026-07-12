@@ -30,7 +30,7 @@ from fisheye.shared.system_metadata import get_git_info
 SCHEMA_ID = "palette.goodcopbadcop.chaser_escape_freeze_canary.v1"
 SCHEMA_VERSION = 1
 METHOD = "goodcopbadcop_chaser_centric_escape_freeze_canary"
-METHOD_VERSION = "1"
+METHOD_VERSION = "2"
 COMPONENT_PARENT_NAME = "chaser_escape_freeze"
 DEFAULT_COMPONENT_NAME = "canary_chaser0_escape_freeze_v1"
 PER_TRIAL_DIAGNOSTIC_PNG_ARTIFACT_NAME = "escape_freeze_per_trial_diagnostic_png"
@@ -244,13 +244,52 @@ def _contiguous_true_segments(mask: np.ndarray) -> list[tuple[int, int]]:
     return [(int(start), int(stop - 1)) for start, stop in zip(changes[0::2], changes[1::2])]
 
 
-def _mode_positive(values: np.ndarray, fallback: int) -> int:
-    data = np.asarray(values, dtype=np.int64).reshape(-1)
-    data = data[data > 0]
-    if data.size == 0:
-        return int(fallback)
-    uniq, counts = np.unique(data, return_counts=True)
-    return int(uniq[int(np.argmax(counts))])
+def _controller_trial_segments(
+    active: np.ndarray,
+    trial_id: np.ndarray,
+) -> tuple[list[tuple[int, int, int]], str]:
+    """Resolve trials by logged ID, bridging aligned-frame gaps within each ID."""
+
+    active_values = np.asarray(active, dtype=bool).reshape(-1)
+    trial_ids = np.asarray(trial_id, dtype=np.int64).reshape(-1)
+    if active_values.shape != trial_ids.shape:
+        raise ValueError("active and trial_id must have matching one-dimensional shapes")
+
+    positive_ids = np.unique(trial_ids[active_values & (trial_ids > 0)])
+    if positive_ids.size == 0:
+        fallback = [
+            (start, end, ordinal)
+            for ordinal, (start, end) in enumerate(
+                _contiguous_true_segments(active_values),
+                start=1,
+            )
+        ]
+        return fallback, "contiguous_chase_sequence_active_fallback"
+
+    segments: list[tuple[int, int, int]] = []
+    covered = np.zeros(active_values.shape, dtype=bool)
+    for raw_id in positive_ids.tolist():
+        positions = np.flatnonzero(active_values & (trial_ids == int(raw_id)))
+        if positions.size == 0:
+            continue
+        start = int(positions[0])
+        end = int(positions[-1])
+        if np.any(covered[start : end + 1]):
+            raise ValueError(
+                "Logged chase_trial_id ranges overlap on the aligned frame axis; "
+                f"cannot construct authoritative trials (trial_id={int(raw_id)})."
+            )
+        covered[start : end + 1] = True
+        segments.append((start, end, int(raw_id)))
+
+    residual = active_values & ~covered
+    next_fallback_id = int(np.max(positive_ids)) + 1
+    for start, end in _contiguous_true_segments(residual):
+        segments.append((start, end, next_fallback_id))
+        next_fallback_id += 1
+    segments.sort(key=lambda value: (value[0], value[1], value[2]))
+    source = "chase_trial_id" if not np.any(residual) else "chase_trial_id_with_active_fallback"
+    return segments, source
 
 
 def _median_positive(values: np.ndarray) -> float | None:
@@ -747,7 +786,8 @@ def build_escape_freeze_canary_result(
     freeze_frames = max(1, int(round(float(freeze_window_s) * float(fps))))
     baseline_frames = max(1, int(round(float(baseline_window_s) * float(fps))))
 
-    segments = _contiguous_true_segments(active)
+    legacy_active_segments = _contiguous_true_segments(active)
+    segments, trial_segmentation_source = _controller_trial_segments(active, trial_id_by_frame)
     trial_table = np.zeros(len(segments), dtype=_trial_dtype())
     metric_table = np.zeros(len(segments), dtype=_metric_dtype())
     for name in trial_table.dtype.names or ():
@@ -762,9 +802,14 @@ def build_escape_freeze_canary_result(
     if not segments:
         warnings.append("no_active_chase_trials_for_selected_chaser")
 
-    for row_idx, (start, end) in enumerate(segments):
+    avoided_fragment_count = max(0, len(legacy_active_segments) - len(segments))
+    if avoided_fragment_count:
+        warnings.append(
+            f"chase_trial_id_bridged_{avoided_fragment_count}_aligned_active_fragments"
+        )
+
+    for row_idx, (start, end, trial_id) in enumerate(segments):
         frames = np.arange(start, end + 1, dtype=np.int64)
-        trial_id = _mode_positive(trial_id_by_frame[frames], fallback=row_idx + 1)
         trigger, trigger_proximity, trigger_source = _select_trial_trigger(
             distance_mm,
             frames,
@@ -885,7 +930,7 @@ def build_escape_freeze_canary_result(
             int(baseline_end),
             float(response_valid_count) / float(response_slice.size) if response_slice.size else np.nan,
             float(freeze_valid_count) / float(freeze_slice.size) if freeze_slice.size else np.nan,
-            int(end - start + 1),
+            int(np.count_nonzero(active[frames])),
         )
         metric_table[row_idx] = (
             int(trial_id),
@@ -960,6 +1005,9 @@ def build_escape_freeze_canary_result(
     ) if metric_table.size else 0
     summary = {
         "trial_count": int(trial_table.shape[0]),
+        "trial_segmentation_source": trial_segmentation_source,
+        "legacy_contiguous_active_segment_count": len(legacy_active_segments),
+        "aligned_fragment_count_avoided": avoided_fragment_count,
         "chaser_index": int(chaser_index),
         "classification_locked": False,
         "candidate_labels_available": True,
@@ -978,6 +1026,7 @@ def build_escape_freeze_canary_result(
         "median_net_displacement_mm": float(np.nanmedian(metric_table["net_displacement_mm"])) if metric_table.size else np.nan,
         "median_radial_excursion_mm": float(np.nanmedian(metric_table["radial_excursion_mm"])) if metric_table.size else np.nan,
         "mean_freeze_low_speed_fraction": _finite_mean(metric_table["freeze_low_speed_fraction"]) if metric_table.size else np.nan,
+        "inert_active_pursuit_available": False,
         "benign_active_pursuit_available": False,
         "interpretation": "diagnostic_us_validation_only_active_pursuit_chaser0_current_cohort",
     }
@@ -991,7 +1040,10 @@ def build_escape_freeze_canary_result(
         "trigger_radius_source": str(trigger_radius_source),
         "trigger_radius_override": bool(trigger_radius_override),
         "measurement_ceiling": "100 FPS; no C-start kinematic signature or sub-30 ms latency claims; windowed speed only",
-        "trial_definition": "contiguous chase_sequence_active true segments; chase_trial_id recorded as trial_id when available",
+        "trial_definition": (
+            "positive chase_trial_id ranges on active controller rows, bridging aligned-frame gaps; "
+            "contiguous chase_sequence_active segments only when positive trial IDs are unavailable"
+        ),
     }
     return EscapeFreezeCanaryResult(
         zarr_path=str(zarr_path),
@@ -1572,6 +1624,8 @@ def write_escape_freeze_canary_component(
                 "low_speed_threshold_mm_s": float(result.low_speed_threshold_mm_s),
                 "heading_min_speed_mm_s": float(result.heading_min_speed_mm_s),
                 "classification_locked": False,
+                "trial_segmentation_version": 2,
+                "trial_segmentation_source": result.summary.get("trial_segmentation_source"),
             }
         )
     )
@@ -1645,6 +1699,7 @@ def write_escape_freeze_canary_component(
         "escape_path_threshold_mm": float(result.escape_path_threshold_mm),
         "low_speed_threshold_mm_s": float(result.low_speed_threshold_mm_s),
         "heading_min_speed_mm_s": float(result.heading_min_speed_mm_s),
+        "trial_segmentation_version": 2,
     }
     attrs = {
         "schema_id": SCHEMA_ID,
@@ -1666,7 +1721,7 @@ def write_escape_freeze_canary_component(
         "total_frames": int(result.total_frames),
         "pixels_per_mm_projector": float(result.pixels_per_mm_projector),
         "measurement_ceiling": "100 FPS; no C-start kinematic signature or sub-30 ms latency claims; windowed speed only",
-        "interpretation_scope": "US validation and within-aggressive trend diagnostic; not active-pursuit aggressive-vs-benign specificity",
+        "interpretation_scope": "US validation and within-aggressive trend diagnostic; not active-pursuit aggressive-vs-inert specificity",
         "git_commit": git.get("commit_hash"),
         "git_branch": git.get("branch"),
         "git_dirty": git.get("is_dirty"),

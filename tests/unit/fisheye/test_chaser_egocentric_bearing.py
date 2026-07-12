@@ -10,7 +10,11 @@ import zarr
 from fisheye.analysis.chaser_distance_runs import write_chaser_distance_run
 from fisheye.analysis.chaser_egocentric_bearing import (
     PRE_POST_POLAR_POINT_CLOUD_PNG_ARTIFACT_NAME,
+    PRE_POST_POLAR_POINT_CLOUD_VISUALIZATION_CONTRACT_ID,
     PRE_POST_POLAR_PNG_ARTIFACT_NAME,
+    PRE_POST_POLAR_VISUALIZATION_CONTRACT_ID,
+    STATIC_VISUALIZATION_RENDERER,
+    STATIC_VISUALIZATION_RENDERER_VERSION,
     build_chaser_egocentric_bearing_result,
     compute_egocentric_chaser_bearing,
     write_chaser_egocentric_bearing_component,
@@ -117,6 +121,24 @@ def test_build_chaser_egocentric_bearing_requires_offline_track_kinematics(tmp_p
         build_chaser_egocentric_bearing_result(zarr_path)
 
 
+def test_build_chaser_egocentric_bearing_falls_back_to_protocol_behavior_labels(
+    tmp_path: Path,
+) -> None:
+    zarr_path = _make_archive_with_detection_occupancy(tmp_path)
+    write_chaser_distance_run(zarr_path, _make_chaser_result(zarr_path), overwrite=True)
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    del root["analysis/chaser_distance_runs/chaser_distance_1/chasers/behavior_class_label_bytes"]
+    _add_track_kinematics_run(zarr_path)
+
+    result = build_chaser_egocentric_bearing_result(
+        zarr_path,
+        chaser_distance_run="chaser_distance_1",
+        track_kinematics_run="tk_1",
+    )
+
+    assert result.chaser_behavior_labels == ("aggressive", "inert")
+
+
 def test_build_chaser_egocentric_bearing_densifies_sparse_track_validity(tmp_path: Path) -> None:
     zarr_path = _make_archive_with_detection_occupancy(tmp_path)
     write_chaser_distance_run(zarr_path, _make_chaser_result(zarr_path), overwrite=True)
@@ -165,10 +187,17 @@ def test_chaser_egocentric_bearing_writer_refreshes_interactive_spec(tmp_path: P
     assert png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
     assert png.attrs["media_type"] == "image/png"
     assert png.attrs["artifact_role"] == "analysis_distribution"
+    assert png.attrs["visualization_contract_id"] == PRE_POST_POLAR_VISUALIZATION_CONTRACT_ID
+    assert png.attrs["renderer"] == STATIC_VISUALIZATION_RENDERER
+    assert png.attrs["renderer_version"] == STATIC_VISUALIZATION_RENDERER_VERSION
     point_cloud_png = component["visualizations"][PRE_POST_POLAR_POINT_CLOUD_PNG_ARTIFACT_NAME]
     point_cloud_png_bytes = np.asarray(point_cloud_png[:], dtype=np.uint8).tobytes()
     assert point_cloud_png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
     assert point_cloud_png.attrs["source_paths"]["distance_mm"].endswith("/per_chaser/distance_mm")
+    assert (
+        point_cloud_png.attrs["visualization_contract_id"]
+        == PRE_POST_POLAR_POINT_CLOUD_VISUALIZATION_CONTRACT_ID
+    )
     assert component.attrs["visualizations"][PRE_POST_POLAR_PNG_ARTIFACT_NAME]["media_type"] == "image/png"
     assert component.attrs["visualizations"][PRE_POST_POLAR_POINT_CLOUD_PNG_ARTIFACT_NAME]["media_type"] == "image/png"
 

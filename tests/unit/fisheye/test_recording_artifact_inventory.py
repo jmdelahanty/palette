@@ -33,6 +33,9 @@ def _make_inventory_zarr(tmp_path: Path) -> Path:
         b"\x89PNG\r\n\x1a\nfake-detect",
         description="Detection summary",
         created_by="test_recording_artifact_inventory",
+        visualization_contract_id="palette.test.detect_summary.v1",
+        renderer="palette-test-detect-summary",
+        renderer_version="1",
         created_at_utc="2026-07-05T00:00:00+00:00",
         source_runs={"detect": "detect_001"},
     )
@@ -126,6 +129,11 @@ def test_build_recording_artifact_inventory_lists_runs_visualizations_and_sideca
     assert detect_run["visualizations"][0]["artifact_name"] == "detect_summary_png"
     assert detect_run["visualizations"][0]["present"] is True
     assert detect_run["visualizations"][0]["media_type"] == "image/png"
+    assert detect_run["visualizations"][0]["visualization_contract_id"] == (
+        "palette.test.detect_summary.v1"
+    )
+    assert detect_run["visualizations"][0]["renderer"] == "palette-test-detect-summary"
+    assert detect_run["visualizations"][0]["renderer_version"] == "1"
 
     quality_family = _family_by_parent(
         inventory,

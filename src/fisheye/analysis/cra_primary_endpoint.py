@@ -23,6 +23,7 @@ from fisheye.analysis.chaser_distance_runs import (
     _bytes_array,
     _write_array,
 )
+from fisheye.analysis.chaser_behavior import behavior_counts, resolve_configured_chaser_behaviors
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
 from fisheye.shared.plot_artifacts import write_interactive_plot_spec_artifact, write_png_visualization_artifact
 from fisheye.shared.run_lineage_fingerprint import build_run_lineage_payload, write_run_lineage_attrs
@@ -49,9 +50,11 @@ QUADRANT_LABELS = ("top_left", "top_right", "bottom_left", "bottom_right")
 class CRAObjectRole:
     object_index: int
     object_role: str
+    behavior_class_id: int
     raw_color_rgba: tuple[float, float, float, float]
     raw_color_hex: str
     enable_chase: bool
+    enable_random_movement: bool
     behavior_mode: int | None
     start_position_preset: str
     end_position_preset: str
@@ -259,41 +262,29 @@ def _first_chaser_parameters(payload: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def resolve_object_roles_from_protocol_payload(payload: Mapping[str, Any]) -> tuple[CRAObjectRole, ...]:
-    """Return aggressive/benign object roles from a GoodCopBadCop protocol payload."""
+    """Return canonical behavior roles from a variable-length chaser payload."""
 
-    params = _first_chaser_parameters(payload)
-    chasers = params.get("chasers")
-    if not isinstance(chasers, list):
-        raise ValueError("protocol_json chasers field is not a list.")
-    roles: list[CRAObjectRole] = []
-    for index, chaser in enumerate(chasers):
-        if not isinstance(chaser, Mapping):
-            continue
-        enable_chase = bool(chaser.get("enable_chase", False))
-        rgba = (
-            _safe_float(chaser.get("color_r"), 0.0),
-            _safe_float(chaser.get("color_g"), 0.0),
-            _safe_float(chaser.get("color_b"), 0.0),
-            _safe_float(chaser.get("color_a"), 1.0),
-        )
-        roles.append(
+    configured = resolve_configured_chaser_behaviors(payload)
+    roles = [
             CRAObjectRole(
-                object_index=int(index),
-                object_role="aggressive" if enable_chase else "benign",
-                raw_color_rgba=rgba,
-                raw_color_hex=_rgba_to_hex(rgba),
-                enable_chase=enable_chase,
-                behavior_mode=_safe_int(chaser.get("behavior_mode")),
-                start_position_preset=str(chaser.get("start_position_preset") or ""),
-                end_position_preset=str(chaser.get("end_position_preset") or ""),
+                object_index=behavior.chaser_index,
+                object_role=behavior.behavior_class,
+                behavior_class_id=behavior.behavior_class_id,
+                raw_color_rgba=behavior.raw_color_rgba,
+                raw_color_hex=_rgba_to_hex(behavior.raw_color_rgba),
+                enable_chase=behavior.enable_chase,
+                enable_random_movement=behavior.enable_random_movement,
+                behavior_mode=behavior.behavior_mode,
+                start_position_preset=behavior.start_position_preset,
+                end_position_preset=behavior.end_position_preset,
             )
-        )
-    n_aggressive = sum(1 for role in roles if role.object_role == "aggressive")
-    n_benign = sum(1 for role in roles if role.object_role == "benign")
-    if n_aggressive != 1 or n_benign != 1:
+            for behavior in configured
+        ]
+    counts = behavior_counts(configured)
+    if counts["aggressive"] != 1 or counts["inert"] != 1:
         raise ValueError(
-            "CRA primary endpoint v1 requires exactly one aggressive and one benign chaser; "
-            f"found aggressive={n_aggressive}, benign={n_benign}."
+            "CRA primary endpoint v1 requires exactly one aggressive and one inert chaser; "
+            f"found aggressive={counts['aggressive']}, inert={counts['inert']}."
         )
     return tuple(roles)
 
@@ -576,7 +567,7 @@ def _build_summary(
     phases: Sequence[CRAPhaseWindow],
 ) -> dict[str, Any]:
     aggressive = _role_index(objects, "aggressive")
-    benign = _role_index(objects, "benign")
+    inert = _role_index(objects, "inert")
     median_distance = arrays["median_distance_mm"]
     occupancy = arrays["occupancy_fraction"]
     dropout = arrays["tracking_dropout_fraction"]
@@ -585,19 +576,19 @@ def _build_summary(
 
     d_pre_agg = _summary_value(median_distance, 0, aggressive)
     d_post_agg = _summary_value(median_distance, 1, aggressive)
-    d_pre_benign = _summary_value(median_distance, 0, benign)
-    d_post_benign = _summary_value(median_distance, 1, benign)
+    d_pre_inert = _summary_value(median_distance, 0, inert)
+    d_post_inert = _summary_value(median_distance, 1, inert)
     occ_pre_agg = _summary_value(occupancy, 0, aggressive)
     occ_post_agg = _summary_value(occupancy, 1, aggressive)
-    occ_pre_benign = _summary_value(occupancy, 0, benign)
-    occ_post_benign = _summary_value(occupancy, 1, benign)
+    occ_pre_inert = _summary_value(occupancy, 0, inert)
+    occ_post_inert = _summary_value(occupancy, 1, inert)
 
     delta_agg = None if d_pre_agg is None or d_post_agg is None else d_post_agg - d_pre_agg
-    delta_benign = None if d_pre_benign is None or d_post_benign is None else d_post_benign - d_pre_benign
-    specificity_distance = None if delta_agg is None or delta_benign is None else delta_agg - delta_benign
+    delta_inert = None if d_pre_inert is None or d_post_inert is None else d_post_inert - d_pre_inert
+    specificity_distance = None if delta_agg is None or delta_inert is None else delta_agg - delta_inert
     delta_occ_agg = None if occ_pre_agg is None or occ_post_agg is None else occ_post_agg - occ_pre_agg
-    delta_occ_benign = None if occ_pre_benign is None or occ_post_benign is None else occ_post_benign - occ_pre_benign
-    specificity_occupancy = None if delta_occ_agg is None or delta_occ_benign is None else delta_occ_agg - delta_occ_benign
+    delta_occ_inert = None if occ_pre_inert is None or occ_post_inert is None else occ_post_inert - occ_pre_inert
+    specificity_occupancy = None if delta_occ_agg is None or delta_occ_inert is None else delta_occ_agg - delta_occ_inert
 
     def q_label(phase_idx: int, object_idx: int) -> str | None:
         code = int(q_codes[phase_idx, object_idx])
@@ -605,25 +596,25 @@ def _build_summary(
             return QUADRANT_LABELS[code]
         return None
 
-    return {
+    return _add_legacy_benign_summary_aliases({
         "fish_id": "0",
         "recording_id": recording_id,
         "dpf": None,
         "aggressive_color": objects[aggressive].raw_color_hex,
-        "benign_color": objects[benign].raw_color_hex,
+        "inert_color": objects[inert].raw_color_hex,
         "d_pre_agg": d_pre_agg,
         "d_post_agg": d_post_agg,
         "delta_agg": delta_agg,
-        "d_pre_benign": d_pre_benign,
-        "d_post_benign": d_post_benign,
-        "delta_benign": delta_benign,
+        "d_pre_inert": d_pre_inert,
+        "d_post_inert": d_post_inert,
+        "delta_inert": delta_inert,
         "specificity_distance": specificity_distance,
         "occ_pre_agg": occ_pre_agg,
         "occ_post_agg": occ_post_agg,
         "delta_occ_agg": delta_occ_agg,
-        "occ_pre_benign": occ_pre_benign,
-        "occ_post_benign": occ_post_benign,
-        "delta_occ_benign": delta_occ_benign,
+        "occ_pre_inert": occ_pre_inert,
+        "occ_post_inert": occ_post_inert,
+        "delta_occ_inert": delta_occ_inert,
         "specificity_occupancy": specificity_occupancy,
         "n_valid_frames_pre": int(np.nanmax(valid_counts[0, :])) if valid_counts.shape[0] > 0 else 0,
         "n_valid_frames_post": int(np.nanmax(valid_counts[1, :])) if valid_counts.shape[0] > 1 else 0,
@@ -631,10 +622,19 @@ def _build_summary(
         "frac_tracking_dropout_post": _summary_value(dropout, 1, aggressive),
         "pre_aggressive_quadrant": q_label(0, aggressive),
         "post_aggressive_quadrant": q_label(1, aggressive),
-        "pre_benign_quadrant": q_label(0, benign),
-        "post_benign_quadrant": q_label(1, benign),
+        "pre_inert_quadrant": q_label(0, inert),
+        "post_inert_quadrant": q_label(1, inert),
         "phase_labels": [phase.phase_label for phase in phases],
-    }
+    })
+
+
+def _add_legacy_benign_summary_aliases(summary: dict[str, Any]) -> dict[str, Any]:
+    """Retain v1 field compatibility while canonical outputs use inert."""
+
+    for key, value in list(summary.items()):
+        if "inert" in key:
+            summary.setdefault(key.replace("inert", "benign"), value)
+    return summary
 
 
 def build_cra_primary_endpoint_result(
@@ -907,13 +907,28 @@ def write_cra_primary_endpoint_component(
     _write_array(objects, "object_index", np.asarray([obj.object_index for obj in result.objects], dtype=np.int16))
     _write_array(objects, "object_role_code", np.asarray([1 if obj.object_role == "aggressive" else 0 for obj in result.objects], dtype=np.int8))
     _write_array(objects, "object_role_label_bytes", _bytes_array([obj.object_role for obj in result.objects], width=32))
+    _write_array(objects, "behavior_class_id", np.asarray([obj.behavior_class_id for obj in result.objects], dtype=np.int8))
+    _write_array(objects, "behavior_class_label_bytes", _bytes_array([obj.object_role for obj in result.objects], width=32))
     _write_array(objects, "raw_color_rgba", np.asarray([obj.raw_color_rgba for obj in result.objects], dtype=np.float32))
     _write_array(objects, "raw_color_hex_bytes", _bytes_array([obj.raw_color_hex for obj in result.objects], width=16))
     _write_array(objects, "enable_chase", np.asarray([obj.enable_chase for obj in result.objects], dtype=bool))
+    _write_array(objects, "enable_random_movement", np.asarray([obj.enable_random_movement for obj in result.objects], dtype=bool))
     _write_array(objects, "behavior_mode", np.asarray([obj.behavior_mode if obj.behavior_mode is not None else -1 for obj in result.objects], dtype=np.int16))
     _write_array(objects, "start_position_preset_bytes", _bytes_array([obj.start_position_preset for obj in result.objects], width=48))
     _write_array(objects, "end_position_preset_bytes", _bytes_array([obj.end_position_preset for obj in result.objects], width=48))
-    objects.attrs.update({"row_axis": "objects", "object_role_code": {"0": "benign", "1": "aggressive"}})
+    objects.attrs.update(
+        {
+            "row_axis": "objects",
+            "object_role_code": {"0": "inert", "1": "aggressive"},
+            "behavior_class_vocabulary": {
+                "0": "unknown",
+                "1": "aggressive",
+                "2": "random_non_chasing",
+                "3": "inert",
+            },
+            "legacy_role_aliases": {"benign": "inert"},
+        }
+    )
 
     phases = component.require_group("phases")
     _write_array(phases, "phase_index", np.asarray([phase.phase_index for phase in result.phases], dtype=np.int16))

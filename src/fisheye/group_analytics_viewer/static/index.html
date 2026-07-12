@@ -38,6 +38,14 @@
           <strong id="summary-speed-distance">--</strong>
         </div>
         <div class="summary-item">
+          <span>Bout hist rows</span>
+          <strong id="summary-bout-histogram">--</strong>
+        </div>
+        <div class="summary-item">
+          <span>IBI hist rows</span>
+          <strong id="summary-ibi-histogram">--</strong>
+        </div>
+        <div class="summary-item">
           <span>Histogram rows</span>
           <strong id="summary-histogram">--</strong>
         </div>
@@ -113,6 +121,10 @@
             <option value="mean">Mean</option>
             <option value="median">Median</option>
           </select>
+        </label>
+        <label>
+          Bout distribution
+          <select id="epoch-bout-hist-metric"></select>
         </label>
         <label>
           CRA metric
@@ -205,6 +217,24 @@
           </div>
           <div id="speed-distance-chart" class="chart compact"></div>
           <div id="speed-distance-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>Bout Metric Distribution</h2>
+            <span id="epoch-bout-hist-meta"></span>
+          </div>
+          <div id="epoch-bout-hist-chart" class="chart compact"></div>
+          <div id="epoch-bout-hist-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>Inter-Bout Interval Distribution</h2>
+            <span id="epoch-ibi-hist-meta"></span>
+          </div>
+          <div id="epoch-ibi-hist-chart" class="chart compact"></div>
+          <div id="epoch-ibi-hist-table" class="table-wrap"></div>
         </section>
 
         <section class="panel wide">

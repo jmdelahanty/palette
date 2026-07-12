@@ -716,6 +716,8 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
             "goodcopbadcop_chaser_epoch_summary",
             "goodcopbadcop_epoch_behavior_summary",
             "goodcopbadcop_epoch_bout_distribution",
+            "goodcopbadcop_epoch_bout_histogram",
+            "goodcopbadcop_epoch_inter_bout_interval_histogram",
             "goodcopbadcop_epoch_center_distance_histogram",
             "goodcopbadcop_epoch_speed_summary",
             "goodcopbadcop_speed_distance_bins",
@@ -737,6 +739,8 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
     assert manifest["row_counts_by_table"]["goodcopbadcop_chaser_epoch_summary"] == 6
     assert manifest["row_counts_by_table"]["goodcopbadcop_epoch_behavior_summary"] == 3
     assert manifest["row_counts_by_table"]["goodcopbadcop_epoch_bout_distribution"] == 4
+    assert manifest["row_counts_by_table"]["goodcopbadcop_epoch_bout_histogram"] == 183
+    assert manifest["row_counts_by_table"]["goodcopbadcop_epoch_inter_bout_interval_histogram"] == 3
     assert manifest["row_counts_by_table"]["goodcopbadcop_epoch_center_distance_histogram"] == 9
     assert manifest["row_counts_by_table"]["goodcopbadcop_epoch_speed_summary"] == 3
     assert manifest["row_counts_by_table"]["goodcopbadcop_speed_distance_bins"] == 18
@@ -795,6 +799,8 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
     assert post_chaser_1["source_detection_path"] == "refined_detect_runs/refined_1/instances"
     assert post_chaser_1["source_stimulus_run"] == "stimulus_1"
     assert post_chaser_1["source_stimulus_epoch_run"] == "epochs_1"
+    assert post_chaser_1["behavior_class_id"] == 3
+    assert post_chaser_1["behavior_class"] == "inert"
     assert post_chaser_1["threshold_mm"] == 20.0
     assert post_chaser_1["valid_frame_count"] == 3
     assert post_chaser_1["p50_distance_mm"] == 6.0
@@ -844,6 +850,52 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
     )
     assert "bout_net_heading_change_deg" in pre_bout_rows[0]
     assert "abs_bout_net_heading_change_deg" in pre_bout_rows[0]
+
+    bout_hist_rows = _read_dataset(
+        output,
+        "goodcopbadcop_epoch_bout_histogram",
+        "goodcopbadcop_export",
+    )
+    assert len(bout_hist_rows) == 183
+    assert {
+        row["metric_name"]
+        for row in bout_hist_rows
+    } == {
+        "abs_bout_net_heading_change_deg",
+        "bout_duration_s",
+        "bout_heading_path_deg",
+        "bout_net_heading_change_deg",
+        "bout_path_length_mm",
+    }
+    pre_duration_hist = [
+        row
+        for row in bout_hist_rows
+        if row["window_label"] == "pre_event" and row["metric_name"] == "bout_duration_s"
+    ]
+    assert pre_duration_hist
+    assert pre_duration_hist[0]["epoch_behavior_component"] == "kinematics_bouts_v1"
+    assert pre_duration_hist[0]["histogram_dataset"] == "per_epoch_bout_histograms"
+    assert pre_duration_hist[0]["source_swim_bout_run"] == "bouts_1"
+    assert sum(row["hist_count"] for row in pre_duration_hist) == 2
+    assert sum(row["hist_fraction"] for row in pre_duration_hist) == 1.0
+    assert "histogram_bin_contract_json" in pre_duration_hist[0]
+    assert "bin_left" in pre_duration_hist[0]
+    assert "bin_right" in pre_duration_hist[0]
+    assert "bin_center" in pre_duration_hist[0]
+
+    ibi_hist_rows = _read_dataset(
+        output,
+        "goodcopbadcop_epoch_inter_bout_interval_histogram",
+        "goodcopbadcop_export",
+    )
+    assert len(ibi_hist_rows) == 3
+    assert {row["metric_name"] for row in ibi_hist_rows} == {"inter_bout_interval_s"}
+    pre_ibi_hist = [row for row in ibi_hist_rows if row["window_label"] == "pre_event"]
+    assert len(pre_ibi_hist) == 1
+    assert pre_ibi_hist[0]["histogram_dataset"] == "per_epoch_inter_bout_interval_histograms"
+    assert pre_ibi_hist[0]["source_swim_bout_run"] == "bouts_1"
+    assert sum(row["hist_count"] for row in pre_ibi_hist) == 1
+    assert sum(row["hist_fraction"] for row in pre_ibi_hist) == 1.0
 
     center_hist_rows = _read_dataset(
         output,
@@ -914,6 +966,8 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
     assert pre_chaser_0_bin_0["bin_right_mm"] == 2.0
     assert pre_chaser_0_bin_0["bin_center_mm"] == 1.0
     assert pre_chaser_0_bin_0["hist_count"] == 1
+    assert pre_chaser_0_bin_0["behavior_class_id"] == 1
+    assert pre_chaser_0_bin_0["behavior_class"] == "aggressive"
     assert pre_chaser_0_bin_0["valid_sample_count"] == 3
     assert len({row["source_lineage_hash"] for row in histogram_rows}) == 18
 
@@ -935,13 +989,13 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
     assert cra_summary["source_chaser_distance_run"] == "chaser_distance_1"
     assert cra_summary["fish_id"] == "0"
     assert cra_summary["aggressive_color"] == "#ff0000"
-    assert cra_summary["benign_color"] == "#0000ff"
+    assert cra_summary["inert_color"] == "#0000ff"
     assert cra_summary["pre_aggressive_quadrant"] == "top_left"
     assert cra_summary["post_aggressive_quadrant"] == "bottom_right"
-    assert cra_summary["pre_benign_quadrant"] == "top_right"
-    assert cra_summary["post_benign_quadrant"] == "bottom_left"
+    assert cra_summary["pre_inert_quadrant"] == "top_right"
+    assert cra_summary["post_inert_quadrant"] == "bottom_left"
     np.testing.assert_allclose(cra_summary["delta_occ_agg"], -1.0)
-    np.testing.assert_allclose(cra_summary["occ_post_benign"], 1.0)
+    np.testing.assert_allclose(cra_summary["occ_post_inert"], 1.0)
     assert len(cra_summary["source_lineage_hash"]) == 64
 
     cra_object_phase_rows = _read_dataset(
@@ -959,6 +1013,7 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
     assert post_aggressive["source_cra_primary_endpoint_path"] == cra_summary["source_cra_primary_endpoint_path"]
     assert post_aggressive["source_component_fingerprint"] == cra_summary["source_component_fingerprint"]
     assert post_aggressive["object_index"] == 0
+    assert post_aggressive["behavior_class"] == "aggressive"
     assert post_aggressive["raw_color_hex"] == "#ff0000"
     assert post_aggressive["enable_chase"] is True
     assert post_aggressive["source_window_label"] == "post_event"

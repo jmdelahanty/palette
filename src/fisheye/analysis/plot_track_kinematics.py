@@ -36,7 +36,14 @@ from .chaser_metrics_loader import load_chaser_metrics
 
 TRACK_KINEMATICS_PLOT_SPEC_SCHEMA_ID = "palette.plot_spec.track_kinematics_summary.v1"
 TRACK_KINEMATICS_PLOT_RENDERER = "palette-track-kinematics-summary-v1"
+TRACK_KINEMATICS_VISUALIZATION_CONTRACT_ID = "palette.core.track_kinematics.summary.v1"
+TRACK_KINEMATICS_RENDERER_VERSION = "1"
 TRACK_KINEMATICS_PNG_PREFIX = "track_kinematics_summary"
+POSITION_XY_TRACE_PLOT_SCHEMA_ID = "palette.plot_spec.position_xy_trace.v1"
+POSITION_XY_TRACE_VISUALIZATION_CONTRACT_ID = "palette.core.position.xy_trace.v1"
+POSITION_XY_TRACE_RENDERER = "palette-core-position-xy-trace-v1"
+POSITION_XY_TRACE_RENDERER_VERSION = "1"
+POSITION_XY_TRACE_PNG_PREFIX = "position_xy_trace"
 DEFAULT_SWIM_BOUT_OVERLAY_SPEED_LEVEL = "exponential"
 
 
@@ -668,6 +675,51 @@ def _track_artifact_names(track_id: int) -> tuple[str, str]:
     )
 
 
+def _position_xy_artifact_name(track_id: int) -> str:
+    return f"{POSITION_XY_TRACE_PNG_PREFIX}_track_{int(track_id)}_png"
+
+
+def _render_position_xy_trace_png(
+    *,
+    run_group: zarr.Group,
+    track_group: zarr.Group,
+    track_id: int,
+    artifact_dpi: int,
+) -> bytes:
+    """Render stimulus-independent X/Y position traces for one track."""
+
+    time_seconds = np.asarray(track_group["time_seconds"][:], dtype=np.float64)
+    unit_label, pos_x, pos_y = pick_units(run_group, track_group)
+    pos_x = np.asarray(pos_x, dtype=np.float64)
+    pos_y = np.asarray(pos_y, dtype=np.float64)
+    if time_seconds.shape[0] != pos_x.shape[0] or pos_x.shape != pos_y.shape:
+        raise ValueError("Position X/Y and time arrays must have the same row count.")
+
+    fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+    series = ((axes[0], pos_x, "X", "tab:blue"), (axes[1], pos_y, "Y", "tab:orange"))
+    for axis, values, axis_name, color in series:
+        finite = np.isfinite(time_seconds) & np.isfinite(values)
+        axis.plot(
+            time_seconds[finite],
+            values[finite],
+            color=color,
+            linewidth=0.9,
+        )
+        axis.set_ylabel(f"{axis_name} ({unit_label})")
+        axis.grid(alpha=0.25)
+        axis.set_title(
+            f"{axis_name} position ({int(np.count_nonzero(finite))}/{values.size} valid samples)"
+        )
+    axes[-1].set_xlabel("Time (s)")
+    fig.suptitle(f"Position traces – track {int(track_id)}")
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    buffer = BytesIO()
+    fig.savefig(buffer, format="png", dpi=int(artifact_dpi), bbox_inches="tight")
+    plt.close(fig)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 def _track_source_paths(run_name: str, track_group: zarr.Group, run_group: zarr.Group, track_id: int) -> dict[str, str]:
     run_path = f"analysis/track_kinematics_runs/{run_name}"
     track_path = f"{run_path}/tracks/id_{int(track_id)}"
@@ -960,6 +1012,9 @@ def write_track_kinematics_plot_artifacts(
     signature = _artifact_signature(
         {
             "schema_id": TRACK_KINEMATICS_PLOT_SPEC_SCHEMA_ID,
+            "visualization_contract_id": TRACK_KINEMATICS_VISUALIZATION_CONTRACT_ID,
+            "renderer": TRACK_KINEMATICS_PLOT_RENDERER,
+            "renderer_version": TRACK_KINEMATICS_RENDERER_VERSION,
             "run_name": run_name,
             "track_id": int(track_id),
             "source_paths": source_paths,
@@ -995,6 +1050,9 @@ def write_track_kinematics_plot_artifacts(
         artifacts={
             "png_artifact": f"visualizations/{png_artifact_name}",
             "interactive_artifact": f"visualizations/{spec_artifact_name}",
+            "position_xy_png_artifact": (
+                f"visualizations/{_position_xy_artifact_name(track_id)}"
+            ),
             "artifact_signature": signature,
         },
     )
@@ -1005,6 +1063,9 @@ def write_track_kinematics_plot_artifacts(
         png_bytes,
         description="Track kinematics summary PNG",
         created_by="fisheye.analysis.plot_track_kinematics",
+        visualization_contract_id=TRACK_KINEMATICS_VISUALIZATION_CONTRACT_ID,
+        renderer=TRACK_KINEMATICS_PLOT_RENDERER,
+        renderer_version=TRACK_KINEMATICS_RENDERER_VERSION,
         artifact_signature=signature,
         created_at_utc=created_at_utc,
         source_paths=source_paths,
@@ -1012,6 +1073,58 @@ def write_track_kinematics_plot_artifacts(
         parameters=parameters,
         extra_attrs={
             "plot_schema_id": TRACK_KINEMATICS_PLOT_SPEC_SCHEMA_ID,
+            "track_id": int(track_id),
+            "run_name": run_name,
+            "provenance": provenance,
+        },
+    )
+    position_xy_name = _position_xy_artifact_name(track_id)
+    position_xy_parameters = {
+        "artifact_dpi": int(artifact_dpi),
+        "coordinate_selection": "positions_mm_when_finite_else_positions_px",
+    }
+    position_xy_signature = _artifact_signature(
+        {
+            "schema_id": POSITION_XY_TRACE_PLOT_SCHEMA_ID,
+            "visualization_contract_id": POSITION_XY_TRACE_VISUALIZATION_CONTRACT_ID,
+            "renderer": POSITION_XY_TRACE_RENDERER,
+            "renderer_version": POSITION_XY_TRACE_RENDERER_VERSION,
+            "run_name": run_name,
+            "track_id": int(track_id),
+            "source_paths": {
+                "time_seconds": source_paths.get("time_seconds"),
+                "positions_mm": source_paths.get("positions_mm"),
+                "positions_px": source_paths.get("positions_px"),
+            },
+            "parameters": position_xy_parameters,
+        }
+    )
+    position_xy_png = _render_position_xy_trace_png(
+        run_group=run_group,
+        track_group=track_group,
+        track_id=track_id,
+        artifact_dpi=artifact_dpi,
+    )
+    write_png_visualization_artifact(
+        run_group,
+        position_xy_name,
+        position_xy_png,
+        description="Stimulus-independent X/Y position traces",
+        created_by="fisheye.analysis.plot_track_kinematics",
+        visualization_contract_id=POSITION_XY_TRACE_VISUALIZATION_CONTRACT_ID,
+        renderer=POSITION_XY_TRACE_RENDERER,
+        renderer_version=POSITION_XY_TRACE_RENDERER_VERSION,
+        artifact_signature=position_xy_signature,
+        created_at_utc=created_at_utc,
+        source_paths={
+            "time_seconds": source_paths.get("time_seconds"),
+            "positions_mm": source_paths.get("positions_mm"),
+            "positions_px": source_paths.get("positions_px"),
+        },
+        source_runs={"track_kinematics": run_name},
+        parameters=position_xy_parameters,
+        extra_attrs={
+            "plot_schema_id": POSITION_XY_TRACE_PLOT_SCHEMA_ID,
             "track_id": int(track_id),
             "run_name": run_name,
             "provenance": provenance,
@@ -1052,7 +1165,8 @@ def write_track_kinematics_plot_artifacts(
     )
     console.print(
         "[green]Wrote zarr visualization artifacts:[/green] "
-        f"visualizations/{png_artifact_name}, visualizations/{spec_artifact_name}"
+        f"visualizations/{png_artifact_name}, visualizations/{spec_artifact_name}, "
+        f"visualizations/{position_xy_name}"
     )
 
 

@@ -16,6 +16,7 @@ embedded via an XMP packet, matching the behaviour of other Palette visualizers.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 from datetime import datetime, timezone
@@ -34,6 +35,9 @@ from fisheye.analysis.swim_bout_io import (
     load_swim_bout_tables,
 )
 from fisheye.shared.json_safety import decode_null_terminated_text
+from fisheye.shared.plot_artifacts import write_png_visualization_artifact
+from fisheye.shared.zarr_helpers import resolve_zarr_run
+from fisheye.shared.zarr_io import open_zarr_root
 
 try:
     from PIL import Image, PngImagePlugin
@@ -44,6 +48,13 @@ except ImportError:  # pragma: no cover
 
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "plots"
 DISPLAY_SPEED_LEVEL_ORDER = ("raw", "filtered", "smoothed", "averaged", "exponential")
+SWIM_BOUT_SUMMARY_PLOT_SCHEMA_ID = "palette.plot_spec.swim_bout_summary.v1"
+SWIM_BOUT_SUMMARY_VISUALIZATION_CONTRACT_ID = "palette.core.swim_bouts.summary.v1"
+SWIM_BOUT_SUMMARY_RENDERER = "palette-core-swim-bouts-summary-v1"
+SWIM_BOUT_SUMMARY_RENDERER_VERSION = "1"
+SWIM_BOUT_SUMMARY_PNG_ARTIFACT_NAME = "swim_bout_summary_png"
+SWIM_BOUT_HISTOGRAM_SCHEMA_ID = "palette.core.swim_bouts.histograms.v1"
+SWIM_BOUT_HISTOGRAM_BIN_COUNT = 30
 
 
 def _decode_bytes(arr: np.ndarray) -> np.ndarray:
@@ -154,6 +165,191 @@ def _save_figure_with_metadata(fig: plt.Figure, output_path: Path, metadata: Dic
         # Fall back to raw bytes without metadata
         with open(output_path, "wb") as handle:
             handle.write(buf.getvalue())
+
+
+def _artifact_signature(payload: Dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _figure_png_bytes(fig: plt.Figure, *, dpi: int) -> bytes:
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", dpi=int(dpi), bbox_inches="tight")
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def _write_histogram_array(group: zarr.Group, name: str, values: np.ndarray) -> None:
+    data = np.asarray(values)
+    chunks = (max(1, int(data.shape[0])),) if data.ndim == 1 else data.shape
+    group.create_array(name, data=data, chunks=chunks, overwrite=True)
+
+
+def _persist_swim_bout_histograms(
+    run_group: zarr.Group,
+    *,
+    datasets: Dict[str, Optional[np.ndarray]],
+    speed_level: str,
+    bin_count: int = SWIM_BOUT_HISTOGRAM_BIN_COUNT,
+) -> str:
+    """Persist the exact histogram rows used by the canonical dashboard."""
+
+    bouts = datasets["bouts"]
+    metric_fields = (
+        ("duration_s", "s", _first_existing_field(bouts, ("duration_s",))),
+        (
+            "bout_distance",
+            "mm" if _first_existing_field(bouts, ("path_length_mm", "distance")) else "px",
+            _first_existing_field(bouts, ("path_length_mm", "distance", "path_length_px", "distance_px")),
+        ),
+        (
+            "mean_speed",
+            "mm/s" if _first_existing_field(bouts, ("mean_speed_mm_s", "mean_speed")) else "px/s",
+            _first_existing_field(bouts, ("mean_speed_mm_s", "mean_speed", "mean_speed_px_s")),
+        ),
+    )
+    parent = run_group.require_group("report_tables").require_group("swim_bout_summary")
+    level_group = parent.require_group(str(speed_level))
+    histograms = level_group.require_group("histograms")
+    written_metrics: list[str] = []
+    for metric_id, units, field in metric_fields:
+        metric_group = histograms.require_group(metric_id)
+        values = _finite_field_values(bouts, field)
+        if values.size:
+            counts, edges = np.histogram(values, bins=int(bin_count))
+        else:
+            edges = np.linspace(0.0, 1.0, int(bin_count) + 1, dtype=np.float64)
+            counts = np.zeros(int(bin_count), dtype=np.int64)
+        fractions = (
+            counts.astype(np.float64) / float(np.sum(counts))
+            if int(np.sum(counts)) > 0
+            else np.zeros(counts.shape, dtype=np.float64)
+        )
+        _write_histogram_array(metric_group, "bin_left", edges[:-1].astype(np.float64))
+        _write_histogram_array(metric_group, "bin_right", edges[1:].astype(np.float64))
+        _write_histogram_array(
+            metric_group,
+            "bin_center",
+            ((edges[:-1] + edges[1:]) / 2.0).astype(np.float64),
+        )
+        _write_histogram_array(metric_group, "count", counts.astype(np.int64))
+        _write_histogram_array(metric_group, "fraction", fractions.astype(np.float64))
+        metric_group.attrs.update(
+            {
+                "schema_id": SWIM_BOUT_HISTOGRAM_SCHEMA_ID,
+                "metric_id": metric_id,
+                "source_field": field,
+                "units": units,
+                "bin_policy": "recording_finite_range_equal_width",
+                "bin_count": int(bin_count),
+                "finite_sample_count": int(values.size),
+            }
+        )
+        written_metrics.append(metric_id)
+    level_group.attrs.update(
+        {
+            "schema_id": SWIM_BOUT_HISTOGRAM_SCHEMA_ID,
+            "schema_version": 1,
+            "speed_level": str(speed_level),
+            "metrics": written_metrics,
+        }
+    )
+    return f"report_tables/swim_bout_summary/{speed_level}"
+
+
+def write_swim_bout_visualization_artifact(
+    *,
+    run_group: zarr.Group,
+    run_name: str,
+    attrs: Dict[str, Any],
+    datasets: Dict[str, Optional[np.ndarray]],
+    speed_level: str,
+    title: Optional[str] = None,
+    artifact_dpi: int = 150,
+) -> str:
+    """Write the canonical swim-bout snapshot and persisted histogram tables."""
+
+    histogram_path = _persist_swim_bout_histograms(
+        run_group,
+        datasets=datasets,
+        speed_level=speed_level,
+    )
+    figure = create_swim_bout_dashboard(attrs, datasets, title=title)
+    png_bytes = _figure_png_bytes(figure, dpi=artifact_dpi)
+    plt.close(figure)
+    source_run_path = f"analysis/swim_bout_runs/{run_name}"
+    source_paths = {
+        "run": source_run_path,
+        "signal": str(attrs.get("source_swim_bout_path") or source_run_path),
+        "histograms": f"{source_run_path}/{histogram_path}",
+    }
+    source_runs = {
+        "swim_bout": run_name,
+        "track_kinematics": attrs.get("source_track_kinematics_run"),
+        "track_id": attrs.get("track_id"),
+    }
+    parameters = {
+        "speed_level": str(speed_level),
+        "artifact_dpi": int(artifact_dpi),
+        "histogram_bin_count": SWIM_BOUT_HISTOGRAM_BIN_COUNT,
+        "histogram_bin_policy": "recording_finite_range_equal_width",
+    }
+    signature = _artifact_signature(
+        {
+            "schema_id": SWIM_BOUT_SUMMARY_PLOT_SCHEMA_ID,
+            "visualization_contract_id": SWIM_BOUT_SUMMARY_VISUALIZATION_CONTRACT_ID,
+            "renderer": SWIM_BOUT_SUMMARY_RENDERER,
+            "renderer_version": SWIM_BOUT_SUMMARY_RENDERER_VERSION,
+            "run_name": run_name,
+            "source_paths": source_paths,
+            "source_runs": source_runs,
+            "parameters": parameters,
+        }
+    )
+    write_png_visualization_artifact(
+        run_group,
+        SWIM_BOUT_SUMMARY_PNG_ARTIFACT_NAME,
+        png_bytes,
+        description="Stimulus-independent swim-bout summary",
+        created_by="fisheye.analysis.swim_bout_visualization",
+        visualization_contract_id=SWIM_BOUT_SUMMARY_VISUALIZATION_CONTRACT_ID,
+        renderer=SWIM_BOUT_SUMMARY_RENDERER,
+        renderer_version=SWIM_BOUT_SUMMARY_RENDERER_VERSION,
+        artifact_signature=signature,
+        source_paths=source_paths,
+        source_runs=source_runs,
+        parameters=parameters,
+        extra_attrs={
+            "plot_schema_id": SWIM_BOUT_SUMMARY_PLOT_SCHEMA_ID,
+            "run_name": run_name,
+            "speed_level": str(speed_level),
+        },
+    )
+    return f"visualizations/{SWIM_BOUT_SUMMARY_PNG_ARTIFACT_NAME}"
+
+
+def _resolve_run_group_for_artifact_write(
+    zarr_path: Path,
+    attrs: Dict[str, Any],
+) -> tuple[zarr.Group, str]:
+    root = open_zarr_root(zarr_path, mode="a")
+    run_name = str(attrs.get("source_swim_bout_run") or "").strip() or None
+    run_group, resolved = resolve_zarr_run(
+        root,
+        "analysis/swim_bout_runs",
+        run_name=run_name,
+        fallback_to_latest=True,
+        fallback_to_sorted=None,
+        latest_aliases=("latest",),
+        run_label="Swim-bout run",
+    )
+    return run_group, resolved
 
 
 def _format_provenance_text(attrs: Dict[str, Any]) -> str:
@@ -503,6 +699,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Suppress console messages.",
     )
+    parser.add_argument(
+        "--write-zarr-artifacts",
+        action="store_true",
+        help=(
+            "Persist the canonical contracted dashboard and histogram tables under "
+            "the selected swim-bout run."
+        ),
+    )
+    parser.add_argument(
+        "--artifact-dpi",
+        type=int,
+        default=150,
+        help="DPI for the run-local PNG artifact (default: 150).",
+    )
     return parser
 
 
@@ -513,6 +723,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     # First load to check if hierarchical
     attrs_initial, _ = _load_swim_bout_run(args.zarr_path, args.run, speed_level=args.speed_level)
     is_hierarchical = attrs_initial.get("is_hierarchical", False)
+    canonical_artifact_level = _display_speed_level(
+        str(attrs_initial.get("speed_level") or args.speed_level)
+    )
 
     if is_hierarchical:
         # Generate a plot for each signal level available in this run.
@@ -552,6 +765,23 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             if not args.quiet:
                 print(f"  Saved to {output_path}")
 
+            if args.write_zarr_artifacts and level == canonical_artifact_level:
+                run_group, resolved_run = _resolve_run_group_for_artifact_write(
+                    args.zarr_path,
+                    attrs,
+                )
+                artifact_path = write_swim_bout_visualization_artifact(
+                    run_group=run_group,
+                    run_name=resolved_run,
+                    attrs=attrs,
+                    datasets=datasets,
+                    speed_level=level,
+                    title=title,
+                    artifact_dpi=int(args.artifact_dpi),
+                )
+                if not args.quiet:
+                    print(f"  Wrote Zarr artifact to {artifact_path}")
+
         if not args.no_show:
             plt.show()
     else:
@@ -579,6 +809,23 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         _save_figure_with_metadata(fig, output_path, metadata)
         if not args.quiet:
             print(f"Saved dashboard to {output_path}")
+
+        if args.write_zarr_artifacts:
+            run_group, resolved_run = _resolve_run_group_for_artifact_write(
+                args.zarr_path,
+                attrs,
+            )
+            artifact_path = write_swim_bout_visualization_artifact(
+                run_group=run_group,
+                run_name=resolved_run,
+                attrs=attrs,
+                datasets=datasets,
+                speed_level=str(args.speed_level),
+                title=args.title,
+                artifact_dpi=int(args.artifact_dpi),
+            )
+            if not args.quiet:
+                print(f"Wrote Zarr artifact to {artifact_path}")
 
         if not args.no_show:
             plt.show()

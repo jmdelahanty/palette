@@ -17,6 +17,7 @@ from fisheye.analysis.chaser_escape_freeze import (
     EscapeFreezeCanaryResult,
     _assert_chaser_trace_moves,
     _classify_escape_attempt_by_path,
+    _controller_trial_segments,
     _contiguous_true_segments,
     _metric_dtype,
     _select_trial_trigger,
@@ -81,6 +82,26 @@ def test_contiguous_true_segments() -> None:
     assert _contiguous_true_segments(np.asarray([False, True, True, False, True])) == [(1, 2), (4, 4)]
     assert _contiguous_true_segments(np.asarray([False, False])) == []
     assert _contiguous_true_segments(np.asarray([True, True])) == [(0, 1)]
+
+
+def test_controller_trial_segments_bridge_alignment_gaps_with_same_logged_id() -> None:
+    active = np.asarray([False, True, True, False, True, False, True, True, False])
+    trial_id = np.asarray([0, 7, 7, 0, 7, 0, 8, 8, 0])
+
+    segments, source = _controller_trial_segments(active, trial_id)
+
+    assert segments == [(1, 4, 7), (6, 7, 8)]
+    assert source == "chase_trial_id"
+
+
+def test_controller_trial_segments_fall_back_when_logged_ids_are_unavailable() -> None:
+    active = np.asarray([False, True, True, False, True])
+    trial_id = np.zeros(active.shape, dtype=np.int64)
+
+    segments, source = _controller_trial_segments(active, trial_id)
+
+    assert segments == [(1, 2, 1), (4, 4, 2)]
+    assert source == "contiguous_chase_sequence_active_fallback"
 
 
 def test_select_trial_trigger_labels_already_inside_radius() -> None:

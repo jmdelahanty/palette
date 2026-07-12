@@ -7618,3 +7618,330 @@ class RegistryMigrationMixin:
             WHERE _rn = 1;
             """
         )
+
+    def _migration_060_recording_chaser_metadata_registry(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recording_chasers (
+                dataset_id TEXT NOT NULL,
+                recording_id TEXT,
+                stimulus_run_id TEXT NOT NULL,
+                chaser_index INTEGER NOT NULL,
+                behavior_class_id INTEGER NOT NULL,
+                behavior_class TEXT NOT NULL,
+                enable_chase INTEGER NOT NULL,
+                enable_random_movement INTEGER NOT NULL,
+                behavior_mode INTEGER,
+                raw_color_rgba_json TEXT,
+                start_position_preset TEXT,
+                end_position_preset TEXT,
+                protocol_name TEXT,
+                source_path TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_metadata_sha256 TEXT NOT NULL,
+                source_zarr_path TEXT NOT NULL,
+                extracted_utc TEXT NOT NULL,
+                PRIMARY KEY (dataset_id, stimulus_run_id, chaser_index),
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE,
+                CHECK(behavior_class IN ('unknown', 'aggressive', 'random_non_chasing', 'inert')),
+                CHECK(enable_chase IN (0, 1)),
+                CHECK(enable_random_movement IN (0, 1))
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recording_chasers_recording_run
+            ON recording_chasers(recording_id, stimulus_run_id, chaser_index);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recording_chasers_behavior
+            ON recording_chasers(behavior_class, recording_id, stimulus_run_id);
+            """
+        )
+        cur.execute("DROP VIEW IF EXISTS recording_chaser_runs;")
+        cur.execute(
+            """
+            CREATE VIEW recording_chaser_runs AS
+            SELECT
+                dataset_id,
+                recording_id,
+                stimulus_run_id,
+                protocol_name,
+                COUNT(*) AS chaser_count,
+                SUM(CASE WHEN behavior_class = 'aggressive' THEN 1 ELSE 0 END) AS aggressive_count,
+                SUM(CASE WHEN behavior_class = 'random_non_chasing' THEN 1 ELSE 0 END) AS random_non_chasing_count,
+                SUM(CASE WHEN behavior_class = 'inert' THEN 1 ELSE 0 END) AS inert_count,
+                SUM(CASE WHEN behavior_class = 'unknown' THEN 1 ELSE 0 END) AS unknown_count,
+                MIN(extracted_utc) AS extracted_utc
+            FROM recording_chasers
+            GROUP BY dataset_id, recording_id, stimulus_run_id, protocol_name;
+            """
+        )
+
+    def _migration_061_stimulus_protocol_registry(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stimulus_protocols (
+                protocol_hash TEXT PRIMARY KEY,
+                protocol_name TEXT,
+                step_count INTEGER NOT NULL,
+                protocol_json TEXT NOT NULL,
+                definition_source TEXT NOT NULL,
+                extracted_utc TEXT NOT NULL,
+                CHECK(step_count >= 0)
+            );
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_stimulus_protocols_name
+            ON stimulus_protocols(protocol_name, protocol_hash);
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stimulus_protocol_steps (
+                protocol_hash TEXT NOT NULL,
+                step_index INTEGER NOT NULL,
+                step_name TEXT,
+                stimulus_mode TEXT NOT NULL,
+                duration_s REAL,
+                parameters_json TEXT,
+                step_definition_json TEXT NOT NULL,
+                PRIMARY KEY (protocol_hash, step_index),
+                FOREIGN KEY(protocol_hash) REFERENCES stimulus_protocols(protocol_hash) ON DELETE CASCADE,
+                CHECK(step_index >= 0),
+                CHECK(duration_s IS NULL OR duration_s >= 0)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_stimulus_protocol_steps_mode
+            ON stimulus_protocol_steps(stimulus_mode, protocol_hash, step_index);
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recording_stimulus_runs (
+                dataset_id TEXT NOT NULL,
+                recording_id TEXT,
+                stimulus_run_id TEXT NOT NULL,
+                protocol_hash TEXT NOT NULL,
+                protocol_name TEXT,
+                is_latest INTEGER NOT NULL,
+                step_count INTEGER NOT NULL,
+                source_path TEXT NOT NULL,
+                source_metadata_sha256 TEXT NOT NULL,
+                source_zarr_path TEXT NOT NULL,
+                extracted_utc TEXT NOT NULL,
+                PRIMARY KEY (dataset_id, stimulus_run_id),
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE,
+                FOREIGN KEY(protocol_hash) REFERENCES stimulus_protocols(protocol_hash),
+                CHECK(is_latest IN (0, 1)),
+                CHECK(step_count >= 0)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recording_stimulus_runs_recording
+            ON recording_stimulus_runs(recording_id, is_latest, stimulus_run_id);
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recording_stimulus_steps (
+                dataset_id TEXT NOT NULL,
+                stimulus_run_id TEXT NOT NULL,
+                step_index INTEGER NOT NULL,
+                step_name TEXT,
+                stimulus_mode TEXT NOT NULL,
+                start_camera_frame INTEGER,
+                end_camera_frame INTEGER,
+                duration_s REAL,
+                step_attrs_json TEXT NOT NULL,
+                PRIMARY KEY (dataset_id, stimulus_run_id, step_index),
+                FOREIGN KEY(dataset_id, stimulus_run_id)
+                    REFERENCES recording_stimulus_runs(dataset_id, stimulus_run_id)
+                    ON DELETE CASCADE,
+                CHECK(step_index >= 0),
+                CHECK(duration_s IS NULL OR duration_s >= 0)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recording_stimulus_steps_mode
+            ON recording_stimulus_steps(stimulus_mode, dataset_id, stimulus_run_id);
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recording_stimulus_modes (
+                dataset_id TEXT NOT NULL,
+                stimulus_run_id TEXT NOT NULL,
+                stimulus_mode TEXT NOT NULL,
+                step_count INTEGER NOT NULL,
+                total_duration_s REAL,
+                PRIMARY KEY (dataset_id, stimulus_run_id, stimulus_mode),
+                FOREIGN KEY(dataset_id, stimulus_run_id)
+                    REFERENCES recording_stimulus_runs(dataset_id, stimulus_run_id)
+                    ON DELETE CASCADE,
+                CHECK(step_count > 0),
+                CHECK(total_duration_s IS NULL OR total_duration_s >= 0)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recording_stimulus_modes_mode
+            ON recording_stimulus_modes(stimulus_mode, dataset_id, stimulus_run_id);
+            """
+        )
+        cur.execute("DROP VIEW IF EXISTS stimulus_protocol_mode_counts;")
+        cur.execute(
+            """
+            CREATE VIEW stimulus_protocol_mode_counts AS
+            SELECT
+                protocol_hash,
+                stimulus_mode,
+                COUNT(*) AS step_count,
+                SUM(duration_s) AS total_duration_s
+            FROM stimulus_protocol_steps
+            GROUP BY protocol_hash, stimulus_mode;
+            """
+        )
+        cur.execute("DROP VIEW IF EXISTS recording_stimulus_mode_counts;")
+        cur.execute(
+            """
+            CREATE VIEW recording_stimulus_mode_counts AS
+            SELECT
+                rsr.dataset_id,
+                rsr.recording_id,
+                rsr.stimulus_run_id,
+                rsr.protocol_hash,
+                rsr.protocol_name,
+                rsr.is_latest,
+                rsm.stimulus_mode,
+                rsm.step_count,
+                rsm.total_duration_s,
+                rsr.source_zarr_path,
+                rsr.extracted_utc
+            FROM recording_stimulus_runs rsr
+            JOIN recording_stimulus_modes rsm
+              ON rsm.dataset_id = rsr.dataset_id
+             AND rsm.stimulus_run_id = rsr.stimulus_run_id;
+            """
+        )
+
+    def _migration_062_analytics_report_registry(self) -> None:
+        self._ensure_analytics_manifest_tables()
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analytics_reports (
+                export_run_id TEXT NOT NULL,
+                report_id TEXT NOT NULL,
+                report_manifest_path TEXT NOT NULL,
+                report_manifest_sha256 TEXT NOT NULL,
+                output_root TEXT NOT NULL,
+                schema_id TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                materialization_policy TEXT NOT NULL,
+                source_backends_json TEXT NOT NULL,
+                source_tables_json TEXT NOT NULL,
+                visualization_count INTEGER NOT NULL,
+                artifact_count INTEGER NOT NULL,
+                nonready_count INTEGER NOT NULL,
+                created_at_utc TEXT,
+                indexed_utc TEXT NOT NULL,
+                status TEXT NOT NULL,
+                metadata_json TEXT,
+                PRIMARY KEY (export_run_id, report_id),
+                UNIQUE (export_run_id, report_manifest_sha256),
+                FOREIGN KEY(export_run_id) REFERENCES analytics_exports(export_run_id) ON DELETE CASCADE,
+                CHECK(materialization_policy IN ('reference', 'copy')),
+                CHECK(visualization_count >= 0),
+                CHECK(artifact_count >= 0),
+                CHECK(nonready_count >= 0)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_analytics_reports_status
+            ON analytics_reports(status, export_run_id, created_at_utc, report_id);
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analytics_report_visualizations (
+                export_run_id TEXT NOT NULL,
+                report_id TEXT NOT NULL,
+                visualization_id TEXT NOT NULL,
+                provider_id TEXT,
+                label TEXT,
+                visualization_contract_id TEXT,
+                renderer TEXT,
+                renderer_version TEXT,
+                source_backends_json TEXT NOT NULL,
+                artifact_count INTEGER NOT NULL,
+                nonready_count INTEGER NOT NULL,
+                materialized_paths_json TEXT NOT NULL,
+                indexed_utc TEXT NOT NULL,
+                PRIMARY KEY (export_run_id, report_id, visualization_id),
+                FOREIGN KEY(export_run_id, report_id)
+                    REFERENCES analytics_reports(export_run_id, report_id)
+                    ON DELETE CASCADE,
+                CHECK(artifact_count >= 0),
+                CHECK(nonready_count >= 0)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_analytics_report_visualizations_id
+            ON analytics_report_visualizations(visualization_id, export_run_id, report_id);
+            """
+        )
+        cur.execute("DROP VIEW IF EXISTS analytics_report_overview;")
+        cur.execute(
+            """
+            CREATE VIEW analytics_report_overview AS
+            SELECT
+                ar.export_run_id,
+                ar.report_id,
+                ar.status,
+                ae.collection_id,
+                ae.collection_manifest_sha256,
+                ac.collection_name,
+                ae.export_manifest_path,
+                ae.output_root AS analytics_output_root,
+                ar.report_manifest_path,
+                ar.report_manifest_sha256,
+                ar.output_root AS report_output_root,
+                ar.schema_id,
+                ar.schema_version,
+                ar.materialization_policy,
+                ar.source_backends_json,
+                ar.source_tables_json,
+                ar.visualization_count,
+                ar.artifact_count,
+                ar.nonready_count,
+                ar.created_at_utc,
+                ar.indexed_utc,
+                ar.metadata_json
+            FROM analytics_reports ar
+            JOIN analytics_exports ae ON ae.export_run_id = ar.export_run_id
+            LEFT JOIN analytics_collections ac
+              ON ac.collection_id = ae.collection_id
+             AND ac.manifest_sha256 = ae.collection_manifest_sha256;
+            """
+        )

@@ -279,12 +279,18 @@ def _visualization_artifact_entry(
         "media_type",
         "mime",
         "description",
+        "visualization_contract_id",
         "renderer",
+        "renderer_version",
         "snapshot_artifact",
+        "artifact_signature",
         "content_sha256",
         "byte_length",
         "created_at_utc",
         "created_by",
+        "source_paths",
+        "source_runs",
+        "parameters",
     ):
         value = attrs.get(key)
         if value is not None:

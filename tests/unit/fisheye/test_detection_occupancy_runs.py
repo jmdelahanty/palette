@@ -7,9 +7,12 @@ import zarr
 
 from fisheye.analysis.detection_occupancy_runs import (
     IMAGE_QUADRANTS_ZONE_SET_ID,
+    SESSION_VISUALIZATION_CONTRACT_ID,
     OccupancyWindow,
     build_detection_occupancy_result,
+    build_session_occupancy_result,
     write_detection_occupancy_run,
+    write_session_occupancy_run,
 )
 
 
@@ -107,3 +110,38 @@ def test_detection_occupancy_writes_image_quadrant_spatial_summary(tmp_path: Pat
     np.testing.assert_array_equal(stored_summary["frame_count"][:], quadrants.frame_count)
     np.testing.assert_array_equal(stored_summary["missing_frame_count"][:], quadrants.missing_frame_count)
     assert zone_group["zone_spec"]["bounds_xyxy"].shape == (4, 4)
+
+
+def test_session_occupancy_does_not_require_stimulus_epochs(tmp_path: Path) -> None:
+    zarr_path = _make_detection_archive(tmp_path)
+
+    result = build_session_occupancy_result(
+        zarr_path,
+        run_name="session_1",
+        detection_path="refined_detect_runs/refined_1/instances",
+        bin_size=50,
+        smooth_sigma=0.0,
+    )
+
+    assert [(window.label, window.start_frame, window.end_frame) for window in result.windows] == [
+        ("full_session", 0, 7)
+    ]
+    assert result.source_stimulus_epoch_path == "recording/full_session"
+
+    run_path = write_session_occupancy_run(
+        zarr_path,
+        result,
+        overwrite=True,
+        write_png=True,
+    )
+
+    assert run_path == "analysis/session_occupancy_runs/session_1"
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    run = root[run_path]
+    assert run.attrs["schema_id"] == "palette.session_occupancy.v1"
+    assert run.attrs["row_axis"] == "session_segments"
+    assert run.attrs["source_segment_kind"] == "full_session"
+    assert "source_stimulus_epoch_run" not in run.attrs
+    artifact = run["visualizations/session_occupancy_overview_png"]
+    assert artifact.attrs["visualization_contract_id"] == SESSION_VISUALIZATION_CONTRACT_ID
+    assert artifact.attrs["renderer"] == "fisheye.analysis.detection_occupancy_runs"

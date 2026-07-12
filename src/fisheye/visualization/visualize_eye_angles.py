@@ -45,6 +45,8 @@ MAX_TIMELINE_POINTS = 8000
 SCATTER_DECIMATE = 10
 EYE_ANGLE_DASHBOARD_PLOT_SCHEMA_ID = "palette.plot_spec.eye_angle_dashboard.v1"
 EYE_ANGLE_DASHBOARD_RENDERER = "palette-eye-angle-dashboard-v1"
+EYE_ANGLE_DASHBOARD_VISUALIZATION_CONTRACT_ID = "palette.core.eye_angles.summary.v1"
+EYE_ANGLE_DASHBOARD_RENDERER_VERSION = "1"
 EYE_ANGLE_DASHBOARD_SOURCES = (
     "eye_frame",
     "gaze",
@@ -539,6 +541,9 @@ def _write_eye_angle_png_artifact(
     signature = _artifact_signature(
         {
             "schema_id": EYE_ANGLE_DASHBOARD_PLOT_SCHEMA_ID,
+            "visualization_contract_id": EYE_ANGLE_DASHBOARD_VISUALIZATION_CONTRACT_ID,
+            "renderer": EYE_ANGLE_DASHBOARD_RENDERER,
+            "renderer_version": EYE_ANGLE_DASHBOARD_RENDERER_VERSION,
             "run_name": run_name,
             "source_paths": source_paths,
             "source_runs": source_runs,
@@ -581,6 +586,9 @@ def _write_eye_angle_png_artifact(
         png_bytes,
         description=f"Eye angle dashboard PNG ({variant_label})",
         created_by="fisheye.visualization.visualize_eye_angles",
+        visualization_contract_id=EYE_ANGLE_DASHBOARD_VISUALIZATION_CONTRACT_ID,
+        renderer=EYE_ANGLE_DASHBOARD_RENDERER,
+        renderer_version=EYE_ANGLE_DASHBOARD_RENDERER_VERSION,
         artifact_signature=signature,
         created_at_utc=generated_at_utc,
         source_paths=source_paths,
@@ -1505,6 +1513,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Suppress status messages.",
     )
+    parser.add_argument(
+        "--no-filesystem-output",
+        action="store_true",
+        help="Do not write a duplicate filesystem PNG; useful for report artifact refreshes.",
+    )
     return parser
 
 
@@ -1572,9 +1585,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
 
         png_bytes = _png_bytes_with_metadata(fig, metadata, dpi=int(args.artifact_dpi))
-        _save_png_bytes(output_path, png_bytes)
-        if not args.quiet:
-            print(f"Saved dashboard ({angle_source}) to {output_path}")
+        if not args.no_filesystem_output:
+            _save_png_bytes(output_path, png_bytes)
+            if not args.quiet:
+                print(f"Saved dashboard ({angle_source}) to {output_path}")
 
         if args.write_zarr_artifact:
             run_group = _resolve_eye_angle_run_group(

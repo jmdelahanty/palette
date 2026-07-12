@@ -8,8 +8,10 @@ import zarr
 from fisheye.analysis.plot_stimulus_response_omr import (
     OMR_BOUT_TRAJECTORY_INTERACTIVE_ARTIFACT_NAME,
     OMR_BOUT_TRAJECTORY_PNG_ARTIFACT_NAME,
+    OMR_BOUT_TRAJECTORY_VISUALIZATION_CONTRACT_ID,
     OMR_SUMMARY_INTERACTIVE_ARTIFACT_NAME,
     OMR_SUMMARY_PNG_ARTIFACT_NAME,
+    OMR_SUMMARY_VISUALIZATION_CONTRACT_ID,
     STIMULUS_RESPONSE_OMR_PLOT_RENDERER,
     write_omr_summary_visualization,
 )
@@ -218,7 +220,11 @@ def test_write_omr_summary_visualization_writes_png_and_spec() -> None:
     assert np.asarray(png[:], dtype=np.uint8).tobytes().startswith(b"\x89PNG\r\n\x1a\n")
     assert np.asarray(trajectory_png[:], dtype=np.uint8).tobytes().startswith(b"\x89PNG\r\n\x1a\n")
     assert png.attrs["n_omr_steps"] == 2
+    assert png.attrs["visualization_contract_id"] == OMR_SUMMARY_VISUALIZATION_CONTRACT_ID
     assert trajectory_png.attrs["track_id"] == 0
+    assert trajectory_png.attrs["visualization_contract_id"] == (
+        OMR_BOUT_TRAJECTORY_VISUALIZATION_CONTRACT_ID
+    )
     assert spec.attrs["renderer"] == STIMULUS_RESPONSE_OMR_PLOT_RENDERER
     assert spec.attrs["snapshot_artifact"] == OMR_SUMMARY_PNG_ARTIFACT_NAME
     assert trajectory_spec.attrs["snapshot_artifact"] == OMR_BOUT_TRAJECTORY_PNG_ARTIFACT_NAME

@@ -18,6 +18,10 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
+from fisheye.analysis.chaser_behavior import (
+    BEHAVIOR_CLASS_LABELS,
+    resolve_configured_chaser_behaviors,
+)
 from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
 from fisheye.analysis.detection_occupancy_runs import _read_epoch_windows, _resolve_epoch_run
 from fisheye.shared.coordinate_transform import load_calibration_transform, projector_to_camera_px
@@ -47,6 +51,7 @@ from fisheye.visualization.goodcopbadcop_interactive import (
     CHASER_DASHBOARD_RENDERER,
     CHASER_DASHBOARD_SPEC_SCHEMA_ID,
     DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT,
+    DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT,
     build_chaser_protocol_dashboard_spec,
 )
 
@@ -60,6 +65,19 @@ TIMESERIES_PNG_ARTIFACT_NAME = "chaser_distance_timeseries_png"
 EPOCH_MEDIAN_PNG_ARTIFACT_NAME = "chaser_distance_epoch_median_png"
 EPOCH_DISTRIBUTION_PNG_ARTIFACT_NAME = "chaser_distance_epoch_distribution_png"
 PNG_ARTIFACT_NAME = TIMESERIES_PNG_ARTIFACT_NAME
+TIMESERIES_VISUALIZATION_CONTRACT_ID = "palette.stimulus.chaser.distance_trace.v1"
+TIMESERIES_VISUALIZATION_RENDERER = "palette-chaser-distance-timeseries-v1"
+EPOCH_MEDIAN_VISUALIZATION_CONTRACT_ID = (
+    "palette.stimulus.chaser.distance_epoch_median.v1"
+)
+EPOCH_MEDIAN_VISUALIZATION_RENDERER = "palette-chaser-distance-epoch-median-v1"
+EPOCH_DISTRIBUTION_VISUALIZATION_CONTRACT_ID = (
+    "palette.stimulus.chaser.distance_epoch_distribution.v1"
+)
+EPOCH_DISTRIBUTION_VISUALIZATION_RENDERER = (
+    "palette-chaser-distance-epoch-distribution-v1"
+)
+STATIC_VISUALIZATION_RENDERER_VERSION = "1"
 
 
 def _artifact_signature(payload: Mapping[str, Any]) -> str:
@@ -102,6 +120,8 @@ class ChaserDistanceResult:
     coordinate_origin: str
     arena_origin_in_canvas_xy: tuple[float, float]
     chaser_indices: np.ndarray
+    chaser_behavior_class_id: np.ndarray
+    chaser_behavior_labels: tuple[str, ...]
     camera_frame_id: np.ndarray
     stimulus_frame_num: np.ndarray
     timestamp_ns: np.ndarray
@@ -529,6 +549,19 @@ def build_chaser_distance_result(
         stim_to_camera=stim_to_camera,
         total_frames=total_frames,
     )
+    try:
+        protocol_payload = json.loads(str(stim_group.attrs.get("protocol_json") or "{}"))
+        configured_behaviors = resolve_configured_chaser_behaviors(protocol_payload)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        configured_behaviors = ()
+    behavior_by_index = {behavior.chaser_index: behavior for behavior in configured_behaviors}
+    chaser_behavior_class_id = np.asarray(
+        [behavior_by_index.get(int(index)).behavior_class_id if int(index) in behavior_by_index else 0 for index in chaser_indices],
+        dtype=np.int8,
+    )
+    chaser_behavior_labels = tuple(
+        BEHAVIOR_CLASS_LABELS.get(int(class_id), "unknown") for class_id in chaser_behavior_class_id
+    )
 
     if coordinate_frame != "arena_relative_canvas_px":
         raise ValueError(
@@ -603,6 +636,8 @@ def build_chaser_distance_result(
         coordinate_origin=coordinate_origin,
         arena_origin_in_canvas_xy=arena_origin,
         chaser_indices=chaser_indices.astype(np.uint8),
+        chaser_behavior_class_id=chaser_behavior_class_id,
+        chaser_behavior_labels=chaser_behavior_labels,
         camera_frame_id=camera_frame_id,
         stimulus_frame_num=stimulus_frame_num,
         timestamp_ns=timestamp_ns,
@@ -658,6 +693,16 @@ def _write_array(group: zarr.Group, name: str, data: np.ndarray) -> None:
     group.create_array(name, data=arr, chunks=_chunks_for(arr), overwrite=True)
 
 
+def _chaser_display_label(result: ChaserDistanceResult, column_index: int) -> str:
+    chaser_index = int(result.chaser_indices[column_index])
+    behavior = (
+        result.chaser_behavior_labels[column_index]
+        if column_index < len(result.chaser_behavior_labels)
+        else "unknown"
+    )
+    return f"chaser {chaser_index} — {behavior}"
+
+
 def render_chaser_distance_timeseries_png(
     result: ChaserDistanceResult,
     *,
@@ -675,13 +720,13 @@ def render_chaser_distance_timeseries_png(
         end_min = (window.end_frame + 1) / float(result.fps) / 60.0
         ax.axvspan(start_min, end_min, alpha=0.08)
 
-    for c_idx, chaser_index in enumerate(result.chaser_indices.tolist()):
+    for c_idx, _chaser_index in enumerate(result.chaser_indices.tolist()):
         ax.plot(
             time_min[idx],
             result.distance_mm[idx, c_idx],
             linewidth=0.8,
             alpha=0.85,
-            label=f"chaser {int(chaser_index)}",
+            label=_chaser_display_label(result, c_idx),
         )
     ax.set_ylabel("distance (mm)")
     ax.set_xlabel("time (min)")
@@ -701,13 +746,13 @@ def render_chaser_distance_epoch_median_png(result: ChaserDistanceResult, *, dpi
     labels = [_display_epoch_label(w.label) for w in result.windows]
     x = np.arange(len(labels))
     width = 0.8 / max(1, n_chasers)
-    for c_idx, chaser_index in enumerate(result.chaser_indices.tolist()):
+    for c_idx, _chaser_index in enumerate(result.chaser_indices.tolist()):
         offset = (c_idx - (n_chasers - 1) / 2.0) * width
         ax.bar(
             x + offset,
             result.epoch_p50_distance_mm[:, c_idx],
             width=width,
-            label=f"chaser {int(chaser_index)}",
+            label=_chaser_display_label(result, c_idx),
         )
     ax.set_ylabel("median distance (mm)")
     ax.set_xticks(x)
@@ -739,7 +784,7 @@ def render_chaser_distance_epoch_distribution_png(result: ChaserDistanceResult, 
 
     centers = result.histogram_bin_centers_mm.astype(np.float32)
     for w_idx, (ax, label) in enumerate(zip(axes_list, labels)):
-        for c_idx, chaser_index in enumerate(result.chaser_indices.tolist()):
+        for c_idx, _chaser_index in enumerate(result.chaser_indices.tolist()):
             density = result.histogram_density[w_idx, c_idx, :]
             sample_count = int(np.sum(result.histogram_counts[w_idx, c_idx, :]))
             color = colors[c_idx % len(colors)] if colors else f"C{c_idx}"
@@ -750,7 +795,7 @@ def render_chaser_distance_epoch_distribution_png(result: ChaserDistanceResult, 
                 density,
                 color=color,
                 linewidth=1.5,
-                label=f"chaser {int(chaser_index)} n={sample_count:,}",
+                label=f"{_chaser_display_label(result, c_idx)} n={sample_count:,}",
             )
             ax.fill_between(centers, density, color=color, alpha=0.18)
             median = float(result.epoch_p50_distance_mm[w_idx, c_idx])
@@ -785,6 +830,7 @@ def write_chaser_dashboard_spec_artifact(
     source_refs: Mapping[str, Any],
     parameters: Mapping[str, Any],
     summary: Mapping[str, Any],
+    artifact_name: str = DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT,
     overwrite: bool = True,
 ) -> None:
     """Write the interactive dashboard spec for a chaser-distance run."""
@@ -810,7 +856,7 @@ def write_chaser_dashboard_spec_artifact(
     )
     write_interactive_plot_spec_artifact(
         run_group,
-        DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT,
+        artifact_name,
         spec,
         description="Chaser dashboard interactive plot spec.",
         created_by="fisheye.analysis.chaser_distance_runs",
@@ -833,6 +879,7 @@ def write_chaser_dashboard_spec_artifact(
 def write_goodcopbadcop_chaser_dashboard_spec_artifact(*args: Any, **kwargs: Any) -> None:
     """Compatibility wrapper for the original GoodCopBadCop-specific writer name."""
 
+    kwargs.setdefault("artifact_name", DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT)
     write_chaser_dashboard_spec_artifact(*args, **kwargs)
 
 
@@ -865,6 +912,23 @@ def write_chaser_distance_run(
 
         chasers = run.require_group("chasers")
         _write_array(chasers, "chaser_index", result.chaser_indices)
+        _write_array(chasers, "behavior_class_id", result.chaser_behavior_class_id)
+        _write_array(
+            chasers,
+            "behavior_class_label_bytes",
+            _bytes_array(result.chaser_behavior_labels, width=32),
+        )
+        chasers.attrs.update(
+            {
+                "row_axis": "chasers",
+                "behavior_class_vocabulary": {
+                    "0": "unknown",
+                    "1": "aggressive",
+                    "2": "random_non_chasing",
+                    "3": "inert",
+                },
+            }
+        )
 
         positions = run.require_group("positions")
         _write_array(positions, "fish_centroid_img_xy", result.fish_centroid_img_xy)
@@ -1028,6 +1092,18 @@ def write_chaser_distance_run(
                 timeseries_png,
                 description="Offline refined-detection fish centroid distance to each chaser over time.",
                 created_by="fisheye.analysis.chaser_distance_runs",
+                visualization_contract_id=TIMESERIES_VISUALIZATION_CONTRACT_ID,
+                renderer=TIMESERIES_VISUALIZATION_RENDERER,
+                renderer_version=STATIC_VISUALIZATION_RENDERER_VERSION,
+                artifact_signature=_artifact_signature(
+                    {
+                        "schema_id": SCHEMA_ID,
+                        "artifact_name": TIMESERIES_PNG_ARTIFACT_NAME,
+                        "visualization_contract_id": TIMESERIES_VISUALIZATION_CONTRACT_ID,
+                        "source_refs": source_refs,
+                        "parameters": parameters,
+                    }
+                ),
                 role="analysis_overview",
                 source_paths={
                     "detection": result.source_detection_path,
@@ -1049,6 +1125,18 @@ def write_chaser_distance_run(
                 epoch_median_png,
                 description="Epoch-median offline refined-detection fish-to-chaser distance barplot.",
                 created_by="fisheye.analysis.chaser_distance_runs",
+                visualization_contract_id=EPOCH_MEDIAN_VISUALIZATION_CONTRACT_ID,
+                renderer=EPOCH_MEDIAN_VISUALIZATION_RENDERER,
+                renderer_version=STATIC_VISUALIZATION_RENDERER_VERSION,
+                artifact_signature=_artifact_signature(
+                    {
+                        "schema_id": SCHEMA_ID,
+                        "artifact_name": EPOCH_MEDIAN_PNG_ARTIFACT_NAME,
+                        "visualization_contract_id": EPOCH_MEDIAN_VISUALIZATION_CONTRACT_ID,
+                        "source_refs": source_refs,
+                        "parameters": parameters,
+                    }
+                ),
                 role="analysis_summary",
                 source_paths={
                     "detection": result.source_detection_path,
@@ -1070,6 +1158,18 @@ def write_chaser_distance_run(
                 epoch_distribution_png,
                 description="Per-epoch distribution of offline refined-detection fish-to-chaser distances.",
                 created_by="fisheye.analysis.chaser_distance_runs",
+                visualization_contract_id=EPOCH_DISTRIBUTION_VISUALIZATION_CONTRACT_ID,
+                renderer=EPOCH_DISTRIBUTION_VISUALIZATION_RENDERER,
+                renderer_version=STATIC_VISUALIZATION_RENDERER_VERSION,
+                artifact_signature=_artifact_signature(
+                    {
+                        "schema_id": SCHEMA_ID,
+                        "artifact_name": EPOCH_DISTRIBUTION_PNG_ARTIFACT_NAME,
+                        "visualization_contract_id": EPOCH_DISTRIBUTION_VISUALIZATION_CONTRACT_ID,
+                        "source_refs": source_refs,
+                        "parameters": parameters,
+                    }
+                ),
                 role="analysis_distribution",
                 source_paths={
                     "detection": result.source_detection_path,

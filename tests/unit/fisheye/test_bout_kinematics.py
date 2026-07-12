@@ -343,6 +343,13 @@ def test_compute_and_save_bout_kinematics_writes_hierarchical_heading_levels(tmp
     png = visualizations["bout_kinematics_summary_track_0_png"]
     assert bytes(np.asarray(png[:], dtype=np.uint8)[:8]) == b"\x89PNG\r\n\x1a\n"
     assert png.attrs["plot_schema_id"] == "palette.plot_spec.bout_kinematics_summary.v1"
+    assert png.attrs["visualization_contract_id"] == (
+        bout_kinematics_module.BOUT_HEADING_VISUALIZATION_CONTRACT_ID
+    )
+    assert png.attrs["renderer"] == bout_kinematics_module.BOUT_KINEMATICS_PLOT_RENDERER
+    assert png.attrs["renderer_version"] == (
+        bout_kinematics_module.BOUT_KINEMATICS_RENDERER_VERSION
+    )
     assert png.attrs["parameters"]["bins"] == 8
     spec_artifact = visualizations["bout_kinematics_summary_track_0_interactive"]
     assert spec_artifact.attrs["snapshot_artifact"] == "bout_kinematics_summary_track_0_png"
@@ -353,6 +360,9 @@ def test_compute_and_save_bout_kinematics_writes_hierarchical_heading_levels(tmp
     movement_png = visualizations["bout_movement_summary_track_0_png"]
     assert bytes(np.asarray(movement_png[:], dtype=np.uint8)[:8]) == b"\x89PNG\r\n\x1a\n"
     assert movement_png.attrs["plot_schema_id"] == "palette.plot_spec.bout_movement_summary.v1"
+    assert movement_png.attrs["visualization_contract_id"] == (
+        bout_kinematics_module.BOUT_MOVEMENT_VISUALIZATION_CONTRACT_ID
+    )
     assert movement_png.attrs["parameters"]["physical_active"]["measurement_signal_level"] == "speed_filtered"
     movement_spec = visualizations["bout_movement_summary_track_0_interactive"]
     assert movement_spec.attrs["snapshot_artifact"] == "bout_movement_summary_track_0_png"
@@ -607,6 +617,9 @@ def test_compute_and_save_bout_kinematics_writes_optional_eye_gaze_metrics(
     png = visualizations["bout_eye_gaze_summary_track_0_png"]
     assert bytes(np.asarray(png[:], dtype=np.uint8)[:8]) == b"\x89PNG\r\n\x1a\n"
     assert png.attrs["plot_schema_id"] == "palette.plot_spec.bout_eye_gaze_summary.v1"
+    assert png.attrs["visualization_contract_id"] == (
+        bout_kinematics_module.BOUT_EYE_GAZE_VISUALIZATION_CONTRACT_ID
+    )
     assert png.attrs["source_runs"]["eye_angle"] == "eye_1"
     spec_artifact = visualizations["bout_eye_gaze_summary_track_0_interactive"]
     assert spec_artifact.attrs["snapshot_artifact"] == "bout_eye_gaze_summary_track_0_png"

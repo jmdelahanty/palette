@@ -17,6 +17,7 @@ import pandas as pd
 import polars as pl
 import zarr
 
+from fisheye.analysis.chaser_behavior import canonical_behavior_label
 from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
 from fisheye.shared.coordinate_transform import load_calibration_transform, projector_to_camera_px
 from fisheye.shared.json_safety import decode_null_terminated_text
@@ -1070,7 +1071,12 @@ def _load_cra_objects_dataframe(component: zarr.Group) -> pl.DataFrame:
         return pl.DataFrame()
     object_index = np.asarray(group["object_index"][:], dtype=np.int64) if "object_index" in group else np.asarray([], dtype=np.int64)
     n = int(object_index.shape[0])
-    roles = _decode_text_column(np.asarray(group["object_role_label_bytes"][:]))[:n] if "object_role_label_bytes" in group else []
+    if "behavior_class_label_bytes" in group:
+        roles = _decode_text_column(np.asarray(group["behavior_class_label_bytes"][:]))[:n]
+    elif "object_role_label_bytes" in group:
+        roles = _decode_text_column(np.asarray(group["object_role_label_bytes"][:]))[:n]
+    else:
+        roles = []
     colors = _decode_text_column(np.asarray(group["raw_color_hex_bytes"][:]))[:n] if "raw_color_hex_bytes" in group else []
     start_presets = (
         _decode_text_column(np.asarray(group["start_position_preset_bytes"][:]))[:n]
@@ -1099,7 +1105,8 @@ def _load_cra_objects_dataframe(component: zarr.Group) -> pl.DataFrame:
             {
                 "object_index": int(object_index[idx]),
                 "object_axis_index": int(idx),
-                "object_role": roles[idx] if idx < len(roles) else "",
+                "object_role": canonical_behavior_label(roles[idx]) if idx < len(roles) else "unknown",
+                "behavior_class": canonical_behavior_label(roles[idx]) if idx < len(roles) else "unknown",
                 "raw_color_hex": colors[idx] if idx < len(colors) else "",
                 "enable_chase": bool(enable_chase[idx]) if idx < enable_chase.shape[0] else False,
                 "behavior_mode": int(behavior_mode[idx]) if idx < behavior_mode.shape[0] else -1,

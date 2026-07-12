@@ -529,6 +529,10 @@ def test_eye_angle_dashboard_zarr_artifact_manifest(tmp_path) -> None:
     assert artifact.attrs["artifact_schema_id"] == PNG_ARTIFACT_SCHEMA_ID
     assert artifact.attrs["plot_schema_id"] == EYE_ANGLE_DASHBOARD_PLOT_SCHEMA_ID
     assert artifact.attrs["renderer"] == EYE_ANGLE_DASHBOARD_RENDERER
+    assert artifact.attrs["visualization_contract_id"] == (
+        "palette.core.eye_angles.summary.v1"
+    )
+    assert artifact.attrs["renderer_version"] == "1"
     assert artifact.attrs["parameters"]["angle_source"] == "ellipse"
     assert artifact.attrs["parameters"]["artifact_dpi"] == 150
     assert artifact.attrs["source_paths"]["angles_roi"].endswith("/angles/roi")

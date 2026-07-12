@@ -24,7 +24,9 @@ from .query import (
     query_cra_summary,
     query_egocentric_histogram,
     query_egocentric_summary,
+    query_epoch_bout_histogram,
     query_epoch_center_distance_histogram,
+    query_epoch_inter_bout_interval_histogram,
     query_epoch_speed_summary,
     query_export_summary,
     query_group_statistics,
@@ -243,6 +245,38 @@ def build_handler(*, context: ViewerContext, static_dir: Path) -> type[BaseHTTPR
                         "center_distance_histogram": query_epoch_center_distance_histogram(
                             context,
                             window_label=window_label,
+                        ),
+                    }
+                )
+                return True
+
+            if path == "/api/goodcopbadcop/epoch-bout-histogram":
+                metric = _param_first(query_params, "metric") or "bout_path_length_mm"
+                window_label = _param_first(query_params, "window_label")
+                self._write_json(
+                    {
+                        "ok": True,
+                        "epoch_bout_histogram": query_epoch_bout_histogram(
+                            context,
+                            metric=metric,
+                            window_label=window_label,
+                        ),
+                    }
+                )
+                return True
+
+            if path == "/api/goodcopbadcop/epoch-inter-bout-interval-histogram":
+                metric = _param_first(query_params, "metric") or "inter_bout_interval_s"
+                window_label = _param_first(query_params, "window_label")
+                self._write_json(
+                    {
+                        "ok": True,
+                        "epoch_inter_bout_interval_histogram": (
+                            query_epoch_inter_bout_interval_histogram(
+                                context,
+                                metric=metric,
+                                window_label=window_label,
+                            )
                         ),
                     }
                 )

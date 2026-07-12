@@ -149,6 +149,8 @@ def _make_chaser_result(zarr_path: Path) -> ChaserDistanceResult:
         coordinate_origin="top_left_of_active_arena",
         arena_origin_in_canvas_xy=(0.0, 0.0),
         chaser_indices=chasers,
+        chaser_behavior_class_id=np.asarray([1, 3], dtype=np.int8),
+        chaser_behavior_labels=("aggressive", "inert"),
         camera_frame_id=camera_frame_id,
         stimulus_frame_num=camera_frame_id,
         timestamp_ns=np.arange(n, dtype=np.int64),
@@ -186,7 +188,8 @@ def _decode_first(array: zarr.Array) -> str:
 def test_resolve_object_roles_from_protocol_payload_maps_protocol_metadata() -> None:
     roles = resolve_object_roles_from_protocol_payload(json.loads(_make_protocol_json()))
 
-    assert [(role.object_index, role.object_role) for role in roles] == [(0, "aggressive"), (1, "benign")]
+    assert [(role.object_index, role.object_role) for role in roles] == [(0, "aggressive"), (1, "inert")]
+    assert [role.behavior_class_id for role in roles] == [1, 3]
     assert roles[0].raw_color_hex == "#ff0000"
     assert roles[1].raw_color_hex == "#0000ff"
     assert roles[0].start_position_preset == "top_left"
@@ -230,7 +233,8 @@ def test_build_and_write_cra_primary_endpoint_component(tmp_path: Path) -> None:
     assert math.isclose(result.summary["occ_pre_agg"], 1.0)
     assert math.isclose(result.summary["occ_post_agg"], 0.0)
     assert math.isclose(result.summary["delta_occ_agg"], -1.0)
-    assert math.isclose(result.summary["occ_post_benign"], 1.0)
+    assert math.isclose(result.summary["occ_post_inert"], 1.0)
+    assert result.summary["occ_post_benign"] == result.summary["occ_post_inert"]
     assert result.summary["pre_aggressive_quadrant"] == "top_left"
     assert result.summary["post_aggressive_quadrant"] == "bottom_right"
     assert result.phases[1].effective_start_frame == 7
@@ -241,6 +245,8 @@ def test_build_and_write_cra_primary_endpoint_component(tmp_path: Path) -> None:
 
     root = zarr.open_group(str(zarr_path), mode="r")
     run = root["analysis/chaser_distance_runs/chaser_distance_1"]
+    assert _decode_first(run["chasers"]["behavior_class_label_bytes"]) == "aggressive"
+    assert np.asarray(run["chasers"]["behavior_class_id"][:]).tolist() == [1, 3]
     assert run[COMPONENT_PARENT_NAME].attrs["latest_complete"] == DEFAULT_COMPONENT_NAME
     component = root[component_path]
     assert component.attrs["schema_id"] == SCHEMA_ID
@@ -248,7 +254,7 @@ def test_build_and_write_cra_primary_endpoint_component(tmp_path: Path) -> None:
     assert component.attrs["summary"]["delta_occ_agg"] == -1.0
     assert component["object_phase"]["object_quadrant_code"][:].tolist() == [[0, 1], [3, 2]]
     assert component["phases"]["effective_start_frame"][:].tolist() == [0, 7]
-    assert _decode_first(component["objects"]["object_role_label_bytes"]) == "aggressive"
+    assert _decode_first(component["objects"]["behavior_class_label_bytes"]) == "aggressive"
     assert float(component["summary"]["delta_occ_agg"][0]) == -1.0
 
     component_visualizations = component["visualizations"]

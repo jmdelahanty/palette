@@ -18,6 +18,8 @@ from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.type_conversions import normalize_attr as _shared_decode_attr
 from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 from .extractors.acquisition_video_streams import _extract_acquisition_video_stream_rows
+from .extractors.chaser_metadata import extract_recording_chaser_metadata
+from .extractors.stimulus_metadata import extract_stimulus_metadata
 from .extractors.crop import _extract_crop_quality_rows
 from .extractors.detect_performance import (
     _extract_detect_performance_rows,
@@ -2232,6 +2234,12 @@ class Registry(RegistryMigrationMixin):
             """
         )
 
+    def _ensure_analytics_report_tables(self) -> None:
+        """Create the analytics-report child index on older ad-hoc registries."""
+
+        if not self._table_exists("analytics_reports"):
+            self._migration_062_analytics_report_registry()
+
     def _ensure_training_model_discovery_columns(self) -> None:
         self._ensure_columns(
             "training_models",
@@ -2832,6 +2840,136 @@ class Registry(RegistryMigrationMixin):
                         _as_int(row_counts.get(table_name)),
                         len(files),
                         _json_dumps(files),
+                        indexed_utc,
+                    ),
+                )
+
+    def upsert_analytics_report(
+        self,
+        *,
+        export_run_id: str,
+        report_id: str,
+        report_manifest_path: Path,
+        report_manifest_sha256: str,
+        output_root: Path,
+        schema_id: str,
+        schema_version: int,
+        materialization_policy: str,
+        source_backends: Sequence[str],
+        source_tables: Sequence[str],
+        visualization_summaries: Sequence[Mapping[str, Any]],
+        artifact_count: int,
+        nonready_count: int,
+        created_at_utc: Optional[str] = None,
+        status: str = "active",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Index one immutable report manifest without expanding per-tile rows."""
+
+        self._ensure_analytics_report_tables()
+        indexed_utc = _utc_now()
+        report_payload = {
+            "export_run_id": str(export_run_id),
+            "report_id": str(report_id),
+            "report_manifest_path": str(report_manifest_path),
+            "report_manifest_sha256": str(report_manifest_sha256),
+            "output_root": str(output_root),
+            "schema_id": str(schema_id),
+            "schema_version": int(schema_version),
+            "materialization_policy": str(materialization_policy),
+            "source_backends_json": _json_dumps(sorted({str(v) for v in source_backends})),
+            "source_tables_json": _json_dumps(sorted({str(v) for v in source_tables})),
+            "visualization_count": len(visualization_summaries),
+            "artifact_count": int(artifact_count),
+            "nonready_count": int(nonready_count),
+            "created_at_utc": created_at_utc,
+            "indexed_utc": indexed_utc,
+            "status": str(status),
+            "metadata_json": _json_dumps(metadata),
+        }
+        existing = self.conn.execute(
+            """
+            SELECT report_manifest_path, report_manifest_sha256
+            FROM analytics_reports
+            WHERE export_run_id = ? AND report_id = ?;
+            """,
+            (str(export_run_id), str(report_id)),
+        ).fetchone()
+        if existing is not None and (
+            str(existing["report_manifest_sha256"]) != str(report_manifest_sha256)
+            or Path(str(existing["report_manifest_path"])).expanduser().resolve()
+            != Path(report_manifest_path).expanduser().resolve()
+        ):
+            raise ValueError(
+                f"Immutable report identity {export_run_id!r}/{report_id!r} is already "
+                "indexed with a different manifest path or hash"
+            )
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO analytics_reports (
+                    export_run_id, report_id, report_manifest_path,
+                    report_manifest_sha256, output_root, schema_id, schema_version,
+                    materialization_policy, source_backends_json, source_tables_json,
+                    visualization_count, artifact_count, nonready_count,
+                    created_at_utc, indexed_utc, status, metadata_json
+                )
+                VALUES (
+                    :export_run_id, :report_id, :report_manifest_path,
+                    :report_manifest_sha256, :output_root, :schema_id, :schema_version,
+                    :materialization_policy, :source_backends_json, :source_tables_json,
+                    :visualization_count, :artifact_count, :nonready_count,
+                    :created_at_utc, :indexed_utc, :status, :metadata_json
+                )
+                ON CONFLICT(export_run_id, report_id) DO UPDATE SET
+                    report_manifest_path=excluded.report_manifest_path,
+                    report_manifest_sha256=excluded.report_manifest_sha256,
+                    output_root=excluded.output_root,
+                    schema_id=excluded.schema_id,
+                    schema_version=excluded.schema_version,
+                    materialization_policy=excluded.materialization_policy,
+                    source_backends_json=excluded.source_backends_json,
+                    source_tables_json=excluded.source_tables_json,
+                    visualization_count=excluded.visualization_count,
+                    artifact_count=excluded.artifact_count,
+                    nonready_count=excluded.nonready_count,
+                    created_at_utc=excluded.created_at_utc,
+                    indexed_utc=excluded.indexed_utc,
+                    status=excluded.status,
+                    metadata_json=excluded.metadata_json;
+                """,
+                report_payload,
+            )
+            self.conn.execute(
+                """
+                DELETE FROM analytics_report_visualizations
+                WHERE export_run_id = ? AND report_id = ?;
+                """,
+                (str(export_run_id), str(report_id)),
+            )
+            for summary in visualization_summaries:
+                self.conn.execute(
+                    """
+                    INSERT INTO analytics_report_visualizations (
+                        export_run_id, report_id, visualization_id, provider_id,
+                        label, visualization_contract_id, renderer,
+                        renderer_version, source_backends_json, artifact_count,
+                        nonready_count, materialized_paths_json, indexed_utc
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    (
+                        str(export_run_id),
+                        str(report_id),
+                        str(summary["visualization_id"]),
+                        summary.get("provider_id"),
+                        summary.get("label"),
+                        summary.get("visualization_contract_id"),
+                        summary.get("renderer"),
+                        summary.get("renderer_version"),
+                        _json_dumps(sorted({str(v) for v in summary.get("source_backends", [])})),
+                        int(summary.get("artifact_count", 0)),
+                        int(summary.get("nonready_count", 0)),
+                        _json_dumps([str(v) for v in summary.get("materialized_paths", [])]),
                         indexed_utc,
                     ),
                 )
@@ -5974,6 +6112,152 @@ class Registry(RegistryMigrationMixin):
                     payload,
                 )
 
+    def replace_recording_chasers(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        """Replace the variable-length configured-chaser rows for one dataset."""
+
+        if not self._sqlite_object_exists("recording_chasers", object_types=("table",)):
+            self._migration_060_recording_chaser_metadata_registry()
+        with self._maybe_transaction():
+            self.conn.execute(
+                "DELETE FROM recording_chasers WHERE dataset_id = ?;",
+                (str(dataset_id),),
+            )
+            for record in records:
+                payload = dict(record)
+                payload["dataset_id"] = str(dataset_id)
+                payload.setdefault("extracted_utc", _utc_now())
+                self.conn.execute(
+                    """
+                    INSERT INTO recording_chasers (
+                        dataset_id, recording_id, stimulus_run_id, chaser_index,
+                        behavior_class_id, behavior_class, enable_chase,
+                        enable_random_movement, behavior_mode, raw_color_rgba_json,
+                        start_position_preset, end_position_preset, protocol_name,
+                        source_path, source_kind, source_metadata_sha256,
+                        source_zarr_path, extracted_utc
+                    )
+                    VALUES (
+                        :dataset_id, :recording_id, :stimulus_run_id, :chaser_index,
+                        :behavior_class_id, :behavior_class, :enable_chase,
+                        :enable_random_movement, :behavior_mode, :raw_color_rgba_json,
+                        :start_position_preset, :end_position_preset, :protocol_name,
+                        :source_path, :source_kind, :source_metadata_sha256,
+                        :source_zarr_path, :extracted_utc
+                    );
+                    """,
+                    payload,
+                )
+
+    def replace_stimulus_metadata(
+        self,
+        dataset_id: str,
+        *,
+        protocols: Iterable[Dict[str, Any]],
+        protocol_steps: Iterable[Dict[str, Any]],
+        recording_runs: Iterable[Dict[str, Any]],
+        recording_steps: Iterable[Dict[str, Any]],
+        recording_modes: Iterable[Dict[str, Any]],
+    ) -> None:
+        """Replace normalized stimulus rows for one dataset and upsert definitions."""
+
+        if not self._sqlite_object_exists("stimulus_protocols", object_types=("table",)):
+            self._migration_061_stimulus_protocol_registry()
+        protocols = tuple(protocols)
+        protocol_steps = tuple(protocol_steps)
+        recording_runs = tuple(recording_runs)
+        recording_steps = tuple(recording_steps)
+        recording_modes = tuple(recording_modes)
+        with self._maybe_transaction():
+            for record in protocols:
+                self.conn.execute(
+                    """
+                    INSERT INTO stimulus_protocols (
+                        protocol_hash, protocol_name, step_count, protocol_json,
+                        definition_source, extracted_utc
+                    ) VALUES (
+                        :protocol_hash, :protocol_name, :step_count, :protocol_json,
+                        :definition_source, :extracted_utc
+                    )
+                    ON CONFLICT(protocol_hash) DO UPDATE SET
+                        protocol_name=COALESCE(excluded.protocol_name, stimulus_protocols.protocol_name),
+                        step_count=excluded.step_count,
+                        protocol_json=excluded.protocol_json,
+                        definition_source=excluded.definition_source,
+                        extracted_utc=excluded.extracted_utc;
+                    """,
+                    dict(record),
+                )
+            hashes = {str(record["protocol_hash"]) for record in protocols}
+            for protocol_hash in hashes:
+                self.conn.execute(
+                    "DELETE FROM stimulus_protocol_steps WHERE protocol_hash = ?;",
+                    (protocol_hash,),
+                )
+            for record in protocol_steps:
+                self.conn.execute(
+                    """
+                    INSERT INTO stimulus_protocol_steps (
+                        protocol_hash, step_index, step_name, stimulus_mode,
+                        duration_s, parameters_json, step_definition_json
+                    ) VALUES (
+                        :protocol_hash, :step_index, :step_name, :stimulus_mode,
+                        :duration_s, :parameters_json, :step_definition_json
+                    );
+                    """,
+                    dict(record),
+                )
+
+            self.conn.execute(
+                "DELETE FROM recording_stimulus_runs WHERE dataset_id = ?;",
+                (str(dataset_id),),
+            )
+            for record in recording_runs:
+                payload = {**dict(record), "dataset_id": str(dataset_id)}
+                self.conn.execute(
+                    """
+                    INSERT INTO recording_stimulus_runs (
+                        dataset_id, recording_id, stimulus_run_id, protocol_hash,
+                        protocol_name, is_latest, step_count, source_path,
+                        source_metadata_sha256, source_zarr_path, extracted_utc
+                    ) VALUES (
+                        :dataset_id, :recording_id, :stimulus_run_id, :protocol_hash,
+                        :protocol_name, :is_latest, :step_count, :source_path,
+                        :source_metadata_sha256, :source_zarr_path, :extracted_utc
+                    );
+                    """,
+                    payload,
+                )
+            for record in recording_steps:
+                payload = {**dict(record), "dataset_id": str(dataset_id)}
+                self.conn.execute(
+                    """
+                    INSERT INTO recording_stimulus_steps (
+                        dataset_id, stimulus_run_id, step_index, step_name,
+                        stimulus_mode, start_camera_frame, end_camera_frame,
+                        duration_s, step_attrs_json
+                    ) VALUES (
+                        :dataset_id, :stimulus_run_id, :step_index, :step_name,
+                        :stimulus_mode, :start_camera_frame, :end_camera_frame,
+                        :duration_s, :step_attrs_json
+                    );
+                    """,
+                    payload,
+                )
+            for record in recording_modes:
+                payload = {**dict(record), "dataset_id": str(dataset_id)}
+                self.conn.execute(
+                    """
+                    INSERT INTO recording_stimulus_modes (
+                        dataset_id, stimulus_run_id, stimulus_mode,
+                        step_count, total_duration_s
+                    ) VALUES (
+                        :dataset_id, :stimulus_run_id, :stimulus_mode,
+                        :step_count, :total_duration_s
+                    );
+                    """,
+                    payload,
+                )
+
     def refresh_crop_quality_from_root(self, root: zarr.Group, zarr_path: Path) -> Tuple[str, int]:
         """Refresh only the crop-quality registry surface for one Zarr root."""
 
@@ -6674,6 +6958,25 @@ class Registry(RegistryMigrationMixin):
             zarr_use=zarr_use,
         )
         self.replace_acquisition_video_streams(dataset_id, acquisition_video_stream_rows)
+        chaser_metadata = extract_recording_chaser_metadata(
+            root,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+        )
+        self.replace_recording_chasers(dataset_id, chaser_metadata.rows)
+        stimulus_metadata = extract_stimulus_metadata(
+            root,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+        )
+        self.replace_stimulus_metadata(
+            dataset_id,
+            protocols=stimulus_metadata.protocols,
+            protocol_steps=stimulus_metadata.protocol_steps,
+            recording_runs=stimulus_metadata.recording_runs,
+            recording_steps=stimulus_metadata.recording_steps,
+            recording_modes=stimulus_metadata.recording_modes,
+        )
         detect_quality_rows = _extract_detect_quality_rows(root, zarr_path=zarr_path)
         self.replace_detect_quality(dataset_id, detect_quality_rows)
         detect_performance_rows = _extract_detect_performance_rows(
