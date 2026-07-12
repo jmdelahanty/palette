@@ -575,9 +575,11 @@ What works today:
 - Raw U-Net output is probability-first: `subject_mask_runs/<run>/mask_probs_roi`
   is canonical, and dense binary `masks_roi` is optional compatibility output.
 - Raw probabilities can opt into `2,048`-row Zarr indexed shards with
-  `--mask-probs-shard-rois 2048`. Inference still writes ordinary inner chunks
-  to a private working array, then packs and exact-validates complete shards
-  before the run can complete. Dense `masks_roi` remains ordinarily chunked.
+  `--mask-probs-shard-rois 2048`. Two channel-major host buffers accumulate
+  ordinary inference batches while one background writer writes each complete
+  physical shard once. Source values are hashed before buffer reuse and the
+  completed destination is reread and exact-validated before run completion.
+  Dense `masks_roi` remains ordinarily chunked.
 - The raw writer copies row lineage from the crop run, including
   `frame_indices`, `source_frame_indices`, `source_clip_indices`,
   `source_clip_local_frame_indices`, `source_crop_row_ids`,
@@ -676,8 +678,8 @@ Implementation checklist for subject-mask clipped collections:
   `run_subject_mask_batch_pipeline.py` and
   `submit_subject_mask_batches_bsub.sh`.
 - [x] Add opt-in post-inference indexed sharding for immutable raw
-  `mask_probs_roi`, with complete-shard writes and exact decoded-byte
-  validation before completion.
+  `mask_probs_roi`, with double-buffered complete-shard writes and exact
+  decoded-byte validation before completion.
 - [x] Add focused tests proving a subject-mask shard does not change
   `subject_mask_runs.latest`, `subject_mask_runs.latest_complete`, or root
   current-pointer attrs.

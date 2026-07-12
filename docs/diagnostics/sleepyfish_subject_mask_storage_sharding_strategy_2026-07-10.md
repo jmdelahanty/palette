@@ -464,7 +464,7 @@ Initial acceptance gates:
    canonical arrays in place.
 9. Evaluate frozen refined outputs separately from active editable outputs.
 
-## Inference Writer Implementation
+## Initial Post-Pack Inference Writer
 
 The first production-path implementation is now available as an explicit
 opt-in:
@@ -499,6 +499,32 @@ supported but perform both the working write and post-pack on PRFS.
 The `2,048`-row layout remains opt-in until a complete clipped-inference canary
 passes decoded-value, lineage, completion, object-count, and publication-time
 checks. Existing completed probability runs are not rewritten in place.
+
+The first full-clip inference canary below passed those integrity and storage
+gates but showed that the separate pack plus two-surface digest added `413.6 s`.
+This post-pack implementation is retained only as a historical compatibility
+helper; new sharded inference uses the double-buffer candidate below.
+
+## Double-Buffered Direct Writer Candidate
+
+The next implementation keeps exactly two channel-major host buffers, each
+covering one `2,048`-row outer shard. The inference output thread fills one
+buffer while a single shard writer hashes and writes the other. Each physical
+`[2048,1,512,512]` channel shard is written once, so logical inference batches
+never trigger partial-shard read-modify-write behavior.
+
+For the three-channel `uint8` contract, each buffer is `1.5 GiB` and the two
+buffers reserve `3.0 GiB`. The writer records both shapes and byte counts in
+`mask_probs_shard_write`. It computes one SHA-256 per channel from the buffer
+before reuse, rereads the completed destination once, computes the same
+per-channel digests, and completes the run only when every digest matches.
+This removes the full ordinary-chunk working array, the separate pack phase,
+and the redundant source validation pass while preserving a full decoded-byte
+storage check.
+
+The direct writer remains opt-in pending a repeated `54,000`-row canary using
+the same model, crop proxy, cache, cluster queue, staging path, and publication
+gates as job `153064680`.
 
 ## Full-Clip Sharded-Inference Canary
 

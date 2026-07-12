@@ -457,7 +457,88 @@ def test_postpack_probability_shards_preserves_working_array_on_digest_mismatch(
     assert mod.MASK_PROBS_CANONICAL_ARRAY in run_group
 
 
-def test_write_subject_mask_outputs_postpacks_probabilities() -> None:
+def test_double_buffered_probability_writer_handles_crossing_batches_and_partial_shard(
+) -> None:
+    run_group = zarr.group(store=zarr.storage.MemoryStore(), zarr_format=3)
+    values = np.arange(17 * 2 * 3 * 3, dtype=np.uint8).reshape(17, 2, 3, 3)
+    destination = run_group.create_array(
+        mod.MASK_PROBS_CANONICAL_ARRAY,
+        shape=values.shape,
+        dtype=values.dtype,
+        chunks=(2, 1, 3, 3),
+        shards=(8, 1, 3, 3),
+        overwrite=True,
+    )
+    writer = mod._DoubleBufferedProbabilityShardWriter(
+        destination,
+        shard_rows=8,
+        profiler=mod.InferenceTimingProfiler(enabled=True),
+    )
+
+    writer[0:3] = values[0:3]
+    writer[3:11] = values[3:11]
+    writer[11:17] = values[11:17]
+    summary = writer.finish(validation_row_step=2)
+
+    np.testing.assert_array_equal(np.asarray(destination[:]), values)
+    assert summary["schema_id"] == mod.MASK_PROBS_DIRECT_SHARDING_SCHEMA
+    assert summary["write_mode"] == "double_buffered_direct"
+    assert summary["buffer_count"] == 2
+    assert summary["full_row_shards_written"] == 2
+    assert summary["partial_row_shards_written"] == 1
+    assert summary["source_working_array_created"] is False
+    assert summary["source_sha256_by_channel"] == summary["destination_sha256_by_channel"]
+    assert summary["source_sha256"] == summary["destination_sha256"]
+    assert summary["exact_match"] is True
+
+
+def test_double_buffered_probability_writer_rejects_nonsequential_batches() -> None:
+    destination = _FakeArray(
+        np.zeros((8, 2, 2, 2), dtype=np.uint8),
+        chunks=(2, 1, 2, 2),
+        shards=(4, 1, 2, 2),
+    )
+    writer = mod._DoubleBufferedProbabilityShardWriter(
+        destination,
+        shard_rows=4,
+        profiler=mod.InferenceTimingProfiler(enabled=False),
+    )
+
+    with pytest.raises(ValueError, match="must be sequential"):
+        writer[1:3] = np.zeros((2, 2, 2, 2), dtype=np.uint8)
+
+    writer[0:8] = np.zeros((8, 2, 2, 2), dtype=np.uint8)
+    writer.finish(validation_row_step=2)
+
+
+def test_double_buffered_probability_writer_fails_closed_on_destination_digest_mismatch(
+    monkeypatch,
+) -> None:
+    destination = _FakeArray(
+        np.zeros((5, 2, 2, 2), dtype=np.uint8),
+        chunks=(1, 1, 2, 2),
+        shards=(4, 1, 2, 2),
+    )
+    writer = mod._DoubleBufferedProbabilityShardWriter(
+        destination,
+        shard_rows=4,
+        profiler=mod.InferenceTimingProfiler(enabled=False),
+    )
+    values = np.arange(5 * 2 * 2 * 2, dtype=np.uint8).reshape(5, 2, 2, 2)
+    writer[0:5] = values
+    monkeypatch.setattr(
+        mod,
+        "_probability_array_digests_by_channel",
+        lambda *_args, **_kwargs: ["0" * 64, "1" * 64],
+    )
+
+    with pytest.raises(RuntimeError, match="digest mismatch"):
+        writer.finish(validation_row_step=1)
+
+    np.testing.assert_array_equal(np.asarray(destination[:]), values)
+
+
+def test_write_subject_mask_outputs_writes_double_buffered_probability_shards() -> None:
     class _FakeCropSource:
         total_rois = 5
         roi_shape = (2, 2)
@@ -493,7 +574,11 @@ def test_write_subject_mask_outputs_postpacks_probabilities() -> None:
 
     assert mod.MASK_PROBS_WORKING_ARRAY not in run_group
     assert run_group[mod.MASK_PROBS_CANONICAL_ARRAY].shards == (4, 1, 2, 2)
-    assert run_group.attrs["mask_probs_postpack"]["status"] == "complete"
+    summary = run_group.attrs["mask_probs_shard_write"]
+    assert summary["status"] == "complete"
+    assert summary["write_mode"] == "double_buffered_direct"
+    assert summary["buffer_count"] == 2
+    assert summary["source_working_array_created"] is False
 
 
 def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporary_cache(

@@ -73,6 +73,9 @@ SUBJECT_MASK_SHARD_OUTPUT_PARENT = "subject_mask_shard_runs"
 MASK_PROBS_WORKING_ARRAY = "_mask_probs_roi_working"
 MASK_PROBS_CANONICAL_ARRAY = "mask_probs_roi"
 MASK_PROBS_SHARDING_SCHEMA = "palette.subject_mask_probability_postpack.v1"
+MASK_PROBS_DIRECT_SHARDING_SCHEMA = (
+    "palette.subject_mask_probability_double_buffered_shards.v1"
+)
 
 
 @dataclass(frozen=True)
@@ -536,7 +539,8 @@ def _write_subject_mask_output_batch(
     stop = int(batch.stop)
     batch_count = max(0, stop - start)
 
-    with profiler.time("output_write_probs", items=batch_count):
+    probability_stage = str(getattr(probs_arr, "timing_stage", "output_write_probs"))
+    with profiler.time(probability_stage, items=batch_count):
         probs_arr[start:stop] = batch.probs_out
     if masks_arr is not None:
         if batch.binary is None:
@@ -567,6 +571,233 @@ def _probability_array_digest(array: zarr.Array, *, row_step: int) -> str:
             values = np.asarray(array[start:stop, channel, :, :])
             digest.update(np.ascontiguousarray(values).view(np.uint8))
     return digest.hexdigest()
+
+
+def _probability_array_digests_by_channel(array: zarr.Array, *, row_step: int) -> list[str]:
+    channel_digests: list[str] = []
+    total_rows = int(array.shape[0])
+    for channel in range(int(array.shape[1])):
+        digest = hashlib.sha256()
+        for start in range(0, total_rows, int(row_step)):
+            stop = min(total_rows, start + int(row_step))
+            values = np.asarray(array[start:stop, channel, :, :])
+            digest.update(np.ascontiguousarray(values).view(np.uint8))
+        channel_digests.append(digest.hexdigest())
+    return channel_digests
+
+
+def _aggregate_channel_digests(channel_digests: Sequence[str]) -> str:
+    digest = hashlib.sha256()
+    for value in channel_digests:
+        digest.update(bytes.fromhex(str(value)))
+    return digest.hexdigest()
+
+
+class _DoubleBufferedProbabilityShardWriter:
+    """Accumulate inference batches and write each physical probability shard once."""
+
+    timing_stage = "output_shard_buffer_submit"
+
+    def __init__(
+        self,
+        destination: zarr.Array,
+        *,
+        shard_rows: int,
+        profiler: InferenceTimingProfiler,
+        buffer_count: int = 2,
+    ) -> None:
+        shape = tuple(int(value) for value in destination.shape)
+        if len(shape) != 4:
+            raise ValueError(f"Probability destination must have shape (N,C,H,W); got {shape}.")
+        resolved_buffer_count = int(buffer_count)
+        if resolved_buffer_count != 2:
+            raise ValueError(
+                "Double-buffered probability writing requires exactly 2 buffers; "
+                f"got {buffer_count}."
+            )
+        self.destination = destination
+        self.total_rows, self.channel_count, self.height, self.width = shape
+        self.shard_rows = int(shard_rows)
+        self.buffer_rows = min(self.shard_rows, max(1, self.total_rows))
+        self.profiler = profiler
+        self.buffer_count = resolved_buffer_count
+        self.buffers = [
+            np.empty(
+                (self.channel_count, self.buffer_rows, self.height, self.width),
+                dtype=destination.dtype,
+            )
+            for _ in range(self.buffer_count)
+        ]
+        self._free_buffers: Queue[int] = Queue(maxsize=self.buffer_count)
+        for index in range(self.buffer_count):
+            self._free_buffers.put(index)
+        self._flush_queue: Queue[object] = Queue(maxsize=self.buffer_count)
+        self._sentinel = object()
+        self._errors: list[BaseException] = []
+        self._active_index: int | None = None
+        self._active_start = 0
+        self._active_rows = 0
+        self._next_row = 0
+        self._source_digests = [hashlib.sha256() for _ in range(self.channel_count)]
+        self._write_seconds = 0.0
+        self._full_shards_written = 0
+        self._partial_shards_written = 0
+        self._worker = Thread(
+            target=self._flush_worker,
+            name="subject-mask-probability-shard-writer",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def _raise_error(self) -> None:
+        if self._errors:
+            raise RuntimeError("Double-buffered probability shard writer failed.") from self._errors[0]
+
+    def _acquire_buffer(self, *, start: int) -> None:
+        self._raise_error()
+        index = self._free_buffers.get()
+        self._raise_error()
+        self._active_index = int(index)
+        self._active_start = int(start)
+        self._active_rows = 0
+
+    def _submit_active(self) -> None:
+        if self._active_index is None or self._active_rows <= 0:
+            return
+        self._flush_queue.put(
+            (self._active_index, self._active_start, self._active_rows)
+        )
+        self._active_index = None
+        self._active_rows = 0
+
+    def __setitem__(self, key: slice, values: np.ndarray) -> None:
+        if not isinstance(key, slice) or key.step not in (None, 1):
+            raise TypeError("Probability shard writer accepts contiguous row slices only.")
+        start = int(0 if key.start is None else key.start)
+        stop = int(self.total_rows if key.stop is None else key.stop)
+        if start != self._next_row:
+            raise ValueError(
+                f"Probability batches must be sequential; expected row {self._next_row}, got {start}."
+            )
+        batch = np.asarray(values, dtype=self.destination.dtype)
+        expected_shape = (stop - start, self.channel_count, self.height, self.width)
+        if tuple(int(value) for value in batch.shape) != expected_shape:
+            raise ValueError(f"Probability batch shape {batch.shape} does not match {expected_shape}.")
+
+        source_offset = 0
+        while source_offset < int(batch.shape[0]):
+            if self._active_index is None:
+                self._acquire_buffer(start=self._next_row)
+            assert self._active_index is not None
+            capacity = self.buffer_rows - self._active_rows
+            take = min(capacity, int(batch.shape[0]) - source_offset)
+            target_start = self._active_rows
+            target_stop = target_start + take
+            source_stop = source_offset + take
+            with self.profiler.time("output_shard_buffer_fill", items=take):
+                np.copyto(
+                    self.buffers[self._active_index][:, target_start:target_stop, :, :],
+                    np.moveaxis(batch[source_offset:source_stop, :, :, :], 0, 1),
+                )
+            self._active_rows = target_stop
+            self._next_row += take
+            source_offset = source_stop
+            if self._active_rows == self.buffer_rows:
+                self._submit_active()
+        self._raise_error()
+
+    def _flush_worker(self) -> None:
+        failed = False
+        while True:
+            item = self._flush_queue.get()
+            try:
+                if item is self._sentinel:
+                    return
+                index, start, row_count = item
+                index = int(index)
+                start = int(start)
+                row_count = int(row_count)
+                if failed:
+                    continue
+                stop = start + row_count
+                write_started = time.perf_counter()
+                with self.profiler.time("output_shard_write", items=row_count):
+                    for channel in range(self.channel_count):
+                        channel_values = self.buffers[index][channel, :row_count, :, :]
+                        self._source_digests[channel].update(channel_values.view(np.uint8))
+                        self.destination[
+                            start:stop,
+                            channel : channel + 1,
+                            :,
+                            :,
+                        ] = channel_values[:, None, :, :]
+                self._write_seconds += float(time.perf_counter() - write_started)
+                if row_count == self.shard_rows:
+                    self._full_shards_written += 1
+                else:
+                    self._partial_shards_written += 1
+            except BaseException as exc:  # pragma: no cover - exercised through caller failure
+                self._errors.append(exc)
+                failed = True
+            finally:
+                if item is not self._sentinel:
+                    self._free_buffers.put(int(item[0]))
+                self._flush_queue.task_done()
+
+    def finish(self, *, validation_row_step: int) -> dict[str, object]:
+        self._raise_error()
+        self._submit_active()
+        self._flush_queue.put(self._sentinel)
+        self._flush_queue.join()
+        self._worker.join()
+        self._raise_error()
+        if self._next_row != self.total_rows:
+            raise RuntimeError(
+                f"Probability shard writer received {self._next_row} of {self.total_rows} rows."
+            )
+
+        source_digests = [digest.hexdigest() for digest in self._source_digests]
+        validation_started = time.perf_counter()
+        with self.profiler.time("output_shard_validate", items=self.total_rows):
+            destination_digests = _probability_array_digests_by_channel(
+                self.destination,
+                row_step=int(validation_row_step),
+            )
+        validation_seconds = float(time.perf_counter() - validation_started)
+        if source_digests != destination_digests:
+            raise RuntimeError(
+                "Direct-sharded probability digest mismatch: "
+                f"source={source_digests} destination={destination_digests}."
+            )
+        source_digest = _aggregate_channel_digests(source_digests)
+        destination_digest = _aggregate_channel_digests(destination_digests)
+        buffer_bytes_each = int(self.buffers[0].nbytes)
+        return {
+            "schema_id": MASK_PROBS_DIRECT_SHARDING_SCHEMA,
+            "status": "complete",
+            "write_mode": "double_buffered_direct",
+            "source_working_array_created": False,
+            "canonical_array": MASK_PROBS_CANONICAL_ARRAY,
+            "row_count": self.total_rows,
+            "channel_count": self.channel_count,
+            "inner_chunk_shape": [int(value) for value in self.destination.chunks],
+            "outer_shard_shape": [int(value) for value in self.destination.shards],
+            "inner_chunks_per_shard": int(self.shard_rows // int(self.destination.chunks[0])),
+            "buffer_count": self.buffer_count,
+            "buffer_shape_channel_first": list(self.buffers[0].shape),
+            "buffer_bytes_each": buffer_bytes_each,
+            "total_buffer_bytes": int(buffer_bytes_each * self.buffer_count),
+            "full_row_shards_written": self._full_shards_written,
+            "partial_row_shards_written": self._partial_shards_written,
+            "write_seconds": self._write_seconds,
+            "validation_seconds": validation_seconds,
+            "digest_scheme": "sha256_per_channel_then_sha256_v1",
+            "source_sha256_by_channel": source_digests,
+            "destination_sha256_by_channel": destination_digests,
+            "source_sha256": source_digest,
+            "destination_sha256": destination_digest,
+            "exact_match": True,
+        }
 
 
 def _postpack_probability_shards(
@@ -697,6 +928,7 @@ def _write_subject_mask_outputs(
     roi_array = roi_source.roi_array
     compression_kwargs = _compression_kwargs(roi_array) if roi_array is not None else {}
     stored_prob_dtype = np.dtype(np.uint8 if mask_probs_dtype == "uint8" else np.float16)
+    profiler = timing_profiler or InferenceTimingProfiler(enabled=False)
 
     masks_arr: Optional[zarr.Array] = None
     if write_masks_roi:
@@ -709,18 +941,45 @@ def _write_subject_mask_outputs(
             overwrite=True,
             **compression_kwargs,
         )
-    probability_array_name = (
-        MASK_PROBS_WORKING_ARRAY if mask_probs_shard_rois is not None else MASK_PROBS_CANONICAL_ARRAY
-    )
-    probs_arr = run_group.create_array(
-        probability_array_name,
-        shape=(total_rois, n_channels, height, width),
-        dtype=stored_prob_dtype,
-        chunks=storage_chunks,
-        fill_value=np.uint8(0) if mask_probs_dtype == "uint8" else np.float16(0.0),
-        overwrite=True,
-        **compression_kwargs,
-    )
+    probability_shard_writer: _DoubleBufferedProbabilityShardWriter | None = None
+    if mask_probs_shard_rois is None:
+        probs_arr = run_group.create_array(
+            MASK_PROBS_CANONICAL_ARRAY,
+            shape=(total_rois, n_channels, height, width),
+            dtype=stored_prob_dtype,
+            chunks=storage_chunks,
+            fill_value=np.uint8(0) if mask_probs_dtype == "uint8" else np.float16(0.0),
+            overwrite=True,
+            **compression_kwargs,
+        )
+    else:
+        outer_shards = (int(mask_probs_shard_rois), 1, height, width)
+        probability_destination = run_group.create_array(
+            MASK_PROBS_CANONICAL_ARRAY,
+            shape=(total_rois, n_channels, height, width),
+            dtype=stored_prob_dtype,
+            chunks=storage_chunks,
+            shards=outer_shards,
+            fill_value=np.uint8(0) if mask_probs_dtype == "uint8" else np.float16(0.0),
+            overwrite=True,
+            **compression_kwargs,
+        )
+        probability_destination.attrs.update(
+            {
+                "storage_layout": "indexed_sharding_v1",
+                "inner_chunk_shape": list(storage_chunks),
+                "outer_shard_shape": list(outer_shards),
+                "write_mode": "double_buffered_direct",
+                "buffer_count": 2,
+            }
+        )
+        probability_shard_writer = _DoubleBufferedProbabilityShardWriter(
+            probability_destination,
+            shard_rows=int(mask_probs_shard_rois),
+            profiler=profiler,
+            buffer_count=2,
+        )
+        probs_arr = probability_shard_writer
     run_group.create_array(
         "available_channels",
         data=np.ones((n_channels,), dtype=bool),
@@ -796,7 +1055,6 @@ def _write_subject_mask_outputs(
         )
 
     stage_start = time.perf_counter()
-    profiler = timing_profiler or InferenceTimingProfiler(enabled=False)
     with progress, torch.no_grad():
         if output_worker is not None:
             output_worker.start()
@@ -903,12 +1161,9 @@ def _write_subject_mask_outputs(
     metrics_group.create_array("centroid_valid", data=centroid_valid, chunks=(metric_row_chunk, n_channels), overwrite=True)
     metrics_group.create_array("bbox_xyxy", data=bbox_xyxy, chunks=(metric_row_chunk, n_channels, 4), overwrite=True)
     metrics_group.create_array("bbox_valid", data=bbox_valid, chunks=(metric_row_chunk, n_channels), overwrite=True)
-    if mask_probs_shard_rois is not None:
-        run_group.attrs["mask_probs_postpack"] = _postpack_probability_shards(
-            run_group,
-            source_name=probability_array_name,
-            shard_rows=int(mask_probs_shard_rois),
-            profiler=profiler,
+    if probability_shard_writer is not None:
+        run_group.attrs["mask_probs_shard_write"] = probability_shard_writer.finish(
+            validation_row_step=int(storage_chunks[0]),
         )
     return float(time.perf_counter() - stage_start)
 
@@ -1053,9 +1308,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=(
-            "Optional outer storage-shard row count for mask_probs_roi. Inference first writes "
-            "ordinary inner chunks, then packs and exact-validates whole indexed shards before "
-            "run completion (production candidate: 2048)."
+            "Optional outer storage-shard row count for mask_probs_roi. Two host-memory buffers "
+            "accumulate inference batches and write each complete indexed shard once; the final "
+            "destination is exact-validated before run completion (production candidate: 2048)."
         ),
     )
     parser.add_argument(
@@ -1406,8 +1661,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 "input_normalize runs after the device transfer so dtype conversion, scaling, and clipping can execute on GPU.",
                 "h2d_copy and model_forward are measured separately for the U-Net loop.",
                 "d2h_copy includes sigmoid + clamp + dtype conversion, on-device spatial metrics, probability transfer, and optional binary transfer when masks_roi is materialized.",
-                "output_write_probs measures dense probability Zarr writes; output_write_binary is present only when masks_roi is materialized.",
-                "output_postpack_shards writes complete immutable probability storage shards after inference; output_postpack_validate exact-checks decoded values before removing the working array.",
+                "output_write_probs measures ordinary probability Zarr writes when indexed sharding is disabled; output_write_binary is present only when masks_roi is materialized.",
+                "output_shard_buffer_submit includes batch submission and any wait for one of two shard buffers; output_shard_buffer_fill measures copies into channel-major host buffers.",
+                "output_shard_write writes complete immutable probability storage shards from the background buffer while inference continues; output_shard_validate rereads only the completed destination and exact-checks per-channel decoded values.",
                 "metric_compute covers copying precomputed per-batch metrics into full-run metric arrays.",
                 "output_queue_put and output_queue_drain appear when --async-output overlaps inference with background output writes.",
             ],
@@ -1493,6 +1749,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             ),
             "roi_live_acceleration": crop_source.roi_live_acceleration_requested,
             "roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
+            "mask_probs_shard_write": run_group.attrs.get("mask_probs_shard_write"),
             "mask_probs_postpack": run_group.attrs.get("mask_probs_postpack"),
         },
         inputs=provenance_inputs,
@@ -1502,6 +1759,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "label_schema_id": label_schema_id,
             "masks_roi_materialized": bool(args.write_masks_roi),
             "mask_probs_storage_layout": run_group.attrs["mask_probs_storage_layout"],
+            "mask_probs_shard_write": run_group.attrs.get("mask_probs_shard_write"),
             "mask_probs_postpack": run_group.attrs.get("mask_probs_postpack"),
             "model_resolution": model_resolution_payload,
         },
