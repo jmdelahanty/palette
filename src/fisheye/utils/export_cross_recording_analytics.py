@@ -1408,21 +1408,23 @@ def _chaser_behaviors_for_run(
             class_id = _array_int(class_ids, column) or 0
             label = canonical_behavior_label(labels[column]) if column < len(labels) and labels[column] else "unknown"
             by_index[index] = (class_id, label)
-    if not by_index:
-        component, _component_name, _error = _latest_cra_primary_endpoint_component(run_group)
-        if component is not None and _has_child(component, "objects"):
-            objects = component["objects"]
-            indices = _read_1d_array(objects, "object_index")
-            labels = _read_canonical_behavior_labels(objects)
-            class_ids = _read_1d_array(objects, "behavior_class_id")
-            label_to_id = {"unknown": 0, "aggressive": 1, "random_non_chasing": 2, "inert": 3}
-            for column, raw_index in enumerate(indices if indices is not None else []):
-                index = _safe_int(raw_index)
-                if index is None:
-                    continue
-                label = labels[column] if column < len(labels) and labels[column] else "unknown"
-                class_id = _array_int(class_ids, column)
-                by_index[index] = (label_to_id.get(label, 0) if class_id is None else class_id, label)
+    component, _component_name, _error = _latest_cra_primary_endpoint_component(run_group)
+    if component is not None and _has_child(component, "objects"):
+        objects = component["objects"]
+        indices = _read_1d_array(objects, "object_index")
+        labels = _read_canonical_behavior_labels(objects)
+        class_ids = _read_1d_array(objects, "behavior_class_id")
+        label_to_id = {"unknown": 0, "aggressive": 1, "random_non_chasing": 2, "inert": 3}
+        for column, raw_index in enumerate(indices if indices is not None else []):
+            index = _safe_int(raw_index)
+            if index is None:
+                continue
+            existing_label = by_index.get(index, (0, "unknown"))[1]
+            if existing_label != "unknown":
+                continue
+            label = labels[column] if column < len(labels) and labels[column] else "unknown"
+            class_id = _array_int(class_ids, column)
+            by_index[index] = (label_to_id.get(label, 0) if class_id is None else class_id, label)
     return [by_index.get(int(index), (0, "unknown")) for index in chaser_indices]
 
 

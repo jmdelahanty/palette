@@ -948,6 +948,37 @@ def query_spatial_occupancy(
     return response
 
 
+def _enrich_chaser_behavior_rows(
+    rows: Sequence[Mapping[str, Any]],
+    object_phase_rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Fill unknown chaser roles from the exported CRA object-column mapping."""
+
+    role_by_recording_column: dict[tuple[str, int], str] = {}
+    for row in object_phase_rows:
+        recording_id = str(row.get("recording_id") or "")
+        object_column = _safe_int(row.get("object_column_index"))
+        role = str(row.get("object_role") or row.get("behavior_class") or "").strip()
+        if recording_id and object_column is not None and role and role != "unknown":
+            role_by_recording_column[(recording_id, object_column)] = role
+
+    enriched: list[dict[str, Any]] = []
+    for source_row in rows:
+        row = dict(source_row)
+        current_role = str(row.get("behavior_class") or "").strip()
+        if not current_role or current_role == "unknown":
+            recording_id = str(row.get("recording_id") or "")
+            chaser_column = _safe_int(row.get("chaser_column_index"))
+            if recording_id and chaser_column is not None:
+                resolved_role = role_by_recording_column.get(
+                    (recording_id, chaser_column)
+                )
+                if resolved_role:
+                    row["behavior_class"] = resolved_role
+        enriched.append(row)
+    return enriched
+
+
 def query_chaser_summary(
     context: ViewerContext,
     *,
@@ -959,7 +990,10 @@ def query_chaser_summary(
         raise ValueError(f"Unsupported chaser metric: {metric}")
     if stat not in {"mean", "median"}:
         raise ValueError("stat must be one of: mean, median")
-    rows = load_table_rows(context, CHASER_SUMMARY_TABLE)
+    rows = _enrich_chaser_behavior_rows(
+        load_table_rows(context, CHASER_SUMMARY_TABLE),
+        load_optional_table_rows(context, CRA_OBJECT_PHASE_TABLE),
+    )
     _stats_run_id, descriptive_rows = _load_descriptive_rows(context)
     grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -2586,7 +2620,10 @@ def query_egocentric_summary(
         raise ValueError(f"Unsupported egocentric metric: {metric}")
     if stat not in {"mean", "median"}:
         raise ValueError("stat must be one of: mean, median")
-    rows = load_table_rows(context, EGOCENTRIC_SUMMARY_TABLE)
+    rows = _enrich_chaser_behavior_rows(
+        load_table_rows(context, EGOCENTRIC_SUMMARY_TABLE),
+        load_optional_table_rows(context, CRA_OBJECT_PHASE_TABLE),
+    )
     grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         grouped[(

@@ -16,6 +16,7 @@ from fisheye.analysis.goodcopbadcop_epoch_behavior_summary import (
     write_goodcopbadcop_epoch_behavior_summary_component,
 )
 from fisheye.group_analytics_viewer.query import (
+    _enrich_chaser_behavior_rows,
     _summary,
     build_context,
     build_health_report,
@@ -69,6 +70,37 @@ def test_group_analytics_summary_reports_sample_std_and_sem() -> None:
     assert summary["mean"] == pytest.approx(3.0)
     assert summary["std_dev"] == pytest.approx(2.0)
     assert summary["sem"] == pytest.approx(2.0 / (3.0 ** 0.5))
+
+
+def test_unknown_chaser_roles_are_resolved_by_recording_and_object_column() -> None:
+    distance_rows = [
+        {
+            "recording_id": "recording-a",
+            "chaser_column_index": 0,
+            "behavior_class": "unknown",
+        },
+        {
+            "recording_id": "recording-a",
+            "chaser_column_index": 1,
+            "behavior_class": "unknown",
+        },
+    ]
+    object_phase_rows = [
+        {
+            "recording_id": "recording-a",
+            "object_column_index": 0,
+            "object_role": "aggressive",
+        },
+        {
+            "recording_id": "recording-a",
+            "object_column_index": 1,
+            "object_role": "inert",
+        },
+    ]
+
+    enriched = _enrich_chaser_behavior_rows(distance_rows, object_phase_rows)
+
+    assert [row["behavior_class"] for row in enriched] == ["aggressive", "inert"]
 
 
 def _make_goodcopbadcop_export(tmp_path: Path):
@@ -224,6 +256,7 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(tmp_path: Path) -> 
         if row["window_label"] == "post_event" and row["chaser_index"] == 1
     )
     assert post_chaser_1["value"] == pytest.approx(6.0)
+    assert post_chaser_1["behavior_class"] == "inert"
     assert post_chaser_1["std_dev"] is None
     assert post_chaser_1["sem"] is None
 

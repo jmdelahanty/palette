@@ -41,7 +41,10 @@ from fisheye.analysis.stimulus_response import (
 )
 from fisheye.analysis.stimulus_response_concentric_omr import ConcentricRadialOMRStepData
 from fisheye.analysis.stimulus_response_omr import OMRStepData
-from fisheye.utils.export_cross_recording_analytics import export_sources
+from fisheye.utils.export_cross_recording_analytics import (
+    _chaser_behaviors_for_run,
+    export_sources,
+)
 from fisheye.utils.export_cross_recording_analytics import main as export_main
 from fisheye.utils.virtual_collection_manifest import with_manifest_sha256
 from tests.unit.fisheye.test_goodcopbadcop_interactive import (
@@ -54,6 +57,35 @@ from tests.unit.fisheye.test_cra_near_field import _add_circle_geometry
 
 def _array(group, name: str, values) -> None:
     group.create_array(name, data=np.asarray(values), overwrite=True)
+
+
+def test_exporter_replaces_unknown_chaser_roles_from_cra_objects() -> None:
+    run = zarr.group()
+    chasers = run.create_group("chasers")
+    _array(chasers, "chaser_index", [0, 1])
+    _array(chasers, "behavior_class_id", [0, 0])
+    _array(
+        chasers,
+        "behavior_class_label_bytes",
+        np.asarray([b"unknown", b"unknown"], dtype="S16"),
+    )
+    parent = run.create_group("cra_primary_endpoint")
+    parent.attrs["latest_complete"] = "roles"
+    component = parent.create_group("roles")
+    component.attrs["status"] = "computed"
+    objects = component.create_group("objects")
+    _array(objects, "object_index", [0, 1])
+    _array(objects, "behavior_class_id", [1, 3])
+    _array(
+        objects,
+        "behavior_class_label_bytes",
+        np.asarray([b"aggressive", b"inert"], dtype="S16"),
+    )
+
+    assert _chaser_behaviors_for_run(run, [0, 1]) == [
+        (1, "aggressive"),
+        (3, "inert"),
+    ]
 
 
 def _add_goodcopbadcop_cra_protocol_metadata(zarr_path: Path) -> None:
