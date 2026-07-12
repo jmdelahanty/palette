@@ -25,6 +25,8 @@ PATH_CONTAINS=""
 DEVICE=""
 BATCH_SIZE_SM=128
 SUBJECT_OUTPUT_PARENT="subject_mask_runs"
+CROP_RUN=""
+NO_ASSIGNMENT_KEYPOINTS=0
 MASK_PROBS_DTYPE="uint8"
 MASK_PROBS_CHUNK_ROIS=32
 MASK_PROBS_SHARD_ROIS=""
@@ -125,6 +127,8 @@ Options:
   --subject-output-parent P subject_mask_runs|subject_mask_shard_runs
                             Raw subject-mask output parent. subject_mask_shard_runs
                             schedules inference only and records collection-shard provenance.
+  --crop-run RUN            Explicit crop_runs child for a single selected archive
+  --no-assignment-keypoints Do not attach assignment keypoints to inference-only raw masks
   --mask-probs-dtype DTYPE  uint8|float16 (default: uint8)
   --mask-probs-chunk-rois N Chunk length for mask_probs_roi (default: 32)
   --mask-probs-shard-rois N Post-inference outer shard rows for mask_probs_roi
@@ -224,6 +228,8 @@ while [[ $# -gt 0 ]]; do
     --device) DEVICE="$2"; shift 2;;
     --batch-size-sm) BATCH_SIZE_SM="$2"; shift 2;;
     --subject-output-parent) SUBJECT_OUTPUT_PARENT="$2"; shift 2;;
+    --crop-run) CROP_RUN="$2"; shift 2;;
+    --no-assignment-keypoints) NO_ASSIGNMENT_KEYPOINTS=1; shift;;
     --mask-probs-dtype) MASK_PROBS_DTYPE="$2"; shift 2;;
     --mask-probs-chunk-rois) MASK_PROBS_CHUNK_ROIS="$2"; shift 2;;
     --mask-probs-shard-rois) MASK_PROBS_SHARD_ROIS="$2"; shift 2;;
@@ -565,6 +571,8 @@ SUBJECT_ARGS=(
   --progress-dir "$RUN_DIR/progress"
 )
 if [[ -n "$MASK_PROBS_SHARD_ROIS" ]]; then SUBJECT_ARGS+=(--mask-probs-shard-rois "$MASK_PROBS_SHARD_ROIS"); fi
+if [[ -n "$CROP_RUN" ]]; then SUBJECT_ARGS+=(--crop-run "$CROP_RUN"); fi
+if [[ "$NO_ASSIGNMENT_KEYPOINTS" == "1" ]]; then SUBJECT_ARGS+=(--no-assignment-keypoints); fi
 if [[ -n "$FINALIZE_DENSE_MASK_ROW_CHUNK" ]]; then SUBJECT_ARGS+=(--finalize-dense-mask-row-chunk "$FINALIZE_DENSE_MASK_ROW_CHUNK"); fi
 if [[ -n "$FINALIZE_POSTCOMPUTE_CHUNK_SIZE" ]]; then SUBJECT_ARGS+=(--finalize-postcompute-chunk-size "$FINALIZE_POSTCOMPUTE_CHUNK_SIZE"); fi
 if [[ "$FINALIZE_POSTCOMPUTE_NUM_WORKERS" != "auto" && -n "$FINALIZE_POSTCOMPUTE_NUM_WORKERS" ]]; then SUBJECT_ARGS+=(--finalize-postcompute-num-workers "$FINALIZE_POSTCOMPUTE_NUM_WORKERS"); fi
