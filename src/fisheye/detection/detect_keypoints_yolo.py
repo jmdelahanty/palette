@@ -983,7 +983,7 @@ def detect_keypoints_yolo(
     profile_timings: bool = False,
     progress_jsonl: Optional[Path] = None,
     progress_every_batches: int = 1,
-    keypoint_roi_shard_rows: Optional[int] = None,
+    keypoint_roi_shard_rows: Optional[int] = DEFAULT_KEYPOINT_ROI_SHARD_ROWS,
     keypoint_frame_shard_rows: int = DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
     registry: Optional[Path] = None,
     console: Optional[Console] = None,
@@ -1486,6 +1486,11 @@ def detect_keypoints_yolo(
         "keypoint_storage_layout": (
             "indexed_sharding_v1" if keypoint_roi_shard_rows is not None else "regular_chunks_v1"
         ),
+        "keypoint_storage_policy": (
+            "default_indexed_sharding_v1"
+            if keypoint_roi_shard_rows is not None
+            else "explicit_regular_chunks_override"
+        ),
         "keypoint_roi_shard_rows": (
             int(keypoint_roi_shard_rows) if keypoint_roi_shard_rows is not None else None
         ),
@@ -1531,6 +1536,11 @@ def detect_keypoints_yolo(
                 "indexed_sharding_v1"
                 if keypoint_roi_shard_rows is not None
                 else "regular_chunks_v1"
+            ),
+            "keypoint_storage_policy": (
+                "default_indexed_sharding_v1"
+                if keypoint_roi_shard_rows is not None
+                else "explicit_regular_chunks_override"
             ),
         },
         "model_names": getattr(model.model, "names", None),
@@ -1599,6 +1609,11 @@ def detect_keypoints_yolo(
                 "keypoint_roi_shard_rows": keypoint_roi_shard_rows,
                 "keypoint_frame_shard_rows": (
                     keypoint_frame_shard_rows if keypoint_roi_shard_rows is not None else None
+                ),
+                "keypoint_storage_policy": (
+                    "default_indexed_sharding_v1"
+                    if keypoint_roi_shard_rows is not None
+                    else "explicit_regular_chunks_override"
                 ),
             },
             input_run_ids={
@@ -1677,6 +1692,11 @@ def detect_keypoints_yolo(
                 "indexed_sharding_v1"
                 if keypoint_roi_shard_rows is not None
                 else "regular_chunks_v1"
+            ),
+            "keypoint_storage_policy": (
+                "default_indexed_sharding_v1"
+                if keypoint_roi_shard_rows is not None
+                else "explicit_regular_chunks_override"
             ),
             "keypoint_shard_write": shard_write_summary,
         },
@@ -1829,14 +1849,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size for inference")
-    parser.add_argument(
+    keypoint_storage_group = parser.add_mutually_exclusive_group()
+    keypoint_storage_group.add_argument(
         "--keypoint-roi-shard-rows",
         type=int,
-        default=None,
+        default=DEFAULT_KEYPOINT_ROI_SHARD_ROWS,
         help=(
-            "Opt-in aligned outer shard rows for immutable ROI-domain keypoint arrays "
-            f"(canary candidate: {DEFAULT_KEYPOINT_ROI_SHARD_ROWS})."
+            "Requested outer rows for indexed-sharded ROI-domain keypoint arrays "
+            f"(default: {DEFAULT_KEYPOINT_ROI_SHARD_ROWS})."
         ),
+    )
+    keypoint_storage_group.add_argument(
+        "--no-keypoint-sharding",
+        action="store_const",
+        dest="keypoint_roi_shard_rows",
+        const=None,
+        help="Use ordinary chunks for YOLO keypoint outputs.",
     )
     parser.add_argument(
         "--keypoint-frame-shard-rows",

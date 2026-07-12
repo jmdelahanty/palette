@@ -12,7 +12,11 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 import zarr
 from rich.console import Console
 
-from ..detection.detect_keypoints_yolo import detect_keypoints_yolo
+from ..detection.detect_keypoints_yolo import (
+    DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
+    DEFAULT_KEYPOINT_ROI_SHARD_ROWS,
+    detect_keypoints_yolo,
+)
 from ..registry.db import Registry, RegistryPaths
 from ..registry.stage_complete import DatasetMetadata, emit_stage_completion
 from ..shared.type_conversions import as_float, normalize_attr
@@ -287,6 +291,29 @@ Examples:
     parser.add_argument("--run-name", help="Optional custom run name inside keypoints_runs")
     parser.add_argument("--crop-run", help="Optional crop run name to use (defaults to latest)")
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size for inference")
+    keypoint_storage_group = parser.add_mutually_exclusive_group()
+    keypoint_storage_group.add_argument(
+        "--keypoint-roi-shard-rows",
+        type=int,
+        default=DEFAULT_KEYPOINT_ROI_SHARD_ROWS,
+        help=(
+            "Requested outer rows for indexed-sharded ROI-domain keypoint arrays "
+            f"(default: {DEFAULT_KEYPOINT_ROI_SHARD_ROWS})."
+        ),
+    )
+    keypoint_storage_group.add_argument(
+        "--no-keypoint-sharding",
+        action="store_const",
+        dest="keypoint_roi_shard_rows",
+        const=None,
+        help="Use ordinary chunks for YOLO keypoint outputs.",
+    )
+    parser.add_argument(
+        "--keypoint-frame-shard-rows",
+        type=int,
+        default=DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
+        help="Outer rows for frame-domain arrays when keypoint sharding is enabled.",
+    )
     parser.add_argument("--device", default=None, help="Torch device string (e.g. cuda:0, cpu)")
     parser.add_argument("--imgsz", type=int, default=None, help="Override inference image size")
     parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold")
@@ -351,6 +378,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             conf=args.conf,
             iou=args.iou,
             max_det=args.max_det,
+            keypoint_roi_shard_rows=args.keypoint_roi_shard_rows,
+            keypoint_frame_shard_rows=args.keypoint_frame_shard_rows,
             roi_cache_policy=args.roi_cache_policy,
             roi_cache_dir=args.roi_cache_dir,
             roi_live_acceleration=args.roi_live_acceleration,

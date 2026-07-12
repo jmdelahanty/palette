@@ -226,10 +226,14 @@ def test_detect_keypoints_yolo_sizes_n_keypoints_to_run_frame_counts(monkeypatch
         batch_size=8,
         imgsz=8,
         input_mode="numpy-list",
+        keypoint_roi_shard_rows=8,
+        keypoint_frame_shard_rows=8,
         registry=None,
     )
 
     run = zarr.open_group(store=str(zarr_path), mode="r")["keypoints_runs"][run_name]
+    assert run.attrs["keypoint_storage_layout"] == "indexed_sharding_v1"
+    assert run.attrs["keypoint_storage_policy"] == "default_indexed_sharding_v1"
     actual = run["n_keypoints"][:]
     assert actual.shape == run["frame_counts"].shape == (20,)
     assert actual[0] == 10
@@ -318,6 +322,8 @@ def _run_keypoint_count_writer(monkeypatch, tmp_path, *, name: str, legacy_count
             batch_size=8,
             imgsz=8,
             input_mode="numpy-list",
+            keypoint_roi_shard_rows=8,
+            keypoint_frame_shard_rows=8,
             registry=None,
         )
     run = zarr.open_group(store=str(zarr_path), mode="r")["keypoints_runs"][run_name]
@@ -370,8 +376,36 @@ def test_detect_keypoints_yolo_can_write_collection_shard_without_canonical_poin
     assert np.asarray(run["keypoints_roi"]).shape == (3, 10, 2)
     assert run["keypoints_roi"].shards == (9, 10, 2)
     assert run.attrs["keypoint_storage_layout"] == "indexed_sharding_v1"
+    assert run.attrs["keypoint_storage_policy"] == "default_indexed_sharding_v1"
     assert run.attrs["keypoint_shard_write"]["exact_match"] is True
     assert run.attrs["keypoint_shard_write"]["buffer_count"] == 2
+
+
+def test_detect_keypoints_yolo_can_opt_out_to_regular_chunks(monkeypatch, tmp_path) -> None:
+    zarr_path = _make_keypoint_count_fixture(tmp_path, "regular")
+    model_path = tmp_path / "regular.pt"
+    with monkeypatch.context() as patch:
+        _patch_keypoint_writer_dependencies(patch, model_path)
+        run_name = detect_keypoints_yolo(
+            zarr_path,
+            model_path,
+            run_provenance=build_writer_run_provenance(
+                command="unit-keypoint-regular-writer",
+                params={"model_path": model_path},
+            ),
+            run_name="keypoints_regular",
+            pose_schema="traditional_v3",
+            batch_size=8,
+            imgsz=8,
+            input_mode="numpy-list",
+            keypoint_roi_shard_rows=None,
+            registry=None,
+        )
+
+    run = zarr.open_group(store=str(zarr_path), mode="r")["keypoints_runs"][run_name]
+    assert run["keypoints_roi"].shards is None
+    assert run.attrs["keypoint_storage_layout"] == "regular_chunks_v1"
+    assert run.attrs["keypoint_storage_policy"] == "explicit_regular_chunks_override"
 
 
 def test_detect_keypoints_yolo_frame_count_writer_matches_legacy_arrays(monkeypatch, tmp_path) -> None:

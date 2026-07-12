@@ -2,12 +2,26 @@ from __future__ import annotations
 
 import json
 import os
+from inspect import signature
 from pathlib import Path
 
 import pytest
 
 from fisheye.shared.run_provenance import validate_run_provenance
 from fisheye.utils import run_keypoints_with_registry_model as mod
+
+
+def test_registry_model_runner_defaults_to_keypoint_sharding() -> None:
+    params = signature(mod.run_keypoints_with_registry_model).parameters
+
+    assert (
+        params["keypoint_roi_shard_rows"].default
+        == mod.DEFAULT_KEYPOINT_ROI_SHARD_ROWS
+    )
+    assert (
+        params["keypoint_frame_shard_rows"].default
+        == mod.DEFAULT_KEYPOINT_FRAME_SHARD_ROWS
+    )
 
 
 def test_pick_best_candidate_enforces_unique_when_tied() -> None:

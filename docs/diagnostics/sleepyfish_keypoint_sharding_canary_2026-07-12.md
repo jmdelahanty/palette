@@ -1,7 +1,7 @@
 # Sleepyfish Keypoint Sharding Canary
 
 **Date:** 2026-07-12
-**Status:** clone and direct YOLO-writer canaries complete; candidate passed; layout remains opt-in
+**Status:** clone and direct YOLO-writer canaries complete; candidate passed; default enabled
 
 ## Scope
 
@@ -74,13 +74,16 @@ latencies remain small, while filesystem-object pressure falls sharply.
 
 ## Direct YOLO Writer
 
-The serial YOLO writer now has an opt-in, double-buffered sharded path. It was
-implemented in commits `227ebc3` and `0cf0132` and is selected with:
+The serial YOLO writer has a double-buffered sharded path. It was implemented
+in commits `227ebc3` and `0cf0132`. The validated/default layout is:
 
 ```text
 --keypoint-roi-shard-rows 65536
 --keypoint-frame-shard-rows 262144
 ```
+
+Those values are now defaults. Use `--no-keypoint-sharding` only for an
+explicit ordinary-chunk compatibility or benchmark run.
 
 The writer retains the existing inner chunk grid. It accumulates the 13
 inference-produced ROI arrays until it owns a complete outer shard, writes that
@@ -160,11 +163,14 @@ runtime regression, and its measured write-plus-validation cost was only
 
 ## Decision And Next Step
 
-The direct YOLO-writer candidate passes output parity, completion/publication,
-file-count, memory, and runtime gates. It is reasonable to make indexed
-sharding the default for immutable outputs from the serial YOLO keypoint
-writer. For now the behavior remains opt-in so that changing the production
-default is a separate, explicit rollout decision.
+The direct YOLO-writer candidate passed output parity, completion/publication,
+file-count, memory, and runtime gates. Indexed sharding is therefore the
+default for immutable outputs from the serial YOLO keypoint writer. The
+ordinary-chunk path remains available through `--no-keypoint-sharding`.
+
+Refined keypoint runs remain ordinarily chunked editable/review outputs. Their
+readers use the standard Zarr array interface and accept either ordinary or
+indexed-sharded source keypoint arrays.
 
 Do not infer that this result makes the traditional/Dask writer shard-safe.
 Traditional/Dask workers must own complete physical shards, or write

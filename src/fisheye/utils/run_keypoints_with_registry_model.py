@@ -19,6 +19,7 @@ import zarr
 from fisheye.detection.detect_keypoints_yolo import (
     DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
     DEFAULT_KEYPOINT_OUTPUT_PARENT,
+    DEFAULT_KEYPOINT_ROI_SHARD_ROWS,
     DEFAULT_POSE_SCHEMA_NAME,
     KEYPOINT_OUTPUT_PARENTS,
     detect_keypoints_yolo,
@@ -534,7 +535,7 @@ def run_keypoints_with_registry_model(
     progress_jsonl: Optional[Path] = None,
     progress_every_batches: int = 1,
     input_mode: str = "numpy-list",
-    keypoint_roi_shard_rows: Optional[int] = None,
+    keypoint_roi_shard_rows: Optional[int] = DEFAULT_KEYPOINT_ROI_SHARD_ROWS,
     keypoint_frame_shard_rows: int = DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
     cpu: bool = False,
     verbose: bool = False,
@@ -802,11 +803,22 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument("--batch-size", type=int, default=256, help="Optional keypoint batch size override.")
-    parser.add_argument(
+    keypoint_storage_group = parser.add_mutually_exclusive_group()
+    keypoint_storage_group.add_argument(
         "--keypoint-roi-shard-rows",
         type=int,
-        default=None,
-        help="Opt-in aligned outer shard rows for ROI-domain YOLO keypoint arrays.",
+        default=DEFAULT_KEYPOINT_ROI_SHARD_ROWS,
+        help=(
+            "Requested outer rows for indexed-sharded ROI-domain YOLO keypoint arrays "
+            f"(default: {DEFAULT_KEYPOINT_ROI_SHARD_ROWS})."
+        ),
+    )
+    keypoint_storage_group.add_argument(
+        "--no-keypoint-sharding",
+        action="store_const",
+        dest="keypoint_roi_shard_rows",
+        const=None,
+        help="Use ordinary chunks for YOLO keypoint outputs.",
     )
     parser.add_argument(
         "--keypoint-frame-shard-rows",

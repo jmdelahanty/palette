@@ -596,6 +596,8 @@ class Pipeline:
                 roi_cache_policy=params.get('roi_cache_policy', 'auto'),
                 roi_cache_dir=params.get('roi_cache_dir'),
                 input_mode=params.get('input_mode', 'numpy-list'),
+                keypoint_roi_shard_rows=params.get('keypoint_roi_shard_rows', 65_536),
+                keypoint_frame_shard_rows=params.get('keypoint_frame_shard_rows', 262_144),
                 verbose=params.get('verbose', False),
                 registry=Path(str(self.config.registry_path)) if self.config.registry_path else None,
                 console=self.console,

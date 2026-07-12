@@ -4,7 +4,11 @@ from typing import Any
 import pytest
 
 from fisheye.detection import detect_keypoints_yolo as yolo_mod
-from fisheye.detection.detect_keypoints_yolo import detect_keypoints_yolo
+from fisheye.detection.detect_keypoints_yolo import (
+    DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
+    DEFAULT_KEYPOINT_ROI_SHARD_ROWS,
+    detect_keypoints_yolo,
+)
 
 
 class _FakeArray:
@@ -39,6 +43,20 @@ def test_detect_keypoints_yolo_accepts_mask_threshold() -> None:
     assert "profile_timings" in params
     assert "keypoint_roi_shard_rows" in params
     assert "keypoint_frame_shard_rows" in params
+    assert params["keypoint_roi_shard_rows"].default == DEFAULT_KEYPOINT_ROI_SHARD_ROWS
+    assert params["keypoint_frame_shard_rows"].default == DEFAULT_KEYPOINT_FRAME_SHARD_ROWS
+
+
+def test_keypoint_cli_defaults_to_sharding_and_supports_regular_chunk_opt_out() -> None:
+    parser = yolo_mod._build_arg_parser()
+    default_args = parser.parse_args(["archive.zarr", "--model", "pose.pt"])
+    regular_args = parser.parse_args(
+        ["archive.zarr", "--model", "pose.pt", "--no-keypoint-sharding"]
+    )
+
+    assert default_args.keypoint_roi_shard_rows == DEFAULT_KEYPOINT_ROI_SHARD_ROWS
+    assert default_args.keypoint_frame_shard_rows == DEFAULT_KEYPOINT_FRAME_SHARD_ROWS
+    assert regular_args.keypoint_roi_shard_rows is None
 
 
 def test_resolve_full_image_shape_prefers_raw_video_shape() -> None:
