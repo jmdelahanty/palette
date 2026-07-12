@@ -1,10 +1,11 @@
 # Sleepyfish Subject-Mask Storage And Sharding Strategy
 
 **Date:** 2026-07-10
-**Last updated:** 2026-07-11
-**Status:** diagnostic, implementation, and complete single-clip finalizer
-layout/parity record complete; the full-collection canary remains pending, and
-no canonical storage migration has been approved or applied
+**Last updated:** 2026-07-12
+**Status:** diagnostic, implementation, finalizer parity, full-collection
+finalizer, and full-clip sharded-inference canaries complete; the `2,048`-row
+layout remains opt-in pending post-pack validation optimization, and no
+canonical storage migration has been approved or applied
 
 ## Scope
 
@@ -498,6 +499,72 @@ supported but perform both the working write and post-pack on PRFS.
 The `2,048`-row layout remains opt-in until a complete clipped-inference canary
 passes decoded-value, lineage, completion, object-count, and publication-time
 checks. Existing completed probability runs are not rewritten in place.
+
+## Full-Clip Sharded-Inference Canary
+
+LSF job `153064680` ran the complete `54,000`-row `clip_000000` inference on
+`h08u16.int.janelia.org` with the production batch path: the `14.2 GB` flat ROI
+cache and inference outputs were staged to node-local scratch, probabilities
+used inner chunks `[32,1,512,512]` and outer shards `[2048,1,512,512]`, and only
+the completed sharded run was atomically copied to PRFS.
+
+Published run:
+
+```text
+subject_mask_shard_runs/
+  subject_masks_unet_registry_sleepyfish_prob_shard_canary_clip000000_20260712_04
+```
+
+Evidence:
+
+```text
+/groups/johnson/johnsonlab/jeremy/recordings/logs/
+  subject_mask_probability_sharded_inference_canary/
+  sm_sleepyfish_prob_shard_canary_clip000000_20260712_04/
+```
+
+Integrity and contract gates passed:
+
+- completion status is `complete`; shard outputs remain selector-ineligible for
+  canonical recording-level resolution and registry refresh remains deferred;
+- the private working array was removed only after validation;
+- source and destination decoded SHA-256 are identical:
+  `fd3bcf09c5e73d53925a3db4d8d1f6784a027a2298e440564b5402bb73cab97b`;
+- this digest is also the previously established full-clip source, regular-
+  fixture, and sharded-fixture digest, proving exact probability parity with
+  the prior raw run;
+- all eight row-lineage arrays match both the proxy crop and prior raw run;
+- all seven metric arrays match the prior raw run exactly;
+- all `54,000` rows have at least one present component, and sampled rows span
+  the full stored probability range `0..255` in every channel.
+
+Storage and publication result:
+
+| Measure | Prior regular run | New sharded run |
+| --- | ---: | ---: |
+| Stored size | `173 MiB` | `172 MiB` |
+| Probability files | `5,065` | `82` |
+| Total run files | `6,646` | `1,663` |
+
+Probability object count fell `61.8x` (`98.4%`) while stored bytes remained
+effectively unchanged. The production publisher scanned the staged run in
+`0.096 s`, copied `1,663` files / `179,533,272` apparent bytes in `16.53 s`,
+and completed the publish phase in `21.79 s`; atomic commit took `0.003 s`.
+
+The performance gate is not yet sufficient to make this layout the default.
+The prior regular raw run completed in `509.2 s`. The sharded canary's raw
+stage took `883.9 s`, including `130.9 s` to pack shards and `282.6 s` to
+reread and SHA-256 validate both complete decoded surfaces. LSF wall time was
+`959 s`, CPU time `1,155 s`, maximum accounted memory `2,022 MB`, and no swap.
+The object/publication improvement is decisive, but adding `413.6 s` of local
+post-processing is too large to enable unconditionally.
+
+The next writer optimization should compute the source SHA-256 incrementally
+from the values already read during the shard-copy loop, then retain one full
+post-write destination digest as the fail-closed storage check. This removes
+one redundant decoded source pass without weakening exact validation. Repeat
+the full-clip inference canary after that change before promoting sharding to a
+production default.
 
 ## Initial 8,192-Row Benchmark Set
 
@@ -1140,6 +1207,11 @@ scripts/submit_subject_mask_complete_finalizer_matrix_bsub.sh \
   passed its identity, memory, publication, exhaustive parity, and dense-
   content gates. The layout remains the selected candidate for new immutable
   read-only probability-mask stores.
+- The full-clip inference canary also passed exactness, lineage, content,
+  completion, object-count, and atomic-publication gates, reducing probability
+  files `61.8x`. Keep the writer opt-in for now because exhaustive post-pack
+  validation increased the raw stage from `509.2 s` to `883.9 s`; eliminate
+  the redundant source digest pass and repeat this canary before defaulting it.
 - Finalized runs include eye geometry, full ragged component contours, and
   sampled component contours by default. The historical `335 s` layout A/B
   excluded those surfaces and must not be quoted as complete production time.
