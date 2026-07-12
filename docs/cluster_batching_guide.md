@@ -779,6 +779,9 @@ scripts/py -m fisheye.utils.run_keypoints_batch /groups/johnson/johnsonlab/jerem
 | `--include-non-success` | off   | Include non-success runs in model resolution |
 | `--crop-run`          | *(auto)* | Explicit crop run name                      |
 | `--batch-size-kp`     | `256`   | Keypoint inference batch size                |
+| `--keypoint-roi-shard-rows` | `65536` | Outer rows for indexed-sharded ROI-domain arrays |
+| `--keypoint-frame-shard-rows` | `262144` | Outer rows for indexed-sharded frame-domain arrays |
+| `--no-keypoint-sharding` | off | Explicitly use ordinary chunks for keypoint outputs |
 | `--device`            | *(auto)* | Torch device override                       |
 | `--roi-cache-dir`     | *(none)* | Scratch directory for temporary Zarr ROI caches |
 | `--roi-cache-manifest` | *(none)* | Explicit `flat_bin_v1` ROI cache manifest; accepted only when exactly one target is selected |
@@ -793,6 +796,13 @@ scripts/py -m fisheye.utils.run_keypoints_batch /groups/johnson/johnsonlab/jerem
 file. For each zarr, it derives the recording directory and calls
 `run_keypoints_with_registry_model --recording-dir <dir>`. Model resolution
 happens per-recording at runtime.
+
+The ordinary batch, clipped-collection, and whole-recording submitters all
+default to indexed-sharded immutable YOLO keypoint outputs. Their dry-run JSON
+records `keypoint_storage.requested` and `keypoint_storage.effective`, and their
+worker commands carry the effective shard rows explicitly. Use
+`--no-keypoint-sharding` only for compatibility or benchmark comparisons;
+refined keypoint outputs remain ordinarily chunked regardless of source layout.
 
 For GPU keypoint jobs, pass `--queue gpu_l4 --gpus 1`. The submitter will request
 `-gpu num=1` from LSF and, unless `--device` is already supplied, will pass

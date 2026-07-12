@@ -17,6 +17,10 @@ CROP_RUN=""
 OUTPUT_PARENT=""
 POSE_SCHEMA=""
 BATCH_SIZE_KP=256
+KEYPOINT_ROI_SHARD_ROWS=65536
+KEYPOINT_ROI_SHARD_ROWS_SET=0
+KEYPOINT_FRAME_SHARD_ROWS=262144
+NO_KEYPOINT_SHARDING=0
 DEVICE=""
 IMGSZ=""
 CONF=""
@@ -63,6 +67,11 @@ Options:
   --output-parent NAME      Optional keypoint output parent: keypoints_runs|keypoint_shard_runs
   --pose-schema NAME        Optional pose schema (for example: traditional_v2 for 5-keypoint models)
   --batch-size-kp N         Keypoint inference batch size (default: 256)
+  --keypoint-roi-shard-rows N
+                            Outer rows for indexed-sharded ROI arrays (default: 65536)
+  --keypoint-frame-shard-rows N
+                            Outer rows for indexed-sharded frame arrays (default: 262144)
+  --no-keypoint-sharding    Use ordinary chunks for keypoint outputs
   --device DEVICE           Torch device override
   --imgsz N                 Pose inference image size override
   --conf FLOAT              Confidence threshold override
@@ -114,6 +123,9 @@ while [[ $# -gt 0 ]]; do
     --output-parent) OUTPUT_PARENT="$2"; shift 2;;
     --pose-schema) POSE_SCHEMA="$2"; shift 2;;
     --batch-size-kp) BATCH_SIZE_KP="$2"; shift 2;;
+    --keypoint-roi-shard-rows) KEYPOINT_ROI_SHARD_ROWS="$2"; KEYPOINT_ROI_SHARD_ROWS_SET=1; shift 2;;
+    --keypoint-frame-shard-rows) KEYPOINT_FRAME_SHARD_ROWS="$2"; shift 2;;
+    --no-keypoint-sharding) NO_KEYPOINT_SHARDING=1; shift;;
     --device) DEVICE="$2"; shift 2;;
     --imgsz) IMGSZ="$2"; shift 2;;
     --conf) CONF="$2"; shift 2;;
@@ -274,6 +286,20 @@ if [[ "$CPU" == "1" && "$GPUS" != "0" ]]; then
   echo "--cpu cannot be combined with --gpus." >&2
   exit 2
 fi
+if [[ "$NO_KEYPOINT_SHARDING" == "1" && "$KEYPOINT_ROI_SHARD_ROWS_SET" == "1" ]]; then
+  echo "--no-keypoint-sharding cannot be combined with --keypoint-roi-shard-rows." >&2
+  exit 2
+fi
+if [[ "$NO_KEYPOINT_SHARDING" != "1" ]]; then
+  if ! [[ "$KEYPOINT_ROI_SHARD_ROWS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "--keypoint-roi-shard-rows must be a positive integer." >&2
+    exit 2
+  fi
+  if ! [[ "$KEYPOINT_FRAME_SHARD_ROWS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "--keypoint-frame-shard-rows must be a positive integer." >&2
+    exit 2
+  fi
+fi
 if [[ "$CPU" != "1" && -z "$DEVICE" && "$GPUS" != "0" ]]; then
   DEVICE="0"
 fi
@@ -298,6 +324,12 @@ if [[ "$INCLUDE_NON_SUCCESS" == "1" ]]; then EXTRA_ARGS+=(--include-non-success)
 if [[ -n "$CROP_RUN" ]]; then EXTRA_ARGS+=(--crop-run "$CROP_RUN"); fi
 if [[ -n "$OUTPUT_PARENT" ]]; then EXTRA_ARGS+=(--output-parent "$OUTPUT_PARENT"); fi
 if [[ -n "$POSE_SCHEMA" ]]; then EXTRA_ARGS+=(--pose-schema "$POSE_SCHEMA"); fi
+if [[ "$NO_KEYPOINT_SHARDING" == "1" ]]; then
+  EXTRA_ARGS+=(--no-keypoint-sharding)
+else
+  EXTRA_ARGS+=(--keypoint-roi-shard-rows "$KEYPOINT_ROI_SHARD_ROWS")
+  EXTRA_ARGS+=(--keypoint-frame-shard-rows "$KEYPOINT_FRAME_SHARD_ROWS")
+fi
 if [[ -n "$DEVICE" ]]; then EXTRA_ARGS+=(--device "$DEVICE"); fi
 if [[ -n "$IMGSZ" ]]; then EXTRA_ARGS+=(--imgsz "$IMGSZ"); fi
 if [[ -n "$CONF" ]]; then EXTRA_ARGS+=(--conf "$CONF"); fi
@@ -316,6 +348,34 @@ printf -v EXTRA_ARGS_SHELL '%q ' "${EXTRA_ARGS[@]}"
 printf -v PROGRESS_JSONL_DIR_SHELL '%q' "$PROGRESS_JSONL_DIR"
 printf -v PROGRESS_EVERY_BATCHES_SHELL '%q' "$PROGRESS_EVERY_BATCHES"
 printf -v ROI_CACHE_STAGING_DIR_SHELL '%q' "$ROI_CACHE_STAGING_DIR"
+
+scripts/py - "$RUN_DIR/manifest_summary.json" "$KEYPOINT_ROI_SHARD_ROWS" "$KEYPOINT_FRAME_SHARD_ROWS" "$NO_KEYPOINT_SHARDING" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+summary_path = Path(sys.argv[1])
+roi_rows = int(sys.argv[2])
+frame_rows = int(sys.argv[3])
+disabled = sys.argv[4] == "1"
+payload = json.loads(summary_path.read_text(encoding="utf-8"))
+payload["keypoint_storage"] = {
+    "requested": {
+        "keypoint_roi_shard_rows": None if disabled else roi_rows,
+        "keypoint_frame_shard_rows": frame_rows,
+        "no_keypoint_sharding": disabled,
+    },
+    "effective": {
+        "keypoint_storage_layout": "regular_chunks_v1" if disabled else "indexed_sharding_v1",
+        "keypoint_storage_policy": (
+            "explicit_regular_chunks_override" if disabled else "default_indexed_sharding_v1"
+        ),
+        "keypoint_roi_shard_rows": None if disabled else roi_rows,
+        "keypoint_frame_shard_rows": None if disabled else frame_rows,
+    },
+}
+summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
 
 JOB_SCRIPT="${RUN_DIR}/run_batch.sh"
 cat > "$JOB_SCRIPT" <<JOBSCRIPT
@@ -419,6 +479,11 @@ echo "Batches: $batch_count"
 echo "Max active: $MAX_ACTIVE"
 echo "Queue: ${QUEUE:-<default>}"
 echo "Resources: ncores=$NCORES mem_gb=$MEM_GB gpus=$GPUS"
+if [[ "$NO_KEYPOINT_SHARDING" == "1" ]]; then
+  echo "Keypoint storage: regular_chunks_v1 (explicit opt-out)"
+else
+  echo "Keypoint storage: indexed_sharding_v1 roi_rows=$KEYPOINT_ROI_SHARD_ROWS frame_rows=$KEYPOINT_FRAME_SHARD_ROWS"
+fi
 echo "Manifest file: $RUN_DIR/recordings.txt"
 echo "Batch files: $RUN_DIR/batch_*.txt"
 echo "Progress JSONL dir: ${PROGRESS_JSONL_DIR:-<disabled>}"
