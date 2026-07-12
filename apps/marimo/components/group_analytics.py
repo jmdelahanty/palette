@@ -38,6 +38,7 @@ class PanelControlSpec:
     show_window: bool = False
     show_chaser: bool = False
     show_statistic: bool = False
+    show_egocentric_bins: bool = False
 
 
 GROUP_PANEL_DEFINITIONS = (
@@ -179,6 +180,7 @@ PANEL_CONTROL_SPECS = {
         show_window=True,
         show_chaser=True,
         show_statistic=True,
+        show_egocentric_bins=True,
     ),
     "statistics": PanelControlSpec("statistics"),
     "inventory": PanelControlSpec("inventory"),

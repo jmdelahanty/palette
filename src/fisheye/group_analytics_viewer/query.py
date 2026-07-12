@@ -2812,6 +2812,222 @@ def query_egocentric_histogram(
     return {"rows": out_rows}
 
 
+def egocentric_rebin_options(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Describe exact coarsenings available from pooled native histogram bins."""
+
+    if not rows:
+        return {
+            "native_distance_bin_width_mm": None,
+            "native_bearing_bin_width_deg": None,
+            "distance": [{"factor": 1, "width": None, "label": "Native"}],
+            "bearing": [{"factor": 1, "width": None, "label": "Native"}],
+        }
+
+    def _native_axis(axis: str) -> tuple[float, int]:
+        width_key = f"{axis}_bin_width_{'mm' if axis == 'distance' else 'deg'}"
+        index_key = f"{axis}_bin_index"
+        left_key = f"{axis}_bin_left_{'mm' if axis == 'distance' else 'deg'}"
+        right_key = f"{axis}_bin_right_{'mm' if axis == 'distance' else 'deg'}"
+        widths = {
+            round(float(width), 12)
+            for row in rows
+            if (width := _safe_float(row.get(width_key))) is not None and width > 0.0
+        }
+        indices = {
+            int(index)
+            for row in rows
+            if (index := _safe_int(row.get(index_key))) is not None
+        }
+        if len(widths) != 1 or not indices:
+            raise ValueError(f"Cannot re-bin a non-uniform {axis} grid")
+        ordered = sorted(indices)
+        if ordered[0] != 0:
+            raise ValueError(f"Cannot re-bin a {axis} grid that does not start at index zero")
+        if ordered != list(range(ordered[0], ordered[-1] + 1)):
+            raise ValueError(f"Cannot re-bin a discontinuous {axis} grid")
+        geometry_by_index: dict[int, set[tuple[float, float]]] = defaultdict(set)
+        for row in rows:
+            index = _safe_int(row.get(index_key))
+            left = _safe_float(row.get(left_key))
+            right = _safe_float(row.get(right_key))
+            if index is not None and left is not None and right is not None:
+                geometry_by_index[int(index)].add(
+                    (round(float(left), 12), round(float(right), 12))
+                )
+        if set(geometry_by_index) != set(indices) or any(
+            len(geometry) != 1 for geometry in geometry_by_index.values()
+        ):
+            raise ValueError(f"Cannot re-bin incompatible {axis} grids")
+        return float(next(iter(widths))), len(ordered)
+
+    distance_width, distance_count = _native_axis("distance")
+    bearing_width, bearing_count = _native_axis("bearing")
+    distance_factors = range(1, min(distance_count, 10) + 1)
+    bearing_factors = [
+        factor for factor in range(1, bearing_count + 1) if bearing_count % factor == 0
+    ]
+
+    def _options(
+        factors: Iterable[int],
+        *,
+        native_width: float,
+        unit: str,
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "factor": int(factor),
+                "width": float(native_width * factor),
+                "label": (
+                    f"{native_width:g} {unit} (native)"
+                    if factor == 1
+                    else f"{native_width * factor:g} {unit} ({factor}× native)"
+                ),
+            }
+            for factor in factors
+        ]
+
+    return {
+        "native_distance_bin_width_mm": distance_width,
+        "native_bearing_bin_width_deg": bearing_width,
+        "distance": _options(
+            distance_factors,
+            native_width=distance_width,
+            unit="mm",
+        ),
+        "bearing": _options(
+            bearing_factors,
+            native_width=bearing_width,
+            unit="deg",
+        ),
+    }
+
+
+def rebin_egocentric_histogram_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    distance_bin_factor: int = 1,
+    bearing_bin_factor: int = 1,
+) -> list[dict[str, Any]]:
+    """Exactly coarsen aligned exported bins by summing counts, never interpolation."""
+
+    distance_factor = int(distance_bin_factor)
+    bearing_factor = int(bearing_bin_factor)
+    if distance_factor < 1 or bearing_factor < 1:
+        raise ValueError("Re-bin factors must be positive integers")
+    if not rows:
+        return []
+
+    options = egocentric_rebin_options(rows)
+    distance_bin_count = max(
+        int(_safe_int(row.get("distance_bin_index")) or 0) for row in rows
+    ) + 1
+    bearing_bin_count = max(
+        int(_safe_int(row.get("bearing_bin_index")) or 0) for row in rows
+    ) + 1
+    if distance_factor > distance_bin_count:
+        raise ValueError("Distance re-bin factor exceeds the native grid")
+    if bearing_factor > bearing_bin_count or bearing_bin_count % bearing_factor != 0:
+        raise ValueError("Bearing re-bin factor must divide the complete circular grid")
+
+    grouped: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        distance_index = _safe_int(row.get("distance_bin_index"))
+        bearing_index = _safe_int(row.get("bearing_bin_index"))
+        distance_left = _safe_float(row.get("distance_bin_left_mm"))
+        distance_right = _safe_float(row.get("distance_bin_right_mm"))
+        bearing_left = _safe_float(row.get("bearing_bin_left_deg"))
+        bearing_right = _safe_float(row.get("bearing_bin_right_deg"))
+        if None in (
+            distance_index,
+            bearing_index,
+            distance_left,
+            distance_right,
+            bearing_left,
+            bearing_right,
+        ):
+            raise ValueError("Cannot re-bin histogram rows with incomplete bin geometry")
+        key = (
+            _safe_int(row.get("window_index")),
+            row.get("window_label"),
+            _safe_int(row.get("chaser_index")),
+            int(distance_index) // distance_factor,
+            int(bearing_index) // bearing_factor,
+        )
+        item = grouped.setdefault(
+            key,
+            {
+                "window_index": key[0],
+                "window_label": key[1],
+                "chaser_index": key[2],
+                "distance_bin_index": key[3],
+                "distance_bin_left_mm": float(distance_left),
+                "distance_bin_right_mm": float(distance_right),
+                "bearing_bin_index": key[4],
+                "bearing_bin_left_deg": float(bearing_left),
+                "bearing_bin_right_deg": float(bearing_right),
+                "pooled_count": 0,
+            },
+        )
+        item["distance_bin_left_mm"] = min(
+            float(item["distance_bin_left_mm"]), float(distance_left)
+        )
+        item["distance_bin_right_mm"] = max(
+            float(item["distance_bin_right_mm"]), float(distance_right)
+        )
+        item["bearing_bin_left_deg"] = min(
+            float(item["bearing_bin_left_deg"]), float(bearing_left)
+        )
+        item["bearing_bin_right_deg"] = max(
+            float(item["bearing_bin_right_deg"]), float(bearing_right)
+        )
+        item["pooled_count"] += int(_safe_int(row.get("pooled_count")) or 0)
+
+    totals: dict[tuple[Any, Any], int] = defaultdict(int)
+    for item in grouped.values():
+        totals[(item["window_label"], item["chaser_index"])] += int(
+            item["pooled_count"]
+        )
+
+    output: list[dict[str, Any]] = []
+    for item in grouped.values():
+        distance_left = float(item["distance_bin_left_mm"])
+        distance_right = float(item["distance_bin_right_mm"])
+        bearing_left = float(item["bearing_bin_left_deg"])
+        bearing_right = float(item["bearing_bin_right_deg"])
+        total = totals[(item["window_label"], item["chaser_index"])]
+        count = int(item["pooled_count"])
+        output.append(
+            {
+                **item,
+                "distance_bin_center_mm": (distance_left + distance_right) / 2.0,
+                "distance_bin_width_mm": distance_right - distance_left,
+                "bearing_bin_center_deg": (bearing_left + bearing_right) / 2.0,
+                "bearing_bin_width_deg": bearing_right - bearing_left,
+                "pooled_total_count": total,
+                "pooled_probability": _round(count / total if total > 0 else None),
+                "distance_bin_factor": distance_factor,
+                "bearing_bin_factor": bearing_factor,
+                "native_distance_bin_width_mm": options[
+                    "native_distance_bin_width_mm"
+                ],
+                "native_bearing_bin_width_deg": options[
+                    "native_bearing_bin_width_deg"
+                ],
+            }
+        )
+    output.sort(
+        key=lambda row: (
+            _sort_int(row.get("window_index")),
+            _sort_int(row.get("chaser_index"), 0),
+            _sort_int(row.get("distance_bin_index"), 0),
+            _sort_int(row.get("bearing_bin_index"), 0),
+        )
+    )
+    return output
+
+
 def query_recordings(context: ViewerContext) -> dict[str, Any]:
     spatial = load_optional_table_rows(context, SPATIAL_TABLE)
     chaser = load_optional_table_rows(context, CHASER_SUMMARY_TABLE)

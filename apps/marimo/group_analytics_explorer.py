@@ -44,6 +44,7 @@ def _():
     from fisheye.group_analytics_viewer.query import (
         build_context,
         build_health_report,
+        egocentric_rebin_options,
         query_chaser_histogram,
         query_chaser_summary,
         query_cra_near_field_curves,
@@ -62,6 +63,7 @@ def _():
         query_recordings,
         query_spatial_occupancy,
         query_speed_distance_bins,
+        rebin_egocentric_histogram_rows,
     )
 
     return (
@@ -74,6 +76,7 @@ def _():
         epoch_selection_options,
         egocentric_polar_figure,
         egocentric_probability_color_max,
+        egocentric_rebin_options,
         filter_rows_by_chasers,
         filter_rows_by_windows,
         group_egocentric_histogram_rows,
@@ -101,6 +104,7 @@ def _():
         query_recordings,
         query_spatial_occupancy,
         query_speed_distance_bins,
+        rebin_egocentric_histogram_rows,
         sample_grain_status_rows,
         select_export_run_id,
     )
@@ -457,9 +461,66 @@ def _(
 
 
 @app.cell
+def _(panel_labels, panel_picker):
+    selected_panel_id = panel_labels[panel_picker.value]
+    return (selected_panel_id,)
+
+
+@app.cell
+def _(
+    analysis_context,
+    egocentric_rebin_options,
+    mo,
+    query_egocentric_histogram,
+    selected_capabilities,
+    selected_panel_id,
+):
+    egocentric_native_histogram = (
+        query_egocentric_histogram(
+            analysis_context,
+            window_label=None,
+            chaser_index=None,
+        )
+        if selected_panel_id == "egocentric"
+        and "chaser.egocentric" in selected_capabilities
+        else {"rows": []}
+    )
+    _rebin_options = egocentric_rebin_options(
+        egocentric_native_histogram.get("rows", [])
+    )
+    egocentric_distance_bin_labels = {
+        str(item["label"]): int(item["factor"])
+        for item in _rebin_options["distance"]
+    }
+    egocentric_bearing_bin_labels = {
+        str(item["label"]): int(item["factor"])
+        for item in _rebin_options["bearing"]
+    }
+    egocentric_distance_bin_picker = mo.ui.dropdown(
+        options=list(egocentric_distance_bin_labels),
+        value=next(iter(egocentric_distance_bin_labels)),
+        label="Distance bins",
+    )
+    egocentric_bearing_bin_picker = mo.ui.dropdown(
+        options=list(egocentric_bearing_bin_labels),
+        value=next(iter(egocentric_bearing_bin_labels)),
+        label="Bearing bins",
+    )
+    return (
+        egocentric_bearing_bin_labels,
+        egocentric_bearing_bin_picker,
+        egocentric_distance_bin_labels,
+        egocentric_distance_bin_picker,
+        egocentric_native_histogram,
+    )
+
+
+@app.cell
 def _(
     behavior_metric_picker,
     bout_metric_picker,
+    egocentric_bearing_bin_picker,
+    egocentric_distance_bin_picker,
     chaser_metric_picker,
     chaser_picker,
     cra_metric_picker,
@@ -469,11 +530,11 @@ def _(
     panel_control_spec,
     panel_labels,
     panel_picker,
+    selected_panel_id,
     spatial_metric_picker,
     stat_picker,
     window_picker,
 ):
-    selected_panel_id = panel_labels[panel_picker.value]
     control_spec = panel_control_spec(selected_panel_id)
     _analysis_picker_by_options_key = {
         "epoch_speed_metrics": behavior_metric_picker,
@@ -496,10 +557,13 @@ def _(
         _controls.append(chaser_picker)
     if control_spec.show_statistic:
         _controls.append(stat_picker)
+    if control_spec.show_egocentric_bins:
+        _controls.extend(
+            [egocentric_distance_bin_picker, egocentric_bearing_bin_picker]
+        )
     mo.hstack(_controls) if _controls else mo.md(
         f"**{panel_picker.value}** has no additional analysis controls."
     )
-    return (selected_panel_id,)
 
 
 @app.cell
@@ -517,6 +581,11 @@ def _(
     cra_metric_picker,
     egocentric_metric_labels,
     egocentric_metric_picker,
+    egocentric_bearing_bin_labels,
+    egocentric_bearing_bin_picker,
+    egocentric_distance_bin_labels,
+    egocentric_distance_bin_picker,
+    egocentric_native_histogram,
     filter_rows_by_chasers,
     filter_rows_by_windows,
     near_metric_labels,
@@ -528,7 +597,6 @@ def _(
     query_cra_near_field_summary,
     query_cra_object_phase,
     query_cra_summary,
-    query_egocentric_histogram,
     query_egocentric_summary,
     query_epoch_bout_histogram,
     query_epoch_inter_bout_interval_histogram,
@@ -537,6 +605,7 @@ def _(
     query_recordings,
     query_spatial_occupancy,
     query_speed_distance_bins,
+    rebin_egocentric_histogram_rows,
     selected_capabilities,
     selected_panel_id,
     spatial_metric_labels,
@@ -693,18 +762,31 @@ def _(
             selected_windows,
         )
         payloads["egocentric_summary"] = _egocentric_summary
-        _egocentric_histogram = query_egocentric_histogram(
-            analysis_context,
-            window_label=None,
-            chaser_index=None,
-        )
-        _egocentric_histogram["rows"] = filter_rows_by_windows(
+        _native_histogram_rows = filter_rows_by_windows(
             filter_rows_by_chasers(
-                _egocentric_histogram.get("rows", []),
+                egocentric_native_histogram.get("rows", []),
                 selected_chasers,
             ),
             selected_windows,
         )
+        _distance_factor = egocentric_distance_bin_labels[
+            egocentric_distance_bin_picker.value
+        ]
+        _bearing_factor = egocentric_bearing_bin_labels[
+            egocentric_bearing_bin_picker.value
+        ]
+        _egocentric_histogram = {
+            "rows": rebin_egocentric_histogram_rows(
+                _native_histogram_rows,
+                distance_bin_factor=_distance_factor,
+                bearing_bin_factor=_bearing_factor,
+            ),
+            "distance_bin_factor": _distance_factor,
+            "bearing_bin_factor": _bearing_factor,
+            "distance_bin_label": egocentric_distance_bin_picker.value,
+            "bearing_bin_label": egocentric_bearing_bin_picker.value,
+            "rebin_method": "exact_aligned_count_sum",
+        }
         payloads["egocentric_histogram"] = _egocentric_histogram
     if selected_panel_id == "statistics" and "group.statistics" in selected_capabilities:
         payloads["statistics"] = query_group_statistics(analysis_context)
@@ -989,7 +1071,13 @@ def _(
             [
                 mo.md("## Egocentric bearing"),
                 _figure_or_message(_summary_figure),
-                mo.md("### Distance-by-bearing polar densities"),
+                mo.md(
+                    "### Distance-by-bearing polar densities\n\n"
+                    f"Bins: `{_hist.get('distance_bin_label', 'native')}` × "
+                    f"`{_hist.get('bearing_bin_label', 'native')}`. "
+                    "Counts are summed on the native grid and probabilities are recomputed; "
+                    "the terminal distance bin may be narrower than the selected nominal width."
+                ),
                 _polar_grid,
                 mo.accordion(
                     {

@@ -15,6 +15,10 @@ from apps.marimo.components.group_analytics import (
     panel_control_spec,
     sample_grain_status_rows,
 )
+from fisheye.group_analytics_viewer.query import (
+    egocentric_rebin_options,
+    rebin_egocentric_histogram_rows,
+)
 
 
 def test_available_group_panels_follow_export_capabilities() -> None:
@@ -68,12 +72,14 @@ def test_panel_controls_only_expose_relevant_filters() -> None:
     assert egocentric.show_window is True
     assert egocentric.show_chaser is True
     assert egocentric.show_statistic is True
+    assert egocentric.show_egocentric_bins is True
 
     inventory = panel_control_spec("inventory")
     assert inventory.analysis_options_key is None
     assert inventory.show_window is False
     assert inventory.show_chaser is False
     assert inventory.show_statistic is False
+    assert inventory.show_egocentric_bins is False
 
 
 def test_chaser_row_filter_supports_multiple_selected_chasers() -> None:
@@ -301,3 +307,72 @@ def test_egocentric_probability_scale_is_robust_across_panels() -> None:
     ]
 
     assert egocentric_probability_color_max(rows, quantile=0.5) == 0.2
+
+
+def _native_egocentric_histogram_rows() -> list[dict[str, object]]:
+    counts = [1, 2, 3, 4, 5, 6, 7, 8]
+    total = sum(counts)
+    rows = []
+    for distance_index in range(2):
+        for bearing_index in range(4):
+            count = counts[distance_index * 4 + bearing_index]
+            rows.append(
+                {
+                    "window_index": 0,
+                    "window_label": "pre",
+                    "chaser_index": 0,
+                    "distance_bin_index": distance_index,
+                    "distance_bin_left_mm": float(distance_index * 2),
+                    "distance_bin_right_mm": float((distance_index + 1) * 2),
+                    "distance_bin_center_mm": float(distance_index * 2 + 1),
+                    "distance_bin_width_mm": 2.0,
+                    "bearing_bin_index": bearing_index,
+                    "bearing_bin_left_deg": float(-180 + bearing_index * 90),
+                    "bearing_bin_right_deg": float(-90 + bearing_index * 90),
+                    "bearing_bin_center_deg": float(-135 + bearing_index * 90),
+                    "bearing_bin_width_deg": 90.0,
+                    "pooled_count": count,
+                    "pooled_total_count": total,
+                    "pooled_probability": count / total,
+                }
+            )
+    return rows
+
+
+def test_egocentric_rebin_options_only_offer_exact_native_multiples() -> None:
+    options = egocentric_rebin_options(_native_egocentric_histogram_rows())
+
+    assert [item["factor"] for item in options["distance"]] == [1, 2]
+    assert [item["label"] for item in options["distance"]] == [
+        "2 mm (native)",
+        "4 mm (2× native)",
+    ]
+    assert [item["factor"] for item in options["bearing"]] == [1, 2, 4]
+    assert [item["width"] for item in options["bearing"]] == [90.0, 180.0, 360.0]
+
+
+def test_egocentric_rebin_sums_counts_and_recomputes_probabilities() -> None:
+    rebinned = rebin_egocentric_histogram_rows(
+        _native_egocentric_histogram_rows(),
+        distance_bin_factor=2,
+        bearing_bin_factor=2,
+    )
+
+    assert len(rebinned) == 2
+    assert [row["pooled_count"] for row in rebinned] == [14, 22]
+    assert all(row["pooled_total_count"] == 36 for row in rebinned)
+    assert sum(float(row["pooled_probability"]) for row in rebinned) == 1.0
+    assert all(row["distance_bin_width_mm"] == 4.0 for row in rebinned)
+    assert all(row["bearing_bin_width_deg"] == 180.0 for row in rebinned)
+    assert all(row["distance_bin_factor"] == 2 for row in rebinned)
+    assert all(row["bearing_bin_factor"] == 2 for row in rebinned)
+
+
+def test_egocentric_rebin_rejects_non_divisible_bearing_factor() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="complete circular grid"):
+        rebin_egocentric_histogram_rows(
+            _native_egocentric_histogram_rows(),
+            bearing_bin_factor=3,
+        )
