@@ -22,10 +22,12 @@ The first application is read-only and displays one export at a time.
 
 ## Current prototype assessment
 
-The current notebook:
+The current notebook now:
 
-- fixes `export_root`, `export_run_id`, and optional `stats_run_id` when the
-  Marimo process starts;
+- fixes the authorized `export_root` and optional `stats_run_id` when the
+  Marimo process starts, while allowing reactive `export_run_id` selection;
+- discovers immutable exports from manifests without requiring a registry and
+  rejects manifest or table paths that escape the authorized root;
 - presents a generic “Palette Group Analytics” title but primarily consumes
   GoodCopBadCop epoch-behavior tables;
 - exposes bout histograms, inter-bout intervals, one selected epoch summary,
@@ -34,8 +36,8 @@ The current notebook:
 - reports health as one summary value without a diagnostic panel;
 - does not expose provenance, report inventory, spatial, chaser, CRA,
   near-field, or egocentric panels;
-- does not route panels from available table capabilities;
-- cannot switch exports reactively.
+- performs only a preliminary GoodCopBadCop table gate rather than routing
+  composable panels from a provider/capability catalog.
 
 The library query layer is substantially richer than the notebook. It already
 contains queries for export summary and health, options, spatial occupancy,
@@ -232,6 +234,81 @@ The first provider set is capability-based:
 Protocol name may help label or prioritize providers, but it is not sufficient
 evidence that a panel's data exists.
 
+## Decision: mixed exports compose visualization capabilities
+
+An export is not assigned one mutually exclusive visualizer such as “chaser,”
+“swim bouts,” or “kinematics.” One immutable export may contain several
+analysis families and several data grains at once. Every compatible panel
+provider is activated independently from the contents of the selected export.
+
+For example:
+
+| Exported content | Visualization capability |
+| --- | --- |
+| swim-bout summary tables | bout rates and condition summaries |
+| swim-bout event tables | per-bout distributions and drilldown |
+| kinematic summary tables | group speed, heading, path, and distance comparisons |
+| frame-level kinematic tables | speed, heading, position, and trajectory traces |
+| chaser summary tables | epoch and pre/post chaser comparisons |
+| chaser event or histogram tables | chase timelines and distance distributions |
+| sampled tail-spline traces | tail-motion and cross-bout kinematic views |
+
+A mixed export containing bout, kinematic, and chaser outputs therefore shows
+all three visualization families. The application may group them into
+navigation sections, but the sections are not competing dataset types.
+
+### Data grain is part of the capability
+
+Panel availability must distinguish the scientific resolution of the exported
+data:
+
+- summary tables support population or condition summaries;
+- histogram tables support the persisted distribution represented by their
+  bin contract;
+- event-level tables support per-bout or per-stimulus-event distributions and
+  drilldown;
+- frame- or sample-level tables support time traces and trajectories;
+- sampled spline tables support tail-shape and tail-motion views.
+
+Summary-only data must not be presented as though detailed traces can be
+reconstructed. When a more detailed grain is absent, the UI should retain the
+available summary panel and explain why the trace or event panel is
+unavailable.
+
+When multiple grains are present, they have complementary roles. Persisted
+summary tables provide fast group views; event and frame tables provide
+on-demand drilldown. The Marimo application may perform display-oriented
+filtering and aggregation allowed by the table contract, but it should not
+silently rerun canonical scientific analyses.
+
+### Panel requirements
+
+Each panel provider declares machine-checkable requirements rather than a
+protocol-name conditional. Requirements include:
+
+- an `all_of` or `one_of` set of table contracts;
+- required columns and compatible schema versions;
+- the data grain and experimental unit;
+- optional linked statistics or provenance inputs;
+- the normalized query payload and renderer it uses.
+
+Example capability identifiers include `bout.summary`, `bout.events`,
+`kinematics.summary`, `kinematics.frame_trace`, `chaser.epoch_summary`, and
+`tail.sampled_spline`. These names describe available evidence, not the name of
+the experiment that produced it.
+
+Capability detection initially derives from manifest table inventory plus
+validated Parquet schemas. The library remains authoritative for table and
+panel requirements. A later export-contract revision should snapshot the
+resolved capabilities, table contract versions, grains, units, and keys into
+the immutable export manifest. That snapshot improves discovery and auditability
+without making the manifest an independent source of scientific definitions.
+
+Every rendered panel records or displays which source table contracts and
+versions satisfied its capability. An unavailable panel reports the missing
+table, column, grain, or compatible version instead of producing a blank plot
+or inferring unavailable data.
+
 ## Scientific presentation defaults
 
 - Recording-weighted summaries are the default when recordings are the
@@ -317,13 +394,15 @@ V1 defers:
 3. Replace startup-fixed `export_run_id` with a reactive dataset selector.
 4. Add export overview, full health diagnostics, recordings, tables,
    provenance, and report inventory.
-5. Define a provider/capability catalog for panels.
+5. Define a composable capability catalog that accounts for table contracts,
+   required columns, schema versions, and data grain.
 6. Extract existing plot construction from the notebook into reusable
    components or normalized renderer inputs.
 7. Mount the already-implemented GoodCopBadCop query surface through the
    provider catalog.
 8. Add core behavior panels that work without a stimulus-specific table set.
-9. Validate aggregation labels and empty/error states with fixtures.
+9. Validate mixed exports, aggregation labels, and empty/error states with
+   fixtures.
 10. Run `marimo check`, unit tests, and a local read-only app smoke.
 11. Only then package the installed command and analytics container.
 

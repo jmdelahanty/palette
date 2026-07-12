@@ -111,7 +111,9 @@ scripts/py -m marimo run apps/marimo/group_analytics_explorer.py -- \
   --stats-run-id auto
 ```
 
-The current command fixes one export at process startup. The FileGlancer design
-will replace that behavior with a reactive selector constrained to a
-FileGlancer-authorized export root. Until that implementation lands, this
-example remains the local focused-app invocation.
+The group analytics app discovers immutable export manifests beneath the
+authorized root and provides a reactive export selector. `--export-run-id`
+chooses the initial export; it does not prevent switching datasets without a
+process restart. Registry-free discovery and symlink-aware root confinement are
+implemented. Composable capability and panel-provider routing is the next
+application layer.
