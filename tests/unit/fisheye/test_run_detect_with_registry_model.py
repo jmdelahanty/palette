@@ -306,6 +306,10 @@ def test_main_runs_detect_resolution_and_writes_provenance(
             "1280",
             "--decode-backend",
             "pynvvc_luma_rgb",
+            "--detect-row-shard-rows",
+            "262144",
+            "--detect-frame-shard-rows",
+            "524288",
         ]
     )
 
@@ -325,6 +329,8 @@ def test_main_runs_detect_resolution_and_writes_provenance(
     assert detect_kwargs.get("resize_dims") == [768, 1280]
     assert detect_kwargs.get("imgsz") is None
     assert detect_kwargs.get("decode_backend") == "pynvvc_luma_rgb"
+    assert detect_kwargs.get("detect_row_shard_rows") == 262_144
+    assert detect_kwargs.get("detect_frame_shard_rows") == 524_288
     assert detect_kwargs.get("run_provenance") == detect_kwargs.get("cli_provenance")
     run_provenance = detect_kwargs.get("run_provenance")
     assert isinstance(run_provenance, dict)

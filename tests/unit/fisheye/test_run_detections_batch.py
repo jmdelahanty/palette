@@ -493,6 +493,8 @@ def test_run_detect_plan_skips_registry_provenance_for_explicit_model(monkeypatc
         resize_dims=None,
         imgsz=None,
         decode_backend=None,
+        detect_row_shard_rows=262_144,
+        detect_frame_shard_rows=262_144,
         cpu=False,
         registry_path=tmp_path / "missing_registry.sqlite",
     )

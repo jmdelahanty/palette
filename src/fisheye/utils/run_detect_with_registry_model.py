@@ -19,6 +19,8 @@ from fisheye.utils.model_resolution_provenance import build_model_resolution_pay
 from fisheye.registry.model_resolution import Candidate, TargetProfile, load_candidates, load_target_profile, resolve_recording_id
 
 _DETECT_STATUS_SOURCE = "runtime_detect_with_registry_model"
+DEFAULT_DETECT_ROW_SHARD_ROWS = 262_144
+DEFAULT_DETECT_FRAME_SHARD_ROWS = 262_144
 
 DECODE_BACKEND_CHOICES = (
     "auto",
@@ -43,7 +45,7 @@ def _emit_detect_step_status(
     """Write a detect step status row to the registry (non-fatal)."""
     try:
         resolved_zarr_path = zarr_path.expanduser().resolve()
-        root = zarr.open(str(resolved_zarr_path), mode="r")
+        root = zarr.open(str(resolved_zarr_path), mode="r", use_consolidated=False)
 
         # Extract method and coverage from the detect run if available
         method = None
@@ -220,6 +222,12 @@ def build_detect_resolution_payload(
             "batch_size": args.batch_size,
             "resize_dims": args.resize_dims,
             "imgsz": args.imgsz,
+            "detect_row_shard_rows": args.detect_row_shard_rows,
+            "detect_frame_shard_rows": (
+                args.detect_frame_shard_rows
+                if args.detect_row_shard_rows is not None
+                else None
+            ),
         },
         inputs={
             "recording_dir": str(recording_dir),
@@ -249,7 +257,7 @@ def write_detect_model_resolution_provenance(
     run_name: str,
     payload: dict[str, Any],
 ) -> None:
-    root = zarr.open_group(str(zarr_path), mode="r+")
+    root = zarr.open_group(str(zarr_path), mode="r+", use_consolidated=False)
     detect_parent = root.get("detect_runs")
     if detect_parent is None or run_name not in detect_parent:
         raise RuntimeError(f"detect run not found for provenance annotation: detect_runs/{run_name}")
@@ -337,6 +345,8 @@ def build_detect_payload_args(
     resize_dims: Optional[list[int]],
     imgsz: Optional[list[int]],
     decode_backend: Optional[str],
+    detect_row_shard_rows: Optional[int],
+    detect_frame_shard_rows: int,
 ) -> argparse.Namespace:
     return argparse.Namespace(
         set_id=set_id,
@@ -353,6 +363,8 @@ def build_detect_payload_args(
         resize_dims=resize_dims,
         imgsz=imgsz,
         decode_backend=decode_backend,
+        detect_row_shard_rows=detect_row_shard_rows,
+        detect_frame_shard_rows=int(detect_frame_shard_rows),
     )
 
 
@@ -379,6 +391,8 @@ def run_detect_with_registry_model(
     resize_dims: Optional[list[int]] = None,
     imgsz: Optional[list[int]] = None,
     decode_backend: Optional[str] = None,
+    detect_row_shard_rows: Optional[int] = None,
+    detect_frame_shard_rows: int = DEFAULT_DETECT_FRAME_SHARD_ROWS,
     cpu: bool = False,
     write_raw_video_metadata: bool = False,
     overwrite_raw_video_metadata: bool = False,
@@ -470,6 +484,8 @@ def run_detect_with_registry_model(
         resize_dims=resize_dims,
         imgsz=imgsz,
         decode_backend=decode_backend,
+        detect_row_shard_rows=detect_row_shard_rows,
+        detect_frame_shard_rows=int(detect_frame_shard_rows),
     )
 
     payload = build_detect_resolution_payload(
@@ -547,6 +563,8 @@ def run_detect_with_registry_model(
             use_gpu=(False if cpu else None),
             write_raw_video_metadata=bool(write_raw_video_metadata),
             overwrite_raw_video_metadata=bool(overwrite_raw_video_metadata),
+            detect_row_shard_rows=detect_row_shard_rows,
+            detect_frame_shard_rows=int(detect_frame_shard_rows),
             cli_provenance=effective_run_provenance,
             run_provenance=effective_run_provenance,
         )
@@ -642,6 +660,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--max-det", type=int, default=None, help="Optional max detections override.")
     parser.add_argument("--batch-size", type=int, default=None, help="Optional batch size override.")
     parser.add_argument(
+        "--detect-row-shard-rows",
+        type=int,
+        default=None,
+        help=(
+            "Enable indexed sharding for detection arrays with this requested "
+            f"outer row count (candidate: {DEFAULT_DETECT_ROW_SHARD_ROWS})."
+        ),
+    )
+    parser.add_argument(
+        "--detect-frame-shard-rows",
+        type=int,
+        default=DEFAULT_DETECT_FRAME_SHARD_ROWS,
+        help="Outer row count for frame-count arrays when detection sharding is enabled.",
+    )
+    parser.add_argument(
         "--resize-dims",
         nargs="+",
         type=int,
@@ -693,6 +726,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         resize_dims=args.resize_dims,
         imgsz=args.imgsz,
         decode_backend=args.decode_backend,
+        detect_row_shard_rows=args.detect_row_shard_rows,
+        detect_frame_shard_rows=int(args.detect_frame_shard_rows),
         cpu=bool(args.cpu),
         write_raw_video_metadata=bool(args.write_raw_video_metadata),
         overwrite_raw_video_metadata=bool(args.overwrite_raw_video_metadata),

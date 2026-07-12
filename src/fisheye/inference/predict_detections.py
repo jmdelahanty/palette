@@ -16,7 +16,11 @@ import numpy as np
 import zarr
 from rich.console import Console
 
-from ..detection.detect_yolo import detect_yolo as run_detect_yolo
+from ..detection.detect_yolo import (
+    DEFAULT_DETECT_FRAME_SHARD_ROWS,
+    DEFAULT_DETECT_ROW_SHARD_ROWS,
+    detect_yolo as run_detect_yolo,
+)
 from ..registry.stage_complete import emit_stage_completion
 from ..shared.zarr_run_completion import resolve_authoritative_run_name
 
@@ -128,7 +132,7 @@ def _write_detect_step_status(
         return
 
     try:
-        root = zarr.open_group(str(output_zarr_path), mode="r")
+        root = zarr.open_group(str(output_zarr_path), mode="r", use_consolidated=False)
 
         detect_group = None
         resolved_run_name = _normalize_text(run_name)
@@ -232,6 +236,21 @@ Examples:
     parser.add_argument("--max-det", dest="max_det", type=int, help="Max detections per frame override")
     parser.add_argument("--batch-size", type=int, help="Batch size override")
     parser.add_argument(
+        "--detect-row-shard-rows",
+        type=int,
+        default=None,
+        help=(
+            "Enable indexed sharding for detection arrays with this requested "
+            f"outer row count (candidate: {DEFAULT_DETECT_ROW_SHARD_ROWS})."
+        ),
+    )
+    parser.add_argument(
+        "--detect-frame-shard-rows",
+        type=int,
+        default=DEFAULT_DETECT_FRAME_SHARD_ROWS,
+        help="Outer row count for frame-count arrays when detection sharding is enabled.",
+    )
+    parser.add_argument(
         "--resize-dims",
         nargs="+",
         type=int,
@@ -287,6 +306,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             imgsz=args.imgsz,
             console=console,
             use_gpu=use_gpu,
+            detect_row_shard_rows=args.detect_row_shard_rows,
+            detect_frame_shard_rows=args.detect_frame_shard_rows,
         )
     except Exception as exc:
         _write_detect_step_status(

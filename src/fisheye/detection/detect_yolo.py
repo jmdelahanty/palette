@@ -7,9 +7,10 @@ which wraps this module and keeps inference scripts in one namespace. This
 module still provides the core implementation and legacy CLI.
 """
 
+import hashlib
 import os
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple, Mapping
+from typing import Optional, Dict, Any, Tuple, Mapping, Sequence
 
 os.environ.setdefault("DECORD_EOF_RETRY_MAX", "65536")
 
@@ -60,7 +61,10 @@ from fisheye.shared.run_provenance import (
     build_run_provenance,
 )
 from fisheye.shared.zarr.schema import get_run_group
-from fisheye.shared.zarr.chunk_profiles import create_geometry_preload_array
+from fisheye.shared.zarr.chunk_profiles import (
+    create_geometry_preload_array,
+    geometry_preload_chunks_for_data,
+)
 from fisheye.shared.zarr_run_completion import (
     COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     mark_run_complete,
@@ -84,6 +88,9 @@ DECODE_BACKEND_CHOICES = (
     DECODE_BACKEND_OPENCV,
 )
 PYNVVC_SURFACE_MATERIALIZATION = "stream_event_owned_batch_v2"
+DETECT_SHARD_WRITE_SCHEMA = "palette.detect_materialized_shards.v1"
+DEFAULT_DETECT_ROW_SHARD_ROWS = 262_144
+DEFAULT_DETECT_FRAME_SHARD_ROWS = 262_144
 
 
 def _decord_available() -> bool:
@@ -474,6 +481,164 @@ def _record_timing(timings: Dict[str, float], key: str, start: float) -> float:
     return elapsed
 
 
+def _aligned_shards(chunks: Sequence[int], shard_rows: int | None) -> tuple[int, ...] | None:
+    if shard_rows is None:
+        return None
+    requested = int(shard_rows)
+    if requested <= 0:
+        raise ValueError("Detection shard rows must be positive.")
+    inner_rows = int(chunks[0])
+    outer_rows = int(((requested + inner_rows - 1) // inner_rows) * inner_rows)
+    return (outer_rows, *tuple(int(value) for value in chunks[1:]))
+
+
+def _digest_values(values: np.ndarray) -> str:
+    contiguous = np.ascontiguousarray(values)
+    return hashlib.sha256(contiguous.view(np.uint8)).hexdigest()
+
+
+def _digest_zarr_array(array: zarr.Array, *, row_step: int) -> str:
+    digest = hashlib.sha256()
+    step = max(1, int(row_step))
+    for start in range(0, int(array.shape[0]), step):
+        stop = min(start + step, int(array.shape[0]))
+        values = np.ascontiguousarray(array[start:stop, ...])
+        digest.update(values.view(np.uint8))
+    return digest.hexdigest()
+
+
+def _write_detection_output_arrays(
+    detect_group: zarr.Group,
+    *,
+    frame_indices: np.ndarray,
+    bbox_coords: np.ndarray,
+    scores: np.ndarray,
+    class_ids: np.ndarray,
+    instance_keys: np.ndarray,
+    frame_counts: np.ndarray,
+    det_chunk: int,
+    detect_row_shard_rows: int | None,
+    detect_frame_shard_rows: int,
+) -> dict[str, Any] | None:
+    """Write materialized YOLO detections, optionally as complete indexed shards."""
+
+    detection_values = {
+        "frame_indices": np.asarray(frame_indices),
+        "bbox_norm_coords": np.asarray(bbox_coords),
+        "scores": np.asarray(scores),
+        "class_ids": np.asarray(class_ids),
+        "instance_key": np.asarray(instance_keys),
+    }
+    frame_values = {
+        "n_detections": np.asarray(frame_counts),
+        "frame_counts": np.asarray(frame_counts),
+    }
+    detection_chunks = {
+        "frame_indices": (int(det_chunk),),
+        "bbox_norm_coords": (int(det_chunk), 4),
+        "scores": (int(det_chunk),),
+        "class_ids": (int(det_chunk),),
+        "instance_key": (int(det_chunk),),
+    }
+
+    if detect_row_shard_rows is None:
+        for name, values in detection_values.items():
+            detect_group.create_array(
+                name,
+                data=values,
+                chunks=detection_chunks[name],
+                overwrite=True,
+            )
+        for name, values in frame_values.items():
+            create_geometry_preload_array(
+                detect_group,
+                name,
+                data=values,
+                overwrite=True,
+            )
+        return None
+
+    count_chunks = geometry_preload_chunks_for_data(frame_counts) or (1,)
+    detection_shards = {
+        name: _aligned_shards(chunks, int(detect_row_shard_rows))
+        for name, chunks in detection_chunks.items()
+    }
+    frame_shards = _aligned_shards(count_chunks, int(detect_frame_shard_rows))
+
+    destinations: dict[str, zarr.Array] = {}
+    for name, values in detection_values.items():
+        shards = detection_shards[name]
+        assert shards is not None
+        destinations[name] = detect_group.create_array(
+            name,
+            shape=values.shape,
+            dtype=values.dtype,
+            chunks=detection_chunks[name],
+            shards=shards,
+            overwrite=True,
+        )
+    for name, values in frame_values.items():
+        assert frame_shards is not None
+        destinations[name] = create_geometry_preload_array(
+            detect_group,
+            name,
+            shape=values.shape,
+            dtype=values.dtype,
+            chunks=count_chunks,
+            shards=frame_shards,
+            overwrite=True,
+        )
+
+    all_values = {**detection_values, **frame_values}
+    source_hashes = {name: _digest_values(values) for name, values in all_values.items()}
+    write_started = time.perf_counter()
+    first_detection_shards = next(iter(detection_shards.values()))
+    assert first_detection_shards is not None
+    effective_detection_rows = int(first_detection_shards[0])
+    for start in range(0, int(frame_indices.shape[0]), effective_detection_rows):
+        stop = min(start + effective_detection_rows, int(frame_indices.shape[0]))
+        for name, values in detection_values.items():
+            destinations[name][start:stop, ...] = values[start:stop, ...]
+    assert frame_shards is not None
+    effective_frame_rows = int(frame_shards[0])
+    for start in range(0, int(frame_counts.shape[0]), effective_frame_rows):
+        stop = min(start + effective_frame_rows, int(frame_counts.shape[0]))
+        for name, values in frame_values.items():
+            destinations[name][start:stop, ...] = values[start:stop, ...]
+    write_seconds = float(time.perf_counter() - write_started)
+
+    validation_started = time.perf_counter()
+    destination_hashes = {
+        name: _digest_zarr_array(
+            array,
+            row_step=(effective_frame_rows if name in frame_values else effective_detection_rows),
+        )
+        for name, array in destinations.items()
+    }
+    validation_seconds = float(time.perf_counter() - validation_started)
+    if source_hashes != destination_hashes:
+        raise RuntimeError(
+            "YOLO detection shard digest mismatch: "
+            f"source={source_hashes} destination={destination_hashes}"
+        )
+    return {
+        "schema_id": DETECT_SHARD_WRITE_SCHEMA,
+        "status": "complete",
+        "write_mode": "materialized_complete_shards",
+        "detection_row_count": int(frame_indices.shape[0]),
+        "frame_row_count": int(frame_counts.shape[0]),
+        "detect_row_shard_rows_requested": int(detect_row_shard_rows),
+        "detect_row_shard_rows_effective": effective_detection_rows,
+        "detect_frame_shard_rows_requested": int(detect_frame_shard_rows),
+        "detect_frame_shard_rows_effective": effective_frame_rows,
+        "write_seconds": write_seconds,
+        "validation_seconds": validation_seconds,
+        "source_sha256_by_array": source_hashes,
+        "destination_sha256_by_array": destination_hashes,
+        "exact_match": True,
+    }
+
+
 def _iter_opencv_rgb_batches(
     *,
     cap: Any,
@@ -632,6 +797,8 @@ def detect_yolo(
     overwrite_raw_video_metadata: bool = False,
     run_name: Optional[str] = None,
     model_sha256: Optional[str] = None,
+    detect_row_shard_rows: Optional[int] = None,
+    detect_frame_shard_rows: int = DEFAULT_DETECT_FRAME_SHARD_ROWS,
     cli_provenance: Optional[Mapping[str, Any]] = None,
     run_provenance: Optional[Mapping[str, Any]] = None,
 ) -> str:
@@ -661,6 +828,9 @@ def detect_yolo(
         overwrite_raw_video_metadata: Overwrite existing raw_video attrs when writing metadata
         run_name: Optional explicit detect run group name. Used by cluster planners
             when downstream jobs need deterministic paths.
+        detect_row_shard_rows: Optional outer shard rows for detection-domain arrays.
+        detect_frame_shard_rows: Outer shard rows for frame-domain count arrays when
+            detection sharding is enabled.
         cli_provenance: Optional Palette CLI provenance block stamped before completion.
         
     Returns:
@@ -964,7 +1134,7 @@ def detect_yolo(
     
     console.print("\n[bold]Preparing output Zarr...[/bold]")
     if output_zarr.exists():
-        root = zarr.open_group(str(output_zarr), mode='r+')
+        root = zarr.open_group(str(output_zarr), mode='r+', use_consolidated=False)
         created_new_root = False
         console.print(f"[cyan]Appending detect run to existing archive:[/cyan] {output_zarr}")
     else:
@@ -1622,13 +1792,18 @@ def detect_yolo(
     
     # Save to zarr
     zarr_write_start = time.perf_counter()
-    detect_group.create_array('frame_indices', data=frame_indices, chunks=(det_chunk,), overwrite=True)
-    detect_group.create_array('bbox_norm_coords', data=bbox_coords, chunks=(det_chunk, 4), overwrite=True)
-    detect_group.create_array('scores', data=scores, chunks=(det_chunk,), overwrite=True)
-    detect_group.create_array('class_ids', data=class_ids, chunks=(det_chunk,), overwrite=True)
-    detect_group.create_array('instance_key', data=instance_keys, chunks=(det_chunk,), overwrite=True)
-    create_geometry_preload_array(detect_group, 'n_detections', data=frame_counts, overwrite=True)
-    create_geometry_preload_array(detect_group, 'frame_counts', data=frame_counts, overwrite=True)
+    detect_shard_write = _write_detection_output_arrays(
+        detect_group,
+        frame_indices=frame_indices,
+        bbox_coords=bbox_coords,
+        scores=scores,
+        class_ids=class_ids,
+        instance_keys=instance_keys,
+        frame_counts=frame_counts,
+        det_chunk=det_chunk,
+        detect_row_shard_rows=detect_row_shard_rows,
+        detect_frame_shard_rows=int(detect_frame_shard_rows),
+    )
     _record_timing(stage_timings, 'zarr_write_seconds_total', zarr_write_start)
     
     # Calculate statistics
@@ -1707,9 +1882,25 @@ def detect_yolo(
             'pynvvc_surface_materialization': (
                 PYNVVC_SURFACE_MATERIALIZATION if use_pynvvc else 'not_applicable'
             ),
+            'detect_row_shard_rows': (
+                int(detect_row_shard_rows) if detect_row_shard_rows is not None else None
+            ),
+            'detect_frame_shard_rows': (
+                int(detect_frame_shard_rows) if detect_row_shard_rows is not None else None
+            ),
         },
         'summary_statistics': stats,
         'timing_summary': timing_summary,
+        'detect_storage_layout': (
+            'indexed_sharding_v1' if detect_row_shard_rows is not None else 'regular_chunks_v1'
+        ),
+        'detect_row_shard_rows': (
+            int(detect_row_shard_rows) if detect_row_shard_rows is not None else None
+        ),
+        'detect_frame_shard_rows': (
+            int(detect_frame_shard_rows) if detect_row_shard_rows is not None else None
+        ),
+        'detect_shard_write': detect_shard_write,
         'git_commit': git_info.get('commit_hash', 'unknown'),
         'git_branch': git_info.get('branch', 'unknown'),
         'hostname': env_info['platform']['hostname']
@@ -1805,6 +1996,10 @@ def detect_yolo(
                 "decode_backend_effective": decode_backend_effective,
                 "use_gpu": bool(use_gpu),
                 "run_name": run_name,
+                "detect_row_shard_rows": detect_row_shard_rows,
+                "detect_frame_shard_rows": (
+                    int(detect_frame_shard_rows) if detect_row_shard_rows is not None else None
+                ),
             },
             input_run_ids={},
             cwd=Path.cwd(),
@@ -1913,6 +2108,21 @@ Examples:
     parser.add_argument('--batch-size', type=int, default=None, 
                        help='Inference batch size (overrides config)')
     parser.add_argument(
+        '--detect-row-shard-rows',
+        type=int,
+        default=None,
+        help=(
+            'Enable indexed sharding for detection-row arrays with this requested '
+            f'outer row count (candidate: {DEFAULT_DETECT_ROW_SHARD_ROWS}).'
+        ),
+    )
+    parser.add_argument(
+        '--detect-frame-shard-rows',
+        type=int,
+        default=DEFAULT_DETECT_FRAME_SHARD_ROWS,
+        help='Outer row count for frame-count arrays when detection sharding is enabled.',
+    )
+    parser.add_argument(
         '--resize-dims',
         nargs='+',
         type=int,
@@ -1972,6 +2182,8 @@ Examples:
             write_raw_video_metadata=args.write_raw_video_metadata,
             overwrite_raw_video_metadata=args.overwrite_raw_video_metadata,
             run_name=args.run_name,
+            detect_row_shard_rows=args.detect_row_shard_rows,
+            detect_frame_shard_rows=args.detect_frame_shard_rows,
         )
     except Exception as e:
         console = Console()

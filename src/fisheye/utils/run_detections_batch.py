@@ -26,6 +26,8 @@ from fisheye.utils.batch_registry_model_resolution import (
 )
 from fisheye.registry.model_resolution import load_candidates, load_target_profile, resolve_recording_id
 from fisheye.utils.run_detect_with_registry_model import DetectRegistryResult
+from fisheye.utils.run_detect_with_registry_model import DEFAULT_DETECT_FRAME_SHARD_ROWS
+from fisheye.utils.run_detect_with_registry_model import DEFAULT_DETECT_ROW_SHARD_ROWS
 from fisheye.utils.run_detect_with_registry_model import build_detect_payload_args
 from fisheye.utils.run_detect_with_registry_model import build_detect_resolution_payload
 from fisheye.utils.run_detect_with_registry_model import pick_best_detect_candidate
@@ -474,6 +476,8 @@ def _resolve_registry_model_for_plan(
     resize_dims: Optional[list[int]],
     imgsz: Optional[list[int]],
     decode_backend: Optional[str],
+    detect_row_shard_rows: Optional[int],
+    detect_frame_shard_rows: int,
     cpu: bool,
 ) -> ResolvedModel:
     if plan.video_path is None:
@@ -515,6 +519,8 @@ def _resolve_registry_model_for_plan(
         resize_dims=resize_dims,
         imgsz=imgsz,
         decode_backend=decode_backend,
+        detect_row_shard_rows=detect_row_shard_rows,
+        detect_frame_shard_rows=int(detect_frame_shard_rows),
     )
     payload = build_detect_resolution_payload(
         args=payload_args,
@@ -548,6 +554,8 @@ def _resolve_registry_models_for_plans(
     resize_dims: Optional[list[int]],
     imgsz: Optional[list[int]],
     decode_backend: Optional[str],
+    detect_row_shard_rows: Optional[int],
+    detect_frame_shard_rows: int,
     cpu: bool,
     on_event: Optional[Callable[[dict[str, object]], None]] = None,
 ) -> tuple[dict[str, ResolvedModel], dict[str, str]]:
@@ -567,6 +575,8 @@ def _resolve_registry_models_for_plans(
             resize_dims=resize_dims,
             imgsz=imgsz,
             decode_backend=decode_backend,
+            detect_row_shard_rows=detect_row_shard_rows,
+            detect_frame_shard_rows=int(detect_frame_shard_rows),
             cpu=cpu,
         )
 
@@ -589,6 +599,8 @@ def _build_explicit_model_payload(
     resize_dims: Optional[list[int]],
     imgsz: Optional[list[int]],
     decode_backend: Optional[str],
+    detect_row_shard_rows: Optional[int],
+    detect_frame_shard_rows: int,
     cpu: bool,
 ) -> dict[str, object]:
     selected = {
@@ -611,6 +623,10 @@ def _build_explicit_model_payload(
             "resize_dims": resize_dims,
             "imgsz": imgsz,
             "decode_backend": decode_backend,
+            "detect_row_shard_rows": detect_row_shard_rows,
+            "detect_frame_shard_rows": (
+                int(detect_frame_shard_rows) if detect_row_shard_rows is not None else None
+            ),
             "cpu": bool(cpu),
         },
         "inputs": {
@@ -636,6 +652,8 @@ def _resolve_explicit_models_for_plans(
     resize_dims: Optional[list[int]],
     imgsz: Optional[list[int]],
     decode_backend: Optional[str],
+    detect_row_shard_rows: Optional[int],
+    detect_frame_shard_rows: int,
     cpu: bool,
 ) -> dict[str, ResolvedModel]:
     return {
@@ -652,6 +670,8 @@ def _resolve_explicit_models_for_plans(
                 resize_dims=resize_dims,
                 imgsz=imgsz,
                 decode_backend=decode_backend,
+                detect_row_shard_rows=detect_row_shard_rows,
+                detect_frame_shard_rows=int(detect_frame_shard_rows),
                 cpu=cpu,
             ),
         )
@@ -673,6 +693,8 @@ def _run_detect_plan(
     resize_dims: Optional[list[int]],
     imgsz: Optional[list[int]],
     decode_backend: Optional[str],
+    detect_row_shard_rows: Optional[int],
+    detect_frame_shard_rows: int,
     cpu: bool,
     registry_path: Path,
 ) -> DetectRegistryResult:
@@ -711,6 +733,8 @@ def _run_detect_plan(
             use_gpu=(False if cpu else None),
             write_raw_video_metadata=bool(write_raw_video_metadata),
             overwrite_raw_video_metadata=bool(overwrite_raw_video_metadata),
+            detect_row_shard_rows=detect_row_shard_rows,
+            detect_frame_shard_rows=int(detect_frame_shard_rows),
         )
         if resolved_model.payload.get("mode") == "registry":
             write_detect_model_resolution_provenance(
@@ -817,6 +841,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--iou", type=float, default=None, help="Optional detect IoU threshold override.")
     parser.add_argument("--max-det", type=int, default=None, help="Optional detect max_det override.")
     parser.add_argument("--batch-size", type=int, default=None, help="Optional detect batch size override.")
+    parser.add_argument(
+        "--detect-row-shard-rows",
+        type=int,
+        default=None,
+        help=(
+            "Enable indexed sharding for detection arrays with this requested "
+            f"outer row count (candidate: {DEFAULT_DETECT_ROW_SHARD_ROWS})."
+        ),
+    )
+    parser.add_argument(
+        "--detect-frame-shard-rows",
+        type=int,
+        default=DEFAULT_DETECT_FRAME_SHARD_ROWS,
+        help="Outer row count for frame-count arrays when detection sharding is enabled.",
+    )
     parser.add_argument(
         "--resize-dims",
         nargs="+",
@@ -1009,6 +1048,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     resize_dims=args.resize_dims,
                     imgsz=args.imgsz,
                     decode_backend=args.decode_backend,
+                    detect_row_shard_rows=args.detect_row_shard_rows,
+                    detect_frame_shard_rows=int(args.detect_frame_shard_rows),
                     cpu=bool(args.cpu),
                 )
             elif runnable_dry_run_plans:
@@ -1027,6 +1068,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     resize_dims=args.resize_dims,
                     imgsz=args.imgsz,
                     decode_backend=args.decode_backend,
+                    detect_row_shard_rows=args.detect_row_shard_rows,
+                    detect_frame_shard_rows=int(args.detect_frame_shard_rows),
                     cpu=bool(args.cpu),
                     on_event=None,
                 )
@@ -1156,6 +1199,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 resize_dims=args.resize_dims,
                 imgsz=args.imgsz,
                 decode_backend=args.decode_backend,
+                detect_row_shard_rows=args.detect_row_shard_rows,
+                detect_frame_shard_rows=int(args.detect_frame_shard_rows),
                 cpu=bool(args.cpu),
             )
             if logger is not None:
@@ -1223,6 +1268,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             resize_dims=args.resize_dims,
             imgsz=args.imgsz,
             decode_backend=args.decode_backend,
+            detect_row_shard_rows=args.detect_row_shard_rows,
+            detect_frame_shard_rows=int(args.detect_frame_shard_rows),
             cpu=bool(args.cpu),
             on_event=_emit_model_resolution_event,
         )
@@ -1288,6 +1335,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             resize_dims=args.resize_dims,
             imgsz=args.imgsz,
             decode_backend=args.decode_backend,
+            detect_row_shard_rows=args.detect_row_shard_rows,
+            detect_frame_shard_rows=int(args.detect_frame_shard_rows),
             cpu=bool(args.cpu),
             registry_path=registry_path,
         )
