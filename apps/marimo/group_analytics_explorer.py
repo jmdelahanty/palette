@@ -25,7 +25,9 @@ def _():
 
     from apps.marimo.components.group_analytics import (
         available_group_panels,
+        chaser_selection_options,
         egocentric_heatmap_figure,
+        filter_rows_by_chasers,
         grouped_bar_figure,
         line_figure,
         panel_control_spec,
@@ -63,8 +65,10 @@ def _():
         available_group_panels,
         build_context,
         build_health_report,
+        chaser_selection_options,
         discover_export_catalog,
         egocentric_heatmap_figure,
+        filter_rows_by_chasers,
         grouped_bar_figure,
         line_figure,
         mo,
@@ -316,6 +320,7 @@ def _(
 @app.cell
 def _(
     analysis_context,
+    chaser_selection_options,
     mo,
     panel_control_spec,
     panel_definitions,
@@ -345,14 +350,13 @@ def _(
         value=window_labels[0],
         label="Epoch",
     )
-    chaser_labels = {"All chasers": None}
-    chaser_labels.update(
-        {f"Chaser {value}": value for value in options.get("chasers", [])}
+    chaser_labels, default_chaser_labels = chaser_selection_options(
+        options.get("chasers", [])
     )
-    chaser_picker = mo.ui.dropdown(
+    chaser_picker = mo.ui.multiselect(
         options=list(chaser_labels),
-        value="All chasers",
-        label="Chaser",
+        value=default_chaser_labels,
+        label="Chasers",
     )
     stat_labels = {"Mean": "mean", "Median": "median"}
     stat_picker = mo.ui.dropdown(
@@ -504,6 +508,7 @@ def _(
     cra_metric_picker,
     egocentric_metric_labels,
     egocentric_metric_picker,
+    filter_rows_by_chasers,
     near_metric_labels,
     near_metric_picker,
     query_chaser_histogram,
@@ -533,7 +538,11 @@ def _(
     selected_window = (
         None if window_picker.value == "All epochs" else str(window_picker.value)
     )
-    selected_chaser = chaser_labels[chaser_picker.value]
+    selected_chasers = tuple(
+        chaser_labels[label]
+        for label in chaser_picker.value
+        if label in chaser_labels
+    )
     selected_stat = stat_labels[stat_picker.value]
     payloads = {}
     if (
@@ -581,29 +590,41 @@ def _(
         )
         _chaser_summary["rows"] = [
             row
-            for row in _chaser_summary.get("rows", [])
+            for row in filter_rows_by_chasers(
+                _chaser_summary.get("rows", []),
+                selected_chasers,
+            )
             if (selected_window is None or row.get("window_label") == selected_window)
-            and (selected_chaser is None or row.get("chaser_index") == selected_chaser)
         ]
         payloads["chaser_summary"] = _chaser_summary
     if (
         selected_panel_id == "chaser_distance"
         and "chaser.distance.histogram" in selected_capabilities
     ):
-        payloads["chaser_histogram"] = query_chaser_histogram(
+        _chaser_histogram = query_chaser_histogram(
             analysis_context,
             window_label=selected_window,
-            chaser_index=selected_chaser,
+            chaser_index=None,
         )
+        _chaser_histogram["rows"] = filter_rows_by_chasers(
+            _chaser_histogram.get("rows", []),
+            selected_chasers,
+        )
+        payloads["chaser_histogram"] = _chaser_histogram
     if (
         selected_panel_id == "chaser_distance"
         and "chaser.distance.speed_relationship" in selected_capabilities
     ):
-        payloads["speed_distance"] = query_speed_distance_bins(
+        _speed_distance = query_speed_distance_bins(
             analysis_context,
             window_label=selected_window,
-            chaser_index=selected_chaser,
+            chaser_index=None,
         )
+        _speed_distance["rows"] = filter_rows_by_chasers(
+            _speed_distance.get("rows", []),
+            selected_chasers,
+        )
+        payloads["speed_distance"] = _speed_distance
     if selected_panel_id == "cra" and "chaser.cra.primary" in selected_capabilities:
         payloads["cra_phase"] = query_cra_object_phase(
             analysis_context,
@@ -633,22 +654,24 @@ def _(
         )
         _egocentric_summary["rows"] = [
             row
-            for row in _egocentric_summary.get("rows", [])
+            for row in filter_rows_by_chasers(
+                _egocentric_summary.get("rows", []),
+                selected_chasers,
+            )
             if (selected_window is None or row.get("window_label") == selected_window)
-            and (selected_chaser is None or row.get("chaser_index") == selected_chaser)
         ]
         payloads["egocentric_summary"] = _egocentric_summary
-        if selected_window is not None and selected_chaser is not None:
+        if selected_window is not None and len(selected_chasers) == 1:
             payloads["egocentric_histogram"] = query_egocentric_histogram(
                 analysis_context,
                 window_label=selected_window,
-                chaser_index=selected_chaser,
+                chaser_index=selected_chasers[0],
             )
     if selected_panel_id == "statistics" and "group.statistics" in selected_capabilities:
         payloads["statistics"] = query_group_statistics(analysis_context)
     if selected_panel_id == "inventory":
         payloads["recordings"] = query_recordings(analysis_context)
-    return payloads, selected_window
+    return payloads, selected_chasers, selected_window
 
 
 @app.cell
@@ -663,6 +686,7 @@ def _(
     payloads,
     pd,
     sample_grain_rows,
+    selected_chasers,
     selected_window,
     summary,
 ):
@@ -874,9 +898,9 @@ def _(
             title=f"Distance × bearing · {selected_window}",
         )
         _heatmap_message = (
-            "Select one epoch and one chaser to avoid pooling distinct conditions or objects "
+            "Select one epoch and exactly one chaser to avoid pooling distinct conditions or objects "
             "in the distance-by-bearing heatmap."
-            if selected_window is None or _hist == {}
+            if selected_window is None or len(selected_chasers) != 1
             else "No egocentric histogram rows are available for these filters."
         )
         panel_output = mo.vstack(

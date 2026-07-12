@@ -255,6 +255,33 @@ def sample_grain_status_rows(
     return rows
 
 
+def filter_rows_by_chasers(
+    rows: Sequence[Mapping[str, Any]],
+    selected_chasers: Iterable[int],
+) -> list[dict[str, Any]]:
+    """Keep rows for the explicitly selected chasers, preserving row order."""
+
+    selected = {int(value) for value in selected_chasers}
+    return [
+        dict(row)
+        for row in rows
+        if row.get("chaser_index") is not None
+        and int(row["chaser_index"]) in selected
+    ]
+
+
+def chaser_selection_options(
+    chaser_indices: Iterable[int],
+) -> tuple[dict[str, int], list[str]]:
+    """Return explicit chaser labels with every available chaser selected by default."""
+
+    options = {
+        f"Chaser {int(chaser_index)}": int(chaser_index)
+        for chaser_index in chaser_indices
+    }
+    return options, list(options)
+
+
 def grouped_bar_figure(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -382,7 +409,9 @@ __all__ = [
     "PanelControlSpec",
     "available_group_panels",
     "capability_inventory_rows",
+    "chaser_selection_options",
     "egocentric_heatmap_figure",
+    "filter_rows_by_chasers",
     "grouped_bar_figure",
     "line_figure",
     "panel_control_spec",

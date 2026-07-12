@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from apps.marimo.components.group_analytics import (
     available_group_panels,
+    chaser_selection_options,
     egocentric_heatmap_figure,
+    filter_rows_by_chasers,
     grouped_bar_figure,
     line_figure,
     panel_control_spec,
@@ -64,6 +66,48 @@ def test_panel_controls_only_expose_relevant_filters() -> None:
     assert inventory.show_window is False
     assert inventory.show_chaser is False
     assert inventory.show_statistic is False
+
+
+def test_chaser_row_filter_supports_multiple_selected_chasers() -> None:
+    rows = [
+        {"chaser_index": 0, "value": 1.0},
+        {"chaser_index": 1, "value": 2.0},
+        {"chaser_index": 2, "value": 3.0},
+    ]
+
+    assert filter_rows_by_chasers(rows, (0, 1)) == rows[:2]
+    assert filter_rows_by_chasers(rows, ()) == []
+
+
+def test_every_available_chaser_is_selected_by_default() -> None:
+    options, defaults = chaser_selection_options((0, 1))
+
+    assert options == {"Chaser 0": 0, "Chaser 1": 1}
+    assert defaults == ["Chaser 0", "Chaser 1"]
+
+
+def test_grouped_bar_places_selected_chasers_side_by_side() -> None:
+    figure = grouped_bar_figure(
+        [
+            {"window_label": "pre", "value": 1.0, "series": "Chaser 0"},
+            {"window_label": "pre", "value": 2.0, "series": "Chaser 1"},
+            {"window_label": "post", "value": 3.0, "series": "Chaser 0"},
+            {"window_label": "post", "value": 4.0, "series": "Chaser 1"},
+        ],
+        title="Chaser comparison",
+        x_key="window_label",
+        y_key="value",
+        series_key="series",
+        yaxis_title="Value",
+    )
+
+    assert figure is not None
+    assert figure.layout.barmode == "group"
+    assert [trace.name for trace in figure.data] == ["Chaser 0", "Chaser 1"]
+    assert [list(trace.x) for trace in figure.data] == [
+        ["pre", "post"],
+        ["pre", "post"],
+    ]
 
 
 def test_plot_helpers_return_none_for_missing_required_columns() -> None:
