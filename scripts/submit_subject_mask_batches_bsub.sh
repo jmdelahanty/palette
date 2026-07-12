@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 ROOT="/groups/johnson/johnsonlab/jeremy/recordings"
 MAX_ACTIVE=4
 QUEUE=""
@@ -609,6 +612,7 @@ if [[ "$OVERWRITE" == "1" ]]; then SUBJECT_ARGS+=(--overwrite); fi
   printf 'SOURCE_ROI_CACHE_ALIAS_MANIFEST=%q\n' "$SOURCE_ROI_CACHE_ALIAS_MANIFEST"
   printf 'STAGE_ROI_CACHE_TO_SCRATCH=%q\n' "$STAGE_ROI_CACHE_TO_SCRATCH"
   printf 'ROI_CACHE_STAGING_DIR=%q\n' "$ROI_CACHE_STAGING_DIR"
+  printf 'REPO_DIR=%q\n' "$REPO_DIR"
 } > "${RUN_DIR}/subject_args.sh"
 
 JOB_SCRIPT="${RUN_DIR}/run_one_recording.sh"
@@ -624,6 +628,11 @@ if [[ -z "${LSB_JOBINDEX:-}" ]]; then
 fi
 
 source "${RUN_DIR}/subject_args.sh"
+if [[ ! -x "${REPO_DIR}/scripts/py" ]]; then
+  echo "Palette repository scripts/py is unavailable: ${REPO_DIR}" >&2
+  exit 2
+fi
+cd "$REPO_DIR"
 
 THREADS_PER_PROCESS="${THREADS_PER_PROCESS:-1}"
 export OMP_NUM_THREADS="$THREADS_PER_PROCESS"
