@@ -7,6 +7,7 @@ EXPORT_RUN_ID=""
 STATS_RUN_ID=""
 OUTPUT_ROOT="${PALETTE_ANALYTICS_EXPORT_ROOT:-/groups/johnson/johnsonlab/palette_analytics}"
 PALETTE_REPO="${PALETTE_GROUPS_REPO:-/groups/johnson/johnsonlab/jeremy/gitrepos/palette}"
+SUBMIT_HOST="${PALETTE_LSF_SUBMIT_HOST:-login1-citrus-poller}"
 REGISTRY="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
 LOG_DIR=""
 QUEUE="normal"
@@ -36,6 +37,8 @@ Options:
                                (default: /groups/johnson/johnsonlab/palette_analytics)
   --palette-repo PATH          Cluster-visible Palette checkout
                                (default: /groups/.../jeremy/gitrepos/palette)
+  --submit-host HOST           SSH host used when bsub is unavailable locally
+                               (default: login1-citrus-poller)
   --tables CSV                 V2 tables (default: all chaser tables)
   --skip-statistics            Do not compute the linked chaser statistics export
   --index-registry             Index the completed base export in the shared registry
@@ -45,7 +48,8 @@ Options:
   --mem-gb N                   Memory request in GB (default: 16)
   --walltime H:MM              LSF wall time (default: 2:00)
   --log-dir PATH               Submission artifacts (default: <output-root>/logs/lsf)
-  --submit                     Submit with bsub; without this flag, only render the job
+  --submit                     Submit with local bsub or SSH only the bsub command
+                               to --submit-host; otherwise only render the job
   -h, --help                   Show this message
 
 The job refuses existing run manifests and validates the exact Palette commit
@@ -66,6 +70,7 @@ while [[ $# -gt 0 ]]; do
     --stats-run-id) STATS_RUN_ID="$2"; shift 2;;
     --output-root) OUTPUT_ROOT="$2"; shift 2;;
     --palette-repo) PALETTE_REPO="$2"; shift 2;;
+    --submit-host) SUBMIT_HOST="$2"; shift 2;;
     --tables) TABLES="$2"; shift 2;;
     --skip-statistics) RUN_STATISTICS=0; shift;;
     --index-registry) INDEX_REGISTRY=1; shift;;
@@ -110,6 +115,7 @@ EXPECTED_COMMIT="$(git -C "$PALETTE_REPO" rev-parse HEAD)"
 JOB_SCRIPT="${RUN_DIR}/run_analytics_export.sh"
 VALIDATION_JSON="${RUN_DIR}/validation.json"
 STATUS_FILE="${RUN_DIR}/status.txt"
+SUBMISSION_FILE="${RUN_DIR}/submission.txt"
 
 q_repo="$(printf '%q' "$PALETTE_REPO")"
 q_collection="$(printf '%q' "$COLLECTION_MANIFEST")"
@@ -211,10 +217,40 @@ printf 'collection_manifest=%s\n' "$COLLECTION_MANIFEST"
 printf 'output_root=%s\n' "$OUTPUT_ROOT"
 printf 'export_run_id=%s\n' "$EXPORT_RUN_ID"
 printf 'stats_run_id=%s\n' "$STATS_RUN_ID"
+printf 'submit_host=%s\n' "$SUBMIT_HOST"
 printf 'job_script=%s\n' "$JOB_SCRIPT"
 printf 'bsub_command='; printf '%q ' "${BSUB_COMMAND[@]}"; printf '\n'
 
 if [[ "$SUBMIT" == "1" ]]; then
-  command -v bsub >/dev/null 2>&1 || fail "bsub is not available on this host"
-  "${BSUB_COMMAND[@]}"
+  submit_mode=""
+  if command -v bsub >/dev/null 2>&1; then
+    submit_mode="local_bsub"
+    submit_output="$("${BSUB_COMMAND[@]}")"
+  else
+    [[ -n "$SUBMIT_HOST" ]] || fail "bsub is unavailable locally and --submit-host is empty"
+    submit_mode="ssh_bsub"
+    printf -v remote_command '%q ' "${BSUB_COMMAND[@]}"
+    submit_output="$(ssh "$SUBMIT_HOST" "$remote_command")"
+  fi
+  printf '%s\n' "$submit_output"
+  job_id="$(printf '%s\n' "$submit_output" | sed -n 's/^Job <\([0-9][0-9]*\)>.*/\1/p' | head -n 1)"
+  [[ -n "$job_id" ]] || fail "Could not parse an LSF job ID from submission output"
+  submission_tmp="${SUBMISSION_FILE}.tmp.$$"
+  {
+    printf 'submitted_at_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'submit_mode=%s\n' "$submit_mode"
+    printf 'submit_host=%s\n' "$SUBMIT_HOST"
+    printf 'job_id=%s\n' "$job_id"
+    printf 'job_script=%s\n' "$JOB_SCRIPT"
+    printf 'lsf_stdout=%s\n' "${RUN_DIR}/${job_id}.out"
+    printf 'lsf_stderr=%s\n' "${RUN_DIR}/${job_id}.err"
+    printf 'status_file=%s\n' "$STATUS_FILE"
+    printf 'palette_commit=%s\n' "$EXPECTED_COMMIT"
+  } >"$submission_tmp"
+  mv "$submission_tmp" "$SUBMISSION_FILE"
+  printf 'job_id=%s\n' "$job_id"
+  printf 'lsf_stdout=%s\n' "${RUN_DIR}/${job_id}.out"
+  printf 'lsf_stderr=%s\n' "${RUN_DIR}/${job_id}.err"
+  printf 'status_file=%s\n' "$STATUS_FILE"
+  printf 'submission_file=%s\n' "$SUBMISSION_FILE"
 fi

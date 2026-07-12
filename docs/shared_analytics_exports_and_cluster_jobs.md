@@ -71,13 +71,30 @@ scripts/submit_analytics_export_bsub.sh \
   --submit
 ```
 
+When `bsub` is unavailable locally, the wrapper follows the Citrus poller
+boundary and SSHes only the shell-quoted `bsub` command to
+`login1-citrus-poller`. Override this with `--submit-host` or
+`PALETTE_LSF_SUBMIT_HOST`. The shared job script already exists before SSH;
+the login host does not run the exporter, validator, or statistics process.
+
+Equivalent explicit login-host submission is:
+
+```bash
+ssh login1-citrus-poller \
+  'bsub ... bash /groups/.../run_analytics_export.sh'
+```
+
+Do not SSH to the login host and execute `run_analytics_export.sh` directly.
+All data reads, Parquet writes, validation, and statistics must occur inside
+the LSF allocation on an execution host.
+
 One CPU LSF job owns the entire collection export. `--ncores` controls both the
 LSF CPU request and the exporter's per-recording process pool. This avoids
 multiple jobs attempting to publish the same table partitions or manifest.
 
 The generated job captures the exact commit of the shared Palette checkout and
 fails if that checkout changes before execution. Submission logs, the rendered
-job script, validation JSON, and completion status are retained below
+job script, parsed LSF job ID, validation JSON, and completion status are retained below
 `palette_analytics/logs/lsf/analytics_export_<run-id>/`.
 
 Registry indexing is optional and occurs only after the base exporter has
