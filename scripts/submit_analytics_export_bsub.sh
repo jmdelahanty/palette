@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 0002
 
 COLLECTION_MANIFEST=""
 EXPORT_RUN_ID=""
