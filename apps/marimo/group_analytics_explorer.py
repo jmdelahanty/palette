@@ -28,6 +28,7 @@ def _():
         egocentric_heatmap_figure,
         grouped_bar_figure,
         line_figure,
+        panel_control_spec,
         sample_grain_status_rows,
     )
     from fisheye.group_analytics_viewer.catalog import (
@@ -68,6 +69,7 @@ def _():
         line_figure,
         mo,
         os,
+        panel_control_spec,
         pd,
         query_chaser_histogram,
         query_chaser_summary,
@@ -315,6 +317,7 @@ def _(
 def _(
     analysis_context,
     mo,
+    panel_control_spec,
     panel_definitions,
     query_options,
     requested_panel_id,
@@ -332,7 +335,7 @@ def _(
     panel_picker = mo.ui.dropdown(
         options=list(panel_labels),
         value=initial_panel_label,
-        label="Visualization",
+        label="Visualization class",
     )
     window_labels = ["All epochs"] + [
         item["window_label"] for item in options.get("windows", [])
@@ -372,61 +375,49 @@ def _(
             label=label,
         )
 
+    _behavior_spec = panel_control_spec("behavior")
     behavior_metric_labels, behavior_metric_picker = _metric_control(
-        options["epoch_speed_metrics"],
-        label="Behavior metric",
-        preferred="bout_rate_per_min",
+        options[_behavior_spec.analysis_options_key],
+        label=_behavior_spec.analysis_label,
+        preferred=_behavior_spec.preferred_analysis,
     )
+    _bout_spec = panel_control_spec("bout_distributions")
     bout_metric_labels, bout_metric_picker = _metric_control(
-        options["epoch_bout_histogram_metrics"],
-        label="Bout distribution",
-        preferred="bout_path_length_mm",
+        options[_bout_spec.analysis_options_key],
+        label=_bout_spec.analysis_label,
+        preferred=_bout_spec.preferred_analysis,
     )
+    _spatial_spec = panel_control_spec("spatial")
     spatial_metric_labels, spatial_metric_picker = _metric_control(
-        options["spatial_metrics"],
-        label="Spatial metric",
-        preferred="fraction_of_epoch",
+        options[_spatial_spec.analysis_options_key],
+        label=_spatial_spec.analysis_label,
+        preferred=_spatial_spec.preferred_analysis,
     )
+    _chaser_spec = panel_control_spec("chaser_distance")
     chaser_metric_labels, chaser_metric_picker = _metric_control(
-        options["chaser_metrics"],
-        label="Chaser-distance metric",
-        preferred="p50_distance_mm",
+        options[_chaser_spec.analysis_options_key],
+        label=_chaser_spec.analysis_label,
+        preferred=_chaser_spec.preferred_analysis,
     )
+    _cra_spec = panel_control_spec("cra")
     cra_metric_labels, cra_metric_picker = _metric_control(
-        options["cra_object_phase_metrics"],
-        label="CRA phase metric",
-        preferred="median_distance_mm",
+        options[_cra_spec.analysis_options_key],
+        label=_cra_spec.analysis_label,
+        preferred=_cra_spec.preferred_analysis,
     )
+    _near_spec = panel_control_spec("near_field")
     near_metric_labels, near_metric_picker = _metric_control(
-        options["cra_near_field_object_phase_metrics"],
-        label="Near-field metric",
-        preferred="near_zone_occupancy_fraction",
+        options[_near_spec.analysis_options_key],
+        label=_near_spec.analysis_label,
+        preferred=_near_spec.preferred_analysis,
     )
+    _egocentric_spec = panel_control_spec("egocentric")
     egocentric_metric_labels, egocentric_metric_picker = _metric_control(
-        options["egocentric_metrics"],
-        label="Egocentric metric",
-        preferred="mean_alignment_cos",
+        options[_egocentric_spec.analysis_options_key],
+        label=_egocentric_spec.analysis_label,
+        preferred=_egocentric_spec.preferred_analysis,
     )
-    mo.vstack(
-        [
-            mo.hstack([panel_picker, window_picker, chaser_picker, stat_picker]),
-            mo.accordion(
-                {
-                    "Panel metrics": mo.vstack(
-                        [
-                            mo.hstack(
-                                [behavior_metric_picker, bout_metric_picker, spatial_metric_picker]
-                            ),
-                            mo.hstack(
-                                [chaser_metric_picker, cra_metric_picker, near_metric_picker]
-                            ),
-                            egocentric_metric_picker,
-                        ]
-                    )
-                }
-            ),
-        ]
-    )
+    panel_picker
     return (
         behavior_metric_labels,
         behavior_metric_picker,
@@ -450,6 +441,52 @@ def _(
         stat_picker,
         window_picker,
     )
+
+
+@app.cell
+def _(
+    behavior_metric_picker,
+    bout_metric_picker,
+    chaser_metric_picker,
+    chaser_picker,
+    cra_metric_picker,
+    egocentric_metric_picker,
+    mo,
+    near_metric_picker,
+    panel_control_spec,
+    panel_labels,
+    panel_picker,
+    spatial_metric_picker,
+    stat_picker,
+    window_picker,
+):
+    selected_panel_id = panel_labels[panel_picker.value]
+    control_spec = panel_control_spec(selected_panel_id)
+    _analysis_picker_by_options_key = {
+        "epoch_speed_metrics": behavior_metric_picker,
+        "epoch_bout_histogram_metrics": bout_metric_picker,
+        "spatial_metrics": spatial_metric_picker,
+        "chaser_metrics": chaser_metric_picker,
+        "cra_object_phase_metrics": cra_metric_picker,
+        "cra_near_field_object_phase_metrics": near_metric_picker,
+        "egocentric_metrics": egocentric_metric_picker,
+    }
+    _controls = []
+    _analysis_picker = _analysis_picker_by_options_key.get(
+        control_spec.analysis_options_key
+    )
+    if _analysis_picker is not None:
+        _controls.append(_analysis_picker)
+    if control_spec.show_window:
+        _controls.append(window_picker)
+    if control_spec.show_chaser:
+        _controls.append(chaser_picker)
+    if control_spec.show_statistic:
+        _controls.append(stat_picker)
+    mo.hstack(_controls) if _controls else mo.md(
+        f"**{panel_picker.value}** has no additional analysis controls."
+    )
+    return (selected_panel_id,)
 
 
 @app.cell
@@ -486,6 +523,7 @@ def _(
     query_spatial_occupancy,
     query_speed_distance_bins,
     selected_capabilities,
+    selected_panel_id,
     spatial_metric_labels,
     spatial_metric_picker,
     stat_labels,
@@ -498,54 +536,85 @@ def _(
     selected_chaser = chaser_labels[chaser_picker.value]
     selected_stat = stat_labels[stat_picker.value]
     payloads = {}
-    if "chaser.epoch.behavior_summary" in selected_capabilities:
+    if (
+        selected_panel_id == "behavior"
+        and "chaser.epoch.behavior_summary" in selected_capabilities
+    ):
         payloads["behavior"] = query_epoch_speed_summary(
             analysis_context,
             metric=behavior_metric_labels[behavior_metric_picker.value],
             stat=selected_stat,
         )
-    if "chaser.epoch.bout_histogram" in selected_capabilities:
+    if (
+        selected_panel_id == "bout_distributions"
+        and "chaser.epoch.bout_histogram" in selected_capabilities
+    ):
         payloads["bout_histogram"] = query_epoch_bout_histogram(
             analysis_context,
             metric=bout_metric_labels[bout_metric_picker.value],
             window_label=selected_window,
         )
-    if "chaser.epoch.inter_bout_interval_histogram" in selected_capabilities:
+    if (
+        selected_panel_id == "bout_distributions"
+        and "chaser.epoch.inter_bout_interval_histogram" in selected_capabilities
+    ):
         payloads["ibi_histogram"] = query_epoch_inter_bout_interval_histogram(
             analysis_context,
             window_label=selected_window,
         )
-    if "chaser.epoch.spatial_occupancy" in selected_capabilities:
+    if (
+        selected_panel_id == "spatial"
+        and "chaser.epoch.spatial_occupancy" in selected_capabilities
+    ):
         payloads["spatial"] = query_spatial_occupancy(
             analysis_context,
             metric=spatial_metric_labels[spatial_metric_picker.value],
         )
-    if "chaser.distance.summary" in selected_capabilities:
-        payloads["chaser_summary"] = query_chaser_summary(
+    if (
+        selected_panel_id == "chaser_distance"
+        and "chaser.distance.summary" in selected_capabilities
+    ):
+        _chaser_summary = query_chaser_summary(
             analysis_context,
             metric=chaser_metric_labels[chaser_metric_picker.value],
             stat=selected_stat,
         )
-    if "chaser.distance.histogram" in selected_capabilities:
+        _chaser_summary["rows"] = [
+            row
+            for row in _chaser_summary.get("rows", [])
+            if (selected_window is None or row.get("window_label") == selected_window)
+            and (selected_chaser is None or row.get("chaser_index") == selected_chaser)
+        ]
+        payloads["chaser_summary"] = _chaser_summary
+    if (
+        selected_panel_id == "chaser_distance"
+        and "chaser.distance.histogram" in selected_capabilities
+    ):
         payloads["chaser_histogram"] = query_chaser_histogram(
             analysis_context,
             window_label=selected_window,
             chaser_index=selected_chaser,
         )
-    if "chaser.distance.speed_relationship" in selected_capabilities:
+    if (
+        selected_panel_id == "chaser_distance"
+        and "chaser.distance.speed_relationship" in selected_capabilities
+    ):
         payloads["speed_distance"] = query_speed_distance_bins(
             analysis_context,
             window_label=selected_window,
             chaser_index=selected_chaser,
         )
-    if "chaser.cra.primary" in selected_capabilities:
+    if selected_panel_id == "cra" and "chaser.cra.primary" in selected_capabilities:
         payloads["cra_phase"] = query_cra_object_phase(
             analysis_context,
             metric=cra_metric_labels[cra_metric_picker.value],
             stat=selected_stat,
         )
         payloads["cra_summary"] = query_cra_summary(analysis_context)
-    if "chaser.cra.near_field" in selected_capabilities:
+    if (
+        selected_panel_id == "near_field"
+        and "chaser.cra.near_field" in selected_capabilities
+    ):
         payloads["near_phase"] = query_cra_near_field_object_phase(
             analysis_context,
             metric=near_metric_labels[near_metric_picker.value],
@@ -553,21 +622,32 @@ def _(
         )
         payloads["near_summary"] = query_cra_near_field_summary(analysis_context)
         payloads["near_curves"] = query_cra_near_field_curves(analysis_context)
-    if "chaser.egocentric" in selected_capabilities:
-        payloads["egocentric_summary"] = query_egocentric_summary(
+    if (
+        selected_panel_id == "egocentric"
+        and "chaser.egocentric" in selected_capabilities
+    ):
+        _egocentric_summary = query_egocentric_summary(
             analysis_context,
             metric=egocentric_metric_labels[egocentric_metric_picker.value],
             stat=selected_stat,
         )
+        _egocentric_summary["rows"] = [
+            row
+            for row in _egocentric_summary.get("rows", [])
+            if (selected_window is None or row.get("window_label") == selected_window)
+            and (selected_chaser is None or row.get("chaser_index") == selected_chaser)
+        ]
+        payloads["egocentric_summary"] = _egocentric_summary
         if selected_window is not None and selected_chaser is not None:
             payloads["egocentric_histogram"] = query_egocentric_histogram(
                 analysis_context,
                 window_label=selected_window,
                 chaser_index=selected_chaser,
             )
-    if "group.statistics" in selected_capabilities:
+    if selected_panel_id == "statistics" and "group.statistics" in selected_capabilities:
         payloads["statistics"] = query_group_statistics(analysis_context)
-    payloads["recordings"] = query_recordings(analysis_context)
+    if selected_panel_id == "inventory":
+        payloads["recordings"] = query_recordings(analysis_context)
     return payloads, selected_window
 
 

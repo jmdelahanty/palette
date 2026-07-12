@@ -28,6 +28,17 @@ class GroupPanelDefinition:
         return True
 
 
+@dataclass(frozen=True)
+class PanelControlSpec:
+    panel_id: str
+    analysis_options_key: str | None = None
+    analysis_label: str | None = None
+    preferred_analysis: str | None = None
+    show_window: bool = False
+    show_chaser: bool = False
+    show_statistic: bool = False
+
+
 GROUP_PANEL_DEFINITIONS = (
     GroupPanelDefinition(
         "behavior",
@@ -113,6 +124,64 @@ SAMPLE_GRAIN_SURFACES = (
 )
 
 
+PANEL_CONTROL_SPECS = {
+    "behavior": PanelControlSpec(
+        "behavior",
+        analysis_options_key="epoch_speed_metrics",
+        analysis_label="Behavior analysis",
+        preferred_analysis="bout_rate_per_min",
+        show_statistic=True,
+    ),
+    "bout_distributions": PanelControlSpec(
+        "bout_distributions",
+        analysis_options_key="epoch_bout_histogram_metrics",
+        analysis_label="Bout analysis",
+        preferred_analysis="bout_path_length_mm",
+        show_window=True,
+    ),
+    "spatial": PanelControlSpec(
+        "spatial",
+        analysis_options_key="spatial_metrics",
+        analysis_label="Spatial analysis",
+        preferred_analysis="fraction_of_epoch",
+    ),
+    "chaser_distance": PanelControlSpec(
+        "chaser_distance",
+        analysis_options_key="chaser_metrics",
+        analysis_label="Chaser-distance analysis",
+        preferred_analysis="p50_distance_mm",
+        show_window=True,
+        show_chaser=True,
+        show_statistic=True,
+    ),
+    "cra": PanelControlSpec(
+        "cra",
+        analysis_options_key="cra_object_phase_metrics",
+        analysis_label="CRA analysis",
+        preferred_analysis="median_distance_mm",
+        show_statistic=True,
+    ),
+    "near_field": PanelControlSpec(
+        "near_field",
+        analysis_options_key="cra_near_field_object_phase_metrics",
+        analysis_label="Near-field analysis",
+        preferred_analysis="near_zone_occupancy_fraction",
+        show_statistic=True,
+    ),
+    "egocentric": PanelControlSpec(
+        "egocentric",
+        analysis_options_key="egocentric_metrics",
+        analysis_label="Egocentric analysis",
+        preferred_analysis="mean_alignment_cos",
+        show_window=True,
+        show_chaser=True,
+        show_statistic=True,
+    ),
+    "statistics": PanelControlSpec("statistics"),
+    "inventory": PanelControlSpec("inventory"),
+}
+
+
 def available_group_panels(
     capabilities: Iterable[str],
     *,
@@ -124,6 +193,13 @@ def available_group_panels(
         for definition in GROUP_PANEL_DEFINITIONS
         if definition.available(available, statistics_available=statistics_available)
     )
+
+
+def panel_control_spec(panel_id: str) -> PanelControlSpec:
+    try:
+        return PANEL_CONTROL_SPECS[str(panel_id)]
+    except KeyError as exc:
+        raise ValueError(f"Unknown group analytics panel: {panel_id}") from exc
 
 
 def capability_inventory_rows(
@@ -300,12 +376,15 @@ def egocentric_heatmap_figure(
 
 __all__ = [
     "GROUP_PANEL_DEFINITIONS",
+    "PANEL_CONTROL_SPECS",
     "SAMPLE_GRAIN_SURFACES",
     "GroupPanelDefinition",
+    "PanelControlSpec",
     "available_group_panels",
     "capability_inventory_rows",
     "egocentric_heatmap_figure",
     "grouped_bar_figure",
     "line_figure",
+    "panel_control_spec",
     "sample_grain_status_rows",
 ]

@@ -5,6 +5,7 @@ from apps.marimo.components.group_analytics import (
     egocentric_heatmap_figure,
     grouped_bar_figure,
     line_figure,
+    panel_control_spec,
     sample_grain_status_rows,
 )
 
@@ -37,6 +38,32 @@ def test_sample_grain_status_is_scoped_to_selected_export() -> None:
         "not included in this exported dataset"
     )
     assert rows_by_surface["Tail motion"]["included_in_export"] is False
+
+
+def test_panel_controls_only_expose_relevant_filters() -> None:
+    behavior = panel_control_spec("behavior")
+    assert behavior.analysis_options_key == "epoch_speed_metrics"
+    assert behavior.show_statistic is True
+    assert behavior.show_window is False
+    assert behavior.show_chaser is False
+
+    bouts = panel_control_spec("bout_distributions")
+    assert bouts.analysis_options_key == "epoch_bout_histogram_metrics"
+    assert bouts.show_window is True
+    assert bouts.show_chaser is False
+    assert bouts.show_statistic is False
+
+    egocentric = panel_control_spec("egocentric")
+    assert egocentric.analysis_options_key == "egocentric_metrics"
+    assert egocentric.show_window is True
+    assert egocentric.show_chaser is True
+    assert egocentric.show_statistic is True
+
+    inventory = panel_control_spec("inventory")
+    assert inventory.analysis_options_key is None
+    assert inventory.show_window is False
+    assert inventory.show_chaser is False
+    assert inventory.show_statistic is False
 
 
 def test_plot_helpers_return_none_for_missing_required_columns() -> None:
