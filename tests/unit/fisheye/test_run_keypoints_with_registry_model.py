@@ -348,6 +348,8 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
             str(registry_path),
             "--set-id",
             "pose_set_123",
+            "--model-run-id",
+            "pose_run_123",
             "--output-parent",
             "keypoint_shard_runs",
             "--pose-schema",
@@ -419,6 +421,7 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
     parameters = payload.get("parameters")
     assert isinstance(parameters, dict)
     assert parameters.get("pose_schema") == "traditional_v2"
+    assert parameters.get("model_run_id") == "pose_run_123"
     assert parameters.get("roi_cache_policy") == "always"
     assert parameters.get("roi_cache_manifest") == str((tmp_path / "flat-cache" / "sample.flat_roi_cache.json"))
     for key in ("contract", "command", "git", "environment", "platform", "parameters", "inputs", "artifacts"):

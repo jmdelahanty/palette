@@ -511,6 +511,7 @@ def run_keypoints_with_registry_model(
     output: Optional[Path] = None,
     registry: Optional[Path] = None,
     set_id: Optional[str] = None,
+    model_run_id: Optional[str] = None,
     require_unique: bool = False,
     top_k: int = 5,
     include_non_success: bool = False,
@@ -552,6 +553,7 @@ def run_keypoints_with_registry_model(
         output=output,
         registry=registry_path,
         set_id=set_id,
+        model_run_id=model_run_id,
         require_unique=bool(require_unique),
         top_k=int(top_k),
         include_non_success=bool(include_non_success),
@@ -609,6 +611,12 @@ def run_keypoints_with_registry_model(
             set_id_filter=set_id,
             include_non_success=bool(include_non_success),
         )
+        if model_run_id is not None:
+            candidates = [
+                candidate
+                for candidate in candidates
+                if candidate.run_id == str(model_run_id)
+            ]
     except Exception as exc:
         return _failure_result(
             reason="model_resolution_failed",
@@ -628,7 +636,10 @@ def run_keypoints_with_registry_model(
         return _failure_result(
             reason="candidate_selection_failed",
             error=str(exc),
-            remediation="Pass --set-id to pin a model set or remove --require-unique.",
+            remediation=(
+                "Verify --model-run-id and --set-id identify a successful pose model, "
+                "or remove --require-unique."
+            ),
             recording_dir=resolved_recording_dir,
             output_path=output_path,
             registry_path=registry_path,
@@ -777,6 +788,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--output", type=Path, help="Optional explicit output zarr path.")
     parser.add_argument("--registry", type=Path, help="Optional registry sqlite path.")
     parser.add_argument("--set-id", type=str, help="Optional set filter during model resolution.")
+    parser.add_argument(
+        "--model-run-id",
+        type=str,
+        help="Optional exact registered pose training run to select.",
+    )
     parser.add_argument("--require-unique", action="store_true", help="Fail if top scores tie.")
     parser.add_argument("--top-k", type=int, default=5, help="Number of candidates to store in provenance.")
     parser.add_argument("--include-non-success", action="store_true", help="Include non-success training runs.")
@@ -897,6 +913,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         output=args.output,
         registry=args.registry,
         set_id=args.set_id,
+        model_run_id=args.model_run_id,
         require_unique=bool(args.require_unique),
         top_k=int(args.top_k),
         include_non_success=bool(args.include_non_success),

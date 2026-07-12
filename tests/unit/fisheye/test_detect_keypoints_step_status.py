@@ -210,6 +210,31 @@ def test_emit_keypoint_step_status_yolo_writes_status_and_cascades(tmp_path: Pat
         registry.close()
 
 
+def test_emit_keypoint_step_status_yolo_honors_deferred_registry_writes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    root, zarr_path = _make_analysis_root(
+        tmp_path / "recording_analysis_deferred.zarr",
+        session_uuid="2026-02-28T03-04-05Z_arena_1",
+    )
+    monkeypatch.setenv("PALETTE_DISABLE_REGISTRY_WRITES", "1")
+
+    yolo_mod._emit_keypoint_step_status(
+        root=root,
+        zarr_path=zarr_path,
+        run_name="keypoints_deferred",
+        method="yolo_pose",
+        coverage_pct=87.5,
+        details={"reason": "present"},
+        console=None,
+        registry=registry_path,
+    )
+
+    assert not registry_path.exists()
+
+
 def test_emit_keypoint_step_status_traditional_writes_status_and_cascades(tmp_path: Path) -> None:
     registry_path = tmp_path / "registry.sqlite"
     root, zarr_path = _make_analysis_root(

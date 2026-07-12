@@ -26,6 +26,9 @@ Common options:
   --run-label LABEL                 Stable label used in run/job names
   --pose-schema NAME                Pose schema (default: traditional_v2)
   --batch-size-kp N                 Keypoint inference batch size (default: 256)
+  --keypoint-roi-shard-rows N       ROI outer shard rows (default: 65536)
+  --keypoint-frame-shard-rows N     Frame outer shard rows (default: 262144)
+  --no-keypoint-sharding            Use ordinary chunks for keypoint shard outputs
   --queue NAME                      Keypoint shard LSF queue (default: gpu_l4)
   --ncores N                        Keypoint shard CPU slots (default: 4)
   --mem-gb N                        Keypoint shard memory GB (default: 32)
@@ -39,8 +42,9 @@ Common options:
   --apply                           Create proxies and submit LSF jobs
   -h, --help                        Show this message
 
-All additional options are forwarded to
-fisheye.utils.plan_clipped_collection_keypoints_bsub.
+All additional options are forwarded to the family-owned
+fisheye.cluster.keypoints.clipped_collection planner. The historical
+fisheye.utils entry point remains available as a compatibility shim.
 USAGE
 }
 
@@ -49,4 +53,4 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
-scripts/py -m fisheye.utils.plan_clipped_collection_keypoints_bsub "$@"
+scripts/py -m fisheye.cluster.keypoints.clipped_collection "$@"

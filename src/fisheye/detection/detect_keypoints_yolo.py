@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from queue import Queue
 from pathlib import Path
@@ -67,6 +68,7 @@ _KEYPOINT_STEP_NAME = "keypoints"
 _KEYPOINT_STATUS_SOURCE = "runtime_keypoints_detect"
 _KEYPOINT_INPUT_MODES = ("numpy-list", "tensor", "auto")
 _KEYPOINT_PROGRESS_SCHEMA_ID = "palette.keypoint_inference_progress.v1"
+_DISABLE_REGISTRY_WRITES_ENV = "PALETTE_DISABLE_REGISTRY_WRITES"
 DEFAULT_KEYPOINT_OUTPUT_PARENT = "keypoints_runs"
 KEYPOINT_OUTPUT_PARENTS = (DEFAULT_KEYPOINT_OUTPUT_PARENT, "keypoint_shard_runs")
 KEYPOINT_SHARD_WRITE_SCHEMA = "palette.keypoint_double_buffered_shards.v1"
@@ -248,6 +250,13 @@ def _resolve_registry_path(registry: Optional[Path]) -> Optional[Path]:
     return inferred
 
 
+def _registry_writes_disabled() -> bool:
+    value = os.environ.get(_DISABLE_REGISTRY_WRITES_ENV)
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _emit_keypoint_step_status(
     *,
     root: zarr.Group,
@@ -259,6 +268,14 @@ def _emit_keypoint_step_status(
     console: Optional[Console],
     registry: Optional[Path],
 ) -> None:
+    if _registry_writes_disabled():
+        if console is not None:
+            console.print(
+                "[yellow]Registry writes disabled:[/yellow] "
+                f"skipping {_KEYPOINT_STEP_NAME} step-status sync for "
+                f"run {run_name!r}"
+            )
+        return
     registry_path = _resolve_registry_path(registry)
     if registry_path is None:
         return

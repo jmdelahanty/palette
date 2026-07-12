@@ -95,6 +95,19 @@ def test_build_plan_resolves_manifests_and_dependency_commands(tmp_path: Path) -
     assert plan.merged_proxy_crop_run == "crop_proxy_test_run_collection"
     assert plan.keypoint_collection_run == "keypoints_test_run"
     assert plan.refined_keypoints_run == "refined_keypoints_test_run"
+    assert plan.keypoint_storage["effective"] == {
+        "keypoint_storage_layout": "indexed_sharding_v1",
+        "keypoint_storage_policy": "default_indexed_sharding_v1",
+        "keypoint_roi_shard_rows": 65536,
+        "keypoint_frame_shard_rows": 262144,
+    }
+    assert "lsf_workflow" not in plan.to_json()
+    assert [job.job_key for job in plan.lsf_workflow.topological_jobs()] == [
+        "kp_test_run_clip_000001",
+        "kp_test_run_clip_000002",
+        "kp_finalize_test_run",
+        "kp_refine_test_run",
+    ]
 
     first = plan.clips[0]
     assert first.proxy_crop_run == "crop_proxy_test_run_clip_000001"
@@ -105,6 +118,30 @@ def test_build_plan_resolves_manifests_and_dependency_commands(tmp_path: Path) -
     assert "--stage-roi-cache-to-scratch" in first.keypoint_command
     assert "--run-name" in first.keypoint_command
     assert "keypoint_shard_test_run_clip_000001" in first.keypoint_command
+    assert first.keypoint_command[first.keypoint_command.index("--keypoint-roi-shard-rows") + 1] == "65536"
+    assert first.keypoint_command[first.keypoint_command.index("--keypoint-frame-shard-rows") + 1] == "262144"
+    assert first.keypoint_bsub_command is not None
+    assert first.keypoint_bsub_command[:-3] == [
+        "bsub",
+        "-J",
+        "kp_test_run_clip_000001",
+        "-n",
+        "4",
+        "-R",
+        "rusage[mem=32G]",
+        "-oo",
+        str(tmp_path / "logs" / "kp_test_run_clip_000001.%J.out"),
+        "-eo",
+        str(tmp_path / "logs" / "kp_test_run_clip_000001.%J.err"),
+        "-q",
+        "gpu_l4",
+        "-gpu",
+        "num=1",
+    ]
+    assert first.keypoint_bsub_command[-3:-1] == ["bash", "-lc"]
+    assert first.keypoint_bsub_command[-1].startswith(
+        "cd /groups/repo && scripts/py -m fisheye.utils.run_keypoints_with_registry_model"
+    )
 
     finalizer_dependency_index = plan.finalizer_bsub_command.index("-w") + 1
     finalizer_dependency = plan.finalizer_bsub_command[finalizer_dependency_index]
@@ -133,6 +170,8 @@ def test_build_plan_marks_missing_cache_without_keypoint_command(tmp_path: Path)
         log_dir=tmp_path / "logs",
         pose_schema="traditional_v2",
         batch_size=256,
+        keypoint_roi_shard_rows=None,
+        keypoint_frame_shard_rows=262144,
         device="0",
         queue="gpu_l4",
         ncores=4,
@@ -152,7 +191,7 @@ def test_build_plan_marks_missing_cache_without_keypoint_command(tmp_path: Path)
         overwrite_proxies=False,
         overwrite_final_outputs=False,
     )
-
+    assert plan.keypoint_storage["effective"]["keypoint_storage_layout"] == "regular_chunks_v1"
     assert len(plan.clips) == 1
     assert plan.clips[0].cache_status == "missing"
     assert plan.clips[0].proxy_command is None
@@ -192,6 +231,8 @@ def test_apply_plan_creates_proxies_and_submits_dependency_dag(tmp_path: Path) -
         log_dir=tmp_path / "logs",
         pose_schema="traditional_v2",
         batch_size=256,
+        keypoint_roi_shard_rows=None,
+        keypoint_frame_shard_rows=262144,
         device="0",
         queue="gpu_l4",
         ncores=4,
@@ -210,6 +251,12 @@ def test_apply_plan_creates_proxies_and_submits_dependency_dag(tmp_path: Path) -
         allow_multiple_cache_manifests=False,
         overwrite_proxies=False,
         overwrite_final_outputs=False,
+    )
+    assert all(
+        clip.keypoint_command is not None
+        and "--no-keypoint-sharding" in clip.keypoint_command
+        and "--keypoint-roi-shard-rows" not in clip.keypoint_command
+        for clip in plan.clips
     )
     calls: list[list[str]] = []
     bsub_outputs = iter(
@@ -249,3 +296,12 @@ def test_apply_plan_creates_proxies_and_submits_dependency_dag(tmp_path: Path) -
     assert saved["schema"] == "palette.clipped_collection_keypoint_bsub_submission.v1"
     assert saved["status"] == "submitted"
     assert saved["refine"]["job_id"] == "301"
+    lsf_plan = json.loads(
+        (tmp_path / "logs" / "lsf_plan.json").read_text(encoding="utf-8")
+    )
+    assert lsf_plan["family"] == "keypoints.clipped_collection"
+    lsf_submission = json.loads(
+        (tmp_path / "logs" / "lsf_submission.json").read_text(encoding="utf-8")
+    )
+    assert lsf_submission["status"] == "submitted"
+    assert lsf_submission["job_ids_by_key"] == submission["job_ids_by_name"]
