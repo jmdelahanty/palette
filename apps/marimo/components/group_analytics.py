@@ -309,6 +309,45 @@ def filter_rows_by_windows(
     ]
 
 
+def group_egocentric_histogram_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    window_labels: Iterable[str],
+    chaser_indices: Iterable[int],
+) -> dict[tuple[str, int], list[dict[str, Any]]]:
+    """Group exported polar bins in explicit epoch-by-chaser display order."""
+
+    windows = tuple(str(value) for value in window_labels)
+    chasers = tuple(int(value) for value in chaser_indices)
+    grouped = {(window, chaser): [] for window in windows for chaser in chasers}
+    for row in rows:
+        window_label = row.get("window_label")
+        chaser_index = row.get("chaser_index")
+        if window_label is None or chaser_index is None:
+            continue
+        key = (str(window_label), int(chaser_index))
+        if key in grouped:
+            grouped[key].append(dict(row))
+    return grouped
+
+
+def egocentric_probability_color_max(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    quantile: float = 0.98,
+) -> float:
+    """Return one robust positive color maximum shared by polar panels."""
+
+    frame = pd.DataFrame(rows)
+    if frame.empty or "pooled_probability" not in frame.columns:
+        return 1.0
+    values = pd.to_numeric(frame["pooled_probability"], errors="coerce")
+    positive = values[values.notna() & (values > 0.0)]
+    if positive.empty:
+        return 1.0
+    return max(float(positive.quantile(float(quantile))), float.fromhex("0x1p-52"))
+
+
 def grouped_bar_figure(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -483,6 +522,107 @@ def egocentric_heatmap_figure(
     return fig
 
 
+def egocentric_polar_figure(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    title: str,
+    color_max: float | None = None,
+    show_colorbar: bool = True,
+) -> go.Figure | None:
+    """Render pooled exported distance-by-bearing bins on a polar axis."""
+
+    frame = pd.DataFrame(rows)
+    required = {
+        "distance_bin_left_mm",
+        "distance_bin_width_mm",
+        "bearing_bin_center_deg",
+        "bearing_bin_width_deg",
+        "pooled_probability",
+    }
+    if frame.empty or not required.issubset(frame.columns):
+        return None
+    numeric_columns = sorted(required)
+    for column in numeric_columns:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame = frame.dropna(subset=numeric_columns)
+    frame = frame[
+        (frame["distance_bin_width_mm"] > 0.0)
+        & (frame["bearing_bin_width_deg"] > 0.0)
+        & (frame["pooled_probability"] >= 0.0)
+    ]
+    if frame.empty:
+        return None
+    effective_color_max = (
+        float(color_max)
+        if color_max is not None and float(color_max) > 0.0
+        else egocentric_probability_color_max(frame.to_dict("records"))
+    )
+    pooled_counts = (
+        pd.to_numeric(frame["pooled_count"], errors="coerce").fillna(0).to_numpy()
+        if "pooled_count" in frame.columns
+        else [0] * len(frame)
+    )
+    fig = go.Figure(
+        data=go.Barpolar(
+            theta=frame["bearing_bin_center_deg"].to_numpy(),
+            r=frame["distance_bin_width_mm"].to_numpy(),
+            base=frame["distance_bin_left_mm"].to_numpy(),
+            width=frame["bearing_bin_width_deg"].to_numpy(),
+            marker=dict(
+                color=frame["pooled_probability"].to_numpy(),
+                colorscale="Viridis",
+                cmin=0.0,
+                cmax=effective_color_max,
+                showscale=bool(show_colorbar),
+                colorbar=dict(title="Probability"),
+                line=dict(width=0),
+            ),
+            customdata=list(
+                zip(
+                    pooled_counts,
+                    frame["pooled_probability"].to_numpy(),
+                    frame["distance_bin_left_mm"].to_numpy(),
+                    (
+                        frame["distance_bin_left_mm"]
+                        + frame["distance_bin_width_mm"]
+                    ).to_numpy(),
+                    (
+                        frame["bearing_bin_center_deg"]
+                        - frame["bearing_bin_width_deg"] / 2.0
+                    ).to_numpy(),
+                    (
+                        frame["bearing_bin_center_deg"]
+                        + frame["bearing_bin_width_deg"] / 2.0
+                    ).to_numpy(),
+                )
+            ),
+            hovertemplate=(
+                "bearing=%{customdata[4]:.1f} to %{customdata[5]:.1f} deg<br>"
+                "distance=%{customdata[2]:.2f} to %{customdata[3]:.2f} mm<br>"
+                "samples=%{customdata[0]:,}<br>"
+                "probability=%{customdata[1]:.4f}<extra></extra>"
+            ),
+        )
+    )
+    fig.update_layout(
+        title=title,
+        height=500,
+        margin=dict(l=35, r=70 if show_colorbar else 35, t=60, b=40),
+        showlegend=False,
+        polar=dict(
+            radialaxis=dict(title="Distance (mm)", rangemode="tozero"),
+            angularaxis=dict(
+                rotation=90,
+                direction="counterclockwise",
+                tickmode="array",
+                tickvals=[-180, -90, 0, 90, 180],
+                ticktext=["behind", "right", "front", "left", "behind"],
+            ),
+        ),
+    )
+    return fig
+
+
 __all__ = [
     "GROUP_PANEL_DEFINITIONS",
     "PANEL_CONTROL_SPECS",
@@ -494,8 +634,11 @@ __all__ = [
     "chaser_selection_options",
     "epoch_selection_options",
     "egocentric_heatmap_figure",
+    "egocentric_polar_figure",
+    "egocentric_probability_color_max",
     "filter_rows_by_chasers",
     "filter_rows_by_windows",
+    "group_egocentric_histogram_rows",
     "grouped_bar_figure",
     "line_figure",
     "panel_control_spec",

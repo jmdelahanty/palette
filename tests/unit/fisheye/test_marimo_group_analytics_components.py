@@ -5,8 +5,11 @@ from apps.marimo.components.group_analytics import (
     chaser_selection_options,
     epoch_selection_options,
     egocentric_heatmap_figure,
+    egocentric_polar_figure,
+    egocentric_probability_color_max,
     filter_rows_by_chasers,
     filter_rows_by_windows,
+    group_egocentric_histogram_rows,
     grouped_bar_figure,
     line_figure,
     panel_control_spec,
@@ -232,3 +235,69 @@ def test_egocentric_heatmap_uses_persisted_probability_bins() -> None:
     assert list(figure.data[0].x) == [1.0, 2.0]
     assert list(figure.data[0].y) == [-45.0]
     assert list(figure.data[0].z[0]) == [0.25, 0.75]
+
+
+def test_egocentric_histogram_groups_every_selected_epoch_chaser_panel() -> None:
+    rows = [
+        {"window_label": "pre", "chaser_index": 0, "pooled_probability": 0.1},
+        {"window_label": "post", "chaser_index": 1, "pooled_probability": 0.2},
+    ]
+
+    grouped = group_egocentric_histogram_rows(
+        rows,
+        window_labels=("pre", "post"),
+        chaser_indices=(0, 1),
+    )
+
+    assert list(grouped) == [
+        ("pre", 0),
+        ("pre", 1),
+        ("post", 0),
+        ("post", 1),
+    ]
+    assert grouped[("pre", 0)] == rows[:1]
+    assert grouped[("pre", 1)] == []
+    assert grouped[("post", 1)] == rows[1:]
+
+
+def test_egocentric_polar_uses_exported_bin_geometry_and_shared_scale() -> None:
+    rows = [
+        {
+            "distance_bin_left_mm": 10.0,
+            "distance_bin_width_mm": 5.0,
+            "bearing_bin_center_deg": 15.0,
+            "bearing_bin_width_deg": 30.0,
+            "pooled_count": 25,
+            "pooled_probability": 0.25,
+        }
+    ]
+
+    figure = egocentric_polar_figure(
+        rows,
+        title="pre · aggressive · chaser 0",
+        color_max=0.5,
+        show_colorbar=False,
+    )
+
+    assert figure is not None
+    trace = figure.data[0]
+    assert trace.type == "barpolar"
+    assert list(trace.theta) == [15.0]
+    assert list(trace.r) == [5.0]
+    assert list(trace.base) == [10.0]
+    assert list(trace.width) == [30.0]
+    assert trace.marker.cmin == 0.0
+    assert trace.marker.cmax == 0.5
+    assert trace.marker.showscale is False
+    assert figure.layout.polar.angularaxis.rotation == 90
+    assert figure.layout.polar.angularaxis.direction == "counterclockwise"
+
+
+def test_egocentric_probability_scale_is_robust_across_panels() -> None:
+    rows = [
+        {"pooled_probability": 0.1},
+        {"pooled_probability": 0.2},
+        {"pooled_probability": 0.9},
+    ]
+
+    assert egocentric_probability_color_max(rows, quantile=0.5) == 0.2

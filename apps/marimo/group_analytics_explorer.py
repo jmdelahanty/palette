@@ -27,9 +27,11 @@ def _():
         available_group_panels,
         chaser_selection_options,
         epoch_selection_options,
-        egocentric_heatmap_figure,
+        egocentric_polar_figure,
+        egocentric_probability_color_max,
         filter_rows_by_chasers,
         filter_rows_by_windows,
+        group_egocentric_histogram_rows,
         grouped_bar_figure,
         line_figure,
         panel_control_spec,
@@ -70,9 +72,11 @@ def _():
         chaser_selection_options,
         discover_export_catalog,
         epoch_selection_options,
-        egocentric_heatmap_figure,
+        egocentric_polar_figure,
+        egocentric_probability_color_max,
         filter_rows_by_chasers,
         filter_rows_by_windows,
+        group_egocentric_histogram_rows,
         grouped_bar_figure,
         line_figure,
         mo,
@@ -689,12 +693,19 @@ def _(
             selected_windows,
         )
         payloads["egocentric_summary"] = _egocentric_summary
-        if len(selected_windows) == 1 and len(selected_chasers) == 1:
-            payloads["egocentric_histogram"] = query_egocentric_histogram(
-                analysis_context,
-                window_label=selected_windows[0],
-                chaser_index=selected_chasers[0],
-            )
+        _egocentric_histogram = query_egocentric_histogram(
+            analysis_context,
+            window_label=None,
+            chaser_index=None,
+        )
+        _egocentric_histogram["rows"] = filter_rows_by_windows(
+            filter_rows_by_chasers(
+                _egocentric_histogram.get("rows", []),
+                selected_chasers,
+            ),
+            selected_windows,
+        )
+        payloads["egocentric_histogram"] = _egocentric_histogram
     if selected_panel_id == "statistics" and "group.statistics" in selected_capabilities:
         payloads["statistics"] = query_group_statistics(analysis_context)
     if selected_panel_id == "inventory":
@@ -704,8 +715,10 @@ def _(
 
 @app.cell
 def _(
-    egocentric_heatmap_figure,
+    egocentric_polar_figure,
+    egocentric_probability_color_max,
     grouped_bar_figure,
+    group_egocentric_histogram_rows,
     health,
     line_figure,
     mo,
@@ -927,25 +940,57 @@ def _(
             color_key="raw_color_hex",
         )
         _hist = payloads.get("egocentric_histogram", {})
-        _heatmap = egocentric_heatmap_figure(
-            _hist.get("rows", []),
-            title=(
-                f"Distance × bearing · {selected_windows[0]}"
-                if len(selected_windows) == 1
-                else "Distance × bearing"
-            ),
+        _hist_rows = _hist.get("rows", [])
+        _polar_groups = group_egocentric_histogram_rows(
+            _hist_rows,
+            window_labels=selected_windows,
+            chaser_indices=selected_chasers,
         )
-        _heatmap_message = (
-            "Select exactly one epoch and exactly one chaser to avoid pooling distinct conditions or objects "
-            "in the distance-by-bearing heatmap."
-            if len(selected_windows) != 1 or len(selected_chasers) != 1
-            else "No egocentric histogram rows are available for these filters."
+        _color_max = egocentric_probability_color_max(_hist_rows)
+        _roles_by_chaser = {}
+        for _row in _summary_rows:
+            _chaser_index = _row.get("chaser_index")
+            if _chaser_index is not None:
+                _roles_by_chaser.setdefault(int(_chaser_index), set()).add(
+                    str(_row.get("behavior_class") or "unknown")
+                )
+        _populated_keys = [
+            _key for _key, _rows in _polar_groups.items() if _rows
+        ]
+        _last_populated_key = _populated_keys[-1] if _populated_keys else None
+        _polar_rows = []
+        for _window_label in selected_windows:
+            _epoch_panels = []
+            for _chaser_index in selected_chasers:
+                _key = (_window_label, _chaser_index)
+                _role = "/".join(
+                    sorted(_roles_by_chaser.get(_chaser_index, {"unknown"}))
+                )
+                _polar_figure = egocentric_polar_figure(
+                    _polar_groups.get(_key, []),
+                    title=f"{_window_label} · {_role} · chaser {_chaser_index}",
+                    color_max=_color_max,
+                    show_colorbar=_key == _last_populated_key,
+                )
+                _epoch_panels.append(
+                    _figure_or_message(
+                        _polar_figure,
+                        f"No polar bins for {_window_label}, chaser {_chaser_index}.",
+                    )
+                )
+            if _epoch_panels:
+                _polar_rows.append(mo.hstack(_epoch_panels))
+        _polar_grid = (
+            mo.vstack(_polar_rows)
+            if _polar_rows
+            else mo.md("Select at least one epoch and one chaser to display polar densities.")
         )
         panel_output = mo.vstack(
             [
                 mo.md("## Egocentric bearing"),
                 _figure_or_message(_summary_figure),
-                _figure_or_message(_heatmap, _heatmap_message),
+                mo.md("### Distance-by-bearing polar densities"),
+                _polar_grid,
                 mo.accordion(
                     {
                         "Summary rows": _rows_table(_summary_rows),
