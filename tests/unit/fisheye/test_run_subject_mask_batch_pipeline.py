@@ -460,6 +460,64 @@ def test_build_archive_plan_inference_mode_ignores_unrelated_subject_runs(tmp_pa
     assert plan.run_finalization is False
 
 
+def test_build_archive_plan_can_select_explicit_crop_run(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    _seed_subject_mask_batch_prereqs(zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    root["crop_runs"].create_group("clip_proxy")
+
+    plan = mod.build_archive_plan(
+        zarr_path,
+        subject_run_name="target_subject_run",
+        refined_run_name="target_refined_run",
+        force_inference=False,
+        force_finalization=False,
+        workflow_stage="inference",
+        crop_run_name="clip_proxy",
+    )
+
+    assert plan.crop_run == "clip_proxy"
+    assert plan.run_inference is True
+
+
+def test_build_archive_plan_rejects_missing_explicit_crop_run(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    _seed_subject_mask_batch_prereqs(zarr_path)
+
+    plan = mod.build_archive_plan(
+        zarr_path,
+        subject_run_name="target_subject_run",
+        refined_run_name="target_refined_run",
+        force_inference=False,
+        force_finalization=False,
+        workflow_stage="inference",
+        crop_run_name="missing_proxy",
+    )
+
+    assert plan.crop_run is None
+    assert plan.run_inference is False
+    assert plan.skip_reason == "missing_crop_run"
+
+
+def test_inference_only_plan_can_omit_assignment_keypoints(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    _seed_subject_mask_batch_prereqs(zarr_path)
+
+    plan = mod.build_archive_plan(
+        zarr_path,
+        subject_run_name="target_subject_run",
+        refined_run_name="target_refined_run",
+        force_inference=False,
+        force_finalization=False,
+        workflow_stage="inference",
+        resolve_assignment_keypoints=False,
+    )
+
+    assert plan.assignment_keypoint_group is None
+    assert plan.assignment_keypoint_run is None
+    assert plan.run_inference is True
+
+
 def test_build_archive_plan_finalization_mode_uses_latest_existing_subject_run(tmp_path: Path) -> None:
     zarr_path = tmp_path / "recording_analysis.zarr"
     _seed_subject_mask_batch_prereqs(zarr_path)
@@ -550,6 +608,58 @@ def test_inference_command_passes_cache_manifest_and_model_resolution_flags(tmp_
     assert "--model-include-non-success" in cmd
     assert cmd[cmd.index("--model-top-k") + 1] == "7"
     assert cmd[cmd.index("--mask-probs-shard-rois") + 1] == "2048"
+
+
+def test_inference_command_omits_missing_assignment_keypoints(tmp_path: Path) -> None:
+    args = SimpleNamespace(
+        registry=tmp_path / "registry.sqlite",
+        model_coverage_class="dense_all_components",
+        model_component_coverage_key="body+eyes+swim_bladder",
+        model_label_schema_id="subject_v1_union",
+        model_top_k=1,
+        model_require_unique=False,
+        model_include_non_success=False,
+        device="0",
+        batch_size=128,
+        mask_probs_dtype="uint8",
+        mask_probs_chunk_rois=32,
+        mask_probs_shard_rois=2048,
+        output_queue_size=2,
+        roi_cache_policy="always",
+        roi_live_acceleration="auto",
+        roi_live_gpu_chunk_frames=32,
+        roi_cache_dir=None,
+        roi_cache_manifest=None,
+        source_roi_cache_alias_manifest=None,
+        source_roi_cache_row_index_path=None,
+        source_collection_id=None,
+        source_collection_path=None,
+        source_clip_id=None,
+        source_clip_index=None,
+        source_work_unit_id=None,
+        source_shard_id=None,
+        profile_timings=False,
+        overwrite=False,
+        subject_output_parent="subject_mask_shard_runs",
+    )
+    plan = mod.ArchivePlan(
+        zarr_path=str(tmp_path / "recording_analysis.zarr"),
+        subject_run="subject_run",
+        refined_run="refined_run",
+        subject_output_parent="subject_mask_shard_runs",
+        crop_run="clip_proxy",
+        assignment_keypoint_group=None,
+        assignment_keypoint_run=None,
+        has_subject_runs=False,
+        has_refined_subject_runs=False,
+        run_inference=True,
+        run_finalization=False,
+    )
+
+    cmd = mod._inference_command(args, plan)
+
+    assert "--assignment-keypoint-group" not in cmd
+    assert "--assignment-keypoint-run" not in cmd
 
 
 def test_inference_command_can_validate_cache_against_canonical_archive(tmp_path: Path) -> None:

@@ -374,6 +374,8 @@ def build_archive_plan(
     force_finalization: bool,
     workflow_stage: str = "all",
     subject_output_parent: str = SUBJECT_MASK_CANONICAL_OUTPUT_PARENT,
+    crop_run_name: str | None = None,
+    resolve_assignment_keypoints: bool = True,
 ) -> ArchivePlan:
     if workflow_stage not in {"all", "inference", "finalization"}:
         raise ValueError(f"workflow_stage must be all, inference, or finalization; got {workflow_stage!r}.")
@@ -385,8 +387,19 @@ def build_archive_plan(
     refined_parent = zarr_path / "refined_subject_masks_runs"
     subject_children = _child_groups(subject_parent)
     refined_children = _child_groups(refined_parent)
-    crop_run = _resolve_crop_run(zarr_path)
-    keypoint_group, keypoint_run = _resolve_assignment_keypoints(zarr_path)
+    if crop_run_name is None:
+        crop_run = _resolve_crop_run(zarr_path)
+    else:
+        requested_crop_run = str(crop_run_name).strip()
+        crop_run = (
+            requested_crop_run
+            if requested_crop_run and (zarr_path / "crop_runs" / requested_crop_run).is_dir()
+            else None
+        )
+    if resolve_assignment_keypoints:
+        keypoint_group, keypoint_run = _resolve_assignment_keypoints(zarr_path)
+    else:
+        keypoint_group, keypoint_run = None, None
 
     has_subject_runs = bool(subject_children)
     has_refined_subject_runs = bool(refined_children)
@@ -414,7 +427,7 @@ def build_archive_plan(
         run_inference = False
         run_finalization = False
         skip_reasons.append("missing_crop_run")
-    if keypoint_group is None or keypoint_run is None:
+    if (keypoint_group is None or keypoint_run is None) and workflow_stage != "inference":
         run_inference = False
         run_finalization = False
         skip_reasons.append("missing_keypoint_assignment_source")
@@ -494,10 +507,6 @@ def _inference_command(
         subject_output_parent,
         "--crop-run",
         str(plan.crop_run),
-        "--assignment-keypoint-group",
-        str(plan.assignment_keypoint_group),
-        "--assignment-keypoint-run",
-        str(plan.assignment_keypoint_run),
         "--device",
         args.device,
         "--batch-size",
@@ -518,6 +527,15 @@ def _inference_command(
         "--roi-live-gpu-chunk-frames",
         str(args.roi_live_gpu_chunk_frames),
     ]
+    if plan.assignment_keypoint_group is not None and plan.assignment_keypoint_run is not None:
+        cmd.extend(
+            [
+                "--assignment-keypoint-group",
+                str(plan.assignment_keypoint_group),
+                "--assignment-keypoint-run",
+                str(plan.assignment_keypoint_run),
+            ]
+        )
     mask_probs_shard_rois = getattr(args, "mask_probs_shard_rois", None)
     if mask_probs_shard_rois is not None:
         cmd.extend(["--mask-probs-shard-rois", str(int(mask_probs_shard_rois))])
@@ -1310,6 +1328,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument(
+        "--crop-run",
+        help="Explicit crop_runs child to use for inference instead of the archive's latest crop run.",
+    )
+    parser.add_argument(
+        "--no-assignment-keypoints",
+        action="store_true",
+        help="Do not attach an assignment-keypoint run to inference-only raw subject masks.",
+    )
+    parser.add_argument(
         "--subject-output-parent",
         choices=SUBJECT_MASK_OUTPUT_PARENTS,
         default=SUBJECT_MASK_CANONICAL_OUTPUT_PARENT,
@@ -1562,6 +1589,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             force_finalization=bool(args.force_finalization),
             workflow_stage=str(args.workflow_stage),
             subject_output_parent=str(args.subject_output_parent),
+            crop_run_name=args.crop_run,
+            resolve_assignment_keypoints=not bool(args.no_assignment_keypoints),
         )
         for zarr_path in discovered_zarrs
     ]
@@ -1573,6 +1602,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "--roi-cache-manifest can only be used when exactly one archive is selected.",
             file=sys.stderr,
         )
+        return 2
+    if args.crop_run is not None and len(all_plans) > 1:
+        print("--crop-run can only be used when exactly one archive is selected.", file=sys.stderr)
         return 2
     if args.emit_paths:
         for plan in plans:
