@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-
 ROOT="/groups/johnson/johnsonlab/jeremy/recordings"
+REPO_DIR="${PALETTE_GROUPS_REPO:-/groups/johnson/johnsonlab/jeremy/gitrepos/palette}"
 MAX_ACTIVE=4
 QUEUE=""
 NCORES=8
@@ -92,6 +90,7 @@ trap.
 
 Options:
   --root PATH               Root recordings directory (default: /groups/johnson/johnsonlab/jeremy/recordings)
+  --repo PATH               Compute-visible Palette checkout (default: shared /groups checkout)
   --max-active N            Max concurrent recording jobs (default: 4)
   --queue NAME              LSF queue name
   --ncores N                Cores per job (default: 8)
@@ -202,6 +201,7 @@ USAGE
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --root) ROOT="$2"; shift 2;;
+    --repo) REPO_DIR="$2"; shift 2;;
     --max-active) MAX_ACTIVE="$2"; shift 2;;
     --queue) QUEUE="$2"; shift 2;;
     --ncores) NCORES="$2"; shift 2;;
@@ -322,6 +322,10 @@ if [[ "$STAGE_ROI_CACHE_TO_SCRATCH" == "1" && "$REQUIRE_ROI_CACHE" != "1" ]]; th
 fi
 if [[ "$STAGE_ROI_CACHE_TO_SCRATCH" == "1" && -z "$ROI_CACHE_ROOT" && -z "$ROI_CACHE_MANIFEST" ]]; then
   echo "Staging requires --roi-cache-root or --roi-cache-manifest." >&2
+  exit 2
+fi
+if [[ ! -x "$REPO_DIR/scripts/py" ]]; then
+  echo "Compute-visible Palette checkout is unavailable: $REPO_DIR" >&2
   exit 2
 fi
 if [[ "$GPUS" != "0" && -z "$DEVICE" ]]; then
