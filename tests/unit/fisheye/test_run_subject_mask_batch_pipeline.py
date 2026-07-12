@@ -517,6 +517,7 @@ def test_inference_command_passes_cache_manifest_and_model_resolution_flags(tmp_
         batch_size=192,
         mask_probs_dtype="uint8",
         mask_probs_chunk_rois=32,
+        mask_probs_shard_rois=2048,
         output_queue_size=2,
         profile_timings=False,
         roi_cache_policy="never",
@@ -548,6 +549,7 @@ def test_inference_command_passes_cache_manifest_and_model_resolution_flags(tmp_
     assert "--model-require-unique" in cmd
     assert "--model-include-non-success" in cmd
     assert cmd[cmd.index("--model-top-k") + 1] == "7"
+    assert cmd[cmd.index("--mask-probs-shard-rois") + 1] == "2048"
 
 
 def test_inference_command_can_validate_cache_against_canonical_archive(tmp_path: Path) -> None:

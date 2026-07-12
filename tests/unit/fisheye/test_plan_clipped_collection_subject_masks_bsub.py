@@ -55,6 +55,7 @@ def _build_subject_mask_plan(
     components: list[str] | None = None,
     assignment_keypoints_run: str | None = "refined_keypoints_collection",
     finalization_mode: str = "collection_direct",
+    mask_probs_shard_rois: int | None = None,
 ) -> SubjectMaskWorkflowPlan:
     zarr_path = tmp_path / "recording" / "zarr" / "sample_analysis.zarr"
     collection_id = "collection_test"
@@ -117,6 +118,7 @@ def _build_subject_mask_plan(
         model_include_non_success=False,
         mask_probs_dtype="uint8",
         mask_probs_chunk_rois=32,
+        mask_probs_shard_rois=mask_probs_shard_rois,
         output_queue_size=2,
         profile_timings=True,
         allow_multiple_cache_manifests=False,
@@ -130,7 +132,7 @@ def _build_subject_mask_plan(
 
 
 def test_build_plan_resolves_subject_mask_shard_commands(tmp_path: Path) -> None:
-    plan = _build_subject_mask_plan(tmp_path)
+    plan = _build_subject_mask_plan(tmp_path, mask_probs_shard_rois=2048)
 
     assert [clip.clip_id for clip in plan.clips] == ["clip_000001", "clip_000002"]
     assert [clip.cache_status for clip in plan.clips] == ["found", "found"]
@@ -150,6 +152,7 @@ def test_build_plan_resolves_subject_mask_shard_commands(tmp_path: Path) -> None
     assert "--source-clip-index" in first.subject_mask_command
     assert "1" in first.subject_mask_command
     assert "--profile-timings" in first.subject_mask_command
+    assert first.subject_mask_command[first.subject_mask_command.index("--mask-probs-shard-rois") + 1] == "2048"
     assert "--assignment-keypoint-group" not in first.subject_mask_command
     assert "--assignment-keypoint-run" not in first.subject_mask_command
     assert "refined_keypoints_collection" not in first.subject_mask_command
@@ -270,6 +273,7 @@ def test_build_plan_marks_missing_cache_without_subject_mask_command(tmp_path: P
         model_include_non_success=False,
         mask_probs_dtype="uint8",
         mask_probs_chunk_rois=32,
+        mask_probs_shard_rois=None,
         output_queue_size=2,
         profile_timings=False,
         allow_multiple_cache_manifests=False,

@@ -243,6 +243,7 @@ def build_plan(
     clip_finalizer_package_dir: Path | None = None,
     import_array_copy_workers: int = 1,
     write_sampled_component_contours: bool = True,
+    mask_probs_shard_rois: int | None = None,
 ) -> SubjectMaskWorkflowPlan:
     zarr_path = zarr_path.expanduser().resolve()
     cache_dir_root = cache_dir_root.expanduser().resolve()
@@ -377,6 +378,10 @@ def build_plan(
                 "--roi-cache-expected-archive-path",
                 str(zarr_path),
             ]
+            if mask_probs_shard_rois is not None:
+                subject_mask_command.extend(
+                    ["--mask-probs-shard-rois", str(int(mask_probs_shard_rois))]
+                )
             if source_collection_path is not None:
                 subject_mask_command.extend(["--source-collection-path", source_collection_path])
             if source_clip_index is not None:
@@ -1079,6 +1084,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-include-non-success", action="store_true")
     parser.add_argument("--mask-probs-dtype", default="uint8")
     parser.add_argument("--mask-probs-chunk-rois", type=int, default=32)
+    parser.add_argument(
+        "--mask-probs-shard-rois",
+        type=int,
+        default=None,
+        help="Optional post-inference outer shard rows for mask_probs_roi (candidate: 2048).",
+    )
     parser.add_argument("--output-queue-size", type=int, default=2)
     parser.add_argument("--profile-timings", action="store_true")
     parser.add_argument("--allow-multiple-cache-manifests", action="store_true")
@@ -1172,6 +1183,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         model_include_non_success=bool(args.model_include_non_success),
         mask_probs_dtype=args.mask_probs_dtype,
         mask_probs_chunk_rois=int(args.mask_probs_chunk_rois),
+        mask_probs_shard_rois=(
+            int(args.mask_probs_shard_rois) if args.mask_probs_shard_rois is not None else None
+        ),
         output_queue_size=int(args.output_queue_size),
         profile_timings=bool(args.profile_timings),
         allow_multiple_cache_manifests=bool(args.allow_multiple_cache_manifests),

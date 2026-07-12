@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import time
@@ -69,6 +70,9 @@ EYE_KEYPOINT_LABELS = ("eye_left", "eye_right")
 SUBJECT_MASK_OUTPUT_PARENTS = ("subject_mask_runs", "subject_mask_shard_runs")
 SUBJECT_MASK_CANONICAL_OUTPUT_PARENT = "subject_mask_runs"
 SUBJECT_MASK_SHARD_OUTPUT_PARENT = "subject_mask_shard_runs"
+MASK_PROBS_WORKING_ARRAY = "_mask_probs_roi_working"
+MASK_PROBS_CANONICAL_ARRAY = "mask_probs_roi"
+MASK_PROBS_SHARDING_SCHEMA = "palette.subject_mask_probability_postpack.v1"
 
 
 @dataclass(frozen=True)
@@ -553,6 +557,104 @@ def _write_subject_mask_output_batch(
         progress.advance(task, batch_count)
 
 
+def _probability_array_digest(array: zarr.Array, *, row_step: int) -> str:
+    digest = hashlib.sha256()
+    total_rows = int(array.shape[0])
+    channels = int(array.shape[1])
+    for channel in range(channels):
+        for start in range(0, total_rows, int(row_step)):
+            stop = min(total_rows, start + int(row_step))
+            values = np.asarray(array[start:stop, channel, :, :])
+            digest.update(np.ascontiguousarray(values).view(np.uint8))
+    return digest.hexdigest()
+
+
+def _postpack_probability_shards(
+    run_group: zarr.Group,
+    *,
+    source_name: str,
+    shard_rows: int,
+    profiler: InferenceTimingProfiler,
+) -> dict[str, object]:
+    source = run_group[source_name]
+    if int(source.ndim) != 4:
+        raise ValueError(f"{source_name} must have shape (N,C,H,W); got {source.shape}.")
+    chunks = tuple(int(value) for value in source.chunks)
+    inner_rows = int(chunks[0])
+    resolved_shard_rows = int(shard_rows)
+    if resolved_shard_rows <= inner_rows:
+        raise ValueError(
+            f"--mask-probs-shard-rois must exceed inner chunk rows {inner_rows}; "
+            f"got {resolved_shard_rows}."
+        )
+    if resolved_shard_rows % inner_rows != 0:
+        raise ValueError(
+            f"--mask-probs-shard-rois must be an integer multiple of "
+            f"--mask-probs-chunk-rois ({inner_rows}); got {resolved_shard_rows}."
+        )
+
+    shape = tuple(int(value) for value in source.shape)
+    shards = (resolved_shard_rows, 1, shape[2], shape[3])
+    if MASK_PROBS_CANONICAL_ARRAY in run_group:
+        del run_group[MASK_PROBS_CANONICAL_ARRAY]
+    destination = run_group.create_array(
+        MASK_PROBS_CANONICAL_ARRAY,
+        shape=shape,
+        dtype=source.dtype,
+        chunks=chunks,
+        shards=shards,
+        fill_value=source.fill_value,
+        overwrite=True,
+        **_compression_kwargs(source),
+    )
+    destination.attrs.update(
+        {
+            "storage_layout": "indexed_sharding_v1",
+            "inner_chunk_shape": list(chunks),
+            "outer_shard_shape": list(shards),
+            "postpack_source_array": source_name,
+        }
+    )
+
+    write_started = time.perf_counter()
+    with profiler.time("output_postpack_shards", items=shape[0]):
+        for channel in range(shape[1]):
+            for start in range(0, shape[0], resolved_shard_rows):
+                stop = min(shape[0], start + resolved_shard_rows)
+                values = np.asarray(source[start:stop, channel : channel + 1, :, :])
+                destination[start:stop, channel : channel + 1, :, :] = values
+    write_seconds = float(time.perf_counter() - write_started)
+
+    validation_started = time.perf_counter()
+    with profiler.time("output_postpack_validate", items=shape[0]):
+        source_digest = _probability_array_digest(source, row_step=inner_rows)
+        destination_digest = _probability_array_digest(destination, row_step=inner_rows)
+    validation_seconds = float(time.perf_counter() - validation_started)
+    if source_digest != destination_digest:
+        raise RuntimeError(
+            "Post-packed probability digest mismatch: "
+            f"source={source_digest} destination={destination_digest}."
+        )
+
+    del run_group[source_name]
+    return {
+        "schema_id": MASK_PROBS_SHARDING_SCHEMA,
+        "status": "complete",
+        "source_working_array_removed": True,
+        "canonical_array": MASK_PROBS_CANONICAL_ARRAY,
+        "row_count": shape[0],
+        "channel_count": shape[1],
+        "inner_chunk_shape": list(chunks),
+        "outer_shard_shape": list(shards),
+        "inner_chunks_per_shard": int(resolved_shard_rows // inner_rows),
+        "write_seconds": write_seconds,
+        "validation_seconds": validation_seconds,
+        "source_sha256": source_digest,
+        "destination_sha256": destination_digest,
+        "exact_match": True,
+    }
+
+
 def _raise_async_writer_error(errors: Sequence[BaseException]) -> None:
     if errors:
         raise RuntimeError("Async subject-mask output writer failed.") from errors[0]
@@ -567,6 +669,7 @@ def _write_subject_mask_outputs(
     device: torch.device,
     mask_labels: Sequence[str],
     mask_probs_chunk_rois: Optional[int],
+    mask_probs_shard_rois: Optional[int],
     mask_probs_dtype: str,
     write_masks_roi: bool,
     async_output: bool,
@@ -582,6 +685,13 @@ def _write_subject_mask_outputs(
     storage_chunks = subject_mask_storage_chunks(total_rois, height, width)
     if mask_probs_chunk_rois is not None:
         storage_chunks = (max(1, min(int(mask_probs_chunk_rois), max(1, total_rois))), storage_chunks[1], storage_chunks[2], storage_chunks[3])
+    if mask_probs_shard_rois is not None:
+        shard_rows = int(mask_probs_shard_rois)
+        if shard_rows <= int(storage_chunks[0]) or shard_rows % int(storage_chunks[0]) != 0:
+            raise ValueError(
+                "--mask-probs-shard-rois must exceed and be an integer multiple of "
+                f"the effective inner chunk rows ({int(storage_chunks[0])}); got {shard_rows}."
+            )
     metric_row_chunk = subject_mask_metric_row_chunk(total_rois)
 
     roi_array = roi_source.roi_array
@@ -599,8 +709,11 @@ def _write_subject_mask_outputs(
             overwrite=True,
             **compression_kwargs,
         )
+    probability_array_name = (
+        MASK_PROBS_WORKING_ARRAY if mask_probs_shard_rois is not None else MASK_PROBS_CANONICAL_ARRAY
+    )
     probs_arr = run_group.create_array(
-        "mask_probs_roi",
+        probability_array_name,
         shape=(total_rois, n_channels, height, width),
         dtype=stored_prob_dtype,
         chunks=storage_chunks,
@@ -790,6 +903,13 @@ def _write_subject_mask_outputs(
     metrics_group.create_array("centroid_valid", data=centroid_valid, chunks=(metric_row_chunk, n_channels), overwrite=True)
     metrics_group.create_array("bbox_xyxy", data=bbox_xyxy, chunks=(metric_row_chunk, n_channels, 4), overwrite=True)
     metrics_group.create_array("bbox_valid", data=bbox_valid, chunks=(metric_row_chunk, n_channels), overwrite=True)
+    if mask_probs_shard_rois is not None:
+        run_group.attrs["mask_probs_postpack"] = _postpack_probability_shards(
+            run_group,
+            source_name=probability_array_name,
+            shard_rows=int(mask_probs_shard_rois),
+            profiler=profiler,
+        )
     return float(time.perf_counter() - stage_start)
 
 
@@ -927,6 +1047,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=32,
         help="ROI chunk length override for mask_probs_roi and masks_roi outputs (default: 32).",
+    )
+    parser.add_argument(
+        "--mask-probs-shard-rois",
+        type=int,
+        default=None,
+        help=(
+            "Optional outer storage-shard row count for mask_probs_roi. Inference first writes "
+            "ordinary inner chunks, then packs and exact-validates whole indexed shards before "
+            "run completion (production candidate: 2048)."
+        ),
     )
     parser.add_argument(
         "--mask-probs-dtype",
@@ -1126,6 +1256,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             device=device,
             mask_labels=mask_labels,
             mask_probs_chunk_rois=args.mask_probs_chunk_rois,
+            mask_probs_shard_rois=args.mask_probs_shard_rois,
             mask_probs_dtype=str(args.mask_probs_dtype),
             write_masks_roi=bool(args.write_masks_roi),
             async_output=bool(args.async_output),
@@ -1205,6 +1336,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         run_group.attrs["source_roi_cache_path"] = crop_source.roi_cache_path
     if args.mask_probs_chunk_rois is not None:
         run_group.attrs["mask_probs_chunk_rois"] = int(args.mask_probs_chunk_rois)
+    if args.mask_probs_shard_rois is not None:
+        run_group.attrs["mask_probs_shard_rois"] = int(args.mask_probs_shard_rois)
+        run_group.attrs["mask_probs_storage_layout"] = "indexed_sharding_v1"
+    else:
+        run_group.attrs["mask_probs_storage_layout"] = "regular_chunks_v1"
     if model_resolution_payload is not None:
         selected = model_resolution_payload.get("selected", {})
         if not isinstance(selected, dict):
@@ -1271,6 +1407,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 "h2d_copy and model_forward are measured separately for the U-Net loop.",
                 "d2h_copy includes sigmoid + clamp + dtype conversion, on-device spatial metrics, probability transfer, and optional binary transfer when masks_roi is materialized.",
                 "output_write_probs measures dense probability Zarr writes; output_write_binary is present only when masks_roi is materialized.",
+                "output_postpack_shards writes complete immutable probability storage shards after inference; output_postpack_validate exact-checks decoded values before removing the working array.",
                 "metric_compute covers copying precomputed per-batch metrics into full-run metric arrays.",
                 "output_queue_put and output_queue_drain appear when --async-output overlaps inference with background output writes.",
             ],
@@ -1333,6 +1470,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "label_schema_id": label_schema_id,
             "mask_labels": list(mask_labels),
             "mask_probs_chunk_rois": int(args.mask_probs_chunk_rois),
+            "mask_probs_shard_rois": (
+                int(args.mask_probs_shard_rois) if args.mask_probs_shard_rois is not None else None
+            ),
+            "mask_probs_storage_layout": run_group.attrs["mask_probs_storage_layout"],
             "mask_probs_dtype": str(args.mask_probs_dtype),
             "write_masks_roi": bool(args.write_masks_roi),
             "async_output": bool(args.async_output),
@@ -1352,6 +1493,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             ),
             "roi_live_acceleration": crop_source.roi_live_acceleration_requested,
             "roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
+            "mask_probs_postpack": run_group.attrs.get("mask_probs_postpack"),
         },
         inputs=provenance_inputs,
         artifacts={
@@ -1359,6 +1501,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "segmenter": "unet",
             "label_schema_id": label_schema_id,
             "masks_roi_materialized": bool(args.write_masks_roi),
+            "mask_probs_storage_layout": run_group.attrs["mask_probs_storage_layout"],
+            "mask_probs_postpack": run_group.attrs.get("mask_probs_postpack"),
             "model_resolution": model_resolution_payload,
         },
     )

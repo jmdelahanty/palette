@@ -518,6 +518,9 @@ def _inference_command(
         "--roi-live-gpu-chunk-frames",
         str(args.roi_live_gpu_chunk_frames),
     ]
+    mask_probs_shard_rois = getattr(args, "mask_probs_shard_rois", None)
+    if mask_probs_shard_rois is not None:
+        cmd.extend(["--mask-probs-shard-rois", str(int(mask_probs_shard_rois))])
     if args.model_require_unique:
         cmd.append("--model-require-unique")
     if args.model_include_non_success:
@@ -1342,6 +1345,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--roi-live-gpu-chunk-frames", type=int, default=32)
     parser.add_argument("--mask-probs-dtype", choices=("uint8", "float16"), default="uint8")
     parser.add_argument("--mask-probs-chunk-rois", type=int, default=32)
+    parser.add_argument(
+        "--mask-probs-shard-rois",
+        type=int,
+        default=None,
+        help="Optional post-inference outer shard rows for mask_probs_roi (candidate: 2048).",
+    )
     parser.add_argument("--output-queue-size", type=int, default=2)
     parser.add_argument(
         "--profile-timings",

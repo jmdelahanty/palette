@@ -27,6 +27,7 @@ BATCH_SIZE_SM=128
 SUBJECT_OUTPUT_PARENT="subject_mask_runs"
 MASK_PROBS_DTYPE="uint8"
 MASK_PROBS_CHUNK_ROIS=32
+MASK_PROBS_SHARD_ROIS=""
 OUTPUT_QUEUE_SIZE=2
 PROFILE_TIMINGS=0
 MODEL_COVERAGE_CLASS="dense_all_components"
@@ -126,6 +127,8 @@ Options:
                             schedules inference only and records collection-shard provenance.
   --mask-probs-dtype DTYPE  uint8|float16 (default: uint8)
   --mask-probs-chunk-rois N Chunk length for mask_probs_roi (default: 32)
+  --mask-probs-shard-rois N Post-inference outer shard rows for mask_probs_roi
+                            (candidate: 2048; default: disabled)
   --output-queue-size N     Async output queue size (default: 2)
   --profile-timings         Persist per-stage subject-mask inference timing diagnostics
   --model-coverage-class X  Registry model coverage_class (default: dense_all_components)
@@ -223,6 +226,7 @@ while [[ $# -gt 0 ]]; do
     --subject-output-parent) SUBJECT_OUTPUT_PARENT="$2"; shift 2;;
     --mask-probs-dtype) MASK_PROBS_DTYPE="$2"; shift 2;;
     --mask-probs-chunk-rois) MASK_PROBS_CHUNK_ROIS="$2"; shift 2;;
+    --mask-probs-shard-rois) MASK_PROBS_SHARD_ROIS="$2"; shift 2;;
     --output-queue-size) OUTPUT_QUEUE_SIZE="$2"; shift 2;;
     --profile-timings) PROFILE_TIMINGS=1; shift;;
     --model-coverage-class) MODEL_COVERAGE_CLASS="$2"; shift 2;;
@@ -560,6 +564,7 @@ SUBJECT_ARGS=(
   --roi-live-gpu-chunk-frames "$ROI_LIVE_GPU_CHUNK_FRAMES"
   --progress-dir "$RUN_DIR/progress"
 )
+if [[ -n "$MASK_PROBS_SHARD_ROIS" ]]; then SUBJECT_ARGS+=(--mask-probs-shard-rois "$MASK_PROBS_SHARD_ROIS"); fi
 if [[ -n "$FINALIZE_DENSE_MASK_ROW_CHUNK" ]]; then SUBJECT_ARGS+=(--finalize-dense-mask-row-chunk "$FINALIZE_DENSE_MASK_ROW_CHUNK"); fi
 if [[ -n "$FINALIZE_POSTCOMPUTE_CHUNK_SIZE" ]]; then SUBJECT_ARGS+=(--finalize-postcompute-chunk-size "$FINALIZE_POSTCOMPUTE_CHUNK_SIZE"); fi
 if [[ "$FINALIZE_POSTCOMPUTE_NUM_WORKERS" != "auto" && -n "$FINALIZE_POSTCOMPUTE_NUM_WORKERS" ]]; then SUBJECT_ARGS+=(--finalize-postcompute-num-workers "$FINALIZE_POSTCOMPUTE_NUM_WORKERS"); fi

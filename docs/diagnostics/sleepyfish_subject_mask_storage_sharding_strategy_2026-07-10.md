@@ -463,6 +463,42 @@ Initial acceptance gates:
    canonical arrays in place.
 9. Evaluate frozen refined outputs separately from active editable outputs.
 
+## Inference Writer Implementation
+
+The first production-path implementation is now available as an explicit
+opt-in:
+
+```text
+--mask-probs-chunk-rois 32 --mask-probs-shard-rois 2048
+```
+
+The U-Net writer does not incrementally update indexed shards. It writes
+ordinary inference batches to the private `_mask_probs_roi_working` array,
+waits for the asynchronous output queue to drain, and then copies complete
+outer-shard row ranges into the canonical `mask_probs_roi` array. It computes
+SHA-256 digests over all decoded source and destination probability bytes and
+removes the working array only after the digests match. A mismatch raises
+before run completion and preserves the working array for diagnosis.
+
+Successful runs record `mask_probs_storage_layout=indexed_sharding_v1`, the
+requested shard rows, inner and outer shapes, pack and validation durations,
+and both digests in attrs and run provenance. Unsharded runs retain
+`regular_chunks_v1`. Dense `masks_roi` remains ordinarily chunked; sharding is
+limited to immutable raw probabilities.
+
+The option is propagated through the recording batch runner, clipped-
+collection planner, and LSF submission wrapper. Because the standard batch
+workflow writes inference output on node-local scratch before atomic PRFS
+publication, the temporary ordinary chunks do not increase PRFS object count.
+Only the validated sharded run group is copied to PRFS. This should reduce
+publication metadata/object overhead substantially, although end-to-end copy
+time still requires a production canary. Direct-to-PRFS invocations remain
+supported but perform both the working write and post-pack on PRFS.
+
+The `2,048`-row layout remains opt-in until a complete clipped-inference canary
+passes decoded-value, lineage, completion, object-count, and publication-time
+checks. Existing completed probability runs are not rewritten in place.
+
 ## Initial 8,192-Row Benchmark Set
 
 The first real-data fixture was generated from rows `[0, 8192)` of

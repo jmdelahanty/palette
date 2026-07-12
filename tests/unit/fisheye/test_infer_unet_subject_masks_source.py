@@ -5,7 +5,9 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import pytest
 import torch
+import zarr
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
@@ -14,11 +16,22 @@ from fisheye.shared.run_provenance import RUN_PROVENANCE_ATTR
 
 
 class _FakeArray:
-    def __init__(self, data: np.ndarray, *, chunks: tuple[int, ...] | None = None) -> None:
+    def __init__(
+        self,
+        data: np.ndarray,
+        *,
+        chunks: tuple[int, ...] | None = None,
+        shards: tuple[int, ...] | None = None,
+        fill_value=0,
+    ) -> None:
         self._data = np.asarray(data)
         self.shape = self._data.shape
+        self.ndim = self._data.ndim
         self.dtype = self._data.dtype
         self.chunks = chunks or ((self.shape[0],) if self.shape else (1,))
+        self.shards = shards
+        self.fill_value = fill_value
+        self.attrs: dict[str, object] = {}
         self.compressors = ()
         self.chunk_codecs = None
         self.filters = None
@@ -56,6 +69,7 @@ class _FakeGroup:
         shape: tuple[int, ...] | None = None,
         dtype=None,
         chunks: tuple[int, ...] | None = None,
+        shards: tuple[int, ...] | None = None,
         fill_value=None,
         overwrite: bool = False,
         **_kwargs,
@@ -68,7 +82,7 @@ class _FakeGroup:
             arr = np.full(shape, 0 if fill_value is None else fill_value, dtype=dtype or np.float32)
         else:
             arr = np.asarray(data, dtype=dtype)
-        fake = _FakeArray(arr, chunks=chunks)
+        fake = _FakeArray(arr, chunks=chunks, shards=shards, fill_value=fill_value)
         self._children[name] = fake
         return fake
 
@@ -80,6 +94,9 @@ class _FakeGroup:
 
     def __contains__(self, name: str) -> bool:
         return name in self._children
+
+    def __delitem__(self, name: str) -> None:
+        del self._children[name]
 
     def group_keys(self):
         return [name for name, value in self._children.items() if isinstance(value, _FakeGroup)]
@@ -202,6 +219,7 @@ def test_write_subject_mask_outputs_can_skip_binary_masks_roi() -> None:
         device=torch.device("cpu"),
         mask_labels=("subject_body", "eyes_union", "swim_bladder"),
         mask_probs_chunk_rois=1,
+        mask_probs_shard_rois=None,
         mask_probs_dtype="uint8",
         write_masks_roi=False,
         async_output=False,
@@ -259,6 +277,7 @@ def test_write_subject_mask_outputs_pads_model_input_and_writes_native_shape() -
         device=torch.device("cpu"),
         mask_labels=("subject_body", "eyes_union", "swim_bladder"),
         mask_probs_chunk_rois=1,
+        mask_probs_shard_rois=None,
         mask_probs_dtype="uint8",
         write_masks_roi=True,
         async_output=False,
@@ -297,6 +316,7 @@ def test_write_subject_mask_outputs_async_matches_serial_outputs() -> None:
         "device": torch.device("cpu"),
         "mask_labels": ("subject_body", "eyes_union", "swim_bladder"),
         "mask_probs_chunk_rois": 1,
+        "mask_probs_shard_rois": None,
         "mask_probs_dtype": "uint8",
         "write_masks_roi": False,
         "model_input_transform": mod.resolve_model_input_transform((2, 2)),
@@ -336,6 +356,144 @@ def test_write_subject_mask_outputs_async_matches_serial_outputs() -> None:
             np.asarray(serial_group["metrics"][name][:]),
         )
     assert "masks_roi" not in async_group
+
+
+def test_postpack_probability_shards_exactly_replaces_working_array() -> None:
+    run_group = _FakeGroup()
+    values = np.arange(5 * 3 * 2 * 2, dtype=np.uint8).reshape(5, 3, 2, 2)
+    run_group.create_array(
+        mod.MASK_PROBS_WORKING_ARRAY,
+        data=values,
+        chunks=(1, 1, 2, 2),
+        overwrite=True,
+    )
+
+    summary = mod._postpack_probability_shards(
+        run_group,
+        source_name=mod.MASK_PROBS_WORKING_ARRAY,
+        shard_rows=4,
+        profiler=mod.InferenceTimingProfiler(enabled=False),
+    )
+
+    assert mod.MASK_PROBS_WORKING_ARRAY not in run_group
+    assert mod.MASK_PROBS_CANONICAL_ARRAY in run_group
+    packed = run_group[mod.MASK_PROBS_CANONICAL_ARRAY]
+    np.testing.assert_array_equal(np.asarray(packed[:]), values)
+    assert packed.chunks == (1, 1, 2, 2)
+    assert packed.shards == (4, 1, 2, 2)
+    assert packed.attrs["storage_layout"] == "indexed_sharding_v1"
+    assert summary["exact_match"] is True
+    assert summary["source_sha256"] == summary["destination_sha256"]
+    assert summary["inner_chunks_per_shard"] == 4
+
+
+def test_postpack_probability_shards_uses_real_indexed_sharding() -> None:
+    run_group = zarr.group(store=zarr.storage.MemoryStore(), zarr_format=3)
+    values = np.arange(9 * 2 * 3 * 3, dtype=np.uint8).reshape(9, 2, 3, 3)
+    run_group.create_array(
+        mod.MASK_PROBS_WORKING_ARRAY,
+        data=values,
+        chunks=(2, 1, 3, 3),
+        overwrite=True,
+    )
+
+    summary = mod._postpack_probability_shards(
+        run_group,
+        source_name=mod.MASK_PROBS_WORKING_ARRAY,
+        shard_rows=8,
+        profiler=mod.InferenceTimingProfiler(enabled=False),
+    )
+
+    packed = run_group[mod.MASK_PROBS_CANONICAL_ARRAY]
+    assert packed.chunks == (2, 1, 3, 3)
+    assert packed.shards == (8, 1, 3, 3)
+    np.testing.assert_array_equal(np.asarray(packed[:]), values)
+    assert summary["exact_match"] is True
+
+
+def test_postpack_probability_shards_rejects_unaligned_outer_rows() -> None:
+    run_group = _FakeGroup()
+    run_group.create_array(
+        mod.MASK_PROBS_WORKING_ARRAY,
+        data=np.zeros((5, 3, 2, 2), dtype=np.uint8),
+        chunks=(2, 1, 2, 2),
+        overwrite=True,
+    )
+
+    with pytest.raises(ValueError, match="integer multiple"):
+        mod._postpack_probability_shards(
+            run_group,
+            source_name=mod.MASK_PROBS_WORKING_ARRAY,
+            shard_rows=5,
+            profiler=mod.InferenceTimingProfiler(enabled=False),
+        )
+
+    assert mod.MASK_PROBS_WORKING_ARRAY in run_group
+    assert mod.MASK_PROBS_CANONICAL_ARRAY not in run_group
+
+
+def test_postpack_probability_shards_preserves_working_array_on_digest_mismatch(
+    monkeypatch,
+) -> None:
+    run_group = _FakeGroup()
+    run_group.create_array(
+        mod.MASK_PROBS_WORKING_ARRAY,
+        data=np.arange(5 * 3 * 2 * 2, dtype=np.uint8).reshape(5, 3, 2, 2),
+        chunks=(1, 1, 2, 2),
+        overwrite=True,
+    )
+    digests = iter(("source-digest", "destination-digest"))
+    monkeypatch.setattr(mod, "_probability_array_digest", lambda *_args, **_kwargs: next(digests))
+
+    with pytest.raises(RuntimeError, match="digest mismatch"):
+        mod._postpack_probability_shards(
+            run_group,
+            source_name=mod.MASK_PROBS_WORKING_ARRAY,
+            shard_rows=4,
+            profiler=mod.InferenceTimingProfiler(enabled=False),
+        )
+
+    assert mod.MASK_PROBS_WORKING_ARRAY in run_group
+    assert mod.MASK_PROBS_CANONICAL_ARRAY in run_group
+
+
+def test_write_subject_mask_outputs_postpacks_probabilities() -> None:
+    class _FakeCropSource:
+        total_rois = 5
+        roi_shape = (2, 2)
+        roi_array = _FakeArray(np.zeros((5, 2, 2), dtype=np.uint8), chunks=(1, 2, 2))
+
+        def read_slice(self, start: int, stop: int) -> np.ndarray:
+            return np.zeros((stop - start, 2, 2), dtype=np.uint8)
+
+    class _FakeModel(torch.nn.Module):
+        def forward(self, imgs: torch.Tensor) -> torch.Tensor:
+            batch, _channels, height, width = imgs.shape
+            return torch.full((batch, 3, height, width), 2.0, device=imgs.device, dtype=torch.float32)
+
+    run_group = _FakeGroup()
+    mod._write_subject_mask_outputs(
+        run_group,
+        _FakeModel(),
+        _FakeCropSource(),
+        batch_size=2,
+        device=torch.device("cpu"),
+        mask_labels=("subject_body", "eyes_union", "swim_bladder"),
+        mask_probs_chunk_rois=1,
+        mask_probs_shard_rois=4,
+        mask_probs_dtype="uint8",
+        write_masks_roi=False,
+        async_output=True,
+        output_queue_size=1,
+        model_input_transform=mod.resolve_model_input_transform((2, 2)),
+        show_progress=False,
+        console=mod.Console(),
+        timing_profiler=None,
+    )
+
+    assert mod.MASK_PROBS_WORKING_ARRAY not in run_group
+    assert run_group[mod.MASK_PROBS_CANONICAL_ARRAY].shards == (4, 1, 2, 2)
+    assert run_group.attrs["mask_probs_postpack"]["status"] == "complete"
 
 
 def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporary_cache(
@@ -394,6 +552,7 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
         device,
         mask_labels,
         mask_probs_chunk_rois,
+        mask_probs_shard_rois,
         mask_probs_dtype,
         write_masks_roi,
         async_output,
@@ -406,6 +565,7 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
         del model, batch_size, device, console
         seen["mask_labels"] = tuple(mask_labels)
         seen["mask_probs_chunk_rois"] = mask_probs_chunk_rois
+        seen["mask_probs_shard_rois"] = mask_probs_shard_rois
         seen["mask_probs_dtype"] = mask_probs_dtype
         seen["write_masks_roi"] = write_masks_roi
         seen["async_output"] = async_output
@@ -493,6 +653,8 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
             "11",
             "--mask-probs-chunk-rois",
             "2",
+            "--mask-probs-shard-rois",
+            "4",
             "--assignment-keypoint-group",
             "refined_keypoints_runs",
             "--assignment-keypoint-run",
@@ -512,6 +674,7 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
     assert Path(str(seen["roi_cache_path"])).exists()
     assert seen["roi_cache_canonical_path"] == "/groups/cache/fake-cache.flat_roi_cache.json"
     assert seen["mask_probs_chunk_rois"] == 2
+    assert seen["mask_probs_shard_rois"] == 4
     assert seen["mask_probs_dtype"] == "uint8"
     assert seen["write_masks_roi"] is False
     assert seen["async_output"] is True
@@ -542,6 +705,8 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
     assert run_group.attrs["assignment_keypoint_eye_indices"] == {"eye_left": 0, "eye_right": 1}
     assert run_group.attrs["method"] == "unet_subject_mask_segmenter"
     assert run_group.attrs["run_semantics"] == "unet_subject_mask_inference"
+    assert run_group.attrs["mask_probs_shard_rois"] == 4
+    assert run_group.attrs["mask_probs_storage_layout"] == "indexed_sharding_v1"
     assert run_group.attrs["profile_timings_enabled"] is True
     provenance_inputs = run_group.attrs["provenance"]["inputs"]
     assert provenance_inputs["source_crop_signature"] == "sig-001"
@@ -550,6 +715,7 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
     assert provenance_inputs["roi_cache_canonical_path"] == "/groups/cache/fake-cache.flat_roi_cache.json"
     assert provenance_inputs["assignment_keypoint_group"] == "refined_keypoints_runs"
     assert provenance_inputs["assignment_keypoints_run"] == "refined_kp_001"
+    assert run_group.attrs["provenance"]["parameters"]["mask_probs_shard_rois"] == 4
     assert run_group["mask_probs_roi"].shape == (2, 3, 4, 4)
     assert "masks_roi" not in run_group
 
@@ -607,6 +773,7 @@ def test_infer_unet_subject_masks_writes_lr_checkpoint_schema(
         device,
         mask_labels,
         mask_probs_chunk_rois,
+        mask_probs_shard_rois,
         mask_probs_dtype,
         write_masks_roi,
         async_output,
@@ -616,7 +783,7 @@ def test_infer_unet_subject_masks_writes_lr_checkpoint_schema(
         console,
         timing_profiler,
     ) -> float:
-        del model, batch_size, device, mask_probs_chunk_rois, mask_probs_dtype, write_masks_roi, async_output, output_queue_size, model_input_transform, show_progress, console, timing_profiler
+        del model, batch_size, device, mask_probs_chunk_rois, mask_probs_shard_rois, mask_probs_dtype, write_masks_roi, async_output, output_queue_size, model_input_transform, show_progress, console, timing_profiler
         seen["mask_labels"] = tuple(mask_labels)
         channel_count = len(mask_labels)
         run_group.create_array(
@@ -782,6 +949,7 @@ def test_infer_unet_subject_masks_can_resolve_checkpoint_from_registry(
         device,
         mask_labels,
         mask_probs_chunk_rois,
+        mask_probs_shard_rois,
         mask_probs_dtype,
         write_masks_roi,
         async_output,
@@ -791,7 +959,7 @@ def test_infer_unet_subject_masks_can_resolve_checkpoint_from_registry(
         console,
         timing_profiler,
     ) -> float:
-        del model, batch_size, device, mask_probs_chunk_rois, mask_probs_dtype, write_masks_roi, output_queue_size, model_input_transform, console, timing_profiler
+        del model, batch_size, device, mask_probs_chunk_rois, mask_probs_shard_rois, mask_probs_dtype, write_masks_roi, output_queue_size, model_input_transform, console, timing_profiler
         seen["async_output"] = async_output
         seen["show_progress"] = show_progress
         channel_count = len(mask_labels)

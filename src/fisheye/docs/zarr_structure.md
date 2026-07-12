@@ -1003,6 +1003,15 @@ and dense `masks_roi` as an optional thresholded compatibility cache. The
 shared compact-mask reader/writer design is documented in
 `docs/mask_rle_storage_design_and_benchmark_plan.md`.
 
+New U-Net runs may store `mask_probs_roi` as Zarr v3 indexed shards while
+retaining independently readable inner chunks. The opt-in writer uses
+`--mask-probs-shard-rois`; it first writes a private ordinary-chunk working
+array, packs complete outer shards, validates an exact decoded-byte digest, and
+only then removes the working array and completes the run. Readers continue to
+address `mask_probs_roi` normally and must not depend on its physical layout.
+Dense editable/refined `masks_roi` is not covered by this raw-probability
+storage option.
+
 `metrics/` subgroup:
 
 - required: `prob_max`, `mask_present`
@@ -1024,6 +1033,10 @@ Important attrs:
 - `run_semantics`
 - `probabilities_dtype`
 - `probabilities_encoding`
+- `mask_probs_chunk_rois`
+- `mask_probs_shard_rois` *(present for indexed-sharded probability runs)*
+- `mask_probs_storage_layout` (`regular_chunks_v1` or `indexed_sharding_v1`)
+- `mask_probs_postpack` *(exact digest and pack/validation summary for indexed-sharded runs)*
 - `summary_statistics`
 
 Component-local lineage lives under `components/<component>/provenance`.
