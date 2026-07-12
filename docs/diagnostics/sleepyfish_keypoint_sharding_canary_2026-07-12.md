@@ -1,7 +1,7 @@
 # Sleepyfish Keypoint Sharding Canary
 
 **Date:** 2026-07-12
-**Status:** clone canary complete; storage candidate passed; inference-writer rollout not yet implemented
+**Status:** clone and direct YOLO-writer canaries complete; candidate passed; layout remains opt-in
 
 ## Scope
 
@@ -72,16 +72,101 @@ Indexed-sharding codec/index handling roughly doubled these small-array read
 times, matching the direction observed for probability-mask sharding. Absolute
 latencies remain small, while filesystem-object pressure falls sharply.
 
+## Direct YOLO Writer
+
+The serial YOLO writer now has an opt-in, double-buffered sharded path. It was
+implemented in commits `227ebc3` and `0cf0132` and is selected with:
+
+```text
+--keypoint-roi-shard-rows 65536
+--keypoint-frame-shard-rows 262144
+```
+
+The writer retains the existing inner chunk grid. It accumulates the 13
+inference-produced ROI arrays until it owns a complete outer shard, writes that
+shard in one operation, and overlaps the write with continued inference using
+exactly two buffers. Copied ROI lineage arrays use the same `65,536`-row outer
+grid; frame-count arrays use the independent `262,144`-row grid. Variable-width
+string arrays are not sharded.
+
+Before a buffer is reused, the writer hashes its decoded source bytes. It then
+rereads the published destination slice and requires an identical SHA-256
+digest. Run attrs record the requested/effective layout and a
+`keypoint_shard_write` summary containing buffer sizes, write and validation
+times, per-array hashes, and the aggregate exact-match result.
+
+### Cluster execution
+
+Both full-clip writer jobs ran through LSF from the shared checkout; no workload
+ran on the login host.
+
+| Job | Host | Result | Purpose |
+| --- | --- | --- | --- |
+| `153064806` | `h08u06` | inference/output passed; wrapper exited 1 | exposed stale consolidated metadata during post-run provenance update |
+| `153064813` | `h08u12` | `DONE` | corrected end-to-end canary after commit `9bc5fa1` |
+
+The first job produced a complete, internally validated output, but its wrapper
+could not rediscover the newly created run through stale consolidated metadata.
+Commit `9bc5fa1` made the mutable post-run provenance update open with
+`use_consolidated=False`. The second job then completed publication and model
+resolution provenance normally.
+
+Corrected canary output:
+
+```text
+keypoint_shard_runs/
+  keypoint_shard_sleepyfish_kp_sharded_writer_canary_20260712_02_clip_000000
+```
+
+Logs:
+
+```text
+/groups/johnson/johnsonlab/jeremy/recordings/logs/keypoint_sharding_writer_canary/
+  sleepyfish_clip000000_20260712_01/canary2.153064813.{out,err}
+```
+
+### Writer and parity results
+
+- All 24 numeric arrays matched the ordinary reference run exactly in an
+  independent cross-run decoded-value audit.
+- The run reported `53,993` successful and 7 failed ROI predictions, identical
+  to the reference (`99.99%` success).
+- All 13 buffered arrays passed the writer's own destination-reread SHA-256
+  validation.
+- This 54,000-row clip fit in one `65,536`-row outer ROI shard. Each of the two
+  buffers occupied `17,928,000` bytes, for `35,856,000` bytes total
+  (approximately `34.2 MiB`).
+- Physical shard writing took `0.632 s`; exhaustive writer reread/validation
+  took `0.692 s`.
+- Completion state, publication, registry model resolution, and recorded
+  provenance all completed successfully.
+
+### Runtime and storage
+
+The closest ordinary-layout reference took `269.1 s` for inference, `360 s`
+of accounted LSF runtime, and `1,917 MB` maximum memory. The corrected sharded
+writer took `257.3 s` for inference, `331 s` accounted runtime, and `2,026 MB`
+maximum memory. The approximately 4.4% faster inference is best treated as node
+variance, not a sharding speedup. More importantly, the sharded writer showed no
+runtime regression, and its measured write-plus-validation cost was only
+`1.32 s`.
+
+| Measure | Ordinary reference | Direct sharded writer | Change |
+| --- | ---: | ---: | ---: |
+| Total files | 742 | 45 | `16.5x` fewer |
+| Payload files | 717 | 20 | `35.9x` fewer |
+| Apparent bytes | 8,832,358 | 8,865,645 | `+0.38%` |
+| Allocated bytes | 9,102,848 | 8,881,152 | `-2.44%` |
+
 ## Decision And Next Step
 
-The storage candidate passes the first canary. Do not rewrite the completed
-source run. The next step is a parity-tested YOLO inference-writer canary using
-two aligned `65,536`-row ROI buffers and complete-shard ownership. The serial
-YOLO batch writer is the safest first production target. Traditional/Dask
-keypoint writers must not write different logical slices within one physical
-shard; they need complete-shard worker ownership or worker-local outputs plus a
-deterministic merge.
+The direct YOLO-writer candidate passes output parity, completion/publication,
+file-count, memory, and runtime gates. It is reasonable to make indexed
+sharding the default for immutable outputs from the serial YOLO keypoint
+writer. For now the behavior remains opt-in so that changing the production
+default is a separate, explicit rollout decision.
 
-Do not make sharding the keypoint default until the inference-writer canary
-passes output parity, completion/publication, file-count, memory, and runtime
-gates.
+Do not infer that this result makes the traditional/Dask writer shard-safe.
+Traditional/Dask workers must own complete physical shards, or write
+worker-local outputs followed by a deterministic merge; disjoint logical row
+slices within one shard are not safe concurrent writes.
