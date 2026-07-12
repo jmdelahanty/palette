@@ -12,6 +12,7 @@ from fisheye.shared.instance_keys import INSTANCE_KEY_ARRAY
 from fisheye.shared.zarr.chunk_profiles import (
     CRIMSON_LINEAGE_PRELOAD_ARRAYS,
     create_geometry_preload_array,
+    geometry_preload_chunks_for_data,
 )
 
 ROW_ALIGNMENT_ARRAYS: Tuple[str, ...] = (
@@ -202,11 +203,35 @@ def write_direct_source_crop_row_ids(
     *,
     total_rois: int,
     overwrite: bool = True,
+    shard_rows: int | None = None,
 ) -> None:
     """Write ``source_crop_row_ids`` for outputs that preserve crop row order."""
 
     data = direct_source_crop_row_ids(total_rois)
-    _write_array(target_group, SOURCE_CROP_ROW_IDS_ARRAY, data, source_array=None, overwrite=overwrite)
+    _write_array(
+        target_group,
+        SOURCE_CROP_ROW_IDS_ARRAY,
+        data,
+        source_array=None,
+        overwrite=overwrite,
+        shard_rows=shard_rows,
+    )
+
+
+def _aligned_shards(
+    chunks: Sequence[int] | None,
+    *,
+    shard_rows: int | None,
+    dtype: np.dtype,
+) -> tuple[int, ...] | None:
+    if shard_rows is None or chunks is None or dtype.kind in {"O", "S", "U"}:
+        return None
+    inner_rows = int(chunks[0])
+    requested = int(shard_rows)
+    if requested <= 0:
+        raise ValueError("shard_rows must be positive when provided.")
+    outer_rows = int(((requested + inner_rows - 1) // inner_rows) * inner_rows)
+    return (outer_rows, *tuple(int(value) for value in chunks[1:]))
 
 
 def _write_array(
@@ -217,9 +242,21 @@ def _write_array(
     source_array: object | None,
     overwrite: bool,
     geometry_preload_names: frozenset[str] | None = None,
+    shard_rows: int | None = None,
 ) -> None:
     if geometry_preload_names is not None and name in geometry_preload_names:
-        create_geometry_preload_array(target_group, name, data=data, overwrite=overwrite)
+        chunks = geometry_preload_chunks_for_data(data)
+        shards = _aligned_shards(chunks, shard_rows=shard_rows, dtype=data.dtype)
+        kwargs = {"chunks": chunks} if chunks is not None else {}
+        if shards is not None:
+            kwargs["shards"] = shards
+        create_geometry_preload_array(
+            target_group,
+            name,
+            data=data,
+            overwrite=overwrite,
+            **kwargs,
+        )
         return
 
     chunks = normalize_chunks_for_data(getattr(source_array, "chunks", None), data.shape)
@@ -231,6 +268,9 @@ def _write_array(
     kwargs = {"data": data, "overwrite": overwrite}
     if chunks is not None:
         kwargs["chunks"] = chunks
+    shards = _aligned_shards(chunks, shard_rows=shard_rows, dtype=data.dtype)
+    if shards is not None:
+        kwargs["shards"] = shards
     try:
         target_group.create_array(name, **kwargs)
     except TypeError:
@@ -246,6 +286,7 @@ def copy_row_lineage_array(
     total_rois: Optional[int] = None,
     overwrite: bool = True,
     use_geometry_preload_profile: bool = False,
+    shard_rows: int | None = None,
 ) -> bool:
     payload = _read_array(source_group, name)
     if payload is None:
@@ -261,6 +302,7 @@ def copy_row_lineage_array(
         geometry_preload_names=(
             CRIMSON_LINEAGE_PRELOAD_ARRAYS if use_geometry_preload_profile else None
         ),
+        shard_rows=shard_rows,
     )
     return True
 
@@ -273,6 +315,8 @@ def copy_row_lineage_arrays(
     total_rois: Optional[int] = None,
     overwrite: bool = True,
     use_geometry_preload_profile: bool = False,
+    shard_rows: int | None = None,
+    count_shard_rows: int | None = None,
 ) -> RowLineageCopyResult:
     copied = []
     missing = []
@@ -284,6 +328,9 @@ def copy_row_lineage_arrays(
             total_rois=total_rois,
             overwrite=overwrite,
             use_geometry_preload_profile=use_geometry_preload_profile,
+            shard_rows=(
+                count_shard_rows if name in COUNT_ROW_LINEAGE_ARRAYS else shard_rows
+            ),
         ):
             copied.append(str(name))
         else:

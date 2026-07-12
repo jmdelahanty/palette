@@ -70,6 +70,30 @@ def test_row_lineage_copy_uses_geometry_preload_only_when_requested(tmp_path: Pa
     assert profiled_target["frame_indices"].attrs["storage_profile_id"] == GEOMETRY_PRELOAD_STORAGE_PROFILE_ID
 
 
+def test_row_lineage_copy_can_shard_roi_and_count_domains_separately(tmp_path: Path) -> None:
+    root = _root(tmp_path / "lineage_sharded.zarr")
+    source = root.create_group("source")
+    total = 20_000
+    source.create_array("frame_indices", data=np.arange(total, dtype=np.int32), chunks=(1000,))
+    source.create_array("frame_counts", data=np.ones(total, dtype=np.int32), chunks=(1000,))
+    target = root.create_group("target")
+
+    copy_row_lineage_arrays(
+        target,
+        source,
+        names=("frame_indices", "frame_counts"),
+        total_rois=total,
+        use_geometry_preload_profile=True,
+        shard_rows=65_536,
+        count_shard_rows=262_144,
+    )
+
+    assert target["frame_indices"].chunks == (GEOMETRY_PRELOAD_ROW_CHUNK,)
+    assert target["frame_indices"].shards == (65_536,)
+    assert target["frame_counts"].chunks == (1000,)
+    assert target["frame_counts"].shards == (263_000,)
+
+
 def test_crop_metadata_writes_validated_lineage_arrays_with_geometry_preload_profile(tmp_path: Path) -> None:
     root = _root(tmp_path / "crop.zarr")
     source = root.create_group("detect")

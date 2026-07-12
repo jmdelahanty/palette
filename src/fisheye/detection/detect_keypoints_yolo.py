@@ -10,9 +10,12 @@ keypoints.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
+from queue import Queue
 from pathlib import Path
+from threading import Thread
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Sequence
 from datetime import datetime, timezone
 import time
@@ -66,6 +69,9 @@ _KEYPOINT_INPUT_MODES = ("numpy-list", "tensor", "auto")
 _KEYPOINT_PROGRESS_SCHEMA_ID = "palette.keypoint_inference_progress.v1"
 DEFAULT_KEYPOINT_OUTPUT_PARENT = "keypoints_runs"
 KEYPOINT_OUTPUT_PARENTS = (DEFAULT_KEYPOINT_OUTPUT_PARENT, "keypoint_shard_runs")
+KEYPOINT_SHARD_WRITE_SCHEMA = "palette.keypoint_double_buffered_shards.v1"
+DEFAULT_KEYPOINT_ROI_SHARD_ROWS = 65_536
+DEFAULT_KEYPOINT_FRAME_SHARD_ROWS = 262_144
 
 
 def _normalize_keypoint_output_parent(output_parent: Optional[str]) -> str:
@@ -283,12 +289,38 @@ def _emit_keypoint_step_status(
     )
 
 
+def _aligned_shards(chunks: Sequence[int], shard_rows: int | None) -> tuple[int, ...] | None:
+    if shard_rows is None:
+        return None
+    requested = int(shard_rows)
+    if requested <= 0:
+        raise ValueError("Keypoint shard rows must be positive.")
+    inner_rows = int(chunks[0])
+    outer_rows = int(((requested + inner_rows - 1) // inner_rows) * inner_rows)
+    return (outer_rows, *tuple(int(value) for value in chunks[1:]))
+
+
+def _shard_kwargs(chunks: Sequence[int], shard_rows: int | None) -> dict[str, object]:
+    shards = _aligned_shards(chunks, shard_rows)
+    return {"shards": shards} if shards is not None else {}
+
+
+def _digest_keypoint_array(array: zarr.Array, *, row_step: int) -> str:
+    digest = hashlib.sha256()
+    for start in range(0, int(array.shape[0]), int(row_step)):
+        stop = min(start + int(row_step), int(array.shape[0]))
+        values = np.ascontiguousarray(array[start:stop, ...])
+        digest.update(values.view(np.uint8))
+    return digest.hexdigest()
+
+
 def _create_output_arrays(
     group: zarr.Group,
     total_rois: int,
     chunk_hint: int,
     *,
     n_keypoints: int,
+    shard_rows: int | None = None,
 ) -> Dict[str, zarr.Array]:
     chunk_len = min(max(chunk_hint, 1), total_rois) if total_rois > 0 else 1
     data_chunk = (chunk_len, int(n_keypoints), 2)
@@ -302,6 +334,7 @@ def _create_output_arrays(
             dtype="f8",
             fill_value=np.nan,
             overwrite=True,
+            **_shard_kwargs(data_chunk, shard_rows),
         ),
         "keypoints_img": group.create_array(
             "keypoints_img",
@@ -310,6 +343,7 @@ def _create_output_arrays(
             dtype="f8",
             fill_value=np.nan,
             overwrite=True,
+            **_shard_kwargs(data_chunk, shard_rows),
         ),
         "keypoints_norm": group.create_array(
             "keypoints_norm",
@@ -318,6 +352,7 @@ def _create_output_arrays(
             dtype="f8",
             fill_value=np.nan,
             overwrite=True,
+            **_shard_kwargs(data_chunk, shard_rows),
         ),
         "heading": group.create_array(
             "heading",
@@ -326,6 +361,7 @@ def _create_output_arrays(
             dtype="f8",
             fill_value=np.nan,
             overwrite=True,
+            **_shard_kwargs(scalar_chunk, shard_rows),
         ),
         "confidence": group.create_array(
             "confidence",
@@ -334,6 +370,7 @@ def _create_output_arrays(
             dtype="f8",
             fill_value=np.nan,
             overwrite=True,
+            **_shard_kwargs(scalar_chunk, shard_rows),
         ),
         "keypoint_confidences": group.create_array(
             "keypoint_confidences",
@@ -342,6 +379,7 @@ def _create_output_arrays(
             dtype="f8",
             fill_value=np.nan,
             overwrite=True,
+            **_shard_kwargs((chunk_len, int(n_keypoints)), shard_rows),
         ),
         "detection_success": group.create_array(
             "detection_success",
@@ -350,6 +388,7 @@ def _create_output_arrays(
             dtype="bool",
             fill_value=False,
             overwrite=True,
+            **_shard_kwargs(scalar_chunk, shard_rows),
         ),
         "pose_bbox_xyxy_roi": group.create_array(
             "pose_bbox_xyxy_roi",
@@ -358,6 +397,7 @@ def _create_output_arrays(
             dtype="f4",
             fill_value=np.nan,
             overwrite=True,
+            **_shard_kwargs((chunk_len, 4), shard_rows),
         ),
         "heading_finite": group.create_array(
             "heading_finite",
@@ -366,6 +406,7 @@ def _create_output_arrays(
             dtype="bool",
             fill_value=False,
             overwrite=True,
+            **_shard_kwargs(scalar_chunk, shard_rows),
         ),
         "heading_usable": group.create_array(
             "heading_usable",
@@ -374,6 +415,7 @@ def _create_output_arrays(
             dtype="bool",
             fill_value=False,
             overwrite=True,
+            **_shard_kwargs(scalar_chunk, shard_rows),
         ),
         "effective_threshold": group.create_array(
             "effective_threshold",
@@ -382,6 +424,7 @@ def _create_output_arrays(
             dtype="f8",
             fill_value=np.nan,
             overwrite=True,
+            **_shard_kwargs(scalar_chunk, shard_rows),
         ),
         "effective_se2_radius": group.create_array(
             "effective_se2_radius",
@@ -390,9 +433,192 @@ def _create_output_arrays(
             dtype="f8",
             fill_value=np.nan,
             overwrite=True,
+            **_shard_kwargs(scalar_chunk, shard_rows),
         ),
     }
     return arrays
+
+
+class _AlignedKeypointShardWriter:
+    """Accumulate sequential YOLO batches and write each physical shard once."""
+
+    def __init__(
+        self,
+        destinations: Mapping[str, zarr.Array],
+        *,
+        shard_rows: int,
+        buffer_count: int = 2,
+    ) -> None:
+        if int(buffer_count) != 2:
+            raise ValueError("YOLO keypoint shard writing requires exactly two buffers.")
+        if not destinations:
+            raise ValueError("At least one keypoint destination array is required.")
+        self.destinations = dict(destinations)
+        row_counts = {int(array.shape[0]) for array in self.destinations.values()}
+        if len(row_counts) != 1:
+            raise ValueError("All buffered keypoint arrays must share one ROI row count.")
+        self.total_rows = row_counts.pop()
+        self.shard_rows = int(shard_rows)
+        self.buffer_rows = min(self.shard_rows, max(1, self.total_rows))
+        self.buffer_count = 2
+        self.buffers = [
+            {
+                name: np.empty(
+                    (self.buffer_rows, *tuple(int(value) for value in array.shape[1:])),
+                    dtype=array.dtype,
+                )
+                for name, array in self.destinations.items()
+            }
+            for _ in range(self.buffer_count)
+        ]
+        self._free: Queue[int] = Queue(maxsize=self.buffer_count)
+        for index in range(self.buffer_count):
+            self._free.put(index)
+        self._flush: Queue[object] = Queue(maxsize=self.buffer_count)
+        self._sentinel = object()
+        self._errors: list[BaseException] = []
+        self._active_index: int | None = None
+        self._active_start = 0
+        self._active_rows = 0
+        self._next_row = 0
+        self._source_digests = {
+            name: hashlib.sha256() for name in self.destinations
+        }
+        self._write_seconds = 0.0
+        self._worker = Thread(
+            target=self._flush_worker,
+            name="yolo-keypoint-shard-writer",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def _raise_error(self) -> None:
+        if self._errors:
+            raise RuntimeError("YOLO keypoint shard writer failed.") from self._errors[0]
+
+    def _acquire(self, *, start: int) -> None:
+        self._raise_error()
+        self._active_index = int(self._free.get())
+        self._active_start = int(start)
+        self._active_rows = 0
+
+    def _submit(self) -> None:
+        if self._active_index is None or self._active_rows <= 0:
+            return
+        self._flush.put((self._active_index, self._active_start, self._active_rows))
+        self._active_index = None
+        self._active_rows = 0
+
+    def write(self, start: int, values: Mapping[str, np.ndarray]) -> None:
+        self._raise_error()
+        if int(start) != self._next_row:
+            raise ValueError(
+                f"Keypoint batches must be sequential; expected {self._next_row}, got {start}."
+            )
+        if set(values) != set(self.destinations):
+            raise ValueError("Keypoint batch fields do not match destination arrays.")
+        arrays = {name: np.asarray(value) for name, value in values.items()}
+        batch_rows = {int(value.shape[0]) for value in arrays.values()}
+        if len(batch_rows) != 1:
+            raise ValueError("All keypoint batch arrays must share one row count.")
+        remaining = batch_rows.pop()
+        source_offset = 0
+        while source_offset < remaining:
+            if self._active_index is None:
+                self._acquire(start=self._next_row)
+            assert self._active_index is not None
+            take = min(
+                self.buffer_rows - self._active_rows,
+                remaining - source_offset,
+            )
+            target = slice(self._active_rows, self._active_rows + take)
+            source = slice(source_offset, source_offset + take)
+            for name, value in arrays.items():
+                expected = tuple(int(item) for item in self.destinations[name].shape[1:])
+                if tuple(int(item) for item in value.shape[1:]) != expected:
+                    raise ValueError(
+                        f"Keypoint field {name!r} has trailing shape {value.shape[1:]}, expected {expected}."
+                    )
+                np.copyto(
+                    self.buffers[self._active_index][name][target],
+                    value[source],
+                    casting="unsafe",
+                )
+            self._active_rows += take
+            self._next_row += take
+            source_offset += take
+            if self._active_rows == self.buffer_rows:
+                self._submit()
+        self._raise_error()
+
+    def _flush_worker(self) -> None:
+        failed = False
+        while True:
+            item = self._flush.get()
+            try:
+                if item is self._sentinel:
+                    return
+                index, start, row_count = (int(value) for value in item)
+                if failed:
+                    continue
+                stop = start + row_count
+                started = time.perf_counter()
+                for name, destination in self.destinations.items():
+                    values = np.ascontiguousarray(self.buffers[index][name][:row_count])
+                    self._source_digests[name].update(values.view(np.uint8))
+                    destination[start:stop, ...] = values
+                self._write_seconds += float(time.perf_counter() - started)
+            except BaseException as exc:  # pragma: no cover - caller observes failure
+                self._errors.append(exc)
+                failed = True
+            finally:
+                if item is not self._sentinel:
+                    self._free.put(int(item[0]))
+                self._flush.task_done()
+
+    def finish(self) -> dict[str, object]:
+        self._raise_error()
+        self._submit()
+        self._flush.put(self._sentinel)
+        self._flush.join()
+        self._worker.join()
+        self._raise_error()
+        if self._next_row != self.total_rows:
+            raise RuntimeError(
+                f"Keypoint shard writer received {self._next_row} of {self.total_rows} rows."
+            )
+        validation_started = time.perf_counter()
+        source_hashes = {
+            name: digest.hexdigest() for name, digest in self._source_digests.items()
+        }
+        destination_hashes = {
+            name: _digest_keypoint_array(array, row_step=self.shard_rows)
+            for name, array in self.destinations.items()
+        }
+        validation_seconds = float(time.perf_counter() - validation_started)
+        if source_hashes != destination_hashes:
+            raise RuntimeError(
+                "YOLO keypoint shard digest mismatch: "
+                f"source={source_hashes} destination={destination_hashes}"
+            )
+        buffer_bytes_each = int(
+            sum(array.nbytes for array in self.buffers[0].values())
+        )
+        return {
+            "schema_id": KEYPOINT_SHARD_WRITE_SCHEMA,
+            "status": "complete",
+            "write_mode": "double_buffered_direct",
+            "row_count": int(self.total_rows),
+            "buffer_count": int(self.buffer_count),
+            "buffer_rows": int(self.buffer_rows),
+            "buffer_bytes_each": buffer_bytes_each,
+            "total_buffer_bytes": int(buffer_bytes_each * self.buffer_count),
+            "write_seconds": float(self._write_seconds),
+            "validation_seconds": validation_seconds,
+            "source_sha256_by_array": source_hashes,
+            "destination_sha256_by_array": destination_hashes,
+            "exact_match": True,
+        }
 
 
 def _prepare_refined_roi_overrides(
@@ -757,6 +983,8 @@ def detect_keypoints_yolo(
     profile_timings: bool = False,
     progress_jsonl: Optional[Path] = None,
     progress_every_batches: int = 1,
+    keypoint_roi_shard_rows: Optional[int] = None,
+    keypoint_frame_shard_rows: int = DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
     registry: Optional[Path] = None,
     console: Optional[Console] = None,
     cli_provenance: Optional[Mapping[str, Any]] = None,
@@ -879,6 +1107,7 @@ def detect_keypoints_yolo(
         total_rois,
         chunk_hint=batch_size * 4,
         n_keypoints=n_keypoints,
+        shard_rows=keypoint_roi_shard_rows,
     )
 
     lineage_result = copy_row_lineage_arrays(
@@ -886,9 +1115,17 @@ def detect_keypoints_yolo(
         crop_group,
         total_rois=total_rois,
         use_geometry_preload_profile=True,
+        shard_rows=keypoint_roi_shard_rows,
+        count_shard_rows=(
+            keypoint_frame_shard_rows if keypoint_roi_shard_rows is not None else None
+        ),
     )
     if "source_crop_row_ids" not in lineage_result.copied:
-        write_direct_source_crop_row_ids(run_group, total_rois=total_rois)
+        write_direct_source_crop_row_ids(
+            run_group,
+            total_rois=total_rois,
+            shard_rows=keypoint_roi_shard_rows,
+        )
     if "detection_indices" not in lineage_result.copied:
         console.print("[yellow]Crop run missing 'detection_indices'; YOLO keypoint run will omit them.[/yellow]")
 
@@ -916,6 +1153,10 @@ def detect_keypoints_yolo(
         data=frame_counts_total,
         chunks=count_chunks,
         overwrite=True,
+        **_shard_kwargs(
+            count_chunks or (max(1, len(frame_counts_total)),),
+            keypoint_frame_shard_rows if keypoint_roi_shard_rows is not None else None,
+        ),
     )
     if "frame_counts" not in lineage_result.copied:
         run_group.create_array(
@@ -923,6 +1164,10 @@ def detect_keypoints_yolo(
             data=frame_counts_total,
             chunks=count_chunks,
             overwrite=True,
+            **_shard_kwargs(
+                count_chunks or (max(1, len(frame_counts_total)),),
+                keypoint_frame_shard_rows if keypoint_roi_shard_rows is not None else None,
+            ),
         )
 
     crop_detection_source = crop_group.get("detection_source")
@@ -938,11 +1183,21 @@ def detect_keypoints_yolo(
         dtype="i1",
         fill_value=0,
         overwrite=True,
+        **_shard_kwargs(scalar_chunk, keypoint_roi_shard_rows),
     )
 
     success_total = 0
     confidence_accum: List[float] = []
     timing_profiler = InferenceTimingProfiler(enabled=profile_timings)
+    shard_writer = (
+        _AlignedKeypointShardWriter(
+            {**arrays, "detection_source": detection_source_dst},
+            shard_rows=int(keypoint_roi_shard_rows),
+            buffer_count=2,
+        )
+        if keypoint_roi_shard_rows is not None
+        else None
+    )
     progress_jsonl_path = Path(progress_jsonl).expanduser() if progress_jsonl is not None else None
     progress_interval = max(1, int(progress_every_batches))
 
@@ -1081,28 +1336,38 @@ def detect_keypoints_yolo(
                     confidence_accum.append(det_conf)
 
             with timing_profiler.time("output_write", items=batch_count):
-                arrays["keypoints_roi"][start:end] = batch_keypoints_roi
-                arrays["keypoints_img"][start:end] = batch_keypoints_img
-                arrays["keypoints_norm"][start:end] = batch_keypoints_norm
-                arrays["heading"][start:end] = batch_heading
-                arrays["confidence"][start:end] = batch_conf
-                arrays["keypoint_confidences"][start:end] = batch_keypoint_conf
-                arrays["detection_success"][start:end] = batch_success
-                arrays["pose_bbox_xyxy_roi"][start:end] = batch_pose_bbox_roi
-                arrays["effective_threshold"][start:end] = np.nan
-                arrays["effective_se2_radius"][start:end] = np.nan
-
                 if crop_detection_source is not None:
                     source_chunk = crop_detection_source[start:end].astype("i1", copy=False)
                 else:
                     source_chunk = np.zeros(end - start, dtype="i1")
-                detection_source_dst[start:end] = source_chunk
                 heading_finite_chunk = np.isfinite(batch_heading)
-                arrays["heading_finite"][start:end] = heading_finite_chunk
-                arrays["heading_usable"][start:end] = np.logical_and(
+                heading_usable_chunk = np.logical_and(
                     np.logical_and(batch_success, source_chunk == 0),
                     heading_finite_chunk,
                 )
+                batch_outputs = {
+                    "keypoints_roi": batch_keypoints_roi,
+                    "keypoints_img": batch_keypoints_img,
+                    "keypoints_norm": batch_keypoints_norm,
+                    "heading": batch_heading,
+                    "confidence": batch_conf,
+                    "keypoint_confidences": batch_keypoint_conf,
+                    "detection_success": batch_success,
+                    "pose_bbox_xyxy_roi": batch_pose_bbox_roi,
+                    "effective_threshold": np.full(batch_count, np.nan, dtype=np.float64),
+                    "effective_se2_radius": np.full(batch_count, np.nan, dtype=np.float64),
+                    "heading_finite": heading_finite_chunk,
+                    "heading_usable": heading_usable_chunk,
+                    "detection_source": source_chunk,
+                }
+                if shard_writer is not None:
+                    shard_writer.write(start, batch_outputs)
+                else:
+                    for name, values in batch_outputs.items():
+                        destination = (
+                            detection_source_dst if name == "detection_source" else arrays[name]
+                        )
+                        destination[start:end, ...] = values
 
             progress.update(task, advance=end - start)
             if batch_index % progress_interval == 0 or end >= total_rois:
@@ -1132,6 +1397,7 @@ def detect_keypoints_yolo(
                     input_mode_effective=effective_input_mode,
                 )
 
+    shard_write_summary = shard_writer.finish() if shard_writer is not None else None
     total_time = time.time() - start_time
     inference_rate = success_total / total_time if total_time > 0 else 0.0
     resolved_model_device = _current_model_device(model, fallback=model_device)
@@ -1151,6 +1417,10 @@ def detect_keypoints_yolo(
         data=success_counts,
         chunks=success_chunks,
         overwrite=True,
+        **_shard_kwargs(
+            success_chunks or (max(1, len(success_counts)),),
+            keypoint_frame_shard_rows if keypoint_roi_shard_rows is not None else None,
+        ),
     )
 
     git_info = get_git_info()
@@ -1213,6 +1483,16 @@ def detect_keypoints_yolo(
         "source_detect_run": source_detect_run or "unknown",
         "keypoints_processed": total_rois,
         "success_rate": round(success_rate, 2),
+        "keypoint_storage_layout": (
+            "indexed_sharding_v1" if keypoint_roi_shard_rows is not None else "regular_chunks_v1"
+        ),
+        "keypoint_roi_shard_rows": (
+            int(keypoint_roi_shard_rows) if keypoint_roi_shard_rows is not None else None
+        ),
+        "keypoint_frame_shard_rows": (
+            int(keypoint_frame_shard_rows) if keypoint_roi_shard_rows is not None else None
+        ),
+        "keypoint_shard_write": shard_write_summary,
         "parameters": {
             "confidence_threshold": conf,
             "iou_threshold": iou,
@@ -1241,6 +1521,17 @@ def detect_keypoints_yolo(
             "model_input_transform": model_input_transform.to_attrs(),
             # Maintained for API compatibility with pipeline/batch configs.
             "mask_threshold": float(mask_threshold),
+            "keypoint_roi_shard_rows": (
+                int(keypoint_roi_shard_rows) if keypoint_roi_shard_rows is not None else None
+            ),
+            "keypoint_frame_shard_rows": (
+                int(keypoint_frame_shard_rows) if keypoint_roi_shard_rows is not None else None
+            ),
+            "keypoint_storage_layout": (
+                "indexed_sharding_v1"
+                if keypoint_roi_shard_rows is not None
+                else "regular_chunks_v1"
+            ),
         },
         "model_names": getattr(model.model, "names", None),
         "summary_statistics": {
@@ -1305,6 +1596,10 @@ def detect_keypoints_yolo(
                 "roi_live_acceleration": roi_live_acceleration,
                 "model_input_transform_mode": model_input_transform_mode,
                 "input_mode": input_mode,
+                "keypoint_roi_shard_rows": keypoint_roi_shard_rows,
+                "keypoint_frame_shard_rows": (
+                    keypoint_frame_shard_rows if keypoint_roi_shard_rows is not None else None
+                ),
             },
             input_run_ids={
                 "crop": latest_crop,
@@ -1378,6 +1673,12 @@ def detect_keypoints_yolo(
             "skeleton_id": str(pose_schema_attrs["skeleton_id"]),
             "kpt_shape": list(pose_schema_attrs["kpt_shape"]),
             "model_kpt_shape": list(model_kpt_shape) if model_kpt_shape is not None else None,
+            "keypoint_storage_layout": (
+                "indexed_sharding_v1"
+                if keypoint_roi_shard_rows is not None
+                else "regular_chunks_v1"
+            ),
+            "keypoint_shard_write": shard_write_summary,
         },
     )
     write_stage_provenance(run_group, provenance_record)
@@ -1528,6 +1829,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size for inference")
+    parser.add_argument(
+        "--keypoint-roi-shard-rows",
+        type=int,
+        default=None,
+        help=(
+            "Opt-in aligned outer shard rows for immutable ROI-domain keypoint arrays "
+            f"(canary candidate: {DEFAULT_KEYPOINT_ROI_SHARD_ROWS})."
+        ),
+    )
+    parser.add_argument(
+        "--keypoint-frame-shard-rows",
+        type=int,
+        default=DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
+        help=(
+            "Aligned outer shard rows for frame-domain arrays when ROI sharding is enabled "
+            f"(default: {DEFAULT_KEYPOINT_FRAME_SHARD_ROWS})."
+        ),
+    )
     parser.add_argument("--imgsz", type=int, default=None, help="Image size for YOLO inference")
     parser.add_argument("--device", default=None, help="Torch device string (e.g. '0' or 'cuda:0')")
     parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold")
@@ -1638,6 +1957,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         profile_timings=args.profile_timings,
         progress_jsonl=args.progress_jsonl,
         progress_every_batches=args.progress_every_batches,
+        keypoint_roi_shard_rows=args.keypoint_roi_shard_rows,
+        keypoint_frame_shard_rows=args.keypoint_frame_shard_rows,
         registry=args.registry,
     )
 

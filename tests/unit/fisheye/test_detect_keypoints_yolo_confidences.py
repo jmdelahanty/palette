@@ -149,6 +149,24 @@ def test_create_output_arrays_includes_keypoint_confidences(tmp_path) -> None:
     assert arrays["pose_bbox_xyxy_roi"].dtype.name == "float32"
 
 
+def test_create_output_arrays_can_use_aligned_indexed_shards(tmp_path) -> None:
+    root = zarr.open_group(store=str(tmp_path / "sharded.zarr"), mode="w")
+    run = root.create_group("keypoints_runs").create_group("keypoints_001")
+
+    arrays = _create_output_arrays(
+        run,
+        total_rois=10,
+        chunk_hint=4,
+        n_keypoints=5,
+        shard_rows=8,
+    )
+
+    assert arrays["keypoints_roi"].chunks == (4, 5, 2)
+    assert arrays["keypoints_roi"].shards == (8, 5, 2)
+    assert arrays["confidence"].chunks == (4,)
+    assert arrays["confidence"].shards == (8,)
+
+
 def test_detect_keypoints_yolo_sizes_n_keypoints_to_run_frame_counts(monkeypatch, tmp_path) -> None:
     zarr_path = tmp_path / "training.zarr"
     root = zarr.open_group(store=str(zarr_path), mode="w")
@@ -329,6 +347,8 @@ def test_detect_keypoints_yolo_can_write_collection_shard_without_canonical_poin
             batch_size=8,
             imgsz=8,
             input_mode="numpy-list",
+            keypoint_roi_shard_rows=8,
+            keypoint_frame_shard_rows=8,
             registry=None,
         )
 
@@ -348,6 +368,10 @@ def test_detect_keypoints_yolo_can_write_collection_shard_without_canonical_poin
     assert run.attrs["stage_selector_eligible"] is False
     assert run.attrs["source_crop_run"] == "crop_001"
     assert np.asarray(run["keypoints_roi"]).shape == (3, 10, 2)
+    assert run["keypoints_roi"].shards == (9, 10, 2)
+    assert run.attrs["keypoint_storage_layout"] == "indexed_sharding_v1"
+    assert run.attrs["keypoint_shard_write"]["exact_match"] is True
+    assert run.attrs["keypoint_shard_write"]["buffer_count"] == 2
 
 
 def test_detect_keypoints_yolo_frame_count_writer_matches_legacy_arrays(monkeypatch, tmp_path) -> None:

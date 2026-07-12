@@ -37,6 +37,8 @@ def test_detect_keypoints_yolo_accepts_mask_threshold() -> None:
     assert "input_mode" in params
     assert "model_input_transform_mode" in params
     assert "profile_timings" in params
+    assert "keypoint_roi_shard_rows" in params
+    assert "keypoint_frame_shard_rows" in params
 
 
 def test_resolve_full_image_shape_prefers_raw_video_shape() -> None:
