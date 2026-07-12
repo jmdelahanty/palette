@@ -26,6 +26,7 @@ def _():
     from apps.marimo.components.group_analytics import (
         available_group_panels,
         chaser_selection_options,
+        cra_quadrant_occupancy_figure,
         epoch_selection_options,
         egocentric_polar_figure,
         egocentric_probability_color_max,
@@ -78,6 +79,7 @@ def _():
         build_context,
         build_health_report,
         chaser_selection_options,
+        cra_quadrant_occupancy_figure,
         discover_export_catalog,
         epoch_selection_options,
         egocentric_polar_figure,
@@ -922,6 +924,7 @@ def _(
 
 @app.cell
 def _(
+    cra_quadrant_occupancy_figure,
     egocentric_polar_figure,
     egocentric_probability_color_max,
     grouped_bar_figure,
@@ -1128,22 +1131,9 @@ def _(
         )
         _summary_data = payloads.get("cra_summary", {})
         _quadrants = payloads.get("cra_quadrants", {})
-        _quadrant_figure = grouped_bar_figure(
-            _quadrants.get("quadrant_rows", []),
-            title="CRA occupancy by arena quadrant",
-            x_key="phase_label",
-            y_key="mean",
-            series_key="quadrant_label",
-            yaxis_title="Mean occupancy fraction",
-        )
-        _quadrant_density_figure = line_figure(
-            _quadrants.get("density_rows", []),
-            title="Chaser vs non-chaser quadrant occupancy",
-            x_key="x",
-            y_key="density",
-            series_keys=("phase_label", "series_role"),
-            xaxis_title="Occupancy fraction",
-            yaxis_title="Density",
+        _quadrant_figure = cra_quadrant_occupancy_figure(
+            _quadrants,
+            title="Descriptive gross quadrant relocation",
         )
         panel_output = mo.vstack(
             [
@@ -1151,7 +1141,6 @@ def _(
                 _figure_or_message(_figure),
                 mo.md("### Quadrant occupancy"),
                 _figure_or_message(_quadrant_figure),
-                _figure_or_message(_quadrant_density_figure),
                 mo.accordion(
                     {
                         "Endpoint summaries": _rows_table(_summary_data.get("metrics", [])),

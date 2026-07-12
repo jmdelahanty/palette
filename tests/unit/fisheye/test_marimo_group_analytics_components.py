@@ -3,6 +3,7 @@ from __future__ import annotations
 from apps.marimo.components.group_analytics import (
     available_group_panels,
     chaser_selection_options,
+    cra_quadrant_occupancy_figure,
     epoch_selection_options,
     egocentric_heatmap_figure,
     egocentric_polar_figure,
@@ -337,6 +338,81 @@ def test_position_occupancy_heatmap_preserves_source_image_orientation() -> None
     assert figure.data[0].zmax == 0.7
     assert figure.layout.yaxis.autorange == "reversed"
     assert figure.layout.yaxis.scaleanchor == "x"
+
+
+def test_cra_quadrant_figure_restores_recording_strips_means_and_densities() -> None:
+    phases = [
+        {"phase_axis_index": 0, "phase_label": "pre_static"},
+        {"phase_axis_index": 1, "phase_label": "post_static"},
+    ]
+    rows = []
+    quadrant_rows = []
+    density_rows = []
+    for phase in phases:
+        phase_label = phase["phase_label"]
+        for order, quadrant in enumerate(
+            ("top_left", "top_right", "bottom_left", "bottom_right")
+        ):
+            rows.append(
+                {
+                    "recording_id": "recording_1",
+                    "phase_label": phase_label,
+                    "quadrant_id": quadrant,
+                    "display_order": order,
+                    "occupancy_fraction": 0.4 if order == 0 else 0.2,
+                    "is_chaser_quadrant": order == 0,
+                }
+            )
+            quadrant_rows.append(
+                {
+                    "phase_label": phase_label,
+                    "quadrant_id": quadrant,
+                    "quadrant_label": quadrant.replace("_", " ").title(),
+                    "display_order": order,
+                    "mean": 0.4 if order == 0 else 0.2,
+                    "sem": 0.02,
+                    "recording_count": 1,
+                    "chaser_recording_count": 1 if order == 0 else 0,
+                }
+            )
+        for series_role in ("chaser", "non_chaser"):
+            density_rows.extend(
+                {
+                    "phase_label": phase_label,
+                    "series_role": series_role,
+                    "x": x,
+                    "density": 1.0 - abs(x - 0.5),
+                }
+                for x in (0.0, 0.5, 1.0)
+            )
+
+    figure = cra_quadrant_occupancy_figure(
+        {
+            "available": True,
+            "chance": 0.25,
+            "phases": phases,
+            "rows": rows,
+            "quadrant_rows": quadrant_rows,
+            "density_rows": density_rows,
+            "statistics": {"n": 1, "p_value": 1.0, "median_difference": 0.0},
+        }
+    )
+
+    assert figure is not None
+    assert figure.layout.title.text.startswith("Descriptive gross quadrant relocation")
+    assert [trace.name for trace in figure.data[:5]] == [
+        "non-chaser quadrants",
+        "chaser quadrant",
+        "mean ± SEM",
+        "non-chaser density",
+        "chaser density",
+    ]
+    assert figure.data[0].marker.color == "#334155"
+    assert figure.data[1].marker.color == "#b54848"
+    assert figure.data[2].error_x.visible is True
+    assert figure.data[3].fill == "tozeroy"
+    assert len(figure.layout.shapes) == 4
+    assert all(shape.x0 == 0.25 and shape.x1 == 0.25 for shape in figure.layout.shapes)
 
 
 def _native_egocentric_histogram_rows() -> list[dict[str, object]]:

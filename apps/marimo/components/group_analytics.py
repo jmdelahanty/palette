@@ -5,9 +5,11 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
+import zlib
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 
 @dataclass(frozen=True)
@@ -589,6 +591,210 @@ def position_occupancy_heatmap_figure(
     return fig
 
 
+def cra_quadrant_occupancy_figure(
+    data: Mapping[str, Any],
+    *,
+    title: str = "Descriptive gross quadrant relocation",
+) -> go.Figure | None:
+    """Recreate the CRA chaser-vs-other-quadrants strip and density display."""
+
+    rows = [dict(row) for row in data.get("rows", [])]
+    phases = sorted(
+        [dict(row) for row in data.get("phases", [])],
+        key=lambda row: int(row.get("phase_axis_index") or 0),
+    )
+    if not rows or not phases:
+        return None
+    quadrant_rows = [dict(row) for row in data.get("quadrant_rows", [])]
+    density_rows = [dict(row) for row in data.get("density_rows", [])]
+    subplot_titles = []
+    row_heights = []
+    for phase in phases:
+        subplot_titles.extend([str(phase.get("phase_label") or "phase"), ""])
+        row_heights.extend([0.68, 0.32])
+    fig = make_subplots(
+        rows=2 * len(phases),
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.045,
+        row_heights=row_heights,
+        subplot_titles=subplot_titles,
+    )
+
+    for phase_index, phase in enumerate(phases):
+        phase_label = str(phase.get("phase_label") or "")
+        strip_row = phase_index * 2 + 1
+        density_row = strip_row + 1
+        phase_rows = [row for row in rows if str(row.get("phase_label") or "") == phase_label]
+        phase_quadrants = sorted(
+            [
+                row
+                for row in quadrant_rows
+                if str(row.get("phase_label") or "") == phase_label
+            ],
+            key=lambda row: (
+                int(row.get("display_order") or 0),
+                str(row.get("quadrant_id") or ""),
+            ),
+        )
+        display_order_by_id = {
+            str(row.get("quadrant_id") or ""): int(row.get("display_order") or 0)
+            for row in phase_quadrants
+        }
+        tickvals = [int(row.get("display_order") or 0) for row in phase_quadrants]
+        ticktext = [
+            str(row.get("quadrant_label") or row.get("quadrant_id") or "quadrant")
+            for row in phase_quadrants
+        ]
+
+        for is_chaser, name, color, opacity, size in (
+            (False, "non-chaser quadrants", "#334155", 0.42, 7),
+            (True, "chaser quadrant", "#b54848", 0.88, 9),
+        ):
+            selected = [
+                row for row in phase_rows if bool(row.get("is_chaser_quadrant")) is is_chaser
+            ]
+            x_values = []
+            y_values = []
+            customdata = []
+            for row in selected:
+                value = pd.to_numeric(row.get("occupancy_fraction"), errors="coerce")
+                quadrant_id = str(row.get("quadrant_id") or "")
+                if pd.isna(value) or quadrant_id not in display_order_by_id:
+                    continue
+                recording_id = str(row.get("recording_id") or "")
+                jitter_key = f"{recording_id}|{phase_label}|{quadrant_id}".encode()
+                jitter = ((zlib.crc32(jitter_key) % 1000) / 999.0 - 0.5) * 0.36
+                x_values.append(float(value))
+                y_values.append(float(display_order_by_id[quadrant_id]) + jitter)
+                customdata.append([recording_id, quadrant_id])
+            fig.add_trace(
+                go.Scatter(
+                    x=x_values,
+                    y=y_values,
+                    mode="markers",
+                    name=name,
+                    legendgroup=name,
+                    showlegend=phase_index == 0,
+                    marker=dict(color=color, opacity=opacity, size=size),
+                    customdata=customdata,
+                    hovertemplate=(
+                        "recording=%{customdata[0]}<br>"
+                        "quadrant=%{customdata[1]}<br>"
+                        "occupancy=%{x:.4f}<extra>%{fullData.name}</extra>"
+                    ),
+                ),
+                row=strip_row,
+                col=1,
+            )
+
+        means = [
+            float(row["mean"])
+            for row in phase_quadrants
+            if row.get("mean") is not None
+        ]
+        mean_rows = [row for row in phase_quadrants if row.get("mean") is not None]
+        fig.add_trace(
+            go.Scatter(
+                x=means,
+                y=[float(row.get("display_order") or 0) - 0.28 for row in mean_rows],
+                mode="markers",
+                name="mean ± SEM",
+                legendgroup="mean",
+                showlegend=phase_index == 0,
+                marker=dict(
+                    symbol="diamond",
+                    size=9,
+                    color=[
+                        "#b54848"
+                        if int(row.get("chaser_recording_count") or 0) > 0
+                        else "#182026"
+                        for row in mean_rows
+                    ],
+                    line=dict(color="white", width=1),
+                ),
+                error_x=dict(
+                    type="data",
+                    array=[float(row.get("sem") or 0.0) for row in mean_rows],
+                    visible=True,
+                    thickness=1.6,
+                ),
+                customdata=[
+                    [row.get("quadrant_label"), row.get("recording_count")]
+                    for row in mean_rows
+                ],
+                hovertemplate=(
+                    "quadrant=%{customdata[0]}<br>mean=%{x:.4f}<br>"
+                    "recordings=%{customdata[1]}<extra></extra>"
+                ),
+            ),
+            row=strip_row,
+            col=1,
+        )
+        fig.update_yaxes(
+            tickmode="array",
+            tickvals=tickvals,
+            ticktext=ticktext,
+            range=[max(tickvals, default=3) + 0.55, -0.55],
+            row=strip_row,
+            col=1,
+        )
+
+        for series_role, name, color, opacity in (
+            ("non_chaser", "non-chaser density", "#334155", 0.16),
+            ("chaser", "chaser density", "#b54848", 0.24),
+        ):
+            selected_density = sorted(
+                [
+                    row
+                    for row in density_rows
+                    if str(row.get("phase_label") or "") == phase_label
+                    and str(row.get("series_role") or "") == series_role
+                ],
+                key=lambda row: float(row.get("x") or 0.0),
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=[row.get("x") for row in selected_density],
+                    y=[row.get("density") for row in selected_density],
+                    mode="lines",
+                    fill="tozeroy",
+                    fillcolor=color,
+                    opacity=opacity,
+                    line=dict(color=color, width=2.3 if series_role == "chaser" else 1.8),
+                    name=name,
+                    legendgroup=name,
+                    showlegend=phase_index == 0,
+                    hovertemplate="occupancy=%{x:.3f}<br>density=%{y:.3f}<extra>%{fullData.name}</extra>",
+                ),
+                row=density_row,
+                col=1,
+            )
+        fig.update_yaxes(title_text="KDE", rangemode="tozero", row=density_row, col=1)
+        fig.add_vline(x=float(data.get("chance") or 0.25), line_dash="dash", line_color="#637080", row=strip_row, col=1)
+        fig.add_vline(x=float(data.get("chance") or 0.25), line_dash="dash", line_color="#637080", row=density_row, col=1)
+
+    statistics = data.get("statistics") or {}
+    subtitle = (
+        f"chaser-only paired pre/post: n={statistics.get('n', 0)}, "
+        f"p={statistics.get('p_value')}, median Δ={statistics.get('median_difference')}"
+    )
+    fig.update_xaxes(range=[0.0, 1.0])
+    fig.update_xaxes(
+        title_text="Time spent in quadrant (normalized occupancy)",
+        row=2 * len(phases),
+        col=1,
+    )
+    fig.update_layout(
+        title=f"{title}<br><sup>{subtitle}</sup>",
+        height=max(640, 430 * len(phases)),
+        margin=dict(l=115, r=35, t=90, b=65),
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0.0),
+        hovermode="closest",
+    )
+    return fig
+
+
 def egocentric_polar_figure(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -699,6 +905,7 @@ __all__ = [
     "available_group_panels",
     "capability_inventory_rows",
     "chaser_selection_options",
+    "cra_quadrant_occupancy_figure",
     "epoch_selection_options",
     "egocentric_heatmap_figure",
     "egocentric_polar_figure",
