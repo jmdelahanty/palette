@@ -309,6 +309,98 @@ versions satisfied its capability. An unavailable panel reports the missing
 table, column, grain, or compatible version instead of producing a blank plot
 or inferring unavailable data.
 
+## Read-only exploratory computation
+
+The published application may compute transparent display derivatives from an
+exported grain without writing them back to the export. This follows Palette's
+existing analysis pattern: builders read exact persisted sources and compute
+in memory, while persistence is a separate explicit writer with a new identity
+and provenance.
+
+Safe notebook computations include:
+
+- filtering and sorting exported event rows;
+- exact empirical cumulative distributions from finite event values;
+- user-selected display histograms and quantiles;
+- descriptive summaries with an explicit experimental unit;
+- per-recording small multiples;
+- recording-weighted distribution curves;
+- paired within-recording differences derived from the same exported metric.
+
+The UI distinguishes these from persisted analysis-owned products. An exact
+ECDF from event rows, a dynamically rebinned display histogram, and a CDF
+formed from persisted histogram counts are different result contracts. The
+last is a binned CDF rather than an exact ECDF.
+
+Recording-weighted summaries are the cohort default. Bout-pooled views remain
+available as explicitly labeled descriptive views because recordings with more
+bouts receive more weight. Every result displays the source export and table
+contract, filters, grain, finite/missing counts, contributing recording count,
+event count, and weighting policy.
+
+The app must not reconstruct a finer grain than the export contains. Current
+bout-event rows support distributions of stored bout measurements but do not
+support re-segmentation, within-bout traces, tail motion, eye traces, or
+trajectory reconstruction. Source-Zarr paths in export lineage are descriptive
+provenance and are not followed by the Parquet viewer.
+
+### Runtime boundary
+
+The broad-user service runs with `marimo run`, not `marimo edit`. Users can
+manipulate widgets, tables, filters, and plot parameters, but cannot edit or
+execute arbitrary notebook code. It exposes no writer functions, source path
+text boxes, shell, arbitrary SQL, or server-side output destination.
+
+Defense in depth additionally requires:
+
+- export roots and optional registries mounted read-only by the container;
+- Zarr opened in read mode and SQLite opened with read-only/query-only flags;
+- writable temporary and cache locations outside the export root;
+- symlink-aware root confinement for every manifest and Parquet part;
+- no report/save action in the first published application;
+- deployment tests that compare source hashes or mtimes before and after
+  representative interactions.
+
+Browser-side downloads do not mutate the server export. If an exploratory
+result later becomes a durable scientific product, a separate workflow creates
+a new derived export with its own run ID, source export ID and manifest hash,
+query/parameters, code identity, and provenance. It is never written into the
+selected immutable export.
+
+An optional future analyst workspace may use `marimo edit`, but only with the
+source export mounted read-only at the operating-system/container boundary and
+a separate writable scratch directory. Editable code and a writable source
+mount must never be combined.
+
+### Query scaling
+
+The existing eager full-table loader is acceptable for the current RedScare
+bout table, but it is not the long-term raw-data query contract. Event and
+sample panels use projected columns, predicate pushdown, pagination or row
+caps, and bounded in-memory caching through PyArrow Dataset or an equivalent
+lazy engine. Frame, contour, and tail-sample exports must not be materialized
+as process-wide lists of Python dictionaries.
+
+## Stabilization before sample-grain expansion
+
+The immediate application milestone is to stabilize viewing what Palette
+already exports. This happens before adding dense sample-grain tables:
+
+1. freeze canonical version-2 table names, vocabulary, grains, keys, units,
+   and required columns;
+2. remove protocol-name prefixes and runtime legacy vocabulary translation;
+3. re-export GoodCopBadCop and RedScare as new immutable version-2 exports;
+4. validate event, summary, histogram, chaser, CRA, egocentric, statistics,
+   and provenance panels against those exports;
+5. provide raw bout-row tables, exact ECDFs where event rows exist, persisted
+   binned distributions, and explicit unavailable-capability explanations;
+6. complete the read-only application and container acceptance tests.
+
+Within-bout speed, trajectories, eye traces, convergence, and tail motion are
+the next export capability, not a prerequisite for stabilizing the first
+viewer. Their planned contracts are defined in
+`behavior_event_analysis_design_decision.md`.
+
 ## Scientific presentation defaults
 
 - Recording-weighted summaries are the default when recordings are the
@@ -370,7 +462,7 @@ V1 includes:
 - optional read-only registry/catalog;
 - reactive single-export selection;
 - overview, health, recordings, tables, and provenance;
-- capability-driven core and existing GoodCopBadCop panels;
+- capability-driven core and existing chaser-analysis panels;
 - correctly linked persisted statistics;
 - existing report inventory;
 - explicit unsupported and failure states;
@@ -386,6 +478,10 @@ V1 defers:
 - user-authored SQL;
 - notebook editing or source-code display.
 
+The first stable version-2 viewer also defers new dense aligned-sample exports.
+It must display those capabilities as not exported rather than following source
+Zarr lineage or approximating them from event summaries.
+
 ## Implementation sequence before deployment
 
 1. Add read-only export discovery for a selected root, with and without a
@@ -398,8 +494,8 @@ V1 defers:
    required columns, schema versions, and data grain.
 6. Extract existing plot construction from the notebook into reusable
    components or normalized renderer inputs.
-7. Mount the already-implemented GoodCopBadCop query surface through the
-   provider catalog.
+7. Migrate the already-implemented chaser query surface from its historical
+   GoodCopBadCop names and mount it through the provider catalog.
 8. Add core behavior panels that work without a stimulus-specific table set.
 9. Validate mixed exports, aggregation labels, and empty/error states with
    fixtures.
@@ -411,8 +507,8 @@ V1 defers:
 The notebook is ready to containerize when:
 
 - two or more exports can be selected without restarting the process;
-- a generic/core export and a GoodCopBadCop export route to different valid
-  panel sets;
+- a generic/core export and a chaser export such as GoodCopBadCop or RedScare
+  route to different valid panel sets;
 - all resolved files remain beneath the selected root;
 - health and provenance failures are understandable in the UI;
 - aggregation units are visible;

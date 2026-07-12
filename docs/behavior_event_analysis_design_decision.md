@@ -3,6 +3,7 @@
 <!-- decision-meta
 status: accepted-design
 created: 2026-07-10
+last_updated: 2026-07-12
 owner: jeremy
 scope: behavioral experimental units, stimulus-event alignment, trajectory
   analysis, dense Zarr traces, Parquet analytics exports, and visualization
@@ -30,8 +31,9 @@ separating three questions:
 Dense frame-aligned traces remain authoritative in recording Zarr analysis
 runs. Cross-recording Parquet exports contain recording-, step-, fish-, bout-,
 event-, endpoint-, and selected histogram-bin-level rows. Optional trace-level
-Parquet exports may be added for recurring cohort analyses, but exporting every
-dense trace is not the default.
+Parquet exports are a planned follow-up for recurring cohort analyses after the
+summary/event viewer stabilizes, but exporting every dense trace is not the
+default.
 
 Zarr-backed and Parquet-backed visualizers are complementary source adapters,
 not automatically separate plot implementations. They share a renderer only
@@ -415,11 +417,110 @@ and post-event occupancy.
 
 ### Optional aligned-sample Parquet
 
-`behavior_event_aligned_samples` is introduced only for a demonstrated
-cross-recording trace query. Its long-form grain is one event and relative-time
-sample. It includes recording, track, event, alignment, coordinate, validity,
-and source-run identity. Partitioning and decimation policies must be explicit
-because this table can be orders of magnitude larger than endpoint tables.
+Interactive cross-recording inspection of within-bout speed, reconstructed
+trajectories, framewise eye angles and convergence, and tail motion is now a
+demonstrated future requirement. It follows stabilization of the version-2
+summary/event viewer rather than entering its first migration.
+
+`behavior_event_aligned_samples` has long-form grain:
+
+```text
+recording x track x event x relative-time sample
+```
+
+It contains, when available:
+
+- recording, track, event, bout, and stimulus-step identity;
+- source frame, source timestamp, sample index, and `relative_time_s`;
+- alignment kind and anchor identity;
+- observed, interpolated, and validity state;
+- calibrated position (`x`, `y`, and later `z`), velocity components, speed,
+  heading, angular change, and cumulative distance;
+- declared coordinate frame, units, origin, handedness, and transform identity;
+- selected framewise eye-angle representations and convergence;
+- applicable chaser/stimulus state, chaser identity and behavior class,
+  position, distance, and egocentric bearing;
+- exact source run IDs, paths, schema versions, and lineage hashes.
+
+Absolute-time bout windows are primary. Optional phase-normalized samples may
+be exported as a distinct alignment contract, but they do not replace absolute
+duration or physical timing.
+
+Tail motion has an additional spatial dimension and therefore uses a separate
+table or tensor adapter rather than repeating a large spline payload in every
+aligned-sample row:
+
+```text
+behavior_event_tail_samples
+  recording x track x event x relative-time sample x normalized-tail-position
+```
+
+The tail contract includes body-frame spline coordinates where needed,
+normalized tail position, signed tangent angle, signed curvature, lateral
+deflection, validity, source geometry identity, polarity, reference length, and
+angle convention. Camera-space points remain diagnostic; cross-fish comparison
+uses the declared normalized body-frame representation.
+
+Partitioning, projection, predicate pushdown, and optional display decimation
+are required because these tables can be orders of magnitude larger than
+endpoint tables. Dense recording Zarr arrays remain authoritative. The Parquet
+tables are immutable, purpose-built cross-recording views with exact source
+lineage.
+
+### General bout facts and stimulus membership
+
+The cross-recording schema should avoid making canonical bout facts belong to
+one stimulus family:
+
+```text
+swim_bout_events
+  one row per canonical bout
+
+inter_bout_interval_events
+  one row per canonical valid interval
+
+stimulus_epoch_bout_membership
+  association between a bout and a contracted epoch/window
+```
+
+`swim_bout_events` supports stimulus-independent core behavior. Chaser and
+other stimulus providers join through the membership table. This avoids
+duplicating bout measurements when a dataset has multiple stimulus families or
+alignment schemes. Persisted stimulus-family histograms remain valid
+analysis-owned products with their own bin and weighting contracts.
+
+An exact bout ECDF can be computed transiently from `swim_bout_events`. An
+exact inter-bout-interval ECDF requires `inter_bout_interval_events`; it must
+not be reconstructed from neighboring bout rows because canonical validity and
+epoch-boundary rules may differ. Cumulative counts from persisted histograms
+produce a binned CDF and are labeled accordingly.
+
+### Completeness for chaser behavior exports
+
+The existing chaser summary, event, histogram, CRA, near-field, egocentric,
+spatial, and statistics tables, combined with the following sample-grain
+surfaces, form a nearly complete portable behavioral-response dataset:
+
+- within-bout speed and movement traces;
+- calibrated trajectory position and velocity sufficient for reconstruction;
+- framewise eye-angle variants and convergence;
+- body-frame tail motion over the bout.
+
+These four surfaces are necessary but not sufficient by themselves. Reliable
+reconstruction also requires the time/alignment axis, validity and observation
+state, track and bout identity, coordinate and calibration contract, stimulus
+anchors, and synchronized chaser state. Without those support fields, arrays
+may be drawable but are not safely comparable across recordings.
+
+Optional contour or mask-boundary samples add morphology and overlay review but
+are not required for the core kinematic time series. Z position can be added
+when it becomes available under the same coordinate and validity contract.
+
+This package supports broad replotting, cross-recording exploration, event
+alignment, and alternative descriptive summaries. It still does not authorize
+the notebook to redefine segmentation, stimulus alignment, tracking identity,
+eye-angle conventions, tail normalization, or other canonical analyses. Such
+changes produce a new versioned analysis and immutable export.
 
 ## Visualization Policy
 

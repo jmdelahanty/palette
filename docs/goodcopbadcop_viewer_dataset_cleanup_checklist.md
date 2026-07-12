@@ -1,13 +1,44 @@
 # GoodCopBadCop Viewer Dataset Cleanup Checklist
 <!-- design-meta
-status: draft
-last_updated: 2026-06-22
+status: historical-implementation-record
+last_updated: 2026-07-12
 -->
 
 Purpose: document the cleanup pass needed after the first GoodCopBadCop
 Marimo and group-viewer prototypes. The main correction is that viewers should
 render persisted analysis outputs. They should not define scientific metrics
 by recomputing them from lower-level arrays at display time.
+
+## Superseding V2 direction
+
+This checklist records the implementation path that produced the current
+version-1 exports. Its protocol-prefixed table names, compatibility fallbacks,
+and legacy vocabulary are not the target contract for the published group
+analytics application.
+
+The version-2 transition is intentionally breaking:
+
+- table names describe an analysis family or data grain, not a protocol;
+- chaser tables use a `chaser_*` family across GoodCopBadCop, RedScare, and
+  other chaser experiments;
+- general bout facts use protocol-neutral tables such as
+  `swim_bout_events` and `inter_bout_interval_events`;
+- stimulus or chaser epoch membership is represented separately from the
+  general bout fact when practical;
+- canonical behavior vocabulary is `aggressive`, `inert`, and `static` where
+  those classes apply;
+- `benign` values and `*_benign` columns are not accepted by the version-2
+  capability/query path;
+- the published viewer does not translate version-1 tables or vocabulary at
+  runtime;
+- version-1 exports remain immutable provenance artifacts but are reported as
+  requiring re-export rather than rendered through compatibility aliases.
+
+Palette will update the exporter and statistics references, create new
+immutable RedScare and GoodCopBadCop exports, compare row counts and scientific
+results with the historical exports, and then point the capability-driven
+viewer at version 2. Historical names below describe what was implemented at
+the time and should not be copied into new contracts.
 
 ## Decision
 
