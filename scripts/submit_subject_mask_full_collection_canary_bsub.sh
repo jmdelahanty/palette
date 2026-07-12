@@ -389,6 +389,8 @@ from pathlib import Path
 import numpy as np
 import zarr
 
+from fisheye.diagnostics.array_prefix_validation import compare_zero_padded_uint8_row_prefix
+
 
 def arrays(group, prefix=""):
     result = {}
@@ -458,6 +460,7 @@ def compare_reference_prefix(reference, candidate, row_count):
     mismatches = []
     compared = []
     skipped = []
+    zero_padded_byte_comparisons = {}
     for path, left in sorted(reference.items()):
         if path in excluded or "source_row_fingerprint" in path or "source_row_stale" in path:
             skipped.append(path)
@@ -474,6 +477,17 @@ def compare_reference_prefix(reference, candidate, row_count):
                 mismatches.append(f"{path}: point-buffer shape incompatible")
                 continue
             same = equal(np.asarray(left[:]), np.asarray(right[: int(left.shape[0])]))
+        elif path.endswith("/reason_bytes"):
+            comparison = compare_zero_padded_uint8_row_prefix(
+                left,
+                right,
+                row_count=row_count,
+                row_step=row_step(left),
+            )
+            zero_padded_byte_comparisons[path] = comparison.to_json()
+            same = bool(comparison.equal)
+            if not same:
+                mismatches.append(f"{path}: {comparison.reason}")
         elif left.ndim > 0 and int(left.shape[0]) == row_count:
             if tuple(left.shape[1:]) != tuple(right.shape[1:]) or int(right.shape[0]) < row_count:
                 mismatches.append(f"{path}: row-prefix shape incompatible")
@@ -494,7 +508,7 @@ def compare_reference_prefix(reference, candidate, row_count):
         compared.append(path)
         if not same and not any(item.startswith(f"{path}:") for item in mismatches):
             mismatches.append(f"{path}: clip-prefix values differ")
-    return mismatches, compared, skipped
+    return mismatches, compared, skipped, zero_padded_byte_comparisons
 
 
 staged_zarr = Path(sys.argv[1])
@@ -520,7 +534,7 @@ published_arrays = arrays(published_run)
 reference_arrays = arrays(reference_group)
 
 publication_mismatches, compared_chunks = compare_arrays(source_arrays, published_arrays)
-prefix_mismatches, prefix_compared, prefix_skipped = compare_reference_prefix(
+prefix_mismatches, prefix_compared, prefix_skipped, prefix_zero_padded_byte_comparisons = compare_reference_prefix(
     reference_arrays,
     published_arrays,
     reference_rows,
@@ -538,7 +552,7 @@ checks = {
     "reference_prefix_exact": not prefix_mismatches,
 }
 payload = {
-    "schema_id": "palette.subject_mask_full_collection_canary_validation.v1",
+    "schema_id": "palette.subject_mask_full_collection_canary_validation.v2",
     "run_name": run_name,
     "expected_rows": expected_rows,
     "expected_shards": expected_shards,
@@ -551,6 +565,8 @@ payload = {
     "reference_compared_array_count": len(prefix_compared),
     "reference_compared_arrays": prefix_compared,
     "reference_skipped_arrays": prefix_skipped,
+    "reference_zero_padded_byte_comparisons": prefix_zero_padded_byte_comparisons,
+    "reason_bytes_comparison_contract": "semantic_zero_padded_uint8_v1",
     "reference_mismatch_count": len(prefix_mismatches),
     "reference_mismatches": prefix_mismatches,
     "collection_worker_index_plan": plan,
