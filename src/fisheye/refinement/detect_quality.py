@@ -834,7 +834,7 @@ def analyze_detect_quality(
     Returns:
         Complete quality analysis report
     """
-    root = zarr.open(zarr_path, mode="r")
+    root = open_zarr_group_direct(zarr_path, mode="r")
     detect_family_path = _normalize_group_path(detect_family_path)
     sampled, sampled_meta = _read_sampled_import_meta(root)
     expected_count = _resolve_expected_subject_count(root, expected_subject_count)

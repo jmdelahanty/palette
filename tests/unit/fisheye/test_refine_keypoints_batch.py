@@ -88,6 +88,34 @@ def test_build_plans_accepts_direct_zarr_directory_path(tmp_path: Path) -> None:
     assert plans[0].keypoint_run == "keypoints_001"
 
 
+def test_build_plans_reads_latest_keypoint_run_when_consolidated_metadata_is_stale(
+    tmp_path: Path,
+) -> None:
+    analysis = _make_archive(
+        tmp_path,
+        "rec_a",
+        "rec_a_analysis.zarr",
+        zarr_purpose="analysis",
+    )
+    zarr.consolidate_metadata(str(analysis))
+    live_root = zarr.open_group(str(analysis), mode="a", use_consolidated=False)
+    keypoints = live_root["keypoints_runs"]
+    keypoints.create_group("keypoints_002")
+    keypoints.attrs["latest"] = "keypoints_002"
+
+    plans = _build_plans(
+        [analysis],
+        recursive=False,
+        keypoint_run=None,
+        skip_existing=False,
+        zarr_use_filter="analysis",
+    )
+
+    assert len(plans) == 1
+    assert plans[0].status == "ok"
+    assert plans[0].keypoint_run == "keypoints_002"
+
+
 def test_build_plans_any_filter_includes_all_uses(tmp_path: Path) -> None:
     analysis = _make_archive(
         tmp_path,

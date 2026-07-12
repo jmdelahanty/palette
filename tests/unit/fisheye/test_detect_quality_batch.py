@@ -92,6 +92,34 @@ def test_build_plans_accepts_direct_zarr_directory(tmp_path: Path) -> None:
     assert plans[0].detect_run == "detect_2026_01"
 
 
+def test_build_plans_reads_latest_detect_run_when_consolidated_metadata_is_stale(
+    tmp_path: Path,
+) -> None:
+    recordings = tmp_path / "recordings"
+    zarr_path = _make_zarr(
+        recordings,
+        "rec_stale",
+        detect_run="detect_2026_01",
+        with_quality=False,
+    )
+    zarr.consolidate_metadata(str(zarr_path))
+    live_root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    detect_parent = live_root["detect_runs"]
+    detect_parent.create_group("detect_2026_02")
+    detect_parent.attrs["latest"] = "detect_2026_02"
+
+    plans = _build_plans(
+        [zarr_path],
+        recursive=False,
+        detect_run=None,
+        skip_existing=False,
+    )
+
+    assert len(plans) == 1
+    assert plans[0].status == "ok"
+    assert plans[0].detect_run == "detect_2026_02"
+
+
 def test_build_plans_detect_run_not_found(tmp_path: Path) -> None:
     recordings = tmp_path / "recordings"
     _make_zarr(recordings, "rec_a", detect_run="detect_2026_01", with_quality=False)

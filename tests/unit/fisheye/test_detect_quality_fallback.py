@@ -61,6 +61,29 @@ def test_analyze_detect_quality_handles_raw_video_without_images_ds(tmp_path: Pa
     assert report["bbox_validation"]["total_bboxes"] == 3
 
 
+def test_analyze_detect_quality_reads_run_when_consolidated_metadata_is_stale(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "analysis_stale.zarr"
+    _write_frame_count_precedence_archive(zarr_path)
+    zarr.consolidate_metadata(str(zarr_path))
+
+    live_root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    detect = live_root["detect_runs"].create_group("detect_fresh")
+    detect.create_array("frame_indices", data=np.array([0], dtype=np.int32))
+    detect.create_array(
+        "bbox_norm_coords",
+        data=np.array([[0.5, 0.5, 0.1, 0.1]], dtype=np.float64),
+    )
+    detect.create_array("frame_counts", data=np.array([1], dtype=np.int32))
+    live_root["detect_runs"].attrs["latest"] = "detect_fresh"
+
+    report = analyze_detect_quality(str(zarr_path), run_name="detect_fresh")
+
+    assert report["source_run"] == "detect_fresh"
+    assert report["bbox_validation"]["total_bboxes"] == 1
+
+
 def test_detect_quality_frame_domains_matches_legacy_report_and_saved_content(
     monkeypatch,
     tmp_path: Path,

@@ -104,6 +104,34 @@ def test_build_plans_accepts_direct_zarr_directory(tmp_path: Path) -> None:
     assert plans[0].detect_run == "detect_001"
 
 
+def test_build_plans_reads_latest_detect_run_when_consolidated_metadata_is_stale(
+    tmp_path: Path,
+) -> None:
+    analysis = _make_archive(
+        tmp_path,
+        "rec_a",
+        "rec_a_analysis.zarr",
+        zarr_purpose="analysis",
+    )
+    zarr.consolidate_metadata(str(analysis))
+    live_root = zarr.open_group(str(analysis), mode="a", use_consolidated=False)
+    detect = live_root["detect_runs"]
+    detect.create_group("detect_002")
+    detect.attrs["latest"] = "detect_002"
+
+    plans = _build_plans(
+        [analysis],
+        recursive=False,
+        detect_run=None,
+        skip_existing=False,
+        zarr_use_filter="analysis",
+    )
+
+    assert len(plans) == 1
+    assert plans[0].status == "ok"
+    assert plans[0].detect_run == "detect_002"
+
+
 def test_build_plans_filter_uses_name_suffix_when_attr_missing(tmp_path: Path) -> None:
     inferred_analysis = _make_archive(
         tmp_path,

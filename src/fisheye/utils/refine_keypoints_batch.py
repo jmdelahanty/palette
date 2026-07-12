@@ -154,7 +154,7 @@ def _build_plans(
     for zarr_path in _iter_zarr(roots, recursive):
         if not zarr_path.exists():
             continue
-        root = zarr.open_group(str(zarr_path), mode="r")
+        root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
         if zarr_use_filter != "any":
             observed_use = _infer_zarr_use(root, zarr_path)
             if observed_use != zarr_use_filter:

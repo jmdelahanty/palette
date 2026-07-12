@@ -125,7 +125,7 @@ def _build_plans(
         if not zarr_path.exists():
             continue
         try:
-            root = zarr.open_group(str(zarr_path), mode="r")
+            root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
         except Exception as exc:
             plans.append(
                 DetectQualityPlan(
