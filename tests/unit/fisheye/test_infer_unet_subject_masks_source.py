@@ -15,6 +15,18 @@ from fisheye.segmentation import infer_unet_subject_masks as mod
 from fisheye.shared.run_provenance import RUN_PROVENANCE_ATTR
 
 
+def test_parser_defaults_to_probability_shards_and_accepts_regular_override() -> None:
+    parser = mod._build_arg_parser()
+
+    default_args = parser.parse_args(["recording.zarr", "model.pt"])
+    regular_args = parser.parse_args(
+        ["recording.zarr", "model.pt", "--no-mask-probs-sharding"]
+    )
+
+    assert default_args.mask_probs_shard_rois == mod.DEFAULT_MASK_PROBS_SHARD_ROIS
+    assert regular_args.mask_probs_shard_rois is None
+
+
 class _FakeArray:
     def __init__(
         self,
@@ -792,6 +804,8 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
     assert run_group.attrs["run_semantics"] == "unet_subject_mask_inference"
     assert run_group.attrs["mask_probs_shard_rois"] == 4
     assert run_group.attrs["mask_probs_storage_layout"] == "indexed_sharding_v1"
+    assert run_group.attrs["mask_probs_storage_policy"] == "default_indexed_sharding_v1"
+    assert run_group.attrs["mask_probs_default_shard_rois"] == 2048
     assert run_group.attrs["profile_timings_enabled"] is True
     provenance_inputs = run_group.attrs["provenance"]["inputs"]
     assert provenance_inputs["source_crop_signature"] == "sig-001"
@@ -801,6 +815,10 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
     assert provenance_inputs["assignment_keypoint_group"] == "refined_keypoints_runs"
     assert provenance_inputs["assignment_keypoints_run"] == "refined_kp_001"
     assert run_group.attrs["provenance"]["parameters"]["mask_probs_shard_rois"] == 4
+    assert (
+        run_group.attrs["provenance"]["parameters"]["mask_probs_storage_policy"]
+        == "default_indexed_sharding_v1"
+    )
     assert run_group["mask_probs_roi"].shape == (2, 3, 4, 4)
     assert "masks_roi" not in run_group
 

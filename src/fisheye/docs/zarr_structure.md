@@ -1003,15 +1003,17 @@ and dense `masks_roi` as an optional thresholded compatibility cache. The
 shared compact-mask reader/writer design is documented in
 `docs/mask_rle_storage_design_and_benchmark_plan.md`.
 
-New U-Net runs may store `mask_probs_roi` as Zarr v3 indexed shards while
-retaining independently readable inner chunks. The opt-in writer uses
-`--mask-probs-shard-rois`; two channel-major host buffers accumulate inference
-batches while one background writer publishes each complete outer shard once.
-The writer hashes source values before buffer reuse, rereads and exact-validates
-the completed destination, and only then completes the run. Readers continue
-to address `mask_probs_roi` normally and must not depend on its physical
-layout. Dense editable/refined `masks_roi` is not covered by this raw-
-probability storage option.
+New U-Net runs store `mask_probs_roi` as Zarr v3 indexed shards by default,
+using `32`-row independently readable inner chunks and `2,048`-row physical
+shards. Two channel-major host buffers accumulate inference batches while one
+background writer publishes each complete outer shard once. The writer hashes
+source values before buffer reuse, rereads and exact-validates the completed
+destination, and only then completes the run. `--mask-probs-shard-rois` may
+select another valid outer size; `--no-mask-probs-sharding` is the explicit
+ordinary-chunk compatibility override. Readers continue to address
+`mask_probs_roi` normally and must not depend on its physical layout. Dense
+editable/refined `masks_roi` is not covered by this raw-probability storage
+policy.
 
 `metrics/` subgroup:
 
@@ -1037,6 +1039,8 @@ Important attrs:
 - `mask_probs_chunk_rois`
 - `mask_probs_shard_rois` *(present for indexed-sharded probability runs)*
 - `mask_probs_storage_layout` (`regular_chunks_v1` or `indexed_sharding_v1`)
+- `mask_probs_storage_policy` (`default_indexed_sharding_v1` or `explicit_regular_chunks_override`)
+- `mask_probs_default_shard_rois` (currently `2048`)
 - `mask_probs_shard_write` *(double-buffer, exact digest, write, and validation summary for new indexed-sharded runs)*
 - `mask_probs_postpack` *(legacy post-pack summary for indexed-sharded runs written before the direct writer)*
 - `summary_statistics`

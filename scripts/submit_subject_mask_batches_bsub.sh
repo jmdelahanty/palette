@@ -30,7 +30,7 @@ CROP_RUN=""
 NO_ASSIGNMENT_KEYPOINTS=0
 MASK_PROBS_DTYPE="uint8"
 MASK_PROBS_CHUNK_ROIS=32
-MASK_PROBS_SHARD_ROIS=""
+MASK_PROBS_SHARD_ROIS=2048
 OUTPUT_QUEUE_SIZE=2
 PROFILE_TIMINGS=0
 MODEL_COVERAGE_CLASS="dense_all_components"
@@ -133,8 +133,8 @@ Options:
   --no-assignment-keypoints Do not attach assignment keypoints to inference-only raw masks
   --mask-probs-dtype DTYPE  uint8|float16 (default: uint8)
   --mask-probs-chunk-rois N Chunk length for mask_probs_roi (default: 32)
-  --mask-probs-shard-rois N Post-inference outer shard rows for mask_probs_roi
-                            (candidate: 2048; default: disabled)
+  --mask-probs-shard-rois N Outer shard rows for mask_probs_roi (default: 2048)
+  --no-mask-probs-sharding Use ordinary probability chunks instead of indexed shards
   --output-queue-size N     Async output queue size (default: 2)
   --profile-timings         Persist per-stage subject-mask inference timing diagnostics
   --model-coverage-class X  Registry model coverage_class (default: dense_all_components)
@@ -236,6 +236,7 @@ while [[ $# -gt 0 ]]; do
     --mask-probs-dtype) MASK_PROBS_DTYPE="$2"; shift 2;;
     --mask-probs-chunk-rois) MASK_PROBS_CHUNK_ROIS="$2"; shift 2;;
     --mask-probs-shard-rois) MASK_PROBS_SHARD_ROIS="$2"; shift 2;;
+    --no-mask-probs-sharding) MASK_PROBS_SHARD_ROIS=""; shift;;
     --output-queue-size) OUTPUT_QUEUE_SIZE="$2"; shift 2;;
     --profile-timings) PROFILE_TIMINGS=1; shift;;
     --model-coverage-class) MODEL_COVERAGE_CLASS="$2"; shift 2;;
@@ -577,7 +578,11 @@ SUBJECT_ARGS=(
   --roi-live-gpu-chunk-frames "$ROI_LIVE_GPU_CHUNK_FRAMES"
   --progress-dir "$RUN_DIR/progress"
 )
-if [[ -n "$MASK_PROBS_SHARD_ROIS" ]]; then SUBJECT_ARGS+=(--mask-probs-shard-rois "$MASK_PROBS_SHARD_ROIS"); fi
+if [[ -n "$MASK_PROBS_SHARD_ROIS" ]]; then
+  SUBJECT_ARGS+=(--mask-probs-shard-rois "$MASK_PROBS_SHARD_ROIS")
+else
+  SUBJECT_ARGS+=(--no-mask-probs-sharding)
+fi
 if [[ -n "$CROP_RUN" ]]; then SUBJECT_ARGS+=(--crop-run "$CROP_RUN"); fi
 if [[ "$NO_ASSIGNMENT_KEYPOINTS" == "1" ]]; then SUBJECT_ARGS+=(--no-assignment-keypoints); fi
 if [[ -n "$FINALIZE_DENSE_MASK_ROW_CHUNK" ]]; then SUBJECT_ARGS+=(--finalize-dense-mask-row-chunk "$FINALIZE_DENSE_MASK_ROW_CHUNK"); fi

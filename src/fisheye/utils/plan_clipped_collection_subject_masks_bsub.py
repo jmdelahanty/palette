@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from fisheye.shared.run_provenance import json_ready
+from fisheye.shared.subject_mask_chunks import DEFAULT_MASK_PROBS_SHARD_ROIS
 from fisheye.utils.plan_clipped_collection_keypoints_bsub import (
     DEFAULT_GROUPS_REPO,
     DEFAULT_REGISTRY,
@@ -243,7 +244,7 @@ def build_plan(
     clip_finalizer_package_dir: Path | None = None,
     import_array_copy_workers: int = 1,
     write_sampled_component_contours: bool = True,
-    mask_probs_shard_rois: int | None = None,
+    mask_probs_shard_rois: int | None = DEFAULT_MASK_PROBS_SHARD_ROIS,
 ) -> SubjectMaskWorkflowPlan:
     zarr_path = zarr_path.expanduser().resolve()
     cache_dir_root = cache_dir_root.expanduser().resolve()
@@ -382,6 +383,8 @@ def build_plan(
                 subject_mask_command.extend(
                     ["--mask-probs-shard-rois", str(int(mask_probs_shard_rois))]
                 )
+            else:
+                subject_mask_command.append("--no-mask-probs-sharding")
             if source_collection_path is not None:
                 subject_mask_command.extend(["--source-collection-path", source_collection_path])
             if source_clip_index is not None:
@@ -1084,11 +1087,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-include-non-success", action="store_true")
     parser.add_argument("--mask-probs-dtype", default="uint8")
     parser.add_argument("--mask-probs-chunk-rois", type=int, default=32)
-    parser.add_argument(
+    probability_storage = parser.add_mutually_exclusive_group()
+    probability_storage.add_argument(
         "--mask-probs-shard-rois",
         type=int,
-        default=None,
-        help="Optional post-inference outer shard rows for mask_probs_roi (candidate: 2048).",
+        default=DEFAULT_MASK_PROBS_SHARD_ROIS,
+        help="Outer shard rows for mask_probs_roi (default: 2048).",
+    )
+    probability_storage.add_argument(
+        "--no-mask-probs-sharding",
+        dest="mask_probs_shard_rois",
+        action="store_const",
+        const=None,
+        help="Use ordinary probability chunks instead of the default indexed-sharded layout.",
     )
     parser.add_argument("--output-queue-size", type=int, default=2)
     parser.add_argument("--profile-timings", action="store_true")

@@ -36,7 +36,11 @@ from ..shared.row_lineage import copy_row_lineage_arrays, write_direct_source_cr
 from ..shared.run_provenance import append_input_artifacts, build_run_provenance_from_stage_record
 from ..shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
-from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
+from ..shared.subject_mask_chunks import (
+    DEFAULT_MASK_PROBS_SHARD_ROIS,
+    subject_mask_metric_row_chunk,
+    subject_mask_storage_chunks,
+)
 from ..shared.subject_mask_component_provenance import write_subject_mask_component_provenance
 from ..shared.zarr_run_completion import (
     mark_run_complete,
@@ -1303,15 +1307,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=32,
         help="ROI chunk length override for mask_probs_roi and masks_roi outputs (default: 32).",
     )
-    parser.add_argument(
+    probability_storage = parser.add_mutually_exclusive_group()
+    probability_storage.add_argument(
         "--mask-probs-shard-rois",
         type=int,
-        default=None,
+        default=DEFAULT_MASK_PROBS_SHARD_ROIS,
         help=(
-            "Optional outer storage-shard row count for mask_probs_roi. Two host-memory buffers "
+            "Outer storage-shard row count for mask_probs_roi (default: 2048). Two host-memory buffers "
             "accumulate inference batches and write each complete indexed shard once; the final "
-            "destination is exact-validated before run completion (production candidate: 2048)."
+            "destination is exact-validated before run completion."
         ),
+    )
+    probability_storage.add_argument(
+        "--no-mask-probs-sharding",
+        dest="mask_probs_shard_rois",
+        action="store_const",
+        const=None,
+        help="Use ordinary mask_probs_roi chunks instead of the default indexed-sharded layout.",
     )
     parser.add_argument(
         "--mask-probs-dtype",
@@ -1594,8 +1606,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if args.mask_probs_shard_rois is not None:
         run_group.attrs["mask_probs_shard_rois"] = int(args.mask_probs_shard_rois)
         run_group.attrs["mask_probs_storage_layout"] = "indexed_sharding_v1"
+        run_group.attrs["mask_probs_storage_policy"] = "default_indexed_sharding_v1"
     else:
         run_group.attrs["mask_probs_storage_layout"] = "regular_chunks_v1"
+        run_group.attrs["mask_probs_storage_policy"] = "explicit_regular_chunks_override"
+    run_group.attrs["mask_probs_default_shard_rois"] = int(DEFAULT_MASK_PROBS_SHARD_ROIS)
     if model_resolution_payload is not None:
         selected = model_resolution_payload.get("selected", {})
         if not isinstance(selected, dict):
@@ -1730,6 +1745,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 int(args.mask_probs_shard_rois) if args.mask_probs_shard_rois is not None else None
             ),
             "mask_probs_storage_layout": run_group.attrs["mask_probs_storage_layout"],
+            "mask_probs_storage_policy": run_group.attrs["mask_probs_storage_policy"],
+            "mask_probs_default_shard_rois": int(DEFAULT_MASK_PROBS_SHARD_ROIS),
             "mask_probs_dtype": str(args.mask_probs_dtype),
             "write_masks_roi": bool(args.write_masks_roi),
             "async_output": bool(args.async_output),
@@ -1759,6 +1776,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "label_schema_id": label_schema_id,
             "masks_roi_materialized": bool(args.write_masks_roi),
             "mask_probs_storage_layout": run_group.attrs["mask_probs_storage_layout"],
+            "mask_probs_storage_policy": run_group.attrs["mask_probs_storage_policy"],
             "mask_probs_shard_write": run_group.attrs.get("mask_probs_shard_write"),
             "mask_probs_postpack": run_group.attrs.get("mask_probs_postpack"),
             "model_resolution": model_resolution_payload,

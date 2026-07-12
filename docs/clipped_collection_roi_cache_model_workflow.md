@@ -574,8 +574,10 @@ What works today:
   optional flat ROI cache manifests.
 - Raw U-Net output is probability-first: `subject_mask_runs/<run>/mask_probs_roi`
   is canonical, and dense binary `masks_roi` is optional compatibility output.
-- Raw probabilities can opt into `2,048`-row Zarr indexed shards with
-  `--mask-probs-shard-rois 2048`. Two channel-major host buffers accumulate
+- Raw probabilities use `2,048`-row Zarr indexed shards by default.
+  `--mask-probs-shard-rois` selects another valid outer row count and
+  `--no-mask-probs-sharding` provides an explicit ordinary-chunk override. Two
+  channel-major host buffers accumulate
   ordinary inference batches while one background writer writes each complete
   physical shard once. Source values are hashed before buffer reuse and the
   completed destination is reread and exact-validated before run completion.
@@ -611,8 +613,10 @@ What this slice fixed:
   `submit_subject_mask_batches_bsub.sh` now expose shard output mode for raw
   inference. Selecting `subject_mask_shard_runs` is inference-only and disables
   the dependent refined-finalization submission in the bsub wrapper.
-- The batch runner, clipped-collection planner, and bsub wrapper also propagate
-  the independent `--mask-probs-shard-rois` physical-storage option. This is
+- The direct writer, batch runner, clipped-collection planner, and bsub wrapper
+  default the independent probability physical-storage policy to `2,048`-row
+  shards and propagate `--no-mask-probs-sharding` explicitly when requested.
+  This is
   orthogonal to the logical `subject_mask_shard_runs` parent: it controls how
   each raw run's canonical probability array is stored, not which rows belong
   to that run.
@@ -677,9 +681,10 @@ Implementation checklist for subject-mask clipped collections:
 - [x] Expose shard-mode raw inference through
   `run_subject_mask_batch_pipeline.py` and
   `submit_subject_mask_batches_bsub.sh`.
-- [x] Add opt-in post-inference indexed sharding for immutable raw
-  `mask_probs_roi`, with double-buffered complete-shard writes and exact
-  decoded-byte validation before completion.
+- [x] Make indexed sharding the default for new immutable raw
+  `mask_probs_roi`, with double-buffered complete-shard writes, exact
+  decoded-byte validation before completion, and an explicit
+  `--no-mask-probs-sharding` compatibility override.
 - [x] Add focused tests proving a subject-mask shard does not change
   `subject_mask_runs.latest`, `subject_mask_runs.latest_complete`, or root
   current-pointer attrs.

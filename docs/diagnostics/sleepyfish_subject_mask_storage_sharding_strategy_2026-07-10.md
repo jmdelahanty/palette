@@ -4,9 +4,9 @@
 **Last updated:** 2026-07-12
 **Status:** diagnostic, implementation, finalizer parity, full-collection
 finalizer, post-pack inference, and double-buffered direct-write canaries
-complete; the `2,048`-row layout remains opt-in pending an explicit default
-rollout decision, and no canonical storage migration has been approved or
-applied
+complete; the `2,048`-row direct-write layout is now the default for new raw
+probability runs, existing runs remain unchanged, and no canonical storage
+migration has been approved or applied
 
 ## Scope
 
@@ -497,9 +497,10 @@ publication metadata/object overhead substantially, although end-to-end copy
 time still requires a production canary. Direct-to-PRFS invocations remain
 supported but perform both the working write and post-pack on PRFS.
 
-The `2,048`-row layout remains opt-in until a complete clipped-inference canary
-passes decoded-value, lineage, completion, object-count, and publication-time
-checks. Existing completed probability runs are not rewritten in place.
+At this stage the `2,048`-row layout remained opt-in until a complete clipped-
+inference canary passed decoded-value, lineage, completion, object-count, and
+publication-time checks. Existing completed probability runs were never
+rewritten in place.
 
 The first full-clip inference canary below passed those integrity and storage
 gates but showed that the separate pack plus two-surface digest added `413.6 s`.
@@ -525,8 +526,8 @@ storage check.
 
 The repeated `54,000`-row canary using the same model, crop proxy, cache,
 cluster queue, staging path, and publication gates as job `153064680` passed.
-The measured result is recorded below. The direct writer remains opt-in until
-the production default is changed explicitly.
+The measured result is recorded below and supported the production-default
+rollout recorded after the canary.
 
 ## Full-Clip Sharded-Inference Canary
 
@@ -662,6 +663,19 @@ lineage, storage-object, and atomic-publication gates. Enabling `2,048`-row
 shards by default for new immutable raw-probability shard runs is now a rollout
 choice, not a correctness blocker. Existing completed runs must remain
 unchanged.
+
+## Default Rollout Decision
+
+On 2026-07-12 the `2,048`-row double-buffered indexed-sharding layout became
+the default for new raw U-Net probability outputs. The direct inference CLI,
+recording batch runner, clipped-collection planner, and LSF batch wrapper all
+resolve to the same default. `--mask-probs-shard-rois` remains available for an
+explicit alternative valid shard size, while `--no-mask-probs-sharding`
+selects ordinary chunks for compatibility or diagnostics.
+
+Runs record the effective layout plus `mask_probs_storage_policy` and
+`mask_probs_default_shard_rois=2048` in attrs and provenance. The default does
+not migrate, rechunk, or otherwise mutate any completed historical run.
 
 ## Initial 8,192-Row Benchmark Set
 
@@ -1310,8 +1324,8 @@ scripts/submit_subject_mask_complete_finalizer_matrix_bsub.sh \
   `883.9 s` to `628.2 s` at `4 GiB` maximum accounted memory, with exact
   source/destination digests and no working array. The remaining `150.5 s`
   full destination validation is the material premium over ordinary chunks.
-  Keep the option explicit until the production-default rollout is approved;
-  no additional correctness canary is required before that decision.
+  The production default is now the `2,048`-row double-buffered layout;
+  ordinary chunks require the explicit `--no-mask-probs-sharding` override.
 - Finalized runs include eye geometry, full ragged component contours, and
   sampled component contours by default. The historical `335 s` layout A/B
   excluded those surfaces and must not be quoted as complete production time.

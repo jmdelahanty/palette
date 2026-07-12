@@ -7,9 +7,11 @@ from types import SimpleNamespace
 import pytest
 import zarr
 
+from fisheye.shared.subject_mask_chunks import DEFAULT_MASK_PROBS_SHARD_ROIS
 from fisheye.utils.plan_clipped_collection_subject_masks_bsub import (
     SubjectMaskWorkflowPlan,
     apply_plan,
+    build_arg_parser,
     build_plan,
 )
 
@@ -55,7 +57,7 @@ def _build_subject_mask_plan(
     components: list[str] | None = None,
     assignment_keypoints_run: str | None = "refined_keypoints_collection",
     finalization_mode: str = "collection_direct",
-    mask_probs_shard_rois: int | None = None,
+    mask_probs_shard_rois: int | None = DEFAULT_MASK_PROBS_SHARD_ROIS,
 ) -> SubjectMaskWorkflowPlan:
     zarr_path = tmp_path / "recording" / "zarr" / "sample_analysis.zarr"
     collection_id = "collection_test"
@@ -131,8 +133,26 @@ def _build_subject_mask_plan(
     )
 
 
+def test_parser_defaults_to_probability_shards_and_accepts_regular_override() -> None:
+    required = [
+        "--zarr",
+        "/recording.zarr",
+        "--collection-id",
+        "collection",
+        "--cache-dir-root",
+        "/cache",
+        "--dry-run",
+    ]
+
+    default_args = build_arg_parser().parse_args(required)
+    regular_args = build_arg_parser().parse_args([*required, "--no-mask-probs-sharding"])
+
+    assert default_args.mask_probs_shard_rois == DEFAULT_MASK_PROBS_SHARD_ROIS
+    assert regular_args.mask_probs_shard_rois is None
+
+
 def test_build_plan_resolves_subject_mask_shard_commands(tmp_path: Path) -> None:
-    plan = _build_subject_mask_plan(tmp_path, mask_probs_shard_rois=2048)
+    plan = _build_subject_mask_plan(tmp_path)
 
     assert [clip.clip_id for clip in plan.clips] == ["clip_000001", "clip_000002"]
     assert [clip.cache_status for clip in plan.clips] == ["found", "found"]
@@ -165,6 +185,15 @@ def test_build_plan_resolves_subject_mask_shard_commands(tmp_path: Path) -> None
     assert "--assignment-keypoints-run" in plan.finalize_command
     assert "refined_keypoints_collection" in plan.finalize_command
     assert "--registry" in plan.finalize_command
+
+
+def test_build_plan_forwards_regular_probability_chunk_override(tmp_path: Path) -> None:
+    plan = _build_subject_mask_plan(tmp_path, mask_probs_shard_rois=None)
+
+    command = plan.clips[0].subject_mask_command
+    assert command is not None
+    assert "--no-mask-probs-sharding" in command
+    assert "--mask-probs-shard-rois" not in command
 
 
 def test_build_plan_can_emit_per_clip_finalizer_package_jobs(tmp_path: Path) -> None:

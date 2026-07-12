@@ -26,6 +26,13 @@ def test_parser_defaults_to_sharded_postcompute_for_batch_workflow() -> None:
     assert args.write_eye_geometry is True
     assert args.write_sampled_component_contours is True
     assert args.write_component_contours is True
+    assert args.mask_probs_shard_rois == mod.DEFAULT_MASK_PROBS_SHARD_ROIS
+
+
+def test_parser_accepts_regular_probability_chunk_override() -> None:
+    args = mod._build_parser().parse_args(["/recordings", "--no-mask-probs-sharding"])
+
+    assert args.mask_probs_shard_rois is None
 
 
 def test_parser_accepts_subject_mask_shard_output_parent() -> None:
@@ -608,6 +615,48 @@ def test_inference_command_passes_cache_manifest_and_model_resolution_flags(tmp_
     assert "--model-include-non-success" in cmd
     assert cmd[cmd.index("--model-top-k") + 1] == "7"
     assert cmd[cmd.index("--mask-probs-shard-rois") + 1] == "2048"
+
+
+def test_inference_command_forwards_regular_probability_chunk_override(tmp_path: Path) -> None:
+    args = SimpleNamespace(
+        registry=tmp_path / "registry.sqlite",
+        model_coverage_class="dense_all_components",
+        model_component_coverage_key="body+eyes+swim_bladder",
+        model_label_schema_id="subject_v1_union",
+        model_top_k=5,
+        model_require_unique=False,
+        model_include_non_success=False,
+        device="0",
+        batch_size=128,
+        mask_probs_dtype="uint8",
+        mask_probs_chunk_rois=32,
+        mask_probs_shard_rois=None,
+        output_queue_size=2,
+        profile_timings=False,
+        roi_cache_policy="never",
+        roi_live_acceleration="auto",
+        roi_live_gpu_chunk_frames=32,
+        roi_cache_dir=None,
+        roi_cache_manifest=None,
+        overwrite=False,
+    )
+    plan = mod.ArchivePlan(
+        zarr_path=str(tmp_path / "recording_analysis.zarr"),
+        subject_run="subject_run",
+        refined_run="refined_run",
+        crop_run="crop_run",
+        assignment_keypoint_group=None,
+        assignment_keypoint_run=None,
+        has_subject_runs=False,
+        has_refined_subject_runs=False,
+        run_inference=True,
+        run_finalization=False,
+    )
+
+    cmd = mod._inference_command(args, plan)
+
+    assert "--no-mask-probs-sharding" in cmd
+    assert "--mask-probs-shard-rois" not in cmd
 
 
 def test_inference_command_omits_missing_assignment_keypoints(tmp_path: Path) -> None:

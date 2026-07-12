@@ -45,6 +45,7 @@ from fisheye.shared.subject_mask_registry_status import (
     emit_refined_subject_mask_stage_completion,
     emit_subject_mask_stage_completion,
 )
+from fisheye.shared.subject_mask_chunks import DEFAULT_MASK_PROBS_SHARD_ROIS
 from fisheye.shared.workflow_profile import WorkflowProfiler
 from fisheye.shared.zarr_helpers import consolidate_metadata_capture_expected_warnings
 from fisheye.shared.zarr_run_completion import (
@@ -539,6 +540,8 @@ def _inference_command(
     mask_probs_shard_rois = getattr(args, "mask_probs_shard_rois", None)
     if mask_probs_shard_rois is not None:
         cmd.extend(["--mask-probs-shard-rois", str(int(mask_probs_shard_rois))])
+    else:
+        cmd.append("--no-mask-probs-sharding")
     if args.model_require_unique:
         cmd.append("--model-require-unique")
     if args.model_include_non_success:
@@ -1372,11 +1375,19 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--roi-live-gpu-chunk-frames", type=int, default=32)
     parser.add_argument("--mask-probs-dtype", choices=("uint8", "float16"), default="uint8")
     parser.add_argument("--mask-probs-chunk-rois", type=int, default=32)
-    parser.add_argument(
+    probability_storage = parser.add_mutually_exclusive_group()
+    probability_storage.add_argument(
         "--mask-probs-shard-rois",
         type=int,
-        default=None,
-        help="Optional post-inference outer shard rows for mask_probs_roi (candidate: 2048).",
+        default=DEFAULT_MASK_PROBS_SHARD_ROIS,
+        help="Outer shard rows for mask_probs_roi (default: 2048).",
+    )
+    probability_storage.add_argument(
+        "--no-mask-probs-sharding",
+        dest="mask_probs_shard_rois",
+        action="store_const",
+        const=None,
+        help="Use ordinary probability chunks instead of the default indexed-sharded layout.",
     )
     parser.add_argument("--output-queue-size", type=int, default=2)
     parser.add_argument(
