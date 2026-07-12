@@ -15,6 +15,7 @@ DECODE_BACKEND=""
 RESIZE_DIMS=()
 DETECT_ROW_SHARD_ROWS=""
 DETECT_FRAME_SHARD_ROWS=""
+NO_DETECT_SHARDING=0
 SCHEDULER="threads"
 NUM_WORKERS=""
 SET_ID=""
@@ -49,9 +50,10 @@ Options:
   --model PATH              Explicit detect model path; bypass registry model resolution
   --decode-backend NAME     Decode backend passed to run_detections_batch
   --resize-dims H W         Canonical inference size passed to run_detections_batch
-  --detect-row-shard-rows N Enable indexed sharding for detection-row arrays
+  --detect-row-shard-rows N Override default detection-row outer shard rows
   --detect-frame-shard-rows N
                             Outer rows for frame-count arrays when sharding is enabled
+  --no-detect-sharding      Use ordinary chunks for YOLO detection outputs
   --scheduler NAME          Legacy pass-through option for batch runner compatibility
   --num-workers N           Legacy pass-through option for batch runner compatibility
   --set-id ID               Optional detect set filter for registry model resolution
@@ -88,6 +90,7 @@ while [[ $# -gt 0 ]]; do
     --resize-dims) RESIZE_DIMS=("$2" "$3"); shift 3;;
     --detect-row-shard-rows) DETECT_ROW_SHARD_ROWS="$2"; shift 2;;
     --detect-frame-shard-rows) DETECT_FRAME_SHARD_ROWS="$2"; shift 2;;
+    --no-detect-sharding) NO_DETECT_SHARDING=1; shift;;
     --scheduler) SCHEDULER="$2"; shift 2;;
     --num-workers) NUM_WORKERS="$2"; shift 2;;
     --set-id) SET_ID="$2"; shift 2;;
@@ -115,8 +118,8 @@ for value in "$DETECT_ROW_SHARD_ROWS" "$DETECT_FRAME_SHARD_ROWS"; do
     exit 2
   fi
 done
-if [[ -n "$DETECT_FRAME_SHARD_ROWS" && -z "$DETECT_ROW_SHARD_ROWS" ]]; then
-  echo "--detect-frame-shard-rows requires --detect-row-shard-rows" >&2
+if [[ "$NO_DETECT_SHARDING" == "1" && ( -n "$DETECT_ROW_SHARD_ROWS" || -n "$DETECT_FRAME_SHARD_ROWS" ) ]]; then
+  echo "--no-detect-sharding cannot be combined with explicit shard row counts" >&2
   exit 2
 fi
 
@@ -262,6 +265,9 @@ fi
 if [[ -n "$DETECT_FRAME_SHARD_ROWS" ]]; then
   EXTRA_ARGS+=(--detect-frame-shard-rows "$DETECT_FRAME_SHARD_ROWS")
 fi
+if [[ "$NO_DETECT_SHARDING" == "1" ]]; then
+  EXTRA_ARGS+=(--no-detect-sharding)
+fi
 if [[ -n "$SCHEDULER" ]]; then
   EXTRA_ARGS+=(--scheduler "$SCHEDULER")
 fi
@@ -335,8 +341,12 @@ if [[ "${#RESIZE_DIMS[@]}" -gt 0 ]]; then
 else
   echo "Resize dims: <runner/config default>"
 fi
-echo "Detect row shard rows: ${DETECT_ROW_SHARD_ROWS:-<regular chunks>}"
-echo "Detect frame shard rows: ${DETECT_FRAME_SHARD_ROWS:-<runner default>}"
+if [[ "$NO_DETECT_SHARDING" == "1" ]]; then
+  echo "Detect storage: regular chunks (explicit override)"
+else
+  echo "Detect row shard rows: ${DETECT_ROW_SHARD_ROWS:-<runner default: 262144>}"
+  echo "Detect frame shard rows: ${DETECT_FRAME_SHARD_ROWS:-<runner default: 262144>}"
+fi
 echo "Analysis zarrs: $analysis_count"
 echo "Batch size: $BATCH_SIZE"
 echo "Batches: $batch_count"

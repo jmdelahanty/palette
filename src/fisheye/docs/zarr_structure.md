@@ -302,10 +302,9 @@ and upstream background information. Standard values:
 
 YOLO detection storage note:
 
-- the serial YOLO detector supports indexed Zarr v3 shards while retaining its
-  existing inner chunk grid; enable the candidate layout with
-  `--detect-row-shard-rows 262144` and
-  `--detect-frame-shard-rows 262144`
+- the serial YOLO detector defaults to indexed Zarr v3 shards while retaining
+  its existing inner chunk grid; the default detection- and frame-domain outer
+  row targets are both `262144`
 - detection inference already materializes the complete result table before
   saving, so the sharded path writes complete outer shards directly and does
   not allocate a second streaming buffer
@@ -314,10 +313,11 @@ YOLO detection storage note:
   `n_detections` share the independent frame-row grid
 - the writer rereads all seven arrays and requires exact decoded SHA-256 parity
   before completion
-- sharded runs record `detect_storage_layout`, `detect_row_shard_rows`,
-  `detect_frame_shard_rows`, and `detect_shard_write` in attrs/provenance
-- the sharded YOLO layout is currently opt-in; blob/traditional detection
-  writers remain unchanged
+- runs record `detect_storage_layout`, `detect_storage_policy`,
+  `detect_row_shard_rows`, `detect_frame_shard_rows`, and
+  `detect_shard_write` in attrs/provenance
+- use `--no-detect-sharding` for an explicit ordinary-chunk compatibility or
+  benchmark run; blob/traditional detection writers remain unchanged
 
 ---
 

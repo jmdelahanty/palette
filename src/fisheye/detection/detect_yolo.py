@@ -797,7 +797,7 @@ def detect_yolo(
     overwrite_raw_video_metadata: bool = False,
     run_name: Optional[str] = None,
     model_sha256: Optional[str] = None,
-    detect_row_shard_rows: Optional[int] = None,
+    detect_row_shard_rows: Optional[int] = DEFAULT_DETECT_ROW_SHARD_ROWS,
     detect_frame_shard_rows: int = DEFAULT_DETECT_FRAME_SHARD_ROWS,
     cli_provenance: Optional[Mapping[str, Any]] = None,
     run_provenance: Optional[Mapping[str, Any]] = None,
@@ -1888,11 +1888,21 @@ def detect_yolo(
             'detect_frame_shard_rows': (
                 int(detect_frame_shard_rows) if detect_row_shard_rows is not None else None
             ),
+            'detect_storage_policy': (
+                'default_indexed_sharding_v1'
+                if detect_row_shard_rows is not None
+                else 'explicit_regular_chunks_override'
+            ),
         },
         'summary_statistics': stats,
         'timing_summary': timing_summary,
         'detect_storage_layout': (
             'indexed_sharding_v1' if detect_row_shard_rows is not None else 'regular_chunks_v1'
+        ),
+        'detect_storage_policy': (
+            'default_indexed_sharding_v1'
+            if detect_row_shard_rows is not None
+            else 'explicit_regular_chunks_override'
         ),
         'detect_row_shard_rows': (
             int(detect_row_shard_rows) if detect_row_shard_rows is not None else None
@@ -1999,6 +2009,11 @@ def detect_yolo(
                 "detect_row_shard_rows": detect_row_shard_rows,
                 "detect_frame_shard_rows": (
                     int(detect_frame_shard_rows) if detect_row_shard_rows is not None else None
+                ),
+                "detect_storage_policy": (
+                    "default_indexed_sharding_v1"
+                    if detect_row_shard_rows is not None
+                    else "explicit_regular_chunks_override"
                 ),
             },
             input_run_ids={},
@@ -2107,14 +2122,22 @@ Examples:
                        help='Max detections per frame (overrides config)')
     parser.add_argument('--batch-size', type=int, default=None, 
                        help='Inference batch size (overrides config)')
-    parser.add_argument(
+    detect_storage_group = parser.add_mutually_exclusive_group()
+    detect_storage_group.add_argument(
         '--detect-row-shard-rows',
         type=int,
-        default=None,
+        default=DEFAULT_DETECT_ROW_SHARD_ROWS,
         help=(
-            'Enable indexed sharding for detection-row arrays with this requested '
-            f'outer row count (candidate: {DEFAULT_DETECT_ROW_SHARD_ROWS}).'
+            'Requested outer rows for indexed-sharded detection arrays '
+            f'(default: {DEFAULT_DETECT_ROW_SHARD_ROWS}).'
         ),
+    )
+    detect_storage_group.add_argument(
+        '--no-detect-sharding',
+        action='store_const',
+        dest='detect_row_shard_rows',
+        const=None,
+        help='Use ordinary chunks for YOLO detection outputs.',
     )
     parser.add_argument(
         '--detect-frame-shard-rows',

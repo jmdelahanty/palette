@@ -45,6 +45,7 @@ cd "$REPO_ROOT"
     --batch-size 16 \
     --resize-dims 640 640 \
     --decode-backend pynvvc_nv12_rgb \
+    --no-detect-sharding \
     --run-name "$REGULAR_RUN"
 
 /usr/bin/time -f $'elapsed_seconds=%e\nmaximum_rss_kib=%M' \

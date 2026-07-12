@@ -841,14 +841,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--iou", type=float, default=None, help="Optional detect IoU threshold override.")
     parser.add_argument("--max-det", type=int, default=None, help="Optional detect max_det override.")
     parser.add_argument("--batch-size", type=int, default=None, help="Optional detect batch size override.")
-    parser.add_argument(
+    detect_storage_group = parser.add_mutually_exclusive_group()
+    detect_storage_group.add_argument(
         "--detect-row-shard-rows",
         type=int,
-        default=None,
+        default=DEFAULT_DETECT_ROW_SHARD_ROWS,
         help=(
-            "Enable indexed sharding for detection arrays with this requested "
-            f"outer row count (candidate: {DEFAULT_DETECT_ROW_SHARD_ROWS})."
+            "Requested outer rows for indexed-sharded detection arrays "
+            f"(default: {DEFAULT_DETECT_ROW_SHARD_ROWS})."
         ),
+    )
+    detect_storage_group.add_argument(
+        "--no-detect-sharding",
+        action="store_const",
+        dest="detect_row_shard_rows",
+        const=None,
+        help="Use ordinary chunks for YOLO detection outputs.",
     )
     parser.add_argument(
         "--detect-frame-shard-rows",

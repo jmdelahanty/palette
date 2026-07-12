@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 import sys
 import types
@@ -8,6 +9,12 @@ import pytest
 
 from fisheye.shared.run_provenance import validate_run_provenance
 from fisheye.utils import run_detect_with_registry_model as mod
+
+
+def test_registry_detect_defaults_to_indexed_sharding() -> None:
+    signature = inspect.signature(mod.run_detect_with_registry_model)
+    assert signature.parameters["detect_row_shard_rows"].default == 262_144
+    assert signature.parameters["detect_frame_shard_rows"].default == 262_144
 
 
 def _patch_detect_yolo(monkeypatch: pytest.MonkeyPatch, func) -> None:

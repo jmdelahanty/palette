@@ -235,14 +235,22 @@ Examples:
     parser.add_argument("--iou", dest="iou_threshold", type=float, help="IoU threshold override")
     parser.add_argument("--max-det", dest="max_det", type=int, help="Max detections per frame override")
     parser.add_argument("--batch-size", type=int, help="Batch size override")
-    parser.add_argument(
+    detect_storage_group = parser.add_mutually_exclusive_group()
+    detect_storage_group.add_argument(
         "--detect-row-shard-rows",
         type=int,
-        default=None,
+        default=DEFAULT_DETECT_ROW_SHARD_ROWS,
         help=(
-            "Enable indexed sharding for detection arrays with this requested "
-            f"outer row count (candidate: {DEFAULT_DETECT_ROW_SHARD_ROWS})."
+            "Requested outer rows for indexed-sharded detection arrays "
+            f"(default: {DEFAULT_DETECT_ROW_SHARD_ROWS})."
         ),
+    )
+    detect_storage_group.add_argument(
+        "--no-detect-sharding",
+        action="store_const",
+        dest="detect_row_shard_rows",
+        const=None,
+        help="Use ordinary chunks for YOLO detection outputs.",
     )
     parser.add_argument(
         "--detect-frame-shard-rows",

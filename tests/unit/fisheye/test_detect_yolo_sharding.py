@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+
 import numpy as np
 import zarr
 
@@ -8,6 +10,21 @@ from fisheye.diagnostics.audit_yolo_detection_sharding import (
     audit_detection_runs,
     replay_detection_run_as_sharded,
 )
+from fisheye.inference import predict_detections
+
+
+def test_yolo_detection_sharding_is_default_with_cli_opt_out() -> None:
+    signature = inspect.signature(mod.detect_yolo)
+    assert signature.parameters["detect_row_shard_rows"].default == 262_144
+    assert signature.parameters["detect_frame_shard_rows"].default == 262_144
+
+    parser = predict_detections._build_parser()  # noqa: SLF001
+    defaults = parser.parse_args(["--video", "sample.mp4"])
+    assert defaults.detect_row_shard_rows == 262_144
+    assert defaults.detect_frame_shard_rows == 262_144
+
+    regular = parser.parse_args(["--video", "sample.mp4", "--no-detect-sharding"])
+    assert regular.detect_row_shard_rows is None
 
 
 def _detection_values() -> dict[str, np.ndarray]:

@@ -391,7 +391,7 @@ def run_detect_with_registry_model(
     resize_dims: Optional[list[int]] = None,
     imgsz: Optional[list[int]] = None,
     decode_backend: Optional[str] = None,
-    detect_row_shard_rows: Optional[int] = None,
+    detect_row_shard_rows: Optional[int] = DEFAULT_DETECT_ROW_SHARD_ROWS,
     detect_frame_shard_rows: int = DEFAULT_DETECT_FRAME_SHARD_ROWS,
     cpu: bool = False,
     write_raw_video_metadata: bool = False,
@@ -659,14 +659,22 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--iou", type=float, default=None, help="Optional IoU threshold override.")
     parser.add_argument("--max-det", type=int, default=None, help="Optional max detections override.")
     parser.add_argument("--batch-size", type=int, default=None, help="Optional batch size override.")
-    parser.add_argument(
+    detect_storage_group = parser.add_mutually_exclusive_group()
+    detect_storage_group.add_argument(
         "--detect-row-shard-rows",
         type=int,
-        default=None,
+        default=DEFAULT_DETECT_ROW_SHARD_ROWS,
         help=(
-            "Enable indexed sharding for detection arrays with this requested "
-            f"outer row count (candidate: {DEFAULT_DETECT_ROW_SHARD_ROWS})."
+            "Requested outer rows for indexed-sharded detection arrays "
+            f"(default: {DEFAULT_DETECT_ROW_SHARD_ROWS})."
         ),
+    )
+    detect_storage_group.add_argument(
+        "--no-detect-sharding",
+        action="store_const",
+        dest="detect_row_shard_rows",
+        const=None,
+        help="Use ordinary chunks for YOLO detection outputs.",
     )
     parser.add_argument(
         "--detect-frame-shard-rows",

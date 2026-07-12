@@ -1,7 +1,7 @@
 # YOLO Detection Sharding Canary
 
 **Date:** 2026-07-12
-**Status:** direct writer and isolated cluster canary passed; layout remains opt-in
+**Status:** direct writer and isolated cluster canary passed; indexed sharding enabled by default
 
 ## Design
 
@@ -11,7 +11,7 @@ finishes. The sharded path therefore does not need a second pair of streaming
 buffers. It creates empty indexed-sharded arrays and writes each complete outer
 shard once from the materialized tables.
 
-The opt-in candidate uses:
+The canary candidate, now the production default, uses:
 
 ```text
 --detect-row-shard-rows 262144
@@ -103,7 +103,7 @@ sharded storage replay was exact for every array.
 ## Decision
 
 The indexed-sharded YOLO detection writer passes correctness, publication,
-object-count, runtime, and memory gates. It is reasonable to make the
-262,144-row layout the default for immutable YOLO detection outputs. The layout
-remains opt-in pending that explicit rollout decision. Blob/traditional writers
-are unchanged.
+object-count, runtime, and memory gates. The 262,144-row layout is now the
+default for immutable serial YOLO detection outputs. Use
+`--no-detect-sharding` only for explicit compatibility tests or regular-chunk
+benchmarks. Blob/traditional writers are unchanged.
