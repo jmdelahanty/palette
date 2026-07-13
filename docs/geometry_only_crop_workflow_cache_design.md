@@ -179,7 +179,7 @@ workflow cache and transfer area, not as canonical analysis storage.
 Current Janelia smoke default:
 
 ```text
-/misc/public/palette_cache/
+/nrs/johnson/palette_staging/flat_roi_cache/
 ```
 
 This path was used as the shared workflow cache root for the 2026-05-16
@@ -322,7 +322,7 @@ Implementation shape:
 scripts/py -m fisheye.utils.build_flat_roi_cache \
   /path/to/recording_analysis.zarr \
   --crop-run crop_<run> \
-  --output-dir /misc/public/palette_cache/<workflow_id>/roi_cache \
+  --output-dir /nrs/johnson/palette_staging/flat_roi_cache/<workflow_id>/roi_cache \
   --batch-size 1024
 ```
 
@@ -335,7 +335,7 @@ scripts/submit_flat_roi_cache_bsub.sh \
   --zarr /path/to/recording_analysis.zarr \
   --crop-run crop_<run> \
   --workflow-id <workflow_id> \
-  --public-cache-root /misc/public/palette_cache
+  --public-cache-root /nrs/johnson/palette_staging/flat_roi_cache
 ```
 
 For the common "create crop geometry, then materialize a flat ROI cache" case,
@@ -346,7 +346,7 @@ scripts/submit_crop_flat_roi_cache_bsub.sh \
   --zarr /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/zarr/<recording>_analysis.zarr \
   --source-type refined \
   --workflow-id smoke_crop_flat_roi_cache_20260516 \
-  --public-cache-root /misc/public/palette_cache \
+  --public-cache-root /nrs/johnson/palette_staging/flat_roi_cache \
   --run-label sickyfish_cam2010093_crop_cache \
   --crop-queue short \
   --cache-queue gpu_l4 \
@@ -368,7 +368,7 @@ For multi-recording LSF batches, use the fan-out wrapper:
 scripts/submit_crop_flat_roi_cache_batches_bsub.sh \
   --file-list /path/to/analysis_zarrs.txt \
   --workflow-id <workflow_id> \
-  --public-cache-root /misc/public/palette_cache \
+  --public-cache-root /nrs/johnson/palette_staging/flat_roi_cache \
   --cache-queue gpu_l4 \
   --cache-gpus 1
 ```
@@ -424,7 +424,7 @@ creation and submit the collection-aware cache builder directly:
 scripts/submit_clipped_collection_flat_roi_cache_bsub.sh \
   --zarr /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/zarr/<recording>_analysis.zarr \
   --collection-id <workflow_id> \
-  --public-cache-root /misc/public/palette_cache \
+  --public-cache-root /nrs/johnson/palette_staging/flat_roi_cache \
   --run-label <recording>_<workflow_id>_roi_cache \
   --queue gpu_l4 \
   --gpus 1 \
@@ -460,7 +460,7 @@ scripts/py -m fisheye.utils.build_flat_roi_cache \
   /path/to/recording_analysis.zarr \
   --decode-backend auto \
   --roi-live-acceleration cpu \
-  --output-dir /misc/public/palette_cache/<workflow_id>/roi_cache
+  --output-dir /nrs/johnson/palette_staging/flat_roi_cache/<workflow_id>/roi_cache
 ```
 
 For geometry-only crop runs backed by an external video, `auto` prefers
@@ -485,8 +485,8 @@ necessarily a failure; check the final status JSON and LSF exit state.
 then publishes payload first and manifest last:
 
 ```text
-/misc/public/palette_cache/<workflow_id>/roi_cache/<label>.flat_roi_cache.bin
-/misc/public/palette_cache/<workflow_id>/roi_cache/<label>.flat_roi_cache.json
+/nrs/johnson/palette_staging/flat_roi_cache/<workflow_id>/roi_cache/<label>.flat_roi_cache.bin
+/nrs/johnson/palette_staging/flat_roi_cache/<workflow_id>/roi_cache/<label>.flat_roi_cache.json
 ```
 
 Downstream pose/segmentation stages should not parse binary payloads directly.
@@ -496,7 +496,7 @@ They pass the manifest to `CropImageSource`:
 scripts/py -m fisheye.detection.detect_keypoints_yolo \
   /path/to/recording_analysis.zarr \
   --model /path/to/best.pt \
-  --roi-cache-manifest /misc/public/palette_cache/<workflow_id>/roi_cache/<cache>.json
+  --roi-cache-manifest /nrs/johnson/palette_staging/flat_roi_cache/<workflow_id>/roi_cache/<cache>.json
 ```
 
 `CropImageSource` is the adapter boundary. It validates the manifest against the
@@ -653,7 +653,7 @@ refined-detect collection directly:
 scripts/py -m fisheye.utils.build_clipped_collection_flat_roi_cache \
   /path/to/recording_analysis.zarr \
   --collection-id <workflow_id> \
-  --output-dir /misc/public/palette_cache/<workflow_id>/roi_cache \
+  --output-dir /nrs/johnson/palette_staging/flat_roi_cache/<workflow_id>/roi_cache \
   --progress-jsonl /path/to/cache.progress.jsonl \
   --progress-stderr
 ```
@@ -747,7 +747,7 @@ Strict parity check:
 ```bash
 scripts/py -m fisheye.diagnostics.check_flat_roi_cache_pixel_parity \
   /path/to/recording_analysis.zarr \
-  --roi-cache-manifest /misc/public/palette_cache/<workflow>/roi_cache/<label>.flat_roi_cache.json \
+  --roi-cache-manifest /nrs/johnson/palette_staging/flat_roi_cache/<workflow>/roi_cache/<label>.flat_roi_cache.json \
   --reference-roi-live-acceleration gpu \
   --sample-count 64 \
   --output-json /path/to/parity_report.json

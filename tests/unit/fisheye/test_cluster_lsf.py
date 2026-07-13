@@ -12,7 +12,9 @@ from fisheye.cluster.lsf import (
     LsfJob,
     LsfResources,
     LsfWorkflow,
+    LsfWorkflowFragment,
     build_bsub_command,
+    compose_lsf_workflow,
     parse_bsub_job_id,
     render_dependency,
     resolve_job_id_placeholders,
@@ -231,6 +233,46 @@ def test_lsf_workflow_validates_and_orders_dependency_graph() -> None:
             jobs=(
                 _job("a", dependency_keys=("b",)),
                 _job("b", dependency_keys=("a",)),
+            ),
+        )
+
+
+def test_lsf_workflow_fragments_validate_declared_inputs_after_composition() -> None:
+    cache = LsfWorkflowFragment(
+        fragment_id="cache",
+        jobs=(_job("cache"),),
+        provides=("roi_cache",),
+    )
+    inference = LsfWorkflowFragment(
+        fragment_id="inference",
+        jobs=(_job("predict", dependency_keys=("cache",)),),
+        requires=("roi_cache",),
+        provides=("predictions",),
+    )
+
+    workflow = compose_lsf_workflow(
+        workflow_id="composed",
+        family="test",
+        fragments=(cache, inference),
+    )
+
+    assert [job.job_key for job in workflow.topological_jobs()] == [
+        "cache",
+        "predict",
+    ]
+    assert workflow.to_json()["metadata"]["fragments"][1]["requires"] == [
+        "roi_cache"
+    ]
+    with pytest.raises(ValueError, match="missing required fragment inputs"):
+        compose_lsf_workflow(
+            workflow_id="missing",
+            family="test",
+            fragments=(
+                LsfWorkflowFragment(
+                    fragment_id="inference",
+                    jobs=(_job("predict"),),
+                    requires=("roi_cache",),
+                ),
             ),
         )
 

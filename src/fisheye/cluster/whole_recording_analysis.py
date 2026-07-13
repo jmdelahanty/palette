@@ -5,19 +5,25 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from fisheye.cluster.keypoints import whole_recording as keypoints
 from fisheye.cluster.keypoints.common import safe_component
+from fisheye.cluster.flat_roi_cache import (
+    build_flat_roi_cache_job,
+    plan_flat_roi_cache_binding,
+)
 from fisheye.cluster.lsf import (
     CommandRunner,
     LsfDependency,
     LsfJob,
     LsfResources,
     LsfWorkflow,
+    LsfWorkflowFragment,
     build_bsub_command,
+    compose_lsf_workflow,
     shell_join,
     submit_lsf_workflow,
     write_json_snapshot,
@@ -26,6 +32,9 @@ from fisheye.cluster.lsf.runtime import (
     RUNTIME_JOB_ID_TOKEN,
     RUNTIME_USER_TOKEN,
     build_runtime_command,
+)
+from fisheye.cluster.whole_recording_analysis_cache_cleanup import (
+    DEFAULT_ALLOWED_ROOT as DEFAULT_ROI_CACHE_CLEANUP_ROOT,
 )
 
 
@@ -50,6 +59,11 @@ class PlannedAnalysisTarget:
     analysis_zarr: Path
     crop_run: str
     roi_cache_manifest: Path
+    roi_cache_manifest_sha256: str | None
+    roi_cache_payload: Path
+    roi_cache_availability: str
+    roi_cache_producer_job_key: str | None
+    roi_cache_contract: Mapping[str, Any]
     keypoint_run: str
     refined_keypoint_run: str
     subject_masks: SubjectMaskRunNames
@@ -57,6 +71,7 @@ class PlannedAnalysisTarget:
     keypoint_refinement_job_key: str
     subject_mask_inference_job_key: str
     subject_mask_finalization_job_key: str
+    target_concurrency_gate_job_key: str | None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -64,6 +79,11 @@ class PlannedAnalysisTarget:
             "analysis_zarr": str(self.analysis_zarr),
             "crop_run": self.crop_run,
             "roi_cache_manifest": str(self.roi_cache_manifest),
+            "roi_cache_manifest_sha256": self.roi_cache_manifest_sha256,
+            "roi_cache_payload": str(self.roi_cache_payload),
+            "roi_cache_availability": self.roi_cache_availability,
+            "roi_cache_producer_job_key": self.roi_cache_producer_job_key,
+            "roi_cache_contract": dict(self.roi_cache_contract),
             "keypoint_run": self.keypoint_run,
             "refined_keypoint_run": self.refined_keypoint_run,
             "subject_masks": self.subject_masks.to_json(),
@@ -73,6 +93,7 @@ class PlannedAnalysisTarget:
                 "subject_mask_inference": self.subject_mask_inference_job_key,
                 "subject_mask_finalization": self.subject_mask_finalization_job_key,
             },
+            "target_concurrency_gate_job_key": self.target_concurrency_gate_job_key,
         }
 
 
@@ -85,6 +106,9 @@ class WholeRecordingAnalysisPlan:
     run_root: Path
     keypoint_plan: keypoints.WholeRecordingWorkflowPlan
     targets: tuple[PlannedAnalysisTarget, ...]
+    max_active_targets: int | None
+    analysis_validation_job_key: str | None
+    roi_cache_cleanup_job_key: str | None
     lsf_workflow: LsfWorkflow
 
     def to_json(self) -> dict[str, Any]:
@@ -98,6 +122,9 @@ class WholeRecordingAnalysisPlan:
             "keypoint_plan_path": str(self.keypoint_plan.run_root / "plan.json"),
             "target_count": len(self.targets),
             "targets": [target.to_json() for target in self.targets],
+            "max_active_targets": self.max_active_targets,
+            "analysis_validation_job_key": self.analysis_validation_job_key,
+            "roi_cache_cleanup_job_key": self.roi_cache_cleanup_job_key,
             "lsf_workflow": self.lsf_workflow.to_json(),
         }
 
@@ -218,6 +245,11 @@ def _build_subject_mask_inference_job(
         resources=resources,
         stdout_path=run_root / "logs" / f"{job_name}.%J.out",
         stderr_path=run_root / "logs" / f"{job_name}.%J.err",
+        dependency=(
+            LsfDependency((target.cache.producer_job_key,))
+            if target.cache.producer_job_key is not None
+            else None
+        ),
         metadata={
             "target_id": target_id,
             "analysis_zarr": str(target.target.analysis_zarr),
@@ -312,6 +344,51 @@ def _build_subject_mask_finalization_job(
     )
 
 
+def _add_job_dependency(job: LsfJob, upstream_job_key: str) -> LsfJob:
+    """Return ``job`` with one additional success dependency."""
+
+    if job.dependency is None:
+        dependency = LsfDependency((upstream_job_key,))
+    else:
+        keys = (*job.dependency.upstream_job_keys, upstream_job_key)
+        dependency = LsfDependency(
+            tuple(dict.fromkeys(keys)),
+            condition=job.dependency.condition,
+        )
+    metadata = dict(job.metadata or {})
+    metadata["target_concurrency_gate_job_key"] = upstream_job_key
+    return replace(job, dependency=dependency, metadata=metadata)
+
+
+def _gate_target_entry_jobs(
+    jobs: list[LsfJob],
+    *,
+    target: keypoints.PlannedWholeRecordingTarget,
+    mask_inference_job_key: str,
+    upstream_finalization_job_key: str,
+) -> None:
+    """Gate the jobs that make a recording occupy one campaign slot."""
+
+    entry_keys = (
+        (target.cache.producer_job_key,)
+        if target.cache.producer_job_key is not None
+        else (target.prediction_job_key, mask_inference_job_key)
+    )
+    entry_key_set = set(entry_keys)
+    replaced_keys: set[str] = set()
+    for index, job in enumerate(jobs):
+        if job.job_key not in entry_key_set:
+            continue
+        jobs[index] = _add_job_dependency(job, upstream_finalization_job_key)
+        replaced_keys.add(job.job_key)
+    missing = entry_key_set - replaced_keys
+    if missing:
+        raise ValueError(
+            "Could not apply target concurrency gate to entry jobs: "
+            + ", ".join(sorted(missing))
+        )
+
+
 def build_plan(
     *,
     keypoint_plan: keypoints.WholeRecordingWorkflowPlan,
@@ -326,8 +403,22 @@ def build_plan(
     model_label_schema_id: str = "subject_v1_union",
     model_top_k: int = 5,
     handoff_package_dir: Path | None = None,
+    max_active_targets: int | None = None,
+    validate_outputs: bool = True,
+    validation_resources: LsfResources | None = None,
+    validation_sample_rows: int = 32,
+    cleanup_roi_caches: bool = False,
+    roi_cache_cleanup_allowed_root: Path = DEFAULT_ROI_CACHE_CLEANUP_ROOT,
+    roi_cache_cleanup_resources: LsfResources | None = None,
 ) -> WholeRecordingAnalysisPlan:
     run_root = run_root.expanduser().resolve()
+    if max_active_targets is not None and int(max_active_targets) <= 0:
+        raise ValueError("max_active_targets must be positive when provided.")
+    if int(validation_sample_rows) <= 0:
+        raise ValueError("validation_sample_rows must be positive.")
+    resolved_max_active_targets = (
+        int(max_active_targets) if max_active_targets is not None else None
+    )
     run_label = keypoint_plan.run_label
     mask_label = safe_component(mask_run_label, default=f"{run_label}_subject_masks")
     mask_names = build_subject_mask_run_names(mask_label)
@@ -345,7 +436,7 @@ def build_plan(
     planned_targets: list[PlannedAnalysisTarget] = []
     mask_finalizer_keys: list[str] = []
 
-    for target in keypoint_plan.targets:
+    for target_index, target in enumerate(keypoint_plan.targets):
         _refuse_mask_output_collisions(target.target.analysis_zarr, mask_names)
         inference_job = _build_subject_mask_inference_job(
             workflow_id=run_label,
@@ -377,12 +468,36 @@ def build_plan(
         )
         jobs.extend((inference_job, finalization_job))
         mask_finalizer_keys.append(finalization_job.job_key)
+        concurrency_gate_job_key = None
+        if (
+            resolved_max_active_targets is not None
+            and target_index >= resolved_max_active_targets
+        ):
+            concurrency_gate_job_key = planned_targets[
+                target_index - resolved_max_active_targets
+            ].subject_mask_finalization_job_key
+            _gate_target_entry_jobs(
+                jobs,
+                target=target,
+                mask_inference_job_key=inference_job.job_key,
+                upstream_finalization_job_key=concurrency_gate_job_key,
+            )
         planned_targets.append(
             PlannedAnalysisTarget(
                 target_id=target.target.target_id,
                 analysis_zarr=target.target.analysis_zarr,
                 crop_run=target.cache.crop_run,
                 roi_cache_manifest=target.cache.manifest_path,
+                roi_cache_manifest_sha256=target.cache.manifest_sha256,
+                roi_cache_payload=target.cache.payload_path,
+                roi_cache_availability=target.cache.availability,
+                roi_cache_producer_job_key=target.cache.producer_job_key,
+                roi_cache_contract={
+                    "crop_signature": target.cache.crop_signature,
+                    "crop_revision": target.cache.crop_revision,
+                    "shape": list(target.cache.shape),
+                    "total_bytes": target.cache.total_bytes,
+                },
                 keypoint_run=target.run_names.keypoint_run,
                 refined_keypoint_run=target.run_names.refined_keypoint_run,
                 subject_masks=mask_names,
@@ -390,6 +505,60 @@ def build_plan(
                 keypoint_refinement_job_key=target.refinement_job_key,
                 subject_mask_inference_job_key=inference_job.job_key,
                 subject_mask_finalization_job_key=finalization_job.job_key,
+                target_concurrency_gate_job_key=concurrency_gate_job_key,
+            )
+        )
+
+    analysis_validation_job_key: str | None = None
+    if validate_outputs:
+        analysis_validation_job_key = "analysis_validate"
+        validation_job_name = safe_component(
+            f"analysis_validate_{run_label}",
+            default="analysis_validate",
+            max_length=120,
+        )
+        validation_output = (
+            run_root / "validation" / f"analysis_validation.{RUNTIME_JOB_ID_TOKEN}.json"
+        )
+        validation_worker = (
+            str(keypoint_plan.repo / "scripts" / "py"),
+            "-m",
+            "fisheye.cluster.whole_recording_analysis_validate",
+            str(run_root / "plan.json"),
+            "--sample-rows",
+            str(int(validation_sample_rows)),
+            "--output-json",
+            str(validation_output),
+        )
+        validation_command = build_runtime_command(
+            validation_worker,
+            status_path_template=(
+                run_root / "status" / f"analysis_validation.{RUNTIME_JOB_ID_TOKEN}.json"
+            ),
+            workflow_id=run_label,
+            family="analysis.whole_recording",
+            job_key=analysis_validation_job_key,
+            stage="analysis_validation",
+            cwd=keypoint_plan.repo,
+            expected_output_templates=(str(validation_output),),
+            python_launcher=(str(keypoint_plan.repo / "scripts" / "py"),),
+        )
+        jobs.append(
+            LsfJob(
+                job_key=analysis_validation_job_key,
+                job_name=validation_job_name,
+                command=validation_command,
+                resources=validation_resources
+                or LsfResources(queue="short", ncores=1, mem_gb=16, walltime="2:00"),
+                stdout_path=run_root / "logs" / f"{validation_job_name}.%J.out",
+                stderr_path=run_root / "logs" / f"{validation_job_name}.%J.err",
+                dependency=LsfDependency(tuple(mask_finalizer_keys)),
+                metadata={
+                    "independent_output_validation": True,
+                    "target_count": len(planned_targets),
+                    "sample_rows": int(validation_sample_rows),
+                    "analysis_plan": str(run_root / "plan.json"),
+                },
             )
         )
 
@@ -434,7 +603,11 @@ def build_plan(
             resources=keypoint_finalizer.resources,
             stdout_path=run_root / "logs" / f"{registry_job_name}.%J.out",
             stderr_path=run_root / "logs" / f"{registry_job_name}.%J.err",
-            dependency=LsfDependency(tuple(mask_finalizer_keys)),
+            dependency=LsfDependency(
+                (analysis_validation_job_key,)
+                if analysis_validation_job_key is not None
+                else tuple(mask_finalizer_keys)
+            ),
             metadata={
                 "whole_recording_analysis_join": True,
                 "target_count": len(planned_targets),
@@ -443,10 +616,131 @@ def build_plan(
             },
         )
     )
-    workflow = LsfWorkflow(
+    cleanup_job_key: str | None = None
+    if cleanup_roi_caches:
+        cleanup_job_key = "roi_cache_cleanup"
+        cleanup_job_name = safe_component(
+            f"analysis_cache_cleanup_{run_label}",
+            default="analysis_cache_cleanup",
+            max_length=120,
+        )
+        cleanup_output = (
+            run_root / "cleanup" / f"roi_cache_cleanup.{RUNTIME_JOB_ID_TOKEN}.json"
+        )
+        cleanup_worker = (
+            str(keypoint_plan.repo / "scripts" / "py"),
+            "-m",
+            "fisheye.cluster.whole_recording_analysis_cache_cleanup",
+            str(run_root / "plan.json"),
+            "--allowed-root",
+            str(roi_cache_cleanup_allowed_root.expanduser().resolve()),
+            "--apply",
+            "--output-json",
+            str(cleanup_output),
+        )
+        cleanup_command = build_runtime_command(
+            cleanup_worker,
+            status_path_template=(
+                run_root / "status" / f"roi_cache_cleanup.{RUNTIME_JOB_ID_TOKEN}.json"
+            ),
+            workflow_id=run_label,
+            family="analysis.whole_recording",
+            job_key=cleanup_job_key,
+            stage="roi_cache_cleanup",
+            cwd=keypoint_plan.repo,
+            expected_output_templates=(str(cleanup_output),),
+            python_launcher=(str(keypoint_plan.repo / "scripts" / "py"),),
+        )
+        jobs.append(
+            LsfJob(
+                job_key=cleanup_job_key,
+                job_name=cleanup_job_name,
+                command=cleanup_command,
+                resources=roi_cache_cleanup_resources
+                or LsfResources(queue="short", ncores=1, mem_gb=4, walltime="1:00"),
+                stdout_path=run_root / "logs" / f"{cleanup_job_name}.%J.out",
+                stderr_path=run_root / "logs" / f"{cleanup_job_name}.%J.err",
+                dependency=LsfDependency((registry_job_key,)),
+                metadata={
+                    "destructive_cleanup": True,
+                    "allowed_root": str(
+                        roi_cache_cleanup_allowed_root.expanduser().resolve()
+                    ),
+                    "cache_count": len(planned_targets),
+                    "analysis_plan": str(run_root / "plan.json"),
+                },
+            )
+        )
+    cache_jobs = tuple(job for job in jobs if job.job_key.startswith("cache:"))
+    keypoint_jobs = tuple(
+        job
+        for job in jobs
+        if job.job_key.startswith("predict:") or job.job_key.startswith("refine:")
+    )
+    mask_jobs = tuple(
+        job
+        for job in jobs
+        if job.job_key.startswith("mask_infer:")
+        or job.job_key.startswith("mask_finalize:")
+    )
+    validation_jobs = tuple(
+        job for job in jobs if job.job_key == analysis_validation_job_key
+    ) if analysis_validation_job_key is not None else ()
+    registry_jobs = tuple(job for job in jobs if job.job_key == registry_job_key)
+    cleanup_jobs = tuple(
+        job for job in jobs if job.job_key == cleanup_job_key
+    ) if cleanup_job_key is not None else ()
+    fragments = tuple(
+        fragment
+        for fragment in (
+            LsfWorkflowFragment(
+                fragment_id="roi_cache",
+                jobs=cache_jobs,
+                provides=("roi_cache",),
+                metadata={"enabled": bool(cache_jobs)},
+            ),
+            LsfWorkflowFragment(
+                fragment_id="keypoints",
+                jobs=keypoint_jobs,
+                requires=("roi_cache",),
+                provides=("refined_keypoints",),
+            ),
+            LsfWorkflowFragment(
+                fragment_id="subject_masks",
+                jobs=mask_jobs,
+                requires=("roi_cache", "refined_keypoints"),
+                provides=("refined_subject_masks",),
+            ),
+            LsfWorkflowFragment(
+                fragment_id="analysis_validation",
+                jobs=validation_jobs,
+                requires=("refined_keypoints", "refined_subject_masks"),
+                provides=("validated_analysis",),
+            ),
+            LsfWorkflowFragment(
+                fragment_id="registry",
+                jobs=registry_jobs,
+                requires=(
+                    ("validated_analysis",)
+                    if validation_jobs
+                    else ("refined_keypoints", "refined_subject_masks")
+                ),
+                provides=("registry_reconciled",),
+            ),
+            LsfWorkflowFragment(
+                fragment_id="cache_cleanup",
+                jobs=cleanup_jobs,
+                requires=("registry_reconciled",),
+                provides=("cache_cleaned",),
+            ),
+        )
+        if fragment.jobs
+    )
+    workflow = compose_lsf_workflow(
         workflow_id=run_label,
         family="analysis.whole_recording",
-        jobs=tuple(jobs),
+        fragments=fragments,
+        external_inputs=(() if cache_jobs else ("roi_cache",)),
         metadata={
             "plan_schema": PLAN_SCHEMA,
             "target_count": len(planned_targets),
@@ -455,6 +749,14 @@ def build_plan(
                 "subject_mask_finalization_joins_keypoint_refinement_and_mask_inference"
             ),
             "mask_run_label": mask_label,
+            "composition_contract": "reusable_workflow_fragments_v1",
+            "max_active_targets": resolved_max_active_targets,
+            "target_concurrency_contract": (
+                "rolling_finalization_gate_v1"
+                if resolved_max_active_targets is not None
+                else None
+            ),
+            "independent_output_validation": bool(validate_outputs),
         },
     )
     return WholeRecordingAnalysisPlan(
@@ -465,13 +767,23 @@ def build_plan(
         run_root=run_root,
         keypoint_plan=keypoint_plan,
         targets=tuple(planned_targets),
+        max_active_targets=resolved_max_active_targets,
+        analysis_validation_job_key=analysis_validation_job_key,
+        roi_cache_cleanup_job_key=cleanup_job_key,
         lsf_workflow=workflow,
     )
 
 
 def materialize_plan_bundle(plan: WholeRecordingAnalysisPlan) -> dict[str, Any]:
     plan.run_root.mkdir(parents=True, exist_ok=True)
-    for name in ("logs", "progress", "status", "registry"):
+    for name in (
+        "logs",
+        "progress",
+        "status",
+        "registry",
+        "validation",
+        "cleanup",
+    ):
         (plan.run_root / name).mkdir(parents=True, exist_ok=True)
     keypoints.materialize_plan_bundle(plan.keypoint_plan)
     payload = plan.to_json()
@@ -525,6 +837,51 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mask-model-label-schema-id", default="subject_v1_union")
     parser.add_argument("--mask-model-top-k", type=int, default=5)
     parser.add_argument("--handoff-package-dir", type=Path)
+    parser.add_argument(
+        "--max-active-targets",
+        type=int,
+        help=(
+            "Maximum recording pipelines active at once. Later targets use a "
+            "rolling dependency on the finalization of the target one window earlier."
+        ),
+    )
+    parser.add_argument("--validation-sample-rows", type=int, default=32)
+    parser.add_argument(
+        "--no-analysis-validation",
+        action="store_true",
+        help="Skip the independent exact-run mask-content validation gate.",
+    )
+    parser.add_argument(
+        "--roi-cache-policy",
+        choices=("existing", "build"),
+        default="existing",
+        help=(
+            "Use already-published caches or prepend one cache build/publish job "
+            "per target to the same DAG."
+        ),
+    )
+    parser.add_argument("--cache-batch-size", type=int, default=1024)
+    parser.add_argument("--cache-decode-backend", default="pynvvc_luma")
+    parser.add_argument("--cache-roi-live-acceleration", default="cpu")
+    parser.add_argument("--cache-roi-live-gpu-chunk-frames", type=int, default=32)
+    parser.add_argument("--cache-queue", default="gpu_l4")
+    parser.add_argument("--cache-ncores", type=int, default=4)
+    parser.add_argument("--cache-mem-gb", type=int, default=64)
+    parser.add_argument("--cache-gpus", type=int, default=1)
+    parser.add_argument("--cache-walltime", default="2:00")
+    parser.add_argument(
+        "--cleanup-roi-caches-after-success",
+        action="store_true",
+        help=(
+            "Submit a separate terminal job that removes planned NRS ROI "
+            "caches after registry success."
+        ),
+    )
+    parser.add_argument(
+        "--roi-cache-cleanup-allowed-root",
+        type=Path,
+        default=DEFAULT_ROI_CACHE_CLEANUP_ROOT,
+    )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
@@ -535,6 +892,51 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     run_root = args.run_root.expanduser().resolve()
+    cache_bindings = None
+    cache_jobs: tuple[LsfJob, ...] = ()
+    if args.roi_cache_policy == "build":
+        cache_bindings = {}
+        planned_cache_jobs: list[LsfJob] = []
+        cache_resources = LsfResources(
+            queue=args.cache_queue,
+            ncores=int(args.cache_ncores),
+            mem_gb=int(args.cache_mem_gb),
+            gpus=int(args.cache_gpus),
+            walltime=args.cache_walltime,
+        )
+        for target in keypoints.load_target_manifest(args.manifest):
+            if target.crop_run is None:
+                raise ValueError(
+                    "The build cache policy requires an explicit crop_run for every "
+                    f"target; missing for {target.target_id!r}."
+                )
+            producer_job_key = f"cache:{target.target_id}"
+            cache = plan_flat_roi_cache_binding(
+                analysis_zarr=target.analysis_zarr,
+                crop_run=target.crop_run,
+                manifest_path=target.roi_cache_manifest,
+                producer_job_key=producer_job_key,
+                min_roi_size=348,
+            )
+            cache_bindings[target.target_id] = cache
+            planned_cache_jobs.append(
+                build_flat_roi_cache_job(
+                    workflow_id=safe_component(args.run_label, default="analysis"),
+                    target_id=target.target_id,
+                    analysis_zarr=target.analysis_zarr,
+                    cache=cache,
+                    repo=args.repo.expanduser().resolve(),
+                    run_root=run_root,
+                    resources=cache_resources,
+                    batch_size=int(args.cache_batch_size),
+                    decode_backend=args.cache_decode_backend,
+                    roi_live_acceleration=args.cache_roi_live_acceleration,
+                    roi_live_gpu_chunk_frames=int(
+                        args.cache_roi_live_gpu_chunk_frames
+                    ),
+                )
+            )
+        cache_jobs = tuple(planned_cache_jobs)
     keypoint_plan = keypoints.build_plan(
         manifest_path=args.manifest,
         run_label=args.run_label,
@@ -556,6 +958,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         refine_num_workers=4,
         refine_memory_limit=None,
         finalizer_resources=LsfResources(queue="short", ncores=1, mem_gb=8, walltime="1:00"),
+        cache_bindings=cache_bindings,
+        upstream_jobs=cache_jobs,
     )
     plan = build_plan(
         keypoint_plan=keypoint_plan,
@@ -570,6 +974,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         model_label_schema_id=args.mask_model_label_schema_id,
         model_top_k=args.mask_model_top_k,
         handoff_package_dir=args.handoff_package_dir,
+        max_active_targets=args.max_active_targets,
+        validate_outputs=not bool(args.no_analysis_validation),
+        validation_resources=LsfResources(
+            queue="short", ncores=1, mem_gb=16, walltime="2:00"
+        ),
+        validation_sample_rows=int(args.validation_sample_rows),
+        cleanup_roi_caches=bool(args.cleanup_roi_caches_after_success),
+        roi_cache_cleanup_allowed_root=args.roi_cache_cleanup_allowed_root,
+        roi_cache_cleanup_resources=LsfResources(
+            queue="short", ncores=1, mem_gb=4, walltime="1:00"
+        ),
     )
     if args.apply:
         result = apply_plan(plan)

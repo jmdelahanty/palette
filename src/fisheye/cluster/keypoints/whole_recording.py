@@ -8,7 +8,7 @@ import json
 import os
 import subprocess
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -213,7 +213,11 @@ def load_target_manifest(path: Path) -> tuple[WholeRecordingTarget, ...]:
     return tuple(targets)
 
 
-def _require_target_paths(target: WholeRecordingTarget) -> None:
+def _require_target_paths(
+    target: WholeRecordingTarget,
+    *,
+    require_cache_manifest: bool = True,
+) -> None:
     if not target.recording_dir.is_dir():
         raise FileNotFoundError(
             f"Recording directory not found for {target.target_id!r}: "
@@ -231,7 +235,7 @@ def _require_target_paths(target: WholeRecordingTarget) -> None:
             f"Analysis Zarr for {target.target_id!r} is outside its recording "
             f"directory: {target.analysis_zarr}"
         ) from exc
-    if not target.roi_cache_manifest.is_file():
+    if require_cache_manifest and not target.roi_cache_manifest.is_file():
         raise FileNotFoundError(
             f"ROI cache manifest not found for {target.target_id!r}: "
             f"{target.roi_cache_manifest}"
@@ -282,6 +286,8 @@ def build_plan(
     refine_num_workers: int,
     refine_memory_limit: str | None,
     finalizer_resources: LsfResources,
+    cache_bindings: Mapping[str, FlatRoiCacheBinding] | None = None,
+    upstream_jobs: Sequence[LsfJob] = (),
 ) -> WholeRecordingWorkflowPlan:
     resolved_manifest = manifest_path.expanduser().resolve()
     resolved_repo = repo.expanduser().resolve()
@@ -311,12 +317,20 @@ def build_plan(
     manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
     targets = load_target_manifest(resolved_manifest)
     run_names = build_keypoint_run_names(resolved_run_label)
-    jobs: list[LsfJob] = []
+    jobs: list[LsfJob] = list(upstream_jobs)
     planned_targets: list[PlannedWholeRecordingTarget] = []
     model_identity: tuple[str, str, str, str] | None = None
 
     for target in targets:
-        _require_target_paths(target)
+        supplied_cache = (
+            cache_bindings.get(target.target_id)
+            if cache_bindings is not None
+            else None
+        )
+        _require_target_paths(
+            target,
+            require_cache_manifest=supplied_cache is None,
+        )
         validate_registered_analysis_zarr(
             registry_path=resolved_registry,
             recording_id=target.recording_id,
@@ -343,12 +357,25 @@ def build_plan(
                 f"across targets; {target.target_id!r} resolved {current_model_identity}, "
                 f"expected {model_identity}."
             )
-        cache = validate_flat_roi_cache_binding(
-            manifest_path=target.roi_cache_manifest,
-            analysis_zarr=target.analysis_zarr,
-            crop_run=target.crop_run,
-            min_roi_size=int(min_roi_size),
-        )
+        if supplied_cache is None:
+            cache = validate_flat_roi_cache_binding(
+                manifest_path=target.roi_cache_manifest,
+                analysis_zarr=target.analysis_zarr,
+                crop_run=target.crop_run,
+                min_roi_size=int(min_roi_size),
+            )
+        else:
+            cache = supplied_cache
+            if cache.manifest_path != target.roi_cache_manifest:
+                raise ValueError(
+                    f"Supplied cache binding for {target.target_id!r} points to "
+                    f"{cache.manifest_path}, expected {target.roi_cache_manifest}."
+                )
+            if target.crop_run is not None and cache.crop_run != target.crop_run:
+                raise ValueError(
+                    f"Supplied cache binding for {target.target_id!r} uses crop run "
+                    f"{cache.crop_run!r}, expected {target.crop_run!r}."
+                )
         input_capability = validate_keypoint_input_dag(
             analysis_zarr=target.analysis_zarr,
             cache=cache,
@@ -378,6 +405,11 @@ def build_plan(
             keypoint_frame_shard_rows=int(keypoint_frame_shard_rows),
             resources=prediction_resources,
         )
+        if cache.producer_job_key is not None:
+            prediction_job = replace(
+                prediction_job,
+                dependency=LsfDependency((cache.producer_job_key,)),
+            )
         refinement_job = build_refinement_job(
             workflow_id=resolved_run_label,
             target_id=target.target_id,

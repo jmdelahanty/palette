@@ -3,7 +3,7 @@ set -euo pipefail
 
 ZARR_PATH=""
 CROP_RUN=""
-PUBLIC_CACHE_ROOT="/misc/public/palette_cache"
+PUBLIC_CACHE_ROOT="/nrs/johnson/palette_staging/flat_roi_cache"
 PUBLIC_CACHE_DIR=""
 LOG_DIR=""
 QUEUE="short"
@@ -36,7 +36,7 @@ Required:
 
 Options:
   --crop-run NAME                Crop run to cache (default: latest_any/latest)
-  --public-cache-root PATH       Shared cache root (default: /misc/public/palette_cache)
+  --public-cache-root PATH       Shared cache root (default: /nrs/johnson/palette_staging/flat_roi_cache)
   --public-cache-dir PATH        Explicit publish directory; overrides root/workflow_id/roi_cache
   --workflow-id ID               Workflow namespace under public-cache-root
   --log-dir PATH                 Log/output directory (default: runs/diagnostics/flat_roi_cache_bsub)

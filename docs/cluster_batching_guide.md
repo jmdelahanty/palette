@@ -806,9 +806,15 @@ refined keypoint outputs remain ordinarily chunked regardless of source layout.
 
 ### Concurrent whole-recording keypoints and subject masks
 
-When a reviewed whole-recording target manifest already binds each recording
-to one complete flat ROI cache, the combined planner can overlap keypoint and
-subject-mask inference:
+The default shared flat ROI cache root is
+`/nrs/johnson/palette_staging/flat_roi_cache`. This is non-redundant,
+reproducible workflow storage; durable outputs still belong on PRFS, and
+successful workflows should enable terminal cache cleanup.
+
+The combined planner can either consume reviewed complete flat ROI caches or
+build and publish them as the first reusable fragment of the same DAG. In both
+cases it overlaps keypoint and subject-mask inference after the exact cache for
+that recording is available:
 
 ```bash
 scripts/submit_whole_recording_analysis_bsub.sh \
@@ -817,18 +823,49 @@ scripts/submit_whole_recording_analysis_bsub.sh \
   --run-root /groups/.../logs/whole_recording_analysis/combined_YYYYMMDD_canary \
   --model-set-id <exact_pose_model_set> \
   --model-run-id <exact_pose_model_run> \
+  --roi-cache-policy build \
+  --max-active-targets 8 \
+  --cleanup-roi-caches-after-success \
   --dry-run
 ```
 
-The two GPU jobs are independent roots. Keypoint refinement depends only on
-keypoint inference. Refined subject-mask finalization depends on both subject-
-mask inference and the target's exact keypoint-refinement job. Raw mask
+With `--roi-cache-policy build`, each target must name an explicit `crop_run`
+and the intended, not-yet-existing `roi_cache_manifest` path. The planner adds
+one cache build/publish job per target. Both inference jobs depend on that exact
+producer, so a cache is never consumed before its payload-first,
+manifest-last publication succeeds. With the default `existing` policy, cache
+metadata and payload size are validated during planning and the inference jobs
+remain independent roots.
+
+Keypoint refinement depends only on keypoint inference. Refined subject-mask
+finalization depends on both subject-mask inference and the target's exact
+keypoint-refinement job. Raw mask
 inference intentionally carries no keypoint binding; finalization receives the
 deterministic refined-keypoint run explicitly and never resolves `latest`.
 Both inference jobs stage private copies of the same immutable cache. Inspect
 `plan.json` and `lsf_plan.json` before replacing `--dry-run` with `--apply`.
 Workers defer registry mutation; a single final fan-in job reconciles exact
-keypoint and mask runs serially and checks registry integrity.
+keypoint and mask runs serially and checks registry integrity. By default, an
+independent compute-node validation job runs before registry reconciliation. It
+checks exact run completion and assignment lineage, encoded `uint8` raw
+probabilities, authoritative dense binary `masks_roi`, whole-run
+`mask_present` counts, sampled contours, full-contour absence, and the refined
+subject-mask contract. Use `--no-analysis-validation` only for an explicitly
+reviewed recovery workflow.
+
+`--max-active-targets N` adds a rolling recording-level gate. Target `N+1`
+cannot begin its cache build (or its two inference roots when using existing
+caches) until target 1 finishes refined-mask finalization. This bounds live
+recording pipelines without forcing every target in a cohort to wait for the
+slowest target before another slot opens.
+
+The implementation composes reusable `roi_cache`, `keypoints`,
+`subject_masks`, `analysis_validation`, `registry`, and optional
+`cache_cleanup` workflow fragments.
+`LsfWorkflow` validates the selected fragments only after composition, so a
+new stage combination does not require a new scheduler backend or a copied DAG
+implementation. Semantic requirements still fail closed: for example, mask
+finalization must name both its mask-inference and refined-keypoint producers.
 The completed GoodCopBadCop baseline and validation gates are recorded in
 `docs/diagnostics/goodcopbadcop_subject_mask_concurrent_dag_2026-07-12.md`.
 

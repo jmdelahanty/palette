@@ -7,7 +7,7 @@ RECORDING_FRAME_INDEX=""
 CLIP_IDS=()
 WORK_UNIT_IDS=()
 ALL_CLIPS=0
-PUBLIC_CACHE_ROOT="/misc/public/palette_cache"
+PUBLIC_CACHE_ROOT="/nrs/johnson/palette_staging/flat_roi_cache"
 PUBLIC_CACHE_DIR_ROOT=""
 LOG_DIR=""
 RUN_ID_PREFIX=""
@@ -57,7 +57,7 @@ Bundle layout:
   --limit-bundles N                 Submit at most N bundles after start index
 
 Cache options:
-  --public-cache-root PATH          Shared cache root (default: /misc/public/palette_cache)
+  --public-cache-root PATH          Shared cache root (default: /nrs/johnson/palette_staging/flat_roi_cache)
   --public-cache-dir-root PATH      Root for per-bundle publish dirs. Default:
                                     <public-cache-root>/<collection>/roi_cache_bundles/<run-id-prefix>
   --roi-size H W                    ROI size in Palette order; default from archive policy

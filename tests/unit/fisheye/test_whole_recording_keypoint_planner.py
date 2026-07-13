@@ -11,7 +11,7 @@ from fisheye.cluster.keypoints.common import KeypointInputCapability, PoseModelB
 from fisheye.cluster.keypoints import registry_finalize as registry_finalize_mod
 from fisheye.cluster.keypoints import whole_recording as planner
 from fisheye.cluster import whole_recording_analysis as analysis_planner
-from fisheye.cluster.lsf import LsfResources
+from fisheye.cluster.lsf import LsfJob, LsfResources
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -90,6 +90,7 @@ def _build_plan(
     target_count: int = 2,
     keypoint_roi_shard_rows: int | None = common_mod.DEFAULT_KEYPOINT_ROI_SHARD_ROWS,
     keypoint_frame_shard_rows: int = common_mod.DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
+    planned_caches: bool = False,
 ):
     manifest, repo, registry, model_path = _make_inputs(
         tmp_path,
@@ -133,6 +134,45 @@ def _build_plan(
             rejected_sources={"persisted_roi_images": "missing"},
         ),
     )
+    cache_bindings = None
+    upstream_jobs: tuple[LsfJob, ...] = ()
+    if planned_caches:
+        cache_bindings = {}
+        cache_jobs: list[LsfJob] = []
+        for target in planner.load_target_manifest(manifest):
+            existing_payload_name = json.loads(
+                target.roi_cache_manifest.read_text(encoding="utf-8")
+            )["array"]["bin_path"]
+            (target.roi_cache_manifest.parent / existing_payload_name).unlink()
+            target.roi_cache_manifest.unlink()
+            producer_job_key = f"cache:{target.target_id}"
+            cache_bindings[target.target_id] = common_mod.FlatRoiCacheBinding(
+                manifest_path=target.roi_cache_manifest,
+                manifest_sha256=None,
+                payload_path=target.roi_cache_manifest.with_suffix(".bin"),
+                crop_run="crop_001",
+                cache_key=None,
+                crop_signature=f"signature-{target.target_id}",
+                crop_revision="revision-001",
+                shape=(2, 348, 348),
+                total_bytes=2 * 348 * 348,
+                payload_sha256=None,
+                availability="planned",
+                producer_job_key=producer_job_key,
+            )
+            cache_jobs.append(
+                LsfJob(
+                    job_key=producer_job_key,
+                    job_name=f"cache_{target.target_id}",
+                    command=("true",),
+                    resources=LsfResources(
+                        queue="gpu_l4", ncores=4, mem_gb=64, gpus=1
+                    ),
+                    stdout_path=tmp_path / f"{target.target_id}.cache.out",
+                    stderr_path=tmp_path / f"{target.target_id}.cache.err",
+                )
+            )
+        upstream_jobs = tuple(cache_jobs)
     plan = planner.build_plan(
         manifest_path=manifest,
         run_label="goodcopbadcop_20260710",
@@ -162,6 +202,8 @@ def _build_plan(
         finalizer_resources=LsfResources(
             queue="short", ncores=1, mem_gb=8, walltime="1:00"
         ),
+        cache_bindings=cache_bindings,
+        upstream_jobs=upstream_jobs,
     )
     return plan
 
@@ -312,6 +354,8 @@ def test_whole_recording_analysis_plan_forks_inference_and_joins_finalization(
             queue="short", ncores=16, mem_gb=32
         ),
         handoff_package_dir=tmp_path / "handoff",
+        cleanup_roi_caches=True,
+        roi_cache_cleanup_allowed_root=tmp_path / "caches",
     )
 
     jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
@@ -325,9 +369,29 @@ def test_whole_recording_analysis_plan_forks_inference_and_joins_finalization(
         "mask_infer:target_0",
         "refine:target_0",
     )
-    assert jobs["registry_finalize"].dependency.upstream_job_keys == (
+    assert jobs["analysis_validate"].dependency.upstream_job_keys == (
         "mask_finalize:target_0",
         "mask_finalize:target_1",
+    )
+    assert jobs["registry_finalize"].dependency.upstream_job_keys == (
+        "analysis_validate",
+    )
+    assert jobs["roi_cache_cleanup"].dependency.upstream_job_keys == (
+        "registry_finalize",
+    )
+    assert plan.roi_cache_cleanup_job_key == "roi_cache_cleanup"
+    assert "fisheye.cluster.whole_recording_analysis_cache_cleanup" in (
+        jobs["roi_cache_cleanup"].command
+    )
+    assert jobs["roi_cache_cleanup"].metadata["destructive_cleanup"] is True
+    assert [job.job_key for job in plan.lsf_workflow.topological_jobs()][-3:] == [
+        "analysis_validate",
+        "registry_finalize",
+        "roi_cache_cleanup",
+    ]
+    assert plan.analysis_validation_job_key == "analysis_validate"
+    assert "fisheye.cluster.whole_recording_analysis_validate" in (
+        jobs["analysis_validate"].command
     )
     assert "fisheye.cluster.whole_recording_analysis_registry_finalize" in (
         jobs["registry_finalize"].command
@@ -353,6 +417,108 @@ def test_whole_recording_analysis_plan_forks_inference_and_joins_finalization(
     assert jobs["mask_finalize:target_0"].metadata[
         "component_contours_requested"
     ] is False
+
+
+def test_whole_recording_analysis_composes_cache_builds_into_both_inference_branches(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    keypoint_plan = _build_plan(
+        tmp_path,
+        monkeypatch,
+        target_count=2,
+        planned_caches=True,
+    )
+    plan = analysis_planner.build_plan(
+        keypoint_plan=keypoint_plan,
+        run_root=tmp_path / "combined",
+        mask_run_label="masks_with_cache",
+        mask_inference_resources=LsfResources(
+            queue="gpu_l4", ncores=8, mem_gb=48, gpus=1
+        ),
+        mask_finalization_resources=LsfResources(
+            queue="short", ncores=16, mem_gb=32
+        ),
+        cleanup_roi_caches=True,
+        roi_cache_cleanup_allowed_root=tmp_path / "caches",
+    )
+
+    jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
+    assert jobs["predict:target_0"].dependency.upstream_job_keys == (
+        "cache:target_0",
+    )
+    assert jobs["mask_infer:target_0"].dependency.upstream_job_keys == (
+        "cache:target_0",
+    )
+    assert jobs["refine:target_0"].dependency.upstream_job_keys == (
+        "predict:target_0",
+    )
+    assert jobs["mask_finalize:target_0"].dependency.upstream_job_keys == (
+        "mask_infer:target_0",
+        "refine:target_0",
+    )
+    assert [
+        fragment["fragment_id"]
+        for fragment in plan.lsf_workflow.to_json()["metadata"]["fragments"]
+    ] == [
+        "roi_cache",
+        "keypoints",
+        "subject_masks",
+        "analysis_validation",
+        "registry",
+        "cache_cleanup",
+    ]
+    assert plan.targets[0].roi_cache_manifest_sha256 is None
+    assert plan.targets[0].roi_cache_availability == "planned"
+    assert plan.targets[0].roi_cache_producer_job_key == "cache:target_0"
+
+
+def test_whole_recording_analysis_limits_active_targets_with_rolling_gate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    keypoint_plan = _build_plan(
+        tmp_path,
+        monkeypatch,
+        target_count=10,
+        planned_caches=True,
+    )
+    plan = analysis_planner.build_plan(
+        keypoint_plan=keypoint_plan,
+        run_root=tmp_path / "combined",
+        mask_run_label="masks_with_concurrency_gate",
+        mask_inference_resources=LsfResources(
+            queue="gpu_l4", ncores=8, mem_gb=48, gpus=1
+        ),
+        mask_finalization_resources=LsfResources(
+            queue="short", ncores=16, mem_gb=32
+        ),
+        max_active_targets=8,
+    )
+
+    jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
+    assert plan.max_active_targets == 8
+    assert plan.targets[7].target_concurrency_gate_job_key is None
+    assert plan.targets[8].target_concurrency_gate_job_key == "mask_finalize:target_0"
+    assert plan.targets[9].target_concurrency_gate_job_key == "mask_finalize:target_1"
+    assert jobs["cache:target_8"].dependency.upstream_job_keys == (
+        "mask_finalize:target_0",
+    )
+    assert jobs["cache:target_9"].dependency.upstream_job_keys == (
+        "mask_finalize:target_1",
+    )
+    assert jobs["predict:target_8"].dependency.upstream_job_keys == (
+        "cache:target_8",
+    )
+    assert jobs["mask_infer:target_8"].dependency.upstream_job_keys == (
+        "cache:target_8",
+    )
+    assert jobs["cache:target_8"].metadata["target_concurrency_gate_job_key"] == (
+        "mask_finalize:target_0"
+    )
+    assert plan.lsf_workflow.metadata["target_concurrency_contract"] == (
+        "rolling_finalization_gate_v1"
+    )
 
 
 def test_whole_recording_plan_supports_regular_chunk_opt_out(

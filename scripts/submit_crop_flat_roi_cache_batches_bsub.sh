@@ -9,7 +9,7 @@ LIMIT=0
 GROUPS_ONLY=1
 ORDER="desc"
 
-PUBLIC_CACHE_ROOT="/misc/public/palette_cache"
+PUBLIC_CACHE_ROOT="/nrs/johnson/palette_staging/flat_roi_cache"
 PUBLIC_CACHE_DIR=""
 LOG_DIR=""
 RUN_ID=""
@@ -63,7 +63,7 @@ Discovery:
 
 Crop/cache:
   --workflow-id ID            Shared workflow namespace under --public-cache-root
-  --public-cache-root PATH    Shared cache root (default: /misc/public/palette_cache)
+  --public-cache-root PATH    Shared cache root (default: /nrs/johnson/palette_staging/flat_roi_cache)
   --public-cache-dir PATH     Explicit shared cache publish dir; overrides root/workflow_id/roi_cache
   --source-type TYPE          Crop detection source type (default: refined)
   --source-path PATH          Explicit detection source path
@@ -171,7 +171,7 @@ reject_recordings_cache_dir() {
     echo "Refusing to publish disposable ROI caches under the recordings root:" >&2
     echo "  cache_dir=$resolved_cache_dir" >&2
     echo "  recordings_root=$resolved_recordings_root" >&2
-    echo "Use --public-cache-root /misc/public/palette_cache or another non-recordings scratch/cache root." >&2
+    echo "Use --public-cache-root /nrs/johnson/palette_staging/flat_roi_cache or another non-recordings scratch/cache root." >&2
     exit 2
   fi
 }

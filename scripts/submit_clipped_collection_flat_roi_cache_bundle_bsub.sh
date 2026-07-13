@@ -7,7 +7,7 @@ RECORDING_FRAME_INDEX=""
 CLIP_IDS=()
 WORK_UNIT_IDS=()
 ALL_CLIPS=0
-PUBLIC_CACHE_ROOT="/misc/public/palette_cache"
+PUBLIC_CACHE_ROOT="/nrs/johnson/palette_staging/flat_roi_cache"
 PUBLIC_CACHE_DIR=""
 LOG_DIR=""
 RUN_ID=""
@@ -52,7 +52,7 @@ Selection:
   --work-unit-id ID                 Restrict each child to matching work_unit_id; repeatable
 
 Cache options:
-  --public-cache-root PATH          Shared cache root (default: /misc/public/palette_cache)
+  --public-cache-root PATH          Shared cache root (default: /nrs/johnson/palette_staging/flat_roi_cache)
   --public-cache-dir PATH           Explicit publish dir; overrides root/collection_id/roi_cache
   --roi-size H W                    ROI size in Palette order; default from archive policy
   --limit-rows N                    Debug/smoke limit per child clip

@@ -22,6 +22,8 @@ from fisheye.cluster.lsf.models import (
     LsfJob,
     LsfResources,
     LsfWorkflow,
+    LsfWorkflowFragment,
+    compose_lsf_workflow,
 )
 from fisheye.cluster.lsf.submission import (
     JobSubmittedCallback,
@@ -37,9 +39,11 @@ __all__ = [
     "LsfJob",
     "LsfResources",
     "LsfWorkflow",
+    "LsfWorkflowFragment",
     "JobSubmittedCallback",
     "LSF_SUBMISSION_SCHEMA",
     "build_bsub_command",
+    "compose_lsf_workflow",
     "build_bsub_prefix",
     "parse_bsub_job_id",
     "render_dependency",

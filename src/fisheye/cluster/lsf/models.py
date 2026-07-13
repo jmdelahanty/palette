@@ -231,10 +231,96 @@ class LsfWorkflow:
         }
 
 
+@dataclass(frozen=True)
+class LsfWorkflowFragment:
+    """A reusable set of jobs that can be composed into an LSF workflow.
+
+    Dependencies may point outside the fragment.  They are validated after all
+    selected fragments are composed into the final :class:`LsfWorkflow`.
+    """
+
+    fragment_id: str
+    jobs: tuple[LsfJob, ...]
+    requires: tuple[str, ...] = ()
+    provides: tuple[str, ...] = ()
+    metadata: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        fragment_id = str(self.fragment_id).strip()
+        jobs = tuple(self.jobs)
+        object.__setattr__(self, "fragment_id", fragment_id)
+        object.__setattr__(self, "jobs", jobs)
+        object.__setattr__(self, "requires", tuple(self.requires))
+        object.__setattr__(self, "provides", tuple(self.provides))
+        if not fragment_id:
+            raise ValueError("LSF workflow fragment_id cannot be empty.")
+        job_keys = [job.job_key for job in jobs]
+        if len(set(job_keys)) != len(job_keys):
+            raise ValueError(
+                f"LSF workflow fragment {fragment_id!r} has duplicate job keys."
+            )
+        if len(set(self.requires)) != len(self.requires):
+            raise ValueError(f"Fragment {fragment_id!r} requirements must be unique.")
+        if len(set(self.provides)) != len(self.provides):
+            raise ValueError(f"Fragment {fragment_id!r} outputs must be unique.")
+        if any(not str(value).strip() for value in (*self.requires, *self.provides)):
+            raise ValueError("Fragment requirements and outputs cannot be empty.")
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "fragment_id": self.fragment_id,
+            "job_count": len(self.jobs),
+            "job_keys": [job.job_key for job in self.jobs],
+            "requires": list(self.requires),
+            "provides": list(self.provides),
+            "metadata": dict(self.metadata) if self.metadata is not None else None,
+        }
+
+
+def compose_lsf_workflow(
+    *,
+    workflow_id: str,
+    family: str,
+    fragments: tuple[LsfWorkflowFragment, ...],
+    external_inputs: tuple[str, ...] = (),
+    metadata: Mapping[str, Any] | None = None,
+) -> LsfWorkflow:
+    """Compose independently built fragments and validate the resulting DAG."""
+
+    selected = tuple(fragments)
+    fragment_ids = [fragment.fragment_id for fragment in selected]
+    if len(set(fragment_ids)) != len(fragment_ids):
+        raise ValueError("Composed LSF workflow fragment ids must be unique.")
+    supplied = set(str(value) for value in external_inputs)
+    for fragment in selected:
+        missing = set(fragment.requires) - supplied
+        if missing:
+            raise ValueError(
+                f"Composed LSF workflow fragment {fragment.fragment_id!r} is "
+                "missing required fragment inputs: "
+                + ", ".join(sorted(missing))
+            )
+        supplied.update(fragment.provides)
+    jobs = tuple(job for fragment in selected for job in fragment.jobs)
+    if not jobs:
+        raise ValueError("A composed LSF workflow requires at least one job.")
+    composed_metadata = dict(metadata or {})
+    composed_metadata["fragments"] = [fragment.to_json() for fragment in selected]
+    composed_metadata["external_inputs"] = list(external_inputs)
+    return LsfWorkflow(
+        workflow_id=workflow_id,
+        family=family,
+        jobs=jobs,
+        metadata=composed_metadata,
+    )
+
+
 __all__ = [
     "LsfDependency",
     "LsfDependencyCondition",
     "LsfJob",
     "LsfResources",
     "LsfWorkflow",
+    "LsfWorkflowFragment",
+    "compose_lsf_workflow",
 ]

@@ -612,7 +612,7 @@ Build a runtime ROI cache from a finalized clipped collection:
 scripts/py -m fisheye.utils.build_clipped_collection_flat_roi_cache \
   <recording_analysis.zarr> \
   --collection-id <workflow_id> \
-  --output-dir /misc/public/palette_cache/<workflow_id>/roi_cache \
+  --output-dir /nrs/johnson/palette_staging/flat_roi_cache/<workflow_id>/roi_cache \
   --progress-jsonl <recording_dir>/derived/cluster_artifacts/<workflow_id>_roi_cache.progress.jsonl \
   --progress-stderr
 ```
@@ -624,7 +624,7 @@ scratch and published to PRFS in manifest-last order:
 scripts/submit_clipped_collection_flat_roi_cache_bsub.sh \
   --zarr <recording_analysis.zarr> \
   --collection-id <workflow_id> \
-  --public-cache-root /misc/public/palette_cache \
+  --public-cache-root /nrs/johnson/palette_staging/flat_roi_cache \
   --run-label <recording>_<workflow_id>_roi_cache \
   --queue gpu_l4 \
   --gpus 1 \

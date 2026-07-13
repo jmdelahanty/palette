@@ -101,15 +101,27 @@ class PoseModelBinding:
 @dataclass(frozen=True)
 class FlatRoiCacheBinding:
     manifest_path: Path
-    manifest_sha256: str
+    manifest_sha256: str | None
     payload_path: Path
     crop_run: str
-    cache_key: str
+    cache_key: str | None
     crop_signature: Any
     crop_revision: Any
     shape: tuple[int, int, int]
     total_bytes: int
     payload_sha256: str | None
+    availability: str = "existing"
+    producer_job_key: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.availability not in {"existing", "planned"}:
+            raise ValueError(
+                "Flat ROI cache availability must be 'existing' or 'planned'."
+            )
+        if self.availability == "existing" and not self.manifest_sha256:
+            raise ValueError("An existing flat ROI cache requires a manifest digest.")
+        if self.availability == "planned" and not self.producer_job_key:
+            raise ValueError("A planned flat ROI cache requires a producer job key.")
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -391,6 +403,8 @@ def validate_flat_roi_cache_binding(
         shape=(int(shape[0]), int(shape[1]), int(shape[2])),
         total_bytes=total_bytes,
         payload_sha256=(str(array.get("sha256")) if array.get("sha256") else None),
+        availability="existing",
+        producer_job_key=None,
     )
 
 
