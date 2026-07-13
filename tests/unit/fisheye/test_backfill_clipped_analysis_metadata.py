@@ -105,7 +105,27 @@ def _make_archive(tmp_path: Path) -> tuple[Path, Path, Path]:
     _write_frame_index(frame_index_path, old_root=old_root)
     _write_manifest(recording_root, old_root=old_root)
     zarr_path = recording_root / "zarr" / "sleepyfish_cam2010095_analysis.zarr"
-    _write_zarr_json(zarr_path, {"zarr_purpose": "production"})
+    old_video = old_root / "cams" / "Cam2010095.mp4"
+    _write_zarr_json(
+        zarr_path,
+        {
+            "zarr_purpose": "production",
+            "source_path": str(old_video),
+            "source_video_path": str(old_video),
+            "source_video_metadata": {
+                "codec": "hevc",
+                "source_path": str(old_video),
+            },
+            "disk_path": str(old_root / "zarr" / zarr_path.name),
+        },
+    )
+    _write_zarr_json(
+        zarr_path / "raw_video",
+        {
+            "import_method": "metadata_only",
+            "source_path": str(old_video),
+        },
+    )
     return zarr_path, recording_root, old_root
 
 
@@ -163,3 +183,72 @@ def test_backfill_clipped_analysis_metadata_applies_root_registry_and_path_rewri
         str(recording_root / "recording_frame_index.parquet"),
         "palette.recording_frame_index.v1",
     )
+
+
+def test_backfill_repairs_live_video_locations_and_preserves_historical_provenance(
+    tmp_path: Path,
+):
+    zarr_path, recording_root, old_root = _make_archive(tmp_path)
+    source_video = recording_root / "cams" / "Cam2010095.mp4"
+    source_video.parent.mkdir()
+    source_video.write_bytes(b"video")
+
+    planned = backfill_clipped_analysis_metadata(
+        zarr_path,
+        source_video_path=source_video,
+    )
+    assert planned["video_location"]["will_update"] is True
+    assert set(planned["video_location"]["changes"]) == {
+        "root.source_path",
+        "root.source_video_path",
+        "root.source_video_metadata.source_path",
+        "raw_video.source_path",
+    }
+    assert _read_zarr_attrs(zarr_path)["source_path"].startswith("/nvme1/")
+
+    result = backfill_clipped_analysis_metadata(
+        zarr_path,
+        source_video_path=source_video,
+        apply=True,
+    )
+    assert result["video_location"]["updated"] is True
+
+    wanted = str(source_video.resolve())
+    root_attrs = _read_zarr_attrs(zarr_path)
+    raw_attrs = _read_zarr_attrs(zarr_path / "raw_video")
+    assert root_attrs["source_path"] == wanted
+    assert root_attrs["source_video_path"] == wanted
+    assert root_attrs["source_video_metadata"]["source_path"] == wanted
+    assert raw_attrs["source_path"] == wanted
+
+    assert root_attrs["source_video_metadata"]["codec"] == "hevc"
+    assert root_attrs["disk_path"] == str(old_root / "zarr" / zarr_path.name)
+    assert raw_attrs["import_method"] == "metadata_only"
+    repair = root_attrs["source_video_location_repair"]
+    assert repair["historical_environment_provenance_preserved"] is True
+    assert repair["previous_live_fields"]["root.source_path"].startswith("/nvme1/")
+
+    repeated = backfill_clipped_analysis_metadata(
+        zarr_path,
+        source_video_path=source_video,
+        apply=True,
+    )
+    assert repeated["video_location"]["updated"] is False
+    assert (
+        _read_zarr_attrs(zarr_path)["source_video_location_repair"]
+        == repair
+    )
+
+
+def test_backfill_rejects_missing_source_video(tmp_path: Path):
+    zarr_path, recording_root, _old_root = _make_archive(tmp_path)
+
+    try:
+        backfill_clipped_analysis_metadata(
+            zarr_path,
+            source_video_path=recording_root / "cams" / "missing.mp4",
+        )
+    except FileNotFoundError as error:
+        assert "Source video not found" in str(error)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("Expected missing source video to be rejected")

@@ -5,6 +5,8 @@ It does not rewrite model outputs or finalized detect collections. By default it
 is a dry run; pass ``--apply`` to modify the Zarr root metadata and registry.
 Pass ``--rewrite-frame-index-paths`` when the recording-level frame index still
 contains stale absolute paths after a recording-store relocation.
+Pass ``--source-video-path`` to repair the live root and ``raw_video`` fields
+used by Crimson and Palette while preserving captured environment provenance.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ PATH_COLUMNS = (
     "clip_manifest_path",
     "clip_recording_folder",
 )
+SUPPORTED_VIDEO_SUFFIXES = {".avi", ".mkv", ".mov", ".mp4"}
 
 
 @dataclass(frozen=True)
@@ -180,6 +183,99 @@ def _apply_attr_diff(current: Mapping[str, Any], diff: Mapping[str, Mapping[str,
     updated["clipped_analysis_metadata_backfilled_at_utc"] = utc_now()
     updated["clipped_analysis_metadata_backfill_tool"] = __name__
     return updated
+
+
+def _validated_source_video_path(source_video_path: Path) -> Path:
+    resolved = source_video_path.expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"Source video not found: {resolved}")
+    if resolved.suffix.lower() not in SUPPORTED_VIDEO_SUFFIXES:
+        raise ValueError(
+            f"Unsupported source video extension {resolved.suffix!r}: {resolved}"
+        )
+    return resolved
+
+
+def _video_location_plan(zarr_path: Path, source_video_path: Path) -> dict[str, Any]:
+    resolved_video = _validated_source_video_path(source_video_path)
+    root_attrs = _load_zarr_attrs(zarr_path)
+    raw_video_path = zarr_path / "raw_video"
+    raw_attrs = _load_zarr_attrs(raw_video_path)
+
+    source_metadata = root_attrs.get("source_video_metadata")
+    if source_metadata is None:
+        source_metadata = {}
+    if not isinstance(source_metadata, Mapping):
+        raise ValueError("Zarr root source_video_metadata is not an object.")
+
+    wanted = str(resolved_video)
+    current = {
+        "root.source_path": root_attrs.get("source_path"),
+        "root.source_video_path": root_attrs.get("source_video_path"),
+        "root.source_video_metadata.source_path": source_metadata.get("source_path"),
+        "raw_video.source_path": raw_attrs.get("source_path"),
+    }
+    changes = {
+        key: {"current": value, "wanted": wanted}
+        for key, value in current.items()
+        if value != wanted
+    }
+    return {
+        "source_video_path": wanted,
+        "changes": changes,
+        "will_update": bool(changes),
+    }
+
+
+def _apply_video_location_plan(
+    zarr_path: Path,
+    plan: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not plan.get("will_update"):
+        return {**dict(plan), "updated": False}
+
+    wanted = str(plan["source_video_path"])
+    changes = plan.get("changes")
+    if not isinstance(changes, Mapping):
+        raise ValueError("Video-location plan changes are not an object.")
+
+    root_attrs = _load_zarr_attrs(zarr_path)
+    raw_video_path = zarr_path / "raw_video"
+    raw_attrs = _load_zarr_attrs(raw_video_path)
+
+    source_metadata = root_attrs.get("source_video_metadata")
+    if source_metadata is None:
+        source_metadata = {}
+    if not isinstance(source_metadata, Mapping):
+        raise ValueError("Zarr root source_video_metadata is not an object.")
+
+    # Write raw_video first because Crimson prefers this field when present.
+    # Each metadata file is replaced atomically by write_json_atomic.
+    updated_raw_attrs = dict(raw_attrs)
+    updated_raw_attrs["source_path"] = wanted
+    _write_zarr_attrs(raw_video_path, updated_raw_attrs)
+
+    repaired_at = utc_now()
+    updated_source_metadata = dict(source_metadata)
+    updated_source_metadata["source_path"] = wanted
+    updated_root_attrs = dict(root_attrs)
+    updated_root_attrs["source_path"] = wanted
+    updated_root_attrs["source_video_path"] = wanted
+    updated_root_attrs["source_video_metadata"] = updated_source_metadata
+    updated_root_attrs["source_video_location_repair"] = {
+        "schema_id": "palette.source_video_location_repair.v1",
+        "repaired_at_utc": repaired_at,
+        "tool": __name__,
+        "source_video_path": wanted,
+        "previous_live_fields": {
+            str(key): item.get("current")
+            for key, item in changes.items()
+            if isinstance(item, Mapping)
+        },
+        "historical_environment_provenance_preserved": True,
+    }
+    _write_zarr_attrs(zarr_path, updated_root_attrs)
+    return {**dict(plan), "updated": True, "repaired_at_utc": repaired_at}
 
 
 def _iter_path_strings(table: pa.Table, columns: Iterable[str]) -> Iterable[str]:
@@ -352,6 +448,7 @@ def backfill_clipped_analysis_metadata(
     zarr_path: Path,
     *,
     recording_root: Path | None = None,
+    source_video_path: Path | None = None,
     registry_path: Path | None = None,
     rewrite_frame_index_paths: bool = False,
     old_root: str | None = None,
@@ -366,6 +463,11 @@ def backfill_clipped_analysis_metadata(
     current_attrs = _load_zarr_attrs(context.zarr_path)
     wanted_attrs = _wanted_attrs(context, manifest)
     attr_diff = _attr_diff(current_attrs, wanted_attrs, force=force)
+    video_location = (
+        _video_location_plan(context.zarr_path, source_video_path)
+        if source_video_path is not None
+        else None
+    )
 
     path_plan: dict[str, Any] | None = None
     if rewrite_frame_index_paths:
@@ -387,6 +489,7 @@ def backfill_clipped_analysis_metadata(
         "recording_id": context.recording_id,
         "frame_index_path": str(context.frame_index_path),
         "attr_changes": attr_diff,
+        "video_location": video_location,
         "path_rewrite": path_plan,
         "registry": registry_result,
     }
@@ -398,6 +501,12 @@ def backfill_clipped_analysis_metadata(
         result["zarr_attrs_updated"] = True
     else:
         result["zarr_attrs_updated"] = False
+
+    if video_location is not None:
+        result["video_location"] = _apply_video_location_plan(
+            context.zarr_path,
+            video_location,
+        )
 
     if rewrite_frame_index_paths and path_plan is not None and path_plan.get("rewrite_count", 0):
         result["path_rewrite"] = _rewrite_frame_index_paths(
@@ -423,6 +532,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("zarr_path", type=Path, help="Clipped analysis Zarr path to repair.")
     parser.add_argument("--recording-root", type=Path, help="Override recording root.")
+    parser.add_argument(
+        "--source-video-path",
+        type=Path,
+        help=(
+            "Repair live root/raw_video source paths to this existing video while "
+            "preserving historical environment provenance."
+        ),
+    )
     parser.add_argument("--registry", type=Path, help="Optional registry SQLite path to update.")
     parser.add_argument("--rewrite-frame-index-paths", action="store_true", help="Rewrite stale active paths inside recording_frame_index.parquet and manifest.")
     parser.add_argument("--old-root", help="Old recording root prefix for frame-index path rewrite.")
@@ -434,6 +551,7 @@ def main(argv: list[str] | None = None) -> int:
     result = backfill_clipped_analysis_metadata(
         args.zarr_path,
         recording_root=args.recording_root,
+        source_video_path=args.source_video_path,
         registry_path=args.registry,
         rewrite_frame_index_paths=args.rewrite_frame_index_paths,
         old_root=args.old_root,
