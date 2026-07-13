@@ -38,6 +38,13 @@ DEFAULT_SHARED_CACHE_ROOT = Path(
 )
 
 
+def cache_contract_snapshot_path(*, run_root: Path, target_id: str) -> Path:
+    """Return the durable planned-contract path consumed by one cache job."""
+
+    safe_target = safe_component(target_id, default="target", max_length=56)
+    return run_root / "cache_contracts" / f"{safe_target}.json"
+
+
 def _cache_contract(cache: FlatRoiCacheBinding) -> dict[str, Any]:
     return {
         "crop_signature": json_ready(cache.crop_signature),
@@ -180,6 +187,10 @@ def build_flat_roi_cache_job(
         / "progress"
         / f"{safe_target}.cache.{RUNTIME_JOB_ID_TOKEN}.jsonl"
     )
+    expected_contract_path = cache_contract_snapshot_path(
+        run_root=run_root,
+        target_id=target_id,
+    )
     worker = (
         str(repo / "scripts" / "py"),
         "-m",
@@ -200,8 +211,8 @@ def build_flat_roi_cache_job(
         str(roi_live_acceleration),
         "--roi-live-gpu-chunk-frames",
         str(int(roi_live_gpu_chunk_frames)),
-        "--expected-contract-json",
-        json.dumps(_cache_contract(cache), sort_keys=True, separators=(",", ":")),
+        "--expected-contract-json-file",
+        str(expected_contract_path),
         "--progress-jsonl",
         str(progress_path),
         "--output-json",
@@ -239,6 +250,7 @@ def build_flat_roi_cache_job(
             "analysis_zarr": str(analysis_zarr),
             "crop_run": cache.crop_run,
             "cache": cache.to_json(),
+            "expected_contract_path": str(expected_contract_path),
             "publish_policy": "payload_first_manifest_last",
         },
     )
@@ -397,7 +409,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--roi-live-acceleration", choices=("auto", "cpu", "gpu"), default="cpu"
     )
     parser.add_argument("--roi-live-gpu-chunk-frames", type=int, default=32)
-    parser.add_argument("--expected-contract-json")
+    expected_contract = parser.add_mutually_exclusive_group()
+    expected_contract.add_argument("--expected-contract-json")
+    expected_contract.add_argument("--expected-contract-json-file", type=Path)
     parser.add_argument("--progress-jsonl", type=Path)
     parser.add_argument("--output-json", type=Path)
     return parser
@@ -405,6 +419,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    expected_contract = None
+    if args.expected_contract_json_file is not None:
+        expected_contract = json.loads(
+            args.expected_contract_json_file.read_text(encoding="utf-8")
+        )
+    elif args.expected_contract_json is not None:
+        expected_contract = json.loads(args.expected_contract_json)
     report = publish_flat_roi_cache(
         analysis_zarr=args.analysis_zarr,
         crop_run=args.crop_run,
@@ -415,11 +436,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         roi_live_acceleration=args.roi_live_acceleration,
         roi_live_gpu_chunk_frames=int(args.roi_live_gpu_chunk_frames),
         progress_jsonl=args.progress_jsonl,
-        expected_contract=(
-            json.loads(args.expected_contract_json)
-            if args.expected_contract_json is not None
-            else None
-        ),
+        expected_contract=expected_contract,
     )
     if args.output_json is not None:
         _write_json_atomic(args.output_json, report)
@@ -435,6 +452,7 @@ __all__ = [
     "DEFAULT_SHARED_CACHE_ROOT",
     "PUBLISH_REPORT_SCHEMA",
     "build_flat_roi_cache_job",
+    "cache_contract_snapshot_path",
     "main",
     "plan_flat_roi_cache_binding",
     "publish_flat_roi_cache",

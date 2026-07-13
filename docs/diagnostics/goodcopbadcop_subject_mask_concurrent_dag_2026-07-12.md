@@ -433,12 +433,28 @@ registry success. Cache paths are confined to:
   goodcopbadcop_prejuly_remaining_20260713_01/
 ```
 
-The initial submission accepted all 90 per-recording jobs, then LSF rejected
-the validation job because its two-hour request exceeded the `short` queue's
-one-hour hard limit. No workload failed and no recording job was resubmitted.
-Validation `153075750` was submitted with the corrected one-hour request and
-the original 18 finalizer dependencies; registry job `153075751` depends on
-validation, and cleanup job `153075752` depends on registry success. The
-immutable original failure and explicit three-job recovery are retained in
-`lsf_submission.json` and `lsf_submission_recovery.json`. The planner default
-is now one hour for future validation jobs.
+The first `v001` submission accepted all 90 per-recording jobs, then LSF
+rejected the validation job because its two-hour request exceeded the `short`
+queue's one-hour hard limit. Validation `153075750`, registry `153075751`, and
+cleanup `153075752` were submitted separately with the corrected one-hour
+validation request.
+
+The eight root cache jobs then exited before decoding any frames. Their worker
+commands carried the planned cache contract as one compact inline JSON
+argument. The LSF command boundary did not preserve that argument as one token;
+`argparse` received the JSON fragments as many unrecognized arguments and
+exited with code 2. All dependent jobs, including the three recovery jobs, were
+therefore terminated as orphans. The NRS cache root was never created, and a
+metadata-only check found none of the exact `v001` keypoint, refined-keypoint,
+raw-mask, or refined-mask run directories in any of the 18 analysis Zarrs.
+`v001` is a failed submission bundle and must not be resumed.
+
+The cache publisher now consumes a durable per-target contract file under the
+run bundle's `cache_contracts/` directory. The compute command passes only the
+file path via `--expected-contract-json-file`; the worker loads the JSON and
+performs the same fail-closed source identity, shape, and byte-count validation.
+Inline JSON remains a compatibility-only CLI surface and is no longer emitted
+by the planner. Focused regression coverage verifies both contract-file
+materialization and worker loading. The planner default is also now one hour
+for validation jobs. A fresh `v002` run label and cache root are required for
+the replacement submission.

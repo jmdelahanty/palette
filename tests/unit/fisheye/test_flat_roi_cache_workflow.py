@@ -129,8 +129,53 @@ def test_cache_job_exposes_planned_artifacts_as_a_reusable_fragment_input(
     assert job.dependency is None
     assert "fisheye.cluster.flat_roi_cache" in job.command
     assert str(manifest) in job.command
-    assert "--expected-contract-json" in job.command
+    assert "--expected-contract-json" not in job.command
+    contract_path = (
+        tmp_path / "run" / "cache_contracts" / "recording_a.json"
+    )
+    assert "--expected-contract-json-file" in job.command
+    assert str(contract_path) in job.command
+    assert job.metadata["expected_contract_path"] == str(contract_path)
     assert job.metadata["publish_policy"] == "payload_first_manifest_last"
+
+
+def test_cache_cli_loads_expected_contract_from_file(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    contract = {
+        "crop_signature": "signature-001",
+        "crop_revision": "revision-001",
+        "shape": [3, 2, 2],
+        "total_bytes": 12,
+    }
+    contract_path = tmp_path / "contract.json"
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+    captured = {}
+
+    def fake_publish(**kwargs):
+        captured.update(kwargs)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(mod, "publish_flat_roi_cache", fake_publish)
+
+    result = mod.main(
+        [
+            "--analysis-zarr",
+            str(tmp_path / "recording.zarr"),
+            "--crop-run",
+            "crop_001",
+            "--manifest-path",
+            str(tmp_path / "cache.json"),
+            "--scratch-dir",
+            str(tmp_path / "scratch"),
+            "--expected-contract-json-file",
+            str(contract_path),
+        ]
+    )
+
+    assert result == 0
+    assert captured["expected_contract"] == contract
 
 
 def test_plan_flat_roi_cache_binding_reads_only_live_crop_contract(

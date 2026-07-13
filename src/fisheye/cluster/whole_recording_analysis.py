@@ -13,6 +13,7 @@ from fisheye.cluster.keypoints import whole_recording as keypoints
 from fisheye.cluster.keypoints.common import safe_component
 from fisheye.cluster.flat_roi_cache import (
     build_flat_roi_cache_job,
+    cache_contract_snapshot_path,
     plan_flat_roi_cache_binding,
 )
 from fisheye.cluster.lsf import (
@@ -783,8 +784,25 @@ def materialize_plan_bundle(plan: WholeRecordingAnalysisPlan) -> dict[str, Any]:
         "registry",
         "validation",
         "cleanup",
+        "cache_contracts",
     ):
         (plan.run_root / name).mkdir(parents=True, exist_ok=True)
+    for target in plan.targets:
+        if target.roi_cache_availability != "planned":
+            continue
+        contract_path = cache_contract_snapshot_path(
+            run_root=plan.run_root,
+            target_id=target.target_id,
+        )
+        contract = dict(target.roi_cache_contract)
+        if contract_path.exists():
+            existing_contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            if existing_contract != contract:
+                raise FileExistsError(
+                    "Run root contains a different planned cache contract: "
+                    f"{contract_path}"
+                )
+        write_json_snapshot(contract_path, contract)
     keypoints.materialize_plan_bundle(plan.keypoint_plan)
     payload = plan.to_json()
     plan_path = plan.run_root / "plan.json"

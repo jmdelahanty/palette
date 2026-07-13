@@ -472,6 +472,12 @@ def test_whole_recording_analysis_composes_cache_builds_into_both_inference_bran
     assert plan.targets[0].roi_cache_availability == "planned"
     assert plan.targets[0].roi_cache_producer_job_key == "cache:target_0"
 
+    analysis_planner.materialize_plan_bundle(plan)
+    contract_path = plan.run_root / "cache_contracts" / "target_0.json"
+    assert json.loads(contract_path.read_text(encoding="utf-8")) == dict(
+        plan.targets[0].roi_cache_contract
+    )
+
 
 def test_whole_recording_analysis_limits_active_targets_with_rolling_gate(
     tmp_path: Path,
