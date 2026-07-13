@@ -1,7 +1,7 @@
 # Heartrate Local Rostral ROI Status - 2026-07-09
 <!-- contract-meta
 status: draft
-last_updated: 2026-07-09
+last_updated: 2026-07-11
 -->
 
 Purpose: record the current state of the heartrate stabilization playground
@@ -9,8 +9,16 @@ after adding subject-mask-relative ROI generation, live-vs-fixed mask
 diagnostics, local rostral-segment alignment, and first-pass local ROI signal
 comparison.
 
+The current combined moving-fish and embedded positive-control summary is in
+[`heartrate_analysis_status_2026-07-11.md`](heartrate_analysis_status_2026-07-11.md).
+
 Current frozen-mask validation results are summarized in
 [`heartrate_frozen_mask_validation_status_2026-07-10.md`](heartrate_frozen_mask_validation_status_2026-07-10.md).
+
+Important: the 2026-07-11 audit withdrew p-values based on the shared
+autocorrelation-preserving surrogate because trace shifts did not carry
+per-pixel validity with them. The observed masks, frequencies, and plots remain
+descriptive; they are not calibrated detections.
 
 ## Bottom Line
 

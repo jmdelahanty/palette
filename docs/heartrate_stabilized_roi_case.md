@@ -1,16 +1,27 @@
 # Heartrate Stabilized ROI Case
 <!-- contract-meta
 status: draft
-last_updated: 2026-07-10
+last_updated: 2026-07-12
 -->
 
 Purpose: document the concrete heartrate use case that needs a fish-attached
 ROI workflow over acquisition crop-video pixels.
 
-Current local-rostral ROI status and results are summarized in
+The final interpretation and reporting boundary are recorded in
+[`heartrate_final_decision_2026-07-12.md`](heartrate_final_decision_2026-07-12.md).
+It supersedes earlier suggestions that the moving-fish window-frequency
+trajectory might be reportable. The full moving-fish and embedded positive-
+control history is summarized in
+[`heartrate_analysis_status_2026-07-11.md`](heartrate_analysis_status_2026-07-11.md).
+The detailed frozen-mask results remain in
 [`heartrate_frozen_mask_validation_status_2026-07-10.md`](heartrate_frozen_mask_validation_status_2026-07-10.md).
 The detailed implementation history remains in
 [`heartrate_local_rostral_roi_status_2026-07-09.md`](heartrate_local_rostral_roi_status_2026-07-09.md).
+
+Important: the 2026-07-11 audit withdrew p-values based on the shared
+autocorrelation-preserving surrogate because trace shifts did not carry
+per-pixel validity with them. The current status is a repeatable candidate
+image pattern, not a calibrated detection or heart-rate measurement.
 
 ## Case
 

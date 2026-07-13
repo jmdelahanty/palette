@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
+import hashlib
 import math
 from typing import Any, Mapping, Sequence
 
@@ -422,14 +424,24 @@ def _crossfit_latent_scores(
     support: np.ndarray,
     frequencies_hz: np.ndarray,
     config: HeartrateConfig,
+    *,
+    residual_cache: dict[int, np.ndarray] | None = None,
+    coefficient_cache: dict[tuple[int, tuple[bytes, ...]], np.ndarray] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Learn pixel phase/polarity on discovery and match it on held-out blocks."""
 
     matched_parts: list[np.ndarray] = []
     coherence_parts: list[np.ndarray] = []
     selected = np.asarray(support, dtype=bool)
-    for model, (discovery_rows, confirmation_rows) in zip(models, partitions):
-        residual = apply_nuisance_model(dataset, model)
+    for model_index, (model, (discovery_rows, confirmation_rows)) in enumerate(
+        zip(models, partitions)
+    ):
+        if residual_cache is None:
+            residual = apply_nuisance_model(dataset, model)
+        else:
+            if model_index not in residual_cache:
+                residual_cache[model_index] = apply_nuisance_model(dataset, model)
+            residual = residual_cache[model_index]
         discovery_chunks = _analysis_chunks(
             dataset,
             discovery_rows,
@@ -444,22 +456,27 @@ def _crossfit_latent_scores(
         )
         if not discovery_chunks or not confirmation_chunks:
             continue
-        discovery_coefficients = _chunk_frequency_coefficients(
-            residual,
-            dataset.timestamps_s,
-            discovery_chunks,
-            frequencies_hz,
-            min_valid_fraction=float(config.min_chunk_valid_fraction),
-            max_interpolated_gap_seconds=float(config.max_interpolated_gap_seconds),
-        )
-        confirmation_coefficients = _chunk_frequency_coefficients(
-            residual,
-            dataset.timestamps_s,
-            confirmation_chunks,
-            frequencies_hz,
-            min_valid_fraction=float(config.min_chunk_valid_fraction),
-            max_interpolated_gap_seconds=float(config.max_interpolated_gap_seconds),
-        )
+        def coefficients_for(chunks: Sequence[np.ndarray]) -> np.ndarray:
+            key = (
+                model_index,
+                tuple(np.asarray(rows, dtype=np.int64).tobytes() for rows in chunks),
+            )
+            if coefficient_cache is not None and key in coefficient_cache:
+                return coefficient_cache[key]
+            values = _chunk_frequency_coefficients(
+                residual,
+                dataset.timestamps_s,
+                chunks,
+                frequencies_hz,
+                min_valid_fraction=float(config.min_chunk_valid_fraction),
+                max_interpolated_gap_seconds=float(config.max_interpolated_gap_seconds),
+            )
+            if coefficient_cache is not None:
+                coefficient_cache[key] = values
+            return values
+
+        discovery_coefficients = coefficients_for(discovery_chunks)
+        confirmation_coefficients = coefficients_for(confirmation_chunks)
         loading = _finite_complex_mean(discovery_coefficients, axis=1)
         matched = np.full(
             (len(frequencies_hz), len(confirmation_chunks)),
@@ -1164,3 +1181,412 @@ def analyze_dynamic_heart_support(
             latent_alignment[selected_index], dtype=np.float64
         ),
     )
+
+
+@dataclass(frozen=True)
+class DynamicSupportNullBatch:
+    """Deterministic shared-surrogate scores for several frozen masks."""
+
+    surrogate_indices: np.ndarray
+    support_scores: Mapping[str, np.ndarray]
+    shared_phase_scores: Mapping[str, np.ndarray]
+    latent_scores: Mapping[str, np.ndarray]
+
+
+@dataclass(frozen=True)
+class DynamicSupportNullContext:
+    """Mask-invariant and mask-specific geometry reused by null batches."""
+
+    names: tuple[str, ...]
+    mask_fingerprints: Mapping[str, str]
+    frequency_bounds_hz: tuple[float, float]
+    partitions: tuple[tuple[np.ndarray, np.ndarray], ...]
+    groups_by_name: Mapping[str, Mapping[str, np.ndarray]]
+    chunks_by_name: Mapping[str, tuple[np.ndarray, ...]]
+    active_rows: np.ndarray
+    frequencies_hz: np.ndarray
+
+
+def prepare_dynamic_support_null_context(
+    dataset: LocalCoordinateDataset,
+    config: HeartrateConfig,
+    result: HeartrateResult,
+    *,
+    heart_masks: Mapping[str, np.ndarray],
+    frequency_min_hz: float,
+    frequency_max_hz: float,
+) -> DynamicSupportNullContext:
+    """Prepare fixed geometry once for any number of surrogate batches."""
+
+    dataset.validated()
+    config.validated()
+    names = tuple(heart_masks)
+    if not names:
+        raise ValueError("heart_masks cannot be empty")
+    if len(set(names)) != len(names):
+        raise ValueError("heart mask names must be unique")
+    if not float(frequency_min_hz) < float(frequency_max_hz):
+        raise ValueError("frequency bounds must be increasing")
+    risks = build_risk_surfaces(dataset, config)
+    partitions = balanced_valid_partitions(dataset, risks, config)
+    groups_by_name = {
+        name: _build_pixel_groups(
+            dataset,
+            result,
+            risks.eligible,
+            heart_mask=np.asarray(heart_masks[name], dtype=bool),
+            esophagus_mask=None,
+        )[0]
+        for name in names
+    }
+    active_rows = np.logical_or.reduce(
+        [np.asarray(confirmation, dtype=bool) for _discovery, confirmation in partitions]
+    )
+    chunks_by_name = {
+        name: tuple(
+            _analysis_chunks(
+                dataset,
+                active_rows,
+                groups_by_name[name]["heart_support"],
+                config,
+            )
+        )
+        for name in names
+    }
+    if any(len(chunks) < 2 for chunks in chunks_by_name.values()):
+        raise ValueError("dynamic support analysis requires at least two held-out blocks per mask")
+    full_grid = _frequency_grid(config)
+    frequencies = full_grid[
+        (full_grid >= float(frequency_min_hz))
+        & (full_grid <= float(frequency_max_hz))
+    ]
+    if frequencies.size == 0:
+        raise ValueError("dynamic frequency grid is empty")
+    return DynamicSupportNullContext(
+        names=names,
+        mask_fingerprints={
+            name: hashlib.sha256(
+                np.asarray(heart_masks[name], dtype=np.uint8).tobytes()
+            ).hexdigest()
+            for name in names
+        },
+        frequency_bounds_hz=(float(frequency_min_hz), float(frequency_max_hz)),
+        partitions=tuple(partitions),
+        groups_by_name=groups_by_name,
+        chunks_by_name=chunks_by_name,
+        active_rows=active_rows,
+        frequencies_hz=frequencies,
+    )
+
+
+def compute_dynamic_support_null_batch(
+    dataset: LocalCoordinateDataset,
+    config: HeartrateConfig,
+    result: HeartrateResult,
+    *,
+    heart_masks: Mapping[str, np.ndarray],
+    surrogate_indices: Sequence[int],
+    seed: int,
+    frequency_min_hz: float,
+    frequency_max_hz: float,
+    workers: int = 1,
+    context: DynamicSupportNullContext | None = None,
+) -> DynamicSupportNullBatch:
+    """Score frozen masks using one nuisance fit and coefficient pass per surrogate.
+
+    A surrogate's random stream is determined only by ``seed`` and its global
+    index. Splitting the indices into batches or changing ``workers`` therefore
+    cannot change the resulting null samples.
+    """
+
+    names = tuple(heart_masks)
+    indices = np.asarray(surrogate_indices, dtype=np.int64)
+    if indices.ndim != 1 or np.any(indices < 0):
+        raise ValueError("surrogate_indices must be a one-dimensional nonnegative sequence")
+    if np.unique(indices).size != indices.size:
+        raise ValueError("surrogate_indices must be unique")
+    worker_count = int(workers)
+    if worker_count < 1:
+        raise ValueError("workers must be positive")
+    prepared = context or prepare_dynamic_support_null_context(
+        dataset,
+        config,
+        result,
+        heart_masks=heart_masks,
+        frequency_min_hz=float(frequency_min_hz),
+        frequency_max_hz=float(frequency_max_hz),
+    )
+    if prepared.names != names:
+        raise ValueError("dynamic null context mask names do not match heart_masks")
+    fingerprints = {
+        name: hashlib.sha256(
+            np.asarray(heart_masks[name], dtype=np.uint8).tobytes()
+        ).hexdigest()
+        for name in names
+    }
+    if prepared.mask_fingerprints != fingerprints:
+        raise ValueError("dynamic null context masks do not match heart_masks")
+    if prepared.frequency_bounds_hz != (
+        float(frequency_min_hz),
+        float(frequency_max_hz),
+    ):
+        raise ValueError("dynamic null context frequency bounds do not match")
+    partitions = prepared.partitions
+    groups_by_name = prepared.groups_by_name
+    active_rows = prepared.active_rows
+    chunks_by_name = prepared.chunks_by_name
+    frequencies = prepared.frequencies_hz
+
+    def score_one(surrogate_index: int) -> dict[str, tuple[float, float, float]]:
+        rng = np.random.default_rng(
+            np.random.SeedSequence([int(seed), int(surrogate_index)])
+        )
+        surrogate = autocorrelation_preserving_surrogate(
+            dataset,
+            active_rows,
+            rng=rng,
+            spatial_block_px=int(config.surrogate_spatial_block_px),
+            min_shift_seconds=float(config.surrogate_min_shift_seconds),
+            max_gap_factor=float(config.max_timestamp_gap_factor),
+        )
+        surrogate_residual, _fold, _active, surrogate_models = _crossfit_residual(
+            surrogate,
+            result,
+            partitions,
+            refit_nuisance=True,
+            nuisance_ridge=float(config.nuisance_ridge),
+        )
+        coefficient_cache: dict[tuple[bytes, ...], np.ndarray] = {}
+        latent_residual_cache: dict[int, np.ndarray] = {}
+        latent_coefficient_cache: dict[
+            tuple[int, tuple[bytes, ...]], np.ndarray
+        ] = {}
+        scores: dict[str, tuple[float, float, float]] = {}
+        for name in names:
+            groups = groups_by_name[name]
+            chunks = chunks_by_name[name]
+            chunk_key = tuple(
+                np.asarray(rows, dtype=np.int64).tobytes() for rows in chunks
+            )
+            coefficients = coefficient_cache.get(chunk_key)
+            if coefficients is None:
+                coefficients = _chunk_frequency_coefficients(
+                    surrogate_residual,
+                    surrogate.timestamps_s,
+                    chunks,
+                    frequencies,
+                    min_valid_fraction=float(config.min_chunk_valid_fraction),
+                    max_interpolated_gap_seconds=float(
+                        config.max_interpolated_gap_seconds
+                    ),
+                )
+                coefficient_cache[chunk_key] = coefficients
+            support_aggregate = _aggregate_coefficients(
+                coefficients,
+                groups["heart_support"],
+            )
+            support_spatial = _spatial_phase_coherence(
+                coefficients,
+                groups["heart_support"],
+            )
+            support_scores = _temporal_coherence_score(
+                support_aggregate,
+                support_spatial,
+            )
+            shared_scores = _shared_phase_frequency_scores(
+                coefficients,
+                frequencies,
+                groups,
+                support_scores,
+            )
+            latent_scores, _matched, _alignment = _crossfit_latent_scores(
+                surrogate,
+                partitions,
+                surrogate_models,
+                groups["heart_support"],
+                frequencies,
+                config,
+                residual_cache=latent_residual_cache,
+                coefficient_cache=latent_coefficient_cache,
+            )
+            scores[name] = (
+                float(np.nanmax(support_scores)),
+                float(np.nanmax(shared_scores)),
+                float(np.nanmax(latent_scores)),
+            )
+        return scores
+
+    if worker_count == 1:
+        rows = [score_one(int(index)) for index in indices]
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            rows = list(executor.map(score_one, indices.tolist()))
+    return DynamicSupportNullBatch(
+        surrogate_indices=indices.copy(),
+        support_scores={
+            name: np.asarray([row[name][0] for row in rows], dtype=np.float64)
+            for name in names
+        },
+        shared_phase_scores={
+            name: np.asarray([row[name][1] for row in rows], dtype=np.float64)
+            for name in names
+        },
+        latent_scores={
+            name: np.asarray([row[name][2] for row in rows], dtype=np.float64)
+            for name in names
+        },
+    )
+
+
+def attach_dynamic_support_nulls(
+    result: DynamicHeartSupportResult,
+    config: HeartrateConfig,
+    *,
+    support_scores: np.ndarray,
+    shared_phase_scores: np.ndarray,
+    latent_scores: np.ndarray,
+) -> DynamicHeartSupportResult:
+    """Attach merged null samples while preserving the single-mask decisions."""
+
+    null_support = np.asarray(support_scores, dtype=np.float64)
+    null_shared = np.asarray(shared_phase_scores, dtype=np.float64)
+    null_latent = np.asarray(latent_scores, dtype=np.float64)
+    if not (null_support.ndim == null_shared.ndim == null_latent.ndim == 1):
+        raise ValueError("dynamic null arrays must be one-dimensional")
+    if not (null_support.size == null_shared.size == null_latent.size):
+        raise ValueError("dynamic null arrays must have equal lengths")
+    count = int(null_support.size)
+
+    def decision(observed: float, null: np.ndarray) -> tuple[float, bool]:
+        if not count:
+            return 1.0, False
+        p_value = float(1 + np.count_nonzero(null >= observed)) / float(count + 1)
+        threshold = float(
+            np.quantile(null, 1.0 - float(config.alpha), method="higher")
+        )
+        return p_value, bool(p_value <= float(config.alpha) and observed > threshold)
+
+    support_p, support_exceeds = decision(result.support_score, null_support)
+    shared_p, shared_exceeds = decision(result.shared_phase_score, null_shared)
+    latent_p, latent_exceeds = decision(result.latent_score, null_latent)
+    comparison_names = [
+        name
+        for name in ("fold0_only", "fold1_only", "anatomical_only")
+        if int(result.group_summary[name]["pixel_count"]) > 0
+    ]
+    insufficient = any(
+        int(result.group_summary[name]["active_block_count"]) < 2
+        for name in comparison_names
+    )
+    stable = bool(
+        comparison_names
+        and not insufficient
+        and all(
+            float(result.group_summary[name]["phase_offset_concentration"]) >= 0.8
+            for name in comparison_names
+        )
+    )
+    if insufficient:
+        phase_pattern = "insufficient_exclusive_region_amplitude"
+    elif stable and support_exceeds and shared_exceeds:
+        phase_pattern = "stable_exclusive_region_phase_relationship_above_joint_null"
+    elif stable:
+        phase_pattern = "stable_offsets_without_joint_support_significance"
+    else:
+        phase_pattern = "exclusive_region_phase_relationship_not_stable"
+    if not result.confirmatory_eligible:
+        interpretation = "exploratory_only_support_was_not_independently_prespecified"
+    elif not latent_exceeds:
+        interpretation = "crossfit_latent_anatomical_pattern_not_significant"
+    else:
+        interpretation = "fixed_anatomical_support_has_confirmatory_latent_pattern_evidence"
+    return replace(
+        result,
+        interpretation=interpretation,
+        phase_pattern=phase_pattern,
+        support_p_value=support_p,
+        support_exceeds_null=support_exceeds,
+        shared_phase_p_value=shared_p,
+        shared_phase_exceeds_null=shared_exceeds,
+        joint_p_value=max(support_p, shared_p),
+        joint_exceeds_null=bool(support_exceeds and shared_exceeds),
+        latent_p_value=latent_p,
+        latent_exceeds_null=latent_exceeds,
+        null_max_support_scores=null_support,
+        null_max_shared_phase_scores=null_shared,
+        null_max_latent_scores=null_latent,
+    )
+
+
+def analyze_dynamic_heart_support_masks(
+    dataset: LocalCoordinateDataset,
+    config: HeartrateConfig,
+    result: HeartrateResult,
+    *,
+    heart_masks: Mapping[str, np.ndarray],
+    frequency_min_hz: float,
+    frequency_max_hz: float,
+    surrogate_count: int,
+    seed: int,
+    surrogate_batch_size: int = 25,
+    surrogate_workers: int = 1,
+) -> dict[str, DynamicHeartSupportResult]:
+    """Analyze frozen masks with deterministic, batched shared surrogates."""
+
+    count = int(surrogate_count)
+    batch_size = int(surrogate_batch_size)
+    if count < 0:
+        raise ValueError("surrogate_count cannot be negative")
+    if batch_size < 1:
+        raise ValueError("surrogate_batch_size must be positive")
+    observed = {
+        name: analyze_dynamic_heart_support(
+            dataset,
+            config,
+            result,
+            heart_mask=mask,
+            mask_is_independent=True,
+            frequency_min_hz=float(frequency_min_hz),
+            frequency_max_hz=float(frequency_max_hz),
+            surrogate_count=0,
+        )
+        for name, mask in heart_masks.items()
+    }
+    null_support = {name: [] for name in heart_masks}
+    null_shared = {name: [] for name in heart_masks}
+    null_latent = {name: [] for name in heart_masks}
+    context = prepare_dynamic_support_null_context(
+        dataset,
+        config,
+        result,
+        heart_masks=heart_masks,
+        frequency_min_hz=float(frequency_min_hz),
+        frequency_max_hz=float(frequency_max_hz),
+    )
+    for start in range(0, count, batch_size):
+        batch = compute_dynamic_support_null_batch(
+            dataset,
+            config,
+            result,
+            heart_masks=heart_masks,
+            surrogate_indices=range(start, min(start + batch_size, count)),
+            seed=int(seed),
+            frequency_min_hz=float(frequency_min_hz),
+            frequency_max_hz=float(frequency_max_hz),
+            workers=int(surrogate_workers),
+            context=context,
+        )
+        for name in heart_masks:
+            null_support[name].append(batch.support_scores[name])
+            null_shared[name].append(batch.shared_phase_scores[name])
+            null_latent[name].append(batch.latent_scores[name])
+    return {
+        name: attach_dynamic_support_nulls(
+            observed[name],
+            config,
+            support_scores=np.concatenate(null_support[name]) if count else np.empty(0),
+            shared_phase_scores=np.concatenate(null_shared[name]) if count else np.empty(0),
+            latent_scores=np.concatenate(null_latent[name]) if count else np.empty(0),
+        )
+        for name in heart_masks
+    }

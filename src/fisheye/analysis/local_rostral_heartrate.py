@@ -921,6 +921,116 @@ def _spatial_block_ids(pixel_xy: np.ndarray, block_px: int) -> np.ndarray:
     return output
 
 
+def _surrogate_shift_plan(
+    dataset: LocalCoordinateDataset,
+    active_rows: np.ndarray,
+    *,
+    min_shift_seconds: float,
+    max_gap_factor: float,
+) -> list[tuple[np.ndarray, dict[str, Any]]]:
+    active = np.asarray(active_rows, dtype=bool)
+    if active.shape != (dataset.frame_count,):
+        raise ValueError("active_rows must match the dataset frame axis")
+    if float(min_shift_seconds) < 0.0:
+        raise ValueError("min_shift_seconds cannot be negative")
+    if float(max_gap_factor) <= 1.0:
+        raise ValueError("max_gap_factor must exceed one")
+    segments = contiguous_segments(
+        dataset.timestamps_s,
+        active,
+        max_gap_factor=float(max_gap_factor),
+    )
+    timestamps = np.asarray(dataset.timestamps_s, dtype=np.float64)
+    plan: list[tuple[np.ndarray, dict[str, Any]]] = []
+    for segment_index, segment in enumerate(segments):
+        size = int(segment.size)
+        dt = (
+            float(np.median(np.diff(timestamps[segment])))
+            if size > 1
+            else math.nan
+        )
+        requested = (
+            max(1, int(math.ceil(float(min_shift_seconds) / dt)))
+            if np.isfinite(dt) and dt > 0.0
+            else 0
+        )
+        maximum_circular = size // 2
+        if size < 4:
+            effective = 0
+            policy = "unchanged_too_short"
+            fallback = False
+        elif requested <= maximum_circular:
+            effective = requested
+            policy = "requested_minimum"
+            fallback = False
+        else:
+            # The requested circular separation cannot fit. Preserve the prior
+            # randomized middle-half behavior, but report its weaker bound.
+            effective = max(1, size // 4)
+            policy = "middle_half_fallback_requested_infeasible"
+            fallback = True
+        details: dict[str, Any] = {
+            "segment_index": int(segment_index),
+            "start_row": int(segment[0]) if size else -1,
+            "stop_row_inclusive": int(segment[-1]) if size else -1,
+            "row_count": size,
+            "nominal_sample_interval_seconds": dt,
+            "requested_minimum_shift_frames": requested,
+            "maximum_feasible_circular_shift_frames": maximum_circular,
+            "requested_minimum_feasible": bool(
+                size >= 4 and requested <= maximum_circular
+            ),
+            "effective_minimum_circular_shift_frames": effective,
+            "effective_minimum_circular_shift_seconds": (
+                float(effective * dt) if effective and np.isfinite(dt) else 0.0
+            ),
+            "sampling_shift_lower_bound_frames": effective,
+            "sampling_shift_upper_bound_frames": (
+                int(size - effective) if effective else 0
+            ),
+            "fallback_used": fallback,
+            "policy": policy,
+        }
+        plan.append((segment, details))
+    return plan
+
+
+def autocorrelation_surrogate_shift_diagnostics(
+    dataset: LocalCoordinateDataset,
+    active_rows: np.ndarray,
+    *,
+    min_shift_seconds: float,
+    max_gap_factor: float,
+) -> dict[str, Any]:
+    """Describe requested and effective circular-shift bounds by segment."""
+
+    plan = _surrogate_shift_plan(
+        dataset,
+        active_rows,
+        min_shift_seconds=float(min_shift_seconds),
+        max_gap_factor=float(max_gap_factor),
+    )
+    segments = [details.copy() for _rows, details in plan]
+    return {
+        "policy": (
+            "requested_minimum_when_circularly_feasible; otherwise randomized_"
+            "middle_half_fallback; segments_shorter_than_four_rows_unchanged"
+        ),
+        "requested_minimum_shift_seconds": float(min_shift_seconds),
+        "segment_count": len(segments),
+        "requested_feasible_segment_count": int(
+            sum(bool(item["requested_minimum_feasible"]) for item in segments)
+        ),
+        "fallback_segment_count": int(
+            sum(bool(item["fallback_used"]) for item in segments)
+        ),
+        "unchanged_too_short_segment_count": int(
+            sum(item["policy"] == "unchanged_too_short" for item in segments)
+        ),
+        "segments": segments,
+    }
+
+
 def autocorrelation_preserving_surrogate(
     dataset: LocalCoordinateDataset,
     active_rows: np.ndarray,
@@ -930,33 +1040,62 @@ def autocorrelation_preserving_surrogate(
     min_shift_seconds: float,
     max_gap_factor: float,
 ) -> LocalCoordinateDataset:
+    """Shift trace samples and their per-pixel validity with one shared roll.
+
+    The requested minimum circular separation is used whenever it fits. Shorter
+    segments retain the historical randomized middle-half fallback, which is
+    recorded explicitly in the returned dataset metadata.
+    """
+
     traces = np.asarray(dataset.traces, dtype=np.float64).copy()
-    segments = contiguous_segments(
-        dataset.timestamps_s,
-        np.asarray(active_rows, dtype=bool),
+    pixel_valid = np.asarray(dataset.pixel_valid, dtype=bool).copy()
+    plan = _surrogate_shift_plan(
+        dataset,
+        active_rows,
+        min_shift_seconds=float(min_shift_seconds),
         max_gap_factor=float(max_gap_factor),
     )
     block_ids = _spatial_block_ids(dataset.pixel_xy, int(spatial_block_px))
-    timestamps = np.asarray(dataset.timestamps_s, dtype=np.float64)
-    for segment in segments:
-        if segment.size < 4:
+    for segment, details in plan:
+        effective_minimum = int(
+            details["effective_minimum_circular_shift_frames"]
+        )
+        if effective_minimum < 1:
             continue
-        dt = float(np.median(np.diff(timestamps[segment])))
-        requested_minimum = max(1, int(math.ceil(float(min_shift_seconds) / dt)))
-        # Short valid segments still need independent random surrogates. Restrict
-        # shifts to the middle half when the requested temporal separation does
-        # not fit, instead of deterministically rolling every segment by half.
-        minimum = min(requested_minimum, max(1, int(segment.size // 4)))
         for block in np.unique(block_ids).tolist():
             pixels = np.flatnonzero(block_ids == int(block))
-            shift = int(rng.integers(minimum, int(segment.size) - minimum + 1))
+            shift = int(
+                rng.integers(
+                    effective_minimum,
+                    int(segment.size) - effective_minimum + 1,
+                )
+            )
             traces[np.ix_(segment, pixels)] = np.roll(
                 traces[np.ix_(segment, pixels)],
                 shift=shift,
                 axis=0,
             )
-    surrogate_valid = np.asarray(dataset.pixel_valid, dtype=bool) & np.isfinite(traces)
-    return replace(dataset, traces=traces, pixel_valid=surrogate_valid)
+            pixel_valid[np.ix_(segment, pixels)] = np.roll(
+                pixel_valid[np.ix_(segment, pixels)],
+                shift=shift,
+                axis=0,
+            )
+    surrogate_valid = pixel_valid & np.isfinite(traces)
+    metadata = dict(dataset.metadata)
+    metadata["autocorrelation_surrogate_shift"] = (
+        autocorrelation_surrogate_shift_diagnostics(
+            dataset,
+            active_rows,
+            min_shift_seconds=float(min_shift_seconds),
+            max_gap_factor=float(max_gap_factor),
+        )
+    )
+    return replace(
+        dataset,
+        traces=traces,
+        pixel_valid=surrogate_valid,
+        metadata=metadata,
+    )
 
 
 def calibrate_discovery(

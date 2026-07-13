@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 
 import numpy as np
 from scipy import ndimage, signal
 
+from fisheye.analysis.consensus_heart_mask import (
+    ConsensusMaskConfig,
+    contiguous_outer_partitions,
+    familywise_max_p_values,
+    learn_consensus_heart_mask,
+)
 from fisheye.analysis.dynamic_heart_support import (
     CrossfitHeartPhaseSeries,
     analyze_dynamic_heart_support,
+    compute_dynamic_support_null_batch,
+    prepare_dynamic_support_null_context,
     reconstruct_crossfit_heart_phase,
 )
 from fisheye.analysis.local_rostral_heartrate import (
@@ -18,6 +27,7 @@ from fisheye.analysis.local_rostral_heartrate import (
     alternating_block_partitions,
     analyze_heartrate,
     autocorrelation_preserving_surrogate,
+    autocorrelation_surrogate_shift_diagnostics,
     bilinear_sample,
     build_risk_surfaces,
     bridge_short_gaps,
@@ -207,12 +217,245 @@ def test_short_segment_surrogates_are_randomized_not_deterministic() -> None:
     assert not np.allclose(first.traces[active], second.traces[active], equal_nan=True)
 
 
+def test_surrogate_shift_bounds_use_requested_distance_when_feasible() -> None:
+    base = _synthetic_dataset()
+    traces = np.arange(
+        base.frame_count * base.pixel_count, dtype=np.float64
+    ).reshape(base.frame_count, base.pixel_count)
+    dataset = replace(
+        base,
+        traces=traces,
+        pixel_valid=np.ones(traces.shape, dtype=bool),
+    ).validated()
+    dt = float(np.median(np.diff(dataset.timestamps_s)))
+    cases = (
+        (20, 8, 8, False),
+        (20, 10, 10, False),
+        (20, 11, 5, True),
+        (21, 10, 10, False),
+        (21, 11, 5, True),
+    )
+    for segment_size, requested_frames, effective_frames, fallback in cases:
+        active = np.zeros(dataset.frame_count, dtype=bool)
+        active[:segment_size] = True
+        requested_seconds = (requested_frames - 0.25) * dt
+        surrogate = autocorrelation_preserving_surrogate(
+            dataset,
+            active,
+            rng=np.random.default_rng(301 + requested_frames + segment_size),
+            spatial_block_px=2,
+            min_shift_seconds=requested_seconds,
+            max_gap_factor=1.75,
+        )
+        diagnostics = autocorrelation_surrogate_shift_diagnostics(
+            dataset,
+            active,
+            min_shift_seconds=requested_seconds,
+            max_gap_factor=1.75,
+        )
+        assert surrogate.metadata["autocorrelation_surrogate_shift"] == diagnostics
+        assert diagnostics["segment_count"] == 1
+        details = diagnostics["segments"][0]
+        assert details["requested_minimum_shift_frames"] == requested_frames
+        assert details["effective_minimum_circular_shift_frames"] == effective_frames
+        assert details["requested_minimum_feasible"] is (not fallback)
+        assert details["fallback_used"] is fallback
+
+        anchor_rows = np.flatnonzero(
+            surrogate.traces[:segment_size, 0] == dataset.traces[0, 0]
+        )
+        assert anchor_rows.size == 1
+        shift = int(anchor_rows[0])
+        circular_distance = min(shift, segment_size - shift)
+        assert circular_distance >= effective_frames
+        if not fallback:
+            assert circular_distance >= requested_frames
+
+    active = np.zeros(dataset.frame_count, dtype=bool)
+    active[:3] = True
+    too_short = autocorrelation_preserving_surrogate(
+        dataset,
+        active,
+        rng=np.random.default_rng(411),
+        spatial_block_px=2,
+        min_shift_seconds=dt,
+        max_gap_factor=1.75,
+    )
+    details = too_short.metadata["autocorrelation_surrogate_shift"]["segments"][0]
+    assert details["policy"] == "unchanged_too_short"
+    assert details["effective_minimum_circular_shift_frames"] == 0
+    assert details["requested_minimum_feasible"] is False
+    assert details["fallback_used"] is False
+    np.testing.assert_array_equal(too_short.traces[:3], dataset.traces[:3])
+
+
+def test_surrogate_shifts_pixel_validity_with_its_trace_exactly() -> None:
+    base = _synthetic_dataset()
+    traces = np.asarray(base.traces, dtype=np.float64).copy()
+    pixel_valid = np.ones(traces.shape, dtype=bool)
+    pixel_valid[15:29, 0] = False
+    pixel_valid[80:87, 0] = False
+    pixel_valid[42:58, 3] = False
+    pixel_valid[120:133, 6] = False
+    traces[~pixel_valid] = np.nan
+    dataset = replace(
+        base, traces=traces, pixel_valid=pixel_valid
+    ).validated()
+
+    surrogate = autocorrelation_preserving_surrogate(
+        dataset,
+        np.ones(dataset.frame_count, dtype=bool),
+        rng=np.random.default_rng(509),
+        spatial_block_px=2,
+        min_shift_seconds=0.5,
+        max_gap_factor=1.75,
+    )
+
+    np.testing.assert_array_equal(
+        np.sum(surrogate.pixel_valid, axis=0),
+        np.sum(dataset.pixel_valid, axis=0),
+    )
+    for pixel in range(dataset.pixel_count):
+        original_anchor = float(dataset.traces[0, pixel])
+        anchor_rows = np.flatnonzero(surrogate.traces[:, pixel] == original_anchor)
+        assert anchor_rows.size == 1
+        shift = int(anchor_rows[0])
+        np.testing.assert_array_equal(
+            surrogate.pixel_valid[:, pixel],
+            np.roll(dataset.pixel_valid[:, pixel], shift),
+        )
+        np.testing.assert_allclose(
+            surrogate.traces[:, pixel],
+            np.roll(dataset.traces[:, pixel], shift),
+            equal_nan=True,
+        )
+
+
+def test_all_valid_surrogate_trace_stream_is_backward_deterministic() -> None:
+    base = _synthetic_dataset()
+    traces = np.arange(
+        base.frame_count * base.pixel_count, dtype=np.float64
+    ).reshape(base.frame_count, base.pixel_count)
+    dataset = replace(
+        base,
+        traces=traces,
+        pixel_valid=np.ones(traces.shape, dtype=bool),
+    ).validated()
+
+    surrogate = autocorrelation_preserving_surrogate(
+        dataset,
+        np.ones(dataset.frame_count, dtype=bool),
+        rng=np.random.default_rng(902),
+        spatial_block_px=2,
+        min_shift_seconds=1.0,
+        max_gap_factor=1.75,
+    )
+
+    digest = hashlib.sha256(np.asarray(surrogate.traces).tobytes()).hexdigest()
+    assert digest == "34360945cc27b0c7e96c84aea952ffd652ecc57215c09b35c056824d7251788c"
+    np.testing.assert_array_equal(surrogate.pixel_valid, dataset.pixel_valid)
+    details = surrogate.metadata["autocorrelation_surrogate_shift"]["segments"][0]
+    assert details["requested_minimum_shift_frames"] == 51
+    assert details["effective_minimum_circular_shift_frames"] == 51
+    assert details["fallback_used"] is False
+
+
 def test_administrative_boundary_is_report_only() -> None:
     dataset = _synthetic_dataset()
     risks = build_risk_surfaces(dataset, _test_config(surrogate_count=0))
 
     assert np.all(risks.administrative_boundary_distance_px == 0.0)
     assert np.all(risks.eligible)
+
+
+def test_consensus_outer_partitions_are_contiguous_and_guarded() -> None:
+    dataset = _synthetic_dataset()
+    config = ConsensusMaskConfig(
+        outer_fold_count=5,
+        outer_guard_seconds=0.2,
+        min_selection_folds=3,
+        min_confirmed_outer_folds=3,
+        consensus_surrogate_count=0,
+        heldout_surrogate_count=0,
+        alpha=0.1,
+    )
+
+    partitions = contiguous_outer_partitions(dataset, config)
+
+    assert len(partitions) == 5
+    timestamps = np.asarray(dataset.timestamps_s, dtype=np.float64)
+    for discovery, confirmation in partitions:
+        assert not np.any(discovery & confirmation)
+        confirmation_times = timestamps[confirmation]
+        assert confirmation_times.size > 0
+        assert np.all(np.diff(np.flatnonzero(confirmation)) == 1)
+        discovery_times = timestamps[discovery]
+        distance = np.min(
+            np.abs(discovery_times[:, None] - confirmation_times[[0, -1]][None, :])
+        )
+        assert distance >= 0.39
+
+
+def test_consensus_mask_recovers_stable_source_across_outer_folds() -> None:
+    dataset = _synthetic_dataset(amplitude=3.0, seed=41)
+    analysis = _test_config(surrogate_count=0, min_control_ratio=1.0)
+    consensus = ConsensusMaskConfig(
+        outer_fold_count=5,
+        outer_guard_seconds=0.2,
+        min_selection_folds=3,
+        min_confirmed_outer_folds=3,
+        consensus_surrogate_count=9,
+        heldout_surrogate_count=9,
+        alpha=0.2,
+        random_seed=43,
+    )
+
+    result = learn_consensus_heart_mask(dataset, analysis, consensus)
+
+    assert result.detected is True
+    assert result.reason == "consensus_mask_detected"
+    assert result.confirmed_outer_fold_count >= 3
+    assert np.count_nonzero(result.consensus_pixels) >= 4
+    assert abs(result.median_candidate_frequency_hz - 2.2) <= 0.1
+    assert np.all(result.selection_counts[result.consensus_pixels] >= 3)
+
+
+def test_consensus_mask_has_explicit_empty_result_without_null_calibration() -> None:
+    dataset = _synthetic_dataset(amplitude=3.0, seed=47)
+    result = learn_consensus_heart_mask(
+        dataset,
+        _test_config(surrogate_count=0),
+        ConsensusMaskConfig(
+            outer_fold_count=5,
+            outer_guard_seconds=0.2,
+            min_selection_folds=3,
+            min_confirmed_outer_folds=3,
+            consensus_surrogate_count=0,
+            heldout_surrogate_count=0,
+            alpha=0.1,
+            random_seed=49,
+        ),
+    )
+
+    assert result.detected is False
+    assert result.reason == "consensus_null_not_run"
+    assert np.count_nonzero(result.consensus_pixels) == 0
+
+
+def test_familywise_mask_comparison_uses_shared_maximum_null() -> None:
+    p_values, threshold, exceeds, maximum = familywise_max_p_values(
+        {"first": 6.0, "second": 4.0},
+        {
+            "first": np.asarray([1.0, 2.0, 5.0, 3.0]),
+            "second": np.asarray([2.0, 4.0, 3.0, 1.0]),
+        },
+        alpha=0.25,
+    )
+
+    assert maximum.tolist() == [2.0, 4.0, 5.0, 3.0]
+    assert threshold == 5.0
+    assert p_values == {"first": 0.2, "second": 0.6}
+    assert exceeds == {"first": True, "second": False}
 
 
 def test_null_data_produces_explicit_no_estimate() -> None:
@@ -461,6 +704,68 @@ def test_dynamic_support_accepts_independently_frozen_anatomical_mask() -> None:
     assert dynamic.frequency_search_source == "explicit_prespecified_bounds"
     assert dynamic.confirmatory_eligible is True
     assert np.count_nonzero(dynamic.pixel_groups["heart_support"]) == 9
+
+
+def test_shared_dynamic_nulls_are_invariant_to_batching_and_workers() -> None:
+    dataset, config, result, _fold1_only = _dynamic_support_fixture()
+    union = (
+        result.folds[0].discovery.candidate.cluster_mask
+        | result.folds[1].discovery.candidate.cluster_mask
+    )
+    masks = {"first": union, "second": union.copy()}
+    context = prepare_dynamic_support_null_context(
+        dataset,
+        config,
+        result,
+        heart_masks=masks,
+        frequency_min_hz=1.9,
+        frequency_max_hz=2.5,
+    )
+    kwargs = {
+        "heart_masks": masks,
+        "seed": 71,
+        "frequency_min_hz": 1.9,
+        "frequency_max_hz": 2.5,
+        "context": context,
+    }
+
+    complete = compute_dynamic_support_null_batch(
+        dataset,
+        config,
+        result,
+        surrogate_indices=range(4),
+        workers=1,
+        **kwargs,
+    )
+    first = compute_dynamic_support_null_batch(
+        dataset,
+        config,
+        result,
+        surrogate_indices=range(2),
+        workers=2,
+        **kwargs,
+    )
+    second = compute_dynamic_support_null_batch(
+        dataset,
+        config,
+        result,
+        surrogate_indices=range(2, 4),
+        workers=2,
+        **kwargs,
+    )
+
+    assert np.array_equal(complete.surrogate_indices, np.arange(4))
+    for name in masks:
+        for attribute in ("support_scores", "shared_phase_scores", "latent_scores"):
+            expected = getattr(complete, attribute)[name]
+            merged = np.concatenate(
+                [getattr(first, attribute)[name], getattr(second, attribute)[name]]
+            )
+            np.testing.assert_array_equal(merged, expected)
+        np.testing.assert_array_equal(
+            complete.latent_scores[name],
+            complete.latent_scores["first"],
+        )
 
 
 def _regional_phase_fixture(block_lags_s: list[float]):
