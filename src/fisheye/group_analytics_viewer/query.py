@@ -356,12 +356,15 @@ def parquet_files(context: ViewerContext, table_name: str, *, export_run_id: str
 
 @lru_cache(maxsize=32)
 def _load_table_rows(export_root: str, export_run_id: str, table_name: str) -> tuple[dict[str, Any], ...]:
-    import pyarrow.parquet as pq
+    import polars as pl
 
     context = ViewerContext(export_root=Path(export_root), export_run_id=export_run_id)
-    rows: list[dict[str, Any]] = []
-    for path in parquet_files(context, table_name):
-        rows.extend(pq.read_table(path).to_pylist())
+    files = [str(path) for path in parquet_files(context, table_name)]
+    rows = (
+        pl.scan_parquet(files, hive_partitioning=False)
+        .collect(engine="streaming")
+        .to_dicts()
+    )
     return tuple(rows)
 
 
@@ -381,11 +384,11 @@ def _load_table_rows_for_run(context: ViewerContext, table_name: str, export_run
 
 
 def _table_schema(context: ViewerContext, table_name: str, *, export_run_id: str | None = None) -> list[dict[str, str]]:
-    import pyarrow.parquet as pq
+    import polars as pl
 
     first = parquet_files(context, table_name, export_run_id=export_run_id)[0]
-    schema = pq.ParquetFile(first).schema_arrow
-    return [{"name": field.name, "type": str(field.type)} for field in schema]
+    schema = pl.read_parquet_schema(first)
+    return [{"name": name, "type": str(dtype)} for name, dtype in schema.items()]
 
 
 def _stats_manifest_candidates(context: ViewerContext) -> list[tuple[str, dict[str, Any]]]:

@@ -1,0 +1,17 @@
+[project]
+name = "palette-analytics-app"
+version = "0.1.0"
+description = "Read-only Marimo explorer for immutable Palette analytics exports."
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[tasks]
+app = { cmd = "bash scripts/run_group_analytics_app.sh", description = "Start the read-only Palette analytics Marimo application." }
+
+[dependencies]
+python = "3.11.*"
+marimo = "==0.23.3"
+numpy = ">=2,<2.3"
+pandas = ">=2.3,<3"
+plotly = ">=6.6,<7"
+polars = "==1.40.0"

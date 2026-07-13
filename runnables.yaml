@@ -1,0 +1,30 @@
+name: Palette Analytics Explorer
+description: Explore immutable Palette analytics exports in a read-only Marimo application.
+requirements:
+  - pixi>=0.40
+
+runnables:
+  - id: app
+    name: Analytics Explorer
+    type: service
+    description: >-
+      Select and explore a Palette analytics export. The source export remains
+      read-only and the application does not provide server-side save actions.
+    command: pixi run app --
+    working_dir: repo
+    pre_run: 'export PATH="$HOME/.pixi/bin:$PATH"'
+    auto_url: true
+    service_url_suffix: "/?access_token=${FG_SERVICE_TOKEN}"
+    parameters:
+      - flag: --export-root
+        name: Analytics Export Root
+        type: directory
+        description: >-
+          Directory containing immutable Palette analytics export manifests and
+          Parquet tables. The application confines discovery and reads to this root.
+        required: true
+        exists: true
+    resources:
+      cpus: 2
+      memory: "16 GB"
+      walltime: "08:00"

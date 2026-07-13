@@ -334,20 +334,24 @@ def discover_export_catalog(export_root: Path) -> ExportCatalog:
 
         invalid_part_contract: tuple[str, str] | None = None
         if first_part_by_table:
-            import pyarrow.parquet as pq
+            import polars as pl
 
             for table_name, part_path in first_part_by_table.items():
                 try:
-                    schema = pq.ParquetFile(part_path).schema_arrow
-                    metadata = schema.metadata or {}
-                    schema_id = metadata.get(b"palette.export_schema_id", b"").decode("utf-8")
-                    schema_version = metadata.get(
-                        b"palette.export_schema_version", b""
-                    ).decode("utf-8")
+                    schema = pl.read_parquet_schema(part_path)
+                    metadata = pl.read_parquet_metadata(part_path)
+                    schema_id = metadata.get("palette.export_schema_id", "")
+                    schema_version = metadata.get("palette.export_schema_version", "")
                     footer_contract = json.loads(
-                        metadata.get(b"palette.table_contract", b"null").decode("utf-8")
+                        metadata.get("palette.table_contract", "null")
                     )
-                except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                except (
+                    OSError,
+                    ValueError,
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                    pl.exceptions.PolarsError,
+                ) as exc:
                     invalid_part_contract = (table_name, f"unreadable Parquet metadata: {exc}")
                     break
                 if schema_id != EXPORT_SCHEMA_ID or schema_version != str(EXPORT_SCHEMA_VERSION):
@@ -359,7 +363,7 @@ def discover_export_catalog(export_root: Path) -> ExportCatalog:
                 if footer_contract != TABLE_CONTRACTS[table_name].to_dict():
                     invalid_part_contract = (table_name, "footer table contract does not match V2")
                     break
-                columns_by_table[table_name] = tuple(field.name for field in schema)
+                columns_by_table[table_name] = tuple(schema.names())
         if invalid_part_contract is not None:
             table_name, reason = invalid_part_contract
             diagnostics.append(

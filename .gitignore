@@ -11,6 +11,7 @@ __marimo__/
 
 # Virtual environments
 .venv/
+.pixi/
 
 # Local dependency checkouts / wheels
 /decord/

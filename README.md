@@ -53,6 +53,13 @@ inspection, use the marimo launcher:
 scripts/run_palette_explorer.sh /path/to/analysis.zarr
 ```
 
+For read-only exploration of an exported cross-recording analytics dataset,
+use the locked lightweight Pixi application:
+
+```bash
+pixi run app -- --export-root /groups/johnson/johnsonlab/palette_analytics
+```
+
 ## Documentation
 
 Useful starting points:
@@ -63,6 +70,7 @@ Useful starting points:
 - `docs/run_resolution_semantics.md` - run-selection semantics.
 - `docs/provenance_finalization_enforcement_design.md` - completion and provenance gate.
 - `docs/marimo_explorer_architecture.md` - interactive viewer structure.
+- `docs/palette_analytics_app_deployment.md` - Pixi and FileGlancer deployment.
 
 Historical investigations and one-off plans are under `docs/archive/` and
 `docs/diagnostics/`.
