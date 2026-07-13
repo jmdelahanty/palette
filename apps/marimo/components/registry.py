@@ -21,8 +21,10 @@ from fisheye.visualization.goodcopbadcop_interactive import (
     CHASER_DASHBOARD_RENDERERS,
     LEGACY_GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
 )
-
 from .common import join_path, normalize_path
+
+
+TRACK_KINEMATICS_PLOT_RENDERER = "palette-track-kinematics-summary-v1"
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,15 @@ class RecordingSpecOption:
 
 
 DEFAULT_RENDERER_REGISTRY: dict[str, RendererRegistration] = {
+    TRACK_KINEMATICS_PLOT_RENDERER: RendererRegistration(
+        renderer=TRACK_KINEMATICS_PLOT_RENDERER,
+        label="Core behavior",
+        component_key="core_behavior",
+        description=(
+            "Projected speed, heading, position, and swim-bout views from one "
+            "persisted track-kinematics run."
+        ),
+    ),
     CHASER_DASHBOARD_RENDERER: RendererRegistration(
         renderer=CHASER_DASHBOARD_RENDERER,
         label="Chaser dashboard",

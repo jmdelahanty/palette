@@ -16,8 +16,10 @@ defaults, and packaging gate are specified in
 
 `apps/marimo/palette_explorer.py` is the general entrypoint for interactive
 visualization specs stored in analysis Zarr archives. It discovers persisted
-interactive spec artifacts, selects a registered renderer, and delegates the
-protocol-specific UI to a component.
+interactive spec artifacts, groups them into capability providers, and offers
+only the analyses supported within the selected provider. Selecting an
+analysis is the data-loading boundary; sibling panels are not evaluated merely
+because their provider is present.
 
 Existing focused notebooks remain available while this pattern settles:
 
@@ -58,26 +60,58 @@ apps/marimo/components/common.py
 apps/marimo/components/static_artifacts.py
 apps/marimo/components/provenance.py
 apps/marimo/components/goodcopbadcop_chaser.py
+apps/marimo/components/core_behavior.py
+apps/marimo/components/analysis_catalog.py
 ```
 
 The top-level notebook should only discover specs, choose a renderer, and route
 to the registered component. It should not hard-code protocol-specific Zarr
 paths except through the selected component.
 
-## Current Renderer Registry
+## Current Renderer Registry and Providers
 
-The first registered renderer is:
+The recording explorer currently registers:
 
 ```text
-palette-goodcopbadcop-chaser-dashboard-v1
+palette-track-kinematics-summary-v1     -> Core behavior
+palette-chaser-protocol-dashboard-v1    -> Chaser stimulus
+legacy chaser and CRA renderer aliases  -> Chaser stimulus
 ```
 
-It renders GoodCopBadCop chaser-distance specs written beside
-`analysis/chaser_distance_runs/<run>/visualizations/*`.
+Provider membership is based on the persisted renderer/capability, not the
+recording's protocol name. A recording can therefore expose both Core behavior
+and Chaser stimulus. The second dropdown contains only analyses from the
+selected provider, preventing a control from another visualization family from
+remaining selectable while doing nothing.
 
-Track kinematics remains in the existing focused notebook for now. Migrating it
-later should mean extracting coherent UI pieces into a component without
-changing the underlying `interactive_track_kinematics.py` adapter.
+Core behavior currently provides projected speed, heading/turning, position,
+eye-angle/convergence, lineage-compatible swim-bout, and canonical pre-period views. Chaser stimulus
+provides distance, epoch, egocentric, polar, spatial, CRA, near-field, escape,
+artifact, and provenance views when their persisted inputs are present.
+
+## Lazy and Deferred Data Semantics
+
+Polars does not have a native Zarr scanner. The recording explorer therefore
+uses a precise two-stage contract:
+
+1. Zarr access is deferred until an analysis is selected. The component reads
+   the time coordinate plus only that analysis' source arrays and selected
+   contiguous row interval.
+2. The resulting projection is represented as a `polars.LazyFrame`; filtering,
+   column projection, grouping, and descriptive display queries remain lazy
+   until collection.
+
+This is called a **deferred Zarr projection**, not a lazy Zarr scan. Source Zarr
+arrays are still materialized for the selected projection.
+
+For immutable analytics exports, Parquet has a stronger contract:
+`scan_export_parquet(...)` delegates to `polars.scan_parquet(...)`, retaining
+projection and predicate pushdown from storage through collection. Dense
+frame/sample export panels should use that path rather than eagerly constructing
+Python row dictionaries.
+
+Both paths are read-only. Viewer projections and exploratory summaries are not
+written into the recording or export.
 
 ## Running
 
@@ -86,6 +120,14 @@ General explorer:
 ```bash
 scripts/py -m marimo run apps/marimo/palette_explorer.py -- \
   --zarr-path <analysis.zarr>
+```
+
+For registry-backed recording discovery without opening every sibling Zarr:
+
+```bash
+scripts/run_palette_explorer.sh \
+  --zarr-path <analysis.zarr> \
+  --registry <palette_registry.sqlite>
 ```
 
 GoodCopBadCop focused notebook:

@@ -2460,8 +2460,15 @@ def load_chaser_dashboard_data(
     *,
     run_path: str,
     artifact_name: str | None = DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT,
+    optional_families: Optional[Sequence[str]] = None,
 ) -> GoodCopBadCopInteractiveData:
-    """Load a persisted chaser dashboard spec and source arrays."""
+    """Load a persisted chaser dashboard spec and selected optional arrays.
+
+    Core time, position, distance, chaser, and window arrays are always loaded.
+    When ``optional_families`` is provided, only the named ``occupancy``,
+    ``spatial_occupancy``, and ``egocentric`` payloads are materialized.
+    ``None`` preserves the historical load-all behavior.
+    """
 
     archive = Path(zarr_path)
     root = open_zarr_root(archive, mode="r")
@@ -2481,6 +2488,10 @@ def load_chaser_dashboard_data(
             f"expected one of {CHASER_DASHBOARD_SPEC_SCHEMA_IDS!r}"
         )
     source_paths = _as_str_mapping(spec.get("source_paths"))
+    selected_families = None if optional_families is None else set(optional_families)
+
+    def include_family(name: str) -> bool:
+        return selected_families is None or name in selected_families
     fps = _safe_float(spec.get("fps"), default=1.0)
     total_frames = _safe_int(spec.get("total_frames"), default=0)
 
@@ -2531,55 +2542,127 @@ def load_chaser_dashboard_data(
         nearest_chaser_index = nearest_chaser_index.astype(np.int32, copy=False).reshape(-1)
 
     windows = _load_windows(root, source_paths, fps)
-    occupancy_normalized = _load_array(root, source_paths, "detection_occupancy_heatmap_normalized")
-    occupancy_counts = _load_array(root, source_paths, "detection_occupancy_heatmap_counts")
-    occupancy_x_edges = _load_array(root, source_paths, "detection_occupancy_heatmap_x_edges")
-    occupancy_y_edges = _load_array(root, source_paths, "detection_occupancy_heatmap_y_edges")
-    spatial_occupancy = _load_spatial_occupancy_zone_sets(root, source_paths)
-    egocentric_component_path = _derive_component_path_from_source(
-        source_paths,
-        "egocentric_bearing_deg",
-        "/per_chaser/",
+    occupancy_normalized = (
+        _load_array(root, source_paths, "detection_occupancy_heatmap_normalized")
+        if include_family("occupancy")
+        else None
+    )
+    occupancy_counts = (
+        _load_array(root, source_paths, "detection_occupancy_heatmap_counts")
+        if include_family("occupancy")
+        else None
+    )
+    occupancy_x_edges = (
+        _load_array(root, source_paths, "detection_occupancy_heatmap_x_edges")
+        if include_family("occupancy")
+        else None
+    )
+    occupancy_y_edges = (
+        _load_array(root, source_paths, "detection_occupancy_heatmap_y_edges")
+        if include_family("occupancy")
+        else None
+    )
+    spatial_occupancy = (
+        _load_spatial_occupancy_zone_sets(root, source_paths)
+        if include_family("spatial_occupancy")
+        else ()
+    )
+    egocentric_component_path = (
+        _derive_component_path_from_source(
+            source_paths,
+            "egocentric_bearing_deg",
+            "/per_chaser/",
+        )
+        if include_family("egocentric")
+        else None
     )
     egocentric_component_name = (
         _normalize_path(egocentric_component_path).split("/")[-1]
         if egocentric_component_path
         else None
     )
-    egocentric_fish_heading_deg = _load_array(root, source_paths, "egocentric_fish_heading_deg")
+    egocentric_fish_heading_deg = (
+        _load_array(root, source_paths, "egocentric_fish_heading_deg")
+        if include_family("egocentric")
+        else None
+    )
     if egocentric_fish_heading_deg is not None:
         egocentric_fish_heading_deg = egocentric_fish_heading_deg.astype(np.float64, copy=False).reshape(-1)
-    egocentric_fish_heading_valid = _load_array(root, source_paths, "egocentric_fish_heading_valid")
+    egocentric_fish_heading_valid = (
+        _load_array(root, source_paths, "egocentric_fish_heading_valid")
+        if include_family("egocentric")
+        else None
+    )
     if egocentric_fish_heading_valid is not None:
         egocentric_fish_heading_valid = egocentric_fish_heading_valid.astype(bool, copy=False).reshape(-1)
-    egocentric_bearing_deg = _load_array(root, source_paths, "egocentric_bearing_deg")
+    egocentric_bearing_deg = (
+        _load_array(root, source_paths, "egocentric_bearing_deg")
+        if include_family("egocentric")
+        else None
+    )
     if egocentric_bearing_deg is not None:
         egocentric_bearing_deg = egocentric_bearing_deg.astype(np.float64, copy=False)
-    egocentric_alignment_cos = _load_array(root, source_paths, "egocentric_alignment_cos")
+    egocentric_alignment_cos = (
+        _load_array(root, source_paths, "egocentric_alignment_cos")
+        if include_family("egocentric")
+        else None
+    )
     if egocentric_alignment_cos is not None:
         egocentric_alignment_cos = egocentric_alignment_cos.astype(np.float64, copy=False)
-    egocentric_lateral_sin = _load_array(root, source_paths, "egocentric_lateral_sin")
+    egocentric_lateral_sin = (
+        _load_array(root, source_paths, "egocentric_lateral_sin")
+        if include_family("egocentric")
+        else None
+    )
     if egocentric_lateral_sin is not None:
         egocentric_lateral_sin = egocentric_lateral_sin.astype(np.float64, copy=False)
-    egocentric_valid = _load_array(root, source_paths, "egocentric_valid")
+    egocentric_valid = (
+        _load_array(root, source_paths, "egocentric_valid")
+        if include_family("egocentric")
+        else None
+    )
     if egocentric_valid is not None:
         egocentric_valid = egocentric_valid.astype(bool, copy=False)
-    egocentric_distance_bin_edges_mm = _load_array(root, source_paths, "egocentric_distance_bin_edges_mm")
+    egocentric_distance_bin_edges_mm = (
+        _load_array(root, source_paths, "egocentric_distance_bin_edges_mm")
+        if include_family("egocentric")
+        else None
+    )
     if egocentric_distance_bin_edges_mm is not None:
         egocentric_distance_bin_edges_mm = egocentric_distance_bin_edges_mm.astype(np.float64, copy=False).reshape(-1)
-    egocentric_distance_bin_centers_mm = _load_array(root, source_paths, "egocentric_distance_bin_centers_mm")
+    egocentric_distance_bin_centers_mm = (
+        _load_array(root, source_paths, "egocentric_distance_bin_centers_mm")
+        if include_family("egocentric")
+        else None
+    )
     if egocentric_distance_bin_centers_mm is not None:
         egocentric_distance_bin_centers_mm = egocentric_distance_bin_centers_mm.astype(np.float64, copy=False).reshape(-1)
-    egocentric_bearing_bin_edges_deg = _load_array(root, source_paths, "egocentric_bearing_bin_edges_deg")
+    egocentric_bearing_bin_edges_deg = (
+        _load_array(root, source_paths, "egocentric_bearing_bin_edges_deg")
+        if include_family("egocentric")
+        else None
+    )
     if egocentric_bearing_bin_edges_deg is not None:
         egocentric_bearing_bin_edges_deg = egocentric_bearing_bin_edges_deg.astype(np.float64, copy=False).reshape(-1)
-    egocentric_bearing_bin_centers_deg = _load_array(root, source_paths, "egocentric_bearing_bin_centers_deg")
+    egocentric_bearing_bin_centers_deg = (
+        _load_array(root, source_paths, "egocentric_bearing_bin_centers_deg")
+        if include_family("egocentric")
+        else None
+    )
     if egocentric_bearing_bin_centers_deg is not None:
         egocentric_bearing_bin_centers_deg = egocentric_bearing_bin_centers_deg.astype(np.float64, copy=False).reshape(-1)
-    egocentric_hist_counts = _load_array(root, source_paths, "egocentric_hist_counts")
+    egocentric_hist_counts = (
+        _load_array(root, source_paths, "egocentric_hist_counts")
+        if include_family("egocentric")
+        else None
+    )
     if egocentric_hist_counts is not None:
         egocentric_hist_counts = egocentric_hist_counts.astype(np.uint32, copy=False)
-    egocentric_hist_probability = _load_array(root, source_paths, "egocentric_hist_probability")
+    egocentric_hist_probability = (
+        _load_array(root, source_paths, "egocentric_hist_probability")
+        if include_family("egocentric")
+        else None
+    )
     if egocentric_hist_probability is not None:
         egocentric_hist_probability = egocentric_hist_probability.astype(np.float64, copy=False)
 

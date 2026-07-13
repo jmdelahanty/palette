@@ -1,0 +1,124 @@
+"""Capability-based provider and analysis routing for the recording explorer."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Iterable, Mapping
+
+from .registry import InteractiveSpecOption, renderer_registration_for
+
+
+@dataclass(frozen=True)
+class AnalysisDefinition:
+    analysis_id: str
+    label: str
+    description: str
+
+
+@dataclass(frozen=True)
+class ProviderDefinition:
+    provider_id: str
+    label: str
+    description: str
+    component_key: str
+    analyses: tuple[AnalysisDefinition, ...]
+
+
+CORE_BEHAVIOR_PROVIDER = ProviderDefinition(
+    provider_id="core_behavior",
+    label="Core behavior",
+    description="Stimulus-independent movement and baseline views.",
+    component_key="core_behavior",
+    analyses=(
+        AnalysisDefinition("speed", "Speed traces", "Projected speed and acceleration series."),
+        AnalysisDefinition("heading", "Heading and turning", "Heading and angular-motion traces."),
+        AnalysisDefinition("position", "Position and trajectory", "Projected x/y trajectory and occupancy."),
+        AnalysisDefinition(
+            "eye_angles",
+            "Eye angles and convergence",
+            "Framewise eye-angle, gaze, and convergence traces when persisted.",
+        ),
+        AnalysisDefinition("swim_bouts", "Swim bouts", "Persisted bout events and distributions."),
+        AnalysisDefinition(
+            "baseline",
+            "Pre-period behavior",
+            "Descriptive activity and trajectory during the persisted baseline epoch.",
+        ),
+    ),
+)
+
+
+CHASER_PROVIDER = ProviderDefinition(
+    provider_id="stimulus_chaser",
+    label="Chaser stimulus",
+    description="Distance, spatial, egocentric, CRA, and escape analyses.",
+    component_key="goodcopbadcop_chaser",
+    analyses=(
+        AnalysisDefinition("distance", "Chaser distances", "Per-chaser distance traces and epoch selection."),
+        AnalysisDefinition("epoch_summary", "Epoch behavior", "Per-epoch chaser and fish summaries."),
+        AnalysisDefinition("egocentric_bearing", "Egocentric bearing", "Bearing distributions for selected chasers."),
+        AnalysisDefinition("polar_distance", "Polar bearing and distance", "Re-binnable polar small multiples."),
+        AnalysisDefinition("fish_heading", "Fish heading", "Heading traces over selected epochs."),
+        AnalysisDefinition("alignment", "Distance and alignment", "Egocentric distance/alignment summaries."),
+        AnalysisDefinition("position_heatmap", "Position heatmap", "Arena occupancy with optional chaser overlay."),
+        AnalysisDefinition("detection_occupancy", "Detection occupancy", "Persisted detection occupancy heatmap."),
+        AnalysisDefinition("spatial_occupancy", "Spatial occupancy", "Quadrant and configured-zone occupancy."),
+        AnalysisDefinition("cra_quadrant", "CRA quadrant relocation", "Chaser quadrant versus other quadrants."),
+        AnalysisDefinition("cra_near_field", "CRA near-field", "Near-field avoidance and radial density."),
+        AnalysisDefinition("escape_freeze", "Escape outcomes", "Successful escape and freezing diagnostics."),
+        AnalysisDefinition("static_artifacts", "Persisted plots", "Analysis-owned PNG artifacts."),
+        AnalysisDefinition("provenance", "Provenance and source rows", "Spec lineage and projected source rows."),
+    ),
+)
+
+
+PROVIDERS: Mapping[str, ProviderDefinition] = {
+    CORE_BEHAVIOR_PROVIDER.provider_id: CORE_BEHAVIOR_PROVIDER,
+    CHASER_PROVIDER.provider_id: CHASER_PROVIDER,
+}
+
+
+def provider_id_for_component(component_key: str) -> str | None:
+    for provider in PROVIDERS.values():
+        if provider.component_key == component_key:
+            return provider.provider_id
+    return None
+
+
+def group_specs_by_provider(
+    options: Iterable[InteractiveSpecOption],
+) -> dict[str, list[InteractiveSpecOption]]:
+    """Group supported specs by capability provider, never by protocol name."""
+
+    grouped: dict[str, list[InteractiveSpecOption]] = {}
+    seen_paths: dict[str, set[str]] = {}
+    ordered = sorted(
+        options,
+        key=lambda item: (
+            0 if "chaser-dashboard" in item.renderer or "chaser-protocol-dashboard" in item.renderer else 1,
+            item.artifact_path,
+        ),
+    )
+    for option in ordered:
+        registration = renderer_registration_for(option.renderer)
+        if registration is None:
+            continue
+        provider_id = provider_id_for_component(registration.component_key)
+        if provider_id is None:
+            continue
+        # Companion chaser specs route to the owning chaser-distance run. Keep a
+        # single selectable source for that run instead of repeating every spec.
+        run_key = option.run_path
+        if "/components/" in run_key:
+            run_key = run_key.split("/components/", 1)[0]
+        provider_seen = seen_paths.setdefault(provider_id, set())
+        if run_key in provider_seen:
+            continue
+        provider_seen.add(run_key)
+        grouped.setdefault(provider_id, []).append(option)
+    return grouped
+
+
+def analyses_for_provider(provider_id: str) -> tuple[AnalysisDefinition, ...]:
+    provider = PROVIDERS.get(str(provider_id))
+    return provider.analyses if provider is not None else ()

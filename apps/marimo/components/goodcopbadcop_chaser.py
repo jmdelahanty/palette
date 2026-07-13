@@ -119,6 +119,50 @@ def is_goodcopbadcop_option(option: InteractiveSpecOption) -> bool:
     return option.renderer in CHASER_PROTOCOL_RENDERERS
 
 
+def available_chaser_analysis_ids(
+    zarr_path: Path | str,
+    option: InteractiveSpecOption,
+) -> tuple[str, ...]:
+    """Return analysis choices supported by persisted evidence in one run."""
+
+    source_paths = option.spec.get("source_paths")
+    paths = source_paths if isinstance(source_paths, Mapping) else {}
+    available: list[str] = []
+    if "distance_mm" in paths:
+        available.extend(["distance", "epoch_summary"])
+    if "egocentric_bearing_deg" in paths:
+        available.extend(["egocentric_bearing", "polar_distance"])
+    if "egocentric_fish_heading_deg" in paths:
+        available.append("fish_heading")
+    if "egocentric_alignment_cos" in paths:
+        available.append("alignment")
+    if "fish_centroid_arena_xy" in paths:
+        available.append("position_heatmap")
+    if "detection_occupancy_heatmap_normalized" in paths:
+        available.append("detection_occupancy")
+    if "detection_spatial_occupancy" in paths:
+        available.append("spatial_occupancy")
+
+    run_path = _owning_chaser_distance_run_path(option)
+    try:
+        root = open_zarr_root(Path(zarr_path), mode="r")
+        run = root[run_path]
+        component_names = set(run.group_keys())
+        components = run.get("components")
+        if components is not None:
+            component_names.update(components.group_keys())
+    except Exception:
+        component_names = set()
+    if any("cra_primary" in name or "object_relative" in name for name in component_names):
+        available.append("cra_quadrant")
+    if any("near_field" in name for name in component_names):
+        available.append("cra_near_field")
+    if any("escape" in name or "freeze" in name for name in component_names):
+        available.append("escape_freeze")
+    available.extend(["static_artifacts", "provenance"])
+    return tuple(dict.fromkeys(available))
+
+
 def _owning_chaser_distance_run_path(option: InteractiveSpecOption) -> str:
     parts = [part for part in str(option.run_path).strip("/").split("/") if part]
     for index in range(len(parts) - 2):
@@ -475,13 +519,27 @@ def load_goodcopbadcop_view(
     *,
     timer: Any,
     include_companion_analyses: bool = True,
+    analysis_id: Optional[str] = None,
 ) -> GoodCopBadCopLoadedView:
     load_t0 = timer.perf_counter()
     run_path = _owning_chaser_distance_run_path(option)
+    optional_families: Optional[tuple[str, ...]]
+    if analysis_id is None:
+        optional_families = None
+    else:
+        families: list[str] = []
+        if analysis_id == "detection_occupancy":
+            families.append("occupancy")
+        if analysis_id == "spatial_occupancy":
+            families.append("spatial_occupancy")
+        if analysis_id in {"egocentric_bearing", "polar_distance", "fish_heading", "alignment"}:
+            families.append("egocentric")
+        optional_families = tuple(families)
     data = load_chaser_dashboard_data(
         zarr_path,
         run_path=run_path,
         artifact_name=_dashboard_artifact_name_for_option(option),
+        optional_families=optional_families,
     )
     if include_companion_analyses:
         cra_endpoint = load_goodcopbadcop_cra_primary_endpoint_data(
@@ -500,23 +558,57 @@ def load_goodcopbadcop_view(
         cra_endpoint = None
         cra_near_field = None
         escape_freeze = None
-    epoch_behavior = load_goodcopbadcop_epoch_behavior_data(
-        zarr_path,
-        run_path=run_path,
+    epoch_behavior = (
+        load_goodcopbadcop_epoch_behavior_data(zarr_path, run_path=run_path)
+        if analysis_id is None or analysis_id == "epoch_summary"
+        else None
     )
-    distance_df = to_distance_timeseries_dataframe(data)
-    position_df = to_position_dataframe(data)
+    distance_df = (
+        to_distance_timeseries_dataframe(data)
+        if analysis_id is None or analysis_id == "distance"
+        else pd.DataFrame()
+    )
+    position_df = (
+        to_position_dataframe(data)
+        if analysis_id is None or analysis_id == "position_heatmap"
+        else pd.DataFrame()
+    )
     windows_df = to_window_dataframe(data)
-    chaser_position_df = to_chaser_position_dataframe(
-        data,
-        sample_step=max(1, int(data.fps // 2) or 1),
+    chaser_position_df = (
+        to_chaser_position_dataframe(
+            data,
+            sample_step=max(1, int(data.fps // 2) or 1),
+        )
+        if analysis_id is None or analysis_id == "position_heatmap"
+        else pd.DataFrame()
     )
-    spatial_occupancy_df = to_spatial_occupancy_dataframe(data)
-    egocentric_bearing_df = to_egocentric_bearing_dataframe(data, valid_only=True)
-    egocentric_alignment_df = to_egocentric_distance_alignment_dataframe(data)
-    egocentric_heading_df = to_egocentric_heading_dataframe(data, valid_only=True)
+    spatial_occupancy_df = (
+        to_spatial_occupancy_dataframe(data)
+        if analysis_id is None or analysis_id == "spatial_occupancy"
+        else pd.DataFrame()
+    )
+    egocentric_bearing_df = (
+        to_egocentric_bearing_dataframe(data, valid_only=True)
+        if analysis_id is None or analysis_id in {"egocentric_bearing", "polar_distance"}
+        else pl.DataFrame()
+    )
+    egocentric_alignment_df = (
+        to_egocentric_distance_alignment_dataframe(data)
+        if analysis_id is None or analysis_id == "alignment"
+        else pl.DataFrame()
+    )
+    egocentric_heading_df = (
+        to_egocentric_heading_dataframe(data, valid_only=True)
+        if analysis_id is None or analysis_id == "fish_heading"
+        else pl.DataFrame()
+    )
     epoch_summary_computed_in_viewer = False
-    if epoch_behavior is not None:
+    if analysis_id is not None and analysis_id != "epoch_summary":
+        epoch_summary_df = _empty_epoch_summary_frame()
+        epoch_summary_source = None
+        epoch_summary_error = None
+        epoch_summary_computed_in_viewer = False
+    elif epoch_behavior is not None:
         epoch_summary_df = _epoch_summary_from_persisted_behavior(epoch_behavior)
         epoch_summary_source = epoch_behavior.component_path
         epoch_summary_error = None
@@ -533,16 +625,24 @@ def load_goodcopbadcop_view(
             if epoch_summary_error
             else fallback_detail
         )
-    polar_png_path, polar_png_bytes, polar_png_error = _load_egocentric_pre_post_polar_png(zarr_path, data)
-    (
-        polar_point_cloud_png_path,
-        polar_point_cloud_png_bytes,
-        polar_point_cloud_png_error,
-    ) = _load_egocentric_pre_post_polar_png(
-        zarr_path,
-        data,
-        artifact_name=EGOCENTRIC_PRE_POST_POLAR_POINT_CLOUD_PNG_ARTIFACT_NAME,
-    )
+    if analysis_id is None or analysis_id in {"egocentric_bearing", "polar_distance"}:
+        polar_png_path, polar_png_bytes, polar_png_error = _load_egocentric_pre_post_polar_png(zarr_path, data)
+        (
+            polar_point_cloud_png_path,
+            polar_point_cloud_png_bytes,
+            polar_point_cloud_png_error,
+        ) = _load_egocentric_pre_post_polar_png(
+            zarr_path,
+            data,
+            artifact_name=EGOCENTRIC_PRE_POST_POLAR_POINT_CLOUD_PNG_ARTIFACT_NAME,
+        )
+    else:
+        polar_png_path, polar_png_bytes, polar_png_error = None, b"", None
+        polar_point_cloud_png_path, polar_point_cloud_png_bytes, polar_point_cloud_png_error = (
+            None,
+            b"",
+            None,
+        )
     return GoodCopBadCopLoadedView(
         data=data,
         cra_endpoint=cra_endpoint,
@@ -2344,7 +2444,7 @@ def _cra_metric_bars(
         return None
     colors = _role_colors(endpoint)
     fig = go.Figure()
-    for role in ("aggressive", "benign"):
+    for role in ("aggressive", "random_non_chasing", "inert"):
         rows = frame.filter(pl.col("object_role") == role).sort("phase_index")
         if rows.is_empty():
             continue
@@ -2497,12 +2597,12 @@ def build_cra_primary_endpoint_output(mo: Any, go: Any, *, loaded: GoodCopBadCop
         {
             "metric": "delta_benign",
             "value": _summary_metric(summary, "delta_benign"),
-            "meaning": "post - pre benign distance",
+            "meaning": "post - pre inert distance (legacy metric key)",
         },
         {
             "metric": "specificity_distance",
             "value": _summary_metric(summary, "specificity_distance"),
-            "meaning": "aggressive distance delta - benign distance delta",
+            "meaning": "aggressive distance delta - inert distance delta",
         },
         {
             "metric": "delta_occ_agg",
@@ -2512,12 +2612,12 @@ def build_cra_primary_endpoint_output(mo: Any, go: Any, *, loaded: GoodCopBadCop
         {
             "metric": "delta_occ_benign",
             "value": _summary_metric(summary, "delta_occ_benign"),
-            "meaning": "post - pre benign object-quadrant occupancy",
+            "meaning": "post - pre inert object-quadrant occupancy (legacy metric key)",
         },
         {
             "metric": "specificity_occupancy",
             "value": _summary_metric(summary, "specificity_occupancy"),
-            "meaning": "aggressive occupancy delta - benign occupancy delta",
+            "meaning": "aggressive occupancy delta - inert occupancy delta",
         },
     ]
     warnings_text = ", ".join(endpoint.qc_warnings) if endpoint.qc_warnings else "none"
@@ -2584,7 +2684,7 @@ def _near_field_metric_bars(
         return None
     colors = _role_colors_from_objects(near_field.objects_df)
     fig = go.Figure()
-    for role in ("aggressive", "benign"):
+    for role in ("aggressive", "random_non_chasing", "inert"):
         rows = frame.filter(pl.col("object_role") == role).sort("phase_index")
         if rows.is_empty():
             continue
@@ -2641,7 +2741,7 @@ def _near_field_radial_density_figure(
     fig = go.Figure()
     phase_dash = {"pre_static": "solid", "post_static": "dash"}
     trace_count = 0
-    for role in ("aggressive", "benign"):
+    for role in ("aggressive", "random_non_chasing", "inert"):
         for phase_label in frame["phase_label"].unique().sort().to_list():
             rows = frame.filter((pl.col("object_role") == role) & (pl.col("phase_label") == phase_label)).sort(
                 "radial_bin_index"
@@ -2700,7 +2800,7 @@ def _near_field_cdf_figure(go: Any, *, near_field: GoodCopBadCopCRANearFieldData
     colors = _role_colors_from_objects(near_field.objects_df)
     fig = go.Figure()
     phase_dash = {"pre_static": "solid", "post_static": "dash"}
-    for role in ("aggressive", "benign"):
+    for role in ("aggressive", "random_non_chasing", "inert"):
         for phase_label in frame["phase_label"].unique().sort().to_list():
             rows = frame.filter((pl.col("object_role") == role) & (pl.col("phase_label") == phase_label)).sort(
                 "threshold_index"
@@ -2725,7 +2825,7 @@ def _near_field_cdf_figure(go: Any, *, near_field: GoodCopBadCopCRANearFieldData
     per_phase = near_field.per_object_phase_df
     if not per_phase.is_empty() and "approach_p05_mm" in per_phase.columns:
         marker_rows = per_phase.sort(["object_role", "phase_index"])
-        for role in ("aggressive", "benign"):
+        for role in ("aggressive", "random_non_chasing", "inert"):
             rows = marker_rows.filter(pl.col("object_role") == role)
             if rows.is_empty():
                 continue
@@ -3261,7 +3361,7 @@ def build_escape_freeze_output(mo: Any, *, loaded: GoodCopBadCopLoadedView) -> A
             ),
             mo.md(
                 "This canary is diagnostic/US-validation only for the current cohort; active pursuit is "
-                "available for chaser 0 but not the benign chaser. Escape labels are candidate labels from "
+                "available for chaser 0 but not the inert chaser. Escape labels are candidate labels from "
                 "full-trial fish path length; classifier thresholds are not cohort-locked."
             ),
             mo.md(f"Warnings: `{warning_text}`"),

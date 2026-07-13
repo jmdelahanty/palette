@@ -12,6 +12,7 @@ import zarr
 
 from apps.marimo.components.goodcopbadcop_chaser import (
     GoodCopBadCopTimeWindow,
+    available_chaser_analysis_ids,
     build_arena_heatmap,
     build_controls,
     build_controls_panel_from_widgets,
@@ -343,6 +344,39 @@ def test_goodcopbadcop_component_loads_selected_registry_option(tmp_path) -> Non
     assert loaded.spatial_occupancy_df["frame_count"].tolist() == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     assert loaded.epoch_summary_df.height == 6
     assert loaded.load_duration_ms >= 0.0
+
+
+def test_goodcopbadcop_component_projects_only_selected_analysis_family(tmp_path) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
+    option = discover_interactive_spec_options(zarr_path)[0]
+
+    loaded = load_goodcopbadcop_view(
+        zarr_path,
+        option,
+        timer=time,
+        include_companion_analyses=False,
+        analysis_id="distance",
+    )
+
+    assert not loaded.distance_df.empty
+    assert loaded.position_df.empty
+    assert loaded.egocentric_bearing_df.is_empty()
+    assert loaded.epoch_summary_df.is_empty()
+    assert loaded.data.egocentric_bearing_deg is None
+    assert loaded.data.occupancy_normalized is None
+
+
+def test_chaser_analysis_choices_follow_persisted_components(tmp_path) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_cra_near_field_spec(tmp_path)
+    option = discover_interactive_spec_options(zarr_path)[0]
+
+    analysis_ids = available_chaser_analysis_ids(zarr_path, option)
+
+    assert "distance" in analysis_ids
+    assert "position_heatmap" in analysis_ids
+    assert "cra_quadrant" in analysis_ids
+    assert "cra_near_field" in analysis_ids
+    assert "escape_freeze" not in analysis_ids
 
 
 def test_goodcopbadcop_component_summarizes_swim_bouts_by_epoch(tmp_path) -> None:

@@ -16,6 +16,8 @@ Options:
   --recordings-root PATH
                     Root containing sibling recording directories. The explorer
                     uses this for the top-level recording selector.
+  --registry PATH   Optional read-only Palette registry used for lazy recording
+                    discovery without opening every Zarr in the collection.
   --recording-name-contains TEXT
                     Recording path/name filter for the selector.
                     (default: GoodCopBadCop)
@@ -65,7 +67,7 @@ while [[ $# -gt 0 ]]; do
       HOST="$2"
       shift 2
       ;;
-    --renderer|--run-path|--artifact|--recordings-root|--recording-name-contains)
+    --renderer|--run-path|--artifact|--recordings-root|--recording-name-contains|--registry)
       APP_ARGS+=("$1" "$2")
       shift 2
       ;;
