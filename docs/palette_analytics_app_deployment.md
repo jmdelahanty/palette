@@ -69,6 +69,37 @@ directory picker and FileGlancer file-share policy provide the outer path
 authorization boundary. Palette opens the Zarr with mode `r`, keeps projections
 bounded, and exposes no save action.
 
+## Editable recording workspace
+
+The opt-in **Recording Exploration Workspace** is distinct from the published
+read-only viewer:
+
+```bash
+pixi run -e recording recording-workspace -- \
+  --zarr-path /path/to/recording_analysis.zarr
+```
+
+It copies `palette_explorer.py` into a per-session writable directory and
+launches that copy with `marimo edit`. Existing application cells have their
+code collapsed, so their normal controls and plots render above one visible
+starter cell. The starter exposes a compact `exploration` object that follows
+the selected provider and analysis.
+
+Because an editor or Marimo Pair agent can execute arbitrary Python, application
+level `mode="r"` is not the write boundary. The launcher creates a Bubblewrap
+mount namespace containing only minimal OS paths, the active Palette/Pixi
+checkout, the selected Zarr, and the session workspace. Palette code and the
+Zarr are read-only mounts; only `/workspace` and its private temporary/cache
+paths are writable. The selected host Zarr appears inside the namespace as
+`/data/recording.zarr`. Collection and registry arguments are rejected so the
+first canary has exactly one dataset authority.
+
+The FileGlancer execution node must provide `bwrap` and permit unprivileged user
+namespaces. The launcher fails closed if Bubblewrap is absent or cannot create
+the namespace. See
+[Marimo Pair Recording Workspace](marimo_pair_recording_workspace.md) for the
+complete trust boundary and Pair connection workflow.
+
 ## Packaging boundary
 
 Pixi is the first deployment target. An Apptainer image remains an optional

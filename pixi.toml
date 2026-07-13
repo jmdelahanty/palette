@@ -8,6 +8,7 @@ platforms = ["linux-64"]
 [tasks]
 app = { cmd = "bash scripts/run_group_analytics_app.sh", description = "Start the read-only Palette analytics Marimo application." }
 recording-app = { cmd = "bash scripts/run_recording_explorer_app.sh", description = "Start the read-only Palette recording Marimo application." }
+recording-workspace = { cmd = "bash scripts/run_recording_exploration_workspace.sh", description = "Start the sandboxed editable Palette recording workspace for Marimo Pair." }
 
 [dependencies]
 python = "3.11.*"

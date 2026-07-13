@@ -114,6 +114,14 @@ Python row dictionaries.
 Both paths are read-only. Viewer projections and exploratory summaries are not
 written into the recording or export.
 
+The editable single-recording workspace adds a stronger deployment boundary.
+It starts a writable copy of this notebook with `marimo edit`, but exposes the
+selected Zarr and Palette checkout through read-only Bubblewrap mounts. A final
+visible cell provides `exploration`, while implementation cells above it are
+collapsed. Pair agents may mutate the notebook copy and write beneath the
+session `/workspace`; they cannot write the mounted recording or canonical
+Palette source. This mode is intentionally limited to one selected recording.
+
 The single-recording explorer uses targeted track/chaser provider discovery
 rather than constructing the audit-oriented whole-recording artifact
 inventory. Within one selected recording/run, the process retains the time
@@ -150,6 +158,15 @@ The deployable Pixi entry point is:
 ```bash
 pixi run -e recording recording-app -- --zarr-path <analysis.zarr>
 ```
+
+The opt-in editable, Pair-compatible entry point is:
+
+```bash
+pixi run -e recording recording-workspace -- --zarr-path <analysis.zarr>
+```
+
+Its security and connection contract is documented in
+[Marimo Pair Recording Workspace](marimo_pair_recording_workspace.md).
 
 For registry-backed recording discovery without opening every sibling Zarr:
 

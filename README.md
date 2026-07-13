@@ -66,6 +66,18 @@ To open one analysis Zarr in the locked recording-viewer environment:
 pixi run -e recording recording-app -- --zarr-path /path/to/recording_analysis.zarr
 ```
 
+To open a sandboxed editable copy with the rendered explorer above live Marimo
+cells:
+
+```bash
+pixi run -e recording recording-workspace -- \
+  --zarr-path /path/to/recording_analysis.zarr
+```
+
+The workspace uses read-only bind mounts for the selected Zarr and Palette
+code. Only its per-session notebook directory is writable. See
+`docs/marimo_pair_recording_workspace.md` before enabling Marimo Pair.
+
 ## Documentation
 
 Useful starting points:
@@ -77,6 +89,7 @@ Useful starting points:
 - `docs/provenance_finalization_enforcement_design.md` - completion and provenance gate.
 - `docs/marimo_explorer_architecture.md` - interactive viewer structure.
 - `docs/palette_analytics_app_deployment.md` - Pixi and FileGlancer deployment.
+- `docs/marimo_pair_recording_workspace.md` - editable, read-only-mounted recording workspace.
 
 Historical investigations and one-off plans are under `docs/archive/` and
 `docs/diagnostics/`.

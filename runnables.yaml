@@ -1,5 +1,5 @@
 name: Palette Explorers
-description: Explore immutable Palette analytics exports or one recording Zarr in read-only Marimo applications.
+description: Explore immutable Palette analytics exports or one recording Zarr in read-only viewers and a sandboxed editable workspace.
 requirements:
   - pixi>=0.40
 
@@ -47,6 +47,34 @@ runnables:
         description: >-
           One Palette analysis Zarr directory. Direct FileGlancer launches show
           only this recording unless collection arguments are supplied separately.
+        required: true
+        exists: true
+    resources:
+      cpus: 2
+      memory: "16 GB"
+      walltime: "08:00"
+
+  - id: recording-workspace
+    name: Recording Exploration Workspace
+    type: service
+    description: >-
+      Open one Palette analysis Zarr in an editable Marimo notebook with the
+      rendered explorer above a live analysis cell. Palette code and the
+      selected recording are isolated in a Bubblewrap mount namespace and are
+      read-only; only the per-session notebook workspace is writable. Marimo
+      Pair may connect to the authenticated editor session.
+    command: pixi run -e recording recording-workspace --
+    working_dir: repo
+    pre_run: 'export PATH="$HOME/.pixi/bin:$PATH"'
+    auto_url: true
+    service_url_suffix: "/?access_token=${FG_SERVICE_TOKEN}"
+    parameters:
+      - flag: --zarr-path
+        name: Recording Analysis Zarr
+        type: directory
+        description: >-
+          Exactly one Palette analysis Zarr. It is exposed inside the editable
+          workspace as the read-only /data/recording.zarr mount.
         required: true
         exists: true
     resources:

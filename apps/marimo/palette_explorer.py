@@ -11,7 +11,7 @@ __generated_with = "0.23.3"
 app = marimo.App(width="full")
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _():
     from pathlib import Path
     import time
@@ -52,6 +52,9 @@ def _():
         resolve_time_windows_from_multiselect,
     )
     from apps.marimo.components.provenance import build_spec_provenance_panel
+    from apps.marimo.components.recording_workspace import (
+        RecordingExplorationWorkspace,
+    )
     from apps.marimo.components.registry import (
         discover_recording_explorer_spec_options,
         discover_protocol_recording_options,
@@ -62,6 +65,7 @@ def _():
         PROVIDERS,
         CoreBehaviorSource,
         Path,
+        RecordingExplorationWorkspace,
         analyses_for_provider,
         available_chaser_analysis_ids,
         build_arena_heatmap,
@@ -96,7 +100,7 @@ def _():
     )
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(Path, discover_protocol_recording_options, mo):
     cli_args = mo.cli_args()
     zarr_path_raw = cli_args.get("zarr-path")
@@ -114,6 +118,12 @@ def _(Path, discover_protocol_recording_options, mo):
     initial_renderer = cli_args.get("renderer")
     initial_run_path = cli_args.get("run-path")
     initial_artifact = cli_args.get("artifact")
+    workspace_mode = str(cli_args.get("workspace") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     collection_browsing = recordings_root_raw is not None or registry_raw is not None
     recording_options = discover_protocol_recording_options(
         seed_zarr_path,
@@ -142,10 +152,11 @@ def _(Path, discover_protocol_recording_options, mo):
         recording_scope_label,
         recording_options,
         seed_zarr_path,
+        workspace_mode,
     )
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo, recording_options, recording_scope_label, seed_zarr_path):
     recording_by_label = {
         f"{index + 1}. {option.label}": option for index, option in enumerate(recording_options)
@@ -178,7 +189,7 @@ def _(mo, recording_options, recording_scope_label, seed_zarr_path):
     return recording_by_label, recording_picker
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     discover_recording_explorer_spec_options,
     initial_artifact,
@@ -198,7 +209,7 @@ def _(
     return selected_recording, spec_options, zarr_path
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(PROVIDERS, group_specs_by_provider, mo, spec_options, zarr_path):
     specs_by_provider = group_specs_by_provider(spec_options)
     provider_by_label = {
@@ -234,7 +245,7 @@ def _(PROVIDERS, group_specs_by_provider, mo, spec_options, zarr_path):
     return provider_by_label, provider_picker, specs_by_provider
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(provider_by_label, provider_picker, specs_by_provider):
     if provider_picker is None:
         selected_provider = None
@@ -245,7 +256,7 @@ def _(provider_by_label, provider_picker, specs_by_provider):
     return provider_specs, selected_provider
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo, provider_specs, selected_provider):
     if selected_provider is None or not provider_specs:
         source_by_label = {}
@@ -269,13 +280,13 @@ def _(mo, provider_specs, selected_provider):
     return source_by_label, source_picker
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(source_by_label, source_picker):
     selected_spec = source_by_label[source_picker.value] if source_picker is not None else None
     return (selected_spec,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     CoreBehaviorSource,
     analyses_for_provider,
@@ -313,7 +324,7 @@ def _(
     return analysis_by_label, analysis_picker, core_source
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(analysis_by_label, analysis_picker):
     selected_analysis = (
         analysis_by_label[analysis_picker.value] if analysis_picker is not None else None
@@ -322,7 +333,7 @@ def _(analysis_by_label, analysis_picker):
     return selected_analysis, selected_analysis_id
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(core_source, mo, selected_analysis_id):
     if core_source is not None and selected_analysis_id in {"speed", "heading"}:
         core_series_options = list(core_source.series_for(selected_analysis_id))
@@ -339,7 +350,7 @@ def _(core_source, mo, selected_analysis_id):
     return (core_series_picker,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(core_source, mo, selected_analysis_id, selected_provider):
     if (
         selected_provider is not None
@@ -364,7 +375,7 @@ def _(core_source, mo, selected_analysis_id, selected_provider):
     return (core_time_window,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     core_source,
     core_series_picker,
@@ -405,7 +416,7 @@ def _(
     return core_error, core_projection
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(build_core_behavior_output, core_error, core_projection, go, mo, px):
     if core_error:
         core_output = mo.md(f"Core behavior analysis failed: `{core_error}`")
@@ -419,7 +430,7 @@ def _(build_core_behavior_output, core_error, core_projection, go, mo, px):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     load_goodcopbadcop_view,
     selected_analysis_id,
@@ -454,7 +465,7 @@ def _(
     return chaser_error, chaser_loaded
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(build_chaser_controls, chaser_loaded, mo, selected_analysis_id):
     analyses_with_controls = {
         "distance",
@@ -473,7 +484,7 @@ def _(build_chaser_controls, chaser_loaded, mo, selected_analysis_id):
     return (chaser_controls,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(chaser_controls, mo, selected_analysis_id):
     if chaser_controls is None:
         chaser_controls_output = mo.md("")
@@ -500,7 +511,7 @@ def _(chaser_controls, mo, selected_analysis_id):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(chaser_controls, chaser_loaded, resolve_time_window_from_widgets):
     if chaser_loaded is not None and chaser_controls is not None:
         chaser_window = resolve_time_window_from_widgets(
@@ -514,7 +525,7 @@ def _(chaser_controls, chaser_loaded, resolve_time_window_from_widgets):
     return (chaser_window,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(chaser_controls, chaser_loaded, resolve_time_windows_from_multiselect, selected_analysis_id):
     if (
         selected_analysis_id == "egocentric_bearing"
@@ -531,7 +542,7 @@ def _(chaser_controls, chaser_loaded, resolve_time_windows_from_multiselect, sel
     return (chaser_egocentric_windows,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     build_arena_heatmap,
     build_cra_near_field_output,
@@ -636,6 +647,68 @@ def _(
         chaser_output = mo.md("The selected analysis has no renderable persisted rows.")
     chaser_output
     return
+
+
+@app.cell(hide_code=True)
+def _(
+    RecordingExplorationWorkspace,
+    chaser_loaded,
+    core_projection,
+    core_source,
+    selected_analysis,
+    selected_provider,
+    selected_recording,
+    selected_spec,
+    zarr_path,
+):
+    recording_workspace = RecordingExplorationWorkspace(
+        zarr_path=zarr_path,
+        selected_recording=selected_recording,
+        selected_provider=selected_provider,
+        selected_spec=selected_spec,
+        selected_analysis=selected_analysis,
+        core_source=core_source,
+        core_projection=core_projection,
+        chaser_view=chaser_loaded,
+    )
+    return (recording_workspace,)
+
+
+@app.cell(hide_code=True)
+def _(mo, workspace_mode):
+    if workspace_mode:
+        workspace_header = mo.vstack(
+            [
+                mo.md("---\n\n## Exploration workspace"),
+                mo.callout(
+                    mo.md(
+                        "The selected recording is mounted read-only at "
+                        "`/data/recording.zarr`. Notebook edits and new files "
+                        "may be saved only beneath `/workspace`."
+                    ),
+                    kind="info",
+                ),
+                mo.md(
+                    "Use the editable cell below, add more cells after it, or "
+                    "ask a Marimo Pair agent to inspect `exploration` and append "
+                    "an analysis. Changing the controls above updates this live handle."
+                ),
+            ]
+        )
+    else:
+        workspace_header = mo.md("")
+    workspace_header
+    return
+
+
+@app.cell
+def _(recording_workspace, workspace_mode):
+    # Start here. `exploration` follows the recording and analysis selected above.
+    # Try `exploration.summary()`, `exploration.core_frame`,
+    # `exploration.chaser_tables`, or `exploration.open_zarr()`.
+    exploration = recording_workspace if workspace_mode else None
+    exploration
+    return (exploration,)
 
 
 if __name__ == "__main__":
