@@ -10,6 +10,7 @@ import pytest
 
 from apps.marimo.components.training_response import (
     filter_training_response_rows,
+    strategy_transition_sankey_figure,
     training_response_scatter_figure,
 )
 from fisheye.analytics_exports.capabilities import resolve_capabilities
@@ -414,3 +415,54 @@ def test_training_response_component_filters_and_labels_noncausal_axes() -> None
     assert figure is not None
     assert figure.layout.xaxis.title.text == "Aggressive proximity score (farther →)"
     assert "avoid" not in figure.layout.title.text.lower()
+
+
+def test_strategy_sankey_matches_only_complete_recording_level_pairs() -> None:
+    baseline = [
+        {
+            "recording_id": "a",
+            "classification_status": "complete",
+            "primary_strategy": "broad_even_explorer",
+        },
+        {
+            "recording_id": "b",
+            "classification_status": "complete",
+            "primary_strategy": "active_wall_following",
+        },
+        {
+            "recording_id": "c",
+            "classification_status": "invalid",
+            "primary_strategy": "unavailable",
+        },
+    ]
+    training = [
+        {
+            "recording_id": "a",
+            "protocol_name": "RedScare",
+            "classification_status": "complete",
+            "primary_training_profile": "active_distance_maintenance",
+        },
+        {
+            "recording_id": "b",
+            "protocol_name": "GoodCopBadCop",
+            "classification_status": "complete",
+            "primary_training_profile": "active_distance_maintenance",
+        },
+        {
+            "recording_id": "c",
+            "protocol_name": "RedScare",
+            "classification_status": "complete",
+            "primary_training_profile": "low_activity_close_proximity",
+        },
+    ]
+    figure = strategy_transition_sankey_figure(baseline, training)
+
+    assert figure is not None
+    sankey = figure.data[0]
+    assert sum(sankey.link.value) == 2
+    assert "Baseline · broad_even_explorer" in sankey.node.label
+    assert "Training · active_distance_maintenance" in sankey.node.label
+    assert "2 matched focal-fish sessions" in figure.layout.title.text
+    assert strategy_transition_sankey_figure([], training) is None
+    with pytest.raises(ValueError, match="duplicate complete training row"):
+        strategy_transition_sankey_figure(baseline, [training[0], training[0]])

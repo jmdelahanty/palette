@@ -37,6 +37,7 @@ def _():
         TRAINING_RESPONSE_CATEGORY_FIELDS,
         TRAINING_RESPONSE_METRICS,
         filter_training_response_rows,
+        strategy_transition_sankey_figure,
         training_response_scatter_figure,
     )
     from fisheye.baseline_strategy.qc import (
@@ -79,6 +80,7 @@ def _():
         select_training_response_run_id,
         source_export_context,
         speed_trace_figure,
+        strategy_transition_sankey_figure,
         trajectory_figure,
         training_response_scatter_figure,
     )
@@ -796,6 +798,7 @@ def _(
     filter_training_response_rows,
     mo,
     pd,
+    qc_rows,
     training_category_labels,
     training_category_picker,
     training_metric_labels,
@@ -803,6 +806,7 @@ def _(
     training_protocol_picker,
     training_response_rows,
     training_response_scatter_figure,
+    strategy_transition_sankey_figure,
     training_status_picker,
 ):
     filtered_training_response_rows = filter_training_response_rows(
@@ -828,6 +832,10 @@ def _(
     )
     training_scatter_figure = training_response_scatter_figure(
         filtered_training_response_rows
+    )
+    strategy_transition_figure = strategy_transition_sankey_figure(
+        qc_rows,
+        filtered_training_response_rows,
     )
     invalid_training_rows = [
         {
@@ -868,6 +876,22 @@ def _(
                 mo.ui.plotly(training_scatter_figure)
                 if training_scatter_figure
                 else no_training_rows
+            ),
+            mo.md("## Baseline-to-training strategy correspondence"),
+            mo.callout(
+                "Links count matched recording-level focal-fish sessions with complete "
+                "classification in both periods. This is a descriptive correspondence, "
+                "not a causal transition or a deduplicated count of biological fish.",
+                kind="info",
+            ),
+            (
+                mo.ui.plotly(strategy_transition_figure)
+                if strategy_transition_figure
+                else mo.callout(
+                    "No recordings with complete baseline and training classifications "
+                    "match the current filters.",
+                    kind="warn",
+                )
             ),
             mo.accordion(
                 {

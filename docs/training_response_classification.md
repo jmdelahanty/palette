@@ -210,3 +210,10 @@ app lazily joins the three small derived
 tables, provides protocol and validity filters, shows factorized category
 counts and continuous distributions, and states the temporal limitation
 directly. It never writes to an export or recording Zarr.
+
+The QC section also shows a Sankey diagram from complete pre-period
+`primary_strategy` labels to complete whole-training
+`primary_training_profile` labels. Links respect the active protocol and
+training-validity filters. Counts are recording-level focal-fish sessions, not
+deduplicated biological individuals, and the flow is a descriptive
+correspondence rather than evidence of a causal state transition.
