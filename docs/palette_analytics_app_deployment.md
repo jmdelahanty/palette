@@ -29,7 +29,7 @@ therefore resolve the same runtime.
 
 ## FileGlancer launch
 
-The root `runnables.yaml` declares the Pixi task as a FileGlancer service. The
+The root `runnables.yaml` declares only the group analytics explorer. The
 launch form requires an authorized analytics export root and then runs:
 
 ```bash
@@ -63,7 +63,9 @@ launch shows exactly the selected recording. Collection browsing is available
 only when `--recordings-root` or `--registry` is supplied explicitly, and an
 optional `--recording-name-contains` value can then narrow the collection.
 
-FileGlancer exposes this as the **Recording Explorer** service. Its required
+FileGlancer discovers the recording viewer independently from
+`apps/fileglancer/recording_explorer/runnables.yaml` and exposes it as the
+**Palette Recording Explorer** app. Its required
 **Recording Analysis Zarr** directory parameter becomes `--zarr-path`; the
 directory picker and FileGlancer file-share policy provide the outer path
 authorization boundary. Palette opens the Zarr with mode `r`, keeps projections
@@ -71,8 +73,9 @@ bounded, and exposes no save action.
 
 ## Editable recording workspace
 
-The opt-in **Recording Exploration Workspace** is distinct from the published
-read-only viewer:
+The opt-in **Palette Recording Exploration Workspace** is a third, independently
+discovered FileGlancer app declared in
+`apps/fileglancer/recording_workspace/runnables.yaml`:
 
 ```bash
 pixi run -e recording recording-workspace -- \
@@ -99,6 +102,12 @@ namespaces. The launcher fails closed if Bubblewrap is absent or cannot create
 the namespace. See
 [Marimo Pair Recording Workspace](marimo_pair_recording_workspace.md) for the
 complete trust boundary and Pair connection workflow.
+
+Keeping these as three manifests gives FileGlancer three app cards rather than
+one app with several launch modes. The group export viewer, locked recording
+viewer, and editable Pair workspace therefore communicate their different data
+and write authorities before a user starts a job. All three still resolve to
+the same Palette commit, Pixi lock, and reusable notebook/component code.
 
 ## Packaging boundary
 

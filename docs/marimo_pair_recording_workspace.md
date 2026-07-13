@@ -21,9 +21,11 @@ pixi run -e recording recording-workspace -- \
   --zarr-path /path/to/recording_analysis.zarr
 ```
 
-FileGlancer exposes the same task as **Recording Exploration Workspace**. It
-requires exactly one **Recording Analysis Zarr** directory. Direct launches use
-port 2721 by default; FileGlancer supplies its allocated port and access token.
+FileGlancer discovers
+`apps/fileglancer/recording_workspace/runnables.yaml` as the independent
+**Palette Recording Exploration Workspace** app. It requires exactly one
+**Recording Analysis Zarr** directory. Direct launches use port 2721 by default;
+FileGlancer supplies its allocated port and access token.
 
 The launcher makes a timestamped notebook copy under:
 

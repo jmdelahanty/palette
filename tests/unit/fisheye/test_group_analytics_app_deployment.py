@@ -36,13 +36,40 @@ def test_pixi_exposes_group_recording_and_editable_workspace_tasks() -> None:
     assert config["dependencies"]["polars"] == "==1.40.0"
 
 
-def test_fileglancer_service_delegates_to_the_pixi_app() -> None:
-    manifest = yaml.safe_load((REPO_ROOT / "runnables.yaml").read_text(encoding="utf-8"))
-    runnables = {item["id"]: item for item in manifest["runnables"]}
-    runnable = runnables["app"]
+def _load_manifest(relative_path: str) -> dict:
+    return yaml.safe_load((REPO_ROOT / relative_path).read_text(encoding="utf-8"))
 
-    assert manifest["requirements"] == ["pixi>=0.40"]
-    assert set(runnables) == {"app", "recording-app", "recording-workspace"}
+
+def test_fileglancer_exposes_three_independent_apps() -> None:
+    discovered_paths = sorted(
+        str(path.relative_to(REPO_ROOT))
+        for path in REPO_ROOT.rglob("runnables.yaml")
+        if ".git" not in path.parts
+    )
+    assert discovered_paths == [
+        "apps/fileglancer/recording_explorer/runnables.yaml",
+        "apps/fileglancer/recording_workspace/runnables.yaml",
+        "runnables.yaml",
+    ]
+
+    group_manifest = _load_manifest("runnables.yaml")
+    recording_manifest = _load_manifest(
+        "apps/fileglancer/recording_explorer/runnables.yaml"
+    )
+    workspace_manifest = _load_manifest(
+        "apps/fileglancer/recording_workspace/runnables.yaml"
+    )
+
+    manifests = (group_manifest, recording_manifest, workspace_manifest)
+    assert {manifest["name"] for manifest in manifests} == {
+        "Palette Group Analytics Explorer",
+        "Palette Recording Explorer",
+        "Palette Recording Exploration Workspace",
+    }
+    assert all(manifest["requirements"] == ["pixi>=0.40"] for manifest in manifests)
+    assert [len(manifest["runnables"]) for manifest in manifests] == [1, 1, 1]
+
+    runnable = group_manifest["runnables"][0]
     assert runnable["id"] == "app"
     assert runnable["type"] == "service"
     assert runnable["command"] == "pixi run app --"
@@ -53,9 +80,12 @@ def test_fileglancer_service_delegates_to_the_pixi_app() -> None:
     assert runnable["parameters"][0]["type"] == "directory"
     assert runnable["parameters"][0]["required"] is True
 
-    recording = runnables["recording-app"]
+    recording = recording_manifest["runnables"][0]
+    assert recording["id"] == "recording-app"
     assert recording["type"] == "service"
-    assert recording["command"] == "pixi run -e recording recording-app --"
+    assert recording["command"] == (
+        "pixi run --manifest-path ../../../pixi.toml -e recording recording-app --"
+    )
     assert recording["working_dir"] == "repo"
     assert recording["auto_url"] is True
     assert recording["service_url_suffix"] == "/?access_token=${FG_SERVICE_TOKEN}"
@@ -66,16 +96,19 @@ def test_fileglancer_service_delegates_to_the_pixi_app() -> None:
             "type": "directory",
             "description": (
                 "One Palette analysis Zarr directory. Direct FileGlancer launches show "
-                "only this recording unless collection arguments are supplied separately."
+                "only this recording."
             ),
             "required": True,
             "exists": True,
         }
     ]
 
-    workspace = runnables["recording-workspace"]
+    workspace = workspace_manifest["runnables"][0]
+    assert workspace["id"] == "recording-workspace"
     assert workspace["type"] == "service"
-    assert workspace["command"] == "pixi run -e recording recording-workspace --"
+    assert workspace["command"] == (
+        "pixi run --manifest-path ../../../pixi.toml -e recording recording-workspace --"
+    )
     assert workspace["working_dir"] == "repo"
     assert workspace["auto_url"] is True
     assert workspace["service_url_suffix"] == "/?access_token=${FG_SERVICE_TOKEN}"

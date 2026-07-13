@@ -77,6 +77,8 @@ pixi run -e recording recording-workspace -- \
 The workspace uses read-only bind mounts for the selected Zarr and Palette
 code. Only its per-session notebook directory is writable. See
 `docs/marimo_pair_recording_workspace.md` before enabling Marimo Pair.
+FileGlancer publishes the group explorer, locked recording viewer, and editable
+recording workspace as three independent apps from this repository.
 
 ## Documentation
 
