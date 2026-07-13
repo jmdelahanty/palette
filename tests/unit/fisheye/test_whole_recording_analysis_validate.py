@@ -20,6 +20,26 @@ class FakeArray:
         return self.values[key]
 
 
+class EllipsisRejectingOIndex:
+    def __init__(self, values: np.ndarray) -> None:
+        self.values = np.asarray(values)
+        self.last_key = None
+
+    def __getitem__(self, key):  # noqa: ANN001, ANN204
+        self.last_key = key
+        if any(item is Ellipsis for item in key):
+            raise AssertionError("orthogonal selection must not contain Ellipsis")
+        return self.values[key]
+
+
+class EllipsisRejectingArray:
+    def __init__(self, values: np.ndarray) -> None:
+        self.values = np.asarray(values)
+        self.shape = self.values.shape
+        self.dtype = self.values.dtype
+        self.oindex = EllipsisRejectingOIndex(self.values)
+
+
 class FakeGroup(dict):
     def __init__(self, *args, attrs=None, **kwargs) -> None:  # noqa: ANN002, ANN003
         super().__init__(*args, **kwargs)
@@ -129,6 +149,21 @@ def test_validate_analysis_plan_checks_exact_dense_outputs(tmp_path: Path) -> No
     assert target["raw_masks"]["dtype"] == "uint8"
     assert target["refined_masks"]["sample_unique_values"] == [1]
     assert target["refined_masks"]["full_component_contours"] == "absent"
+
+
+def test_read_rows_uses_explicit_slices_for_zarr_orthogonal_indexing() -> None:
+    values = np.arange(5 * 3 * 2 * 2).reshape(5, 3, 2, 2)
+    array = EllipsisRejectingArray(values)
+
+    sampled = mod._read_rows(array, np.asarray([0, 3], dtype=np.int64))
+
+    np.testing.assert_array_equal(sampled, values[[0, 3], :, :, :])
+    assert array.oindex.last_key == (
+        [0, 3],
+        slice(None),
+        slice(None),
+        slice(None),
+    )
 
 
 def test_validate_analysis_plan_fails_on_all_zero_raw_component(tmp_path: Path) -> None:

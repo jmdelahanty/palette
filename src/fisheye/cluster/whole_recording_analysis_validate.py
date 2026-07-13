@@ -44,10 +44,11 @@ def _uniform_indices(total_rows: int, sample_rows: int) -> np.ndarray:
 
 def _read_rows(array: Any, row_indices: np.ndarray) -> np.ndarray:
     selection = row_indices.tolist()
+    selection_key = (selection,) + (slice(None),) * (len(array.shape) - 1)
     oindex = getattr(array, "oindex", None)
     if oindex is not None:
-        return np.asarray(oindex[selection, ...])
-    return np.asarray(array[selection, ...])
+        return np.asarray(oindex[selection_key])
+    return np.asarray(array[selection_key])
 
 
 def _require_complete_run(root: Any, parent_name: str, run_name: str) -> Any:
