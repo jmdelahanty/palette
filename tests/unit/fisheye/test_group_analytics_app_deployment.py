@@ -14,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 def test_pixi_exposes_one_lightweight_public_app_task() -> None:
     config = tomllib.loads((REPO_ROOT / "pixi.toml").read_text(encoding="utf-8"))
 
-    assert config["project"]["platforms"] == ["linux-64"]
+    assert config["workspace"]["platforms"] == ["linux-64"]
     assert config["tasks"] == {
         "app": {
             "cmd": "bash scripts/run_group_analytics_app.sh",
