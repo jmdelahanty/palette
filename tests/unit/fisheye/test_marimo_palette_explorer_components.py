@@ -414,7 +414,7 @@ def test_goodcopbadcop_component_summarizes_swim_bouts_by_epoch(tmp_path) -> Non
             return {"label": label, "value": value}
 
         @staticmethod
-        def hstack(items):
+        def hstack(items, **_kwargs):
             return list(items)
 
         @staticmethod
@@ -474,7 +474,7 @@ def test_goodcopbadcop_component_prefers_persisted_epoch_behavior_summary(tmp_pa
             return {"label": label, "value": value}
 
         @staticmethod
-        def hstack(items):
+        def hstack(items, **_kwargs):
             return list(items)
 
         @staticmethod
@@ -484,9 +484,19 @@ def test_goodcopbadcop_component_prefers_persisted_epoch_behavior_summary(tmp_pa
     output = build_epoch_summary_output(_Mo, go, loaded=loaded)
 
     assert "persisted zarr component" in output[0]
-    summary_plots = output[2]
-    distribution_plots = output[4]
-    ibi_distribution_plots = output[6]
+    summary_plot_rows = output[2]
+    distribution_plot_rows = output[4]
+    ibi_distribution_plot_rows = output[6]
+    summary_plots = [figure for row in summary_plot_rows for figure in row if hasattr(figure, "layout")]
+    distribution_plots = [
+        figure for row in distribution_plot_rows for figure in row if hasattr(figure, "layout")
+    ]
+    ibi_distribution_plots = [
+        figure for row in ibi_distribution_plot_rows for figure in row if hasattr(figure, "layout")
+    ]
+    assert [len(row) for row in summary_plot_rows] == [2, 2, 2, 2]
+    assert [len(row) for row in distribution_plot_rows] == [2, 2, 2]
+    assert [len(row) for row in ibi_distribution_plot_rows] == [2]
     assert [figure.layout.title.text for figure in summary_plots] == [
         "Bout Rate by Epoch",
         "Bout Count by Epoch",
@@ -513,6 +523,8 @@ def test_goodcopbadcop_component_prefers_persisted_epoch_behavior_summary(tmp_pa
     assert ibi_distribution_plots[0].data[0].type == "bar"
     assert summary_plots[0].layout.yaxis.title.text == "Bouts / min"
     assert summary_plots[1].layout.yaxis.title.text == "Bouts"
+    assert all(figure.layout.height == 360 for figure in summary_plots)
+    assert all(figure.layout.height == 360 for figure in distribution_plots)
     assert "bout_rate_per_min" in output[-1].columns
     assert "tracking_dropout_fraction" in output[-1].columns
     assert "mean_bout_duration_s" in output[-1].columns

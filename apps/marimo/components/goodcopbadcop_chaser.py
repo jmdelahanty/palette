@@ -1079,6 +1079,27 @@ def _build_persisted_epoch_distribution_plots(
     return figures
 
 
+def _two_column_plot_grid(
+    mo: Any,
+    plots: list[Any],
+    *,
+    height: int = 360,
+) -> Any:
+    """Lay Plotly panels out in compact, equal-width pairs."""
+
+    rows: list[Any] = []
+    for start in range(0, len(plots), 2):
+        cells = list(plots[start : start + 2])
+        for figure in cells:
+            update_layout = getattr(figure, "update_layout", None)
+            if callable(update_layout):
+                update_layout(height=int(height), autosize=True)
+        if len(cells) == 1:
+            cells.append(mo.md(""))
+        rows.append(mo.hstack(cells, widths="equal", align="start"))
+    return mo.vstack(rows)
+
+
 def build_epoch_summary_output(
     mo: Any,
     go: Any = None,
@@ -1519,7 +1540,7 @@ def build_epoch_summary_output(
         ),
     ]
     if plots:
-        items.append(mo.vstack(plots))
+        items.append(_two_column_plot_grid(mo, plots))
     if loaded.epoch_behavior is not None:
         distribution_plots = _build_persisted_epoch_distribution_plots(
             go,
@@ -1533,7 +1554,7 @@ def build_epoch_summary_output(
             )
         if distribution_plots:
             items.append(mo.md("## Swim Bout Distributions"))
-            items.append(mo.vstack(distribution_plots))
+            items.append(_two_column_plot_grid(mo, distribution_plots))
         ibi_distribution_plots = _build_persisted_epoch_distribution_plots(
             go,
             loaded.epoch_behavior.per_epoch_inter_bout_interval_histograms_df,
@@ -1541,7 +1562,7 @@ def build_epoch_summary_output(
         )
         if ibi_distribution_plots:
             items.append(mo.md("## Inter-Bout Interval Distributions"))
-            items.append(mo.vstack(ibi_distribution_plots))
+            items.append(_two_column_plot_grid(mo, ibi_distribution_plots))
     items.append(mo.ui.table(display_pd, selection=None, page_size=12))
     return mo.vstack(items)
 
