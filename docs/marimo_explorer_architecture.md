@@ -114,6 +114,20 @@ Python row dictionaries.
 Both paths are read-only. Viewer projections and exploratory summaries are not
 written into the recording or export.
 
+The single-recording explorer uses targeted track/chaser provider discovery
+rather than constructing the audit-oriented whole-recording artifact
+inventory. Within one selected recording/run, the process retains the time
+coordinate, resolved bout source, and bout-event rows in RAM so reactive time
+window changes do not repeat network metadata and table reads. Speed samples
+remain bounded Zarr slices from the authoritative source.
+
+Dense core plots also enforce a display-only serialization budget. Speed and
+heading read only explicitly selected series, with one physical speed trace as
+the default, and Plotly traces are deterministically decimated to at most
+60,000 total displayed points. Raising Marimo's output-size limit is not part
+of the design; the source data remain unchanged and exact event boundaries are
+retained.
+
 ## Running
 
 General explorer:

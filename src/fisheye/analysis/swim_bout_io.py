@@ -110,6 +110,20 @@ class SwimBoutTables:
     signal_attrs: Mapping[str, Any]
 
 
+@dataclass(frozen=True)
+class SwimBoutEvents:
+    """Projected event-only payload for interactive timelines."""
+
+    run_name: str
+    run_path: str
+    level_path: str
+    candidate: SwimBoutCandidate
+    signal: SwimBoutSignalVariant
+    bouts: np.ndarray
+    run_attrs: Mapping[str, Any]
+    signal_attrs: Mapping[str, Any]
+
+
 def normalize_speed_level(value: object, default: str | None = None) -> str:
     """Return a canonical ``speed_*`` level name."""
 
@@ -142,6 +156,7 @@ def discover_swim_bout_candidates(
     *,
     track_run_name: object | None = None,
     track_id: int | None = None,
+    include_bout_counts: bool = True,
 ) -> list[SwimBoutCandidate]:
     """Discover logical swim-bout candidates under ``analysis/swim_bout_runs``.
 
@@ -168,6 +183,7 @@ def discover_swim_bout_candidates(
             run_group,
             run_name=str(run_name),
             is_latest=str(latest_name) == str(run_name),
+            include_bout_counts=include_bout_counts,
         ):
             if candidate.signals:
                 candidates.append(candidate)
@@ -271,6 +287,57 @@ def load_swim_bout_tables(
     )
 
 
+def load_swim_bout_events(
+    root: zarr.Group,
+    *,
+    candidate: SwimBoutCandidate,
+    signal: SwimBoutSignalVariant,
+) -> SwimBoutEvents:
+    """Load only the selected persisted bout-event rows.
+
+    Unlike :func:`load_swim_bout_tables`, this projection does not read peak
+    events, intervals, histograms, summary metrics, point tables, trials, or
+    detector-signal arrays.
+    """
+
+    parent = _require_child(root, "analysis/swim_bout_runs")
+    run_group = _require_child(parent, candidate.run_name)
+    if _is_compact_v2_group(run_group):
+        tables = _require_child(run_group, "tables")
+        bouts = _filter_records(
+            _load_structured_or_empty(tables, "bouts", required=True),
+            candidate_id=candidate.candidate_id,
+            signal_id=signal.signal_id,
+        )
+        indexes = _require_child(run_group, "indexes")
+        signal_rows = _load_structured_or_empty(indexes, "signal_variants")
+        signal_row = _row_by_int_field(signal_rows, "signal_id", signal.signal_id)
+        level_path = (
+            f"analysis/swim_bout_runs/{candidate.run_name}/tables/bouts"
+            f"?candidate_id={candidate.candidate_id}&signal_id={signal.signal_id}"
+        )
+        signal_attrs = _record_to_dict(signal_row) if signal_row is not None else signal.attrs
+    else:
+        level_group = _require_child(run_group, signal.speed_level) if signal.speed_level else run_group
+        bouts = _load_structured_or_empty(level_group, "bouts", required=True)
+        level_path = (
+            f"analysis/swim_bout_runs/{candidate.run_name}/{signal.speed_level}"
+            if signal.speed_level
+            else f"analysis/swim_bout_runs/{candidate.run_name}"
+        )
+        signal_attrs = _attrs_dict(level_group)
+    return SwimBoutEvents(
+        run_name=candidate.run_name,
+        run_path=f"analysis/swim_bout_runs/{candidate.run_name}",
+        level_path=level_path,
+        candidate=candidate,
+        signal=signal,
+        bouts=bouts,
+        run_attrs=_attrs_dict(run_group),
+        signal_attrs=signal_attrs,
+    )
+
+
 def _is_compact_v2_group(run_group: zarr.Group) -> bool:
     attrs = _attrs_dict(run_group)
     return attrs.get("layout") == COMPACT_V2_LAYOUT or _get_child(run_group, "indexes/candidates") is not None
@@ -281,9 +348,15 @@ def _candidates_from_run_group(
     *,
     run_name: str,
     is_latest: bool,
+    include_bout_counts: bool = True,
 ) -> list[SwimBoutCandidate]:
     if _is_compact_v2_group(run_group):
-        return _candidates_from_compact_v2_group(run_group, run_name=run_name, is_latest=is_latest)
+        return _candidates_from_compact_v2_group(
+            run_group,
+            run_name=run_name,
+            is_latest=is_latest,
+            include_bout_counts=include_bout_counts,
+        )
     return [_candidate_from_v1_group(run_group, run_name=run_name, is_latest=is_latest)]
 
 
@@ -396,12 +469,17 @@ def _candidates_from_compact_v2_group(
     *,
     run_name: str,
     is_latest: bool,
+    include_bout_counts: bool = True,
 ) -> list[SwimBoutCandidate]:
     candidate_rows = _load_structured_or_empty(_require_child(run_group, "indexes"), "candidates")
     if candidate_rows.size == 0:
         return []
     signal_rows = _load_structured_or_empty(_require_child(run_group, "indexes"), "signal_variants")
-    bouts = _load_structured_or_empty(_require_child(run_group, "tables"), "bouts")
+    bouts = (
+        _load_structured_or_empty(_require_child(run_group, "tables"), "bouts")
+        if include_bout_counts
+        else np.zeros(0, dtype=[])
+    )
     run_attrs = _attrs_dict(run_group)
     default_signal_id = _safe_int(run_attrs.get("default_signal_id"))
     default_speed_level = _signal_row_speed_level(

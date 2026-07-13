@@ -20,7 +20,7 @@ import polars as pl
 from fisheye.analysis.swim_bout_io import (
     SwimBoutIOError,
     discover_swim_bout_candidates,
-    load_swim_bout_tables,
+    load_swim_bout_events,
     structured_records_to_dicts,
 )
 from fisheye.analytics_exports.baseline import is_baseline_label
@@ -124,6 +124,10 @@ class CoreBehaviorSource:
         self.option = option
         self.source_paths = _source_paths(option)
         self.track_id = int(option.spec.get("track_id") or 0)
+        self._time_seconds_cache: np.ndarray | None = None
+        self._swim_bout_selection_cache: tuple[Any, Any] | None = None
+        self._swim_bout_events_cache: Any = None
+        self._available_analysis_ids_cache: tuple[str, ...] | None = None
 
     @property
     def available_series(self) -> tuple[str, ...]:
@@ -154,8 +158,35 @@ class CoreBehaviorSource:
             )
         return ()
 
+    def default_series_for(self, analysis_id: str) -> tuple[str, ...]:
+        available = set(self.series_for(analysis_id))
+        if analysis_id == "speed":
+            preferred = (
+                "speed_smoothed_mm",
+                "speed_filtered_mm",
+                "speed_raw_mm",
+                "speed_averaged_mm",
+                "speed_smoothed_px",
+                "speed_filtered_px",
+                "speed_raw_px",
+                "speed_averaged_px",
+            )
+            return tuple(name for name in preferred if name in available)[:1]
+        if analysis_id == "heading":
+            preferred = (
+                "smoothed_heading_degrees",
+                "angular_speed_smoothed_deg_s",
+                "angular_velocity_smoothed_deg_s",
+                "delta_heading_smoothed_degrees",
+            )
+            return tuple(name for name in preferred if name in available)[:2]
+        return ()
+
     def available_analysis_ids(self) -> tuple[str, ...]:
         """Detect analysis capabilities from array and lineage metadata."""
+
+        if self._available_analysis_ids_cache is not None:
+            return self._available_analysis_ids_cache
 
         available: list[str] = []
         if self.series_for("speed"):
@@ -165,13 +196,7 @@ class CoreBehaviorSource:
         if "positions_mm" in self.source_paths or "positions_px" in self.source_paths:
             available.append("position")
         try:
-            root = self._root()
-            track_run_name = _normal_path(self.option.run_path).split("/")[-1]
-            if discover_swim_bout_candidates(
-                root,
-                track_run_name=track_run_name,
-                track_id=self.track_id,
-            ):
+            if self._swim_bout_selection() is not None:
                 available.append("swim_bouts")
         except Exception:
             pass
@@ -187,7 +212,40 @@ class CoreBehaviorSource:
                 available.append("baseline")
         except Exception:
             pass
-        return tuple(available)
+        self._available_analysis_ids_cache = tuple(available)
+        return self._available_analysis_ids_cache
+
+    def _swim_bout_selection(self) -> tuple[Any, Any] | None:
+        if self._swim_bout_selection_cache is not None:
+            return self._swim_bout_selection_cache
+        root = self._root()
+        track_run_name = _normal_path(self.option.run_path).split("/")[-1]
+        candidates = discover_swim_bout_candidates(
+            root,
+            track_run_name=track_run_name,
+            track_id=self.track_id,
+            include_bout_counts=False,
+        )
+        if not candidates:
+            return None
+        candidate = candidates[0]
+        signal = next((item for item in candidate.signals if item.is_default), candidate.signals[0])
+        self._swim_bout_selection_cache = (candidate, signal)
+        return self._swim_bout_selection_cache
+
+    def _swim_bout_events(self) -> Any:
+        if self._swim_bout_events_cache is not None:
+            return self._swim_bout_events_cache
+        selection = self._swim_bout_selection()
+        if selection is None:
+            raise SwimBoutIOError("No lineage-compatible swim-bout run is available")
+        candidate, signal = selection
+        self._swim_bout_events_cache = load_swim_bout_events(
+            self._root(),
+            candidate=candidate,
+            signal=signal,
+        )
+        return self._swim_bout_events_cache
 
     def _root(self):
         return open_zarr_root(self.zarr_path, mode="r")
@@ -202,6 +260,8 @@ class CoreBehaviorSource:
             return None
 
     def time_bounds(self) -> tuple[float, float]:
+        if self._time_seconds_cache is not None:
+            return _finite_bounds(self._time_seconds_cache)
         root = self._root()
         array = self._array(root, "time_seconds")
         if array is None or int(array.shape[0]) == 0:
@@ -224,7 +284,9 @@ class CoreBehaviorSource:
             raise ValueError("Track-kinematics spec does not resolve time_seconds")
         # Only the coordinate is materialized to resolve a chunk-friendly
         # contiguous slice. Payload arrays are read with that slice below.
-        times = np.asarray(time_array[:], dtype=np.float64).reshape(-1)
+        if self._time_seconds_cache is None:
+            self._time_seconds_cache = np.asarray(time_array[:], dtype=np.float64).reshape(-1)
+        times = self._time_seconds_cache
         if times.size == 0:
             return times, slice(0, 0)
         lo = float(start_s) if start_s is not None else float(times[0])
@@ -338,24 +400,8 @@ class CoreBehaviorSource:
         stop_s: float | None = None,
     ) -> CoreBehaviorProjection:
         started = time.perf_counter()
-        root = self._root()
-        track_run_name = _normal_path(self.option.run_path).split("/")[-1]
-        candidates = discover_swim_bout_candidates(
-            root,
-            track_run_name=track_run_name,
-            track_id=self.track_id,
-        )
-        if not candidates:
-            raise SwimBoutIOError("No lineage-compatible swim-bout run is available")
-        candidate = candidates[0]
-        signal = next((item for item in candidate.signals if item.is_default), candidate.signals[0])
-        tables = load_swim_bout_tables(
-            root,
-            run_name=candidate.run_name,
-            candidate_id=candidate.candidate_id,
-            signal_id=signal.signal_id,
-        )
-        lazy = _structured_lazy(tables.bouts)
+        events = self._swim_bout_events()
+        lazy = _structured_lazy(events.bouts)
         schema = lazy.collect_schema()
         aliases: list[pl.Expr] = []
         if "start_time_s" in schema and "start_s" not in schema:
@@ -380,7 +426,7 @@ class CoreBehaviorSource:
         else:
             bounds = (0.0, 0.0)
         row_count = int(lazy.select(pl.len()).collect().item())
-        signal_prefix = str(tables.signal.speed_level or "").strip()
+        signal_prefix = str(events.signal.speed_level or "").strip()
         speed_candidates = [
             name
             for name in (
@@ -413,13 +459,13 @@ class CoreBehaviorSource:
             analysis_id="swim_bouts",
             frame=lazy,
             columns=tuple(schema.names()),
-            source_paths=tuple(dict.fromkeys((tables.level_path, *speed.source_paths))),
+            source_paths=tuple(dict.fromkeys((events.level_path, *speed.source_paths))),
             start_s=bounds[0],
             stop_s=bounds[1],
             row_count=row_count,
             load_duration_ms=(time.perf_counter() - started) * 1000.0,
             note=(
-                f"Persisted `{tables.signal.speed_level}` bout segmentation from `{tables.run_name}`; "
+                f"Persisted `{events.signal.speed_level}` bout segmentation from `{events.run_name}`; "
                 "the lineage-compatible speed trace and downstream Polars queries are read-only."
             ),
             related_frames=related_frames,
@@ -519,9 +565,15 @@ def load_core_behavior_projection(
     *,
     start_s: float | None = None,
     stop_s: float | None = None,
+    series_keys: Sequence[str] | None = None,
 ) -> CoreBehaviorProjection:
     if analysis_id in {"speed", "heading"}:
-        return source.project_timeseries(analysis_id, start_s=start_s, stop_s=stop_s)
+        return source.project_timeseries(
+            analysis_id,
+            start_s=start_s,
+            stop_s=stop_s,
+            series_keys=series_keys,
+        )
     if analysis_id == "position":
         return source.project_positions(start_s=start_s, stop_s=stop_s)
     if analysis_id == "swim_bouts":
@@ -607,6 +659,29 @@ def collect_projection(
     return query.collect()
 
 
+def _decimate_for_display(
+    frame: pl.DataFrame,
+    *,
+    trace_count: int,
+    max_total_values: int = 60000,
+) -> pl.DataFrame:
+    """Bound serialized plotting payload without changing persisted data."""
+
+    if frame.is_empty():
+        return frame
+    row_budget = max(1000, int(max_total_values) // max(1, int(trace_count)))
+    if frame.height <= row_budget:
+        return frame
+    stride = max(1, int(np.ceil(frame.height / float(row_budget))))
+    return (
+        frame.lazy()
+        .with_row_index("_display_row")
+        .filter((pl.col("_display_row") % stride) == 0)
+        .drop("_display_row")
+        .collect()
+    )
+
+
 def build_core_behavior_output(
     mo: Any,
     go: Any,
@@ -635,10 +710,16 @@ def build_core_behavior_output(
             and frame.schema[name].is_numeric()
             and frame.schema[name] != pl.Boolean
         ]
+        display_frame = _decimate_for_display(frame, trace_count=len(value_columns))
         figure = go.Figure()
         for column in value_columns:
             figure.add_trace(
-                go.Scattergl(x=frame["time_s"], y=frame[column], mode="lines", name=column)
+                go.Scattergl(
+                    x=display_frame["time_s"],
+                    y=display_frame[column],
+                    mode="lines",
+                    name=column,
+                )
             )
         figure.update_layout(
             title=(
@@ -656,8 +737,13 @@ def build_core_behavior_output(
         body = figure if value_columns else mo.md("No compatible series are present in this run.")
     elif projection.analysis_id in {"position", "baseline"}:
         if frame.height:
+            display_frame = _decimate_for_display(
+                frame,
+                trace_count=3,
+                max_total_values=75000,
+            )
             figure = px.scatter(
-                frame.to_pandas(),
+                display_frame.to_pandas(),
                 x="x",
                 y="y",
                 color="time_s",
@@ -684,8 +770,8 @@ def build_core_behavior_output(
                 if speed_column is not None:
                     speed_fig = go.Figure(
                         go.Scattergl(
-                            x=frame["time_s"],
-                            y=frame[speed_column],
+                            x=display_frame["time_s"],
+                            y=display_frame[speed_column],
                             mode="lines",
                             name=speed_column,
                         )

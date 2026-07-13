@@ -33,6 +33,7 @@ from apps.marimo.components.goodcopbadcop_chaser import (
 from apps.marimo.components.registry import (
     artifact_path_for,
     discover_interactive_spec_options,
+    discover_recording_explorer_spec_options,
     discover_protocol_recording_options,
     infer_recordings_root_from_zarr_path,
     recording_id_from_analysis_zarr,
@@ -215,6 +216,7 @@ def test_palette_explorer_registry_discovers_goodcopbadcop_interactive_spec(tmp_
     )
     assert filtered == options
     assert discover_interactive_spec_options(zarr_path, renderer_filter="missing-renderer") == []
+    assert discover_recording_explorer_spec_options(zarr_path) == options
 
 
 def test_palette_explorer_discovers_interactive_specs_from_manifest_without_recursive_walk(

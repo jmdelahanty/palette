@@ -49,7 +49,7 @@ def _():
     )
     from apps.marimo.components.provenance import build_spec_provenance_panel
     from apps.marimo.components.registry import (
-        discover_interactive_spec_options,
+        discover_recording_explorer_spec_options,
         discover_protocol_recording_options,
         infer_recordings_root_from_zarr_path,
     )
@@ -78,7 +78,7 @@ def _():
         build_spatial_occupancy_output,
         build_spec_provenance_panel,
         build_static_artifacts_panel,
-        discover_interactive_spec_options,
+        discover_recording_explorer_spec_options,
         discover_protocol_recording_options,
         go,
         group_specs_by_provider,
@@ -118,6 +118,7 @@ def _(Path, discover_protocol_recording_options, mo):
         run_path_filter=str(initial_run_path) if initial_run_path else None,
         artifact_filter=str(initial_artifact) if initial_artifact else None,
         name_contains=str(name_contains) if name_contains else None,
+        recording_explorer_only=True,
     )
     if not recording_options:
         raise ValueError(f"No recording Zarrs were discovered from {seed_zarr_path}")
@@ -166,7 +167,7 @@ def _(infer_recordings_root_from_zarr_path, mo, recording_options, seed_zarr_pat
 
 @app.cell
 def _(
-    discover_interactive_spec_options,
+    discover_recording_explorer_spec_options,
     initial_artifact,
     initial_renderer,
     initial_run_path,
@@ -175,7 +176,7 @@ def _(
 ):
     selected_recording = recording_by_label[recording_picker.value]
     zarr_path = selected_recording.zarr_path
-    spec_options = discover_interactive_spec_options(
+    spec_options = discover_recording_explorer_spec_options(
         zarr_path,
         renderer_filter=str(initial_renderer) if initial_renderer else None,
         run_path_filter=str(initial_run_path) if initial_run_path else None,
@@ -309,6 +310,23 @@ def _(analysis_by_label, analysis_picker):
 
 
 @app.cell
+def _(core_source, mo, selected_analysis_id):
+    if core_source is not None and selected_analysis_id in {"speed", "heading"}:
+        core_series_options = list(core_source.series_for(selected_analysis_id))
+        core_series_picker = mo.ui.multiselect(
+            options=core_series_options,
+            value=list(core_source.default_series_for(selected_analysis_id)),
+            label="Series",
+        )
+        core_series_output = core_series_picker
+    else:
+        core_series_picker = None
+        core_series_output = mo.md("")
+    core_series_output
+    return (core_series_picker,)
+
+
+@app.cell
 def _(core_source, mo, selected_analysis_id, selected_provider):
     if (
         selected_provider is not None
@@ -336,6 +354,7 @@ def _(core_source, mo, selected_analysis_id, selected_provider):
 @app.cell
 def _(
     core_source,
+    core_series_picker,
     core_time_window,
     load_core_behavior_projection,
     selected_analysis_id,
@@ -357,6 +376,11 @@ def _(
                 selected_analysis_id,
                 start_s=start_s,
                 stop_s=stop_s,
+                series_keys=(
+                    tuple(core_series_picker.value)
+                    if core_series_picker is not None
+                    else None
+                ),
             )
             core_error = None
         except Exception as exc:

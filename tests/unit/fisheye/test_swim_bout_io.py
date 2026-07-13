@@ -9,6 +9,7 @@ from fisheye.analysis.swim_bout_io import (
     SwimBoutIOError,
     discover_swim_bout_candidates,
     load_default_swim_bout_tables,
+    load_swim_bout_events,
     load_swim_bout_tables,
     structured_records_to_dicts,
 )
@@ -413,3 +414,21 @@ def test_load_compact_v2_tables_can_select_physical_signal() -> None:
     assert payload.signal.signal_id == 0
     assert payload.signal.role == "physical_estimator"
     assert payload.bouts["bout_id"].tolist() == [10]
+
+
+def test_load_compact_v2_bout_events_skips_companion_tables() -> None:
+    root = _build_compact_v2_swim_bout_root()
+    candidate = discover_swim_bout_candidates(
+        root,
+        track_run_name="tk_hyst4_low2_s005",
+        track_id=0,
+        include_bout_counts=False,
+    )[0]
+    signal = next(item for item in candidate.signals if item.is_default)
+
+    payload = load_swim_bout_events(root, candidate=candidate, signal=signal)
+
+    assert [item.n_bouts for item in candidate.signals] == [0, 0]
+    assert payload.bouts["bout_id"].tolist() == [20, 21]
+    assert payload.signal.speed_level == "speed_exponential"
+    assert payload.level_path.endswith("candidate_id=0&signal_id=1")

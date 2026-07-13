@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import polars as pl
 import plotly.express as px
 import plotly.graph_objects as go
@@ -8,12 +9,14 @@ import apps.marimo.components.core_behavior as core_component
 from apps.marimo.components.analysis_catalog import group_specs_by_provider
 from apps.marimo.components.core_behavior import (
     CoreBehaviorSource,
+    CoreBehaviorProjection,
     build_core_behavior_output,
     collect_projection,
     scan_export_parquet,
 )
 from apps.marimo.components.registry import (
     discover_interactive_spec_options,
+    discover_recording_explorer_spec_options,
     supported_renderer_ids,
 )
 from tests.unit.fisheye.test_interactive_track_kinematics import (
@@ -38,6 +41,9 @@ def test_track_renderer_is_registered_and_routes_to_core_provider(tmp_path) -> N
     assert option.is_supported is True
     assert option.renderer in supported_renderer_ids()
     assert group_specs_by_provider([option]) == {"core_behavior": [option]}
+
+    targeted = discover_recording_explorer_spec_options(zarr_path)
+    assert [item.artifact_path for item in targeted] == [option.artifact_path]
 
 
 def test_core_source_defers_zarr_open_until_projection(tmp_path, monkeypatch) -> None:
@@ -119,6 +125,7 @@ def test_core_source_exposes_only_lineage_compatible_swim_bouts(tmp_path) -> Non
 
     bounded = source.project_swim_bouts(start_s=0.0, stop_s=0.03)
     assert bounded.row_count == 1
+    assert bounded.related_frames["speed_trace"].collect().height == 6
 
 
 def test_core_source_exposes_eye_angles_only_when_persisted(tmp_path) -> None:
@@ -155,3 +162,57 @@ def test_export_parquet_uses_true_polars_lazy_scan(tmp_path) -> None:
     result = lazy.filter(pl.col("recording_id") == "a").collect()
     assert result.columns == ["recording_id", "speed_mm_s"]
     assert result["speed_mm_s"].to_list() == [1.0, 2.0]
+
+
+def test_dense_core_plot_enforces_serialized_point_budget() -> None:
+    row_count = 20000
+    series_count = 10
+    frame = pl.DataFrame(
+        {
+            "time_s": np.arange(row_count, dtype=np.float64) / 100.0,
+            **{
+                f"speed_series_{index}_mm": np.full(row_count, float(index), dtype=np.float32)
+                for index in range(series_count)
+            },
+        }
+    )
+    projection = CoreBehaviorProjection(
+        analysis_id="speed",
+        frame=frame.lazy(),
+        columns=tuple(frame.columns),
+        source_paths=("test",),
+        start_s=0.0,
+        stop_s=200.0,
+        row_count=row_count,
+        load_duration_ms=0.0,
+        note="test",
+    )
+
+    class _Ui:
+        @staticmethod
+        def table(frame, selection=None, page_size=10):
+            return frame
+
+    class _Mo:
+        ui = _Ui()
+
+        @staticmethod
+        def md(text):
+            return text
+
+        @staticmethod
+        def stat(*, label, value):
+            return {"label": label, "value": value}
+
+        @staticmethod
+        def hstack(items):
+            return list(items)
+
+        @staticmethod
+        def vstack(items):
+            return list(items)
+
+    figure = build_core_behavior_output(_Mo, go, px, projection=projection)[2]
+
+    assert len(figure.data) == series_count
+    assert sum(len(trace.x) for trace in figure.data) <= 60000

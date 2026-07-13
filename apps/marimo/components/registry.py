@@ -25,6 +25,7 @@ from .common import join_path, normalize_path
 
 
 TRACK_KINEMATICS_PLOT_RENDERER = "palette-track-kinematics-summary-v1"
+TRACK_KINEMATICS_INTERACTIVE_ARTIFACT = "track_kinematics_summary_track_0_interactive"
 
 
 @dataclass(frozen=True)
@@ -319,6 +320,97 @@ def _discover_goodcopbadcop_chaser_specs_fast(
     return sorted(options, key=lambda item: (not item.is_supported, item.renderer, item.run_path, item.artifact_name))
 
 
+def _discover_track_kinematics_specs_fast(
+    root: zarr.Group,
+    archive: Path,
+    *,
+    run_path_filter: Optional[str],
+    artifact_filter: Optional[str],
+) -> list[InteractiveSpecOption]:
+    run_path_wanted = normalize_path(str(run_path_filter)) if run_path_filter else None
+    artifact_wanted = normalize_path(str(artifact_filter)) if artifact_filter else None
+    if artifact_wanted and "/" not in artifact_wanted and artifact_wanted != TRACK_KINEMATICS_INTERACTIVE_ARTIFACT:
+        return []
+
+    if artifact_wanted and "/" in artifact_wanted:
+        candidate_paths = [artifact_wanted]
+    elif run_path_wanted:
+        candidate_paths = [artifact_path_for(run_path_wanted, TRACK_KINEMATICS_INTERACTIVE_ARTIFACT)]
+    else:
+        try:
+            parent = root["analysis/track_kinematics_runs"]
+        except Exception:
+            return []
+        candidate_paths = [
+            artifact_path_for(
+                f"analysis/track_kinematics_runs/{scope}/{run_name}",
+                TRACK_KINEMATICS_INTERACTIVE_ARTIFACT,
+            )
+            for scope in _group_names(parent)
+            for run_name in _group_names(parent[scope])
+        ]
+
+    options: list[InteractiveSpecOption] = []
+    for artifact_path in candidate_paths:
+        option = _read_option(root, archive, artifact_path)
+        if option is None or option.renderer != TRACK_KINEMATICS_PLOT_RENDERER:
+            continue
+        if run_path_wanted and option.run_path != run_path_wanted:
+            continue
+        if artifact_wanted and artifact_wanted not in {option.artifact_name, option.artifact_path}:
+            continue
+        options.append(option)
+    return sorted(options, key=lambda item: (not item.is_supported, item.run_path, item.artifact_name))
+
+
+def discover_recording_explorer_spec_options(
+    zarr_path: Path | str,
+    *,
+    renderer_filter: Optional[str] = None,
+    run_path_filter: Optional[str] = None,
+    artifact_filter: Optional[str] = None,
+) -> list[InteractiveSpecOption]:
+    """Discover only providers mounted by the single-recording explorer.
+
+    This avoids building the broad recording artifact inventory, which is
+    useful for audits but expensive over a network filesystem.
+    """
+
+    archive = Path(zarr_path)
+    renderer_wanted = str(renderer_filter).strip() if renderer_filter else None
+    if renderer_wanted and renderer_wanted not in {
+        TRACK_KINEMATICS_PLOT_RENDERER,
+        *CHASER_DASHBOARD_RENDERERS,
+    }:
+        return discover_interactive_spec_options(
+            archive,
+            renderer_filter=renderer_wanted,
+            run_path_filter=run_path_filter,
+            artifact_filter=artifact_filter,
+        )
+    root = open_zarr_root(archive, mode="r")
+    options: list[InteractiveSpecOption] = []
+    if renderer_wanted in {None, TRACK_KINEMATICS_PLOT_RENDERER}:
+        options.extend(
+            _discover_track_kinematics_specs_fast(
+                root,
+                archive,
+                run_path_filter=run_path_filter,
+                artifact_filter=artifact_filter,
+            )
+        )
+    if renderer_wanted is None or renderer_wanted in CHASER_DASHBOARD_RENDERERS:
+        options.extend(
+            _discover_goodcopbadcop_chaser_specs_fast(
+                root,
+                archive,
+                run_path_filter=run_path_filter,
+                artifact_filter=artifact_filter,
+            )
+        )
+    return sorted(options, key=lambda item: (not item.is_supported, item.renderer, item.run_path, item.artifact_name))
+
+
 def discover_interactive_spec_options(
     zarr_path: Path | str,
     *,
@@ -501,6 +593,7 @@ def discover_protocol_recording_options(
     artifact_filter: Optional[str] = None,
     name_contains: Optional[str] = "GoodCopBadCop",
     lazy_registry_specs: bool = True,
+    recording_explorer_only: bool = False,
 ) -> list[RecordingSpecOption]:
     """Find sibling recordings with matching interactive specs.
 
@@ -536,7 +629,12 @@ def discover_protocol_recording_options(
                 )
             )
             continue
-        spec_options = discover_interactive_spec_options(
+        discover_specs = (
+            discover_recording_explorer_spec_options
+            if recording_explorer_only
+            else discover_interactive_spec_options
+        )
+        spec_options = discover_specs(
             archive,
             renderer_filter=renderer_filter,
             run_path_filter=run_path_filter,
