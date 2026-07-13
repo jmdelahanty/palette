@@ -83,6 +83,12 @@ def test_baseline_summary_has_activity_spatial_and_quality_metrics() -> None:
     assert 0.0 <= row["spatial_entropy_normalized"] <= 1.0
     assert 0.0 <= row["quadrant_entropy_normalized"] <= 1.0
     assert row["coordinate_frame"] == "arena_centered_mm"
+    assert row["experimental_area_geometry_type"] == "circle"
+    assert row["boundary_distance_method"] == "circle_radius_minus_center_distance_v1"
+    assert row["wall_fraction_denominator"] == "valid_position_frames"
+    expected_boundary = 10.0 - float(np.mean(np.linspace(0.0, 9.0, 20)[:10]))
+    assert np.isclose(row["mean_distance_to_arena_boundary_mm"], expected_boundary)
+    assert np.isclose(row["expected_uniform_wall_fraction"], 0.36)
 
 
 def test_baseline_time_bins_preserve_temporal_change() -> None:
@@ -95,6 +101,10 @@ def test_baseline_time_bins_preserve_temporal_change() -> None:
     assert [row["distance_travelled_mm"] for row in rows] == [5.0, 5.0]
     assert [row["bout_count"] for row in rows] == [1, 1]
     assert rows[0]["representative_x_mm"] < rows[1]["representative_x_mm"]
+    assert rows[0]["mean_distance_to_arena_boundary_mm"] > rows[1][
+        "mean_distance_to_arena_boundary_mm"
+    ]
+    assert all(row["wall_fraction_denominator"] == "valid_position_frames" for row in rows)
 
 
 def test_baseline_samples_are_deterministic_and_support_full_resolution() -> None:
@@ -114,6 +124,14 @@ def test_baseline_samples_are_deterministic_and_support_full_resolution() -> Non
     assert all(row["sampling_stride_frames"] == 5 for row in sampled)
     assert all(row["nominal_sample_rate_hz"] == 2.0 for row in sampled)
     assert all(row["effective_sample_rate_hz"] == 2.0 for row in sampled)
+    assert np.allclose(
+        [row["distance_to_arena_boundary_mm"] for row in sampled],
+        [10.0, 10.0 - np.linspace(0.0, 9.0, 20)[5]],
+    )
+    assert all(
+        row["boundary_distance_method"] == "circle_radius_minus_center_distance_v1"
+        for row in sampled
+    )
     assert len(full) == 10
     assert all(row["sampling_policy"] == FULL_SAMPLE_POLICY for row in full)
     assert all(row["sampling_stride_frames"] == 1 for row in full)

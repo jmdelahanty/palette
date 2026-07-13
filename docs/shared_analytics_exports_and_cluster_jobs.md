@@ -139,9 +139,38 @@ deterministic integer-frame sampling stride. Use
 required. The requested rate, effective rate, stride, and sampling policy are
 stored in both rows and the export manifest.
 
+For circular arenas, new sample rows also include
+`distance_to_arena_boundary_mm`, computed as radius minus center distance, plus
+an explicit `boundary_distance_method`. Summary and time-bin rows declare that
+wall fractions use valid position frames as their denominator. The boundary is
+the experimental area, not the subject segmentation mask.
+
 Other controls are `--baseline-time-bin-s` and
 `--baseline-spatial-grid-size`. Changing any of these settings creates a new
 immutable export run; existing exports are not patched.
+
+## Derived baseline strategy analytics
+
+The baseline tables can feed the separate fish/rodent open-field strategy
+workflow documented in
+[Baseline Behavior Strategy Analytics](baseline_behavior_strategy_analytics.md).
+It produces activity, boundary-affinity, spatial-organization, temporal, and
+optional cluster tables without modifying the base export.
+
+Submit it only after the base export validates:
+
+```bash
+scripts/submit_baseline_strategy_analytics_bsub.sh \
+  --source-export-run-id <base-export-run> \
+  --analysis-run-id <new-strategy-run> \
+  --submit
+```
+
+Use `--include-baseline-samples` on the base export to enable progression
+episodes, active wall following, accessible-area occupancy, and
+dominant-dwell/home-base-like measures. Without samples, the downstream run
+still emits summary- and time-bin-derived scores and explicitly marks the
+sample-dependent feature family unavailable.
 
 The sample table is a derived kinematic surface, not raw video. Source Zarr
 arrays remain authoritative. Cohort-dependent strategy/cluster assignments do

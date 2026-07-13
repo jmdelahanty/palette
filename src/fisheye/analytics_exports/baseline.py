@@ -21,6 +21,8 @@ COORDINATE_ORIGIN = "arena_center"
 TIME_BIN_POLICY = "fixed_width_from_baseline_start_half_open_v1"
 SAMPLE_POLICY = "source_frame_modulo_stride_v1"
 FULL_SAMPLE_POLICY = "all_source_samples_v1"
+BOUNDARY_DISTANCE_METHOD = "circle_radius_minus_center_distance_v1"
+WALL_FRACTION_DENOMINATOR = "valid_position_frames"
 
 
 @dataclass(frozen=True)
@@ -137,6 +139,7 @@ def _position_surfaces(inputs: BaselineArrays) -> dict[str, np.ndarray | float]:
     relative_mm = relative_px / inputs.pixels_per_mm
     center_distance_mm = np.sqrt(np.sum(relative_mm**2, axis=1))
     arena_radius_mm = inputs.arena_radius_px / inputs.pixels_per_mm
+    distance_to_boundary_mm = np.maximum(0.0, arena_radius_mm - center_distance_mm)
     finite = np.isfinite(relative_mm).all(axis=1)
     in_arena = center_distance_mm <= arena_radius_mm
     valid = inputs.position_valid & finite & in_arena
@@ -147,6 +150,7 @@ def _position_surfaces(inputs: BaselineArrays) -> dict[str, np.ndarray | float]:
         "relative_mm": relative_mm,
         "center_distance_mm": center_distance_mm,
         "arena_radius_mm": arena_radius_mm,
+        "distance_to_boundary_mm": distance_to_boundary_mm,
         "valid": valid,
         "wall": wall,
     }
@@ -259,6 +263,11 @@ def build_summary_metrics(
         frame_slice
     ][valid_positions]
     center_summary = _finite_summary(center_values)
+    boundary_summary = _finite_summary(
+        np.asarray(positions["distance_to_boundary_mm"], dtype=np.float64)[frame_slice][
+            valid_positions
+        ]
+    )
     wall_count = int(
         np.count_nonzero(np.asarray(positions["wall"], dtype=bool)[frame_slice])
     )
@@ -309,11 +318,19 @@ def build_summary_metrics(
         "bout_rate_per_min": bouts / (duration_s / 60.0) if duration_s > 0 else None,
         "arena_radius_mm": radius_mm,
         "wall_band_mm": float(inputs.wall_band_mm),
+        "expected_uniform_wall_fraction": 1.0
+        - (max(0.0, radius_mm - float(inputs.wall_band_mm)) / radius_mm) ** 2,
+        "experimental_area_geometry_type": "circle",
+        "boundary_distance_method": BOUNDARY_DISTANCE_METHOD,
+        "wall_fraction_denominator": WALL_FRACTION_DENOMINATOR,
         "wall_frame_count": wall_count,
         "wall_fraction": float(wall_count) / float(valid_count) if valid_count else None,
         "mean_distance_from_arena_center_mm": center_summary["mean"],
         "median_distance_from_arena_center_mm": center_summary["median"],
         "p95_distance_from_arena_center_mm": center_summary["p95"],
+        "mean_distance_to_arena_boundary_mm": boundary_summary["mean"],
+        "median_distance_to_arena_boundary_mm": boundary_summary["median"],
+        "p95_distance_to_arena_boundary_mm": boundary_summary["p95"],
         "mean_center_distance_norm": (
             float(center_summary["mean"]) / radius_mm
             if center_summary["mean"] is not None and radius_mm > 0
@@ -399,6 +416,10 @@ def build_time_bin_metrics(
             frame_slice
         ][position_valid]
         center_summary = _finite_summary(center)
+        boundary = np.asarray(positions["distance_to_boundary_mm"], dtype=np.float64)[
+            frame_slice
+        ][position_valid]
+        boundary_summary = _finite_summary(boundary)
         wall_count = int(
             np.count_nonzero(np.asarray(positions["wall"], dtype=bool)[frame_slice])
         )
@@ -438,6 +459,11 @@ def build_time_bin_metrics(
                 ),
                 "mean_center_distance_mm": center_summary["mean"],
                 "median_center_distance_mm": center_summary["median"],
+                "mean_distance_to_arena_boundary_mm": boundary_summary["mean"],
+                "median_distance_to_arena_boundary_mm": boundary_summary["median"],
+                "experimental_area_geometry_type": "circle",
+                "boundary_distance_method": BOUNDARY_DISTANCE_METHOD,
+                "wall_fraction_denominator": WALL_FRACTION_DENOMINATOR,
                 "wall_frame_count": wall_count,
                 "wall_fraction": (
                     float(wall_count) / float(valid_count) if valid_count else None
@@ -533,7 +559,14 @@ def build_sample_metrics(
                 "center_distance_mm": (
                     float(center_distance[frame]) if position_ok else None
                 ),
+                "distance_to_arena_boundary_mm": (
+                    float(np.asarray(positions["distance_to_boundary_mm"])[frame])
+                    if position_ok
+                    else None
+                ),
                 "wall": bool(wall[frame]) if position_ok else None,
+                "experimental_area_geometry_type": "circle",
+                "boundary_distance_method": BOUNDARY_DISTANCE_METHOD,
                 "position_valid": position_ok,
                 "sample_valid": sample_ok,
                 "sampling_policy": policy,
@@ -552,6 +585,7 @@ def build_sample_metrics(
 
 
 __all__ = [
+    "BOUNDARY_DISTANCE_METHOD",
     "BaselineArrays",
     "BaselineWindow",
     "COORDINATE_FRAME",
@@ -560,6 +594,7 @@ __all__ = [
     "METHOD",
     "METHOD_VERSION",
     "SAMPLE_POLICY",
+    "WALL_FRACTION_DENOMINATOR",
     "TIME_BIN_POLICY",
     "build_sample_metrics",
     "build_summary_metrics",
