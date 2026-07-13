@@ -34,7 +34,7 @@ indexes. Those changes must not silently change the meaning of an already
 materialized analysis export, because exports should point to immutable
 collection manifests with concrete source run IDs and source fingerprints.
 
-### Index hygiene: temporary stores
+### Index hygiene: scratch and unowned analysis stores
 
 Durable registry databases must not index Zarr stores under temporary roots.
 Dataset registration refuses a temporary store path when the registry database
@@ -42,6 +42,21 @@ itself is not also under a temporary root. This preserves ordinary test behavior
 where both the registry and store live in a temp directory, while preventing
 ephemeral test/dev stores from becoming durable locators. The explicit emergency
 override is `PALETTE_REGISTRY_ALLOW_TEMP_STORES=1`.
+
+Durable registries also reject unmistakable scratch paths such as
+`in-memory.zarr` and agent-worktree stores. The separate emergency override is
+`PALETTE_REGISTRY_ALLOW_SCRATCH_STORES=1`; it does not waive recording identity
+requirements.
+
+Every dataset registered with `zarr_use='analysis'` in a durable registry must
+have a non-empty normalized `recording_id`. This is the ownership boundary that
+prevents ad hoc derived Zarrs from inflating recording-level cohorts. The
+emergency override is `PALETTE_REGISTRY_ALLOW_UNOWNED_ANALYSIS=1`. Group-level
+analytics exports belong in analytics manifest tables rather than masquerading
+as recording analysis datasets. Training merges may remain recording-agnostic.
+
+Registries beneath temporary roots remain isolated test/development registries
+and are exempt from these production guardrails.
 
 ## Immutable vs Mutable
 

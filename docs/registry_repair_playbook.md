@@ -15,10 +15,12 @@ Use `/nvme1/palette_registry.sqlite` only for legacy/local snapshot repairs.
 For stale registry rows that point at abandoned temp-root Zarr paths, use
 `PYTHONPATH=src scripts/py -m fisheye.registry.prune_stale_datasets --registry "$REG" --json /path/to/dryrun.json`
 first. The tool opens dry runs read-only, reports temp-root candidates and `/home`
-rows needing maintainer review, and only executes with `--execute --backup <path>
---include-temp-root all-temp`; exact `/home` dataset IDs must be opted in with
-repeatable `--include-dataset-id`. The tool does not run `VACUUM`; after a large
-reviewed prune, the maintainer may choose to vacuum the NFS registry manually.
+rows needing maintainer review, plus active analysis rows without a normalized
+`recording_id`. It only executes with `--execute --backup <path>
+--include-temp-root all-temp`; exact `/home` or unowned-analysis dataset IDs must
+be opted in with repeatable `--include-dataset-id`. The tool does not run
+`VACUUM`; after a large reviewed prune, the maintainer may choose to vacuum the
+NFS registry manually.
 
 ## 1) Backup First
 

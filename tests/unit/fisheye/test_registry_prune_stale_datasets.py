@@ -112,6 +112,14 @@ def _make_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Pat
             zarr_path=Path("/home/delahantyj@hhmi.org/worktree/analysis.zarr"),
             recording_id="rec_home",
         )
+        registry.upsert_dataset(
+            "unowned_analysis",
+            session_uuid=None,
+            zarr_path=Path("/nvme1/dan_detect_infer.zarr"),
+            recording_id=None,
+            artifact_kind="derived_analysis",
+            zarr_use="analysis",
+        )
         _seed_dependents(registry, "temp_pytest", parent_dataset_id="archive_missing")
     finally:
         registry.close()
@@ -138,6 +146,8 @@ def test_dry_run_counts_match_and_writes_json(
     assert report["classes"]["pytest-tmp"]["dataset_count"] == 1
     assert report["classes"]["tmp"]["dataset_count"] == 1
     assert report["needs_maintainer_review"]["dataset_count"] == 1
+    assert report["unowned_analysis_review"]["dataset_count"] == 1
+    assert report["unowned_analysis_review"]["datasets"][0]["dataset_id"] == "unowned_analysis"
     assert report["classes"]["pytest-tmp"]["dependent_row_counts"]["provenance"] == 1
     assert report["classes"]["pytest-tmp"]["dependent_row_counts"]["detect_quality"] == 1
     assert report["classes"]["pytest-tmp"]["dependent_row_counts"]["recording_step_status"] == 1
@@ -180,7 +190,7 @@ def test_execute_deletes_classified_temp_rows_dependents_and_orphan_recording(
             str(row[0])
             for row in conn.execute("SELECT recording_id FROM recordings ORDER BY recording_id;").fetchall()
         }
-        assert dataset_ids == {"archive_missing", "home_review"}
+        assert dataset_ids == {"archive_missing", "home_review", "unowned_analysis"}
         assert "rec_delete" not in recording_ids
         assert "rec_shared" in recording_ids
         assert _count(conn, "provenance") == pre_provenance_count - 1
@@ -224,7 +234,38 @@ def test_home_row_survives_unless_exactly_included(
             str(row[0])
             for row in conn.execute("SELECT dataset_id FROM datasets ORDER BY dataset_id;").fetchall()
         }
-    assert dataset_ids == {"archive_missing"}
+    assert dataset_ids == {"archive_missing", "unowned_analysis"}
+
+
+def test_unowned_analysis_row_survives_unless_exactly_included(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry_path, _fake_tmp = _make_registry(tmp_path, monkeypatch)
+
+    assert (
+        main(
+            [
+                "--registry",
+                str(registry_path),
+                "--execute",
+                "--include-temp-root",
+                "all-temp",
+                "--include-dataset-id",
+                "unowned_analysis",
+                "--backup",
+                str(tmp_path / "backup.sqlite"),
+            ]
+        )
+        == 0
+    )
+
+    with sqlite3.connect(registry_path) as conn:
+        dataset_ids = {
+            str(row[0])
+            for row in conn.execute("SELECT dataset_id FROM datasets ORDER BY dataset_id;").fetchall()
+        }
+    assert dataset_ids == {"archive_missing", "home_review"}
 
 
 def test_execute_rejects_non_home_include_dataset_id(
@@ -233,7 +274,7 @@ def test_execute_rejects_non_home_include_dataset_id(
 ) -> None:
     registry_path, _fake_tmp = _make_registry(tmp_path, monkeypatch)
 
-    with pytest.raises(SystemExit, match="/home review rows"):
+    with pytest.raises(SystemExit, match="/home or unowned-analysis review rows"):
         main(
             [
                 "--registry",

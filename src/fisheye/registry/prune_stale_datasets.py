@@ -41,8 +41,12 @@ DEPENDENT_DATASET_TABLES: tuple[DependentTable, ...] = (
     DependentTable("keypoint_performance", ("dataset_id",)),
     DependentTable("keypoint_quality", ("dataset_id",)),
     DependentTable("provenance", ("dataset_id",)),
+    DependentTable("recording_chasers", ("dataset_id",)),
     DependentTable("recording_step_status", ("dataset_id",)),
     DependentTable("recording_step_status_history", ("dataset_id",)),
+    DependentTable("recording_stimulus_modes", ("dataset_id",)),
+    DependentTable("recording_stimulus_runs", ("dataset_id",)),
+    DependentTable("recording_stimulus_steps", ("dataset_id",)),
     DependentTable("recording_subjects", ("dataset_id",)),
     DependentTable("subject_mask_component_quality", ("dataset_id",)),
     DependentTable("subject_mask_data_profile", ("dataset_id",)),
@@ -56,6 +60,9 @@ class DatasetCandidate:
     dataset_id: str
     zarr_path: str
     recording_id: str | None
+    artifact_kind: str | None
+    zarr_use: str | None
+    status: str | None
     path_class: str
     path_exists: bool
 
@@ -64,6 +71,9 @@ class DatasetCandidate:
             "dataset_id": self.dataset_id,
             "zarr_path": self.zarr_path,
             "recording_id": self.recording_id,
+            "artifact_kind": self.artifact_kind,
+            "zarr_use": self.zarr_use,
+            "status": self.status,
             "path_class": self.path_class,
             "path_exists": self.path_exists,
         }
@@ -153,7 +163,7 @@ def classify_zarr_path(path_text: str) -> str | None:
 def _all_dataset_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
         """
-        SELECT dataset_id, zarr_path, recording_id
+        SELECT dataset_id, zarr_path, recording_id, artifact_kind, zarr_use, status
         FROM datasets
         ORDER BY dataset_id;
         """
@@ -167,9 +177,18 @@ def scan_candidates(conn: sqlite3.Connection) -> dict[str, list[DatasetCandidate
         "var-tmp": [],
         "dev-shm": [],
         "home-review": [],
+        "unowned-analysis-review": [],
     }
     for row in _all_dataset_rows(conn):
         path_class = classify_zarr_path(str(row["zarr_path"]))
+        recording_id = str(row["recording_id"] or "").strip() or None
+        if (
+            path_class is None
+            and str(row["zarr_use"] or "").strip().casefold() == "analysis"
+            and str(row["status"] or "").strip().casefold() == "active"
+            and recording_id is None
+        ):
+            path_class = "unowned-analysis-review"
         if path_class not in grouped:
             continue
         path = Path(str(row["zarr_path"]))
@@ -177,7 +196,12 @@ def scan_candidates(conn: sqlite3.Connection) -> dict[str, list[DatasetCandidate
             DatasetCandidate(
                 dataset_id=str(row["dataset_id"]),
                 zarr_path=str(row["zarr_path"]),
-                recording_id=str(row["recording_id"]) if row["recording_id"] is not None else None,
+                recording_id=recording_id,
+                artifact_kind=(
+                    str(row["artifact_kind"]) if row["artifact_kind"] is not None else None
+                ),
+                zarr_use=str(row["zarr_use"]) if row["zarr_use"] is not None else None,
+                status=str(row["status"]) if row["status"] is not None else None,
                 path_class=path_class,
                 path_exists=path.exists(),
             )
@@ -303,12 +327,16 @@ def _build_report(
     temp_class_names = ("pytest-tmp", "tmp", "var-tmp", "dev-shm")
     temp_ids = _flatten_ids(candidates, temp_class_names)
     home_candidates = candidates["home-review"]
-    home_by_id = {candidate.dataset_id: candidate for candidate in home_candidates}
-    opted_home_ids = sorted(set(include_dataset_id) & set(home_by_id))
+    unowned_candidates = candidates["unowned-analysis-review"]
+    review_by_id = {
+        candidate.dataset_id: candidate
+        for candidate in (*home_candidates, *unowned_candidates)
+    }
+    opted_review_ids = sorted(set(include_dataset_id) & set(review_by_id))
 
     selected_temp_classes = _selected_temp_classes(include_temp_root)
     selected_ids = _flatten_ids(candidates, selected_temp_classes)
-    selected_ids.extend(opted_home_ids)
+    selected_ids.extend(opted_review_ids)
     selected_ids = sorted(set(selected_ids))
 
     dependent_by_class = {
@@ -340,6 +368,7 @@ def _build_report(
         "summary": {
             "temp_root_dataset_count": len(temp_ids),
             "home_review_dataset_count": len(home_candidates),
+            "unowned_analysis_review_dataset_count": len(unowned_candidates),
             "selected_dataset_count": len(selected_ids),
             "selected_recording_count": recordings_by_class["selected"],
         },
@@ -355,8 +384,18 @@ def _build_report(
         "needs_maintainer_review": {
             "path_class": "home-review",
             "dataset_count": len(home_candidates),
-            "included_dataset_count": len(opted_home_ids),
+            "included_dataset_count": len(
+                set(opted_review_ids) & {row.dataset_id for row in home_candidates}
+            ),
             "datasets": [candidate.as_dict() for candidate in home_candidates],
+        },
+        "unowned_analysis_review": {
+            "path_class": "unowned-analysis-review",
+            "dataset_count": len(unowned_candidates),
+            "included_dataset_count": len(
+                set(opted_review_ids) & {row.dataset_id for row in unowned_candidates}
+            ),
+            "datasets": [candidate.as_dict() for candidate in unowned_candidates],
         },
         "selected": {
             "dataset_ids": selected_ids,
@@ -412,6 +451,11 @@ def _print_report(report: Mapping[str, Any]) -> None:
     print("")
     print(f"NEEDS-MAINTAINER-REVIEW /home rows: {review['dataset_count']}")
     for candidate in review["datasets"]:
+        print(f"  {candidate['dataset_id']}  {candidate['zarr_path']}")
+    unowned = report["unowned_analysis_review"]
+    print("")
+    print(f"NEEDS-MAINTAINER-REVIEW unowned analysis rows: {unowned['dataset_count']}")
+    for candidate in unowned["datasets"]:
         print(f"  {candidate['dataset_id']}  {candidate['zarr_path']}")
 
 
@@ -529,10 +573,17 @@ def _validate_execute_args(args: argparse.Namespace, report: Mapping[str, Any]) 
         str(candidate["dataset_id"])
         for candidate in report["needs_maintainer_review"]["datasets"]
     }
+    review_ids.update(
+        str(candidate["dataset_id"])
+        for candidate in report["unowned_analysis_review"]["datasets"]
+    )
     invalid_includes = sorted(set(args.include_dataset_id) - review_ids)
     if invalid_includes:
         joined = ", ".join(invalid_includes)
-        raise SystemExit(f"--include-dataset-id is only allowed for /home review rows: {joined}")
+        raise SystemExit(
+            "--include-dataset-id is only allowed for /home or unowned-analysis "
+            f"review rows: {joined}"
+        )
 
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
@@ -555,7 +606,10 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         "--include-dataset-id",
         action="append",
         default=[],
-        help="Repeatable exact /home review dataset_id to include during execute.",
+        help=(
+            "Repeatable exact /home or active unowned-analysis review dataset_id "
+            "to include during execute."
+        ),
     )
     return parser.parse_args(argv)
 

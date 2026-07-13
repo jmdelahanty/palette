@@ -2501,7 +2501,6 @@ class Registry(RegistryMigrationMixin):
         source_recording_frame_index_path: Optional[str] = None,
         source_frame_index_schema: Optional[str] = None,
     ) -> None:
-        assert_temp_store_registration_allowed(registry_path=self.path, store_path=zarr_path)
         now = _utc_now()
         resolved_recording_id = recording_id
         if resolved_recording_id is None and session_uuid:
@@ -2517,6 +2516,13 @@ class Registry(RegistryMigrationMixin):
             artifact_kind=resolved_artifact_kind,
             zarr_purpose=zarr_purpose,
         )
+        resolved_zarr_use = _normalize_zarr_use(zarr_use) or inferred_use
+        assert_temp_store_registration_allowed(
+            registry_path=self.path,
+            store_path=zarr_path,
+            recording_id=resolved_recording_id,
+            zarr_use=resolved_zarr_use,
+        )
         payload = {
             "dataset_id": dataset_id,
             "session_uuid": session_uuid,
@@ -2524,7 +2530,7 @@ class Registry(RegistryMigrationMixin):
             "recording_id": resolved_recording_id,
             "artifact_kind": resolved_artifact_kind,
             "zarr_origin": _normalize_zarr_origin(zarr_origin) or inferred_origin,
-            "zarr_use": _normalize_zarr_use(zarr_use) or inferred_use,
+            "zarr_use": resolved_zarr_use,
             "source_layout": _decode_attr(source_layout),
             "source_frame_index_path": _decode_attr(source_frame_index_path),
             "source_recording_frame_index_path": _decode_attr(source_recording_frame_index_path),
