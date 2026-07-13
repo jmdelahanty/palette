@@ -98,7 +98,9 @@ The normalized stimulus tables are caches populated by registry dataset
 reconciliation. An empty mode table is not evidence that no chaser recordings
 exist. It is an indexing-coverage failure and must be repaired by a scoped
 registry refresh/backfill on compute nodes. Do not silently fall back to
-protocol-name guessing.
+protocol-name guessing. Use the targeted cluster workflow in
+`docs/registry_stimulus_metadata_backfill.md`; it refreshes only the normalized
+stimulus tables and requires a pre-write SQLite backup.
 
 ## Identity Versus Location
 
