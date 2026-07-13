@@ -89,6 +89,22 @@ scripts/py -m fisheye.utils.build_virtual_collection_manifest \
   --output /groups/johnson/johnsonlab/palette_analytics/v1/manifests/collections/all_chaser_<date>_v001.manifest.json
 ```
 
+Because the builder opens each selected Zarr to resolve concrete run families,
+production registry collections should build on a compute node:
+
+```bash
+scripts/submit_registry_collection_manifest_bsub.sh \
+  --collection-id all_chaser_<date>_v001 \
+  --collection-name "All normalized chaser recordings" \
+  --stimulus-mode CHASER \
+  --submit
+```
+
+The submitter pins the shared Palette checkout commit and validates both the
+manifest schema and canonical hash before writing its completion status. The
+registry query is read-only; only the new immutable manifest and LSF audit files
+are written.
+
 For a `CHASER` registry query, the CLI defaults to the `chaser` export profile
 and `shared_groups` storage tier. The profile pins chaser-distance,
 detection-occupancy, and track-kinematics runs, and records optional bout, eye,
