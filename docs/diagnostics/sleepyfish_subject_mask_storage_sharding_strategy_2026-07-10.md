@@ -1127,6 +1127,42 @@ Corrected evidence is stored in:
       summary_corrected.json
 ```
 
+### Canonical Copy Promotion
+
+The completed canary did not need another finalizer run. Commit `e49e3d75`
+added a copy-only promotion path, and LSF job `153075919` used it to import
+`refined_subject_masks_sleepyfish_full_collection_canary_20260711_02` into the
+canonical recording Zarr. The source was copied into a hidden sibling,
+validated there, and exposed with one atomic rename. Inference, refinement,
+metrics, geometry, and contour computation were not rerun.
+
+The source and canonical inventories both contain `298,677` files and
+`2,846,839,371` apparent bytes. Their relative-path/size digests and metadata
+byte digests match exactly. Exhaustive decoded comparison covered all `155`
+arrays in `364,522` batches with zero mismatches. The canonical contract then
+passed with zero errors and zero warnings. Dense `masks_roi` is physically
+present as `uint8` with shape `(1,169,010, 4, 512, 512)`.
+
+All three selectors now name the full run:
+
+- `latest`
+- `latest_complete`
+- `refined_subject_mask_review_status_latest`
+
+The registry refresh completed successfully and reports the canonical
+`refined_subject_masks` step as `ok`, sourced from
+`copy_promoted_completed_refined_subject_mask_run`. The prior two-clip smoke
+run remains preserved but is no longer selected.
+
+The promotion took `8,853.00 s` total. Physical copy took `3,002.02 s`; the
+remaining cost was dominated by inventories and exhaustive decoded equality.
+Because dense masks contain about `1.2 TB` of logical pixels, comparing source
+and destination decodes about `2.4 TB` even though each compressed tree is only
+about `2.85 GB`. This was appropriate as a one-time recovery proof, but routine
+same-filesystem promotion should use atomic copy, exact physical inventory or
+payload digests, contract validation, and deterministic decoded sampling. It
+should not make a full decoded equality pass the default.
+
 ### Next Benchmark: PRFS Input Staging
 
 The next controlled experiment will separate the benefit of indexed storage
@@ -1334,7 +1370,8 @@ scripts/submit_subject_mask_complete_finalizer_matrix_bsub.sh \
   finalizer completion/publication behavior, exhaustive array parity, and
   independent dense-content validation at the complete `1,169,010`-row scale.
   Preserve the same gates for future collection or storage-layout canaries.
-- Recover the canonical refined output by rerunning finalization from the
-  existing raw shards into a new run only after that canary passes. Never
-  overwrite or promote the incomplete historical refined run.
+- The complete canary output has been imported into the canonical recording
+  Zarr by validated copy and atomic rename. It is now the `latest`,
+  `latest_complete`, and review-status-selected refined subject-mask run. The
+  incomplete historical all-clips run remains unpromoted.
 - Do not rerun GPU inference merely to recover this refined output.
