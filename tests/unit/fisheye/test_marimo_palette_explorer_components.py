@@ -5,6 +5,7 @@ import time
 
 import apps.marimo.components.registry as registry_component
 import numpy as np
+import pandas as pd
 import polars as pl
 import plotly.express as px
 import plotly.graph_objects as go
@@ -12,6 +13,7 @@ import zarr
 
 from apps.marimo.components.goodcopbadcop_chaser import (
     GoodCopBadCopTimeWindow,
+    _minmax_line_display_frame,
     available_chaser_analysis_ids,
     build_arena_heatmap,
     build_controls,
@@ -834,6 +836,30 @@ def test_goodcopbadcop_spatial_figures_use_image_y_axis(tmp_path) -> None:
     assert [trace.marker.color for trace in chaser_position_traces] == ["#ff0000", "#0000ff"]
     assert occupancy_fig.layout.yaxis.autorange == "reversed"
     assert occupancy_fig.layout.yaxis.title.text == "Source image Y (px, down)"
+
+
+def test_distance_line_display_budget_preserves_real_extrema() -> None:
+    row_count = 10000
+    frame = pd.DataFrame(
+        {
+            "time_s": np.arange(row_count, dtype=np.float64) / 100.0,
+            "distance_mm": np.sin(np.arange(row_count, dtype=np.float64) / 100.0),
+        }
+    )
+    frame.loc[4321, "distance_mm"] = 50.0
+    frame.loc[6789, "distance_mm"] = -25.0
+
+    display = _minmax_line_display_frame(
+        frame,
+        value_column="distance_mm",
+        max_points=1000,
+    )
+
+    assert len(display) <= 1000
+    assert display["time_s"].is_monotonic_increasing
+    assert display["distance_mm"].max() == 50.0
+    assert display["distance_mm"].min() == -25.0
+    assert set(display.index).issubset(set(frame.index))
 
 
 def test_goodcopbadcop_spatial_occupancy_panel_renders_zone_summary(tmp_path) -> None:

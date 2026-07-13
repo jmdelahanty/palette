@@ -907,6 +907,38 @@ def resolve_time_windows_from_multiselect(
     )
 
 
+def _minmax_line_display_frame(
+    frame: pd.DataFrame,
+    *,
+    value_column: str,
+    max_points: int,
+) -> pd.DataFrame:
+    """Select real samples while preserving local extrema for line display."""
+
+    if len(frame) <= int(max_points) or int(max_points) < 4:
+        return frame[["time_s", value_column]]
+    target_bins = max(1, int(max_points) // 4)
+    bucket_size = max(1, int(np.ceil(len(frame) / float(target_bins))))
+    values = frame[value_column].to_numpy(dtype=np.float64, copy=False)
+    selected: list[int] = []
+    for start in range(0, len(frame), bucket_size):
+        stop = min(len(frame), start + bucket_size)
+        indexes = [start, stop - 1]
+        chunk = values[start:stop]
+        finite_offsets = np.flatnonzero(np.isfinite(chunk))
+        if finite_offsets.size:
+            finite_values = chunk[finite_offsets]
+            indexes.extend(
+                [
+                    start + int(finite_offsets[int(np.argmin(finite_values))]),
+                    start + int(finite_offsets[int(np.argmax(finite_values))]),
+                ]
+            )
+        selected.extend(sorted(set(indexes)))
+    selected = sorted(set(selected))
+    return frame.iloc[selected][["time_s", value_column]]
+
+
 def build_distance_figure(
     go: Any,
     *,
@@ -920,15 +952,22 @@ def build_distance_figure(
     ].copy()
     fig = go.Figure()
     add_epoch_overlays(fig, loaded.windows_df)
-    for column in distance_series_picker.value:
-        if column not in visible:
-            continue
+    selected_columns = [column for column in distance_series_picker.value if column in visible]
+    points_per_trace = max(4000, 24000 // max(1, len(selected_columns)))
+    for column in selected_columns:
+        display = _minmax_line_display_frame(
+            visible,
+            value_column=column,
+            max_points=points_per_trace,
+        )
         fig.add_trace(
             go.Scattergl(
-                x=visible["time_s"],
-                y=visible[column],
+                x=display["time_s"],
+                y=display[column],
                 mode="lines",
                 name=column,
+                connectgaps=False,
+                hovertemplate="time=%{x:.3f}s<br>distance=%{y:.3f} mm<extra>%{fullData.name}</extra>",
             )
         )
     apply_full_width_timeseries_layout(
@@ -936,6 +975,7 @@ def build_distance_figure(
         title=f"Fish-to-Chaser Distance ({window.selected_epoch_label})",
         yaxis_title="Distance (mm)",
     )
+    fig.update_layout(hoverdistance=10, spikedistance=10)
     return fig, visible
 
 

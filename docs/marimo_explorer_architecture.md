@@ -128,6 +128,12 @@ the default, and Plotly traces are deterministically decimated to at most
 of the design; the source data remain unchanged and exact event boundaries are
 retained.
 
+Chaser-distance lines use a separate 24,000-point budget shared across visible
+traces. The display projection selects real source samples and retains each
+time bucket's endpoints, minimum, and maximum, preserving transient extrema
+while reducing browser hover targets. The full filtered dataframe remains the
+read-only debug/query surface.
+
 ## Running
 
 General explorer:
