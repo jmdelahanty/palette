@@ -55,10 +55,6 @@ def _():
     )
     from apps.marimo.components.static_artifacts import build_static_artifacts_panel
 
-    # Preserve per-section widget identity as additional lazy sections become
-    # visible. The cache lives for the lifetime of this read-only app process.
-    chaser_controls_cache = {}
-
     return (
         PROVIDERS,
         CoreBehaviorSource,
@@ -82,7 +78,6 @@ def _():
         build_spatial_occupancy_output,
         build_spec_provenance_panel,
         build_static_artifacts_panel,
-        chaser_controls_cache,
         discover_recording_explorer_spec_options,
         discover_protocol_recording_options,
         go,
@@ -153,8 +148,13 @@ def _(infer_recordings_root_from_zarr_path, mo, recording_options, seed_zarr_pat
     recording_picker = mo.ui.dropdown(
         options=list(recording_by_label), value=default_recording, label="Recording"
     )
-    recording_context = mo.vstack(
+    mo.vstack(
         [
+            mo.md("# Palette Recording Explorer"),
+            mo.md(
+                "The recording Zarr is opened read-only. A selected analysis triggers a bounded "
+                "Zarr projection; exported Parquet datasets use true Polars lazy scans."
+            ),
             recording_picker,
             mo.md(
                 f"Search root: `{infer_recordings_root_from_zarr_path(seed_zarr_path)}` · "
@@ -162,7 +162,7 @@ def _(infer_recordings_root_from_zarr_path, mo, recording_options, seed_zarr_pat
             ),
         ]
     )
-    return recording_by_label, recording_context, recording_picker
+    return recording_by_label, recording_picker
 
 
 @app.cell
@@ -202,8 +202,22 @@ def _(PROVIDERS, group_specs_by_provider, mo, spec_options, zarr_path):
         provider_picker = mo.ui.dropdown(
             options=list(provider_by_label), value=default_provider, label="Analysis class"
         )
+        provider_output = mo.vstack(
+            [
+                mo.md(f"## Available analyses\n\n`{zarr_path}`"),
+                provider_picker,
+                mo.md(
+                    "Only analysis classes supported by persisted artifacts in this recording are shown."
+                ),
+            ]
+        )
     else:
         provider_picker = None
+        provider_output = mo.md(
+            "No supported interactive analysis specs are present in this recording. "
+            "Run or backfill a track-kinematics or chaser visualization contract first."
+        )
+    provider_output
     return provider_by_label, provider_picker, specs_by_provider
 
 
@@ -223,6 +237,7 @@ def _(mo, provider_specs, selected_provider):
     if selected_provider is None or not provider_specs:
         source_by_label = {}
         source_picker = None
+        source_output = mo.md("")
     else:
         source_by_label = {
             f"{index + 1}. {option.run_name or option.run_path}": option
@@ -231,6 +246,13 @@ def _(mo, provider_specs, selected_provider):
         source_picker = mo.ui.dropdown(
             options=list(source_by_label), value=next(iter(source_by_label)), label="Analysis run"
         )
+        source_output = mo.vstack(
+            [
+                mo.md(f"### {selected_provider.label}\n\n{selected_provider.description}"),
+                source_picker,
+            ]
+        )
+    source_output
     return source_by_label, source_picker
 
 
@@ -266,159 +288,161 @@ def _(
         for analysis_id in available_ids
         if analysis_id in definitions
     }
-    return analysis_by_label, core_source
-
-
-@app.cell
-def _(analysis_by_label, mo, selected_provider):
-    analysis_by_id = {
-        definition.analysis_id: definition for definition in analysis_by_label.values()
-    }
-    provider_id = selected_provider.provider_id if selected_provider is not None else "analysis"
-    section_anchor_by_id = {
-        analysis_id: f"{provider_id}-{analysis_id.replace('_', '-')}"
-        for analysis_id in analysis_by_id
-    }
-    # Each sentinel changes value only after it enters the viewport. Downstream
-    # projection cells use that value as the read boundary.
-    section_lazy_by_id = {
-        analysis_id: mo.lazy(
-            lambda: mo.md(""),
-            show_loading_indicator=True,
+    if analysis_by_label:
+        analysis_picker = mo.ui.dropdown(
+            options=list(analysis_by_label), value=next(iter(analysis_by_label)), label="Analysis"
         )
-        for analysis_id in analysis_by_id
-    }
-    return analysis_by_id, section_anchor_by_id, section_lazy_by_id
+        analysis_output = analysis_picker
+    else:
+        analysis_picker = None
+        analysis_output = mo.md("No analysis in this class has all required persisted inputs.")
+    analysis_output
+    return analysis_by_label, analysis_picker, core_source
 
 
 @app.cell
-def _(analysis_by_id, core_source, mo, selected_provider):
-    core_controls_by_id = {}
+def _(analysis_by_label, analysis_picker):
+    selected_analysis = (
+        analysis_by_label[analysis_picker.value] if analysis_picker is not None else None
+    )
+    selected_analysis_id = selected_analysis.analysis_id if selected_analysis is not None else ""
+    return selected_analysis, selected_analysis_id
+
+
+@app.cell
+def _(core_source, mo, selected_analysis_id):
+    if core_source is not None and selected_analysis_id in {"speed", "heading"}:
+        core_series_options = list(core_source.series_for(selected_analysis_id))
+        core_series_picker = mo.ui.multiselect(
+            options=core_series_options,
+            value=list(core_source.default_series_for(selected_analysis_id)),
+            label="Series",
+        )
+        core_series_output = core_series_picker
+    else:
+        core_series_picker = None
+        core_series_output = mo.md("")
+    core_series_output
+    return (core_series_picker,)
+
+
+@app.cell
+def _(core_source, mo, selected_analysis_id, selected_provider):
     if (
         selected_provider is not None
         and selected_provider.provider_id == "core_behavior"
         and core_source is not None
+        and selected_analysis_id in {"speed", "heading", "position", "eye_angles", "swim_bouts"}
     ):
         core_start_s, core_stop_s = core_source.time_bounds()
-        for _analysis_id in analysis_by_id:
-            _series_picker = None
-            if _analysis_id in {"speed", "heading"}:
-                _series_picker = mo.ui.multiselect(
-                    options=list(core_source.series_for(_analysis_id)),
-                    value=list(core_source.default_series_for(_analysis_id)),
-                    label="Series",
-                )
-            _time_window = None
-            if _analysis_id in {"speed", "heading", "position", "eye_angles", "swim_bouts"}:
-                _time_window = mo.ui.range_slider(
-                    start=core_start_s,
-                    stop=max(core_stop_s, core_start_s + 1e-9),
-                    value=(core_start_s, core_stop_s),
-                    step=max((core_stop_s - core_start_s) / 1000.0, 0.001),
-                    label="Time window (s)",
-                    full_width=True,
-                )
-            core_controls_by_id[_analysis_id] = (_series_picker, _time_window)
-    return (core_controls_by_id,)
+        core_time_window = mo.ui.range_slider(
+            start=core_start_s,
+            stop=max(core_stop_s, core_start_s + 1e-9),
+            value=(core_start_s, core_stop_s),
+            step=max((core_stop_s - core_start_s) / 1000.0, 0.001),
+            label="Time window (s)",
+            full_width=True,
+        )
+        core_time_output = core_time_window
+    else:
+        core_time_window = None
+        core_time_output = mo.md("")
+    core_time_output
+    return (core_time_window,)
 
 
 @app.cell
 def _(
-    analysis_by_id,
-    build_core_behavior_output,
-    core_controls_by_id,
     core_source,
-    go,
+    core_series_picker,
+    core_time_window,
     load_core_behavior_projection,
-    mo,
-    px,
-    section_lazy_by_id,
+    selected_analysis_id,
     selected_provider,
 ):
-    core_control_outputs = {}
-    core_outputs = {}
-    if selected_provider is not None and selected_provider.provider_id == "core_behavior":
-        for _analysis_id in analysis_by_id:
-            _series_picker, _time_window = core_controls_by_id.get(_analysis_id, (None, None))
-            _control_items = [
-                item for item in (_series_picker, _time_window) if item is not None
-            ]
-            core_control_outputs[_analysis_id] = (
-                mo.vstack(_control_items) if _control_items else mo.md("")
+    if (
+        selected_provider is not None
+        and selected_provider.provider_id == "core_behavior"
+        and core_source is not None
+        and selected_analysis_id
+    ):
+        try:
+            if core_time_window is None:
+                start_s = stop_s = None
+            else:
+                start_s, stop_s = core_time_window.value
+            core_projection = load_core_behavior_projection(
+                core_source,
+                selected_analysis_id,
+                start_s=start_s,
+                stop_s=stop_s,
+                series_keys=(
+                    tuple(core_series_picker.value)
+                    if core_series_picker is not None
+                    else None
+                ),
             )
-            if not section_lazy_by_id[_analysis_id].value or core_source is None:
-                core_outputs[_analysis_id] = mo.md("_This analysis loads when it enters view._")
-                continue
-            try:
-                if _time_window is None:
-                    _start_s = _stop_s = None
-                else:
-                    _start_s, _stop_s = _time_window.value
-                _projection = load_core_behavior_projection(
-                    core_source,
-                    _analysis_id,
-                    start_s=_start_s,
-                    stop_s=_stop_s,
-                    series_keys=(
-                        tuple(_series_picker.value) if _series_picker is not None else None
-                    ),
-                )
-                core_outputs[_analysis_id] = build_core_behavior_output(
-                    mo, go, px, projection=_projection
-                )
-            except Exception as exc:
-                core_outputs[_analysis_id] = mo.md(
-                    f"Core behavior analysis failed: `{exc}`"
-                )
-    return core_control_outputs, core_outputs
+            core_error = None
+        except Exception as exc:
+            core_projection = None
+            core_error = str(exc)
+    else:
+        core_projection = None
+        core_error = None
+    return core_error, core_projection
+
+
+@app.cell
+def _(build_core_behavior_output, core_error, core_projection, go, mo, px):
+    if core_error:
+        core_output = mo.md(f"Core behavior analysis failed: `{core_error}`")
+    elif core_projection is not None:
+        core_output = build_core_behavior_output(
+            mo, go, px, projection=core_projection
+        )
+    else:
+        core_output = mo.md("")
+    core_output
+    return
 
 
 @app.cell
 def _(
-    analysis_by_id,
     load_goodcopbadcop_view,
-    section_lazy_by_id,
+    selected_analysis_id,
     selected_provider,
     selected_spec,
     time,
     zarr_path,
 ):
-    chaser_errors_by_id = {}
-    chaser_loaded_by_id = {}
+    chaser_needs_loaded = selected_analysis_id not in {"", "static_artifacts", "provenance"}
     if (
         selected_provider is not None
         and selected_provider.provider_id == "stimulus_chaser"
         and selected_spec is not None
+        and chaser_needs_loaded
     ):
-        for _analysis_id in analysis_by_id:
-            if (
-                not section_lazy_by_id[_analysis_id].value
-                or _analysis_id in {"static_artifacts", "provenance"}
-            ):
-                continue
-            try:
-                chaser_loaded_by_id[_analysis_id] = load_goodcopbadcop_view(
-                    zarr_path,
-                    selected_spec,
-                    timer=time,
-                    include_companion_analyses=_analysis_id
-                    in {"cra_quadrant", "cra_near_field", "escape_freeze"},
-                    analysis_id=_analysis_id,
-                )
-            except Exception as exc:
-                chaser_errors_by_id[_analysis_id] = str(exc)
-    return chaser_errors_by_id, chaser_loaded_by_id
+        try:
+            chaser_loaded = load_goodcopbadcop_view(
+                zarr_path,
+                selected_spec,
+                timer=time,
+                include_companion_analyses=selected_analysis_id
+                in {"cra_quadrant", "cra_near_field", "escape_freeze"},
+                analysis_id=selected_analysis_id,
+            )
+            chaser_error = None
+        except Exception as exc:
+            chaser_loaded = None
+            chaser_error = str(exc)
+    else:
+        chaser_loaded = None
+        chaser_error = None
+    return chaser_error, chaser_loaded
 
 
 @app.cell
-def _(
-    build_chaser_controls,
-    chaser_controls_cache,
-    chaser_loaded_by_id,
-    mo,
-    selected_spec,
-    zarr_path,
-):
+def _(build_chaser_controls, chaser_loaded, mo, selected_analysis_id):
     analyses_with_controls = {
         "distance",
         "egocentric_bearing",
@@ -429,84 +453,77 @@ def _(
         "detection_occupancy",
         "spatial_occupancy",
     }
-    chaser_controls_by_id = {}
-    for _analysis_id, _loaded in chaser_loaded_by_id.items():
-        if _analysis_id not in analyses_with_controls:
-            continue
-        _cache_key = (
-            str(zarr_path),
-            selected_spec.artifact_path if selected_spec is not None else "",
-            _analysis_id,
-        )
-        if _cache_key not in chaser_controls_cache:
-            chaser_controls_cache[_cache_key] = build_chaser_controls(mo, loaded=_loaded)
-        chaser_controls_by_id[_analysis_id] = chaser_controls_cache[_cache_key]
-    return (chaser_controls_by_id,)
+    if chaser_loaded is not None and selected_analysis_id in analyses_with_controls:
+        chaser_controls = build_chaser_controls(mo, loaded=chaser_loaded)
+    else:
+        chaser_controls = None
+    return (chaser_controls,)
 
 
 @app.cell
-def _(
-    analysis_by_id,
-    chaser_controls_by_id,
-    chaser_loaded_by_id,
-    mo,
-    resolve_time_window_from_widgets,
-    resolve_time_windows_from_multiselect,
-):
-    chaser_control_outputs = {}
-    chaser_egocentric_windows_by_id = {}
-    chaser_windows_by_id = {}
-    for _analysis_id in analysis_by_id:
-        _controls = chaser_controls_by_id.get(_analysis_id)
-        _loaded = chaser_loaded_by_id.get(_analysis_id)
-        if _controls is None or _loaded is None:
-            chaser_control_outputs[_analysis_id] = mo.md("")
-            continue
-        _items = []
-        if _analysis_id == "distance":
-            _items.append(_controls.distance_series_picker)
-        if _analysis_id in {"distance", "egocentric_bearing", "polar_distance", "alignment"}:
-            _items.append(_controls.chaser_picker)
-        if _analysis_id == "egocentric_bearing":
-            _items.append(_controls.egocentric_epoch_picker)
-            chaser_egocentric_windows_by_id[_analysis_id] = resolve_time_windows_from_multiselect(
-                epoch_options=_controls.epoch_options,
-                epoch_picker=_controls.egocentric_epoch_picker,
-                windows_df=_loaded.windows_df,
-            )
+def _(chaser_controls, mo, selected_analysis_id):
+    if chaser_controls is None:
+        chaser_controls_output = mo.md("")
+    else:
+        items = []
+        if selected_analysis_id == "distance":
+            items.append(chaser_controls.distance_series_picker)
+        if selected_analysis_id in {"distance", "egocentric_bearing", "polar_distance", "alignment"}:
+            items.append(chaser_controls.chaser_picker)
+        if selected_analysis_id == "egocentric_bearing":
+            items.append(chaser_controls.egocentric_epoch_picker)
         else:
-            _items.append(_controls.epoch_picker)
-            if _controls.epoch_options.get(_controls.epoch_picker.value) is None:
-                _items.append(_controls.time_window)
-        if _analysis_id in {"polar_distance", "position_heatmap"}:
-            _items.append(_controls.heatmap_bins)
-        if _analysis_id == "position_heatmap":
-            _items.append(_controls.chaser_overlay)
-        if (
-            _analysis_id == "spatial_occupancy"
-            and _controls.spatial_zone_set_picker is not None
-        ):
-            _items.append(_controls.spatial_zone_set_picker)
-        chaser_control_outputs[_analysis_id] = mo.vstack(_items)
-        chaser_windows_by_id[_analysis_id] = resolve_time_window_from_widgets(
-            epoch_options=_controls.epoch_options,
-            epoch_picker=_controls.epoch_picker,
-            time_window=_controls.time_window,
-            windows_df=_loaded.windows_df,
+            items.append(chaser_controls.epoch_picker)
+            if chaser_controls.epoch_options.get(chaser_controls.epoch_picker.value) is None:
+                items.append(chaser_controls.time_window)
+        if selected_analysis_id in {"polar_distance", "position_heatmap"}:
+            items.append(chaser_controls.heatmap_bins)
+        if selected_analysis_id == "position_heatmap":
+            items.append(chaser_controls.chaser_overlay)
+        if selected_analysis_id == "spatial_occupancy" and chaser_controls.spatial_zone_set_picker is not None:
+            items.append(chaser_controls.spatial_zone_set_picker)
+        chaser_controls_output = mo.vstack(items)
+    chaser_controls_output
+    return
+
+
+@app.cell
+def _(chaser_controls, chaser_loaded, resolve_time_window_from_widgets):
+    if chaser_loaded is not None and chaser_controls is not None:
+        chaser_window = resolve_time_window_from_widgets(
+            epoch_options=chaser_controls.epoch_options,
+            epoch_picker=chaser_controls.epoch_picker,
+            time_window=chaser_controls.time_window,
+            windows_df=chaser_loaded.windows_df,
         )
-    return (
-        chaser_control_outputs,
-        chaser_egocentric_windows_by_id,
-        chaser_windows_by_id,
-    )
+    else:
+        chaser_window = None
+    return (chaser_window,)
+
+
+@app.cell
+def _(chaser_controls, chaser_loaded, resolve_time_windows_from_multiselect, selected_analysis_id):
+    if (
+        selected_analysis_id == "egocentric_bearing"
+        and chaser_loaded is not None
+        and chaser_controls is not None
+    ):
+        chaser_egocentric_windows = resolve_time_windows_from_multiselect(
+            epoch_options=chaser_controls.epoch_options,
+            epoch_picker=chaser_controls.egocentric_epoch_picker,
+            windows_df=chaser_loaded.windows_df,
+        )
+    else:
+        chaser_egocentric_windows = ()
+    return (chaser_egocentric_windows,)
 
 
 @app.cell
 def _(
-    analysis_by_id,
     build_arena_heatmap,
     build_cra_near_field_output,
     build_cra_primary_endpoint_output,
+    build_debug_tables,
     build_detection_occupancy_output,
     build_distance_figure,
     build_egocentric_alignment_output,
@@ -518,219 +535,93 @@ def _(
     build_spatial_occupancy_output,
     build_spec_provenance_panel,
     build_static_artifacts_panel,
-    chaser_controls_by_id,
-    chaser_egocentric_windows_by_id,
-    chaser_errors_by_id,
-    chaser_loaded_by_id,
-    chaser_windows_by_id,
+    chaser_controls,
+    chaser_egocentric_windows,
+    chaser_error,
+    chaser_loaded,
+    chaser_window,
     go,
     mo,
+    pd,
     px,
-    section_lazy_by_id,
+    selected_analysis_id,
     selected_provider,
     selected_spec,
     zarr_path,
 ):
-    chaser_outputs = {}
-    if selected_provider is not None and selected_provider.provider_id == "stimulus_chaser":
-        for _analysis_id in analysis_by_id:
-            if not section_lazy_by_id[_analysis_id].value:
-                chaser_outputs[_analysis_id] = mo.md(
-                    "_This analysis loads when it enters view._"
-                )
-                continue
-            if _analysis_id in chaser_errors_by_id:
-                chaser_outputs[_analysis_id] = mo.md(
-                    f"Chaser analysis failed: `{chaser_errors_by_id[_analysis_id]}`"
-                )
-                continue
-            if _analysis_id == "static_artifacts" and selected_spec is not None:
-                chaser_outputs[_analysis_id] = build_static_artifacts_panel(
-                    mo,
-                    zarr_path=zarr_path,
-                    run_path=selected_spec.run_path,
-                    spec=selected_spec.spec,
-                )
-                continue
-            if _analysis_id == "provenance" and selected_spec is not None:
-                chaser_outputs[_analysis_id] = build_spec_provenance_panel(
-                    mo,
-                    spec=selected_spec.spec,
-                    artifact_attrs=selected_spec.attrs,
-                    option=selected_spec,
-                )
-                continue
-            _loaded = chaser_loaded_by_id.get(_analysis_id)
-            _controls = chaser_controls_by_id.get(_analysis_id)
-            _window = chaser_windows_by_id.get(_analysis_id)
-            if _loaded is None:
-                chaser_outputs[_analysis_id] = mo.md(
-                    "The analysis has no renderable persisted rows."
-                )
-            elif _analysis_id == "distance" and _controls is not None and _window is not None:
-                chaser_outputs[_analysis_id], _ = build_distance_figure(
-                    go,
-                    loaded=_loaded,
-                    distance_series_picker=_controls.distance_series_picker,
-                    window=_window,
-                )
-            elif _analysis_id == "epoch_summary":
-                chaser_outputs[_analysis_id] = build_epoch_summary_output(
-                    mo, go, loaded=_loaded, chaser_picker=None
-                )
-            elif _analysis_id == "egocentric_bearing" and _controls is not None:
-                chaser_outputs[_analysis_id] = build_egocentric_bearing_output(
-                    mo,
-                    go,
-                    loaded=_loaded,
-                    windows=chaser_egocentric_windows_by_id.get(_analysis_id, ()),
-                    chaser_picker=_controls.chaser_picker,
-                )
-            elif _analysis_id == "polar_distance" and _controls is not None and _window is not None:
-                chaser_outputs[_analysis_id] = build_egocentric_polar_heatmap_output(
-                    mo,
-                    go,
-                    loaded=_loaded,
-                    window=_window,
-                    chaser_picker=_controls.chaser_picker,
-                )
-            elif _analysis_id == "fish_heading" and _window is not None:
-                chaser_outputs[_analysis_id] = build_fish_heading_output(
-                    mo, go, loaded=_loaded, window=_window
-                )
-            elif _analysis_id == "alignment" and _controls is not None and _window is not None:
-                chaser_outputs[_analysis_id] = build_egocentric_alignment_output(
-                    mo,
-                    go,
-                    loaded=_loaded,
-                    window=_window,
-                    chaser_picker=_controls.chaser_picker,
-                )
-            elif _analysis_id == "position_heatmap" and _controls is not None and _window is not None:
-                chaser_outputs[_analysis_id], _ = build_arena_heatmap(
-                    px,
-                    loaded=_loaded,
-                    heatmap_bins=_controls.heatmap_bins,
-                    chaser_overlay=_controls.chaser_overlay,
-                    window=_window,
-                )
-            elif _analysis_id == "detection_occupancy" and _window is not None:
-                chaser_outputs[_analysis_id] = build_detection_occupancy_output(
-                    mo, go, loaded=_loaded, window=_window
-                )
-            elif _analysis_id == "spatial_occupancy" and _controls is not None and _window is not None:
-                chaser_outputs[_analysis_id] = build_spatial_occupancy_output(
-                    mo,
-                    go,
-                    loaded=_loaded,
-                    window=_window,
-                    spatial_zone_set_picker=_controls.spatial_zone_set_picker,
-                )
-            elif _analysis_id == "cra_quadrant":
-                chaser_outputs[_analysis_id] = build_cra_primary_endpoint_output(
-                    mo, go, loaded=_loaded
-                )
-            elif _analysis_id == "cra_near_field":
-                chaser_outputs[_analysis_id] = build_cra_near_field_output(
-                    mo, go, loaded=_loaded
-                )
-            elif _analysis_id == "escape_freeze":
-                chaser_outputs[_analysis_id] = build_escape_freeze_output(
-                    mo, loaded=_loaded
-                )
-            else:
-                chaser_outputs[_analysis_id] = mo.md(
-                    "The analysis has no renderable persisted rows."
-                )
-    return (chaser_outputs,)
-
-
-@app.cell
-def _(
-    analysis_by_id,
-    chaser_control_outputs,
-    chaser_outputs,
-    core_control_outputs,
-    core_outputs,
-    mo,
-    provider_picker,
-    recording_context,
-    section_anchor_by_id,
-    section_lazy_by_id,
-    selected_provider,
-    source_picker,
-    zarr_path,
-):
-    if selected_provider is None:
-        navigation = {"#explorer-top": "Overview"}
-    else:
-        navigation = {"#explorer-top": "Overview"}
-        navigation.update(
-            {
-                f"#{section_anchor_by_id[analysis_id]}": definition.label
-                for analysis_id, definition in analysis_by_id.items()
-            }
+    if selected_provider is None or selected_provider.provider_id != "stimulus_chaser":
+        chaser_output = mo.md("")
+    elif chaser_error:
+        chaser_output = mo.md(f"Chaser analysis failed: `{chaser_error}`")
+    elif selected_analysis_id == "static_artifacts" and selected_spec is not None:
+        chaser_output = build_static_artifacts_panel(
+            mo, zarr_path=zarr_path, run_path=selected_spec.run_path, spec=selected_spec.spec
         )
-    sidebar_items = [mo.md("## Recording explorer"), recording_context]
-    if provider_picker is not None:
-        sidebar_items.extend([provider_picker])
-    if source_picker is not None:
-        sidebar_items.extend([source_picker])
-    sidebar_items.extend(
-        [mo.md("### Contents"), mo.nav_menu(navigation, orientation="vertical")]
-    )
-    mo.sidebar(mo.vstack(sidebar_items), width="21rem")
-
-    if not analysis_by_id:
-        sections = [
-            mo.md(
-                "No analysis in this class has all required persisted inputs. "
-                "Run or backfill the corresponding visualization contract first."
-            )
-        ]
+    elif selected_analysis_id == "provenance" and selected_spec is not None:
+        chaser_output = build_spec_provenance_panel(
+            mo,
+            spec=selected_spec.spec,
+            artifact_attrs=selected_spec.attrs,
+            option=selected_spec,
+        )
+    elif chaser_loaded is None:
+        chaser_output = mo.md("")
+    elif selected_analysis_id == "distance" and chaser_window is not None:
+        chaser_output, _ = build_distance_figure(
+            go,
+            loaded=chaser_loaded,
+            distance_series_picker=chaser_controls.distance_series_picker,
+            window=chaser_window,
+        )
+    elif selected_analysis_id == "epoch_summary":
+        chaser_output = build_epoch_summary_output(
+            mo, go, loaded=chaser_loaded, chaser_picker=None
+        )
+    elif selected_analysis_id == "egocentric_bearing":
+        chaser_output = build_egocentric_bearing_output(
+            mo, go, loaded=chaser_loaded, windows=chaser_egocentric_windows,
+            chaser_picker=chaser_controls.chaser_picker,
+        )
+    elif selected_analysis_id == "polar_distance" and chaser_window is not None:
+        chaser_output = build_egocentric_polar_heatmap_output(
+            mo, go, loaded=chaser_loaded, window=chaser_window,
+            chaser_picker=chaser_controls.chaser_picker,
+        )
+    elif selected_analysis_id == "fish_heading" and chaser_window is not None:
+        chaser_output = build_fish_heading_output(
+            mo, go, loaded=chaser_loaded, window=chaser_window
+        )
+    elif selected_analysis_id == "alignment" and chaser_window is not None:
+        chaser_output = build_egocentric_alignment_output(
+            mo, go, loaded=chaser_loaded, window=chaser_window,
+            chaser_picker=chaser_controls.chaser_picker,
+        )
+    elif selected_analysis_id == "position_heatmap" and chaser_window is not None:
+        chaser_output, _ = build_arena_heatmap(
+            px,
+            loaded=chaser_loaded,
+            heatmap_bins=chaser_controls.heatmap_bins,
+            chaser_overlay=chaser_controls.chaser_overlay,
+            window=chaser_window,
+        )
+    elif selected_analysis_id == "detection_occupancy" and chaser_window is not None:
+        chaser_output = build_detection_occupancy_output(
+            mo, go, loaded=chaser_loaded, window=chaser_window
+        )
+    elif selected_analysis_id == "spatial_occupancy" and chaser_window is not None:
+        chaser_output = build_spatial_occupancy_output(
+            mo, go, loaded=chaser_loaded, window=chaser_window,
+            spatial_zone_set_picker=chaser_controls.spatial_zone_set_picker,
+        )
+    elif selected_analysis_id == "cra_quadrant":
+        chaser_output = build_cra_primary_endpoint_output(mo, go, loaded=chaser_loaded)
+    elif selected_analysis_id == "cra_near_field":
+        chaser_output = build_cra_near_field_output(mo, go, loaded=chaser_loaded)
+    elif selected_analysis_id == "escape_freeze":
+        chaser_output = build_escape_freeze_output(mo, loaded=chaser_loaded)
     else:
-        sections = []
-        for _analysis_id, _definition in analysis_by_id.items():
-            _controls = (
-                core_control_outputs.get(_analysis_id, mo.md(""))
-                if selected_provider is not None
-                and selected_provider.provider_id == "core_behavior"
-                else chaser_control_outputs.get(_analysis_id, mo.md(""))
-            )
-            _output = (
-                core_outputs.get(_analysis_id, mo.md(""))
-                if selected_provider is not None
-                and selected_provider.provider_id == "core_behavior"
-                else chaser_outputs.get(_analysis_id, mo.md(""))
-            )
-            sections.append(
-                mo.vstack(
-                    [
-                        mo.md(
-                            f'<div id="{section_anchor_by_id[_analysis_id]}"></div>\n\n'
-                            f"## {_definition.label}\n\n{_definition.description}"
-                        ),
-                        section_lazy_by_id[_analysis_id],
-                        _controls,
-                        _output,
-                    ]
-                ).style(min_height="65vh", scroll_margin_top="1rem")
-            )
-
-    mo.vstack(
-        [
-            mo.md(
-                '<div id="explorer-top"></div>\n\n# Palette Recording Explorer\n\n'
-                "This viewer opens the recording Zarr read-only. Use the contents "
-                "sidebar to move through available analyses. "
-                "Each visualization reads its bounded Zarr projection only when "
-                "its section enters view."
-            ),
-            mo.md(f"**{selected_provider.label if selected_provider else 'No analysis class'}**"),
-            mo.md(f"`{zarr_path}`"),
-            *sections,
-        ]
-    )
+        chaser_output = mo.md("The selected analysis has no renderable persisted rows.")
+    chaser_output
     return
 
 

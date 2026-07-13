@@ -17,11 +17,9 @@ defaults, and packaging gate are specified in
 `apps/marimo/palette_explorer.py` is the general entrypoint for interactive
 visualization specs stored in analysis Zarr archives. It discovers persisted
 interactive spec artifacts, groups them into capability providers, and offers
-only the analyses supported within the selected provider. Available analyses
-are arranged as anchored document sections with a vertical contents sidebar.
-An analysis section entering the viewport is the data-loading boundary;
-off-screen sibling panels are not evaluated merely because their provider is
-present.
+only the analyses supported within the selected provider. Selecting an
+analysis is the data-loading boundary; sibling panels are not evaluated merely
+because their provider is present.
 
 Existing focused notebooks remain available while this pattern settles:
 
@@ -82,10 +80,9 @@ legacy chaser and CRA renderer aliases  -> Chaser stimulus
 
 Provider membership is based on the persisted renderer/capability, not the
 recording's protocol name. A recording can therefore expose both Core behavior
-and Chaser stimulus. The contents sidebar contains only analyses from the
-selected provider, preventing navigation to a visualization family that is not
-active. Recording, provider, and analysis-run selectors remain in that sidebar.
-Each contents entry is a stable hash link to its analysis section.
+and Chaser stimulus. The second dropdown contains only analyses from the
+selected provider, preventing a control from another visualization family from
+remaining selectable while doing nothing.
 
 Core behavior currently provides projected speed, heading/turning, position,
 eye-angle/convergence, lineage-compatible swim-bout segmentation overlays,
@@ -98,10 +95,9 @@ artifact, and provenance views when their persisted inputs are present.
 Polars does not have a native Zarr scanner. The recording explorer therefore
 uses a precise two-stage contract:
 
-1. Zarr access is deferred until an analysis section enters the viewport. A
-   contents link scrolls directly to its anchor, which makes its lazy sentinel
-   visible. The component then reads the time coordinate plus only that
-   analysis' source arrays and selected contiguous row interval.
+1. Zarr access is deferred until an analysis is selected. The component reads
+   the time coordinate plus only that analysis' source arrays and selected
+   contiguous row interval.
 2. The resulting projection is represented as a `polars.LazyFrame`; filtering,
    column projection, grouping, and descriptive display queries remain lazy
    until collection.
@@ -117,12 +113,6 @@ Python row dictionaries.
 
 Both paths are read-only. Viewer projections and exploratory summaries are not
 written into the recording or export.
-
-Section shells and controls are inexpensive and may exist before their data are
-read. Each section has an independent control instance; changing an epoch,
-series, or binning choice in one section does not mutate another section. A
-loaded section reuses the existing in-process provider caches for subsequent
-reactive control changes.
 
 The single-recording explorer uses targeted track/chaser provider discovery
 rather than constructing the audit-oriented whole-recording artifact
