@@ -100,6 +100,7 @@ class GoodCopBadCopControls:
     chaser_picker: Any
     time_window: Any
     epoch_picker: Any
+    egocentric_epoch_picker: Any
     epoch_options: Mapping[str, Optional[int]]
     heatmap_bins: Any
     chaser_overlay: Any
@@ -749,6 +750,14 @@ def build_controls(mo: Any, *, loaded: GoodCopBadCopLoadedView) -> GoodCopBadCop
         value="Custom time window",
         label="Epoch",
     )
+    egocentric_epoch_labels = [
+        label for label, window_id in epoch_options.items() if window_id is not None
+    ]
+    egocentric_epoch_picker = mo.ui.multiselect(
+        options=egocentric_epoch_labels,
+        value=egocentric_epoch_labels,
+        label="Epochs",
+    )
     heatmap_bins = mo.ui.slider(start=20, stop=160, value=80, step=10, label="Heatmap bins")
     chaser_overlay = mo.ui.checkbox(value=True, label="Chaser overlay")
     zone_set_options = (
@@ -770,6 +779,7 @@ def build_controls(mo: Any, *, loaded: GoodCopBadCopLoadedView) -> GoodCopBadCop
         chaser_picker=chaser_picker,
         time_window=time_window,
         epoch_picker=epoch_picker,
+        egocentric_epoch_picker=egocentric_epoch_picker,
         epoch_options=epoch_options,
         heatmap_bins=heatmap_bins,
         chaser_overlay=chaser_overlay,
@@ -864,6 +874,36 @@ def resolve_time_window_from_widgets(
         selected_epoch_label=selected_epoch_label,
         start_s=start_s,
         stop_s=stop_s,
+    )
+
+
+def resolve_time_windows_from_multiselect(
+    *,
+    epoch_options: Mapping[str, Optional[int]],
+    epoch_picker: Any,
+    windows_df: pd.DataFrame,
+) -> tuple[GoodCopBadCopTimeWindow, ...]:
+    """Resolve one or more persisted epochs in recording order."""
+
+    selected_labels = set(str(value) for value in (epoch_picker.value or []))
+    selected_ids = {
+        int(window_id)
+        for label, window_id in epoch_options.items()
+        if label in selected_labels and window_id is not None
+    }
+    if not selected_ids or not len(windows_df):
+        return ()
+    rows = windows_df[windows_df["window_id"].astype(int).isin(selected_ids)].sort_values(
+        ["start_time_s", "window_id"]
+    )
+    return tuple(
+        GoodCopBadCopTimeWindow(
+            selected_epoch_id=int(row.window_id),
+            selected_epoch_label=str(row.label),
+            start_s=float(row.start_time_s),
+            stop_s=float(row.end_time_s),
+        )
+        for row in rows.itertuples(index=False)
     )
 
 
@@ -1579,73 +1619,92 @@ def build_egocentric_bearing_output(
     go: Any,
     *,
     loaded: GoodCopBadCopLoadedView,
-    window: GoodCopBadCopTimeWindow,
+    window: Optional[GoodCopBadCopTimeWindow] = None,
+    windows: Optional[tuple[GoodCopBadCopTimeWindow, ...]] = None,
     chaser_picker: Any = None,
     max_points: int = 16000,
 ) -> Any:
     if loaded.data.egocentric_component_name is None or loaded.egocentric_bearing_df.is_empty():
         return mo.md("No egocentric chaser-bearing component is linked to this chaser-distance run.")
 
-    visible = _filter_selected_chaser(
-        _filter_egocentric_window(loaded.egocentric_bearing_df, window),
-        chaser_picker,
-    )
-    if visible.is_empty():
-        return mo.md("No valid egocentric chaser-bearing samples in the selected window.")
-    if visible.height > int(max_points):
-        step = max(1, int(np.ceil(visible.height / float(max_points))))
-        visible = visible.with_row_index("_row").filter((pl.col("_row") % step) == 0).drop("_row")
+    selected_windows = tuple(windows or (() if window is None else (window,)))
+    if not selected_windows:
+        return mo.md("Select at least one persisted epoch.")
 
-    fig = go.Figure()
-    for chaser_index in visible["chaser_index"].unique().sort().to_list():
-        rows = visible.filter(pl.col("chaser_index") == int(chaser_index))
-        if rows.is_empty():
-            continue
-        fig.add_trace(
-            go.Scatterpolar(
-                theta=rows["bearing_deg"].to_numpy(),
-                r=rows["distance_mm"].to_numpy(),
-                mode="markers",
-                name=f"chaser {int(chaser_index)}",
-                marker=dict(
-                    size=4,
-                    opacity=0.32,
-                    color=_chaser_color(loaded, int(chaser_index)),
-                ),
-                customdata=np.column_stack(
-                    [
-                        rows["time_s"].to_numpy(),
-                        rows["frame_index"].to_numpy(),
-                        rows["alignment_cos"].to_numpy(),
-                    ]
-                ),
-                hovertemplate=(
-                    "bearing=%{theta:.1f} deg<br>"
-                    "distance=%{r:.2f} mm<br>"
-                    "time=%{customdata[0]:.2f}s<br>"
-                    "frame=%{customdata[1]}<br>"
-                    "alignment=%{customdata[2]:.3f}"
-                    "<extra>%{fullData.name}</extra>"
-                ),
-            )
+    figures: list[Any] = []
+    per_epoch_max_points = max(1, int(max_points) // len(selected_windows))
+    for selected_window in selected_windows:
+        visible = _filter_selected_chaser(
+            _filter_egocentric_window(loaded.egocentric_bearing_df, selected_window),
+            chaser_picker,
         )
-    fig.update_layout(
-        title=f"Egocentric Chaser Bearing ({window.selected_epoch_label})",
-        height=560,
-        margin=dict(l=40, r=40, t=58, b=48),
-        polar=dict(
-            radialaxis=dict(title="Distance (mm)", rangemode="tozero"),
-            angularaxis=dict(
-                rotation=90,
-                direction="counterclockwise",
-                tickmode="array",
-                tickvals=[-180, -90, 0, 90, 180],
-                ticktext=["behind", "right", "front", "left", "behind"],
+        if visible.is_empty():
+            continue
+        if visible.height > per_epoch_max_points:
+            step = max(1, int(np.ceil(visible.height / float(per_epoch_max_points))))
+            visible = visible.with_row_index("_row").filter((pl.col("_row") % step) == 0).drop("_row")
+
+        fig = go.Figure()
+        for chaser_index in visible["chaser_index"].unique().sort().to_list():
+            rows = visible.filter(pl.col("chaser_index") == int(chaser_index))
+            if rows.is_empty():
+                continue
+            fig.add_trace(
+                go.Scatterpolar(
+                    theta=rows["bearing_deg"].to_numpy(),
+                    r=rows["distance_mm"].to_numpy(),
+                    mode="markers",
+                    name=f"chaser {int(chaser_index)}",
+                    marker=dict(
+                        size=4,
+                        opacity=0.32,
+                        color=_chaser_color(loaded, int(chaser_index)),
+                    ),
+                    customdata=np.column_stack(
+                        [
+                            rows["time_s"].to_numpy(),
+                            rows["frame_index"].to_numpy(),
+                            rows["alignment_cos"].to_numpy(),
+                        ]
+                    ),
+                    hovertemplate=(
+                        "bearing=%{theta:.1f} deg<br>"
+                        "distance=%{r:.2f} mm<br>"
+                        "time=%{customdata[0]:.2f}s<br>"
+                        "frame=%{customdata[1]}<br>"
+                        "alignment=%{customdata[2]:.3f}"
+                        "<extra>%{fullData.name}</extra>"
+                    ),
+                )
+            )
+        fig.update_layout(
+            title=str(selected_window.selected_epoch_label),
+            height=520,
+            margin=dict(l=28, r=28, t=54, b=48),
+            polar=dict(
+                radialaxis=dict(title="Distance (mm)", rangemode="tozero"),
+                angularaxis=dict(
+                    rotation=90,
+                    direction="counterclockwise",
+                    tickmode="array",
+                    tickvals=[-180, -90, 0, 90, 180],
+                    ticktext=["behind", "right", "front", "left", "behind"],
+                ),
             ),
-        ),
-        legend=dict(orientation="h", yanchor="top", y=-0.08, xanchor="left", x=0.0),
+            legend=dict(orientation="h", yanchor="top", y=-0.08, xanchor="left", x=0.0),
+        )
+        figures.append(fig)
+    if not figures:
+        return mo.md("No valid egocentric chaser-bearing samples in the selected epochs.")
+    if len(figures) == 1:
+        figures[0].update_layout(title=f"Egocentric Chaser Bearing ({figures[0].layout.title.text})")
+        return figures[0]
+    return mo.vstack(
+        [
+            mo.md("## Egocentric Chaser Bearing"),
+            mo.hstack(figures, widths="equal", align="start"),
+        ]
     )
-    return fig
 
 
 def _egocentric_distance_bin_width_mm(loaded: GoodCopBadCopLoadedView) -> float:

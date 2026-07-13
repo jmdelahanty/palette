@@ -28,6 +28,7 @@ from apps.marimo.components.goodcopbadcop_chaser import (
     build_spatial_occupancy_output,
     is_goodcopbadcop_option,
     load_goodcopbadcop_view,
+    resolve_time_windows_from_multiselect,
 )
 from apps.marimo.components.registry import (
     artifact_path_for,
@@ -788,6 +789,7 @@ def test_goodcopbadcop_controls_do_not_read_widget_values_during_creation(tmp_pa
     controls = build_controls(_Mo, loaded=loaded)
 
     assert len(controls.view) == 7
+    assert len(controls.egocentric_epoch_picker._initial_value) == 3
 
 
 def test_goodcopbadcop_spatial_figures_use_image_y_axis(tmp_path) -> None:
@@ -849,6 +851,10 @@ def test_goodcopbadcop_spatial_occupancy_panel_renders_zone_summary(tmp_path) ->
     class _Mo:
         @staticmethod
         def vstack(items):
+            return list(items)
+
+        @staticmethod
+        def hstack(items, **_kwargs):
             return list(items)
 
     figures = build_spatial_occupancy_output(
@@ -934,6 +940,10 @@ def test_goodcopbadcop_egocentric_panels_render_from_linked_component(tmp_path) 
         def vstack(items):
             return list(items)
 
+        @staticmethod
+        def hstack(items, **_kwargs):
+            return list(items)
+
     class _ChaserPicker:
         value = "chaser 1"
 
@@ -982,6 +992,22 @@ def test_goodcopbadcop_egocentric_panels_render_from_linked_component(tmp_path) 
         window=window,
         chaser_picker=_ChaserPicker(),
     )
+    epoch_labels = list(loaded.windows_df["label"])
+    epoch_windows = tuple(
+        GoodCopBadCopTimeWindow(
+            selected_epoch_id=int(row.window_id),
+            selected_epoch_label=str(row.label),
+            start_s=float(row.start_time_s),
+            stop_s=float(row.end_time_s),
+        )
+        for row in loaded.windows_df.itertuples(index=False)
+    )
+    multi_epoch_output = build_egocentric_bearing_output(
+        _Mo,
+        go,
+        loaded=loaded,
+        windows=epoch_windows,
+    )
 
     assert loaded.data.egocentric_component_name == "track_offline_tk_1_id_0_smoothed"
     assert loaded.egocentric_bearing_df.height > 0
@@ -1009,6 +1035,33 @@ def test_goodcopbadcop_egocentric_panels_render_from_linked_component(tmp_path) 
     assert [trace.name for trace in single_bearing_fig.data] == ["chaser 1"]
     assert single_density_fig.data[0].name == "chaser 1"
     assert [trace.name for trace in single_alignment_fig.data] == ["chaser 1"]
+    assert multi_epoch_output[0] == "## Egocentric Chaser Bearing"
+    multi_epoch_figures = multi_epoch_output[1]
+    assert [figure.layout.title.text for figure in multi_epoch_figures] == epoch_labels
+    assert len(multi_epoch_figures) == 3
+
+
+def test_goodcopbadcop_multi_epoch_picker_resolves_selected_windows_in_time_order(tmp_path) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
+    option = discover_interactive_spec_options(zarr_path)[0]
+    loaded = load_goodcopbadcop_view(zarr_path, option, timer=time)
+
+    class _Picker:
+        value = ["post (0.6-0.9s)", "pre (0.0-0.3s)"]
+
+    resolved = resolve_time_windows_from_multiselect(
+        epoch_options={
+            "Custom time window": None,
+            "pre (0.0-0.3s)": 0,
+            "training (0.3-0.6s)": 1,
+            "post (0.6-0.9s)": 2,
+        },
+        epoch_picker=_Picker(),
+        windows_df=loaded.windows_df,
+    )
+
+    assert [window.selected_epoch_id for window in resolved] == [0, 2]
+    assert [window.selected_epoch_label for window in resolved] == ["pre_event", "post_event"]
 
 
 def test_goodcopbadcop_controls_show_time_slider_only_for_custom_window() -> None:

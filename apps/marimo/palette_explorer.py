@@ -45,6 +45,7 @@ def _():
         build_spatial_occupancy_output,
         load_goodcopbadcop_view,
         resolve_time_window_from_widgets,
+        resolve_time_windows_from_multiselect,
     )
     from apps.marimo.components.provenance import build_spec_provenance_panel
     from apps.marimo.components.registry import (
@@ -88,6 +89,7 @@ def _():
         pd,
         px,
         resolve_time_window_from_widgets,
+        resolve_time_windows_from_multiselect,
         time,
     )
 
@@ -444,9 +446,12 @@ def _(chaser_controls, mo, selected_analysis_id):
             items.append(chaser_controls.distance_series_picker)
         if selected_analysis_id in {"distance", "egocentric_bearing", "polar_distance", "alignment"}:
             items.append(chaser_controls.chaser_picker)
-        items.append(chaser_controls.epoch_picker)
-        if chaser_controls.epoch_options.get(chaser_controls.epoch_picker.value) is None:
-            items.append(chaser_controls.time_window)
+        if selected_analysis_id == "egocentric_bearing":
+            items.append(chaser_controls.egocentric_epoch_picker)
+        else:
+            items.append(chaser_controls.epoch_picker)
+            if chaser_controls.epoch_options.get(chaser_controls.epoch_picker.value) is None:
+                items.append(chaser_controls.time_window)
         if selected_analysis_id in {"polar_distance", "position_heatmap"}:
             items.append(chaser_controls.heatmap_bins)
         if selected_analysis_id == "position_heatmap":
@@ -473,6 +478,23 @@ def _(chaser_controls, chaser_loaded, resolve_time_window_from_widgets):
 
 
 @app.cell
+def _(chaser_controls, chaser_loaded, resolve_time_windows_from_multiselect, selected_analysis_id):
+    if (
+        selected_analysis_id == "egocentric_bearing"
+        and chaser_loaded is not None
+        and chaser_controls is not None
+    ):
+        chaser_egocentric_windows = resolve_time_windows_from_multiselect(
+            epoch_options=chaser_controls.epoch_options,
+            epoch_picker=chaser_controls.egocentric_epoch_picker,
+            windows_df=chaser_loaded.windows_df,
+        )
+    else:
+        chaser_egocentric_windows = ()
+    return (chaser_egocentric_windows,)
+
+
+@app.cell
 def _(
     build_arena_heatmap,
     build_cra_near_field_output,
@@ -490,6 +512,7 @@ def _(
     build_spec_provenance_panel,
     build_static_artifacts_panel,
     chaser_controls,
+    chaser_egocentric_windows,
     chaser_error,
     chaser_loaded,
     chaser_window,
@@ -530,9 +553,9 @@ def _(
         chaser_output = build_epoch_summary_output(
             mo, go, loaded=chaser_loaded, chaser_picker=None
         )
-    elif selected_analysis_id == "egocentric_bearing" and chaser_window is not None:
+    elif selected_analysis_id == "egocentric_bearing":
         chaser_output = build_egocentric_bearing_output(
-            mo, go, loaded=chaser_loaded, window=chaser_window,
+            mo, go, loaded=chaser_loaded, windows=chaser_egocentric_windows,
             chaser_picker=chaser_controls.chaser_picker,
         )
     elif selected_analysis_id == "polar_distance" and chaser_window is not None:
