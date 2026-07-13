@@ -334,6 +334,45 @@ def test_palette_explorer_discovers_sibling_goodcopbadcop_recordings(tmp_path) -
     )
 
 
+def test_palette_explorer_direct_launch_does_not_discover_siblings(tmp_path) -> None:
+    recordings_root = tmp_path / "recordings"
+    selected = _make_recording_archive_with_goodcopbadcop_spec(
+        recordings_root,
+        "2026-06-14T21-12-08Z_arena_1_GoodCopBadCop",
+    )
+    _make_recording_archive_with_goodcopbadcop_spec(
+        recordings_root,
+        "2026-06-14T21-12-08Z_arena_2_GoodCopBadCop",
+    )
+
+    options = discover_protocol_recording_options(
+        selected,
+        name_contains=None,
+        recording_explorer_only=True,
+        include_collection=False,
+    )
+
+    assert [option.zarr_path for option in options] == [selected]
+
+
+def test_palette_explorer_direct_launch_reports_selected_zarr_without_specs(tmp_path) -> None:
+    selected = tmp_path / "recording_analysis.zarr"
+    zarr.open_group(str(selected), mode="w", use_consolidated=False)
+
+    options = discover_protocol_recording_options(
+        selected,
+        name_contains=None,
+        recording_explorer_only=True,
+        include_collection=False,
+        include_seed_without_specs=True,
+    )
+
+    assert len(options) == 1
+    assert options[0].zarr_path == selected
+    assert options[0].interactive_spec_count == 0
+    assert options[0].supported_spec_count == 0
+
+
 def test_goodcopbadcop_component_loads_selected_registry_option(tmp_path) -> None:
     zarr_path = _make_archive_with_goodcopbadcop_spec(tmp_path)
     option = discover_interactive_spec_options(zarr_path)[0]

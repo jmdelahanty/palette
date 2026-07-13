@@ -7,6 +7,7 @@ platforms = ["linux-64"]
 
 [tasks]
 app = { cmd = "bash scripts/run_group_analytics_app.sh", description = "Start the read-only Palette analytics Marimo application." }
+recording-app = { cmd = "bash scripts/run_recording_explorer_app.sh", description = "Start the read-only Palette recording Marimo application." }
 
 [dependencies]
 python = "3.11.*"
@@ -15,3 +16,14 @@ numpy = ">=2,<2.3"
 pandas = ">=2.3,<3"
 plotly = ">=6.6,<7"
 polars = "==1.40.0"
+
+[feature.recording.dependencies]
+matplotlib-base = ">=3.9,<4"
+pyyaml = ">=6,<7"
+rich = ">=13,<15"
+scipy = ">=1.14,<2"
+zarr = ">=3,<4"
+
+[environments]
+default = { solve-group = "default" }
+recording = { features = ["recording"], solve-group = "default" }

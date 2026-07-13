@@ -1,11 +1,11 @@
-name: Palette Analytics Explorer
-description: Explore immutable Palette analytics exports in a read-only Marimo application.
+name: Palette Explorers
+description: Explore immutable Palette analytics exports or one recording Zarr in read-only Marimo applications.
 requirements:
   - pixi>=0.40
 
 runnables:
   - id: app
-    name: Analytics Explorer
+    name: Group Analytics Explorer
     type: service
     description: >-
       Select and explore a Palette analytics export. The source export remains
@@ -22,6 +22,31 @@ runnables:
         description: >-
           Directory containing immutable Palette analytics export manifests and
           Parquet tables. The application confines discovery and reads to this root.
+        required: true
+        exists: true
+    resources:
+      cpus: 2
+      memory: "16 GB"
+      walltime: "08:00"
+
+  - id: recording-app
+    name: Recording Explorer
+    type: service
+    description: >-
+      Open one Palette analysis Zarr through bounded, capability-routed views.
+      The selected Zarr is opened read-only and no save actions are exposed.
+    command: pixi run -e recording recording-app --
+    working_dir: repo
+    pre_run: 'export PATH="$HOME/.pixi/bin:$PATH"'
+    auto_url: true
+    service_url_suffix: "/?access_token=${FG_SERVICE_TOKEN}"
+    parameters:
+      - flag: --zarr-path
+        name: Recording Analysis Zarr
+        type: directory
+        description: >-
+          One Palette analysis Zarr directory. Direct FileGlancer launches show
+          only this recording unless collection arguments are supplied separately.
         required: true
         exists: true
     resources:

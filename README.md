@@ -60,6 +60,12 @@ use the locked lightweight Pixi application:
 pixi run app -- --export-root /groups/johnson/johnsonlab/palette_analytics
 ```
 
+To open one analysis Zarr in the locked recording-viewer environment:
+
+```bash
+pixi run -e recording recording-app -- --zarr-path /path/to/recording_analysis.zarr
+```
+
 ## Documentation
 
 Useful starting points:

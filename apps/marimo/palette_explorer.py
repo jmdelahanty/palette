@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Read-only, capability-routed explorer for one Palette recording Zarr."""
+"""Read-only, capability-routed explorer for one Palette recording Zarr.
+
+A direct ``--zarr-path`` launch shows only that recording. Collection browsing
+is enabled explicitly with ``--recordings-root`` or ``--registry``.
+"""
 
 import marimo
 
@@ -51,7 +55,6 @@ def _():
     from apps.marimo.components.registry import (
         discover_recording_explorer_spec_options,
         discover_protocol_recording_options,
-        infer_recordings_root_from_zarr_path,
     )
     from apps.marimo.components.static_artifacts import build_static_artifacts_panel
 
@@ -82,7 +85,6 @@ def _():
         discover_protocol_recording_options,
         go,
         group_specs_by_provider,
-        infer_recordings_root_from_zarr_path,
         load_core_behavior_projection,
         load_goodcopbadcop_view,
         mo,
@@ -104,12 +106,15 @@ def _(Path, discover_protocol_recording_options, mo):
             "apps/marimo/palette_explorer.py -- --zarr-path <analysis.zarr>"
         )
     seed_zarr_path = Path(str(zarr_path_raw))
+    if not seed_zarr_path.is_dir():
+        raise ValueError(f"Recording Zarr directory was not found: {seed_zarr_path}")
     recordings_root_raw = cli_args.get("recordings-root")
     registry_raw = cli_args.get("registry")
-    name_contains = cli_args.get("recording-name-contains", "GoodCopBadCop")
+    name_contains = cli_args.get("recording-name-contains")
     initial_renderer = cli_args.get("renderer")
     initial_run_path = cli_args.get("run-path")
     initial_artifact = cli_args.get("artifact")
+    collection_browsing = recordings_root_raw is not None or registry_raw is not None
     recording_options = discover_protocol_recording_options(
         seed_zarr_path,
         recordings_root=Path(str(recordings_root_raw)) if recordings_root_raw else None,
@@ -119,20 +124,29 @@ def _(Path, discover_protocol_recording_options, mo):
         artifact_filter=str(initial_artifact) if initial_artifact else None,
         name_contains=str(name_contains) if name_contains else None,
         recording_explorer_only=True,
+        include_collection=collection_browsing,
+        include_seed_without_specs=True,
     )
     if not recording_options:
         raise ValueError(f"No recording Zarrs were discovered from {seed_zarr_path}")
+    if registry_raw:
+        recording_scope_label = f"Registry collection: `{registry_raw}`"
+    elif recordings_root_raw:
+        recording_scope_label = f"Recording collection: `{recordings_root_raw}`"
+    else:
+        recording_scope_label = f"Selected recording only: `{seed_zarr_path}`"
     return (
         initial_artifact,
         initial_renderer,
         initial_run_path,
+        recording_scope_label,
         recording_options,
         seed_zarr_path,
     )
 
 
 @app.cell
-def _(infer_recordings_root_from_zarr_path, mo, recording_options, seed_zarr_path):
+def _(mo, recording_options, recording_scope_label, seed_zarr_path):
     recording_by_label = {
         f"{index + 1}. {option.label}": option for index, option in enumerate(recording_options)
     }
@@ -157,8 +171,7 @@ def _(infer_recordings_root_from_zarr_path, mo, recording_options, seed_zarr_pat
             ),
             recording_picker,
             mo.md(
-                f"Search root: `{infer_recordings_root_from_zarr_path(seed_zarr_path)}` · "
-                f"{len(recording_options):,} recording(s)"
+                f"{recording_scope_label} · {len(recording_options):,} recording(s)"
             ),
         ]
     )

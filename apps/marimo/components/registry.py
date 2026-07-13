@@ -594,13 +594,17 @@ def discover_protocol_recording_options(
     name_contains: Optional[str] = "GoodCopBadCop",
     lazy_registry_specs: bool = True,
     recording_explorer_only: bool = False,
+    include_collection: bool = True,
+    include_seed_without_specs: bool = False,
 ) -> list[RecordingSpecOption]:
     """Find sibling recordings with matching interactive specs.
 
     The common organized-recording layout is:
     ``<recordings_root>/<recording_id>/zarr/<recording_id>_analysis.zarr``.
     The seed archive is always included as a candidate so explicit Zarr paths
-    continue to work even when no sibling root can be inferred.
+    continue to work even when no sibling root can be inferred. Set
+    ``include_collection=False`` for a direct single-recording launch; sibling
+    discovery then occurs only when a recordings root or registry is supplied.
     """
 
     seed = Path(seed_zarr_path).expanduser()
@@ -609,7 +613,7 @@ def discover_protocol_recording_options(
     if registry_path is not None:
         registry_candidates.update(_registry_analysis_zarrs(registry_path, name_contains=name_contains))
         candidates.update(registry_candidates)
-    else:
+    elif recordings_root is not None or include_collection:
         root = Path(recordings_root).expanduser() if recordings_root else infer_recordings_root_from_zarr_path(seed)
         candidates.update(_candidate_analysis_zarrs(root, name_contains=name_contains))
 
@@ -641,6 +645,18 @@ def discover_protocol_recording_options(
             artifact_filter=artifact_filter,
         )
         if not spec_options:
+            if include_seed_without_specs and archive == seed:
+                recording_id = recording_id_from_analysis_zarr(archive)
+                options.append(
+                    RecordingSpecOption(
+                        zarr_path=archive,
+                        recording_id=recording_id,
+                        label=f"{recording_id} (no supported interactive specs)",
+                        interactive_spec_count=0,
+                        supported_spec_count=0,
+                        renderer_counts={},
+                    )
+                )
             continue
         renderer_counts: dict[str, int] = {}
         for spec in spec_options:

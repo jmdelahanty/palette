@@ -1,4 +1,4 @@
-# Palette analytics application deployment
+# Palette explorer application deployment
 
 Palette owns the deployable group analytics application because the notebook,
 export contracts, catalog checks, and visualizations must resolve to one Palette
@@ -47,6 +47,28 @@ selects an immutable `export_run_id` within that directory, and the catalog
 rejects manifests or Parquet parts that resolve outside it. The first published
 application has no server-side writer or report-save action.
 
+## Individual recording launch
+
+The recording explorer uses a separate Pixi feature/environment so Zarr,
+Matplotlib, and SciPy do not enlarge the group-viewer runtime:
+
+```bash
+pixi run -e recording recording-app -- \
+  --zarr-path /path/to/recording_analysis.zarr
+```
+
+The task launches `apps/marimo/palette_explorer.py` with the same read-only
+Marimo service and token protocol as the group app. A direct `--zarr-path`
+launch shows exactly the selected recording. Collection browsing is available
+only when `--recordings-root` or `--registry` is supplied explicitly, and an
+optional `--recording-name-contains` value can then narrow the collection.
+
+FileGlancer exposes this as the **Recording Explorer** service. Its required
+**Recording Analysis Zarr** directory parameter becomes `--zarr-path`; the
+directory picker and FileGlancer file-share policy provide the outer path
+authorization boundary. Palette opens the Zarr with mode `r`, keeps projections
+bounded, and exposes no save action.
+
 ## Packaging boundary
 
 Pixi is the first deployment target. An Apptainer image remains an optional
@@ -54,13 +76,8 @@ hardening and cluster-portability layer after this launch path is stable. A
 separate application repository is only warranted after the viewer has an
 independently versioned package/API and an independent release cadence.
 
-Individual-recording exploration remains a second application in this same
-repository. It has a different authority and loading contract: it opens one
-analysis Zarr with array-aware readers instead of scanning cohort Parquet
-tables. A future `recording-app` task should use its own Pixi feature/environment
-so Zarr and rendering dependencies do not enlarge this group-viewer runtime.
-FileGlancer can expose both tasks as separate service entry points while they
-continue to share Palette visualization components. The existing
-`palette_explorer.py` and `track_kinematics_explorer.py` should be consolidated
-into that supported recording entry point rather than introducing another
-notebook.
+Individual-recording exploration remains a separate application in this same
+repository because it has a different authority and loading contract from the
+Parquet viewer. `palette_explorer.py` is the supported recording entry point;
+`track_kinematics_explorer.py` remains a focused development and debugging
+surface rather than another published FileGlancer service.

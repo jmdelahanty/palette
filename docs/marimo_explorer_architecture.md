@@ -143,6 +143,14 @@ scripts/py -m marimo run apps/marimo/palette_explorer.py -- \
   --zarr-path <analysis.zarr>
 ```
 
+A direct `--zarr-path` launch shows only the selected recording. Broader
+recording discovery is opt-in through `--recordings-root` or `--registry`.
+The deployable Pixi entry point is:
+
+```bash
+pixi run -e recording recording-app -- --zarr-path <analysis.zarr>
+```
+
 For registry-backed recording discovery without opening every sibling Zarr:
 
 ```bash

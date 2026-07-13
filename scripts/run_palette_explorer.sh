@@ -20,7 +20,7 @@ Options:
                     discovery without opening every Zarr in the collection.
   --recording-name-contains TEXT
                     Recording path/name filter for the selector.
-                    (default: GoodCopBadCop)
+                    (default: no filter)
   --port PORT        Local workstation port for marimo. (default: 2720)
   --host HOST        Host interface for marimo. (default: 127.0.0.1)
   --renderer ID      Initial renderer filter passed to the explorer.
