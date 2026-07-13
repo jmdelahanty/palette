@@ -9,7 +9,7 @@ lazy from storage through collection.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import time
 from typing import Any, Iterable, Mapping, Sequence
@@ -59,6 +59,7 @@ class CoreBehaviorProjection:
     row_count: int
     load_duration_ms: float
     note: str
+    related_frames: Mapping[str, pl.LazyFrame] = field(default_factory=dict)
 
 
 def scan_export_parquet(
@@ -249,6 +250,7 @@ class CoreBehaviorSource:
         *,
         start_s: float | None = None,
         stop_s: float | None = None,
+        series_keys: Sequence[str] | None = None,
     ) -> CoreBehaviorProjection:
         started = time.perf_counter()
         root = self._root()
@@ -261,7 +263,7 @@ class CoreBehaviorSource:
             if frame_values.shape[0] == times.shape[0]:
                 columns["frame_index"] = frame_values
                 loaded_paths.append(self.source_paths["frame_indices"])
-        for key in self.series_for(analysis_id):
+        for key in tuple(series_keys) if series_keys is not None else self.series_for(analysis_id):
             array = self._array(root, key)
             if array is None:
                 continue
@@ -329,7 +331,12 @@ class CoreBehaviorSource:
             note="Deferred position projection from Zarr; Polars transformations are lazy after array read.",
         )
 
-    def project_swim_bouts(self) -> CoreBehaviorProjection:
+    def project_swim_bouts(
+        self,
+        *,
+        start_s: float | None = None,
+        stop_s: float | None = None,
+    ) -> CoreBehaviorProjection:
         started = time.perf_counter()
         root = self._root()
         track_run_name = _normal_path(self.option.run_path).split("/")[-1]
@@ -358,6 +365,11 @@ class CoreBehaviorSource:
         if aliases:
             lazy = lazy.with_columns(aliases)
             schema = lazy.collect_schema()
+        if {"start_s", "end_s"}.issubset(schema):
+            if start_s is not None:
+                lazy = lazy.filter(pl.col("end_s") >= float(start_s))
+            if stop_s is not None:
+                lazy = lazy.filter(pl.col("start_s") <= float(stop_s))
         bounds_columns = [name for name in ("start_s", "end_s", "peak_time_s") if name in schema]
         if bounds_columns:
             bounds_row = lazy.select(
@@ -367,16 +379,50 @@ class CoreBehaviorSource:
             bounds = (float(bounds_row[0] or 0.0), float(bounds_row[1] or 0.0))
         else:
             bounds = (0.0, 0.0)
+        row_count = int(lazy.select(pl.len()).collect().item())
+        signal_prefix = str(tables.signal.speed_level or "").strip()
+        speed_candidates = [
+            name
+            for name in (
+                f"{signal_prefix}_mm",
+                f"{signal_prefix}_px",
+                "speed_smoothed_mm",
+                "speed_filtered_mm",
+                "speed_raw_mm",
+                "speed_averaged_mm",
+                "speed_smoothed_px",
+                "speed_filtered_px",
+                "speed_raw_px",
+                "speed_averaged_px",
+            )
+            if name in self.source_paths and _is_physical_speed_column(name)
+        ]
+        selected_speed = speed_candidates[0] if speed_candidates else None
+        speed = self.project_timeseries(
+            "speed",
+            start_s=start_s,
+            stop_s=stop_s,
+            series_keys=(selected_speed,) if selected_speed is not None else (),
+        )
+        related_frames = (
+            {"speed_trace": speed.frame.select(["time_s", selected_speed])}
+            if selected_speed is not None
+            else {}
+        )
         return CoreBehaviorProjection(
             analysis_id="swim_bouts",
             frame=lazy,
             columns=tuple(schema.names()),
-            source_paths=(tables.level_path,),
+            source_paths=tuple(dict.fromkeys((tables.level_path, *speed.source_paths))),
             start_s=bounds[0],
             stop_s=bounds[1],
-            row_count=int(tables.bouts.shape[0]),
+            row_count=row_count,
             load_duration_ms=(time.perf_counter() - started) * 1000.0,
-            note="Persisted bout rows loaded on selection; downstream Polars queries remain lazy.",
+            note=(
+                f"Persisted `{tables.signal.speed_level}` bout segmentation from `{tables.run_name}`; "
+                "the lineage-compatible speed trace and downstream Polars queries are read-only."
+            ),
+            related_frames=related_frames,
         )
 
     def project_eye_angles(
@@ -479,7 +525,7 @@ def load_core_behavior_projection(
     if analysis_id == "position":
         return source.project_positions(start_s=start_s, stop_s=stop_s)
     if analysis_id == "swim_bouts":
-        return source.project_swim_bouts()
+        return source.project_swim_bouts(start_s=start_s, stop_s=stop_s)
     if analysis_id == "eye_angles":
         return source.project_eye_angles(start_s=start_s, stop_s=stop_s)
     if analysis_id == "baseline":
@@ -670,6 +716,78 @@ def build_core_behavior_output(
             None,
         )
         pieces: list[Any] = []
+        speed_lazy = projection.related_frames.get("speed_trace")
+        speed_frame = speed_lazy.collect() if speed_lazy is not None else pl.DataFrame()
+        if speed_frame.height > 50000:
+            stride = max(1, int(np.ceil(speed_frame.height / 50000.0)))
+            speed_frame = (
+                speed_frame.lazy()
+                .with_row_index("_row")
+                .filter((pl.col("_row") % stride) == 0)
+                .drop("_row")
+                .collect()
+            )
+        speed_column = next((name for name in speed_frame.columns if name != "time_s"), None)
+        segmentation_figure = go.Figure()
+        if speed_column is not None and speed_frame.height:
+            segmentation_figure.add_trace(
+                go.Scattergl(
+                    x=speed_frame["time_s"],
+                    y=speed_frame[speed_column],
+                    mode="lines",
+                    name=speed_column,
+                    line=dict(color="#334155", width=1.25),
+                )
+            )
+        if frame.height and {"start_s", "end_s"}.issubset(frame.columns):
+            starts = frame["start_s"].to_numpy().astype(np.float64, copy=False)
+            stops = frame["end_s"].to_numpy().astype(np.float64, copy=False)
+            widths = stops - starts
+            valid = np.isfinite(starts) & np.isfinite(stops) & (widths > 0)
+            bout_column = next((name for name in ("bout_id", "source_bout_id") if name in frame.columns), None)
+            bout_ids = (
+                frame[bout_column].to_numpy()
+                if bout_column is not None
+                else np.arange(frame.height, dtype=np.int64)
+            )
+            if valid.any():
+                segmentation_figure.add_trace(
+                    go.Bar(
+                        x=(starts[valid] + stops[valid]) / 2.0,
+                        y=np.ones(int(np.count_nonzero(valid)), dtype=np.float64),
+                        width=widths[valid],
+                        base=np.zeros(int(np.count_nonzero(valid)), dtype=np.float64),
+                        yaxis="y2",
+                        name="Persisted swim bouts",
+                        marker=dict(color="#f59e0b", line=dict(width=0)),
+                        opacity=0.24,
+                        customdata=np.column_stack([bout_ids[valid], starts[valid], stops[valid]]),
+                        hovertemplate=(
+                            "bout=%{customdata[0]}<br>"
+                            "start=%{customdata[1]:.3f}s<br>"
+                            "end=%{customdata[2]:.3f}s<extra></extra>"
+                        ),
+                    )
+                )
+        if segmentation_figure.data:
+            segmentation_figure.update_layout(
+                title="Speed trace with persisted swim-bout segmentation",
+                xaxis_title="Time (s)",
+                yaxis_title=speed_column or "Speed",
+                yaxis2=dict(
+                    overlaying="y",
+                    side="right",
+                    range=[0, 1],
+                    showgrid=False,
+                    showticklabels=False,
+                    title="Bout intervals",
+                ),
+                barmode="overlay",
+                height=480,
+                margin=dict(l=55, r=55, t=60, b=50),
+                legend=dict(orientation="h", yanchor="top", y=-0.14, xanchor="left", x=0.0),
+            )
+            pieces.append(segmentation_figure)
         if duration_column and frame.height:
             pieces.append(
                 px.histogram(

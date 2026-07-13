@@ -85,7 +85,8 @@ selected provider, preventing a control from another visualization family from
 remaining selectable while doing nothing.
 
 Core behavior currently provides projected speed, heading/turning, position,
-eye-angle/convergence, lineage-compatible swim-bout, and canonical pre-period views. Chaser stimulus
+eye-angle/convergence, lineage-compatible swim-bout segmentation overlays,
+and canonical pre-period views. Chaser stimulus
 provides distance, epoch, egocentric, polar, spatial, CRA, near-field, escape,
 artifact, and provenance views when their persisted inputs are present.
 

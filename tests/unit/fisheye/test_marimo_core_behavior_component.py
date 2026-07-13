@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import polars as pl
+import plotly.express as px
+import plotly.graph_objects as go
 
 import apps.marimo.components.core_behavior as core_component
 from apps.marimo.components.analysis_catalog import group_specs_by_provider
 from apps.marimo.components.core_behavior import (
     CoreBehaviorSource,
+    build_core_behavior_output,
     collect_projection,
     scan_export_parquet,
 )
@@ -80,6 +83,42 @@ def test_core_source_exposes_only_lineage_compatible_swim_bouts(tmp_path) -> Non
     assert isinstance(projection.frame, pl.LazyFrame)
     assert projection.row_count == 2
     assert {"start_s", "end_s", "duration_s"}.issubset(projection.columns)
+    assert "speed_trace" in projection.related_frames
+    speed_trace = projection.related_frames["speed_trace"].collect()
+    assert speed_trace.columns == ["time_s", "speed_smoothed_mm"]
+
+    class _Ui:
+        @staticmethod
+        def table(frame, selection=None, page_size=10):
+            return frame
+
+    class _Mo:
+        ui = _Ui()
+
+        @staticmethod
+        def md(text):
+            return text
+
+        @staticmethod
+        def stat(*, label, value):
+            return {"label": label, "value": value}
+
+        @staticmethod
+        def hstack(items):
+            return list(items)
+
+        @staticmethod
+        def vstack(items):
+            return list(items)
+
+    output = build_core_behavior_output(_Mo, go, px, projection=projection)
+    segmentation_figure = output[2][0]
+    assert [trace.type for trace in segmentation_figure.data] == ["scattergl", "bar"]
+    assert segmentation_figure.data[1].name == "Persisted swim bouts"
+    assert segmentation_figure.layout.yaxis2.overlaying == "y"
+
+    bounded = source.project_swim_bouts(start_s=0.0, stop_s=0.03)
+    assert bounded.row_count == 1
 
 
 def test_core_source_exposes_eye_angles_only_when_persisted(tmp_path) -> None:

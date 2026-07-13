@@ -314,7 +314,7 @@ def _(core_source, mo, selected_analysis_id, selected_provider):
         selected_provider is not None
         and selected_provider.provider_id == "core_behavior"
         and core_source is not None
-        and selected_analysis_id in {"speed", "heading", "position", "eye_angles"}
+        and selected_analysis_id in {"speed", "heading", "position", "eye_angles", "swim_bouts"}
     ):
         core_start_s, core_stop_s = core_source.time_bounds()
         core_time_window = mo.ui.range_slider(
