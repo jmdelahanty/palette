@@ -386,6 +386,7 @@ def test_workflow_publishes_separate_validated_lazy_tables(tmp_path: Path) -> No
     qc_rows = scan_training_response_qc_rows(output_root, "training_001").collect()
     assert qc_rows.shape[0] == 6
     assert "primary_training_profile" in qc_rows.columns
+    assert "selected_component_count" in qc_rows.columns
 
 
 def test_training_response_component_filters_and_labels_noncausal_axes() -> None:

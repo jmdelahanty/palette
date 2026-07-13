@@ -303,17 +303,35 @@ def scan_training_response_qc_rows(
             "profile_separation_score",
         ),
     )
+    cluster_columns = (
+        *keys,
+        "cluster_status",
+        "cluster_reason",
+        "cluster_id",
+        "cluster_probability",
+        "selected_component_count",
+        "selected_bic",
+        "bic_by_component_count",
+        "cluster_stability_median_ari",
+        "cluster_stability_threshold",
+        "cluster_stability_resample_count",
+        "cluster_min_rows_per_component",
+        "cluster_axes",
+        "cluster_semantics",
+    )
     clusters = scan_training_response_table(
-        output_root,
-        analysis_run_id,
-        TRAINING_RESPONSE_CLUSTERS_TABLE,
-        columns=(
-            *keys,
-            "cluster_status",
-            "cluster_reason",
-            "cluster_id",
-            "cluster_probability",
-        ),
+        output_root, analysis_run_id, TRAINING_RESPONSE_CLUSTERS_TABLE
+    )
+    available_cluster_columns = set(clusters.collect_schema().names())
+    clusters = clusters.select(
+        [
+            (
+                pl.col(column)
+                if column in available_cluster_columns
+                else pl.lit(None).alias(column)
+            )
+            for column in cluster_columns
+        ]
     )
     return features.join(classifications, on=keys, how="left").join(
         clusters, on=keys, how="left"

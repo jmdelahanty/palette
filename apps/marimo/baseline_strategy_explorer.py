@@ -722,6 +722,27 @@ def _(
         row.get("classification_status") == "invalid"
         for row in training_response_rows
     )
+    training_cluster_statuses = sorted(
+        {
+            str(row.get("cluster_status") or "unknown")
+            for row in training_response_rows
+            if row.get("classification_status") == "complete"
+        }
+    )
+    training_cluster_notice = mo.callout(
+        "Optional unsupervised cluster status: "
+        + ", ".join(training_cluster_statuses or ["unavailable"])
+        + ". Numeric cluster IDs remain exploratory and require stable resampling "
+        "before biological interpretation.",
+        kind=(
+            "warn"
+            if any(
+                status in {"unstable_model", "stability_unavailable"}
+                for status in training_cluster_statuses
+            )
+            else "info"
+        ),
+    )
     mo.vstack(
         [
             mo.md(f"## Training cohort overview · `{selected_training_response_run_id}`"),
@@ -755,6 +776,7 @@ def _(
                 "training-period time bins or samples were not exported.",
                 kind="info",
             ),
+            training_cluster_notice,
         ]
     )
     return (
