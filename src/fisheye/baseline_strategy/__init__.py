@@ -16,6 +16,13 @@ from .contracts import (
 )
 from .features import derive_baseline_strategy_features, derive_exploration_episodes
 from .query import scan_strategy_table, strategy_table_parts
+from .qc import (
+    discover_strategy_catalog,
+    scan_recording_baseline_samples,
+    scan_strategy_qc_rows,
+    select_strategy_run_id,
+    source_export_context,
+)
 from .validation import StrategyAnalyticsValidationError, validate_strategy_analytics_run
 
 __all__ = [
@@ -29,7 +36,12 @@ __all__ = [
     "derive_baseline_strategy_features",
     "derive_exploration_episodes",
     "discover_strategy_clusters",
+    "discover_strategy_catalog",
     "scan_strategy_table",
+    "scan_recording_baseline_samples",
+    "scan_strategy_qc_rows",
+    "select_strategy_run_id",
+    "source_export_context",
     "strategy_table_parts",
     "validate_strategy_analytics_run",
 ]

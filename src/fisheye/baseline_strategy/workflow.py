@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -62,6 +63,28 @@ def _load_manifest(source_root: Path, source_run_id: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"source manifest is not an object: {path}")
     return payload
+
+
+def _source_manifest_path(source_root: Path, source_run_id: str) -> Path:
+    return source_root / "v1" / "manifests" / f"export_run_id={source_run_id}.json"
+
+
+def _with_source_export_identity(
+    row: Mapping[str, Any], source_export_run_id: str
+) -> dict[str, Any]:
+    """Attach authoritative run identity supplied by the validated manifest."""
+
+    enriched = dict(row)
+    declared = str(enriched.get("source_export_run_id") or "").strip()
+    legacy = str(enriched.get("export_run_id") or "").strip()
+    for candidate in (declared, legacy):
+        if candidate and candidate != source_export_run_id:
+            raise ValueError(
+                "source row export identity does not match the validated manifest: "
+                f"{candidate!r} != {source_export_run_id!r}"
+            )
+    enriched["source_export_run_id"] = source_export_run_id
+    return enriched
 
 
 def _declared_parts(
@@ -225,13 +248,17 @@ def run_strategy_analytics(
             "output_root must not equal, contain, or be contained by the immutable source_export_root"
         )
     validation = validate_export_run(source_root, source_run_id)
+    manifest_path_source = _source_manifest_path(source_root, source_run_id)
     manifest = _load_manifest(source_root, source_run_id)
     summary_parts = _declared_parts(
         source_root, source_run_id, manifest, BASELINE_BEHAVIOR_SUMMARY_TABLE
     )
     if not summary_parts:
         raise ValueError("source export has no baseline_behavior_summary parts")
-    summary_rows = _read_rows(summary_parts)
+    summary_rows = [
+        _with_source_export_identity(row, source_run_id)
+        for row in _read_rows(summary_parts)
+    ]
     time_rows = _read_rows(
         _declared_parts(
             source_root, source_run_id, manifest, BASELINE_BEHAVIOR_TIME_BINS_TABLE
@@ -327,6 +354,18 @@ def run_strategy_analytics(
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_export_root": str(source_root),
         "source_export_run_id": source_run_id,
+        "source_export_manifest_sha256": hashlib.sha256(
+            manifest_path_source.read_bytes()
+        ).hexdigest(),
+        "source_collection_manifest_sha256": (
+            manifest.get("collection_manifest", {}).get("manifest_sha256")
+            if isinstance(manifest.get("collection_manifest"), Mapping)
+            else None
+        ),
+        "row_provenance": {
+            "source_export_run_id": source_run_id,
+            "status": "complete",
+        },
         "source_validation": validation,
         "feature_config": config.to_dict(),
         "output_tables": list(OUTPUT_TABLES),

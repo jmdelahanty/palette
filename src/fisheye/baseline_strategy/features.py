@@ -69,7 +69,9 @@ def _identity(summary: Mapping[str, Any]) -> dict[str, Any]:
         "track_id": _int(summary.get("track_id")),
         "baseline_window_id": _int(summary.get("baseline_window_id")),
         "baseline_window_label": summary.get("baseline_window_label"),
-        "source_export_run_id": summary.get("export_run_id"),
+        "source_export_run_id": (
+            summary.get("source_export_run_id") or summary.get("export_run_id")
+        ),
         "zarr_path": summary.get("zarr_path"),
     }
 

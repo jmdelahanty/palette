@@ -305,6 +305,30 @@ inside the LSF allocation, validates the published derived manifest and all
 Parquet parts, and retains the job script, logs, parsed job ID, and completion
 status beneath the derived output root.
 
+## Read-only Marimo QC
+
+Inspect immutable strategy runs and their source baseline samples with:
+
+```bash
+scripts/py -m marimo run apps/marimo/baseline_strategy_explorer.py -- \
+  --strategy-root /groups/johnson/johnsonlab/palette_strategy_analytics \
+  --analysis-run-id latest \
+  --export-root /groups/johnson/johnsonlab/palette_analytics
+```
+
+The app discovers only manifest-declared strategy runs. Cohort tables use
+Polars lazy scans, and the baseline sample table is filtered by recording
+before collection. It provides protocol-stratified category counts, continuous
+feature distributions, boundary-versus-coverage QC, tracking-invalid records,
+and a selected recording's 10 Hz trajectory and speed trace. The app never
+writes to the source export or recording Zarr.
+
+New strategy runs also stamp the authoritative `source_export_run_id` into
+every derived row and record the source export manifest SHA-256 plus the frozen
+collection manifest SHA-256. The QC app verifies these hashes before following
+the linked source metadata. Historical runs that predate the hash fields remain
+readable but do not claim hash verification.
+
 ## Interpretation and validation gates
 
 Before using semantic labels in a scientific comparison:

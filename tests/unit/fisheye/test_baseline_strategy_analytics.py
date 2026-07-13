@@ -268,6 +268,9 @@ def _write_summary_only_export(root: Path, run_id: str) -> Path:
                 quadrant_entropy_normalized=0.4 + 0.08 * index,
             )
         )
+        # Production analytics rows receive export identity from their immutable
+        # manifest/directory, not from a duplicated Parquet column.
+        row.pop("export_run_id", None)
         row["export_schema_version"] = EXPORT_SCHEMA_VERSION
         row["table_name"] = table_name
         rows.append(row)
@@ -321,6 +324,12 @@ def test_workflow_reads_validated_export_and_publishes_separate_manifest(tmp_pat
 
     assert source_part.read_bytes() == source_bytes
     assert result["source_export_mutated"] is False
+    assert result["source_export_run_id"] == "source_001"
+    assert result["row_provenance"] == {
+        "source_export_run_id": "source_001",
+        "status": "complete",
+    }
+    assert len(result["source_export_manifest_sha256"]) == 64
     assert result["row_counts_by_table"]["baseline_strategy_features"] == 6
     assert result["row_counts_by_table"]["baseline_strategy_classification"] == 6
     assert Path(result["manifest_path"]).is_file()
@@ -328,7 +337,13 @@ def test_workflow_reads_validated_export_and_publishes_separate_manifest(tmp_pat
     assert validate_strategy_analytics_run(output_root, "strategy_001")["table_count"] == 4
     feature_part = Path(result["part_files_by_table"]["baseline_strategy_features"][0])
     assert feature_part.is_file()
-    assert pq.ParquetFile(feature_part).read().num_rows == 6
+    feature_table = pq.ParquetFile(feature_part).read()
+    assert feature_table.num_rows == 6
+    assert set(feature_table.column("source_export_run_id").to_pylist()) == {"source_001"}
+    for table_name, parts in result["part_files_by_table"].items():
+        for part_path in parts:
+            table = pq.ParquetFile(part_path).read(columns=["source_export_run_id"])
+            assert set(table.column(0).to_pylist()) == {"source_001"}, table_name
     lazy = scan_strategy_table(
         output_root,
         "strategy_001",
@@ -336,3 +351,21 @@ def test_workflow_reads_validated_export_and_publishes_separate_manifest(tmp_pat
         columns=("recording_id", "feature_status"),
     )
     assert lazy.collect().shape == (6, 2)
+
+
+def test_workflow_rejects_conflicting_source_export_identity(tmp_path: Path) -> None:
+    source_root = tmp_path / "source_export"
+    output_root = tmp_path / "derived_analytics"
+    part = _write_summary_only_export(source_root, "source_001")
+    table = pq.ParquetFile(part).read().append_column(
+        "export_run_id", pa.array(["wrong_export"] * 6)
+    )
+    pq.write_table(table, part)
+
+    with np.testing.assert_raises_regex(ValueError, "does not match"):
+        run_strategy_analytics(
+            source_export_root=source_root,
+            source_export_run_id="source_001",
+            output_root=output_root,
+            analysis_run_id="strategy_001",
+        )

@@ -61,6 +61,13 @@ def validate_strategy_analytics_run(
         tables = []
     row_counts = _mapping(payload.get("row_counts_by_table"))
     parts_by_table = _mapping(payload.get("part_files_by_table"))
+    row_provenance = _mapping(payload.get("row_provenance"))
+    expected_source_run_id = str(
+        row_provenance.get("source_export_run_id") or ""
+    ).strip()
+    enforce_row_provenance = row_provenance.get("status") == "complete"
+    if enforce_row_provenance and not expected_source_run_id:
+        errors.append("row_provenance is complete but source_export_run_id is empty")
     checked_parts = 0
     checked_rows = 0
     for raw_table in tables:
@@ -109,6 +116,26 @@ def validate_strategy_analytics_run(
             missing = sorted(required - columns)
             if missing:
                 errors.append(f"{table_name}/{part_name}: missing fields {missing}")
+            if enforce_row_provenance and "source_export_run_id" in columns:
+                try:
+                    observed_source_ids = {
+                        str(value)
+                        for value in parquet_file.read(
+                            columns=["source_export_run_id"]
+                        ).column(0).to_pylist()
+                        if value is not None
+                    }
+                except Exception as exc:
+                    errors.append(
+                        f"{table_name}/{part_name}: cannot read source export identity: {exc}"
+                    )
+                else:
+                    if observed_source_ids != {expected_source_run_id}:
+                        errors.append(
+                            f"{table_name}/{part_name}: source_export_run_id values "
+                            f"{sorted(observed_source_ids)!r} do not match "
+                            f"{expected_source_run_id!r}"
+                        )
             rows = int(parquet_file.metadata.num_rows)
             observed_rows += rows
             checked_rows += rows
