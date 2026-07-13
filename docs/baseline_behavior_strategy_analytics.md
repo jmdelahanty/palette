@@ -45,6 +45,35 @@ Kinematic sample parts are processed one source recording at a time, matching
 the exporter's one-part-per-recording publication policy. The full sample table
 is not accumulated in memory across the cohort.
 
+## Chaser cohort boundary
+
+For the cross-protocol analysis, cohort eligibility is defined by the
+registry's normalized latest stimulus mode `CHASER`, not by a protocol name.
+This combines RedScare, GoodCopBadCop, and future chaser experiment types in
+one immutable virtual collection. The behavioral features themselves use only
+the pre-stimulus window; `CHASER` defines which recordings enter the cohort and
+does not leak post-stimulus behavior into the baseline phenotype.
+
+Protocol name, protocol hash, acquisition date, rig, and arena should remain
+available as diagnostic strata. The primary robust scaling and strategy
+classification are fit over the declared combined chaser cohort. Validation
+must then check protocol cross-tabs, protocol-balanced sensitivity analyses,
+and leave-one-protocol-out stability so a discovered cluster is not merely a
+RedScare-versus-GoodCopBadCop or acquisition-batch split.
+
+Build the source collection through the read-only registry query described in
+`docs/virtual_collection_manifest_schema.md`, then generate a new baseline-
+enabled cross-recording export from that frozen collection. Never concatenate
+independently standardized protocol exports: that destroys the common feature
+scale needed for a combined classification.
+
+Operational note (2026-07-12): the shared registry schema contains the
+normalized stimulus tables, but the deployed registry had zero indexed
+`recording_stimulus_mode_counts` rows when audited. Existing analysis datasets
+must be reconciled/backfilled on cluster compute nodes before the live
+`CHASER` collection can be materialized. This is an index-population gap, not a
+reason to infer cohort membership from filenames or protocol strings.
+
 ## Feature families
 
 ### Locomotor vigor

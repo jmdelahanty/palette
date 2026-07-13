@@ -61,6 +61,45 @@ Practical rule:
 - Virtual collection manifest: immutable cross-recording source selection.
 - Export lake: rebuildable analytics product generated from a manifest.
 
+### Normalized stimulus-capability collections
+
+Stimulus cohorts must be selected from normalized stimulus metadata, not from
+protocol-name substrings. For example, the all-chaser collection predicate is:
+
+```text
+recording_stimulus_mode_counts.stimulus_mode = CHASER
+recording_stimulus_mode_counts.is_latest = 1
+dataset_context_current.zarr_use = analysis
+dataset_context_current.dataset_status = active
+```
+
+This deliberately combines RedScare, GoodCopBadCop, and any future protocol
+whose latest indexed stimulus run contains a `CHASER` step. `protocol_name` and
+`protocol_hash` remain manifest metadata for stratified QC and confound checks;
+they are not cohort-membership predicates.
+
+The protocol-neutral builder is:
+
+```bash
+scripts/py -m fisheye.utils.build_virtual_collection_manifest \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --stimulus-mode CHASER \
+  --collection-id all_chaser_<date>_v001 \
+  --collection-name "All normalized chaser recordings" \
+  --output /groups/johnson/johnsonlab/palette_analytics/v1/manifests/collections/all_chaser_<date>_v001.manifest.json
+```
+
+For a `CHASER` registry query, the CLI defaults to the `chaser` export profile
+and `shared_groups` storage tier. The profile pins chaser-distance,
+detection-occupancy, and track-kinematics runs, and records optional bout, eye,
+tail, stimulus, and stimulus-response run availability.
+
+The normalized stimulus tables are caches populated by registry dataset
+reconciliation. An empty mode table is not evidence that no chaser recordings
+exist. It is an indexing-coverage failure and must be repaired by a scoped
+registry refresh/backfill on compute nodes. Do not silently fall back to
+protocol-name guessing.
+
 ## Identity Versus Location
 
 Manifests must not treat absolute filesystem paths as scientific identity.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sqlite3
 from typing import Any
 
 from fisheye.utils import build_virtual_collection_manifest as builder
@@ -80,6 +81,72 @@ def _fake_root() -> FakeRoot:
         root.runs[(parent, run_id)] = FakeGroup(attrs)
         root.latest[parent] = run_id
     return root
+
+
+def _fake_chaser_root() -> FakeRoot:
+    root = FakeRoot()
+    run_data = {
+        ("analysis/detection_occupancy_runs", "occupancy_latest"): {
+            "schema_id": "palette.detection_occupancy.v1",
+            "schema_version": 1,
+            "source_fingerprint": "occupancy_fp",
+        },
+        ("analysis/chaser_distance_runs", "chaser_latest"): {
+            "schema_id": "palette.chaser_distance.v1",
+            "schema_version": 1,
+            "source_fingerprint": "chaser_fp",
+        },
+        ("analysis/track_kinematics_runs/offline", "track_latest"): {
+            "schema_id": "palette.analysis.track_kinematics",
+            "schema_version": 1,
+            "source_fingerprint": "track_fp",
+        },
+    }
+    for (parent, run_id), attrs in run_data.items():
+        root.runs[(parent, run_id)] = FakeGroup(attrs)
+        root.latest[parent] = run_id
+    return root
+
+
+def _registry_fixture(path: Path, rows: list[tuple[Any, ...]]) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE dataset_context_current (
+                dataset_id TEXT,
+                recording_id TEXT,
+                zarr_path TEXT,
+                protocol_name TEXT,
+                zarr_use TEXT,
+                dataset_status TEXT
+            );
+            CREATE TABLE recording_stimulus_mode_counts (
+                dataset_id TEXT,
+                recording_id TEXT,
+                stimulus_run_id TEXT,
+                protocol_hash TEXT,
+                protocol_name TEXT,
+                is_latest INTEGER,
+                stimulus_mode TEXT,
+                step_count INTEGER,
+                total_duration_s REAL
+            );
+            """
+        )
+        for row in rows:
+            conn.execute(
+                """
+                INSERT INTO dataset_context_current VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                row[:6],
+            )
+            conn.execute(
+                """
+                INSERT INTO recording_stimulus_mode_counts
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (row[0], row[1], *row[6:]),
+            )
 
 
 def test_build_manifest_from_explicit_zarr_paths(monkeypatch, tmp_path: Path) -> None:
@@ -177,6 +244,194 @@ def test_build_manifest_goodcopbadcop_profile_resolves_required_runs(monkeypatch
     assert record["source_runs"]["chaser_distance_run"]["required"] is True
     assert record["source_runs"]["chaser_distance_run"]["run_id"] == "chaser_latest"
     assert "swim_bout_run" not in record["source_runs"]
+
+
+def test_select_registry_stimulus_datasets_combines_protocols_by_mode(tmp_path: Path) -> None:
+    registry = tmp_path / "palette_registry.sqlite"
+    _registry_fixture(
+        registry,
+        [
+            (
+                "dataset_red",
+                "recording_red",
+                str(tmp_path / "red_analysis.zarr"),
+                "RedScare",
+                "analysis",
+                "active",
+                "stim_red",
+                "hash_red",
+                "RedScare",
+                1,
+                "CHASER",
+                2,
+                60.0,
+            ),
+            (
+                "dataset_goodcop",
+                "recording_goodcop",
+                str(tmp_path / "goodcop_analysis.zarr"),
+                "GoodCopBadCop",
+                "analysis",
+                "active",
+                "stim_goodcop",
+                "hash_goodcop",
+                "GoodCopBadCop",
+                1,
+                "chaser",
+                3,
+                90.0,
+            ),
+            (
+                "dataset_grating",
+                "recording_grating",
+                str(tmp_path / "grating_analysis.zarr"),
+                "Optomotor",
+                "analysis",
+                "active",
+                "stim_grating",
+                "hash_grating",
+                "Optomotor",
+                1,
+                "MOVING_GRATING",
+                2,
+                60.0,
+            ),
+        ],
+    )
+
+    selected = builder.select_registry_stimulus_datasets(
+        registry,
+        stimulus_mode="chaser",
+    )
+
+    assert [row.dataset_id for row in selected] == ["dataset_goodcop", "dataset_red"]
+    assert {row.protocol_name for row in selected} == {"GoodCopBadCop", "RedScare"}
+    assert {row.stimulus_mode for row in selected} == {"CHASER"}
+
+
+def test_build_manifest_from_registry_uses_protocol_neutral_chaser_profile(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    root = _fake_chaser_root()
+    _install_fake_zarr(monkeypatch, root)
+    red_path = tmp_path / "red_analysis.zarr"
+    goodcop_path = tmp_path / "goodcop_analysis.zarr"
+    red_path.mkdir()
+    goodcop_path.mkdir()
+    registry = tmp_path / "palette_registry.sqlite"
+    _registry_fixture(
+        registry,
+        [
+            (
+                "dataset_red",
+                "recording_red",
+                str(red_path),
+                "RedScare",
+                "analysis",
+                "active",
+                "stim_red",
+                "hash_red",
+                "RedScare",
+                1,
+                "CHASER",
+                2,
+                60.0,
+            ),
+            (
+                "dataset_goodcop",
+                "recording_goodcop",
+                str(goodcop_path),
+                "GoodCopBadCop",
+                "analysis",
+                "active",
+                "stim_goodcop",
+                "hash_goodcop",
+                "GoodCopBadCop",
+                1,
+                "CHASER",
+                3,
+                90.0,
+            ),
+        ],
+    )
+
+    manifest = builder.build_manifest_from_registry(
+        registry,
+        stimulus_mode="CHASER",
+        collection_id="all_chaser_v001",
+        collection_name="All Chaser Recordings",
+        created_utc="2026-07-12T12:00:00Z",
+    )
+
+    assert verify_manifest_sha256(manifest)
+    assert manifest["export_profiles"][0]["profile_id"] == "chaser"
+    assert manifest["query"]["filters"]["normalized_stimulus_mode"] == "CHASER"
+    assert manifest["query"]["filters"]["protocol_name"] is None
+    assert {row["dataset_id"] for row in manifest["records"]} == {
+        "dataset_red",
+        "dataset_goodcop",
+    }
+    assert {row["protocol"]["protocol_name"] for row in manifest["records"]} == {
+        "RedScare",
+        "GoodCopBadCop",
+    }
+    assert all(
+        row["source_runs"]["track_kinematics_run"]["required"]
+        for row in manifest["records"]
+    )
+
+
+def test_registry_cli_defaults_to_chaser_profile_and_shared_storage(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    root = _fake_chaser_root()
+    _install_fake_zarr(monkeypatch, root)
+    zarr_path = tmp_path / "red_analysis.zarr"
+    zarr_path.mkdir()
+    registry = tmp_path / "palette_registry.sqlite"
+    _registry_fixture(
+        registry,
+        [
+            (
+                "dataset_red",
+                "recording_red",
+                str(zarr_path),
+                "RedScare",
+                "analysis",
+                "active",
+                "stim_red",
+                "hash_red",
+                "RedScare",
+                1,
+                "CHASER",
+                2,
+                60.0,
+            ),
+        ],
+    )
+    output = tmp_path / "all_chaser.manifest.json"
+
+    rc = builder.main(
+        [
+            "--registry",
+            str(registry),
+            "--stimulus-mode",
+            "CHASER",
+            "--collection-id",
+            "all_chaser_v001",
+            "--collection-name",
+            "All Chaser",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert rc == 0
+    manifest = json.loads(output.read_text(encoding="utf-8"))
+    assert manifest["export_profiles"][0]["profile_id"] == "chaser"
+    assert manifest["records"][0]["locator_at_selection"]["storage_tier"] == "shared_groups"
 
 
 def test_build_manifest_cli_writes_stamped_manifest(monkeypatch, tmp_path: Path, capsys) -> None:
