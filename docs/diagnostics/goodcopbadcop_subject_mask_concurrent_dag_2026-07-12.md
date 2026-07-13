@@ -432,3 +432,13 @@ registry success. Cache paths are confined to:
 /nrs/johnson/palette_staging/flat_roi_cache/
   goodcopbadcop_prejuly_remaining_20260713_01/
 ```
+
+The initial submission accepted all 90 per-recording jobs, then LSF rejected
+the validation job because its two-hour request exceeded the `short` queue's
+one-hour hard limit. No workload failed and no recording job was resubmitted.
+Validation `153075750` was submitted with the corrected one-hour request and
+the original 18 finalizer dependencies; registry job `153075751` depends on
+validation, and cleanup job `153075752` depends on registry success. The
+immutable original failure and explicit three-job recovery are retained in
+`lsf_submission.json` and `lsf_submission_recovery.json`. The planner default
+is now one hour for future validation jobs.

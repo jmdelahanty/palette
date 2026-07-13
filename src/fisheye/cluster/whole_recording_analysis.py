@@ -549,7 +549,7 @@ def build_plan(
                 job_name=validation_job_name,
                 command=validation_command,
                 resources=validation_resources
-                or LsfResources(queue="short", ncores=1, mem_gb=16, walltime="2:00"),
+                or LsfResources(queue="short", ncores=1, mem_gb=16, walltime="1:00"),
                 stdout_path=run_root / "logs" / f"{validation_job_name}.%J.out",
                 stderr_path=run_root / "logs" / f"{validation_job_name}.%J.err",
                 dependency=LsfDependency(tuple(mask_finalizer_keys)),
@@ -977,7 +977,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_active_targets=args.max_active_targets,
         validate_outputs=not bool(args.no_analysis_validation),
         validation_resources=LsfResources(
-            queue="short", ncores=1, mem_gb=16, walltime="2:00"
+            queue="short", ncores=1, mem_gb=16, walltime="1:00"
         ),
         validation_sample_rows=int(args.validation_sample_rows),
         cleanup_roi_caches=bool(args.cleanup_roi_caches_after_success),
