@@ -323,6 +323,12 @@ feature distributions, boundary-versus-coverage QC, tracking-invalid records,
 and a selected recording's 10 Hz trajectory and speed trace. The app never
 writes to the source export or recording Zarr.
 
+When a whole-training response run derived from the same source export exists,
+the app also presents the factorized training-response QC documented in
+[Whole-Training Chaser Response Classification](training_response_classification.md).
+The source export ID, export-manifest hash, and frozen collection hash must
+match; runs from another cohort are not offered in the selector.
+
 New strategy runs also stamp the authoritative `source_export_run_id` into
 every derived row and record the source export manifest SHA-256 plus the frozen
 collection manifest SHA-256. The QC app verifies these hashes before following

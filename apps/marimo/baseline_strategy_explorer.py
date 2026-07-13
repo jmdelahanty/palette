@@ -33,6 +33,12 @@ def _():
         speed_trace_figure,
         trajectory_figure,
     )
+    from apps.marimo.components.training_response import (
+        TRAINING_RESPONSE_CATEGORY_FIELDS,
+        TRAINING_RESPONSE_METRICS,
+        filter_training_response_rows,
+        training_response_scatter_figure,
+    )
     from fisheye.baseline_strategy.qc import (
         discover_strategy_catalog,
         load_strategy_manifest,
@@ -41,31 +47,53 @@ def _():
         select_strategy_run_id,
         source_export_context,
     )
+    from fisheye.training_response.query import (
+        discover_training_response_catalog,
+        load_training_response_manifest,
+        scan_training_response_qc_rows,
+        select_training_response_run_id,
+    )
 
     return (
         Path,
         STRATEGY_CATEGORY_FIELDS,
         STRATEGY_FEATURE_METRICS,
+        TRAINING_RESPONSE_CATEGORY_FIELDS,
+        TRAINING_RESPONSE_METRICS,
         category_count_figure,
         discover_strategy_catalog,
+        discover_training_response_catalog,
         feature_distribution_figure,
         feature_scatter_figure,
         filter_qc_rows,
+        filter_training_response_rows,
         load_strategy_manifest,
+        load_training_response_manifest,
         mo,
         os,
         pd,
         scan_recording_baseline_samples,
         scan_strategy_qc_rows,
+        scan_training_response_qc_rows,
         select_strategy_run_id,
+        select_training_response_run_id,
         source_export_context,
         speed_trace_figure,
         trajectory_figure,
+        training_response_scatter_figure,
     )
 
 
 @app.cell
-def _(Path, discover_strategy_catalog, mo, os, pd, select_strategy_run_id):
+def _(
+    Path,
+    discover_strategy_catalog,
+    discover_training_response_catalog,
+    mo,
+    os,
+    pd,
+    select_strategy_run_id,
+):
     cli_args = mo.cli_args()
     strategy_root = Path(
         str(
@@ -89,8 +117,25 @@ def _(Path, discover_strategy_catalog, mo, os, pd, select_strategy_run_id):
             )
         )
     )
+    training_response_root = Path(
+        str(
+            cli_args.get(
+                "training-response-root",
+                os.environ.get(
+                    "PALETTE_TRAINING_RESPONSE_ANALYTICS_ROOT",
+                    "/groups/johnson/johnsonlab/palette_training_response_analytics",
+                ),
+            )
+        )
+    )
     requested_run_id = str(cli_args.get("analysis-run-id", "latest"))
+    requested_training_response_run_id = str(
+        cli_args.get("training-response-run-id", "latest")
+    )
     catalog = discover_strategy_catalog(strategy_root)
+    training_response_catalog = discover_training_response_catalog(
+        training_response_root
+    )
     diagnostic_rows = [
         {
             "manifest_path": item.manifest_path,
@@ -175,7 +220,15 @@ def _(Path, discover_strategy_catalog, mo, os, pd, select_strategy_run_id):
         )
     )
     mo.vstack(selector)
-    return export_root, label_to_run_id, run_picker, strategy_root
+    return (
+        export_root,
+        label_to_run_id,
+        requested_training_response_run_id,
+        run_picker,
+        strategy_root,
+        training_response_catalog,
+        training_response_root,
+    )
 
 
 @app.cell
@@ -432,6 +485,382 @@ def _(
                 widths="equal",
             ),
             mo.ui.table(pd.DataFrame(selected_metadata), selection=None),
+        ]
+    )
+    return
+
+
+@app.cell
+def _(
+    mo,
+    pd,
+    requested_training_response_run_id,
+    select_training_response_run_id,
+    source_context,
+    strategy_manifest,
+    training_response_catalog,
+    training_response_root,
+):
+    selected_source_export_sha256 = str(
+        strategy_manifest.get("source_export_manifest_sha256") or ""
+    ).strip()
+    selected_source_collection_sha256 = str(
+        strategy_manifest.get("source_collection_manifest_sha256") or ""
+    ).strip()
+    matching_training_entries = [
+        entry
+        for entry in training_response_catalog.entries
+        if entry.ready and entry.source_export_run_id == source_context.export_run_id
+        and (
+            not selected_source_export_sha256
+            or entry.source_export_manifest_sha256 == selected_source_export_sha256
+        )
+        and (
+            not selected_source_collection_sha256
+            or entry.source_collection_manifest_sha256
+            == selected_source_collection_sha256
+        )
+    ]
+    training_response_warning = None
+    training_response_picker = None
+    training_response_label_to_run_id = {}
+    if matching_training_entries:
+        try:
+            initial_training_response_run_id = select_training_response_run_id(
+                training_response_catalog,
+                requested_training_response_run_id,
+                source_export_run_id=source_context.export_run_id,
+                source_export_manifest_sha256=(
+                    selected_source_export_sha256 or None
+                ),
+                source_collection_manifest_sha256=(
+                    selected_source_collection_sha256 or None
+                ),
+            )
+        except ValueError as exc:
+            initial_training_response_run_id = select_training_response_run_id(
+                training_response_catalog,
+                "latest",
+                source_export_run_id=source_context.export_run_id,
+                source_export_manifest_sha256=(
+                    selected_source_export_sha256 or None
+                ),
+                source_collection_manifest_sha256=(
+                    selected_source_collection_sha256 or None
+                ),
+            )
+            training_response_warning = str(exc)
+        training_response_label_to_run_id = {
+            entry.label: entry.analysis_run_id for entry in matching_training_entries
+        }
+        initial_training_response_label = next(
+            label
+            for label, run_id in training_response_label_to_run_id.items()
+            if run_id == initial_training_response_run_id
+        )
+        training_response_picker = mo.ui.dropdown(
+            options=list(training_response_label_to_run_id),
+            value=initial_training_response_label,
+            label="Training-response analysis run",
+            searchable=True,
+        )
+
+    training_response_diagnostics = [
+        {
+            "manifest_path": item.manifest_path,
+            "code": item.code,
+            "message": item.message,
+        }
+        for item in training_response_catalog.diagnostics
+    ]
+    training_selector = [
+        mo.md("# Whole-training Response QC"),
+        mo.md(
+            "Read-only, descriptive pre-to-training response profiles. "
+            "Closer/farther labels are relative to this export cohort; they do not "
+            "establish avoidance, fear, anxiety, or escape success."
+        ),
+        mo.md(
+            f"Training-response root: `{training_response_root.resolve()}`  \n"
+            f"Required source export: `{source_context.export_run_id}`"
+        ),
+    ]
+    if training_response_picker is not None:
+        training_selector.append(training_response_picker)
+    else:
+        training_selector.append(
+            mo.callout(
+                "No ready training-response run matches the selected baseline run's "
+                "source export. Baseline QC remains available above.",
+                kind="warn",
+            )
+        )
+    if training_response_warning:
+        training_selector.append(mo.callout(training_response_warning, kind="warn"))
+    training_selector.append(
+        mo.accordion(
+            {
+                "Matching immutable runs": (
+                    mo.ui.table(
+                        pd.DataFrame(
+                            [
+                                {
+                                    "analysis_run_id": entry.analysis_run_id,
+                                    "source_export_run_id": entry.source_export_run_id,
+                                    "source_export_manifest_sha256": (
+                                        entry.source_export_manifest_sha256
+                                    ),
+                                    "created_at_utc": entry.created_at_utc,
+                                    "row_count": entry.row_count,
+                                }
+                                for entry in matching_training_entries
+                            ]
+                        ),
+                        selection=None,
+                        page_size=10,
+                    )
+                    if matching_training_entries
+                    else mo.md("No matching runs.")
+                ),
+                "Rejected manifests": (
+                    mo.ui.table(
+                        pd.DataFrame(training_response_diagnostics),
+                        selection=None,
+                        page_size=10,
+                    )
+                    if training_response_diagnostics
+                    else mo.md("No manifests were rejected.")
+                ),
+            }
+        )
+    )
+    mo.vstack(training_selector)
+    return training_response_label_to_run_id, training_response_picker
+
+
+@app.cell
+def _(
+    load_training_response_manifest,
+    mo,
+    scan_training_response_qc_rows,
+    training_response_label_to_run_id,
+    training_response_picker,
+    training_response_root,
+):
+    mo.stop(training_response_picker is None)
+    selected_training_response_run_id = training_response_label_to_run_id[
+        training_response_picker.value
+    ]
+    training_response_manifest = load_training_response_manifest(
+        training_response_root, selected_training_response_run_id
+    )
+    training_response_rows = (
+        scan_training_response_qc_rows(
+            training_response_root, selected_training_response_run_id
+        )
+        .sort(["protocol_name", "recording_id"])
+        .collect()
+        .to_dicts()
+    )
+    return (
+        selected_training_response_run_id,
+        training_response_manifest,
+        training_response_rows,
+    )
+
+
+@app.cell
+def _(
+    TRAINING_RESPONSE_CATEGORY_FIELDS,
+    TRAINING_RESPONSE_METRICS,
+    mo,
+    selected_training_response_run_id,
+    training_response_manifest,
+    training_response_rows,
+):
+    training_protocol_values = sorted(
+        {str(row.get("protocol_name") or "unknown") for row in training_response_rows}
+    )
+    training_status_values = sorted(
+        {
+            str(row.get("classification_status") or "unknown")
+            for row in training_response_rows
+        }
+    )
+    training_protocol_picker = mo.ui.multiselect(
+        options=training_protocol_values,
+        value=training_protocol_values,
+        label="Protocols",
+    )
+    training_status_picker = mo.ui.multiselect(
+        options=training_status_values,
+        value=training_status_values,
+        label="Tracking/classification status",
+    )
+    training_category_labels = {
+        label: field for field, label in TRAINING_RESPONSE_CATEGORY_FIELDS.items()
+    }
+    training_metric_labels = {
+        label: field for field, label in TRAINING_RESPONSE_METRICS.items()
+    }
+    training_category_picker = mo.ui.dropdown(
+        options=list(training_category_labels),
+        value=TRAINING_RESPONSE_CATEGORY_FIELDS["primary_training_profile"],
+        label="Response category",
+    )
+    training_metric_picker = mo.ui.dropdown(
+        options=list(training_metric_labels),
+        value=TRAINING_RESPONSE_METRICS["mean_speed_mm_s_log2_ratio"],
+        label="Continuous feature",
+    )
+    training_feature_config = training_response_manifest.get("feature_config") or {}
+    training_complete_count = sum(
+        row.get("classification_status") == "complete"
+        for row in training_response_rows
+    )
+    training_invalid_count = sum(
+        row.get("classification_status") == "invalid"
+        for row in training_response_rows
+    )
+    mo.vstack(
+        [
+            mo.md(f"## Training cohort overview · `{selected_training_response_run_id}`"),
+            mo.hstack(
+                [
+                    mo.stat(label="Recordings", value=f"{len(training_response_rows):,}"),
+                    mo.stat(
+                        label="Classification complete",
+                        value=f"{training_complete_count:,}",
+                    ),
+                    mo.stat(label="Tracking invalid", value=f"{training_invalid_count:,}"),
+                    mo.stat(
+                        label="Minimum valid coverage",
+                        value=(
+                            f"{float(training_feature_config.get('min_valid_position_fraction', 0)):.0%}"
+                        ),
+                    ),
+                ]
+            ),
+            mo.hstack(
+                [
+                    training_protocol_picker,
+                    training_status_picker,
+                    training_category_picker,
+                    training_metric_picker,
+                ],
+                widths="equal",
+            ),
+            mo.callout(
+                "Temporal adaptation and habituation are unavailable in this run because "
+                "training-period time bins or samples were not exported.",
+                kind="info",
+            ),
+        ]
+    )
+    return (
+        training_category_labels,
+        training_category_picker,
+        training_metric_labels,
+        training_metric_picker,
+        training_protocol_picker,
+        training_status_picker,
+    )
+
+
+@app.cell
+def _(
+    category_count_figure,
+    feature_distribution_figure,
+    filter_training_response_rows,
+    mo,
+    pd,
+    training_category_labels,
+    training_category_picker,
+    training_metric_labels,
+    training_metric_picker,
+    training_protocol_picker,
+    training_response_rows,
+    training_response_scatter_figure,
+    training_status_picker,
+):
+    filtered_training_response_rows = filter_training_response_rows(
+        training_response_rows,
+        protocols=training_protocol_picker.value,
+        statuses=training_status_picker.value,
+    )
+    selected_training_category_label = training_category_picker.value
+    selected_training_category_key = training_category_labels[
+        selected_training_category_label
+    ]
+    selected_training_metric_label = training_metric_picker.value
+    selected_training_metric_key = training_metric_labels[selected_training_metric_label]
+    training_category_figure = category_count_figure(
+        filtered_training_response_rows,
+        category_key=selected_training_category_key,
+        title=f"{selected_training_category_label} by protocol",
+    )
+    training_distribution_figure = feature_distribution_figure(
+        filtered_training_response_rows,
+        metric=selected_training_metric_key,
+        label=selected_training_metric_label,
+    )
+    training_scatter_figure = training_response_scatter_figure(
+        filtered_training_response_rows
+    )
+    invalid_training_rows = [
+        {
+            "recording_id": row.get("recording_id"),
+            "protocol_name": row.get("protocol_name"),
+            "pre_tracking_dropout_fraction": row.get(
+                "pre_tracking_dropout_fraction"
+            ),
+            "training_tracking_dropout_fraction": row.get(
+                "training_tracking_dropout_fraction"
+            ),
+            "reason": row.get("classification_reason"),
+        }
+        for row in training_response_rows
+        if row.get("classification_status") != "complete"
+    ]
+    no_training_rows = mo.callout(
+        "No finite rows match the current filters.", kind="warn"
+    )
+    mo.vstack(
+        [
+            mo.hstack(
+                [
+                    (
+                        mo.ui.plotly(training_category_figure)
+                        if training_category_figure
+                        else no_training_rows
+                    ),
+                    (
+                        mo.ui.plotly(training_distribution_figure)
+                        if training_distribution_figure
+                        else no_training_rows
+                    ),
+                ],
+                widths="equal",
+            ),
+            (
+                mo.ui.plotly(training_scatter_figure)
+                if training_scatter_figure
+                else no_training_rows
+            ),
+            mo.accordion(
+                {
+                    "Tracking-invalid recordings": mo.ui.table(
+                        pd.DataFrame(invalid_training_rows),
+                        selection=None,
+                        page_size=12,
+                    ),
+                    "Filtered training-response features": mo.ui.table(
+                        pd.DataFrame(filtered_training_response_rows),
+                        selection=None,
+                        page_size=12,
+                    ),
+                }
+            ),
         ]
     )
     return
