@@ -139,7 +139,11 @@ def test_build_and_write_cra_near_field_component_from_existing_cra_stack(tmp_pa
     assert result.source_cra_primary_endpoint_path == cra_component_path
     assert result.geometry_status == "circle"
     assert result.arena_geometry_source == "analysis/stimulus_runs/stimulus_1/calibration/arena_geometry"
-    assert result.qc_warnings == ()
+    # This fixture carries no analysis_metadata.dish_mask, so the resolver correctly falls back
+    # to the projector's nominal experimental_area circle -- and must say so. A silent fallback
+    # is the bug that inverted thigmotaxis on the real recording.
+    assert result.qc_warnings == ("arena_geometry_fallback_to_nominal:circle",)
+    assert result.geometry_status == "circle"
     assert result.near_zone_occupancy_fraction.shape == (2, 2)
     assert result.approach_percentile_mm.shape == (2, 2, 2)
     assert result.approach_percentile_cdf_fraction.shape == (2, 2, 2)

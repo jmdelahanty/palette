@@ -23,6 +23,7 @@ from fisheye.analysis.epoch_segments import (
 )
 from fisheye.analysis.swim_bout_io import load_default_swim_bout_tables
 from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
+from fisheye.shared.arena_geometry import resolve_arena_geometry as _resolve_shared_arena_geometry
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
 from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
 from fisheye.shared.system_metadata import get_git_info
@@ -317,47 +318,35 @@ def _get_group_by_path(root: zarr.Group, path: str | None) -> Optional[zarr.Grou
 
 
 def _resolve_arena_geometry(root: zarr.Group, run_group: zarr.Group) -> ArenaGeometry:
-    source_path = str(run_group.attrs.get("source_stimulus_path") or "").strip()
-    candidates: list[tuple[str, Mapping[str, Any]]] = []
-    if source_path:
-        group = _get_group_by_path(root, f"{source_path}/calibration/arena_geometry")
-        if group is not None:
-            candidates.append((f"{source_path}/calibration/arena_geometry", group.attrs))
-    analysis_calibration = _get_group_by_path(root, "analysis/calibration")
-    if analysis_calibration is not None:
-        candidates.append(("analysis/calibration", analysis_calibration.attrs))
+    """Prefer the fitted dish mask over the projector's nominal experimental_area circle.
 
-    for source, attrs in candidates:
-        shape = str(attrs.get("experimental_area_shape") or attrs.get("arena_shape") or "").strip().lower()
-        center_x = _optional_float(attrs.get("experimental_area_center_x_px"))
-        center_y = _optional_float(attrs.get("experimental_area_center_y_px"))
-        radius_px = _optional_float(attrs.get("experimental_area_radius_px"))
-        pixels_per_mm = _optional_float(run_group.attrs.get("pixels_per_mm_projector"))
-        if radius_px is None and pixels_per_mm is not None and pixels_per_mm > 0:
-            radius_mm = _optional_float(attrs.get("experimental_area_radius_mm"))
-            if radius_mm is not None:
-                radius_px = radius_mm * pixels_per_mm
-        if shape == "circle" and center_x is not None and center_y is not None and radius_px is not None:
-            return ArenaGeometry(
-                status="circle",
-                source=source,
-                shape="circle",
-                width_px=float(radius_px * 2.0),
-                height_px=float(radius_px * 2.0),
-                center_x_px=float(center_x),
-                center_y_px=float(center_y),
-                radius_px=float(radius_px),
-            )
+    See fisheye.shared.arena_geometry -- these are different circles, and the nominal one is
+    ~3 mm off-centre and ~2.4 mm small, which places a wall-hugging fish "outside the arena".
+    """
 
+    pixels_per_mm = _optional_float(run_group.attrs.get("pixels_per_mm_projector")) or 1.0
+    try:
+        resolved, _notes = _resolve_shared_arena_geometry(root, run_group, pixels_per_mm=float(pixels_per_mm))
+    except ValueError:
+        return ArenaGeometry(
+            status="missing",
+            source=None,
+            shape="unknown",
+            width_px=float("nan"),
+            height_px=float("nan"),
+            center_x_px=None,
+            center_y_px=None,
+            radius_px=None,
+        )
     return ArenaGeometry(
-        status="missing",
-        source=None,
-        shape="unknown",
-        width_px=float("nan"),
-        height_px=float("nan"),
-        center_x_px=None,
-        center_y_px=None,
-        radius_px=None,
+        status=resolved.status,
+        source=resolved.source,
+        shape=resolved.shape,
+        width_px=float(resolved.width_px),
+        height_px=float(resolved.height_px),
+        center_x_px=resolved.center_x_px,
+        center_y_px=resolved.center_y_px,
+        radius_px=resolved.radius_px,
     )
 
 
@@ -1259,7 +1248,7 @@ def build_goodcopbadcop_epoch_behavior_summary_result(
         speed_level=speed_level,
     )
     geometry = _resolve_arena_geometry(root, run_group)
-    if geometry.status != "circle":
+    if geometry.shape != "circle":
         warnings.append(f"arena_geometry_unavailable: {geometry.status}")
     per_epoch_fish = _make_per_epoch_fish(
         windows=windows,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from io import BytesIO
 import json
@@ -21,6 +21,11 @@ import zarr  # noqa: E402
 from fisheye.analysis.chaser_distance_runs import _bytes_array, _write_array
 from fisheye.analysis.chaser_behavior import canonical_behavior_label
 from fisheye.analysis.cra_primary_endpoint import COMPONENT_PARENT_NAME as CRA_PRIMARY_ENDPOINT_PARENT
+from fisheye.shared.arena_geometry import (
+    ArenaGeometry,
+    out_of_bounds_notes,
+    resolve_arena_geometry as _resolve_shared_arena_geometry,
+)
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
 from fisheye.shared.plot_artifacts import write_interactive_plot_spec_artifact, write_png_visualization_artifact
 from fisheye.shared.run_lineage_fingerprint import build_run_lineage_payload, write_run_lineage_attrs
@@ -49,18 +54,6 @@ DEFAULT_CDF_THRESHOLDS_MM = (2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 15.0, 20.
 DEFAULT_PERIMETER_BAND_MM = 5.0
 DEFAULT_IMMOBILITY_SPEED_THRESHOLD_MM_S = 1.0
 DEFAULT_RECTANGLE_AREA_GRID_STEP_MM = 0.25
-
-
-@dataclass(frozen=True)
-class ArenaGeometry:
-    status: str
-    source: str | None
-    width_px: float
-    height_px: float
-    shape: str
-    center_x_px: float | None
-    center_y_px: float | None
-    radius_px: float | None
 
 
 @dataclass(frozen=True)
@@ -370,53 +363,23 @@ def _resolve_arena_geometry(
     cra_component: zarr.Group,
     *,
     pixels_per_mm: float,
-) -> ArenaGeometry:
+) -> tuple[ArenaGeometry, list[str]]:
+    """Prefer the fitted dish mask over the projector's nominal experimental_area circle.
+
+    They are not the same circle: the nominal one sits ~3 mm off-centre and ~2.4 mm small, which
+    put 56% of a post-period's frames "outside the arena" and silently inverted the thigmotaxis
+    metric. See fisheye.shared.arena_geometry.
+    """
+
     width_px = _safe_float(cra_component.attrs.get("quadrant_width_px"))
     height_px = _safe_float(cra_component.attrs.get("quadrant_height_px"))
     if not math.isfinite(width_px) or width_px <= 0 or not math.isfinite(height_px) or height_px <= 0:
         raise ValueError("CRA primary endpoint component lacks positive arena width/height attrs.")
 
-    candidates: list[tuple[str, Mapping[str, Any]]] = []
-    source_path = str(run_group.attrs.get("source_stimulus_path") or "").strip()
-    if source_path:
-        stim_geometry = _get_group_by_path(root, f"{source_path}/calibration/arena_geometry")
-        if stim_geometry is not None:
-            candidates.append((f"{source_path}/calibration/arena_geometry", stim_geometry.attrs))
-    analysis_calibration = _get_group_by_path(root, "analysis/calibration")
-    if analysis_calibration is not None:
-        candidates.append(("analysis/calibration", analysis_calibration.attrs))
-
-    for source, attrs in candidates:
-        shape = str(attrs.get("experimental_area_shape") or attrs.get("arena_shape") or "").strip().lower()
-        center_x = _optional_float(attrs.get("experimental_area_center_x_px"))
-        center_y = _optional_float(attrs.get("experimental_area_center_y_px"))
-        radius_px = _optional_float(attrs.get("experimental_area_radius_px"))
-        if radius_px is None:
-            radius_mm = _optional_float(attrs.get("experimental_area_radius_mm"))
-            if radius_mm is not None and pixels_per_mm > 0:
-                radius_px = float(radius_mm) * float(pixels_per_mm)
-        if shape == "circle" and center_x is not None and center_y is not None and radius_px is not None and radius_px > 0:
-            return ArenaGeometry(
-                status="circle",
-                source=source,
-                width_px=float(width_px),
-                height_px=float(height_px),
-                shape="circle",
-                center_x_px=float(center_x),
-                center_y_px=float(center_y),
-                radius_px=float(radius_px),
-            )
-
-    return ArenaGeometry(
-        status="rectangular_approximation",
-        source="cra_primary_endpoint.quadrant_bounds",
-        width_px=float(width_px),
-        height_px=float(height_px),
-        shape="rectangle",
-        center_x_px=None,
-        center_y_px=None,
-        radius_px=None,
-    )
+    geometry, notes = _resolve_shared_arena_geometry(root, run_group, pixels_per_mm=float(pixels_per_mm))
+    # The quadrant bounds are the component's own view of the arena box; keep them so the
+    # rectangular fallback path is unchanged.
+    return replace(geometry, width_px=float(width_px), height_px=float(height_px)), notes
 
 
 def _normalize_float_array(values: Sequence[float] | np.ndarray, *, name: str, positive: bool = False) -> np.ndarray:
@@ -647,7 +610,12 @@ def _thigmotaxis_for_phase(
     )
     if not np.any(valid):
         return math.nan, math.nan
-    count = int(np.count_nonzero(in_bounds & wall))
+    # `wall` is unbounded above (radial >= radius - band), so a frame beyond the arena radius
+    # still counts as wall -- which it physically is. The previous `in_bounds & wall` dropped
+    # exactly those frames from the numerator while keeping them in the denominator, so the
+    # harder the fish hugged the wall the MORE its wall-hugging was discarded. With a radius
+    # 2.4 mm too small that turned a 0.37 -> 0.87 thigmotaxis increase into 0.354 -> 0.353.
+    count = int(np.count_nonzero(wall))
     total = int(np.count_nonzero(valid))
     fraction = float(count) / float(total) if total > 0 else math.nan
     safe_fps = float(fps) if math.isfinite(float(fps)) and float(fps) > 0 else 1.0
@@ -803,8 +771,10 @@ def _compute_near_field_arrays(
     immobile_fraction = np.full(n_phases, np.nan, dtype=np.float32)
     speed_sample_count = np.zeros(n_phases, dtype=np.int64)
     warnings: list[str] = []
-    if geometry.status != "circle":
-        warnings.append(f"arena_geometry_status:{geometry.status}")
+    # Warn on a *shape* fallback (a rectangle approximation), not on the status string --
+    # "dish_mask" is the good case and must not read as a problem.
+    if geometry.shape != "circle":
+        warnings.append(f"arena_geometry_not_circular:{geometry.status}")
 
     for p_idx, phase in enumerate(phases):
         slc = _phase_slice(phase, total_frames)
@@ -1217,12 +1187,15 @@ def build_cra_near_field_result(
     if object_x_px.shape[:2] != (len(phases), len(objects)) or object_y_px.shape[:2] != (len(phases), len(objects)):
         raise ValueError("CRA primary endpoint object_phase position arrays do not match phase/object axes.")
 
-    geometry = _resolve_arena_geometry(
+    geometry, geometry_notes = _resolve_arena_geometry(
         root,
         run_group,
         cra_component,
         pixels_per_mm=float(pixels_per_mm),
     )
+    # A fish "outside the arena" is a geometry error, not a fish. Say so instead of quietly
+    # dropping those frames downstream.
+    geometry_notes = geometry_notes + out_of_bounds_notes(fish_xy, fish_valid, geometry, label="fish")
 
     percentiles = _normalize_float_array(percentile_values, name="percentile_values")
     if np.any((percentiles < 0) | (percentiles > 100)):
@@ -1277,6 +1250,7 @@ def build_cra_near_field_result(
         valid_distance_count=arrays["valid_distance_count"],
         source_cra_component=cra_component,
     )
+    compute_warnings = tuple(dict.fromkeys(list(compute_warnings) + list(geometry_notes)))
     source_refs = cra_component.attrs.get("source_refs")
     if not isinstance(source_refs, Mapping):
         source_refs = {}
