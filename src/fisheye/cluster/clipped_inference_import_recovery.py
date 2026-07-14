@@ -1,4 +1,4 @@
-"""Plan a clipped-inference recovery from completed caches and raw masks."""
+"""Recover clipped inference after a collection-level mask import failure."""
 
 from __future__ import annotations
 
@@ -14,6 +14,11 @@ from fisheye.cluster.clipped_inference import (
     _job,
     build_ssh_bsub_runner,
 )
+from fisheye.cluster.clipped_inference_keypoint_recovery import (
+    _inner_command,
+    _replace_run_root,
+    _resources,
+)
 from fisheye.cluster.keypoints.common import safe_component
 from fisheye.cluster.lsf import (
     LsfJob,
@@ -22,14 +27,13 @@ from fisheye.cluster.lsf import (
     submit_lsf_workflow,
     write_json_snapshot,
 )
-from fisheye.utils.prepare_clipped_keypoint_recovery import prepare_keypoint_recovery
 
 
-RECOVERY_SCHEMA = "palette.clipped_inference_keypoint_recovery.v1"
+RECOVERY_SCHEMA = "palette.clipped_inference_import_recovery.v1"
 
 
 @dataclass(frozen=True)
-class KeypointRecoveryPlan:
+class ImportRecoveryPlan:
     payload: Mapping[str, Any]
     workflow: LsfWorkflow
     repo: Path
@@ -46,40 +50,69 @@ def _read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"), parse_constant=reject_constant)
 
 
-def _inner_command(job: Mapping[str, Any]) -> tuple[str, ...]:
-    command = job.get("command")
-    if not isinstance(command, list) or "--" not in command:
-        raise ValueError(f"Prior job has no runtime-wrapped command: {job.get('job_key')}")
-    separator = command.index("--")
-    inner = tuple(str(value) for value in command[separator + 1 :])
-    if not inner:
-        raise ValueError(f"Prior job has an empty inner command: {job.get('job_key')}")
-    return inner
+def _group_attrs(path: Path) -> Mapping[str, Any] | None:
+    metadata = path / "zarr.json"
+    if not metadata.is_file():
+        return None
+    payload = _read_json(metadata)
+    attrs = payload.get("attributes") if isinstance(payload, Mapping) else None
+    return attrs if isinstance(attrs, Mapping) else {}
 
 
-def _resources(job: Mapping[str, Any]) -> LsfResources:
-    payload = job.get("resources")
-    if not isinstance(payload, Mapping):
-        raise ValueError(f"Prior job has no resources: {job.get('job_key')}")
-    return LsfResources(
-        queue=str(payload.get("queue") or ""),
-        ncores=int(payload["ncores"]),
-        mem_gb=int(payload["mem_gb"]),
-        gpus=int(payload.get("gpus") or 0),
-        walltime=str(payload["walltime"]) if payload.get("walltime") is not None else None,
-        extra_lsf_args=tuple(str(value) for value in payload.get("extra_lsf_args") or ()),
-    )
+def _preflight(source: Mapping[str, Any]) -> dict[str, Any]:
+    reports: list[dict[str, Any]] = []
+    for target in source["targets"]:
+        zarr_path = Path(str(target["analysis_zarr"])).expanduser().resolve()
+        refined_keypoints = zarr_path / "refined_keypoints_runs" / str(
+            target["refined_keypoint_run"]
+        )
+        keypoint_attrs = _group_attrs(refined_keypoints)
+        if not keypoint_attrs or keypoint_attrs.get("palette_run_completion_status") != "complete":
+            raise RuntimeError(f"Refined keypoints are not complete: {refined_keypoints}")
+
+        packages: list[dict[str, Any]] = []
+        for clip in target["clips"]:
+            package = Path(str(clip["package_path"])).expanduser().resolve()
+            if not package.is_file() or package.stat().st_size <= 0:
+                raise FileNotFoundError(f"Completed mask package is missing: {package}")
+            packages.append(
+                {
+                    "clip_id": str(clip["clip_id"]),
+                    "path": str(package),
+                    "size_bytes": int(package.stat().st_size),
+                }
+            )
+
+        output = zarr_path / "refined_subject_masks_runs" / str(
+            target["refined_subject_mask_run"]
+        )
+        output_attrs = _group_attrs(output)
+        output_status = (
+            str(output_attrs.get("palette_run_completion_status") or "")
+            if output_attrs is not None
+            else "absent"
+        )
+        if output_status == "complete":
+            raise RuntimeError(f"Refined subject-mask output is already complete: {output}")
+        reports.append(
+            {
+                "target_id": str(target["target_id"]),
+                "analysis_zarr": str(zarr_path),
+                "package_count": len(packages),
+                "package_bytes": sum(row["size_bytes"] for row in packages),
+                "packages": packages,
+                "refined_keypoints_status": "complete",
+                "partial_output": str(output),
+                "partial_output_status": output_status,
+                "import_action": "overwrite_incomplete_output",
+            }
+        )
+    return {"status": "ok", "target_count": len(reports), "targets": reports}
 
 
-def _replace_run_root(
-    command: Sequence[str],
-    *,
-    prior_run_root: Path,
-    recovery_run_root: Path,
-) -> tuple[str, ...]:
-    old = str(prior_run_root)
-    new = str(recovery_run_root)
-    return tuple(str(value).replace(old, new) for value in command)
+def _with_overwrite(command: Sequence[str]) -> tuple[str, ...]:
+    values = tuple(str(value) for value in command)
+    return values if "--overwrite" in values else (*values, "--overwrite")
 
 
 def build_plan(
@@ -87,7 +120,7 @@ def build_plan(
     source_plan_path: Path,
     run_root: Path,
     recovery_label: str,
-) -> KeypointRecoveryPlan:
+) -> ImportRecoveryPlan:
     source_plan_path = source_plan_path.expanduser().resolve()
     run_root = run_root.expanduser().resolve()
     source = _read_json(source_plan_path)
@@ -98,7 +131,8 @@ def build_plan(
     prior_jobs = workflow_payload.get("jobs") if isinstance(workflow_payload, Mapping) else None
     if not isinstance(targets, list) or not targets or not isinstance(prior_jobs, list):
         raise ValueError("Source plan requires targets and an LSF workflow.")
-    label = safe_component(recovery_label, default="keypoint_recovery", max_length=72)
+
+    label = safe_component(recovery_label, default="import_recovery", max_length=72)
     repo = Path(str(source["repo"])).expanduser().resolve()
     registry = Path(str(source["registry"])).expanduser().resolve()
     prior_run_root = Path(str(source["run_root"])).expanduser().resolve()
@@ -107,159 +141,33 @@ def build_plan(
         for job in prior_jobs
         if isinstance(job, Mapping) and job.get("job_key")
     }
-    preflight = prepare_keypoint_recovery(source_plan_path, apply=False)
-    if preflight.get("status") != "ok":
-        raise RuntimeError("Keypoint recovery preflight did not pass.")
+    preflight = _preflight(source)
 
     jobs: list[LsfJob] = []
-    preparation_key = "prepare_keypoint_recovery"
-    preparation_report = run_root / "recovery" / "preparation.json"
-    jobs.append(
-        _job(
-            workflow_id=label,
-            repo=repo,
-            run_root=run_root,
-            job_key=preparation_key,
-            stage="keypoint_recovery_preparation",
-            command=(
-                "scripts/py",
-                "-m",
-                "fisheye.utils.prepare_clipped_keypoint_recovery",
-                "--plan",
-                str(source_plan_path),
-                "--apply",
-                "--output-json",
-                str(preparation_report),
-            ),
-            resources=LsfResources(queue="short", ncores=2, mem_gb=16, walltime="1:00"),
-            expected_outputs=(preparation_report,),
-        )
-    )
-
     validation_keys: list[str] = []
     for target in targets:
-        if not isinstance(target, Mapping):
-            raise ValueError("Source plan target must be an object.")
         target_safe = safe_component(str(target["target_id"]), default="target", max_length=56)
         zarr_path = Path(str(target["analysis_zarr"])).expanduser().resolve()
-        keypoint_keys: list[str] = []
-        for clip in target["clips"]:
-            clip_id = str(clip["clip_id"])
-            key = f"keypoints:{target_safe}:{clip_id}"
-            prior = prior_by_key[key]
-            command = _replace_run_root(
-                _inner_command(prior),
+        import_key = f"mask_import:{target_safe}"
+        import_prior = prior_by_key[import_key]
+        import_command = _with_overwrite(
+            _replace_run_root(
+                _inner_command(import_prior),
                 prior_run_root=prior_run_root,
                 recovery_run_root=run_root,
             )
-            jobs.append(
-                _job(
-                    workflow_id=label,
-                    repo=repo,
-                    run_root=run_root,
-                    job_key=key,
-                    stage="keypoints",
-                    command=command,
-                    resources=_resources(prior),
-                    upstream=(preparation_key,),
-                    expected_outputs=(
-                        zarr_path
-                        / "keypoint_shard_runs"
-                        / str(clip["keypoint_shard_run"])
-                        / "zarr.json",
-                    ),
-                )
-            )
-            keypoint_keys.append(key)
-
-        finalize_key = f"keypoint_finalize:{target_safe}"
-        finalize_prior = prior_by_key[finalize_key]
-        jobs.append(
-            _job(
-                workflow_id=label,
-                repo=repo,
-                run_root=run_root,
-                job_key=finalize_key,
-                stage="keypoint_finalize",
-                command=_replace_run_root(
-                    _inner_command(finalize_prior),
-                    prior_run_root=prior_run_root,
-                    recovery_run_root=run_root,
-                ),
-                resources=_resources(finalize_prior),
-                upstream=tuple(keypoint_keys),
-                expected_outputs=(
-                    zarr_path / "keypoints_runs" / str(target["keypoint_run"]) / "zarr.json",
-                ),
-            )
         )
-        refine_key = f"keypoint_refine:{target_safe}"
-        refine_prior = prior_by_key[refine_key]
-        jobs.append(
-            _job(
-                workflow_id=label,
-                repo=repo,
-                run_root=run_root,
-                job_key=refine_key,
-                stage="keypoint_refine",
-                command=_replace_run_root(
-                    _inner_command(refine_prior),
-                    prior_run_root=prior_run_root,
-                    recovery_run_root=run_root,
-                ),
-                resources=_resources(refine_prior),
-                upstream=(finalize_key,),
-                expected_outputs=(
-                    zarr_path
-                    / "refined_keypoints_runs"
-                    / str(target["refined_keypoint_run"])
-                    / "zarr.json",
-                ),
-            )
-        )
-
-        package_keys: list[str] = []
-        for clip in target["clips"]:
-            clip_id = str(clip["clip_id"])
-            key = f"mask_package:{target_safe}:{clip_id}"
-            prior = prior_by_key[key]
-            jobs.append(
-                _job(
-                    workflow_id=label,
-                    repo=repo,
-                    run_root=run_root,
-                    job_key=key,
-                    stage="subject_mask_refine_package",
-                    command=_replace_run_root(
-                        _inner_command(prior),
-                        prior_run_root=prior_run_root,
-                        recovery_run_root=run_root,
-                    ),
-                    resources=_resources(prior),
-                    upstream=(refine_key,),
-                    expected_outputs=(Path(str(clip["package_path"])),),
-                )
-            )
-            package_keys.append(key)
-
-        import_key = f"mask_import:{target_safe}"
-        import_prior = prior_by_key[import_key]
         jobs.append(
             _job(
                 workflow_id=label,
                 repo=repo,
                 run_root=run_root,
                 job_key=import_key,
-                stage="subject_mask_collection_import",
-                command=_replace_run_root(
-                    _inner_command(import_prior),
-                    prior_run_root=prior_run_root,
-                    recovery_run_root=run_root,
-                ),
+                stage="subject_mask_collection_import_recovery",
+                command=import_command,
                 resources=LsfResources(
                     queue="local", ncores=8, mem_gb=32, walltime="3:00"
                 ),
-                upstream=tuple(package_keys),
                 expected_outputs=(
                     zarr_path
                     / "refined_subject_masks_runs"
@@ -268,9 +176,10 @@ def build_plan(
                 ),
             )
         )
+
         validation_key = f"validate:{target_safe}"
-        validation_report = run_root / "validation" / f"{target_safe}.json"
         validation_prior = prior_by_key[validation_key]
+        validation_report = run_root / "validation" / f"{target_safe}.json"
         jobs.append(
             _job(
                 workflow_id=label,
@@ -346,8 +255,7 @@ def build_plan(
         metadata={
             "recovery_schema": RECOVERY_SCHEMA,
             "source_plan": str(source_plan_path),
-            "reused_completed_raw_subject_masks": True,
-            "reused_completed_roi_caches": True,
+            "reused_completed_mask_packages": True,
         },
     )
     payload = {
@@ -358,32 +266,32 @@ def build_plan(
         "run_root": str(run_root),
         "repo": str(repo),
         "registry": str(registry),
-        "recovery": {
+        "import_recovery": {
             "schema": RECOVERY_SCHEMA,
             "source_plan": str(source_plan_path),
             "preflight": preflight,
         },
     }
-    return KeypointRecoveryPlan(payload=payload, workflow=workflow, repo=repo, run_root=run_root)
+    return ImportRecoveryPlan(payload=payload, workflow=workflow, repo=repo, run_root=run_root)
 
 
-def materialize_plan(plan: KeypointRecoveryPlan) -> dict[str, Any]:
+def materialize_plan(plan: ImportRecoveryPlan) -> dict[str, Any]:
     payload = plan.to_json()
     plan_path = plan.run_root / "plan.json"
     lsf_path = plan.run_root / "lsf_plan.json"
     if plan_path.exists():
         existing = _read_json(plan_path)
         if existing != payload or not lsf_path.is_file() or _read_json(lsf_path) != plan.workflow.to_json():
-            raise FileExistsError(f"Recovery run root contains different immutable evidence: {plan.run_root}")
+            raise FileExistsError(f"Import recovery contains different evidence: {plan.run_root}")
         return existing
-    for name in ("logs", "status", "progress", "recovery", "validation", "registry", "cleanup"):
+    for name in ("logs", "status", "validation", "registry", "cleanup"):
         (plan.run_root / name).mkdir(parents=True, exist_ok=True)
     write_json_snapshot(plan_path, payload)
     write_json_snapshot(lsf_path, plan.workflow.to_json())
     return payload
 
 
-def apply_plan(plan: KeypointRecoveryPlan, *, submit_host: str) -> dict[str, Any]:
+def apply_plan(plan: ImportRecoveryPlan, *, submit_host: str) -> dict[str, Any]:
     materialize_plan(plan)
     submission = plan.run_root / "lsf_submission.json"
     if submission.exists():
@@ -421,10 +329,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "submission_path": str(plan.run_root / "lsf_submission.json"),
         "result": result if args.apply else None,
     }
-    if args.json:
-        print(json.dumps(summary, indent=2, sort_keys=True, default=str))
-    else:
-        print(f"{summary['status']}: {summary['job_count']} jobs; plan={summary['plan_path']}")
+    print(json.dumps(summary, indent=2, sort_keys=True) if args.json else summary)
     return 0
 
 

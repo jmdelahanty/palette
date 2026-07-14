@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from fisheye.cluster import clipped_inference as workflow
+from fisheye.cluster import clipped_inference_import_recovery as import_recovery
 from fisheye.cluster import clipped_inference_keypoint_recovery as recovery
 from fisheye.cluster.clipped_inference_cleanup import cleanup
 from fisheye.cluster.clipped_inference_validate import _instance_keys
@@ -142,8 +143,11 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(tmp_path: Path, m
         f"keypoint_refine:{target_safe}",
     )
     cache_job = jobs[f"cache:{target_safe}:00"]
+    import_job = jobs[f"mask_import:{target_safe}"]
     assert "--run-direct" in cache_job.command
     assert "bsub" not in cache_job.command
+    assert import_job.resources.queue == "local"
+    assert import_job.resources.walltime == "3:00"
     assert all(job.command[:3] == ("scripts/py", "-m", "fisheye.cluster.lsf.runtime") for job in jobs.values())
 
 
@@ -216,6 +220,7 @@ def test_keypoint_recovery_reuses_cache_and_raw_masks(
     )
     assert jobs[package_key].dependency.upstream_job_keys == (refine_key,)
     assert jobs["nrs_cleanup"].dependency.upstream_job_keys == ("registry_finalize",)
+    assert jobs[f"mask_import:{target_safe}"].resources.queue == "local"
     assert {
         str(job.metadata["stage"])
         for job in plan.workflow.jobs
@@ -224,6 +229,43 @@ def test_keypoint_recovery_reuses_cache_and_raw_masks(
     assert any(str(recovery_root) in value for value in jobs[keypoint_key].command)
     assert all(str(source.run_root) not in value for value in jobs[keypoint_key].command)
     assert plan.payload["targets"] == source.to_json()["targets"]
+
+
+def test_import_recovery_reuses_packages_on_long_queue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _build_fixture_plan(tmp_path, monkeypatch)
+    source_plan = tmp_path / "source_import_plan.json"
+    _write_json(source_plan, source.to_json())
+    monkeypatch.setattr(
+        import_recovery,
+        "_preflight",
+        lambda _source: {"status": "ok", "target_count": 1},
+    )
+
+    recovery_root = tmp_path / "import_recovery"
+    plan = import_recovery.build_plan(
+        source_plan_path=source_plan,
+        run_root=recovery_root,
+        recovery_label="sleepyfish_import_recovery",
+    )
+    jobs = {job.job_key: job for job in plan.workflow.jobs}
+    target = source.target_plans[0]
+    target_safe = workflow.safe_component(
+        str(target["target_id"]), default="target", max_length=56
+    )
+    import_key = f"mask_import:{target_safe}"
+    validation_key = f"validate:{target_safe}"
+
+    assert len(plan.workflow.jobs) == 4
+    assert jobs[import_key].dependency is None
+    assert jobs[import_key].resources.queue == "local"
+    assert jobs[import_key].resources.walltime == "3:00"
+    assert "--overwrite" in jobs[import_key].command
+    assert jobs[validation_key].dependency.upstream_job_keys == (import_key,)
+    assert jobs["registry_finalize"].dependency.upstream_job_keys == (validation_key,)
+    assert jobs["nrs_cleanup"].dependency.upstream_job_keys == ("registry_finalize",)
 
 
 def test_existing_detection_resume_preflight_requires_exact_provenance(

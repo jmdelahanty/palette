@@ -121,6 +121,15 @@ repair/cleanup -> 22 keypoints -> keypoint finalize -> keypoint refine
 The merged proxy may legitimately be absent during preflight because the
 keypoint finalizer creates it immediately before merging the completed shards.
 
+Collection-level refined-mask import runs on the `local` CPU queue with a
+three-hour requested wall time. The import publishes a very large dense mask
+surface and can exceed the `short` queue's hard one-hour limit even when memory
+use is low. If import is interrupted after all clip packages complete,
+`fisheye.cluster.clipped_inference_import_recovery` preflights those packages
+and complete refined keypoints, then submits only import, validation, registry
+reconciliation, and NRS cleanup. Recovery imports use `--overwrite` to replace
+the incomplete, non-promoted collection output; a complete output is refused.
+
 ## Sleepyfish dry run, 2026-07-14
 
 The reviewed three-recording plan covers cams 2010093, 2010094, and 2010096,

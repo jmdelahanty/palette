@@ -548,6 +548,7 @@ def build_plan(
     detect_reuse_cpu = LsfResources(queue="short", ncores=1, mem_gb=8, walltime="1:00")
     cpu = LsfResources(queue="short", ncores=4, mem_gb=32, walltime="1:00")
     final_cpu = LsfResources(queue="short", ncores=8, mem_gb=32, walltime="1:00")
+    import_cpu = LsfResources(queue="local", ncores=8, mem_gb=32, walltime="3:00")
     cache_gpu = LsfResources(
         queue="gpu_l4",
         ncores=8,
@@ -932,7 +933,7 @@ def build_plan(
             _job(
                 workflow_id=workflow_id, repo=repo, run_root=run_root,
                 job_key=mask_import_key, stage="subject_mask_collection_import",
-                command=mask_import, resources=final_cpu, upstream=tuple(package_keys),
+                command=mask_import, resources=import_cpu, upstream=tuple(package_keys),
                 expected_outputs=(target.analysis_zarr / "refined_subject_masks_runs" / refined_subject_mask_run / "zarr.json",),
             )
         )
