@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -76,6 +77,14 @@ def test_create_clipped_collection_proxy_crop_run_writes_lineage_and_alias(
     assert crop.attrs["source_roi_cache_required"] is True
     assert crop.attrs["source_roi_cache_manifest"] == manifest["manifest_path"]
     assert crop.attrs["source_roi_cache_alias_manifest"] == result["alias_manifest_path"]
+    assert crop.attrs["source_video_width"] == 5
+    assert crop.attrs["source_video_height"] == 4
+    assert crop.attrs["width"] == 5
+    assert crop.attrs["height"] == 4
+
+    alias = json.loads(Path(result["alias_manifest_path"]).read_text(encoding="utf-8"))
+    assert alias["source"]["source_video_width"] == 5
+    assert alias["source"]["source_video_height"] == 4
 
     np.testing.assert_array_equal(crop["frame_indices"][:], np.array([11, 9], dtype=np.int64))
     np.testing.assert_array_equal(crop["source_frame_indices"][:], np.array([11, 9], dtype=np.int64))
@@ -143,3 +152,42 @@ def test_create_clipped_collection_proxy_crop_run_refuses_existing_without_overw
         assert "already exists" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("Expected existing proxy crop run to be refused")
+
+
+def test_proxy_resolves_dimensions_from_bound_raw_detection(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path, manifest, _expected = _build_tiny_clipped_cache(monkeypatch, tmp_path)
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    root.attrs.pop("width")
+    root.attrs.pop("height")
+    refined_path = (
+        "clips/clip_000000/cameras/2010093/refined_detect_runs/"
+        "refined_workflow_001_clip_000000_cam2010093"
+    )
+    refined = root[refined_path]
+    refined.attrs["source_detect_run"] = "detect_workflow_001_clip_000000_cam2010093"
+    detect = root.require_group(
+        "clips/clip_000000/cameras/2010093/detect_runs/"
+        "detect_workflow_001_clip_000000_cam2010093"
+    )
+    detect.attrs["source_video_width"] = 4512
+    detect.attrs["source_video_height"] = 4512
+
+    result = create_clipped_collection_proxy_crop_run(
+        zarr_path=zarr_path,
+        manifest_path=manifest["manifest_path"],
+        proxy_run_name="crop_proxy_clip_000000",
+    )
+
+    crop = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)[
+        "crop_runs/crop_proxy_clip_000000"
+    ]
+    assert crop.attrs["source_video_width"] == 4512
+    assert crop.attrs["source_video_height"] == 4512
+    assert crop.attrs["width"] == 4512
+    assert crop.attrs["height"] == 4512
+    assert "detect_workflow_001_clip_000000_cam2010093" in result[
+        "source_video_dimensions_source"
+    ]

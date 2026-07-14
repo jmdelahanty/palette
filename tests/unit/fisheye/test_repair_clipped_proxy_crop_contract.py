@@ -147,3 +147,36 @@ def test_repair_clipped_proxy_crop_contract_repairs_merged_from_legacy_sources(t
             dtype=np.float32,
         ),
     )
+
+
+def test_repair_clipped_proxy_crop_contract_backfills_source_dimensions(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "sample_analysis.zarr"
+    root = zarr.open_group(store=zarr_path, mode="w")
+    row_index_path = tmp_path / "rows" / "clip_0.parquet"
+    _write_row_index(row_index_path, clip_index=0, n_rows=2)
+    _write_legacy_proxy(
+        root,
+        "crop_proxy_old",
+        frames=[10, 11],
+        clip_index=0,
+        row_index_path=row_index_path,
+    )
+    refined_path = "clips/clip_000000/refined_detect_runs/refined_clip_000000"
+    refined = root.require_group(refined_path)
+    refined.attrs["source_detect_run"] = "detect_clip_000000"
+    detect = root.require_group("clips/clip_000000/detect_runs/detect_clip_000000")
+    detect.attrs["source_video_width"] = 4512
+    detect.attrs["source_video_height"] = 4512
+
+    result = repair_clipped_proxy_crop_contract(
+        zarr_path,
+        crop_runs=["crop_proxy_old"],
+        apply=True,
+    )
+
+    assert result["status"] == "ok"
+    repaired = zarr.open_group(store=zarr_path, mode="r")["crop_runs/crop_proxy_old"]
+    assert repaired.attrs["source_video_width"] == 4512
+    assert repaired.attrs["source_video_height"] == 4512
+    assert repaired.attrs["width"] == 4512
+    assert repaired.attrs["height"] == 4512

@@ -60,6 +60,15 @@ Keypoints and masks safely read the same immutable cache concurrently. Each
 mask package waits for both its clip-local probability shard and the exact
 recording-level refined-keypoint run used for left/right eye assignment.
 
+Every proxy crop run also carries the full-resolution source-video dimension
+contract: `source_video_width`, `source_video_height`, `width`, and `height`.
+Proxy creation resolves one consistent value from the analysis root, the
+refined detection run, or its explicitly bound raw detection run. It refuses
+creation if no dimensions can be established or if clips disagree. This is
+required even though the pixels come from the ROI cache: keypoint coordinates
+must still be transformed into the full-frame coordinate system. The merged
+collection proxy preserves the same dimensions.
+
 Detection and keypoint model outputs use the repository's indexed-sharding
 defaults. Raw subject-mask probabilities are `uint8` encoded probabilities
 with 32-row inner chunks and 2,048-row storage shards. Refined subject masks
@@ -77,6 +86,40 @@ binary/nonempty dense refined masks, sampled contours, and exact refined
 keypoint assignment lineage. A single registry writer reconciles all targets
 only after every validation succeeds. NRS cache and package directories are
 removed only after that registry report passes its integrity check.
+
+## Keypoint-stage recovery
+
+`fisheye.cluster.clipped_inference_keypoint_recovery` resumes a failed campaign
+after ROI caches and raw subject-mask probability shards are complete. It does
+not rerun detection, detection refinement, cache construction, or subject-mask
+inference. Planning first runs the read-only
+`fisheye.utils.prepare_clipped_keypoint_recovery` preflight. For every planned
+clip, the preflight requires:
+
+- a complete cache manifest and alias with a valid row count;
+- an exact, complete raw subject-mask shard with matching crop, collection,
+  cache, model path, and model SHA-256 provenance;
+- equal cache and raw-probability row counts;
+- a repairable per-clip proxy source-dimension contract;
+- no complete keypoint shard or downstream output collision.
+
+The submitted recovery starts with one short CPU maintenance job. That job
+repairs the proxy attributes, removes only the exact incomplete keypoint shard
+groups named by the source plan, and clears `latest_pending` only if it selects
+one of those incomplete groups. The remaining DAG is:
+
+```text
+repair/cleanup -> 22 keypoints -> keypoint finalize -> keypoint refine
+                                                        |
+                                  completed raw masks -> 22 mask packages
+                                                        |
+                                          refined-mask import
+                                                        |
+                                      validation -> registry -> NRS cleanup
+```
+
+The merged proxy may legitimately be absent during preflight because the
+keypoint finalizer creates it immediately before merging the completed shards.
 
 ## Sleepyfish dry run, 2026-07-14
 

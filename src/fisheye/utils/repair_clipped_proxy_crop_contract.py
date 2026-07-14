@@ -24,6 +24,7 @@ from fisheye.utils.create_clipped_collection_proxy_crop_run import (
     PROXY_CROP_RUN_SCHEMA,
     bbox_norm_from_clipped_collection_row_index,
     clipped_collection_proxy_source_detect_label,
+    resolve_proxy_source_video_dimensions,
 )
 from fisheye.utils.merge_clipped_proxy_crop_runs import MERGED_PROXY_CROP_RUN_SCHEMA
 
@@ -229,6 +230,7 @@ def _aggregate_source_attrs(
 
 
 def _expected_attrs(
+    root: zarr.Group,
     crop_parent: zarr.Group,
     group: zarr.Group,
     *,
@@ -270,6 +272,25 @@ def _expected_attrs(
             attrs["source_refined_runs"] = source_refined_runs
         if source_refined_paths:
             attrs["source_refined_run_paths"] = source_refined_paths
+    source_refined_paths = attrs.get("source_refined_run_paths")
+    if isinstance(source_refined_paths, list) and source_refined_paths:
+        try:
+            width, height, source = resolve_proxy_source_video_dimensions(
+                root,
+                [str(value) for value in source_refined_paths],
+            )
+        except (KeyError, ValueError):
+            pass
+        else:
+            attrs.update(
+                {
+                    "source_video_width": width,
+                    "source_video_height": height,
+                    "source_video_dimensions_source": source,
+                    "width": width,
+                    "height": height,
+                }
+            )
     return attrs
 
 
@@ -292,6 +313,7 @@ def _bbox_needs_update(group: zarr.Group, bbox: np.ndarray) -> bool:
 
 
 def _repair_crop_group(
+    root: zarr.Group,
     crop_parent: zarr.Group,
     group: zarr.Group,
     *,
@@ -322,7 +344,7 @@ def _repair_crop_group(
         else:
             bbox, bbox_source = _bbox_from_per_clip_proxy(group, crop_run=crop_run, zarr_path=zarr_path)
             repaired_count = int(bbox_source != "existing_bbox_norm_coords")
-        expected_attrs = _expected_attrs(crop_parent, group, zarr_path=zarr_path)
+        expected_attrs = _expected_attrs(root, crop_parent, group, zarr_path=zarr_path)
         if _is_merged_proxy_crop_run(group):
             expected_attrs["legacy_bbox_norm_coords_repair_count"] = repaired_count
         attr_updates = _attrs_need_update(group, expected_attrs)
@@ -391,6 +413,7 @@ def repair_clipped_proxy_crop_contract(
             continue
         reports.append(
             _repair_crop_group(
+                root,
                 crop_parent,
                 crop_parent[crop_run],
                 crop_run=crop_run,

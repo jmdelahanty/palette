@@ -58,6 +58,11 @@ def _write_source_crop(root: zarr.Group, name: str, *, frames: list[int], clip_i
             "bbox_norm_coords_semantics": "bbox_xywh_normalized_to_full_frame",
             "roi_shape": [512, 512],
             "roi_size": [512, 512],
+            "source_video_width": 4512,
+            "source_video_height": 4512,
+            "source_video_dimensions_source": f"detect_clip_{clip_index:06d}:attrs",
+            "width": 4512,
+            "height": 4512,
         }
     )
 
@@ -104,6 +109,10 @@ def test_merge_clipped_proxy_crop_runs_writes_collection_proxy(tmp_path: Path) -
     assert merged.attrs["source_refined_runs"] == ["refined_clip_000000", "refined_clip_000001"]
     assert merged.attrs["bbox_norm_coords_semantics"] == "bbox_xywh_normalized_to_full_frame"
     assert merged.attrs["legacy_bbox_norm_coords_repair_count"] == 0
+    assert merged.attrs["source_video_width"] == 4512
+    assert merged.attrs["source_video_height"] == 4512
+    assert merged.attrs["width"] == 4512
+    assert merged.attrs["height"] == 4512
     np.testing.assert_array_equal(merged["frame_indices"][:], np.array([10, 11, 20, 21], dtype=np.int64))
     np.testing.assert_allclose(
         merged["bbox_norm_coords"][:],

@@ -246,6 +246,24 @@ def merge_clipped_proxy_crop_runs(
     source_clip_indices = [group.attrs.get("source_clip_index") for _name, group in sources]
     source_manifests = [normalize_attr(group.attrs.get("source_roi_cache_manifest")) for _name, group in sources]
     source_alias_manifests = [normalize_attr(group.attrs.get("source_roi_cache_alias_manifest")) for _name, group in sources]
+    source_video_width = (
+        _single_common_attr(sources, "source_video_width")
+        or _single_common_attr(sources, "width")
+        or root.attrs.get("source_video_width")
+        or root.attrs.get("width")
+    )
+    source_video_height = (
+        _single_common_attr(sources, "source_video_height")
+        or _single_common_attr(sources, "height")
+        or root.attrs.get("source_video_height")
+        or root.attrs.get("height")
+    )
+    if source_video_width is None or source_video_height is None:
+        raise ValueError("Source proxy crop runs do not provide source-video dimensions.")
+    source_video_dimension_sources = _unique_attr_values(
+        sources,
+        "source_video_dimensions_source",
+    )
     created_at = _utc_now()
     target.attrs.update(
         json_ready(
@@ -284,8 +302,11 @@ def merge_clipped_proxy_crop_runs(
                 "legacy_bbox_norm_coords_repair_count": repaired_bbox_source_count,
                 "roi_size": first_attrs.get("roi_size"),
                 "roi_shape": first_attrs.get("roi_shape"),
-                "height": first_attrs.get("height") if first_attrs.get("height") is not None else root.attrs.get("height"),
-                "width": first_attrs.get("width") if first_attrs.get("width") is not None else root.attrs.get("width"),
+                "source_video_width": int(source_video_width),
+                "source_video_height": int(source_video_height),
+                "source_video_dimensions_source": source_video_dimension_sources,
+                "height": int(source_video_height),
+                "width": int(source_video_width),
                 "created_at_utc": created_at,
                 "row_count": total_rows,
             }

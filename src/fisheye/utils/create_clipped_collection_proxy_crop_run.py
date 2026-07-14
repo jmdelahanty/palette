@@ -29,6 +29,20 @@ from fisheye.shared.zarr_run_completion import (
 PROXY_CROP_RUN_SCHEMA = "palette_clipped_collection_proxy_crop_run_v1"
 CLIPPED_COLLECTION_PROXY_DETECTION_SOURCE_TYPE = "finalized_clipped_refined_detect_collection_proxy"
 CLIPPED_COLLECTION_BBOX_COLUMNS = ("bbox_norm_cx", "bbox_norm_cy", "bbox_norm_w", "bbox_norm_h")
+SOURCE_WIDTH_ATTRS = (
+    "video_width",
+    "palette_video_width",
+    "source_full_width",
+    "source_video_width",
+    "width",
+)
+SOURCE_HEIGHT_ATTRS = (
+    "video_height",
+    "palette_video_height",
+    "source_full_height",
+    "source_video_height",
+    "height",
+)
 
 
 def _utc_now() -> str:
@@ -86,6 +100,78 @@ def _single_unique(values: Sequence[Any], *, name: str) -> str:
     return unique[0]
 
 
+def _positive_int(value: Any) -> int | None:
+    try:
+        resolved = int(value)
+    except (TypeError, ValueError):
+        return None
+    return resolved if resolved > 0 else None
+
+
+def _dimensions_from_attrs(attrs: Mapping[str, Any]) -> tuple[int, int] | None:
+    width = next(
+        (_positive_int(attrs.get(name)) for name in SOURCE_WIDTH_ATTRS if _positive_int(attrs.get(name))),
+        None,
+    )
+    height = next(
+        (_positive_int(attrs.get(name)) for name in SOURCE_HEIGHT_ATTRS if _positive_int(attrs.get(name))),
+        None,
+    )
+    if width is None or height is None:
+        return None
+    return int(width), int(height)
+
+
+def _bound_detect_group_path(refined_path: str, refined_group: zarr.Group) -> str | None:
+    source_detect_run = str(refined_group.attrs.get("source_detect_run") or "").strip()
+    if not source_detect_run:
+        return None
+    parts = list(Path(refined_path).parts)
+    try:
+        family_index = parts.index("refined_detect_runs")
+    except ValueError:
+        return None
+    return str(Path(*parts[:family_index], "detect_runs", source_detect_run))
+
+
+def resolve_proxy_source_video_dimensions(
+    root: zarr.Group,
+    source_refined_run_paths: Sequence[str],
+) -> tuple[int, int, str]:
+    """Resolve one full-frame dimension contract for a clipped proxy crop run."""
+
+    root_dimensions = _dimensions_from_attrs(root.attrs)
+    if root_dimensions is not None:
+        return (*root_dimensions, "analysis_zarr_root_attrs")
+
+    candidates: list[tuple[int, int, str]] = []
+    for refined_path in source_refined_run_paths:
+        refined_group = root[str(refined_path)]
+        refined_dimensions = _dimensions_from_attrs(refined_group.attrs)
+        if refined_dimensions is not None:
+            candidates.append((*refined_dimensions, f"{refined_path}:attrs"))
+            continue
+        detect_path = _bound_detect_group_path(str(refined_path), refined_group)
+        if detect_path is None:
+            continue
+        detect_group = root[detect_path]
+        detect_dimensions = _dimensions_from_attrs(detect_group.attrs)
+        if detect_dimensions is not None:
+            candidates.append((*detect_dimensions, f"{detect_path}:attrs"))
+
+    unique = {(width, height) for width, height, _source in candidates}
+    if not candidates:
+        raise ValueError(
+            "Unable to resolve source-video dimensions from the analysis root, "
+            "source refined detections, or their bound raw detection runs."
+        )
+    if len(unique) != 1:
+        raise ValueError(f"Source runs disagree on source-video dimensions: {candidates!r}")
+    width, height = next(iter(unique))
+    sources = ",".join(source for _width, _height, source in candidates)
+    return int(width), int(height), sources
+
+
 def clipped_collection_proxy_source_detect_label(collection_id: object) -> str:
     collection_id = str(collection_id or "").strip()
     if collection_id:
@@ -126,6 +212,9 @@ def _write_alias_manifest(
     proxy_run_name: str,
     alias_manifest_path: Path,
     row_index_path: Path,
+    source_video_width: int,
+    source_video_height: int,
+    source_video_dimensions_source: str,
 ) -> dict[str, Any]:
     alias_manifest_path.parent.mkdir(parents=True, exist_ok=True)
     alias = json.loads(json.dumps(dict(source_manifest)))
@@ -136,6 +225,9 @@ def _write_alias_manifest(
     source["proxy_crop_run_name"] = proxy_run_name
     source["proxy_crop_run_schema"] = PROXY_CROP_RUN_SCHEMA
     source["source_manifest_path"] = str(source_manifest_path)
+    source["source_video_width"] = int(source_video_width)
+    source["source_video_height"] = int(source_video_height)
+    source["source_video_dimensions_source"] = source_video_dimensions_source
 
     array = alias.get("array")
     if not isinstance(array, dict):
@@ -260,6 +352,9 @@ def create_clipped_collection_proxy_crop_run(
     source_detect_label = _source_detect_label(source)
     source_refined_runs = _unique_nonempty(_column_pylist(table, "refined_detect_run"))
     source_refined_paths = _unique_nonempty(_column_pylist(table, "refined_group_path"))
+    source_video_width, source_video_height, source_video_dimensions_source = (
+        resolve_proxy_source_video_dimensions(root, source_refined_paths)
+    )
     source_archive = str(source.get("archive_path") or "")
     if source_archive and Path(source_archive).expanduser().resolve() != archive_path:
         raise ValueError(f"Manifest archive_path {source_archive!r} does not match zarr_path {str(archive_path)!r}.")
@@ -296,8 +391,11 @@ def create_clipped_collection_proxy_crop_run(
             "bbox_norm_coords_source": "clipped_collection_row_index.bbox_norm_cxcywh",
             "roi_size": [int(shape[1]), int(shape[2])],
             "roi_shape": [int(shape[1]), int(shape[2])],
-            "height": int(root.attrs["height"]) if root.attrs.get("height") is not None else None,
-            "width": int(root.attrs["width"]) if root.attrs.get("width") is not None else None,
+            "source_video_width": source_video_width,
+            "source_video_height": source_video_height,
+            "source_video_dimensions_source": source_video_dimensions_source,
+            "height": source_video_height,
+            "width": source_video_width,
             "created_at_utc": _utc_now(),
             "row_count": int(table.num_rows),
         }
@@ -309,6 +407,9 @@ def create_clipped_collection_proxy_crop_run(
         proxy_run_name=resolved_proxy_run,
         alias_manifest_path=alias_manifest,
         row_index_path=row_index_path,
+        source_video_width=source_video_width,
+        source_video_height=source_video_height,
+        source_video_dimensions_source=source_video_dimensions_source,
     )
     cache = open_flat_roi_cache(
         alias_manifest,
@@ -334,6 +435,9 @@ def create_clipped_collection_proxy_crop_run(
         "source_clip_id": clip_id,
         "source_clip_index": int(clip_indices[0]),
         "source_video_path": video_path,
+        "source_video_width": source_video_width,
+        "source_video_height": source_video_height,
+        "source_video_dimensions_source": source_video_dimensions_source,
         "source_collection_id": source.get("collection_id"),
         "source_crop_run_name_in_alias": alias_manifest_payload["source"]["crop_run_name"],
     }

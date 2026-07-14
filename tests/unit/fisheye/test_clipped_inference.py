@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from fisheye.cluster import clipped_inference as workflow
+from fisheye.cluster import clipped_inference_keypoint_recovery as recovery
 from fisheye.cluster.clipped_inference_cleanup import cleanup
 from fisheye.cluster.clipped_inference_validate import _instance_keys
 
@@ -179,6 +180,50 @@ def test_resume_plan_revalidates_detections_on_cpu_and_preserves_dependencies(
     assert detect.resources.gpus == 0
     assert "--reuse-existing" in detect.command
     assert refine.dependency.upstream_job_keys == (detect.job_key,)
+
+
+def test_keypoint_recovery_reuses_cache_and_raw_masks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _build_fixture_plan(tmp_path, monkeypatch, resume_existing_detections=True)
+    source_plan = tmp_path / "source_plan.json"
+    _write_json(source_plan, source.to_json())
+    monkeypatch.setattr(
+        recovery,
+        "prepare_keypoint_recovery",
+        lambda *_args, **_kwargs: {"status": "ok", "clip_count": 22},
+    )
+
+    recovery_root = tmp_path / "recovery"
+    plan = recovery.build_plan(
+        source_plan_path=source_plan,
+        run_root=recovery_root,
+        recovery_label="sleepyfish_keypoint_recovery",
+    )
+    jobs = {job.job_key: job for job in plan.workflow.jobs}
+    target = source.target_plans[0]
+    target_safe = workflow.safe_component(
+        str(target["target_id"]), default="target", max_length=56
+    )
+    keypoint_key = f"keypoints:{target_safe}:clip_000000"
+    refine_key = f"keypoint_refine:{target_safe}"
+    package_key = f"mask_package:{target_safe}:clip_000000"
+
+    assert len(plan.workflow.jobs) == 51
+    assert jobs[keypoint_key].dependency.upstream_job_keys == (
+        "prepare_keypoint_recovery",
+    )
+    assert jobs[package_key].dependency.upstream_job_keys == (refine_key,)
+    assert jobs["nrs_cleanup"].dependency.upstream_job_keys == ("registry_finalize",)
+    assert {
+        str(job.metadata["stage"])
+        for job in plan.workflow.jobs
+        if job.metadata is not None
+    }.isdisjoint({"detect", "detect_reuse", "detect_refine", "roi_cache", "subject_masks"})
+    assert any(str(recovery_root) in value for value in jobs[keypoint_key].command)
+    assert all(str(source.run_root) not in value for value in jobs[keypoint_key].command)
+    assert plan.payload["targets"] == source.to_json()["targets"]
 
 
 def test_existing_detection_resume_preflight_requires_exact_provenance(
