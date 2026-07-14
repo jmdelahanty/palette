@@ -99,6 +99,38 @@ image_crop = exploration.read(
 )
 ```
 
+### Numeric trace plotting
+
+Selecting a numeric one- or two-dimensional array reveals a **Numeric trace
+plot** panel. For known compact-dense Palette arrays such as `frame_angles`, the
+workspace resolves human-readable channel names through the persisted channel
+index. It also uses a matching time coordinate such as
+`support/frame_time_seconds` when available. The eye-angle defaults are the
+smoothed left, right, and vergence channels.
+
+The initial plot window is 1,800 rows, and no interactive plot may scan more
+than 100,000 source rows. Up to 5,000 points are displayed by default using a
+line-only WebGL trace. This distinction matters for matrices whose physical
+chunks contain every channel: display decimation reduces browser work but does
+not avoid reading every physical chunk intersecting the requested source
+window.
+
+Pair agents and custom cells can use the same bounded path without Plotly:
+
+```python
+channels = exploration.channel_index(selected_path)
+trace = exploration.trace_frame(
+    selected_path,
+    column=11,
+    start=0,
+    stop=1_800,
+    max_points=1_800,
+)
+```
+
+`trace` is a Polars DataFrame containing `row_index`, `value`, and
+`time_seconds` when a matching coordinate is available.
+
 Sibling one-dimensional arrays can be loaded directly into a bounded Polars
 DataFrame, without Pandas or a PyArrow conversion bridge:
 

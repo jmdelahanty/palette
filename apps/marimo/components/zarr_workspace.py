@@ -24,6 +24,15 @@ from fisheye.shared.zarr_io import open_zarr_root
 DEFAULT_MAX_READ_ELEMENTS = 100_000
 DEFAULT_MAX_INVENTORY_ITEMS = 250
 DEFAULT_MAX_TABLE_ROWS = 10_000
+DEFAULT_MAX_TRACE_POINTS = 5_000
+DEFAULT_MAX_TRACE_SOURCE_ROWS = 100_000
+
+_DENSE_CHANNEL_INDEX_LAYOUTS = {
+    "frame_angles": ("angle_channel_index", "frame_available"),
+    "roi_angles": ("angle_channel_index", "roi_available"),
+    "frame_qa": ("qa_channel_index", "frame_available"),
+    "roi_qa": ("qa_channel_index", "roi_available"),
+}
 
 
 def _normalise_path(path: str | None) -> str:
@@ -368,6 +377,210 @@ class ZarrExplorationWorkspace:
             )
         if not data:
             raise ValueError(f"No compatible one-dimensional arrays found in {relative or '/'}.")
+        return pl.DataFrame(data)
+
+    def _fixed_width_strings(
+        self,
+        path: str,
+        *,
+        expected_rows: int | None = None,
+    ) -> list[str]:
+        """Decode Palette's bounded fixed-width uint8 string matrices."""
+
+        info = self.info(path)
+        shape = tuple(info.get("shape", ()))
+        if len(shape) != 2 or info.get("dtype") != "uint8":
+            raise ValueError(f"{path!r} is not a fixed-width uint8 string matrix.")
+        if expected_rows is not None and shape[0] != expected_rows:
+            raise ValueError(
+                f"{path!r} has {shape[0]} rows; expected {expected_rows}."
+            )
+        if shape[0] > 2_000 or shape[1] > 4_096:
+            raise ValueError(f"Refusing unusually large string index at {path!r}: {shape}.")
+        raw = self.read(path, max_elements=shape[0] * shape[1])
+        return [
+            bytes(np.asarray(row, dtype=np.uint8)).split(b"\0", 1)[0].decode(
+                "utf-8", errors="replace"
+            )
+            for row in raw
+        ]
+
+    def channel_index(
+        self,
+        array_path: str,
+        *,
+        available_only: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Resolve named columns for known compact dense Palette arrays.
+
+        Unknown two-dimensional arrays return an empty list; callers may fall
+        back to numeric column indices.
+        """
+
+        relative = _normalise_path(array_path)
+        if "/" in relative:
+            parent_path, array_name = relative.rsplit("/", 1)
+        else:
+            parent_path, array_name = "", relative
+        layout = _DENSE_CHANNEL_INDEX_LAYOUTS.get(array_name)
+        if layout is None:
+            return []
+        array_info = self.info(relative)
+        shape = tuple(array_info.get("shape", ()))
+        if len(shape) != 2:
+            return []
+        index_name, availability_name = layout
+        index_path = f"{parent_path}/{index_name}" if parent_path else index_name
+        names_path = f"{index_path}/name"
+        availability_path = f"{index_path}/{availability_name}"
+        try:
+            names = self._fixed_width_strings(names_path, expected_rows=shape[1])
+            availability = np.asarray(
+                self.read(availability_path, max_elements=shape[1]), dtype=bool
+            )
+        except (KeyError, TypeError, ValueError):
+            return []
+        if availability.shape != (shape[1],):
+            return []
+
+        units: list[str]
+        try:
+            units = self._fixed_width_strings(
+                f"{index_path}/units", expected_rows=shape[1]
+            )
+        except (KeyError, TypeError, ValueError):
+            units = [""] * shape[1]
+        return [
+            {
+                "index": index,
+                "name": names[index],
+                "units": units[index],
+                "available": bool(availability[index]),
+            }
+            for index in range(shape[1])
+            if not available_only or bool(availability[index])
+        ]
+
+    def suggested_coordinate_path(self, array_path: str) -> str | None:
+        """Find a conventional one-dimensional coordinate matching axis zero."""
+
+        relative = _normalise_path(array_path)
+        info = self.info(relative)
+        shape = tuple(info.get("shape", ()))
+        if not shape:
+            return None
+        if "/" in relative:
+            parent_path, array_name = relative.rsplit("/", 1)
+        else:
+            parent_path, array_name = "", relative
+        prefix = f"{parent_path}/" if parent_path else ""
+        if array_name.startswith("frame_"):
+            candidates = (
+                f"{prefix}support/frame_time_seconds",
+                f"{prefix}frame_time_seconds",
+                f"{prefix}time_seconds",
+                f"{prefix}time_s",
+            )
+        elif array_name.startswith("roi_"):
+            candidates = (
+                f"{prefix}support/time_seconds",
+                f"{prefix}time_seconds",
+                f"{prefix}time_s",
+            )
+        else:
+            candidates = (
+                f"{prefix}time_seconds",
+                f"{prefix}time_s",
+                f"{prefix}timestamps",
+            )
+        for candidate in candidates:
+            try:
+                candidate_info = self.info(candidate)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if (
+                candidate_info.get("kind") == "array"
+                and tuple(candidate_info.get("shape", ())) == (shape[0],)
+            ):
+                return candidate
+        return None
+
+    def trace_frame(
+        self,
+        array_path: str,
+        *,
+        column: int | None = None,
+        start: int = 0,
+        stop: int | None = None,
+        max_points: int = DEFAULT_MAX_TRACE_POINTS,
+        max_source_rows: int = DEFAULT_MAX_TRACE_SOURCE_ROWS,
+        coordinate_path: str | None = None,
+    ) -> pl.DataFrame:
+        """Read one bounded numeric trace into a compact Polars DataFrame."""
+
+        relative = _normalise_path(array_path)
+        array = self._node(relative)
+        if not _is_array(array):
+            raise TypeError(f"Zarr node {relative or '/'} is not an array.")
+        shape = _shape_tuple(array)
+        if len(shape) not in {1, 2}:
+            raise ValueError("Trace plotting supports only one- or two-dimensional arrays.")
+        try:
+            numeric = np.issubdtype(np.dtype(getattr(array, "dtype")), np.number)
+        except TypeError:
+            numeric = False
+        if not numeric:
+            raise ValueError(f"Trace plotting requires a numeric dtype, not {array.dtype}.")
+        if start < 0 or start >= shape[0]:
+            raise ValueError(f"start must be between 0 and {max(0, shape[0] - 1):,}.")
+        resolved_stop = min(shape[0], int(stop) if stop is not None else shape[0])
+        if resolved_stop <= start:
+            raise ValueError("stop must be greater than start.")
+        if max_points < 2 or max_source_rows < 1:
+            raise ValueError("Trace limits must be positive and max_points must be at least 2.")
+        source_rows = resolved_stop - start
+        if source_rows > max_source_rows:
+            raise ValueError(
+                f"Trace window spans {source_rows:,} source rows; the interactive "
+                f"limit is {max_source_rows:,}. Use a smaller window."
+            )
+        if len(shape) == 2:
+            if column is None or column < 0 or column >= shape[1]:
+                raise ValueError(f"column must be between 0 and {shape[1] - 1}.")
+        elif column is not None:
+            raise ValueError("column is only valid for two-dimensional arrays.")
+
+        stride = max(1, int(np.ceil(source_rows / max_points)))
+        row_selection = slice(start, resolved_stop, stride)
+        selection: Any = (
+            row_selection if len(shape) == 1 else (row_selection, int(column))
+        )
+        values = np.asarray(
+            self.read(relative, selection, max_elements=max_points), dtype=np.float64
+        ).reshape(-1)
+        row_indices = np.arange(start, resolved_stop, stride, dtype=np.int64)
+        data: dict[str, np.ndarray] = {
+            "row_index": row_indices,
+            "value": values,
+        }
+
+        resolved_coordinate = (
+            _normalise_path(coordinate_path)
+            if coordinate_path is not None
+            else self.suggested_coordinate_path(relative)
+        )
+        if resolved_coordinate:
+            coordinate = np.asarray(
+                self.read(
+                    resolved_coordinate,
+                    row_selection,
+                    max_elements=max_points,
+                ),
+                dtype=np.float64,
+            ).reshape(-1)
+            if coordinate.shape != values.shape:
+                raise ValueError("Coordinate and trace selections have different lengths.")
+            data["time_seconds"] = coordinate
         return pl.DataFrame(data)
 
     def summary(self) -> dict[str, Any]:

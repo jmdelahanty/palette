@@ -12,10 +12,12 @@ def _():
     from pathlib import Path
 
     import marimo as mo
+    import numpy as np
+    import plotly.graph_objects as go
 
     from apps.marimo.components.zarr_workspace import ZarrExplorationWorkspace
 
-    return Path, ZarrExplorationWorkspace, mo
+    return Path, ZarrExplorationWorkspace, go, mo, np
 
 
 @app.cell(hide_code=True)
@@ -371,6 +373,226 @@ def _(
 
 
 @app.cell(hide_code=True)
+def _(mo, np, selected_kind, selected_path, zarr_workspace):
+    trace_supported = False
+    trace_channel_lookup = {}
+    trace_channel_picker = None
+    trace_start = None
+    trace_stop = None
+    trace_max_points = None
+    trace_run = None
+    trace_coordinate_path = None
+    if selected_kind == "array":
+        try:
+            trace_info = zarr_workspace.info(selected_path)
+            trace_shape = tuple(trace_info.get("shape", ()))
+            trace_dtype = np.dtype(str(trace_info.get("dtype", "")))
+            trace_supported = (
+                len(trace_shape) in {1, 2}
+                and trace_shape[0] > 0
+                and np.issubdtype(trace_dtype, np.number)
+            )
+        except (TypeError, ValueError):
+            trace_shape = ()
+            trace_supported = False
+    else:
+        trace_shape = ()
+
+    if trace_supported:
+        trace_channels = zarr_workspace.channel_index(selected_path)
+        if len(trace_shape) == 1:
+            trace_channel_labels = ["value"]
+            trace_channel_lookup = {"value": None}
+            trace_default_labels = ["value"]
+        elif trace_channels:
+            trace_channel_labels = [
+                (
+                    f"{row['index']}: {row['name']}"
+                    + (f" [{row['units']}]" if row.get("units") else "")
+                )
+                for row in trace_channels
+            ]
+            trace_channel_lookup = {
+                label: int(row["index"])
+                for label, row in zip(
+                    trace_channel_labels, trace_channels, strict=True
+                )
+            }
+            preferred_names = (
+                "left_eye_angle_deg_smoothed",
+                "right_eye_angle_deg_smoothed",
+                "vergence_eye_angle_deg_smoothed",
+            )
+            trace_default_labels = [
+                label
+                for label, row in zip(
+                    trace_channel_labels, trace_channels, strict=True
+                )
+                if row["name"] in preferred_names
+            ][:3]
+            if not trace_default_labels:
+                trace_default_labels = trace_channel_labels[:1]
+        else:
+            trace_channel_labels = [
+                f"column {index}" for index in range(trace_shape[1])
+            ]
+            trace_channel_lookup = {
+                label: index for index, label in enumerate(trace_channel_labels)
+            }
+            trace_default_labels = trace_channel_labels[:1]
+
+        trace_channel_picker = mo.ui.multiselect(
+            options=trace_channel_labels,
+            value=trace_default_labels,
+            label="Trace channels",
+            max_selections=6,
+        )
+        trace_start = mo.ui.number(
+            start=0,
+            stop=max(0, trace_shape[0] - 1),
+            step=1,
+            value=0,
+            label="Start row",
+        )
+        trace_stop = mo.ui.number(
+            start=1,
+            stop=trace_shape[0],
+            step=1,
+            value=min(trace_shape[0], 1_800),
+            label="Stop row (exclusive)",
+        )
+        trace_max_points = mo.ui.number(
+            start=100,
+            stop=20_000,
+            step=100,
+            value=5_000,
+            label="Maximum plotted points",
+        )
+        trace_run = mo.ui.run_button(label="Plot selected trace", kind="success")
+        trace_coordinate_path = zarr_workspace.suggested_coordinate_path(selected_path)
+        trace_controls_output = mo.vstack(
+            [
+                mo.md("## Numeric trace plot"),
+                mo.md(
+                    "Plot one or more named channels over a bounded row window. "
+                    "For compact eye-angle arrays, channel names come from the "
+                    "persisted channel index and frame time is selected automatically."
+                ),
+                mo.hstack(
+                    [
+                        trace_channel_picker,
+                        trace_start,
+                        trace_stop,
+                        trace_max_points,
+                        trace_run,
+                    ],
+                    justify="start",
+                    gap=1,
+                    wrap=True,
+                ),
+                mo.md(
+                    f"Coordinate: `{trace_coordinate_path or 'row_index'}`. The "
+                    "interactive source-window limit is 100,000 rows; plotted-point "
+                    "decimation does not make a wider source scan inexpensive."
+                ),
+            ]
+        )
+    else:
+        trace_controls_output = mo.md("")
+    trace_controls_output
+    return (
+        trace_channel_lookup,
+        trace_channel_picker,
+        trace_coordinate_path,
+        trace_max_points,
+        trace_run,
+        trace_start,
+        trace_stop,
+        trace_supported,
+    )
+
+
+@app.cell(hide_code=True)
+def _(
+    go,
+    mo,
+    selected_path,
+    trace_channel_lookup,
+    trace_channel_picker,
+    trace_coordinate_path,
+    trace_max_points,
+    trace_run,
+    trace_start,
+    trace_stop,
+    trace_supported,
+    zarr_workspace,
+):
+    if not trace_supported or trace_run is None:
+        trace_plot_output = mo.md("")
+    elif not trace_run.value:
+        trace_plot_output = mo.md("Select **Plot selected trace** to read the window.")
+    elif trace_channel_picker is None or not trace_channel_picker.value:
+        trace_plot_output = mo.callout(
+            "Select at least one trace channel.", kind="warn"
+        )
+    else:
+        try:
+            trace_figure = go.Figure()
+            trace_start_row = int(trace_start.value or 0)
+            trace_stop_row = int(trace_stop.value or 0)
+            trace_point_limit = int(trace_max_points.value or 5_000)
+            for trace_label in trace_channel_picker.value:
+                trace_frame = zarr_workspace.trace_frame(
+                    selected_path,
+                    column=trace_channel_lookup[trace_label],
+                    start=trace_start_row,
+                    stop=trace_stop_row,
+                    max_points=trace_point_limit,
+                    coordinate_path=trace_coordinate_path,
+                )
+                trace_x_column = (
+                    "time_seconds"
+                    if "time_seconds" in trace_frame.columns
+                    else "row_index"
+                )
+                trace_figure.add_trace(
+                    go.Scattergl(
+                        x=trace_frame[trace_x_column].to_numpy(),
+                        y=trace_frame["value"].to_numpy(),
+                        mode="lines",
+                        name=str(trace_label),
+                        hovertemplate=(
+                            "%{x:.3f} s<br>%{y:.3f}<extra>%{fullData.name}</extra>"
+                            if trace_x_column == "time_seconds"
+                            else "row %{x}<br>%{y:.3f}<extra>%{fullData.name}</extra>"
+                        ),
+                    )
+                )
+            trace_figure.update_layout(
+                title=f"{selected_path} · rows {trace_start_row:,}–{trace_stop_row:,}",
+                xaxis_title=(
+                    "Time (s)" if trace_coordinate_path else "Source row index"
+                ),
+                yaxis_title="Value",
+                template="plotly_white",
+                hovermode="x unified",
+                legend_title="Channel",
+                height=520,
+            )
+            trace_plot_output = mo.ui.plotly(
+                trace_figure,
+                config={"displaylogo": False, "scrollZoom": True},
+            )
+        except Exception as exc:
+            trace_plot_output = mo.callout(
+                mo.md(f"Trace plot refused: `{type(exc).__name__}: {exc}`"),
+                kind="danger",
+            )
+    trace_plot_output
+    return
+
+
+@app.cell(hide_code=True)
 def _(mo):
     mo.vstack(
         [
@@ -394,6 +616,7 @@ exploration.walk("tracks", max_depth=2)      # bounded recursive inventory
 exploration.find("speed")                     # bounded path search
 exploration.info("tracks/speed")              # shape, dtype, chunks, size
 exploration.attrs("tracks")                   # bounded attributes
+exploration.channel_index(selected_path)       # named compact-dense columns
 
 # Explicit bounded NumPy reads (integers, slices, and ellipsis only):
 speed = exploration.read("tracks/speed", slice(0, 1_000))
@@ -408,6 +631,11 @@ table = exploration.to_polars(
 
 # Obtain a lazy Zarr handle without reading values when a library needs one:
 array_handle = exploration.handle("tracks/speed")
+
+# Produce a bounded, decimated Polars trace table for custom plotting:
+trace = exploration.trace_frame(
+    selected_path, column=11, start=0, stop=1_800, max_points=1_800
+)
 ```
 
 The helper defaults to at most 100,000 array elements per `read` and 10,000

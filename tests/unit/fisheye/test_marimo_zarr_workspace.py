@@ -60,6 +60,64 @@ def _workspace() -> tuple[ZarrExplorationWorkspace, _FakeArray, _FakeArray]:
     )
 
 
+def _fixed_width_rows(values: list[str], width: int = 32) -> np.ndarray:
+    result = np.zeros((len(values), width), dtype=np.uint8)
+    for row, value in enumerate(values):
+        encoded = value.encode("utf-8")[:width]
+        result[row, : len(encoded)] = np.frombuffer(encoded, dtype=np.uint8)
+    return result
+
+
+def _eye_angle_workspace() -> ZarrExplorationWorkspace:
+    frame_angles = _FakeArray(
+        np.column_stack(
+            [
+                np.arange(20, dtype=np.float32),
+                np.arange(20, dtype=np.float32) * 2,
+                np.arange(20, dtype=np.float32) * 3,
+            ]
+        ),
+        chunks=(8, 3),
+    )
+    channel_index = _FakeGroup(
+        {
+            "name": _FakeArray(
+                _fixed_width_rows(
+                    [
+                        "left_eye_angle_deg_smoothed",
+                        "right_eye_angle_deg_smoothed",
+                        "vergence_eye_angle_deg_smoothed",
+                    ]
+                )
+            ),
+            "units": _FakeArray(_fixed_width_rows(["deg", "deg", "deg"])),
+            "frame_available": _FakeArray(np.array([True, True, False])),
+        }
+    )
+    support = _FakeGroup(
+        {"frame_time_seconds": _FakeArray(np.arange(20, dtype=np.float32) / 10)}
+    )
+    run = _FakeGroup(
+        {
+            "frame_angles": frame_angles,
+            "angle_channel_index": channel_index,
+            "support": support,
+        }
+    )
+    root = _FakeGroup(
+        {
+            "analysis": _FakeGroup(
+                {"eye_angle_runs": _FakeGroup({"canary": run})}
+            )
+        }
+    )
+    return ZarrExplorationWorkspace(
+        zarr_path=Path("/data/source.zarr"),
+        _root=root,
+        max_read_elements=1_000,
+    )
+
+
 def test_zarr_workspace_opens_source_read_only(monkeypatch, tmp_path: Path) -> None:
     root = _FakeGroup()
     calls: list[tuple[Path, str]] = []
@@ -151,3 +209,52 @@ def test_zarr_workspace_rejects_paths_outside_selected_root() -> None:
         workspace.info("/etc")
     with pytest.raises(ValueError, match="Invalid relative"):
         workspace.info("../sibling.zarr")
+
+
+def test_zarr_workspace_resolves_compact_dense_channel_names() -> None:
+    workspace = _eye_angle_workspace()
+    path = "analysis/eye_angle_runs/canary/frame_angles"
+
+    assert workspace.channel_index(path) == [
+        {
+            "index": 0,
+            "name": "left_eye_angle_deg_smoothed",
+            "units": "deg",
+            "available": True,
+        },
+        {
+            "index": 1,
+            "name": "right_eye_angle_deg_smoothed",
+            "units": "deg",
+            "available": True,
+        },
+    ]
+    assert workspace.suggested_coordinate_path(path) == (
+        "analysis/eye_angle_runs/canary/support/frame_time_seconds"
+    )
+
+
+def test_zarr_workspace_builds_bounded_time_trace() -> None:
+    workspace = _eye_angle_workspace()
+    path = "analysis/eye_angle_runs/canary/frame_angles"
+
+    frame = workspace.trace_frame(
+        path,
+        column=1,
+        start=2,
+        stop=18,
+        max_points=4,
+    )
+
+    assert frame["row_index"].to_list() == [2, 6, 10, 14]
+    assert frame["time_seconds"].to_list() == pytest.approx([0.2, 0.6, 1.0, 1.4])
+    assert frame["value"].to_list() == [4.0, 12.0, 20.0, 28.0]
+
+    with pytest.raises(ValueError, match="interactive limit"):
+        workspace.trace_frame(
+            path,
+            column=0,
+            start=0,
+            stop=20,
+            max_source_rows=10,
+        )
