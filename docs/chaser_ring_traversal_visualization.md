@@ -31,17 +31,37 @@ python -m fisheye.visualization.chaser_ring_traversal <archive.zarr> \
 - `collect_ring_entries(zarr)` — reuses `chaser_visit_trajectories.collect_visits` for the
   trajectories and canonical frame, then attaches the bout segments.
 
-## Frame
+## Two frames, one per kind of epoch
 
-Inherited from `chaser_visit_trajectories`: **object at the origin, arena centre rotated onto
-+x**, so pre and post entries — whose objects sit at different arena positions — land on top of
-each other and are comparable. The wall is the grey arc it really is; since the object sits
-~7 mm from it, a wall-following fish sweeps through the rings for free, and that confound is
+**Static epochs (pre / post) — `collect_ring_entries`.** Object at the origin, arena centre
+rotated onto +x, so pre and post entries — whose objects sit at different arena positions — land
+on top of each other and are comparable. The wall is the grey arc it really is; since the object
+sits ~7 mm from it, a wall-following fish sweeps through the rings for free, and that confound is
 drawn rather than hidden.
 
-**Static epochs only (pre/post).** During the chase the object moves, so a ring centred on its
-median position would be a fiction; the chase-epoch escape dynamics are a chaser-centric
-question answered by `chaser_escape_events`.
+**Training epoch (chase) — `collect_chase_ring_entries`.** The object *moves*, so a ring centred
+on its median position would be a fiction. Here the **moving chaser is fixed at the origin and
+the fish is drawn relative to it, rotated so the pursuit direction points +y** — the same
+chaser-centric frame `chaser_escape_freeze` scores the escape/freeze response in (built from its
+tested `chaser_frame_transform` / `_heading_angles_from_chaser`). The rings are literal
+distance-to-chaser bands; there is **no fixed wall arc**, because nothing is fixed but the
+chaser. The aggressive object is resolved from the CRA endpoint role codes (never index order),
+falling back to chaser 0 with a note if no endpoint is present. In this frame the escapes read
+directly: the fish darts *up and outward* (away from the pursuer) and is pulled back in.
+
+The CLI dispatches on the requested epoch: `--epochs training_event` (or `chase`) uses the
+chaser-centric collector, anything else uses the static one. **They cannot be mixed in one
+figure** — the frames are different — so request them separately. Output filenames carry the
+epoch (`..._ring_entries_<epoch>.png`), and the figure caption states which frame it is drawn in.
+
+For the pre / training / post trio, run the tool three times:
+
+```bash
+for ep in pre_event training_event post_event; do
+  python -m fisheye.visualization.chaser_ring_traversal <archive.zarr> \
+      --epochs $ep --out-dir <dir> --gif <dir>/ring_traversal_$ep.mp4 --gif-max-entries 10
+done
+```
 
 ## Three things that are not cosmetic
 

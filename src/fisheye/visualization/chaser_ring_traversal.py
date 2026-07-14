@@ -46,9 +46,18 @@ from matplotlib.animation import FFMpegWriter, FuncAnimation, PillowWriter  # no
 from matplotlib.collections import LineCollection  # noqa: E402
 import numpy as np  # noqa: E402
 
+from fisheye.analysis.chaser_bout_response import _segment_visits
 from fisheye.analysis.chaser_escape_events import DEFAULT_PEAK_SPEED_THRESHOLD_MM_S
+from fisheye.analysis.chaser_escape_freeze import (
+    _heading_angles_from_chaser,
+    chaser_frame_transform,
+)
 from fisheye.analysis.chaser_radial_occupancy import (
+    _apply_settle_trim,
+    _decode_text_column,
     _open_root,
+    _protocol_position_transition_s,
+    _read_epochs,
     _resolve_chaser_distance_run,
     _safe_float,
 )
@@ -109,6 +118,155 @@ def collect_ring_entries(
         for visit in scene.visits:
             visit["bouts"] = _bouts_in_visit(visit, bs, be, peak, float(peak_speed_threshold_mm_s))
     return scenes, meta
+
+
+def _aggressive_chaser_index(run_group) -> tuple[int, str]:
+    """The chasing object's index from the CRA endpoint role codes -- never index order.
+    Falls back to chaser 0 with a note if no endpoint is present."""
+
+    parent = run_group.get("cra_primary_endpoint")
+    if parent is not None and len(list(parent.keys())):
+        cra = parent[sorted(parent.keys())[-1]]
+        objs = cra.get("objects")
+        if objs is not None and "object_role_code" in objs:
+            idx = np.asarray(objs["object_index"][:]).reshape(-1)
+            code = np.asarray(objs["object_role_code"][:]).reshape(-1)
+            hit = np.flatnonzero(code == 1)
+            if hit.size:
+                return int(idx[int(hit[0])]), "cra_role_code"
+    return 0, "fallback_chaser_0_no_cra_endpoint"
+
+
+def collect_chase_ring_entries(
+    zarr_path: Path,
+    *,
+    chaser_distance_run: str = "latest",
+    swim_bout_run: str = "latest",
+    bout_response_component: str = "latest",
+    peak_speed_threshold_mm_s: float = DEFAULT_PEAK_SPEED_THRESHOLD_MM_S,
+    epoch_label: str = "training_event",
+    visit_enter_mm: float = 15.0,
+    visit_exit_mm: float = 20.0,
+    pad_s: float = 1.0,
+    min_speed_mm_s: float = 0.5,
+) -> tuple[list[VisitScene], dict[str, Any]]:
+    """The training-epoch analogue of collect_ring_entries, in a CHASER-CENTRIC frame.
+
+    During the chase the object MOVES, so the static-object ring frame is a fiction. Here the
+    (moving) chaser is fixed at the origin and the fish is drawn relative to it, rotated so the
+    chaser's direction of pursuit points +y -- the same frame chaser_escape_freeze scores the
+    escape/freeze response in. The rings are literal distance-to-chaser bands; an entry is the
+    fish crossing into 15 mm and not leaving until it passes 20 mm of the pursuer. There is no
+    fixed wall arc, because there is no fixed anything but the chaser.
+    """
+
+    root = _open_root(zarr_path, mode="r")
+    run_group, run_name, _run_path = _resolve_chaser_distance_run(root, chaser_distance_run)
+    ppm = _safe_float(run_group.attrs.get("pixels_per_mm_projector"))
+    fps = _safe_float(run_group.attrs.get("fps"), 100.0)
+
+    agg_idx, role_source = _aggressive_chaser_index(run_group)
+    chaser_indices = np.asarray(run_group["chasers"]["chaser_index"][:], dtype=np.int64).reshape(-1)
+    col = int(np.flatnonzero(chaser_indices == agg_idx)[0]) if np.any(chaser_indices == agg_idx) else 0
+
+    positions = run_group["positions"]
+    fish_px = np.asarray(positions["fish_centroid_arena_xy"][:], dtype=np.float64)
+    chaser_px = np.asarray(positions["chaser_arena_xy"][:, col, :], dtype=np.float64)
+    fish_valid = np.asarray(positions["fish_valid"][:], dtype=bool)
+    chaser_valid = np.asarray(positions["chaser_valid"][:, col], dtype=bool)
+    total_frames = int(fish_px.shape[0])
+
+    # chaser heading (direction of pursuit) and the fish in the chaser-centric frame
+    heading_rad, _held, _ch_speed = _heading_angles_from_chaser(
+        chaser_px, chaser_valid, ppm=float(ppm), fps=float(fps), min_speed_mm_s=float(min_speed_mm_s)
+    )
+    frame_xy, radius_mm, _bearing = chaser_frame_transform(
+        fish_px, chaser_px, heading_rad, pixels_per_mm=float(ppm)
+    )
+    frame_xy = np.asarray(frame_xy, dtype=np.float64)      # (n, 2) mm, y-up, chaser heading -> +y
+    dist = np.asarray(radius_mm, dtype=np.float64)
+    frame_valid = fish_valid & chaser_valid & np.isfinite(dist) & np.isfinite(frame_xy).all(axis=1)
+
+    # the training epoch window, settle-trimmed the same way every other component trims it
+    epochs = _read_epochs(run_group, total_frames=total_frames)
+    epochs = _apply_settle_trim(
+        epochs,
+        chaser_xy=np.asarray(positions["chaser_arena_xy"][:], dtype=np.float32),
+        chaser_valid=np.asarray(positions["chaser_valid"][:], dtype=bool),
+        fps=float(fps),
+        pixels_per_mm=float(ppm),
+        settle_trim_s=_protocol_position_transition_s(root, run_group),
+        motion_spread_threshold_mm=1.0,
+    )
+    epoch = next((e for e in epochs if e.label == epoch_label), None)
+    if epoch is None:
+        raise ValueError(f"No {epoch_label!r} epoch in {run_name}.")
+
+    lo, hi = int(epoch.start_frame), int(epoch.end_frame)
+    slc = slice(lo, hi + 1)
+    d_ep = dist[slc]
+    ok_ep = frame_valid[slc]
+    vid = _segment_visits(d_ep, ok_ep, enter_mm=float(visit_enter_mm), exit_mm=float(visit_exit_mm))
+
+    label = run_group["chasers"].get("behavior_class_label_bytes")
+    ref_label = "aggressive chaser"
+    if label is not None:
+        names = _decode_text_column(np.asarray(label[:]))
+        if col < len(names) and names[col]:
+            ref_label = f"{names[col]} (aggressive)"
+
+    scene = VisitScene(epoch.label, ref_label, True, math.nan, math.nan)
+    scene.chaser_centric = True
+    pad = int(max(0.0, float(pad_s)) * fps)
+
+    for v in range(int(vid.max()) + 1 if vid.max() >= 0 else 0):
+        idx = np.flatnonzero(vid == v)
+        if idx.size < 5:
+            continue
+        w0 = max(0, int(idx[0]) - pad)
+        w1 = min(len(d_ep) - 1, int(idx[-1]) + pad)
+        window = np.arange(w0, w1 + 1)
+        window = window[ok_ep[window]]
+        if window.size < 5:
+            continue
+        g = window + lo
+        xy = frame_xy[g]
+        # heading arrow = the fish's motion direction in the DRAWN frame, so it is always
+        # consistent with the trajectory regardless of frame convention (the drawing code
+        # negates y, so store atan2(-dy, dx) of the drawn deltas).
+        head = np.full(xy.shape[0], np.nan)
+        if xy.shape[0] >= 3:
+            dxy = np.gradient(xy, axis=0)
+            head = np.degrees(np.arctan2(-dxy[:, 1], dxy[:, 0]))
+        scene.visits.append(
+            {
+                "visit_id": v,
+                "xy": xy,
+                "distance_mm": dist[g],
+                "t_s": (window - idx[0]) / fps,
+                "heading_deg": head,
+                "cpa_mm": float(np.nanmin(dist[g])),
+                "is_bout_onset": np.zeros(xy.shape[0], dtype=bool),
+                "frames": g,
+            }
+        )
+
+    bs, be, peak = _load_bout_segments(zarr_path, chaser_distance_run, bout_response_component)
+    for visit in scene.visits:
+        visit["bouts"] = _bouts_in_visit(visit, bs, be, peak, float(peak_speed_threshold_mm_s))
+
+    meta = {
+        "recording_id": str(run_group.attrs.get("recording_id") or Path(zarr_path).stem),
+        "run": run_name,
+        "fps": float(fps),
+        "peak_speed_threshold_mm_s": float(peak_speed_threshold_mm_s),
+        "responsive_band_mm": list(RESPONSIVE_BAND_MM),
+        "ring_edges_mm": list(RING_EDGES_MM),
+        "frame": "chaser_centric",
+        "aggressive_chaser_index": int(agg_idx),
+        "aggressive_role_source": role_source,
+    }
+    return [scene], meta
 
 
 def _load_bout_segments(
@@ -188,10 +346,17 @@ def _draw_rings(ax, scene: VisitScene, *, limit: float) -> None:
     # the measured escape trigger radius
     ax.add_patch(plt.Circle((0.0, 0.0), ESCAPE_TRIGGER_MM, fill=False, lw=1.0, ls="--",
                             color=ESCAPE_C, alpha=0.55, zorder=1))
-    # the wall, where it really falls in this frame
-    ax.add_patch(plt.Circle((scene.arena_center_distance_mm, 0.0), scene.arena_radius_mm,
-                            fill=False, color="#64748b", lw=1.6, zorder=1))
-    # the object
+    chaser_centric = bool(getattr(scene, "chaser_centric", False))
+    if chaser_centric:
+        # no fixed wall to draw -- the chaser moves. Mark the pursuit direction instead.
+        ax.annotate("", xy=(0.0, limit * 0.9), xytext=(0.0, limit * 0.72),
+                    arrowprops=dict(arrowstyle="-|>", color="#94a3b8", lw=1.4))
+        ax.text(0.0, limit * 0.93, "pursuit", ha="center", va="bottom", fontsize=7, color="#64748b")
+    elif np.isfinite(scene.arena_center_distance_mm) and np.isfinite(scene.arena_radius_mm):
+        # the wall, where it really falls in this static-object frame
+        ax.add_patch(plt.Circle((scene.arena_center_distance_mm, 0.0), scene.arena_radius_mm,
+                                fill=False, color="#64748b", lw=1.6, zorder=1))
+    # the object / chaser
     ax.add_patch(plt.Circle((0.0, 0.0), DOT_RADIUS_MM,
                             color=ESCAPE_C if scene.is_object else "#94a3b8",
                             alpha=0.9 if scene.is_object else 0.4, zorder=5))
@@ -275,10 +440,16 @@ def render_ring_entries_png(
 
     dropped = len(rows) - len(shown)
     extra = f"   (showing {len(shown)} of {len(rows)} entries)" if dropped else ""
+    is_chase = meta.get("frame") == "chaser_centric"
+    frame_line = (
+        "MOVING chaser at origin, rotated so pursuit points up · no fixed wall (nothing is fixed but the chaser)"
+        if is_chase else
+        "static object at origin, arena centre rotated to +x · grey arc = wall"
+    )
     fig.suptitle(
         f"Bouts per entry through the responsive rings — {meta['recording_id']}{extra}\n"
         f"amber shell = 8–16 mm responsive band · red dashed = {ESCAPE_TRIGGER_MM:g} mm escape trigger · "
-        "grey arc = wall\n"
+        f"{frame_line}\n"
         "green square = entry · blue = ordinary bout · red ★ = escape bout · red circle = closest approach",
         fontsize=9.5,
     )
@@ -396,15 +567,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 
+CHASE_EPOCHS = ("training_event", "chase", "chase_event")
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    scenes, meta = collect_ring_entries(
-        Path(args.zarr_path),
-        chaser_distance_run=str(args.chaser_distance_run),
-        swim_bout_run=str(args.swim_bout_run),
-        epochs_wanted=[e.strip() for e in str(args.epochs).split(",") if e.strip()],
-        virtual_rotations_deg=[float(v) for v in str(args.virtual_rotations_deg).split(",") if v.strip()],
-    )
+    wanted = [e.strip() for e in str(args.epochs).split(",") if e.strip()]
+    chase_wanted = [e for e in wanted if e in CHASE_EPOCHS]
+    static_wanted = [e for e in wanted if e not in CHASE_EPOCHS]
+
+    # The chase epoch's chaser moves, so it needs the chaser-centric frame. A request that mixes
+    # chase and static epochs cannot share one frame; keep this call to a single kind.
+    if chase_wanted and static_wanted:
+        raise SystemExit(
+            "The training/chase epoch uses a chaser-centric frame and cannot be combined with "
+            "static epochs in one figure. Run them separately, e.g. --epochs training_event."
+        )
+
+    if chase_wanted:
+        scenes, meta = collect_chase_ring_entries(
+            Path(args.zarr_path),
+            chaser_distance_run=str(args.chaser_distance_run),
+            swim_bout_run=str(args.swim_bout_run),
+            epoch_label=chase_wanted[0],
+        )
+    else:
+        scenes, meta = collect_ring_entries(
+            Path(args.zarr_path),
+            chaser_distance_run=str(args.chaser_distance_run),
+            swim_bout_run=str(args.swim_bout_run),
+            epochs_wanted=static_wanted,
+            virtual_rotations_deg=[float(v) for v in str(args.virtual_rotations_deg).split(",") if v.strip()],
+        )
     for scene in scenes:
         if not scene.is_object:
             continue
@@ -413,9 +607,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"{scene.epoch_label:<12} {scene.ref_label:<26} entries={len(scene.visits):<3} "
               f"bouts={nb:<4} escapes={ne}")
 
+    epoch_tag = (chase_wanted[0] if chase_wanted else "_".join(static_wanted)) or "epochs"
     out_dir = args.out_dir or Path.cwd()
     out_dir.mkdir(parents=True, exist_ok=True)
-    png = out_dir / f"{meta['recording_id']}_ring_entries.png"
+    png = out_dir / f"{meta['recording_id']}_ring_entries_{epoch_tag}.png"
     png.write_bytes(render_ring_entries_png(scenes, meta, limit=float(args.limit_mm)))
     print(f"wrote {png}")
 

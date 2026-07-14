@@ -14,6 +14,7 @@ Mostly "renders without crashing", but three things here are not cosmetic:
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +25,7 @@ from fisheye.visualization.chaser_ring_traversal import (
     RESPONSIVE_BAND_MM,
     RING_EDGES_MM,
     _ordered_entries,
+    collect_chase_ring_entries,
     collect_ring_entries,
     render_ring_entries_png,
     write_ring_traversal_gif,
@@ -214,3 +216,80 @@ def test_animation_with_no_entries_raises(tmp_path: Path) -> None:
         s.visits.clear()
     with pytest.raises(ValueError, match="No entries"):
         write_ring_traversal_gif(scenes, meta, tmp_path / "x.gif")
+
+
+# --------------------------------------------------------------------------------------
+# The training epoch: chaser-centric frame (the object moves, so no static ring)
+# --------------------------------------------------------------------------------------
+
+
+def _chase_archive(tmp_path: Path, name: str) -> Path:
+    """A training_event archive with a MOVING chaser, escape-speed bouts, and a materialized
+    chaser_bout_response -- built by the escape-events fixture, which is exactly this shape."""
+
+    from tests.unit.fisheye.test_chaser_escape_events import THRESHOLD, _build
+
+    z = _build(tmp_path, name=name)
+    root = zarr.open_group(str(z), mode="a", use_consolidated=False)
+    bouts = root["analysis/chaser_distance_runs/chaser_distance_1/chaser_bout_response/"
+                 "chaser_bout_response_v1/bouts"]
+    # plant escapes: every 3rd valid bout goes to escape speed
+    peak = np.asarray(bouts["peak_speed_mm_s"][:], dtype=np.float64)
+    peak[::3] = 250.0
+    bouts["peak_speed_mm_s"][:] = peak
+    return z
+
+
+def test_training_epoch_uses_a_chaser_centric_frame(tmp_path: Path) -> None:
+    """During the chase the object moves, so the static ring frame is a fiction. The training
+    collector must return a chaser-centric scene with NO fixed wall."""
+
+    z = _chase_archive(tmp_path, "chase.zarr")
+    scenes, meta = collect_chase_ring_entries(z, chaser_distance_run="chaser_distance_1",
+                                              epoch_label="training_event")
+    assert meta["frame"] == "chaser_centric"
+    assert len(scenes) == 1
+    scene = scenes[0]
+    assert scene.is_object
+    assert bool(getattr(scene, "chaser_centric", False))
+    # there is no fixed wall in this frame -- the arena geometry fields are NaN, and the
+    # drawing must not try to place a wall arc
+    assert math.isnan(scene.arena_center_distance_mm)
+    assert math.isnan(scene.arena_radius_mm)
+    assert scene.visits, "the moving chaser crosses the fish's near zone during the chase"
+
+
+def test_training_entries_carry_escape_coloured_bouts(tmp_path: Path) -> None:
+    z = _chase_archive(tmp_path, "chase2.zarr")
+    scenes, meta = collect_chase_ring_entries(z, chaser_distance_run="chaser_distance_1")
+    bouts = [b for v in scenes[0].visits for b in v["bouts"]]
+    assert bouts, "training entries should carry bout segments"
+    assert any(b["is_escape"] for b in bouts)
+    # every bout's frames lie inside the entry that owns it
+    for v in scenes[0].visits:
+        lo, hi = int(v["frames"][0]), int(v["frames"][-1])
+        for b in v["bouts"]:
+            gf = v["frames"][b["i0"]: b["i1"] + 1]
+            assert int(gf[0]) >= lo and int(gf[-1]) <= hi
+
+
+def test_training_figure_and_animation_render(tmp_path: Path) -> None:
+    z = _chase_archive(tmp_path, "chase3.zarr")
+    scenes, meta = collect_chase_ring_entries(z, chaser_distance_run="chaser_distance_1")
+    png = render_ring_entries_png(scenes, meta)
+    assert png.startswith(PNG_MAGIC)
+    # the caption must not claim a wall in the chaser-centric frame
+    out = write_ring_traversal_gif(scenes, meta, tmp_path / "chase.gif",
+                                   fps=10, frames_per_entry=10, max_entries=3)
+    assert out.read_bytes().startswith(b"GIF")
+
+
+def test_aggressive_chaser_falls_back_cleanly_without_a_cra_endpoint(tmp_path: Path) -> None:
+    """With a single chaser and no cra_primary_endpoint, the collector must not crash -- it
+    falls back to chaser 0 and says so."""
+
+    z = _chase_archive(tmp_path, "chase4.zarr")
+    # the escape-events fixture has no cra endpoint on this run
+    _scenes, meta = collect_chase_ring_entries(z, chaser_distance_run="chaser_distance_1")
+    assert meta["aggressive_chaser_index"] == 0
+    assert "fallback" in meta["aggressive_role_source"] or meta["aggressive_role_source"] == "cra_role_code"
