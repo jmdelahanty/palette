@@ -27,6 +27,7 @@ DEFAULT_MAX_INVENTORY_ITEMS = 250
 DEFAULT_MAX_TABLE_ROWS = 10_000
 DEFAULT_MAX_TRACE_POINTS = 5_000
 DEFAULT_MAX_TRACE_SOURCE_ROWS = 100_000
+DEFAULT_MAX_FULL_COPY_BYTES = 1_000_000_000
 
 _DENSE_CHANNEL_INDEX_LAYOUTS = {
     "frame_angles": ("angle_channel_index", "frame_available"),
@@ -193,6 +194,35 @@ class ZarrAnalysisDataset:
             if path
         }
 
+    def estimated_copy_nbytes(self, *, include_coordinates: bool = True) -> int:
+        """Estimate raw in-memory bytes for a complete detached table copy."""
+
+        paths = [self.value_path]
+        if include_coordinates:
+            paths.extend(
+                str(self.descriptor.get(key) or "")
+                for key in ("time_path", "frame_path")
+            )
+        total = self.row_count * np.dtype(np.int64).itemsize
+        for path in paths:
+            if not path:
+                continue
+            try:
+                total += int(self._workspace.info(path).get("nbytes") or 0)
+            except (KeyError, TypeError, ValueError):
+                continue
+        return int(total)
+
+    def _guard_full_copy(self, *, estimated_bytes: int, max_copy_bytes: int) -> None:
+        if max_copy_bytes < 1:
+            raise ValueError("max_copy_bytes must be positive.")
+        if estimated_bytes > max_copy_bytes:
+            raise ValueError(
+                f"Complete working copy is estimated at {estimated_bytes:,} raw "
+                f"bytes, above the {max_copy_bytes:,}-byte guard. Use bounded "
+                "batches or explicitly raise max_copy_bytes after reviewing memory."
+            )
+
     def _row_selection(
         self,
         *,
@@ -249,6 +279,24 @@ class ZarrAnalysisDataset:
                 max_elements=element_limit,
             ),
             copy=True,
+        )
+
+    def to_numpy_full(
+        self,
+        *,
+        max_copy_bytes: int = DEFAULT_MAX_FULL_COPY_BYTES,
+    ) -> np.ndarray:
+        """Copy every value row after checking its uncompressed byte estimate."""
+
+        value_bytes = int(self._workspace.info(self.value_path).get("nbytes") or 0)
+        self._guard_full_copy(
+            estimated_bytes=value_bytes,
+            max_copy_bytes=int(max_copy_bytes),
+        )
+        return self.to_numpy(
+            start=0,
+            stop=self.row_count,
+            max_source_rows=self.row_count,
         )
 
     def to_polars(
@@ -318,6 +366,24 @@ class ZarrAnalysisDataset:
         """Return a LazyFrame over a bounded in-memory Zarr projection."""
 
         return self.to_polars(**kwargs).lazy()
+
+    def to_polars_full(
+        self,
+        *,
+        max_copy_bytes: int = DEFAULT_MAX_FULL_COPY_BYTES,
+    ) -> pl.DataFrame:
+        """Copy the complete aligned dataset into one guarded Polars frame."""
+
+        estimated_bytes = self.estimated_copy_nbytes(include_coordinates=True)
+        self._guard_full_copy(
+            estimated_bytes=estimated_bytes,
+            max_copy_bytes=int(max_copy_bytes),
+        )
+        return self.to_polars(
+            start=0,
+            stop=self.row_count,
+            max_source_rows=self.row_count,
+        )
 
     def iter_polars(
         self,

@@ -112,6 +112,10 @@ speed = exploration.select_dataset(
 values = analysis_dataset.to_numpy(start=0, stop=1_800)
 frame = analysis_dataset.to_polars(start=0, stop=1_800)
 query = analysis_dataset.to_lazy(start=0, stop=1_800)
+
+# Explicit complete copies have a 1 GB raw-column memory guard by default.
+all_values = analysis_dataset.to_numpy_full()
+all_rows = analysis_dataset.to_polars_full()
 ```
 
 `to_numpy` returns a writable NumPy copy. `to_polars` returns an in-memory
@@ -120,10 +124,13 @@ when available, and semantic value columns such as `speed_mm_s`. `to_lazy`
 provides lazy downstream Polars transformations after the bounded Zarr read;
 Polars does not scan Zarr lazily from storage.
 
-The notebook's **Load bounded working copy** control performs the same Polars
-projection and exposes it as `analysis_data`. The default copy is 1,800 source
-rows and the UI refuses windows above 100,000 source rows. Only the first 25
-rows are rendered, avoiding a large Marimo output payload.
+The notebook's working-copy scope defaults to **Complete dataset**. Before any
+read it reports the selected dataset's row count and estimated uncompressed
+bytes for values, aligned time/frame coordinates, and the generated row index.
+The load button then exposes the complete copy as `analysis_data`, subject to a
+1 GB raw-column guard. Switching to **Bounded window** enables row and stride
+controls and refuses windows above 100,000 source rows. In either mode, only the
+first 25 rows are rendered, avoiding a large Marimo output payload.
 
 Long recordings can be processed without one giant browser allocation:
 
@@ -144,6 +151,48 @@ This creates a separate derived file. There is deliberately no method to write
 the result back into the mounted source Zarr. Ingesting a reviewed result into
 a canonical Palette analysis family remains a batch-pipeline responsibility,
 where schema, lineage, validation, and atomic completion can be enforced.
+
+#### Finding extended stationary intervals
+
+Once the complete smoothed-speed dataset is loaded, contiguous below-threshold
+runs can be measured directly in Polars. Finite-value checking makes NaNs at
+tracking gaps break a stationary interval rather than bridge it:
+
+```python
+import polars as pl
+
+speed_column = "speed_mm_s"
+stationary_threshold_mm_s = 1.0
+minimum_stationary_duration_s = 30.0
+
+stationary_periods = (
+    analysis_data.sort("time_s")
+    .with_columns(
+        (
+            pl.col(speed_column).is_finite()
+            & (pl.col(speed_column) <= stationary_threshold_mm_s)
+        ).alias("stationary")
+    )
+    .with_columns(pl.col("stationary").rle_id().alias("segment_id"))
+    .filter(pl.col("stationary"))
+    .group_by("segment_id", maintain_order=True)
+    .agg(
+        pl.col("time_s").first().alias("start_s"),
+        pl.col("time_s").last().alias("stop_s"),
+        pl.col("frame_index").first().alias("start_frame"),
+        pl.col("frame_index").last().alias("stop_frame"),
+        pl.len().alias("sample_count"),
+        pl.col(speed_column).mean().alias("mean_speed_mm_s"),
+    )
+    .with_columns((pl.col("stop_s") - pl.col("start_s")).alias("duration_s"))
+    .filter(pl.col("duration_s") >= minimum_stationary_duration_s)
+)
+```
+
+This is a descriptive threshold analysis, not a new canonical behavioral label.
+Users can vary the threshold and duration in copied data, compare results, and
+save candidate tables under `/workspace` without changing persisted speed or
+bout data.
 
 ### Guided eye-angle analysis
 

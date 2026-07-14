@@ -315,6 +315,21 @@ def test_analysis_dataset_iterates_whole_recording_in_bounded_batches() -> None:
     )
 
 
+def test_analysis_dataset_loads_complete_copy_with_memory_guard() -> None:
+    workspace, _, _ = _track_kinematics_workspace()
+    dataset = workspace.select_dataset(
+        "speed", variant="smoothed", units="mm/s", track_id=0
+    )
+
+    estimated_bytes = dataset.estimated_copy_nbytes()
+
+    assert estimated_bytes == 336
+    assert dataset.to_numpy_full(max_copy_bytes=48).shape == (12,)
+    assert dataset.to_polars_full(max_copy_bytes=estimated_bytes).shape == (12, 4)
+    with pytest.raises(ValueError, match="above the .*byte guard"):
+        dataset.to_polars_full(max_copy_bytes=estimated_bytes - 1)
+
+
 def test_analysis_dataset_projects_multicolumn_position_semantically() -> None:
     workspace, _, _ = _track_kinematics_workspace()
     position = workspace.select_dataset(

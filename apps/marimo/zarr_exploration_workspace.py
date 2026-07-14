@@ -14,10 +14,11 @@ def _():
     import marimo as mo
     import numpy as np
     import plotly.graph_objects as go
+    import polars as pl
 
     from apps.marimo.components.zarr_workspace import ZarrExplorationWorkspace
 
-    return Path, ZarrExplorationWorkspace, go, mo, np
+    return Path, ZarrExplorationWorkspace, go, mo, np, pl
 
 
 @app.cell(hide_code=True)
@@ -196,17 +197,53 @@ def _(
 
 @app.cell(hide_code=True)
 def _(advanced_storage_mode, analysis_dataset, mo):
+    analysis_copy_scope = None
+    analysis_copy_estimated_bytes = 0
+    if not advanced_storage_mode and analysis_dataset is not None:
+        analysis_copy_estimated_bytes = analysis_dataset.estimated_copy_nbytes()
+        analysis_copy_scope = mo.ui.dropdown(
+            options=["Complete dataset", "Bounded window"],
+            value="Complete dataset",
+            label="Working-copy scope",
+        )
+        analysis_copy_scope_output = mo.vstack(
+            [
+                analysis_copy_scope,
+                mo.md(
+                    f"The complete aligned table contains "
+                    f"**{analysis_dataset.row_count:,} rows** and is estimated at "
+                    f"**{analysis_copy_estimated_bytes / (1024**2):,.1f} MiB** of raw "
+                    "column data before small DataFrame/runtime overhead."
+                ),
+            ]
+        )
+    else:
+        analysis_copy_scope_output = mo.md("")
+    analysis_copy_scope_output
+    return analysis_copy_estimated_bytes, analysis_copy_scope
+
+
+@app.cell(hide_code=True)
+def _(advanced_storage_mode, analysis_copy_scope, analysis_dataset, mo):
     analysis_copy_start = None
     analysis_copy_stop = None
     analysis_copy_stride = None
     analysis_copy_run = None
-    if not advanced_storage_mode and analysis_dataset is not None:
+    if (
+        not advanced_storage_mode
+        and analysis_dataset is not None
+        and analysis_copy_scope is not None
+    ):
+        analysis_copy_is_complete = (
+            analysis_copy_scope.value == "Complete dataset"
+        )
         analysis_copy_start = mo.ui.number(
             start=0,
             stop=max(0, analysis_dataset.row_count - 1),
             step=1,
             value=0,
             label="Start row",
+            disabled=analysis_copy_is_complete,
         )
         analysis_copy_stop = mo.ui.number(
             start=1,
@@ -214,6 +251,7 @@ def _(advanced_storage_mode, analysis_dataset, mo):
             step=1,
             value=min(analysis_dataset.row_count, 1_800),
             label="Stop row (exclusive)",
+            disabled=analysis_copy_is_complete,
         )
         analysis_copy_stride = mo.ui.number(
             start=1,
@@ -221,9 +259,14 @@ def _(advanced_storage_mode, analysis_dataset, mo):
             step=1,
             value=1,
             label="Row stride",
+            disabled=analysis_copy_is_complete,
         )
         analysis_copy_run = mo.ui.run_button(
-            label="Load bounded working copy",
+            label=(
+                "Load complete dataset"
+                if analysis_copy_is_complete
+                else "Load bounded working copy"
+            ),
             kind="success",
         )
         analysis_copy_controls_output = mo.vstack(
@@ -240,9 +283,13 @@ def _(advanced_storage_mode, analysis_dataset, mo):
                     wrap=True,
                 ),
                 mo.md(
-                    "The notebook copy is limited to 100,000 source rows. It is "
-                    "detached from the read-only Zarr and becomes available below as "
-                    "the Polars DataFrame `analysis_data`."
+                    (
+                        "The complete copy has a 1 GB raw-column memory guard. "
+                        if analysis_copy_is_complete
+                        else "A bounded copy is limited to 100,000 source rows. "
+                    )
+                    + "It is detached from the read-only Zarr and becomes available "
+                    "below as the Polars DataFrame `analysis_data`."
                 ),
             ]
         )
@@ -260,7 +307,9 @@ def _(advanced_storage_mode, analysis_dataset, mo):
 @app.cell(hide_code=True)
 def _(
     advanced_storage_mode,
+    analysis_copy_estimated_bytes,
     analysis_copy_run,
+    analysis_copy_scope,
     analysis_copy_start,
     analysis_copy_stop,
     analysis_copy_stride,
@@ -272,23 +321,29 @@ def _(
         analysis_copy_output = mo.md("")
     elif analysis_copy_run is None or not analysis_copy_run.value:
         analysis_copy_output = mo.md(
-            "Select **Load bounded working copy** when you want a Polars object for "
-            "custom cells. Metadata and lazy handles above require no value read."
+            "Select the load button when you want a Polars object for custom cells. "
+            "Metadata and lazy handles above require no value read."
         )
     else:
         try:
-            analysis_data = analysis_dataset.to_polars(
-                start=int(analysis_copy_start.value or 0),
-                stop=int(analysis_copy_stop.value or 0),
-                stride=int(analysis_copy_stride.value or 1),
-                max_source_rows=100_000,
-            )
+            if analysis_copy_scope.value == "Complete dataset":
+                analysis_data = analysis_dataset.to_polars_full(
+                    max_copy_bytes=1_000_000_000,
+                )
+            else:
+                analysis_data = analysis_dataset.to_polars(
+                    start=int(analysis_copy_start.value or 0),
+                    stop=int(analysis_copy_stop.value or 0),
+                    stride=int(analysis_copy_stride.value or 1),
+                    max_source_rows=100_000,
+                )
             analysis_copy_output = mo.vstack(
                 [
                     mo.callout(
                         f"Copied {analysis_data.height:,} row(s) and "
                         f"{analysis_data.width:,} column(s) into memory. The source "
-                        "Zarr was not modified.",
+                        f"Zarr was not modified. Estimated raw columns: "
+                        f"{analysis_copy_estimated_bytes / (1024**2):,.1f} MiB.",
                         kind="success",
                     ),
                     mo.ui.table(
@@ -1466,6 +1521,27 @@ analysis_dataset.summary()
 arrays = analysis_dataset.handles()
 writable_values = analysis_dataset.to_numpy(start=0, stop=1_800)
 working_frame = analysis_dataset.to_polars(start=0, stop=1_800)
+complete_frame = analysis_dataset.to_polars_full()  # guarded at 1 GB raw bytes
+
+# Example: contiguous finite speed <= 1 mm/s for at least 30 seconds.
+stationary_periods = (
+    complete_frame.sort("time_s")
+    .with_columns(
+        (
+            pl.col("speed_mm_s").is_finite()
+            & (pl.col("speed_mm_s") <= 1.0)
+        ).alias("stationary")
+    )
+    .with_columns(pl.col("stationary").rle_id().alias("segment_id"))
+    .filter(pl.col("stationary"))
+    .group_by("segment_id", maintain_order=True)
+    .agg(
+        pl.col("time_s").first().alias("start_s"),
+        pl.col("time_s").last().alias("stop_s"),
+    )
+    .with_columns((pl.col("stop_s") - pl.col("start_s")).alias("duration_s"))
+    .filter(pl.col("duration_s") >= 30.0)
+)
 
 # Process a complete long recording without one giant browser allocation.
 for batch in analysis_dataset.iter_polars(batch_rows=100_000):

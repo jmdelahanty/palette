@@ -564,6 +564,11 @@ def test_zarr_workspace_mounts_only_source_and_code_read_only(tmp_path: Path) ->
     assert "zarr_workspace.analysis_datasets(" in notebook_source
     assert "analysis_dataset = zarr_workspace.dataset(" in notebook_source
     assert "Load bounded working copy" in notebook_source
+    assert "Complete dataset" in notebook_source
+    assert "analysis_dataset.to_polars_full(" in notebook_source
+    assert "max_copy_bytes=1_000_000_000" in notebook_source
+    assert "import polars as pl" in notebook_source
+    assert '.rle_id().alias("segment_id")' in notebook_source
     assert "analysis_dataset.to_polars(" in notebook_source
     assert "analysis_dataset.iter_polars(" in notebook_source
     assert "group_contents_table = mo.ui.table" in notebook_source
