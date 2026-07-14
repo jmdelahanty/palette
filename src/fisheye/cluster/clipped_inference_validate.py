@@ -60,6 +60,13 @@ def _instance_keys(run: Any, *, label: str) -> dict[str, Any]:
     }
 
 
+def _refined_instance_keys(run: Any, *, label: str) -> dict[str, Any]:
+    instances = run.get("instances")
+    if instances is None:
+        raise RuntimeError(f"Modern refined detection run is missing instances: {label}")
+    return _instance_keys(instances, label=f"{label}/instances")
+
+
 def _cache_manifest_report(path: Path, *, zarr_path: Path, collection_id: str, clip_id: str) -> dict[str, Any]:
     manifest = load_flat_roi_cache_manifest(path)
     if not bool(manifest.get("cache_complete")):
@@ -136,7 +143,7 @@ def validate_target(plan_path: Path, *, target_id: str, sample_rows: int = 16) -
         refined = root
         for part in Path(refined_path).parts:
             refined = refined[part]
-        identity = _instance_keys(refined, label=refined_path)
+        identity = _refined_instance_keys(refined, label=refined_path)
         detection_rows += int(identity["row_count"])
         detection_reports.append({"clip_id": str(clip["clip_id"]), "instance_key": identity})
 

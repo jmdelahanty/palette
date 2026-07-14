@@ -13,12 +13,23 @@ from fisheye.cluster import clipped_inference_import_recovery as import_recovery
 from fisheye.cluster import clipped_inference_keypoint_recovery as recovery
 from fisheye.cluster import refined_subject_mask_encoded_chunk_canary as encoded_canary
 from fisheye.cluster.clipped_inference_cleanup import cleanup
-from fisheye.cluster.clipped_inference_validate import _instance_keys
+from fisheye.cluster.clipped_inference_validate import _instance_keys, _refined_instance_keys
 
 
 def _write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_refined_detection_identity_uses_instances_subgroup() -> None:
+    run = {
+        "instance_key": np.asarray([999], dtype=np.uint64),
+        "instances": {"instance_key": np.asarray([10, 11], dtype=np.uint64)},
+    }
+
+    report = _refined_instance_keys(run, label="refined_detect_runs/example")
+
+    assert report == {"row_count": 2, "unique_count": 2, "dtype": "uint64"}
 
 
 def _target(tmp_path: Path, name: str = "sleepyfish_cam2010093") -> workflow.CampaignTarget:
