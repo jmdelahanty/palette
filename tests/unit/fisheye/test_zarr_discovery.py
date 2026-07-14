@@ -6,6 +6,7 @@ import pytest
 
 from fisheye.shared.zarr_discovery import (
     discover_filesystem_zarrs,
+    discover_registry_zarr_entries,
     iter_filesystem_zarrs,
     load_path_list,
 )
@@ -151,3 +152,66 @@ def test_load_path_list_wraps_non_missing_read_errors(
 def test_load_path_list_preserves_missing_file_error(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         load_path_list(tmp_path / "missing.txt", wrap_errors=True)
+
+
+def test_registry_discovery_filters_protocol_name_case_insensitively(
+    tmp_path: Path,
+) -> None:
+    class _FakeRegistry:
+        def __init__(self, _path: Path) -> None:
+            self.closed = False
+
+        def query_datasets(self, **_kwargs: object) -> list[dict[str, object]]:
+            return [
+                {
+                    "zarr_path": str(tmp_path / "keep_analysis.zarr"),
+                    "camera_id": "1",
+                    "protocol_name": "GoodCopBadCop",
+                },
+                {
+                    "zarr_path": str(tmp_path / "drop_analysis.zarr"),
+                    "camera_id": "2",
+                    "protocol_name": "RedScare",
+                },
+            ]
+
+        def close(self) -> None:
+            self.closed = True
+
+    entries = discover_registry_zarr_entries(
+        registry_path=tmp_path / "registry.sqlite",
+        scope_paths=[],
+        protocol_name="goodcopbadcop",
+        registry_cls=_FakeRegistry,
+    )
+
+    assert [entry.zarr_path.name for entry in entries] == ["keep_analysis.zarr"]
+
+
+def test_registry_discovery_excludes_missing_protocol_when_filtering(
+    tmp_path: Path,
+) -> None:
+    class _FakeRegistry:
+        def __init__(self, _path: Path) -> None:
+            pass
+
+        def query_datasets(self, **_kwargs: object) -> list[dict[str, object]]:
+            return [
+                {
+                    "zarr_path": str(tmp_path / "unknown_analysis.zarr"),
+                    "camera_id": None,
+                    "protocol_name": None,
+                }
+            ]
+
+        def close(self) -> None:
+            pass
+
+    entries = discover_registry_zarr_entries(
+        registry_path=tmp_path / "registry.sqlite",
+        scope_paths=[],
+        protocol_name="GoodCopBadCop",
+        registry_cls=_FakeRegistry,
+    )
+
+    assert entries == []

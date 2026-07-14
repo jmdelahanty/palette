@@ -8,10 +8,14 @@ ROOTS_FROM_REPORT=""
 PATH_CONTAINS=""
 SOURCE="filesystem"
 REGISTRY="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
+PALETTE_REPO="${PALETTE_GROUPS_REPO:-/groups/johnson/johnsonlab/jeremy/gitrepos/palette}"
+SUBMIT_HOST="${PALETTE_LSF_SUBMIT_HOST:-login1-citrus-poller}"
 ZARR_USE="analysis"
+ZARR_ORIGIN=""
 RIG_ID=""
 ARENA_ID=""
 CAMERA_ID=""
+PROTOCOL_NAME=""
 REQUIRE_STEPS_OK=()
 
 QUEUE=""
@@ -31,6 +35,8 @@ RUN_CRA_NEAR=1
 RUN_EPOCH_BEHAVIOR=1
 RUN_EGOCENTRIC=1
 RUN_ESCAPE_FREEZE=1
+RUN_EYE_ANGLES=0
+RUN_GAZE_TRACKING=0
 
 OVERWRITE=0
 NO_PNG=0
@@ -49,6 +55,10 @@ CRA_NEAR_COMPONENT="object_relative_near_field_v1"
 EPOCH_BEHAVIOR_COMPONENT="kinematics_bouts_v1"
 EGOCENTRIC_COMPONENT="egocentric_bearing_v1"
 ESCAPE_FREEZE_COMPONENT="canary_chaser0_escape_freeze_v1"
+EYE_ANGLE_OUTPUT_RUN="eye_angles_chaser_gaze_v1_20260714"
+EYE_ANGLE_RUN="latest"
+GAZE_EGOCENTRIC_COMPONENT="latest"
+GAZE_TRACKING_COMPONENT="chaser_gaze_tracking_v1_20260714"
 
 OCCUPANCY_BIN_SIZE=128
 OCCUPANCY_SMOOTH_SIGMA=1.0
@@ -116,10 +126,14 @@ Target selection, choose at least one, or use --source registry:
                               Registry mode snapshots matching rows before bsub.
   --registry PATH             Registry sqlite path for --source registry.
   --zarr-use NAME             Registry zarr_use filter (default: analysis).
+  --zarr-origin NAME          Registry origin filter, usually source or derived.
   --rig-id ID                 Registry rig_id filter.
   --arena-id ID               Registry arena_id filter.
   --camera-id ID              Registry camera_id filter.
+  --protocol-name NAME        Exact, case-insensitive registry protocol filter.
   --require-step-ok STEP      Registry step-status filter. May be repeated.
+  --palette-repo PATH         Clean cluster-visible Palette checkout.
+  --submit-host HOST          Citrus SSH poller when bsub is unavailable locally.
 
 LSF options:
   --queue NAME                LSF queue. If omitted, bsub default queue is used.
@@ -140,6 +154,10 @@ Stage toggles:
   --skip-epoch-behavior       Skip epoch behavior/bout distribution summary.
   --skip-egocentric           Skip fish-centered egocentric chaser bearing.
   --skip-escape-freeze        Skip escape/freeze diagnostic.
+  --run-eye-angles            Run/reuse the DAG eye-angle target before gaze validation.
+  --run-gaze-tracking         Validate eye conventions, then write chaser gaze tracking.
+  --eye-and-gaze-only         Disable the legacy stage set; run eye angles then gaze tracking.
+  --gaze-only                 Disable the legacy stage set; validate/use an existing eye run.
 
 Run names and components:
   --preset NAME               Apply a run-name preset: goodcopbadcop or redscare.
@@ -155,6 +173,10 @@ Run names and components:
   --epoch-behavior-component NAME
   --egocentric-component NAME
   --escape-freeze-component NAME
+  --eye-angle-output-run NAME Output run used when the DAG must create eye angles.
+  --eye-angle-run NAME        Eye run validated/used for gaze (default: latest).
+  --gaze-egocentric-component NAME
+  --gaze-tracking-component NAME
 
 Parameters:
   --overwrite                 Overwrite existing runs/components where supported.
@@ -186,10 +208,14 @@ while [[ $# -gt 0 ]]; do
     --source) SOURCE="$2"; shift 2;;
     --registry) REGISTRY="$2"; shift 2;;
     --zarr-use) ZARR_USE="$2"; shift 2;;
+    --zarr-origin) ZARR_ORIGIN="$2"; shift 2;;
     --rig-id) RIG_ID="$2"; shift 2;;
     --arena-id) ARENA_ID="$2"; shift 2;;
     --camera-id) CAMERA_ID="$2"; shift 2;;
+    --protocol-name) PROTOCOL_NAME="$2"; shift 2;;
     --require-step-ok) REQUIRE_STEPS_OK+=("$2"); shift 2;;
+    --palette-repo) PALETTE_REPO="$2"; shift 2;;
+    --submit-host) SUBMIT_HOST="$2"; shift 2;;
     --queue) QUEUE="$2"; shift 2;;
     --ncores) NCORES="$2"; shift 2;;
     --mem-gb) MEM_GB="$2"; shift 2;;
@@ -206,6 +232,18 @@ while [[ $# -gt 0 ]]; do
     --skip-epoch-behavior) RUN_EPOCH_BEHAVIOR=0; shift;;
     --skip-egocentric) RUN_EGOCENTRIC=0; shift;;
     --skip-escape-freeze) RUN_ESCAPE_FREEZE=0; shift;;
+    --run-eye-angles) RUN_EYE_ANGLES=1; shift;;
+    --run-gaze-tracking) RUN_GAZE_TRACKING=1; shift;;
+    --eye-and-gaze-only)
+      RUN_MOVEMENT=0; RUN_STIMULUS_EPOCH=0; RUN_DETECTION_OCCUPANCY=0
+      RUN_CHASER_DISTANCE=0; RUN_CRA_PRIMARY=0; RUN_CRA_NEAR=0
+      RUN_EPOCH_BEHAVIOR=0; RUN_EGOCENTRIC=0; RUN_ESCAPE_FREEZE=0
+      RUN_EYE_ANGLES=1; RUN_GAZE_TRACKING=1; shift;;
+    --gaze-only)
+      RUN_MOVEMENT=0; RUN_STIMULUS_EPOCH=0; RUN_DETECTION_OCCUPANCY=0
+      RUN_CHASER_DISTANCE=0; RUN_CRA_PRIMARY=0; RUN_CRA_NEAR=0
+      RUN_EPOCH_BEHAVIOR=0; RUN_EGOCENTRIC=0; RUN_ESCAPE_FREEZE=0
+      RUN_EYE_ANGLES=0; RUN_GAZE_TRACKING=1; shift;;
     --preset) apply_preset "$2"; shift 2;;
     --track-run) TRACK_RUN="$2"; shift 2;;
     --swim-bout-run) SWIM_BOUT_RUN="$2"; shift 2;;
@@ -218,6 +256,10 @@ while [[ $# -gt 0 ]]; do
     --epoch-behavior-component) EPOCH_BEHAVIOR_COMPONENT="$2"; shift 2;;
     --egocentric-component) EGOCENTRIC_COMPONENT="$2"; shift 2;;
     --escape-freeze-component) ESCAPE_FREEZE_COMPONENT="$2"; shift 2;;
+    --eye-angle-output-run) EYE_ANGLE_OUTPUT_RUN="$2"; shift 2;;
+    --eye-angle-run) EYE_ANGLE_RUN="$2"; shift 2;;
+    --gaze-egocentric-component) GAZE_EGOCENTRIC_COMPONENT="$2"; shift 2;;
+    --gaze-tracking-component) GAZE_TRACKING_COMPONENT="$2"; shift 2;;
     --overwrite) OVERWRITE=1; shift;;
     --no-png) NO_PNG=1; shift;;
     --no-interactive-spec) NO_INTERACTIVE_SPEC=1; shift;;
@@ -242,6 +284,16 @@ if [[ "$SOURCE" != "filesystem" && "$SOURCE" != "registry" ]]; then
   echo "--source must be filesystem or registry, got: $SOURCE" >&2
   exit 2
 fi
+
+if [[ ! -d "$PALETTE_REPO/.git" || ! -x "$PALETTE_REPO/scripts/py" ]]; then
+  echo "Cluster-visible Palette checkout is unavailable: $PALETTE_REPO" >&2
+  exit 2
+fi
+if [[ -n "$(git -C "$PALETTE_REPO" status --porcelain)" ]]; then
+  echo "Cluster-visible Palette checkout must be clean: $PALETTE_REPO" >&2
+  exit 2
+fi
+EXPECTED_COMMIT="$(git -C "$PALETTE_REPO" rev-parse HEAD)"
 
 if [[ "${#ZARRS[@]}" -eq 0 && -z "$ZARR_LIST" && -z "$ROOTS_FROM_REPORT" && "${#ROOTS[@]}" -eq 0 && "$SOURCE" != "registry" ]]; then
   echo "No targets provided. Pass --zarr, --zarr-list, --roots-from-report, or --root." >&2
@@ -283,9 +335,11 @@ TARGET_ARGS=()
 TARGET_ARGS+=(--source "$SOURCE")
 if [[ "$SOURCE" == "registry" ]]; then
   TARGET_ARGS+=(--registry "$REGISTRY" --zarr-use "$ZARR_USE")
+  if [[ -n "$ZARR_ORIGIN" ]]; then TARGET_ARGS+=(--zarr-origin "$ZARR_ORIGIN"); fi
   if [[ -n "$RIG_ID" ]]; then TARGET_ARGS+=(--rig-id "$RIG_ID"); fi
   if [[ -n "$ARENA_ID" ]]; then TARGET_ARGS+=(--arena-id "$ARENA_ID"); fi
   if [[ -n "$CAMERA_ID" ]]; then TARGET_ARGS+=(--camera-id "$CAMERA_ID"); fi
+  if [[ -n "$PROTOCOL_NAME" ]]; then TARGET_ARGS+=(--protocol-name "$PROTOCOL_NAME"); fi
   for step in "${REQUIRE_STEPS_OK[@]}"; do
     TARGET_ARGS+=(--require-step-ok "$step")
   done
@@ -318,9 +372,11 @@ parser.add_argument("output", type=Path)
 parser.add_argument("--source", choices=["filesystem", "registry"], default="filesystem")
 parser.add_argument("--registry", type=Path)
 parser.add_argument("--zarr-use", default="analysis")
+parser.add_argument("--zarr-origin")
 parser.add_argument("--rig-id")
 parser.add_argument("--arena-id")
 parser.add_argument("--camera-id")
+parser.add_argument("--protocol-name")
 parser.add_argument("--require-step-ok", action="append", default=[])
 parser.add_argument("--zarr", action="append", default=[])
 parser.add_argument("--zarr-list", type=Path)
@@ -364,9 +420,11 @@ if args.source == "registry":
             registry_path=args.registry,
             scope_paths=root_paths,
             zarr_use=args.zarr_use,
+            zarr_origin=args.zarr_origin,
             rig_id=args.rig_id,
             arena_id=args.arena_id,
             camera_id=args.camera_id,
+            protocol_name=args.protocol_name,
             path_contains=args.path_contains or None,
             require_steps_ok=args.require_step_ok or None,
             zarr_suffix="_analysis.zarr" if args.zarr_use == "analysis" else ".zarr",
@@ -399,9 +457,11 @@ summary = {
     "source": args.source,
     "registry": str(args.registry) if args.registry is not None else None,
     "zarr_use": args.zarr_use,
+    "zarr_origin": args.zarr_origin,
     "rig_id": args.rig_id,
     "arena_id": args.arena_id,
     "camera_id": args.camera_id,
+    "protocol_name": args.protocol_name,
     "root_count": len(root_paths),
     "require_steps_ok": args.require_step_ok,
     "target_count": len(selected),
@@ -426,7 +486,8 @@ write_var() {
   printf '%s=%q\n' "$1" "$2" >> "$CONFIG_FILE"
 }
 
-write_var REPO_ROOT "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+write_var REPO_ROOT "$PALETTE_REPO"
+write_var EXPECTED_COMMIT "$EXPECTED_COMMIT"
 write_var RUN_MOVEMENT "$RUN_MOVEMENT"
 write_var RUN_STIMULUS_EPOCH "$RUN_STIMULUS_EPOCH"
 write_var RUN_DETECTION_OCCUPANCY "$RUN_DETECTION_OCCUPANCY"
@@ -436,6 +497,8 @@ write_var RUN_CRA_NEAR "$RUN_CRA_NEAR"
 write_var RUN_EPOCH_BEHAVIOR "$RUN_EPOCH_BEHAVIOR"
 write_var RUN_EGOCENTRIC "$RUN_EGOCENTRIC"
 write_var RUN_ESCAPE_FREEZE "$RUN_ESCAPE_FREEZE"
+write_var RUN_EYE_ANGLES "$RUN_EYE_ANGLES"
+write_var RUN_GAZE_TRACKING "$RUN_GAZE_TRACKING"
 write_var OVERWRITE "$OVERWRITE"
 write_var NO_PNG "$NO_PNG"
 write_var NO_INTERACTIVE_SPEC "$NO_INTERACTIVE_SPEC"
@@ -451,6 +514,10 @@ write_var CRA_NEAR_COMPONENT "$CRA_NEAR_COMPONENT"
 write_var EPOCH_BEHAVIOR_COMPONENT "$EPOCH_BEHAVIOR_COMPONENT"
 write_var EGOCENTRIC_COMPONENT "$EGOCENTRIC_COMPONENT"
 write_var ESCAPE_FREEZE_COMPONENT "$ESCAPE_FREEZE_COMPONENT"
+write_var EYE_ANGLE_OUTPUT_RUN "$EYE_ANGLE_OUTPUT_RUN"
+write_var EYE_ANGLE_RUN "$EYE_ANGLE_RUN"
+write_var GAZE_EGOCENTRIC_COMPONENT "$GAZE_EGOCENTRIC_COMPONENT"
+write_var GAZE_TRACKING_COMPONENT "$GAZE_TRACKING_COMPONENT"
 write_var OCCUPANCY_BIN_SIZE "$OCCUPANCY_BIN_SIZE"
 write_var OCCUPANCY_SMOOTH_SIGMA "$OCCUPANCY_SMOOTH_SIGMA"
 write_var CHASER_THRESHOLD_MM "$CHASER_THRESHOLD_MM"
@@ -484,6 +551,14 @@ mkdir -p "$json_dir" "$RUN_DIR/status" "$RUN_DIR/matplotlib/${index}"
 export MPLCONFIGDIR="$RUN_DIR/matplotlib/${index}"
 
 cd "$REPO_ROOT"
+if [[ "$(git rev-parse HEAD)" != "$EXPECTED_COMMIT" ]]; then
+  echo "Palette commit mismatch on execution host" >&2
+  exit 2
+fi
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "Palette checkout became dirty on execution host" >&2
+  exit 2
+fi
 py="$REPO_ROOT/scripts/py"
 
 overwrite_args=()
@@ -650,6 +725,39 @@ if [[ "$RUN_EGOCENTRIC" == "1" ]]; then
     --json
 fi
 
+if [[ "$RUN_EYE_ANGLES" == "1" ]]; then
+  run_log_step eye_angles "$py" -m fisheye.utils.execute_analysis_workflow \
+    "$zarr_path" \
+    --execution-id "${GAZE_TRACKING_COMPONENT}_${index}" \
+    --num-workers "${LSB_DJOB_NUMPROC:-1}" \
+    --report "$json_dir/eye_angle_workflow_report.json" \
+    --apply \
+    --target eye_angles \
+    --output-run "eye_angles=${EYE_ANGLE_OUTPUT_RUN}"
+fi
+
+if [[ "$RUN_GAZE_TRACKING" == "1" ]]; then
+  run_log_step gaze_convention_validation "$py" -m fisheye.analysis.gaze_convention_validation \
+    "$zarr_path" \
+    --eye-angle-run "$EYE_ANGLE_RUN" \
+    --windows 12 \
+    --rows-per-window 256 \
+    --review-png "$json_dir/gaze_convention_review.png" \
+    --review-panels 12 \
+    --json-output "$json_dir/gaze_convention_validation.json" \
+    --fail-on-error
+
+  run_json_step chaser_gaze_tracking "$py" -m fisheye.analysis.chaser_gaze_tracking \
+    "$zarr_path" \
+    --chaser-distance-run "$CHASER_DISTANCE_RUN" \
+    --egocentric-component "$GAZE_EGOCENTRIC_COMPONENT" \
+    --eye-angle-run "$EYE_ANGLE_RUN" \
+    --component-name "$GAZE_TRACKING_COMPONENT" \
+    --apply \
+    "${overwrite_args[@]}" \
+    "${png_args[@]}"
+fi
+
 if [[ "$RUN_ESCAPE_FREEZE" == "1" ]]; then
   escape_args=()
   if [[ -n "$ESCAPE_CHASER_INDEX" ]]; then
@@ -696,9 +804,13 @@ if [[ "$DRY_RUN" == "1" ]]; then
   exit 0
 fi
 
-if ! command -v bsub >/dev/null 2>&1; then
-  echo "bsub not found in PATH. Is this an LSF cluster?" >&2
-  exit 2
+if command -v bsub >/dev/null 2>&1; then
+  "${BSUB_COMMAND[@]}"
+else
+  if [[ -z "$SUBMIT_HOST" ]]; then
+    echo "bsub is unavailable and --submit-host is empty" >&2
+    exit 2
+  fi
+  printf -v remote_command '%q ' "${BSUB_COMMAND[@]}"
+  ssh "$SUBMIT_HOST" "$remote_command"
 fi
-
-"${BSUB_COMMAND[@]}"

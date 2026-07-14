@@ -194,9 +194,11 @@ def discover_registry_zarr_entries(
     registry_path: Path,
     scope_paths: Sequence[Path],
     zarr_use: str = "analysis",
+    zarr_origin: Optional[str] = None,
     rig_id: Optional[str] = None,
     arena_id: Optional[str] = None,
     camera_id: Optional[str] = None,
+    protocol_name: Optional[str] = None,
     path_contains: Optional[str] = None,
     require_steps_ok: Optional[Sequence[str]] = None,
     exclude_step_ok: Optional[str] = None,
@@ -212,6 +214,7 @@ def discover_registry_zarr_entries(
     try:
         query_kwargs: dict[str, Any] = dict(
             zarr_use=zarr_use,
+            zarr_origin=zarr_origin,
             exclude_status="missing",
             require_recording=True,
             rig_id=rig_id,
@@ -229,6 +232,13 @@ def discover_registry_zarr_entries(
 
     entries: list[RegistryZarrEntry] = []
     for row in rows:
+        if protocol_name is not None:
+            try:
+                row_protocol = normalize_attr(row["protocol_name"])
+            except Exception:
+                row_protocol = None
+            if row_protocol is None or str(row_protocol).casefold() != str(protocol_name).strip().casefold():
+                continue
         raw = row["zarr_path"]
         if raw is None:
             continue
