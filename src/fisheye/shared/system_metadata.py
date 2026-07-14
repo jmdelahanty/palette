@@ -43,6 +43,8 @@ def _run(cmd: List[str], cwd: Optional[Path] = None, timeout: float = 5.0) -> Op
 def _find_git_root(start: Path, max_depth: int = 8) -> Optional[Path]:
     """Walk up directory tree to find .git directory."""
     p = start.resolve()
+    if p.is_file():
+        p = p.parent
     for _ in range(max_depth):
         if (p / ".git").exists():
             return p
@@ -88,14 +90,16 @@ def get_git_info(repo_path: Optional[Path] = None) -> Dict[str, Any]:
     Get git repository information.
     
     Args:
-        repo_path: Optional path to git repo. If None, searches from current directory.
+        repo_path: Optional path to git repo. If None, resolves the source
+            checkout first and falls back to the current directory.
         
     Returns:
         Dict containing commit hash and dirty status
     """
-    # Start from current directory, not __file__ (more robust)
     if repo_path is None:
-        repo_path = _find_git_root(Path.cwd())
+        repo_path = _find_git_root(Path(__file__).resolve())
+        if repo_path is None:
+            repo_path = _find_git_root(Path.cwd())
     
     if not repo_path or not _which("git"):
         return {

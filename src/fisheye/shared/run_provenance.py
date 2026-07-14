@@ -66,6 +66,31 @@ def sha256_payload(value: Any) -> str:
     return hashlib.sha256(stable_json(value).encode("utf-8")).hexdigest()
 
 
+def _find_git_root(start: Path) -> Path | None:
+    """Return the nearest Git worktree root at or above ``start``."""
+
+    candidate = start.expanduser().resolve()
+    if candidate.is_file():
+        candidate = candidate.parent
+    while True:
+        if (candidate / ".git").exists():
+            return candidate
+        if candidate.parent == candidate:
+            return None
+        candidate = candidate.parent
+
+
+def _git_command_cwd(cwd: Path | None) -> Path | None:
+    """Resolve code identity independently of the process working directory."""
+
+    if cwd is not None:
+        return Path(cwd).expanduser().resolve()
+    source_root = _find_git_root(Path(__file__).resolve())
+    if source_root is not None:
+        return source_root
+    return _find_git_root(Path.cwd())
+
+
 def _run_git(args: Sequence[str], *, cwd: Path | None) -> tuple[str | None, str | None]:
     try:
         completed = subprocess.run(
@@ -87,15 +112,18 @@ def _run_git(args: Sequence[str], *, cwd: Path | None) -> tuple[str | None, str 
 def git_identity(*, cwd: Path | None = None) -> dict[str, Any]:
     """Return the actual git state visible to this process."""
 
-    sha, sha_error = _run_git(["rev-parse", "HEAD"], cwd=cwd)
-    short, _short_error = _run_git(["rev-parse", "--short", "HEAD"], cwd=cwd)
-    status, dirty_error = _run_git(["status", "--porcelain"], cwd=cwd)
+    git_cwd = _git_command_cwd(cwd)
+    sha, sha_error = _run_git(["rev-parse", "HEAD"], cwd=git_cwd)
+    short, _short_error = _run_git(["rev-parse", "--short", "HEAD"], cwd=git_cwd)
+    status, dirty_error = _run_git(["status", "--porcelain"], cwd=git_cwd)
     dirty = None if status is None else bool(status.strip())
     out: dict[str, Any] = {
         "git_sha": sha,
         "git_short_sha": short,
         "git_dirty": dirty,
     }
+    if git_cwd is not None:
+        out["git_root"] = str(git_cwd)
     if sha_error:
         out["git_unavailable_reason"] = sha_error
     elif dirty_error:

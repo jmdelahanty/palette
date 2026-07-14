@@ -9,6 +9,7 @@ from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.run_provenance import scheduler_context
 from fisheye.shared.run_provenance import sha256_payload
 from fisheye.shared.run_provenance import validate_run_provenance
+from fisheye.shared.system_metadata import get_git_info
 
 
 def _valid_payload(**overrides: object) -> dict[str, object]:
@@ -218,6 +219,24 @@ def test_build_run_provenance_from_stage_record_reuses_parameters_and_inputs() -
     assert payload["params"] == {"jump_threshold": 100}
     assert payload["input_run_ids"] == {"source_detect_run": "detect_001"}
     assert validate_run_provenance(payload).valid is True
+
+
+def test_provenance_resolves_source_checkout_outside_git_working_directory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    payload = build_writer_run_provenance(
+        command="outside-repo-writer",
+        params={},
+    )
+    stage_git = get_git_info()
+
+    assert validate_run_provenance(payload).valid is True
+    assert payload["git_sha"] == stage_git["commit_hash"]
+    assert payload["git_root"] == stage_git["top_level"]
+    assert payload["git_sha"] not in (None, "", "N/A")
 
 
 def test_scheduler_context_captures_lsf_job_identity(monkeypatch) -> None:

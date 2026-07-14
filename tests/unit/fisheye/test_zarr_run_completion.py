@@ -26,6 +26,7 @@ from fisheye.shared.zarr_run_completion import (
     RUN_PROVENANCE_BYPASS_ATTR,
     RUN_COMPLETED_AT_ATTR,
     RUN_COMPLETION_STATUS_ATTR,
+    RUN_STATUS_FAILED,
     RUN_STATUS_RUNNING,
     clear_authoritative_run,
     describe_run_parent,
@@ -399,11 +400,15 @@ def test_epoch_two_mark_complete_refuses_missing_run_provenance() -> None:
     run = FakeGroup()
     parent["run_001"] = run
     mark_run_started(run, run_name="run_001", stage="detect")
+    note_pending_latest(parent, "run_001")
 
     with pytest.raises(RuntimeError, match="requires valid run provenance"):
         mark_run_complete(run, parent_group=parent, run_name="run_001")
 
     assert is_run_complete(run) is False
+    assert run.attrs[RUN_COMPLETION_STATUS_ATTR] == RUN_STATUS_FAILED
+    assert "requires valid run provenance" in run.attrs["palette_run_error"]
+    assert "latest_pending" not in parent.attrs
     assert "latest" not in parent.attrs
     assert "latest_complete" not in parent.attrs
 

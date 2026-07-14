@@ -203,14 +203,27 @@ def mark_run_complete(
 ) -> None:
     """Mark a run as complete and then publish it as latest when requested."""
 
-    _validate_or_record_run_provenance(
-        run_group,
-        parent_group=parent_group,
-        run_name=run_name,
-        run_provenance=run_provenance,
-        allow_missing_run_provenance=allow_missing_run_provenance,
-        missing_run_provenance_reason=missing_run_provenance_reason,
-    )
+    try:
+        _validate_or_record_run_provenance(
+            run_group,
+            parent_group=parent_group,
+            run_name=run_name,
+            run_provenance=run_provenance,
+            allow_missing_run_provenance=allow_missing_run_provenance,
+            missing_run_provenance_reason=missing_run_provenance_reason,
+        )
+    except Exception as exc:
+        if run_group.attrs.get(RUN_COMPLETION_STATUS_ATTR) == RUN_STATUS_RUNNING:
+            try:
+                mark_run_failed(
+                    run_group,
+                    parent_group=parent_group,
+                    run_name=run_name,
+                    error=f"completion finalization failed: {exc}",
+                )
+            except Exception:
+                pass
+        raise
     attrs = run_group.attrs
     attrs[RUN_COMPLETION_CONTRACT_ATTR] = RUN_COMPLETION_CONTRACT
     attrs[RUN_COMPLETION_STATUS_ATTR] = RUN_STATUS_COMPLETE
@@ -231,6 +244,8 @@ def mark_run_complete(
 def mark_run_failed(
     run_group: Any,
     *,
+    parent_group: Optional[Any] = None,
+    run_name: Optional[str] = None,
     failed_at_utc: Optional[str] = None,
     error: Optional[str] = None,
 ) -> None:
@@ -238,8 +253,17 @@ def mark_run_failed(
     attrs[RUN_COMPLETION_CONTRACT_ATTR] = RUN_COMPLETION_CONTRACT
     attrs[RUN_COMPLETION_STATUS_ATTR] = RUN_STATUS_FAILED
     attrs["palette_run_failed_at_utc"] = failed_at_utc or utc_now_iso()
+    if run_name is not None:
+        attrs[RUN_NAME_ATTR] = str(run_name)
     if error:
         attrs["palette_run_error"] = str(error)
+    if parent_group is not None and run_name is not None:
+        name = str(run_name)
+        if parent_group.attrs.get(RUN_LATEST_PENDING_ATTR) == name:
+            try:
+                del parent_group.attrs[RUN_LATEST_PENDING_ATTR]
+            except Exception:
+                parent_group.attrs[RUN_LATEST_PENDING_ATTR] = None
 
 
 def has_run_completion_contract(run_group: Any) -> bool:
