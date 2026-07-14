@@ -74,7 +74,10 @@ exploration.handle("tracks/speed")
 The metadata inventory in the rendered notebook also supports single-row
 selection. Selecting an array or group reveals its metadata and attributes,
 drives the bounded preview, and updates `selected_path` for editable cells and
-Pair agents.
+Pair agents. Groups remain valid metadata selections but do not have directly
+previewable values; the preview controls enable only when the selected row is
+an array. To browse below a deep group, use its selected path as the inventory's
+**Group path** and adjust the bounded traversal depth.
 
 These calls inspect handles and metadata. They do not materialize array values.
 Node paths are relative to the selected Zarr and reject absolute paths or

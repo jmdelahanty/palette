@@ -128,13 +128,28 @@ def _(inventory_depth, inventory_limit, inventory_path, mo, zarr_workspace):
 def _(inventory_table, mo, zarr_workspace):
     selected_rows = inventory_table.value if inventory_table is not None else []
     selected_path = str(selected_rows[0]["path"]) if selected_rows else ""
+    selected_kind = ""
     if selected_path:
         try:
             selected_info = zarr_workspace.info(selected_path)
+            selected_kind = str(selected_info.get("kind", ""))
             selected_attrs = zarr_workspace.attrs(selected_path)
+            if selected_kind == "group":
+                selected_guidance = mo.callout(
+                    mo.md(
+                        "This selection is a **group**: it has metadata and child "
+                        "nodes, but no array values to preview. Select a row whose "
+                        "kind is `array`. To inspect deeper children, enter this "
+                        "path in **Group path** above and adjust the traversal depth."
+                    ),
+                    kind="info",
+                )
+            else:
+                selected_guidance = mo.md("")
             selected_output = mo.vstack(
                 [
                     mo.md(f"### Selected dataset: `{selected_path}`"),
+                    selected_guidance,
                     mo.hstack(
                         [
                             mo.tree(selected_info, label="Metadata"),
@@ -154,27 +169,42 @@ def _(inventory_table, mo, zarr_workspace):
     else:
         selected_output = mo.md("Select a dataset row above to reveal it.")
     selected_output
-    return (selected_path,)
+    return selected_kind, selected_path
 
 
 @app.cell(hide_code=True)
-def _(mo, selected_path):
+def _(mo, selected_kind, selected_path):
+    selected_is_array = selected_kind == "array"
     preview_rows = mo.ui.number(
-        start=0, stop=10_000, step=10, value=100, label="Leading rows"
+        start=0,
+        stop=10_000,
+        step=10,
+        value=100,
+        label="Leading rows",
+        disabled=not selected_is_array,
     )
     preview_run = mo.ui.run_button(
         label="Load selected array preview",
         kind="success",
-        disabled=not selected_path,
+        disabled=not selected_is_array,
     )
+    if selected_kind == "group":
+        preview_instruction = (
+            "The selected path is a group. Select an `array` row to enable preview."
+        )
+    elif not selected_path:
+        preview_instruction = "Select an `array` row above to enable preview."
+    else:
+        preview_instruction = (
+            "Request a small leading-axis preview. Large multidimensional rows may "
+            "still exceed the 100,000-element guard; use an explicit tuple of slices "
+            "in the exploration cell below."
+        )
     mo.vstack(
         [
             mo.md("## Array preview"),
             mo.md(
-                f"Selected path: `{selected_path or 'none'}`. Request a small "
-                "leading-axis preview after selecting an array above. "
-                "Large multidimensional rows may still exceed the 100,000-element "
-                "guard; use an explicit tuple of slices in the exploration cell below."
+                f"Selected path: `{selected_path or 'none'}`. {preview_instruction}"
             ),
             mo.hstack(
                 [preview_rows, preview_run],
@@ -188,11 +218,23 @@ def _(mo, selected_path):
 
 
 @app.cell(hide_code=True)
-def _(mo, preview_rows, preview_run, selected_path, zarr_workspace):
-    if not preview_run.value:
-        preview_output = mo.md("Select **Load bounded preview** to read array values.")
-    elif not selected_path:
+def _(
+    mo,
+    preview_rows,
+    preview_run,
+    selected_kind,
+    selected_path,
+    zarr_workspace,
+):
+    if not selected_path:
         preview_output = mo.callout("Select a dataset row first.", kind="warn")
+    elif selected_kind != "array":
+        preview_output = mo.callout(
+            "The selected node is a group. Select an array row to preview values.",
+            kind="info",
+        )
+    elif not preview_run.value:
+        preview_output = mo.md("Select **Load selected array preview** to read values.")
     else:
         try:
             preview_metadata = zarr_workspace.info(selected_path)

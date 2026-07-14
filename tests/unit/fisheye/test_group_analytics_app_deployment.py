@@ -546,6 +546,8 @@ def test_zarr_workspace_mounts_only_source_and_code_read_only(tmp_path: Path) ->
     assert "exploration.read" in notebook_source
     assert 'selection="single"' in notebook_source
     assert "(exploration, selected_path)" in notebook_source
+    assert 'selected_is_array = selected_kind == "array"' in notebook_source
+    assert "The selected node is a group" in notebook_source
 
 
 def test_zarr_workspace_uses_fileglancer_authentication(tmp_path: Path) -> None:
