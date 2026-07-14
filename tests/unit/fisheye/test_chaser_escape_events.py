@@ -84,8 +84,41 @@ def _static_epoch() -> tuple[np.ndarray, np.ndarray]:
     return fish_x, np.full(EPOCH_FRAMES, 24.0)
 
 
+TRIGGER_RADIUS_MM = 10.0     # distance falls 16 -> 8 over c..c+20, so the trigger fires at c+15
+TRIGGER_OFFSET = 15
+
+
+def _write_chase_trials(root: zarr.Group, n: int) -> None:
+    """One chase trial per cycle of the chase epoch, via the controller's chase_trial_id.
+
+    Only the chase epoch has trials; the post epoch's object never chases.
+    """
+
+    dt = np.dtype([
+        ("stimulus_frame_num", np.int64),
+        ("chaser_index", np.int64),
+        ("chase_sequence_active", np.bool_),
+        ("is_chasing", np.bool_),
+        ("chase_trial_id", np.int64),
+        ("initial_distance_mm", np.float64),
+    ])
+    rec = np.zeros(n, dtype=dt)
+    rec["stimulus_frame_num"] = np.arange(n, dtype=np.int64)
+    rec["initial_distance_mm"] = TRIGGER_RADIUS_MM
+    for i in range(N_CYCLES):
+        c = i * CYCLE
+        lo, hi = c, c + 65            # active window inside the chase epoch
+        rec["chase_sequence_active"][lo:hi] = True
+        rec["is_chasing"][lo:hi] = True
+        rec["chase_trial_id"][lo:hi] = i + 1
+    tracking = root["analysis/stimulus_runs/stimulus_1"].require_group("tracking_data")
+    tracking.create_array("chaser_states", data=rec, overwrite=True)
+
+
 def _build(tmp_path: Path, *, name: str = "escape.zarr",
-           dropout: tuple[int, int] | None = None) -> Path:
+           dropout: tuple[int, int] | None = None,
+           habituating: bool = False,
+           with_trials: bool = True) -> Path:
     chase_fish, chase_obj = _chase_epoch()
     post_fish, post_obj = _static_epoch()
     fish_x = np.concatenate([chase_fish, post_fish])
@@ -121,13 +154,23 @@ def _build(tmp_path: Path, *, name: str = "escape.zarr",
     frames.create_array("fish_heading_valid", data=np.ones(n, dtype=bool), overwrite=True)
     run["egocentric_bearing"].attrs["latest"] = "track_test"
 
+    if with_trials:
+        _write_chase_trials(root, n)
+
     starts: list[int] = []
     peaks: list[float] = []
     for base in (0, EPOCH_FRAMES):
         for i in range(N_CYCLES):
             c = base + i * CYCLE
             starts.append(c + ONSET_OFFSET)
-            peaks.append(ESCAPE_PEAK)
+            # habituating: only the first two cycles of the CHASE epoch escape; later ones
+            # make an ordinary bout in exactly the same place. Everything else is identical,
+            # so any declining slope must come from the escapes and not from the geometry.
+            fast = ESCAPE_PEAK
+            if habituating and base == 0 and i >= 2:
+                fast = ORDINARY_PEAK
+            starts[-1] = c + ONSET_OFFSET
+            peaks.append(fast)
             for off in ORDINARY_OFFSETS:
                 starts.append(c + off)
                 peaks.append(ORDINARY_PEAK)
@@ -377,3 +420,99 @@ def test_png_renders(tmp_path: Path) -> None:
     png = render_escape_events_png(_result(_build(tmp_path)))
     assert png.startswith(b"\x89PNG")
     assert len(png) > 15_000
+
+
+# ======================================================================================
+# Trial-locked habituation
+# ======================================================================================
+
+
+def test_trials_come_from_the_controllers_chase_trial_id(tmp_path: Path) -> None:
+    r = _result(_build(tmp_path))
+    assert r.trial_segmentation_source == "chase_trial_id"
+    assert len(r.trial_ordinal) == N_CYCLES                    # only the chase epoch has trials
+    assert list(np.asarray(r.trial_ordinal)) == [1, 2, 3, 4]
+    assert list(np.asarray(r.trial_id)) == [1, 2, 3, 4]
+    # every trial lies inside the chase epoch, never the post epoch
+    assert int(np.max(np.asarray(r.trial_end_frame))) < EPOCH_FRAMES
+
+
+def test_escapes_are_joined_to_the_trial_they_fall_in(tmp_path: Path) -> None:
+    r = _result(_build(tmp_path))
+    # one escape per cycle, and the post-epoch escapes belong to no trial at all
+    assert list(np.asarray(r.trial_escape_count)) == [1, 1, 1, 1]
+    assert np.all(np.asarray(r.trial_any_escape))
+    # latency is measured from the proximity trigger, not the trial start
+    lat = np.asarray(r.trial_first_escape_latency_s)
+    assert np.allclose(lat, (ONSET_OFFSET - TRIGGER_OFFSET) / FPS, atol=0.15)
+    assert np.all(lat > 0.0)      # the chaser closes, THEN the fish flees
+
+
+def test_habituation_slope_is_negative_only_when_escapes_actually_decline(tmp_path: Path) -> None:
+    """The whole point of the trial axis. Escape collapse after the first trials is invisible
+    when the chase epoch is averaged; it only exists per trial."""
+
+    flat = _result(_build(tmp_path, name="flat.zarr"))
+    hab = _result(_build(tmp_path, name="hab.zarr", habituating=True))
+
+    assert list(np.asarray(hab.trial_escape_count)) == [1, 1, 0, 0]
+    assert float(flat.habituation_slope_per_trial) == pytest.approx(0.0, abs=1e-6)
+    assert float(hab.habituation_slope_per_trial) < 0.0
+    assert float(hab.habituation_slope_any_escape) < 0.0
+
+    s = hab.summary
+    assert float(s["p_any_escape_trials_1_2"]) == pytest.approx(1.0)
+    assert float(s["escape_rate_per_valid_s_trials_1_2"]) > float(s["escape_rate_per_valid_s_trials_5plus"] or 0.0) \
+        if s.get("escape_rate_per_valid_s_trials_5plus") is not None else True
+
+
+def test_trial_rate_uses_valid_time_so_a_lost_fish_is_not_a_calm_fish(tmp_path: Path) -> None:
+    """A trial that lost half its frames must not read as a trial where the fish escaped
+    half as much. This is the exact artifact that could manufacture fake habituation:
+    dropout rises when the fish freezes, and freezing is what we are trying to measure."""
+
+    # blank the second half of trial 3 (frames 160..205 of an 80-frame cycle starting at 160)
+    z = _build(tmp_path, name="tdrop.zarr", dropout=(185, 225))
+    r = _result(z)
+    d = np.asarray(r.trial_dropout_fraction)
+    assert float(d[2]) > 0.3 and float(d[0]) == pytest.approx(0.0, abs=1e-6)
+    # the trial still has its escape (frame 180 is before the blanked span) ...
+    assert int(np.asarray(r.trial_escape_count)[2]) == 1
+    # ... and because the denominator shrank, its rate is HIGHER than a clean trial's, not lower
+    rate = np.asarray(r.trial_escape_rate_per_valid_s)
+    assert float(rate[2]) > float(rate[0])
+
+
+def test_wall_distance_at_trigger_is_recorded_for_the_confound(tmp_path: Path) -> None:
+    """Habituation is confounded with the fish moving to the wall. The component must record
+    wall position so the question can be asked -- and must NOT quietly regress it out, since
+    wall position is downstream of the chase (a mediator, not a covariate)."""
+
+    r = _result(_build(tmp_path))
+    w = np.asarray(r.trial_wall_distance_at_trigger_mm)
+    assert np.all(np.isfinite(w))
+    # fixture: fish at x=40 in a 40 mm-radius arena centred at 50 -> 10 mm off centre, 30 from wall
+    assert np.allclose(w, 30.0, atol=1.0)
+    assert "mediator" in str(r.diagnostics["wall_confound"])
+
+    path = write_chaser_escape_events_component(_build(tmp_path, name="w2.zarr"),
+                                                _result(_build(tmp_path, name="w2.zarr")),
+                                                overwrite=True, write_png=False)
+    root = zarr.open_group(str(tmp_path / "w2.zarr"), mode="r", use_consolidated=False)
+    trials = root[path]["trials"]
+    assert "wall_distance_at_trigger_mm" in list(trials.keys())
+    assert "post-treatment" in str(trials.attrs["wall_confound"])
+
+
+def test_no_stimulus_controller_leaves_trials_empty_rather_than_failing(tmp_path: Path) -> None:
+    """A recording with no chase_trial_id still gets rates, traces and pursuit. The trial
+    axis simply is not available, and says so."""
+
+    r = _result(_build(tmp_path, name="notrials.zarr", with_trials=False))
+    assert len(r.trial_ordinal) == 0
+    assert r.trial_segmentation_source == "unavailable"
+    assert math.isnan(float(r.habituation_slope_per_trial))
+    assert any(w.startswith("trial_segmentation_unavailable") for w in r.qc_warnings)
+    # the rest of the component is unaffected
+    assert int(r.summary["escape_event_count"]) == 2 * N_CYCLES
+    assert float(r.pursuit_gain_mm[_epoch(r, "training_event"), _obj(r)]) > 4.0

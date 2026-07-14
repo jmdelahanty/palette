@@ -81,6 +81,14 @@ from fisheye.analysis.chaser_bout_response import (
     BoutReference,
 )
 from fisheye.analysis.chaser_distance_runs import _bytes_array, _write_array
+from fisheye.analysis.chaser_escape_freeze import (
+    _controller_trial_segments,
+    _dense_controller_state,
+    _load_chaser_states,
+    _resolve_trigger_radius,
+    _select_trial_trigger,
+    _source_stimulus_path,
+)
 from fisheye.analysis.chaser_radial_occupancy import (
     ChaserRadialEpoch,
     _decode_text_column,
@@ -96,10 +104,10 @@ from fisheye.shared.system_metadata import get_git_info
 from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
 
 
-SCHEMA_ID = "palette.chaser_escape_events.v1"
-SCHEMA_VERSION = 1
-METHOD = "peak_speed_escape_events_with_pursuit_decomposition"
-METHOD_VERSION = "1"
+SCHEMA_ID = "palette.chaser_escape_events.v2"
+SCHEMA_VERSION = 2
+METHOD = "peak_speed_escape_events_with_pursuit_decomposition_and_trial_habituation"
+METHOD_VERSION = "2"
 COMPONENT_PARENT_NAME = "chaser_escape_events"
 DEFAULT_COMPONENT_NAME = "chaser_escape_events_v1"
 
@@ -114,6 +122,7 @@ DEFAULT_RECAPTURE_WINDOW_S = 4.0
 DEFAULT_ONSET_BASELINE_FRAMES = 4
 DEFAULT_MAX_WINDOW_DROPOUT_FRACTION = 0.25
 DEFAULT_MIN_EVENTS_FOR_TRACE = 3
+MIN_TRIALS_FOR_HABITUATION_SLOPE = 4
 
 
 @dataclass(frozen=True)
@@ -174,6 +183,23 @@ class ChaserEscapeEventsResult:
     # per (threshold, epoch)
     sweep_escape_count: np.ndarray
     sweep_rate_per_valid_min: np.ndarray
+    # per chase trial (n_trials,) -- empty when the stimulus run has no chase_trial_id
+    trial_id: np.ndarray
+    trial_ordinal: np.ndarray
+    trial_start_frame: np.ndarray
+    trial_end_frame: np.ndarray
+    trial_trigger_frame: np.ndarray
+    trial_trigger_distance_mm: np.ndarray
+    trial_escape_count: np.ndarray
+    trial_any_escape: np.ndarray
+    trial_valid_s: np.ndarray
+    trial_dropout_fraction: np.ndarray
+    trial_escape_rate_per_valid_s: np.ndarray
+    trial_wall_distance_at_trigger_mm: np.ndarray
+    trial_first_escape_latency_s: np.ndarray
+    trial_segmentation_source: str
+    habituation_slope_per_trial: float      # within-fish OLS slope of escape rate on ordinal
+    habituation_slope_any_escape: float
     status: str
     qc_warnings: tuple[str, ...]
     summary: dict[str, Any]
@@ -502,6 +528,129 @@ def build_chaser_escape_events_result(
             if valid_duration[e] > 0:
                 sweep_rate[t, e] = float(c) / float(valid_duration[e]) * 60.0
 
+    # ---- trial-locked: does the escape response habituate across chase trials? ------------
+    #
+    # The chase epoch is not 180 s of continuous chasing: it is ~12 experimenter-initiated
+    # trials of ~5 s. Escape collapses after trial 1-2 while freezing rises -- an active-to-
+    # passive defence switch. It is only visible per trial; averaged over the epoch it is
+    # invisible.
+    #
+    # WALL DISTANCE IS RECORDED HERE ON PURPOSE. The fish moves to the wall after trial 1 and
+    # stays, and at the wall it rarely escapes -- so "habituation" and "cornered against the
+    # wall with nowhere to flee" are confounded by construction. Two checks rule the trap out
+    # (see the contract), but wall position is DOWNSTREAM of the chase: it is a mediator of
+    # the response, not a nuisance covariate. Regressing it out would be conditioning on a
+    # post-treatment variable. It is stored so the question can be asked, not silently
+    # "controlled for".
+    trial_id = np.zeros(0, dtype=np.int64)
+    trial_ordinal = np.zeros(0, dtype=np.int32)
+    trial_start = np.zeros(0, dtype=np.int64)
+    trial_end = np.zeros(0, dtype=np.int64)
+    trial_trigger = np.zeros(0, dtype=np.int64)
+    trial_trigger_dist = np.zeros(0, dtype=np.float64)
+    trial_escapes = np.zeros(0, dtype=np.int64)
+    trial_any = np.zeros(0, dtype=bool)
+    trial_valid_s = np.zeros(0, dtype=np.float64)
+    trial_dropout = np.zeros(0, dtype=np.float64)
+    trial_rate = np.zeros(0, dtype=np.float64)
+    trial_wall = np.zeros(0, dtype=np.float64)
+    trial_latency = np.zeros(0, dtype=np.float64)
+    seg_source = "unavailable"
+    hab_slope = math.nan
+    hab_slope_any = math.nan
+
+    try:
+        _stim_run, stim_path = _source_stimulus_path(run_group)
+        chaser_states = _load_chaser_states(root, stim_path)
+        stim_frames = np.asarray(run_group["frames/stimulus_frame_num"][:], dtype=np.int64)
+        # Trials belong to the chaser that actually chases. Objects that never move have no
+        # trials, so pick the chaser the controller marks active rather than assuming index 0.
+        active_index = int(chaser_indices[0])
+        for cand in np.asarray(chaser_indices, dtype=np.int64).reshape(-1):
+            probe = _dense_controller_state(chaser_states, stimulus_frame_nums=stim_frames,
+                                            chaser_index=int(cand))
+            if int(np.count_nonzero(probe["active"])) > 0:
+                active_index = int(cand)
+                break
+        controller = _dense_controller_state(chaser_states, stimulus_frame_nums=stim_frames,
+                                             chaser_index=active_index)
+        segments, seg_source = _controller_trial_segments(controller["active"], controller["trial_id"])
+    except Exception as exc:                      # noqa: BLE001 -- a missing stimulus run is not fatal
+        segments = []
+        qc.append(f"trial_segmentation_unavailable:{type(exc).__name__}")
+
+    if segments:
+        radius_mm, _rsrc, _rov, _rw = _resolve_trigger_radius(
+            root, source_stimulus_path=stim_path, chaser_states=chaser_states,
+            chaser_index=active_index, trigger_radius_mm=None,
+        )
+        obj_col = {int(v): i for i, v in enumerate(chaser_indices)}.get(active_index, 0)
+        obj_ref = next(
+            (i for i, rr in enumerate(references)
+             if rr.kind == REFERENCE_KIND_OBJECT and rr.chaser_index == active_index),
+            None,
+        )
+        dist_to_chaser = distance[:, obj_ref] if obj_ref is not None else np.full(total_frames, np.nan)
+        radius_mm_arena = float(geometry.radius_px) / float(pixels_per_mm)
+        fish_radius_mm = np.hypot(
+            fish_xy[:, 0] - float(geometry.center_x_px), fish_xy[:, 1] - float(geometry.center_y_px)
+        ) / float(pixels_per_mm)
+        wall_mm = radius_mm_arena - fish_radius_mm
+        wall_mm[~fish_valid] = np.nan
+
+        esc_frames = bout_start[ev] if n_events else np.zeros(0, dtype=np.int64)
+        k = len(segments)
+        trial_id = np.zeros(k, dtype=np.int64)
+        trial_ordinal = np.zeros(k, dtype=np.int32)
+        trial_start = np.zeros(k, dtype=np.int64)
+        trial_end = np.zeros(k, dtype=np.int64)
+        trial_trigger = np.zeros(k, dtype=np.int64)
+        trial_trigger_dist = np.full(k, np.nan)
+        trial_escapes = np.zeros(k, dtype=np.int64)
+        trial_any = np.zeros(k, dtype=bool)
+        trial_valid_s = np.zeros(k, dtype=np.float64)
+        trial_dropout = np.full(k, np.nan)
+        trial_rate = np.full(k, np.nan)
+        trial_wall = np.full(k, np.nan)
+        trial_latency = np.full(k, np.nan)
+
+        for i, (start, end, tid) in enumerate(segments):
+            lo, hi = int(start), int(end) + 1
+            span = max(1, hi - lo)
+            trig, _prox, _src = _select_trial_trigger(dist_to_chaser, np.arange(lo, hi, dtype=np.int64),
+                                                      trigger_radius_mm=float(radius_mm))
+            n_valid_t = int(np.count_nonzero(fish_valid[lo:hi]))
+            inside = esc_frames[(esc_frames >= lo) & (esc_frames < hi)] if n_events else np.zeros(0, np.int64)
+
+            trial_id[i] = int(tid)
+            trial_ordinal[i] = int(i + 1)
+            trial_start[i] = lo
+            trial_end[i] = hi - 1
+            trial_trigger[i] = int(trig)
+            if 0 <= trig < total_frames:
+                trial_trigger_dist[i] = float(dist_to_chaser[trig])
+                trial_wall[i] = float(wall_mm[trig])
+            trial_escapes[i] = int(inside.size)
+            trial_any[i] = bool(inside.size)
+            trial_valid_s[i] = float(n_valid_t) / float(fps)
+            trial_dropout[i] = 1.0 - (float(n_valid_t) / float(span))
+            # Escapes per *validly tracked* second: a trial that lost half its frames must not
+            # read as a trial where the fish escaped half as much.
+            if trial_valid_s[i] > 0.5:
+                trial_rate[i] = float(inside.size) / float(trial_valid_s[i])
+            if inside.size and 0 <= trig < total_frames:
+                trial_latency[i] = float(int(inside.min()) - int(trig)) / float(fps)
+
+        ordinals = trial_ordinal.astype(np.float64)
+        for target, slot in ((trial_rate, "rate"), (trial_any.astype(np.float64), "any")):
+            fit = np.isfinite(target)
+            if int(np.count_nonzero(fit)) >= MIN_TRIALS_FOR_HABITUATION_SLOPE and float(np.std(ordinals[fit])) > 0:
+                slope = float(np.polyfit(ordinals[fit], target[fit], 1)[0])
+                if slot == "rate":
+                    hab_slope = slope
+                else:
+                    hab_slope_any = slope
+
     # ---- QC ------------------------------------------------------------------------------
     finite_peak = bout_peak[usable]
     max_peak = float(np.max(finite_peak)) if finite_peak.size else math.nan
@@ -530,6 +679,21 @@ def build_chaser_escape_events_result(
             summary[f"pursuit_gain_mm_{label}_{ref.label}"] = float(gain[e, r])
             summary[f"pursuit_recapture_mm_{label}_{ref.label}"] = float(recapture[e, r])
             summary[f"pursuit_event_count_{label}_{ref.label}"] = int(pursuit_n[e, r])
+
+    if len(trial_ordinal):
+        early = trial_ordinal <= 2
+        late = trial_ordinal >= 5
+        summary["trial_count"] = int(len(trial_ordinal))
+        summary["trial_segmentation_source"] = str(seg_source)
+        summary["habituation_slope_escapes_per_valid_s_per_trial"] = float(hab_slope)
+        summary["habituation_slope_any_escape_per_trial"] = float(hab_slope_any)
+        summary["escape_rate_per_valid_s_trials_1_2"] = _nan_median(trial_rate[early])
+        summary["escape_rate_per_valid_s_trials_5plus"] = _nan_median(trial_rate[late])
+        summary["p_any_escape_trials_1_2"] = float(np.mean(trial_any[early])) if early.any() else math.nan
+        summary["p_any_escape_trials_5plus"] = float(np.mean(trial_any[late])) if late.any() else math.nan
+        summary["wall_distance_at_trigger_mm_trials_1_2"] = _nan_median(trial_wall[early])
+        summary["wall_distance_at_trigger_mm_trials_5plus"] = _nan_median(trial_wall[late])
+        summary["median_first_escape_latency_s"] = _nan_median(trial_latency)
 
     diagnostics = {
         "escape_definition": (
@@ -572,6 +736,27 @@ def build_chaser_escape_events_result(
             "events/ holds one row per escape, and one fish contributes many. Reduce to a per-fish "
             "value before any cross-recording test. pursuit/ and traces/ are already per-recording "
             "medians and are the safe things to aggregate."
+        ),
+        "trial_definition": (
+            "chase trials from the controller's chase_trial_id (see chaser_escape_freeze, whose "
+            "segmentation this reuses): ~12 experimenter-initiated trials of ~5 s inside the 180 s "
+            f"chase epoch. Segmentation source: {seg_source}."
+        ),
+        "habituation": (
+            "escape collapses after trial 1-2 while freezing rises: an active-to-passive defence "
+            "switch inside ~10-15 s of cumulative chase. Averaged over the epoch it is invisible. "
+            "trial_escape_rate_per_valid_s is the readout; trial_escape_count is NOT, because "
+            "trials differ in how much of the fish was tracked."
+        ),
+        "wall_confound": (
+            "trial_wall_distance_at_trigger_mm is stored because habituation is CONFOUNDED with it: "
+            "the fish moves to the wall after trial 1 (9.6 mm -> ~2 mm) and at the wall it seldom "
+            "escapes (P=0.10 vs 0.60 off the wall). Two checks rule out a geometric trap -- (a) with "
+            "no chaser at all, being at the wall does not suppress fast bouts (p=0.40); (b) on trial "
+            "1, fish that start AT the wall escape just as often as fish that do not (0.82 vs 0.75, "
+            "p=0.68). So the wall does not prevent escape. But wall position is DOWNSTREAM of the "
+            "chase -- a mediator, not a nuisance covariate -- so do not regress it out; that is "
+            "conditioning on a post-treatment variable."
         ),
         "source_bout_response_component": str(bout_name),
     }
@@ -630,6 +815,22 @@ def build_chaser_escape_events_result(
         trace_event_count=trace_n,
         sweep_escape_count=sweep_count,
         sweep_rate_per_valid_min=sweep_rate.astype(np.float32),
+        trial_id=trial_id,
+        trial_ordinal=trial_ordinal,
+        trial_start_frame=trial_start,
+        trial_end_frame=trial_end,
+        trial_trigger_frame=trial_trigger,
+        trial_trigger_distance_mm=trial_trigger_dist.astype(np.float32),
+        trial_escape_count=trial_escapes,
+        trial_any_escape=trial_any,
+        trial_valid_s=trial_valid_s.astype(np.float32),
+        trial_dropout_fraction=trial_dropout.astype(np.float32),
+        trial_escape_rate_per_valid_s=trial_rate.astype(np.float32),
+        trial_wall_distance_at_trigger_mm=trial_wall.astype(np.float32),
+        trial_first_escape_latency_s=trial_latency.astype(np.float32),
+        trial_segmentation_source=str(seg_source),
+        habituation_slope_per_trial=float(hab_slope),
+        habituation_slope_any_escape=float(hab_slope_any),
         status=status,
         qc_warnings=tuple(qc),
         summary=json_attr_safe(summary),
@@ -797,6 +998,26 @@ def write_chaser_escape_events_component(
         {
             "axis_order": ["epoch", "reference", "time"],
             "trace_definition": result.diagnostics.get("trace_definition"),
+        }
+    )
+
+    trials = component.require_group("trials")
+    for name in ("trial_id", "trial_ordinal", "trial_start_frame", "trial_end_frame",
+                 "trial_trigger_frame", "trial_trigger_distance_mm", "trial_escape_count",
+                 "trial_any_escape", "trial_valid_s", "trial_dropout_fraction",
+                 "trial_escape_rate_per_valid_s", "trial_wall_distance_at_trigger_mm",
+                 "trial_first_escape_latency_s"):
+        _write_array(trials, name.removeprefix("trial_") if name != "trial_id" else name,
+                     getattr(result, name))
+    trials.attrs.update(
+        {
+            "row_axis": "chase_trial",
+            "segmentation_source": result.trial_segmentation_source,
+            "habituation_slope_escapes_per_valid_s_per_trial": float(result.habituation_slope_per_trial),
+            "habituation_slope_any_escape_per_trial": float(result.habituation_slope_any_escape),
+            "trial_definition": result.diagnostics.get("trial_definition"),
+            "habituation": result.diagnostics.get("habituation"),
+            "wall_confound": result.diagnostics.get("wall_confound"),
         }
     )
 

@@ -1,6 +1,6 @@
 # `chaser_escape_events` contract
 
-**Schema:** `palette.chaser_escape_events.v1`
+**Schema:** `palette.chaser_escape_events.v2`
 **Path:** `analysis/chaser_distance_runs/<run>/chaser_escape_events/<component>`
 **Module:** `src/fisheye/analysis/chaser_escape_events.py`
 **Runner:** `python -m fisheye.utils.run_goodcopbadcop_chaser_escape_events`
@@ -9,13 +9,14 @@
 ## What it is for
 
 An escape is a **rare, high-amplitude event**, not a shift in the bout distribution. This
-component picks the fast bouts out of the `chaser_bout_response` bout table and asks three
+component picks the fast bouts out of the `chaser_bout_response` bout table and asks four
 things about them:
 
 1. **Rate** — how often, per minute of *validly tracked* time, in each epoch?
 2. **Trigger** — how far was the object when the escape fired, versus an ordinary bout?
 3. **Pursuit** — aligned on escape onset, does the fish gain ground, and does the chaser
    take it back?
+4. **Habituation** — per chase *trial*, does the escape response collapse?
 
 ## Hard dependency
 
@@ -54,7 +55,56 @@ the wrong instrument for a rare, nameable, high-amplitude class.
 | `trigger/` | epoch × reference | `escape_onset_distance_mm`, `ordinary_onset_distance_mm`, **`proximity_shift_mm`** |
 | `pursuit/` | epoch × reference | **`gain_mm`**, **`recapture_mm`**, `net_mm`, `event_count` |
 | `traces/` | epoch × reference × time | `time_s`, `delta_distance_mm` (median, baseline-subtracted at onset), `event_count` |
+| `trials/` | chase_trial | `trial_id`, `ordinal`, `start_frame`, `end_frame`, `trigger_frame`, `trigger_distance_mm`, `escape_count`, `any_escape`, `valid_s`, `dropout_fraction`, **`escape_rate_per_valid_s`**, **`wall_distance_at_trigger_mm`**, `first_escape_latency_s` |
 | `threshold_sweep/` | threshold × epoch | `escape_count`, `rate_per_valid_min` |
+
+## The trial axis, and the confound that comes with it
+
+The chase epoch is **not 180 s of continuous chasing**. It is ~12 experimenter-initiated trials
+of ~5 s, delimited by the controller's `chase_trial_id`. Segmentation is reused from
+`chaser_escape_freeze` (`_controller_trial_segments`) — not reimplemented.
+
+**The escape response collapses after the first one or two trials** while freezing rises. This
+is invisible when the epoch is averaged; it exists only per trial. Clean trials (<5% dropout),
+per fish:
+
+| | trials 1–2 | trials 5+ | p |
+|---|---|---|---|
+| escapes / valid second | **2.66** | **0.57** | **0.0001** (20/26 fish) |
+| freeze fraction | 0.45 | 0.65 | **4e-05** |
+| P(escape in trial) | 0.72 → 0.35 | ~0.10 | |
+| **wall distance at trigger** | **9.6 mm** | **~2.0 mm** | |
+
+Escape latency is **+0.24 s after** the proximity trigger (88% fire after it) — the chaser
+closes, *then* the fish flees.
+
+### `wall_distance_at_trigger_mm` — read this before interpreting habituation
+
+The fish **moves to the wall after trial 1 and stays**, and at the wall it seldom escapes:
+P(escape) = **0.10** at the wall versus **0.60** off it (p<0.0001). So "the escape habituated"
+and "the fish is cornered with nowhere to flee" are **confounded by construction**.
+
+Two checks rule out the geometric trap:
+
+- **With no chaser at all** (pre epoch), being at the wall does **not** suppress fast bouts:
+  3.72/min at the wall vs 3.16/min off it, **p=0.40**. There is no kinematic reason a
+  wall-adjacent fish cannot produce a fast bout.
+- **On trial 1**, fish that start *already at the wall* escape just as often as fish that do
+  not: **0.82 vs 0.75, p=0.68**. A fish at the wall escapes fine — when it still wants to.
+
+So the wall does not *prevent* escape. Wall position, freezing, and escape failure are three
+faces of **one defensive state switch**, not three findings.
+
+> **Do NOT regress wall distance out.** It is **downstream of the chase** — a mediator of the
+> response, not a nuisance covariate. Controlling for it is conditioning on a post-treatment
+> variable. It is stored so the question can be *asked*, not silently absorbed.
+
+The direct test (does the decline survive when the fish is off the wall?) is **underpowered to
+the point of uninformative**: only 47 off-wall clean trials cohort-wide, and just **3 fish**
+have both early and late off-wall trials. That is absence of evidence, not evidence of absence.
+
+**Use `escape_rate_per_valid_s`, not `escape_count`.** Trials differ in how much of the fish was
+tracked, and dropout rises when the fish freezes — which is the very thing being measured.
 
 ## The three things that are easy to get wrong
 

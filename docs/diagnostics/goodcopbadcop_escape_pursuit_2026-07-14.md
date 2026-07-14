@@ -160,6 +160,77 @@ chase. It is not the cause:
 
 ---
 
+## 4b. The escape response habituates: active defence → passive defence, in ~10 s
+
+The chase epoch is **not 180 s of continuous chasing** — it is ~12 experimenter-initiated trials
+of ~5 s, delimited by the controller's `chase_trial_id`. **394 chase trials across 32 fish.**
+Resolving by trial changes the picture completely; averaged over the epoch this is invisible.
+
+Clean trials only (<5% dropout, 311/394 survive):
+
+| trial | n | P(escape) | escapes/valid-s | freeze | wall dist at trigger |
+|---|---|---|---|---|---|
+| **1** | 25 | **0.72** | **3.95** | 0.33 | **9.6 mm** |
+| **2** | 26 | 0.35 | 1.77 | 0.53 | 3.8 mm |
+| 3 | 24 | 0.08 | 0.48 | 0.63 | 1.7 mm |
+| 4–12 | ~24 ea | ~0.10 | ~0.5 | ~0.65 | ~2.0 mm |
+
+**Paired within fish, trials 1–2 vs 5+ (n=26):**
+
+| | trials 1–2 | trials 5+ | p |
+|---|---|---|---|
+| escapes / valid second | **2.66** | **0.57** | **0.0001** (20/26 decline) |
+| freeze fraction | 0.45 | 0.65 | **4e-05** |
+
+Within-fish slope of escape rate on trial number: **−0.184 /trial, p=0.011, 24/29 fish negative.**
+
+Escape latency is **+0.24 s after the proximity trigger** (88% of escapes fire *after* it), so
+the causal ordering is right: the chaser closes, then the fish flees.
+
+This is precisely the operator's independent recollection — *"many of the fish will only escape
+once or twice throughout the entire session"* — and it explains the 62% freeze during the chase
+(§6): after trial 2, the fish has stopped running.
+
+### The tracking-dropout artifact does NOT explain it
+
+Dropout rises across trials in the marginal table (0.05 → 0.20), and escapes are detected from
+bouts, which need tracking. Three checks:
+
+- **Dropout has no within-fish trend**: +0.007/trial, **p=0.31** (19/32 negative). The marginal
+  rise is a *between*-fish effect — a few bad fish weighting later trials.
+- **Normalizing by validly-tracked time**: the decline survives (−0.18/trial, p=0.011).
+- **Clean trials only**: everything survives (escape rate p=0.018, P(escape) p=0.045, freeze
+  p=0.040).
+
+### The "cornered fish" alternative — ruled out, but read this before you quote the result
+
+The fish **moves to the wall after trial 1 and stays** (9.6 mm → ~2 mm), and at the wall it
+seldom escapes: **P(escape) = 0.10 at the wall vs 0.60 off it (p<0.0001)**. So "habituation" and
+"pinned against the wall with nowhere to flee" are **confounded by construction.**
+
+Two checks rule out the geometric trap:
+
+| check | result |
+|---|---|
+| With **no chaser at all** (pre epoch), does the wall suppress fast bouts? | **No.** 3.72/min at the wall vs 3.16/min off it, **p=0.40** |
+| On **trial 1**, do fish that start *at* the wall escape less? | **No.** 0.82 vs 0.75, **p=0.68** |
+
+A fish at the wall escapes perfectly well — when it still wants to. So a fish sitting at the wall
+on trial 5 and not fleeing is not a fish that *cannot* flee. **Wall position, freezing, and escape
+failure are three faces of one defensive state switch, not three findings.**
+
+**Do not regress wall distance out.** It is *downstream of the chase* — a mediator of the
+response, not a nuisance covariate — so controlling for it is conditioning on a post-treatment
+variable. `trials/wall_distance_at_trigger_mm` is stored so the question can be asked, not
+silently absorbed.
+
+**The honest limit:** the direct test (does the decline survive when the fish is off the wall?) is
+**underpowered to the point of uninformative** — only 47 off-wall clean trials cohort-wide, and
+just **3 fish** have both early and late off-wall trials (p=0.84 on n=3). That is absence of
+evidence, not evidence of absence. The two indirect checks above are what carry the argument.
+
+---
+
 ## 5. What this does NOT show
 
 - **Nothing about aggressive vs inert.** Only the aggressive object chases, so there is no inert
