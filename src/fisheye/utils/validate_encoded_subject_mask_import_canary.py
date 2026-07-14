@@ -11,6 +11,59 @@ from typing import Any, Sequence
 import numpy as np
 import zarr
 
+from fisheye.utils.import_refined_subject_mask_clip_packages import _get_node, _iter_array_paths
+
+
+def _arrays_equal(expected: np.ndarray, observed: np.ndarray) -> bool:
+    if expected.dtype.kind in {"f", "c"}:
+        return bool(np.array_equal(expected, observed, equal_nan=True))
+    return bool(np.array_equal(expected, observed))
+
+
+def _validate_non_mask_arrays(baseline: zarr.Group, encoded: zarr.Group) -> dict[str, Any]:
+    baseline_paths = set(_iter_array_paths(baseline)) - {"masks_roi"}
+    encoded_paths = set(_iter_array_paths(encoded)) - {"masks_roi"}
+    if baseline_paths != encoded_paths:
+        raise ValueError(
+            "v1/v2 non-mask array paths differ: "
+            f"missing={sorted(baseline_paths - encoded_paths)!r}, "
+            f"extra={sorted(encoded_paths - baseline_paths)!r}."
+        )
+    elements_checked = 0
+    for path in sorted(baseline_paths):
+        expected_array = _get_node(baseline, path)
+        observed_array = _get_node(encoded, path)
+        expected_shape = tuple(int(value) for value in expected_array.shape)
+        observed_shape = tuple(int(value) for value in observed_array.shape)
+        if expected_shape != observed_shape or np.dtype(expected_array.dtype) != np.dtype(observed_array.dtype):
+            raise ValueError(
+                f"v1/v2 array contract differs for {path}: "
+                f"shape {expected_shape} != {observed_shape}, "
+                f"dtype {expected_array.dtype} != {observed_array.dtype}."
+            )
+        if not expected_shape:
+            expected = np.asarray(expected_array[...])
+            observed = np.asarray(observed_array[...])
+            if not _arrays_equal(expected, observed):
+                raise ValueError(f"v1/v2 scalar array values differ for {path}.")
+            elements_checked += 1
+            continue
+        row_count = int(expected_shape[0])
+        row_chunk = max(1, int(getattr(expected_array, "chunks", (4096,))[0] or 4096))
+        for start in range(0, row_count, row_chunk):
+            stop = min(start + row_chunk, row_count)
+            expected = np.asarray(expected_array[start:stop])
+            observed = np.asarray(observed_array[start:stop])
+            if not _arrays_equal(expected, observed):
+                raise ValueError(f"v1/v2 array values differ for {path} in rows [{start}, {stop}).")
+            elements_checked += int(expected.size)
+    return {
+        "array_count": int(len(baseline_paths)),
+        "elements_checked": int(elements_checked),
+        "array_paths": sorted(baseline_paths),
+        "comparison": "exact_all_values_equal_nan_for_float",
+    }
+
 
 def validate_canary(
     *,
@@ -58,12 +111,7 @@ def validate_canary(
                 f"Mask parity failed in row chunk {chunk_idx} at relative index {mismatch.tolist()}."
             )
         rows_checked += stop - start
-    for path in ("frame_indices", "detection_indices", "available_channels"):
-        if path in baseline or path in encoded:
-            if path not in baseline or path not in encoded:
-                raise ValueError(f"v1/v2 array presence differs for {path}.")
-            if not np.array_equal(np.asarray(baseline[path][:]), np.asarray(encoded[path][:])):
-                raise ValueError(f"v1/v2 array values differ for {path}.")
+    non_mask_arrays = _validate_non_mask_arrays(baseline, encoded)
     return {
         "status": "ok",
         "zarr_path": str(zarr_path),
@@ -78,6 +126,7 @@ def validate_canary(
         "baseline_duration_seconds": baseline.attrs.get("duration_seconds"),
         "encoded_duration_seconds": encoded.attrs.get("duration_seconds"),
         "encoded_mask_publication": publication,
+        "non_mask_arrays": non_mask_arrays,
     }
 
 
