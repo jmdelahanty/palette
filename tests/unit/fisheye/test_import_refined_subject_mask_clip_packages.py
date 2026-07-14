@@ -15,6 +15,8 @@ from fisheye.shared.detect_reason_codec import read_reason_labels, write_reason_
 from fisheye.shared.zarr_run_completion import RUN_COMPLETION_STATUS_ATTR
 from fisheye.utils.finalize_subject_mask_clip_package import PACKAGE_SCHEMA_ID
 from fisheye.utils.import_refined_subject_mask_clip_packages import (
+    ClipPackage,
+    _build_row_chunk_copy_plan,
     import_refined_subject_mask_clip_packages,
 )
 
@@ -100,6 +102,51 @@ def _write_package(
         info.mtime = int(time.time())
         tar.addfile(info, BytesIO(manifest_bytes))
     return package_path
+
+
+def test_row_chunk_copy_plan_splits_misaligned_clip_boundary_once() -> None:
+    package_a_path = Path("/tmp/clip_a.tar.gz")
+    package_b_path = Path("/tmp/clip_b.tar.gz")
+    package_a = ClipPackage(
+        package_path=package_a_path,
+        extract_dir=Path("/tmp/clip_a"),
+        manifest={},
+        run_name="clip_a",
+        group=None,  # type: ignore[arg-type]
+        source_crop_row_ids=np.arange(6, dtype=np.int64),
+    )
+    package_b = ClipPackage(
+        package_path=package_b_path,
+        extract_dir=Path("/tmp/clip_b"),
+        manifest={},
+        run_name="clip_b",
+        group=None,  # type: ignore[arg-type]
+        source_crop_row_ids=np.arange(6, 10, dtype=np.int64),
+    )
+    row_maps = {
+        package_a_path: (np.arange(6, dtype=np.int64), np.arange(6, dtype=np.int64)),
+        package_b_path: (np.arange(4, dtype=np.int64), np.arange(6, 10, dtype=np.int64)),
+    }
+
+    plan = _build_row_chunk_copy_plan(
+        [package_a, package_b],
+        row_maps=row_maps,
+        total_rows=10,
+        row_chunk=4,
+    )
+
+    assert [(chunk.dst_start, chunk.dst_stop) for chunk in plan] == [(0, 4), (4, 8), (8, 10)]
+    assert [
+        [(run.package_path, run.src_start, run.src_stop, run.dst_start, run.dst_stop) for run in chunk.runs]
+        for chunk in plan
+    ] == [
+        [(package_a_path, 0, 4, 0, 4)],
+        [
+            (package_a_path, 4, 6, 4, 6),
+            (package_b_path, 0, 2, 6, 8),
+        ],
+        [(package_b_path, 2, 4, 8, 10)],
+    ]
 
 
 def test_import_refined_subject_mask_clip_packages_merges_rows_and_contours(tmp_path: Path) -> None:

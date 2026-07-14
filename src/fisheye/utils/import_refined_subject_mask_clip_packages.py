@@ -73,6 +73,22 @@ class ClipPackage:
         return int(self.source_crop_row_ids.shape[0])
 
 
+@dataclass(frozen=True)
+class RowCopyRun:
+    package_path: Path
+    src_start: int
+    src_stop: int
+    dst_start: int
+    dst_stop: int
+
+
+@dataclass(frozen=True)
+class RowChunkCopyPlan:
+    dst_start: int
+    dst_stop: int
+    runs: tuple[RowCopyRun, ...]
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -335,6 +351,52 @@ def _contiguous_runs(local_rows: np.ndarray, dest_rows: np.ndarray) -> list[tupl
     return runs
 
 
+def _build_row_chunk_copy_plan(
+    packages: Sequence[ClipPackage],
+    *,
+    row_maps: Mapping[Path, tuple[np.ndarray, np.ndarray]],
+    total_rows: int,
+    row_chunk: int,
+) -> tuple[RowChunkCopyPlan, ...]:
+    """Index package contributions once for one destination row-chunk grid."""
+
+    row_chunk = max(1, int(row_chunk))
+    chunk_bounds = [
+        (start, min(start + row_chunk, int(total_rows)))
+        for start in range(0, int(total_rows), row_chunk)
+    ]
+    runs_by_chunk: list[list[RowCopyRun]] = [[] for _ in chunk_bounds]
+    for package in packages:
+        local_rows, dest_rows = row_maps[package.package_path]
+        for src_start, src_stop, dst_start, dst_stop in _contiguous_runs(local_rows, dest_rows):
+            current_src = int(src_start)
+            current_dst = int(dst_start)
+            while current_dst < int(dst_stop):
+                chunk_idx = current_dst // row_chunk
+                chunk_stop = min(int(dst_stop), (chunk_idx + 1) * row_chunk)
+                copy_count = int(chunk_stop) - current_dst
+                runs_by_chunk[chunk_idx].append(
+                    RowCopyRun(
+                        package_path=package.package_path,
+                        src_start=current_src,
+                        src_stop=current_src + copy_count,
+                        dst_start=current_dst,
+                        dst_stop=chunk_stop,
+                    )
+                )
+                current_src += copy_count
+                current_dst = chunk_stop
+            if current_src != int(src_stop):
+                raise AssertionError(
+                    f"Row-copy plan consumed source rows through {current_src}, expected {int(src_stop)}."
+                )
+
+    return tuple(
+        RowChunkCopyPlan(dst_start=start, dst_stop=stop, runs=tuple(runs_by_chunk[idx]))
+        for idx, (start, stop) in enumerate(chunk_bounds)
+    )
+
+
 def _numpy_block_dtype(dtype: Any) -> Any:
     try:
         return np.dtype(dtype)
@@ -363,6 +425,7 @@ def _copy_row_aligned_array_by_chunk(
     row_maps: Mapping[Path, tuple[np.ndarray, np.ndarray]],
     total_rows: int,
     array_copy_workers: int,
+    chunk_copy_plan: Sequence[RowChunkCopyPlan] | None = None,
 ) -> None:
     """Copy one row-aligned array with one writer per physical row chunk.
 
@@ -376,38 +439,44 @@ def _copy_row_aligned_array_by_chunk(
     fill_value = getattr(dest, "fill_value", None)
     dtype = getattr(dest, "dtype", None)
 
-    def write_dest_chunk(dst_start: int, dst_stop: int) -> None:
+    if chunk_copy_plan is None:
+        chunk_copy_plan = _build_row_chunk_copy_plan(
+            packages,
+            row_maps=row_maps,
+            total_rows=total_rows,
+            row_chunk=row_chunk,
+        )
+    expected_chunk_count = (int(total_rows) + row_chunk - 1) // row_chunk
+    if len(chunk_copy_plan) != expected_chunk_count:
+        raise ValueError(
+            f"Row-copy plan has {len(chunk_copy_plan)} chunks, expected {expected_chunk_count} "
+            f"for total_rows={int(total_rows)} and row_chunk={row_chunk}."
+        )
+    package_arrays = {
+        package.package_path: _get_node(package.group, array_path)
+        for package in packages
+    }
+
+    def write_dest_chunk(plan: RowChunkCopyPlan) -> None:
+        dst_start = int(plan.dst_start)
+        dst_stop = int(plan.dst_stop)
         block_shape = (int(dst_stop) - int(dst_start), *tuple(int(value) for value in dest.shape[1:]))
         block = _empty_chunk_block(block_shape, dtype, fill_value)
-        wrote_any = False
-        for package in packages:
-            local_rows, dest_rows = row_maps[package.package_path]
-            mask = (dest_rows >= dst_start) & (dest_rows < dst_stop)
-            if not bool(np.any(mask)):
-                continue
-            package_array = _get_node(package.group, array_path)
-            selected_local_rows = local_rows[mask]
-            selected_dest_rows = dest_rows[mask]
-            for src_start, src_stop, run_dst_start, run_dst_stop in _contiguous_runs(
-                selected_local_rows,
-                selected_dest_rows,
-            ):
-                rel_start = int(run_dst_start) - int(dst_start)
-                rel_stop = int(run_dst_stop) - int(dst_start)
-                block[rel_start:rel_stop] = package_array[src_start:src_stop]
-                wrote_any = True
-        if not wrote_any:
+        if not plan.runs:
             return
+        for run in plan.runs:
+            rel_start = int(run.dst_start) - dst_start
+            rel_stop = int(run.dst_stop) - dst_start
+            block[rel_start:rel_stop] = package_arrays[run.package_path][run.src_start : run.src_stop]
         dest[dst_start:dst_stop] = block
 
-    chunks = [(start, min(start + row_chunk, total_rows)) for start in range(0, int(total_rows), row_chunk)]
     workers = max(1, int(array_copy_workers))
-    if workers == 1 or len(chunks) <= 1:
-        for start, stop in chunks:
-            write_dest_chunk(start, stop)
+    if workers == 1 or len(chunk_copy_plan) <= 1:
+        for plan in chunk_copy_plan:
+            write_dest_chunk(plan)
         return
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(write_dest_chunk, start, stop) for start, stop in chunks]
+        futures = [executor.submit(write_dest_chunk, plan) for plan in chunk_copy_plan]
         for future in futures:
             future.result()
 
@@ -609,6 +678,7 @@ def import_refined_subject_mask_clip_packages(
             dest_run.attrs["palette_run_completion_status"] = "running"
 
             total_rows = int(sorted_crop_rows.shape[0])
+            row_chunk_copy_plans: dict[int, tuple[RowChunkCopyPlan, ...]] = {}
             target_crop_runs = sorted({str(package.group.attrs.get("source_crop_run") or "") for package in packages})
             if expected_target_crop_run and target_crop_runs != [str(expected_target_crop_run)]:
                 raise ValueError(
@@ -642,6 +712,16 @@ def import_refined_subject_mask_clip_packages(
                                 f"{package.package_path}:{array_path} has first dimension "
                                 f"{int(package_array.shape[0])}, expected {package.row_count}."
                             )
+                    dest_row_chunk = int(getattr(dest_array, "chunks", (total_rows,))[0] or total_rows or 1)
+                    chunk_copy_plan = row_chunk_copy_plans.get(dest_row_chunk)
+                    if chunk_copy_plan is None:
+                        chunk_copy_plan = _build_row_chunk_copy_plan(
+                            packages,
+                            row_maps=row_maps,
+                            total_rows=total_rows,
+                            row_chunk=dest_row_chunk,
+                        )
+                        row_chunk_copy_plans[dest_row_chunk] = chunk_copy_plan
                     _copy_row_aligned_array_by_chunk(
                         dest_array,
                         packages,
@@ -649,6 +729,7 @@ def import_refined_subject_mask_clip_packages(
                         row_maps=row_maps,
                         total_rows=total_rows,
                         array_copy_workers=array_copy_workers,
+                        chunk_copy_plan=chunk_copy_plan,
                     )
                 else:
                     data = np.asarray(source_array[:])
@@ -691,6 +772,8 @@ def import_refined_subject_mask_clip_packages(
         dest_run.attrs["row_merge_order"] = "ascending_source_crop_row_ids"
         dest_run.attrs["array_copy_workers"] = int(max(1, array_copy_workers))
         dest_run.attrs["array_copy_strategy"] = "chunk_owned_parallel" if int(array_copy_workers) > 1 else "chunk_owned_serial"
+        dest_run.attrs["row_copy_index_strategy"] = "precomputed_chunk_placements_v1"
+        dest_run.attrs["row_copy_index_row_chunks"] = sorted(int(value) for value in row_chunk_copy_plans)
         dest_run.attrs["import_schema_id"] = IMPORT_SCHEMA_ID
         dest_run.attrs["created_at_utc"] = _utc_now()
         dest_run.attrs["created_utc"] = dest_run.attrs["created_at_utc"]

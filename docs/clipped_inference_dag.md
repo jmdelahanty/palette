@@ -130,6 +130,82 @@ and complete refined keypoints, then submits only import, validation, registry
 reconciliation, and NRS cleanup. Recovery imports use `--overwrite` to replace
 the incomplete, non-promoted collection output; a complete output is refused.
 
+## Next-recording encoded-chunk publication checklist
+
+The current v1 clip packages restart their Zarr row grid at local row zero.
+When a package row count is not a multiple of the canonical dense-mask row
+chunk, all following encoded package chunks are shifted relative to the
+recording-level grid. The compatibility importer must then decode, splice, and
+re-encode the dense masks. The following checklist gates a v2 package contract
+that can publish encoded chunks directly while retaining an ordinary,
+editable, non-sharded canonical `masks_roi` array.
+
+### Canonical grid and ownership
+
+- [ ] Freeze the recording-level ordered `source_crop_row_ids`, total row
+  count, label order, dtype, fill value, chunk shape, and codec configuration
+  before clip finalization starts.
+- [ ] Fingerprint that complete array contract and require the same fingerprint
+  in every package manifest.
+- [ ] Assign exactly one writer to every physical canonical chunk
+  `(row_chunk, channel_chunk, y_chunk, x_chunk)`; never allow two jobs to write
+  different logical rows within one physical chunk.
+- [ ] Store interior package chunks under their global canonical chunk keys
+  instead of restarting the chunk grid at package-local row zero.
+- [ ] Define the cross-clip boundary policy explicitly. Prefer complete
+  globally aligned interior chunks plus a small boundary-fragment merge job;
+  at most the chunks intersecting clip boundaries should require pixel decode.
+- [ ] Record requested and effective worker/chunk ownership in provenance.
+
+### Package v2 contract
+
+- [ ] Add a versioned manifest containing the global array-contract
+  fingerprint, global row interval, owned canonical chunk keys, boundary
+  fragments, per-object size/digest, source runs, and package completion
+  status.
+- [ ] Require complete refined-keypoint assignment lineage and raw-mask source
+  lineage before a package may be sealed.
+- [ ] Keep authoritative dense binary `uint8 masks_roi` payloads. Bitpacked,
+  RLE, metrics, geometry, and sampled contours remain derived data and must not
+  replace the dense edit surface.
+- [ ] Preserve the v1 package reader/importer as a compatibility fallback.
+
+### Transactional publisher
+
+- [ ] Preflight exact chunk-key coverage, uniqueness, contract fingerprints,
+  object digests, and boundary-fragment coverage before mutating the canonical
+  recording Zarr.
+- [ ] Publish into a new incomplete run group, copy encoded objects without
+  Zarr array assignment, write canonical metadata, then validate before
+  setting completion and latest/review pointers.
+- [ ] Refuse overwrite of complete runs and remove an incomplete destination
+  only through the explicit recovery path.
+- [ ] Make retries idempotent and record whether each object was copied,
+  verified existing, or boundary-merged.
+- [ ] Run registry reconciliation and NRS cleanup only after content
+  validation succeeds.
+
+### Canary and rollout gates
+
+- [ ] Build a two-clip canary whose boundary is deliberately not divisible by
+  the 128-row dense-mask chunk size.
+- [ ] A/B the v1 decoded importer and v2 encoded publisher for exact row
+  identity, decoded mask equality, metrics, sampled contours, eye geometry,
+  provenance, completion pointers, and Crimson/`MaskStore` reads.
+- [ ] Validate every boundary row plus deterministic samples from every
+  package and channel; verify copied encoded-object digests before decode
+  checks.
+- [ ] Record wall time, CPU time, peak RSS, bytes read/written, and PRFS object
+  operations for both paths.
+- [ ] Keep v2 behind an explicit feature flag for the first full recording and
+  fall back closed to the v1 importer on any contract mismatch.
+- [ ] Enable v2 by default only after a full recording passes validation,
+  registry reconciliation, Crimson loading, and post-cleanup audit.
+
+Independent of package v2, the v1 importer must pre-index package row
+placements once per destination chunk grid. It must not rescan all recording
+rows for every destination chunk.
+
 ## Sleepyfish dry run, 2026-07-14
 
 The reviewed three-recording plan covers cams 2010093, 2010094, and 2010096,
