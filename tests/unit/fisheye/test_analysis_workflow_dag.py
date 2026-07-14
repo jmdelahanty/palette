@@ -50,6 +50,13 @@ def test_core_behavior_profile_declares_portable_and_framewise_resolutions() -> 
         "refined_keypoints",
         "tracks",
     )
+    visualization = workflow.node_by_id["track_kinematics_visualization"]
+    assert visualization.kind == "visualization"
+    assert visualization.depends_on == ("track_kinematics", "swim_bouts")
+    assert visualization.output_run_from == "track_kinematics"
+    assert "track_kinematics_visualization" in workflow.node_by_id[
+        "bout_kinematics"
+    ].depends_on
 
 
 def test_temporal_policy_allows_numeric_overrides_but_not_trace_downsampling() -> None:
@@ -246,6 +253,77 @@ def test_availability_resolver_discovers_tracking_authority(tmp_path: Path) -> N
     assert status.available is True
     assert status.run_name == "tracking_a"
     assert status.artifact_path == "tracking_runs/tracking_a"
+
+
+def test_visualization_availability_is_tied_to_selected_track_run(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "analysis" / "track_kinematics_runs" / "offline"
+    _write_zarr_metadata(parent, {"latest_complete": "track_a"})
+    _write_zarr_metadata(
+        parent / "track_a",
+        {"palette_run_completion_status": "complete"},
+    )
+
+    missing = discover_stage_availability(
+        tmp_path,
+        "track_kinematics_visualization",
+        requested_run="track_a",
+        dependency_runs={
+            "track_kinematics": "track_a",
+            "swim_bouts": "swim_a",
+        },
+    )
+
+    assert missing.available is False
+    assert missing.run_name == "track_a"
+    assert "interactive track-kinematics contract is missing" in missing.reason
+
+    artifact = (
+        parent
+        / "track_a"
+        / "visualizations"
+        / "track_kinematics_summary_track_0_interactive"
+    )
+    _write_zarr_metadata(
+        artifact,
+        {
+            "renderer": "palette-track-kinematics-summary-v1",
+            "source_runs": {"track_kinematics": "offline/track_a"},
+            "parameters": {"swim_bout_run": "swim_a"},
+        },
+    )
+    _write_zarr_metadata(artifact / "spec_json")
+
+    available = discover_stage_availability(
+        tmp_path,
+        "track_kinematics_visualization",
+        requested_run="track_a",
+        dependency_runs={
+            "track_kinematics": "track_a",
+            "swim_bouts": "swim_a",
+        },
+    )
+
+    assert available.available is True
+    assert available.run_name == "track_a"
+    assert available.artifact_path == (
+        "analysis/track_kinematics_runs/offline/track_a/visualizations/"
+        "track_kinematics_summary_track_0_interactive"
+    )
+
+    stale = discover_stage_availability(
+        tmp_path,
+        "track_kinematics_visualization",
+        requested_run="track_a",
+        dependency_runs={
+            "track_kinematics": "track_a",
+            "swim_bouts": "swim_b",
+        },
+    )
+
+    assert stale.available is False
+    assert "swim-bout lineage does not match" in stale.reason
 
 
 def test_availability_resolver_requires_pointer_or_explicit_run(tmp_path: Path) -> None:

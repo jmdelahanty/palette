@@ -23,7 +23,7 @@ ANALYSIS_WORKFLOW_SCHEMA_ID = "palette.analysis_workflow"
 ANALYSIS_WORKFLOW_SCHEMA_VERSION = 1
 FRAMEWISE_RESOLUTION = "framewise"
 NODE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
-NODE_KINDS = frozenset({"prerequisite", "analysis", "export"})
+NODE_KINDS = frozenset({"prerequisite", "analysis", "visualization", "export"})
 TEMPORAL_PRODUCTS = frozenset(
     {"kinematics", "activity_spatial", "eye_traces", "tail_traces"}
 )
@@ -221,6 +221,7 @@ class WorkflowNode:
     kind: str
     depends_on: tuple[str, ...] = ()
     stage_id: str | None = None
+    output_run_from: str | None = None
     runnable: bool = True
     temporal_product: str | None = None
     execution_policy: str | None = None
@@ -241,9 +242,27 @@ class WorkflowNode:
         if len(set(dependencies)) != len(dependencies):
             raise ValueError(f"node {node_id!r} repeats a dependency")
         object.__setattr__(self, "depends_on", dependencies)
+        output_run_from = (
+            str(self.output_run_from).strip()
+            if self.output_run_from is not None
+            else None
+        )
+        if output_run_from is not None and output_run_from not in dependencies:
+            raise ValueError(
+                f"node {node_id!r} output_run_from must name one of its dependencies"
+            )
+        if kind == "visualization" and output_run_from is None:
+            raise ValueError(
+                f"visualization node {node_id!r} requires output_run_from"
+            )
+        if kind != "visualization" and output_run_from is not None:
+            raise ValueError(
+                f"only visualization nodes may declare output_run_from ({node_id!r})"
+            )
+        object.__setattr__(self, "output_run_from", output_run_from)
         if self.stage_id is not None:
             object.__setattr__(self, "stage_id", canonical_stage_id(str(self.stage_id)))
-        if kind in {"prerequisite", "analysis"} and self.stage_id is None:
+        if kind in {"prerequisite", "analysis", "visualization"} and self.stage_id is None:
             raise ValueError(f"node {node_id!r} requires a canonical stage_id")
         if not isinstance(self.runnable, bool):
             raise ValueError(f"node {node_id!r} runnable must be a boolean")
@@ -269,6 +288,11 @@ class WorkflowNode:
             kind=str(raw.get("kind") or "analysis"),
             depends_on=_string_tuple(raw.get("depends_on"), label="node.depends_on"),
             stage_id=(str(raw["stage_id"]) if raw.get("stage_id") is not None else None),
+            output_run_from=(
+                str(raw["output_run_from"])
+                if raw.get("output_run_from") is not None
+                else None
+            ),
             runnable=raw.get("runnable", True),
             temporal_product=(
                 str(raw["temporal_product"])
@@ -289,6 +313,7 @@ class WorkflowNode:
             "kind": self.kind,
             "stage_id": self.stage_id,
             "depends_on": list(self.depends_on),
+            "output_run_from": self.output_run_from,
             "runnable": self.runnable,
             "temporal_product": self.temporal_product,
             "execution_policy": self.execution_policy,

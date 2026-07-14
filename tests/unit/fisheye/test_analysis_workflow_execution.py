@@ -64,6 +64,9 @@ def _analysis_execution_plan(tmp_path: Path):
             run_name="track_a",
         ),
         "swim_bouts": _status("swim_bouts", available=False),
+        "track_kinematics_visualization": _status(
+            "track_kinematics_visualization", available=False
+        ),
         "bout_kinematics": _status("bout_kinematics", available=False),
         "eye_angles": _status("eye_angles", available=False),
         "subject_shape": _status("subject_shape", available=False),
@@ -91,6 +94,7 @@ def test_execution_plan_renders_exact_dependency_runs_and_parallel_backends(
 
     assert [command.node_id for command in execution.commands] == [
         "swim_bouts",
+        "track_kinematics_visualization",
         "bout_kinematics",
         "eye_angles",
         "subject_shape",
@@ -107,6 +111,22 @@ def test_execution_plan_renders_exact_dependency_runs_and_parallel_backends(
     assert swim[swim.index("--run-name") + 1] == (
         "swim_bouts_canary_20260713_01"
     )
+
+    visualization = commands["track_kinematics_visualization"]
+    view = visualization.argv
+    assert view[:4] == (
+        "/palette/python",
+        "-m",
+        "fisheye.analysis.plot_track_kinematics",
+        str(tmp_path / "recording_analysis.zarr"),
+    )
+    assert view[view.index("--track-kinematics-run") + 1] == "track_a"
+    assert view[view.index("--swim-bout-run") + 1] == (
+        "swim_bouts_canary_20260713_01"
+    )
+    assert view[view.index("--speed-level") + 1] == "exponential"
+    assert visualization.output_run == "track_a"
+    assert execution.output_runs["track_kinematics_visualization"] == "track_a"
 
     bout = commands["bout_kinematics"].argv
     assert bout[bout.index("--swim-bout-run") + 1] == (
@@ -156,6 +176,42 @@ def test_output_run_override_is_used_by_downstream_commands(tmp_path: Path) -> N
 
     bout_command = execution.commands[-1].argv
     assert bout_command[bout_command.index("--swim-bout-run") + 1] == "custom_bouts"
+
+
+def test_visualization_refuses_independent_output_run_override(tmp_path: Path) -> None:
+    workflow = load_analysis_workflow(default_core_behavior_profile_path())
+    availability = {
+        "refined_keypoints": _status(
+            "refined_keypoints", available=True, run_name="refined_kp_a"
+        ),
+        "track_kinematics": _status(
+            "track_kinematics", available=True, run_name="track_a"
+        ),
+        "swim_bouts": _status(
+            "swim_bouts", available=True, run_name="swim_a"
+        ),
+        "track_kinematics_visualization": _status(
+            "track_kinematics_visualization", available=False
+        ),
+    }
+    plan = plan_analysis_workflow(
+        workflow,
+        availability,
+        targets=("track_kinematics_visualization",),
+    )
+
+    with pytest.raises(WorkflowExecutionError, match="inherits its output run"):
+        build_workflow_execution_plan(
+            workflow,
+            plan,
+            zarr_path=tmp_path,
+            execution_id="run_a",
+            num_workers=1,
+            output_run_overrides={
+                "track_kinematics_visualization": "independent_view_run"
+            },
+            python_executable="python",
+        )
 
 
 def test_execution_refuses_export_target_without_materializer(tmp_path: Path) -> None:

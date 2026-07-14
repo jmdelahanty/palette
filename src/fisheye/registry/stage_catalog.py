@@ -159,7 +159,12 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
     StageSpec(
         id="track_kinematics",
         depends_on=("refined_keypoints",),
-        invalidates=("swim_bouts", "stimulus_response", "bout_classification"),
+        invalidates=(
+            "swim_bouts",
+            "track_kinematics_visualization",
+            "stimulus_response",
+            "bout_classification",
+        ),
         artifact_families=("analysis/track_kinematics_runs",),
         category=DERIVED_ANALYSIS,
         description="Speed, distance, heading, and derived track kinematics.",
@@ -167,10 +172,24 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
     StageSpec(
         id="swim_bouts",
         depends_on=("track_kinematics",),
-        invalidates=("bout_kinematics", "stimulus_response", "bout_classification"),
+        invalidates=(
+            "track_kinematics_visualization",
+            "bout_kinematics",
+            "stimulus_response",
+            "bout_classification",
+        ),
         artifact_families=("analysis/swim_bout_runs",),
         category=DERIVED_ANALYSIS,
         description="Swim-bout segmentation candidates derived from kinematics.",
+    ),
+    StageSpec(
+        id="track_kinematics_visualization",
+        depends_on=("track_kinematics", "swim_bouts"),
+        artifact_families=("analysis/track_kinematics_runs/*/*/visualizations",),
+        category=DERIVED_ANALYSIS,
+        description=(
+            "Interactive core-behavior contract embedded in a track-kinematics run."
+        ),
     ),
     StageSpec(
         id="bout_kinematics",

@@ -67,10 +67,20 @@ nodes:
     execution_policy: whole_recording_temporal_state
     description: Detect bouts on the continuous trace so events may cross clip boundaries.
 
+  - id: track_kinematics_visualization
+    kind: visualization
+    stage_id: track_kinematics_visualization
+    depends_on: [track_kinematics, swim_bouts]
+    output_run_from: track_kinematics
+    execution_policy: embedded_interactive_contract
+    description: >-
+      Persist the bounded core-behavior PNG snapshot and interactive spec in
+      the selected track-kinematics run for recording-explorer discovery.
+
   - id: bout_kinematics
     kind: analysis
     stage_id: bout_kinematics
-    depends_on: [track_kinematics, swim_bouts]
+    depends_on: [track_kinematics, swim_bouts, track_kinematics_visualization]
     execution_policy: recording_driver_single_writer
     description: Compute sparse per-bout movement and heading metrics.
 

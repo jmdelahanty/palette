@@ -484,12 +484,57 @@ def _completion_from_quality_reports(root: Any) -> CompletionInfo:
     return candidates[-1]
 
 
+def _completion_from_track_kinematics_visualization(root: Any) -> CompletionInfo:
+    parent_path = "analysis/track_kinematics_runs"
+    parent = _get_group(root, parent_path)
+    if parent is None:
+        return CompletionInfo(complete=False)
+    source = _completion_from_parent(parent, parent_path)
+    if source.run is None:
+        return CompletionInfo(complete=False, artifact=parent_path)
+    artifact_path = (
+        f"{parent_path}/{source.run}/visualizations/"
+        "track_kinematics_summary_track_0_interactive"
+    )
+    artifact = _get_group(root, artifact_path)
+    if artifact is None or not _path_exists(root, f"{artifact_path}/spec_json"):
+        return CompletionInfo(
+            complete=False,
+            run=source.run,
+            artifact=artifact_path,
+            latest_complete_run=source.latest_complete_run,
+            run_resolution=source.run_resolution,
+        )
+    attrs = getattr(artifact, "attrs", {})
+    if str(attrs.get("renderer") or "") != "palette-track-kinematics-summary-v1":
+        return CompletionInfo(
+            complete=False,
+            run=source.run,
+            artifact=artifact_path,
+            latest_complete_run=source.latest_complete_run,
+            run_resolution=source.run_resolution,
+        )
+    return CompletionInfo(
+        complete=True,
+        run=source.run,
+        kind="artifact_present",
+        completed_at_utc=_normalize_text(attrs.get("created_at_utc")),
+        artifact=artifact_path,
+        authoritative_run=source.authoritative_run,
+        authoritative_run_provenance=source.authoritative_run_provenance,
+        latest_complete_run=source.latest_complete_run,
+        run_resolution=source.run_resolution,
+    )
+
+
 def _completion_for_artifact(root: Any, spec: StageSpec, path: str) -> CompletionInfo:
     if spec.id == "detect_quality":
         info = _completion_from_quality_reports(root)
         if info.run is not None:
             return info
         return CompletionInfo(complete=False)
+    if spec.id == "track_kinematics_visualization":
+        return _completion_from_track_kinematics_visualization(root)
     group = _get_group(root, path)
     if group is None:
         if _path_exists(root, path):

@@ -207,6 +207,7 @@ def execute_workflow_plan(
             zarr_path,
             command.stage_id,
             requested_run=command.output_run,
+            dependency_runs=command.dependency_runs,
         )
         result["verification"] = availability.to_dict()
         if not availability.available:

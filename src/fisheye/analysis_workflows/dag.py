@@ -16,6 +16,7 @@ class NodePlan:
     stage_id: str | None
     action: str
     depends_on: tuple[str, ...]
+    output_run_from: str | None
     artifact_path: str | None
     selected_run: str | None
     reason: str
@@ -29,6 +30,7 @@ class NodePlan:
             "stage_id": self.stage_id,
             "action": self.action,
             "depends_on": list(self.depends_on),
+            "output_run_from": self.output_run_from,
             "artifact_path": self.artifact_path,
             "selected_run": self.selected_run,
             "reason": self.reason,
@@ -184,6 +186,7 @@ def plan_analysis_workflow(
             stage_id=node.stage_id,
             action=action,
             depends_on=node.depends_on,
+            output_run_from=node.output_run_from,
             artifact_path=artifact_path,
             selected_run=selected_run,
             reason=reason,

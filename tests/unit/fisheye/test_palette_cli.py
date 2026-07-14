@@ -144,6 +144,47 @@ def test_status_surfaces_authoritative_run_distinct_from_latest(tmp_path, capsys
     assert subject_masks["authoritative_run_provenance"]["approved_by"] == "jeremy"
 
 
+def test_status_discovers_embedded_track_kinematics_visualization(
+    tmp_path,
+    capsys,
+) -> None:
+    zarr_path = tmp_path / "core_behavior.zarr"
+    root = _open_tmp_store(zarr_path)
+    parent = root.require_group("analysis").require_group("track_kinematics_runs")
+    run = parent.require_group("offline").require_group("track_a")
+    mark_run_complete(
+        run,
+        parent_group=parent,
+        run_name="offline/track_a",
+        completed_at_utc="2026-07-14T12:00:00+00:00",
+    )
+    artifact = run.require_group("visualizations").require_group(
+        "track_kinematics_summary_track_0_interactive"
+    )
+    artifact.require_group("spec_json")
+    artifact.attrs.update(
+        {
+            "renderer": "palette-track-kinematics-summary-v1",
+            "created_at_utc": "2026-07-14T12:01:00+00:00",
+        }
+    )
+
+    rc, payload = _run_json(capsys, "status", str(zarr_path))
+
+    assert rc == palette.EXIT_OK
+    visualization = next(
+        stage
+        for stage in payload["stages"]
+        if stage["stage"] == "track_kinematics_visualization"
+    )
+    assert visualization["state"] == "complete"
+    assert visualization["run"] == "offline/track_a"
+    assert visualization["completion"] == "artifact_present"
+    assert visualization["artifact"].endswith(
+        "offline/track_a/visualizations/track_kinematics_summary_track_0_interactive"
+    )
+
+
 def test_plan_reports_stale_downstream_stage(tmp_path, capsys) -> None:
     zarr_path = tmp_path / "stale_training.zarr"
     root = _open_tmp_store(zarr_path)

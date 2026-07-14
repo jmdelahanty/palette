@@ -52,6 +52,7 @@ class StageCommand:
     node_id: str
     stage_id: str
     output_run: str
+    dependency_runs: Mapping[str, str]
     argv: tuple[str, ...]
 
     def to_dict(self) -> dict[str, object]:
@@ -59,6 +60,7 @@ class StageCommand:
             "node_id": self.node_id,
             "stage_id": self.stage_id,
             "output_run": self.output_run,
+            "dependency_runs": dict(self.dependency_runs),
             "argv": list(self.argv),
         }
 
@@ -160,6 +162,32 @@ def _swim_bout_command(context: StageCommandContext) -> tuple[str, ...]:
     return tuple(command)
 
 
+def _track_kinematics_visualization_command(
+    context: StageCommandContext,
+) -> tuple[str, ...]:
+    track_run = context.dependency_run("track_kinematics")
+    if context.output_run != track_run:
+        raise WorkflowExecutionError(
+            "track-kinematics visualization output must inherit its track run"
+        )
+    command = _module_command(context, "fisheye.analysis.plot_track_kinematics")
+    command.extend(
+        (
+            "--track-kinematics-run",
+            track_run,
+            "--track-id",
+            "0",
+            "--offline-only",
+            "--write-zarr-artifacts",
+            "--swim-bout-run",
+            context.dependency_run("swim_bouts"),
+            "--speed-level",
+            "exponential",
+        )
+    )
+    return tuple(command)
+
+
 def _bout_kinematics_command(context: StageCommandContext) -> tuple[str, ...]:
     command = _module_command(context, "fisheye.analysis.bout_kinematics")
     command.extend(
@@ -252,6 +280,7 @@ STAGE_COMMAND_BUILDERS: Mapping[str, StageCommandBuilder] = MappingProxyType(
     {
         "track_kinematics": _track_kinematics_command,
         "swim_bouts": _swim_bout_command,
+        "track_kinematics_visualization": _track_kinematics_visualization_command,
         "bout_kinematics": _bout_kinematics_command,
         "eye_angles": _eye_angle_command,
         "subject_shape": _subject_shape_command,
@@ -325,17 +354,32 @@ def build_workflow_execution_plan(
                 )
             resolved_runs[node.node_id] = node.selected_run
         elif node.action == "run" and node.stage_id is not None:
-            output_run = overrides.get(node.stage_id) or default_output_run_name(
-                execution_id=execution_id,
-                node_id=node.node_id,
-            )
+            workflow_node = workflow_nodes[node.node_id]
+            if workflow_node.output_run_from is not None:
+                if node.stage_id in overrides:
+                    raise WorkflowExecutionError(
+                        f"stage {node.stage_id!r} inherits its output run from "
+                        f"{workflow_node.output_run_from!r}; --output-run is not allowed"
+                    )
+                try:
+                    output_run = resolved_runs[workflow_node.output_run_from]
+                except KeyError as exc:
+                    raise WorkflowExecutionError(
+                        f"node {node.node_id!r} cannot resolve inherited output run "
+                        f"from {workflow_node.output_run_from!r}"
+                    ) from exc
+            else:
+                output_run = overrides.get(node.stage_id) or default_output_run_name(
+                    execution_id=execution_id,
+                    node_id=node.node_id,
+                )
             output_runs[node.stage_id] = output_run
             resolved_runs[node.node_id] = output_run
 
     commands: list[StageCommand] = []
     for node_id in workflow_plan.execution_order:
         node = planned_by_id[node_id]
-        if node.kind != "analysis" or node.stage_id is None:
+        if node.kind not in {"analysis", "visualization"} or node.stage_id is None:
             raise WorkflowExecutionError(
                 f"node {node_id!r} requires an execution adapter that is not implemented"
             )
@@ -363,6 +407,7 @@ def build_workflow_execution_plan(
                 node_id=node.node_id,
                 stage_id=node.stage_id,
                 output_run=output_run,
+                dependency_runs=MappingProxyType(dependency_runs),
                 argv=builder(context),
             )
         )

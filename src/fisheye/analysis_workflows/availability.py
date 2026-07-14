@@ -28,6 +28,12 @@ COMPLETE_STATUSES = frozenset({"complete", "completed", "ok", "success"})
 COMPLETION_EPOCH_ATTR = "palette_completion_epoch"
 RUN_COMPLETION_CONTRACT_ATTR = "palette_run_completion_contract"
 RUN_COMPLETION_CONTRACT = "palette.zarr_run_completion.v1"
+TRACK_KINEMATICS_VISUALIZATION_STAGE = "track_kinematics_visualization"
+TRACK_KINEMATICS_PARENT = "analysis/track_kinematics_runs/offline"
+TRACK_KINEMATICS_INTERACTIVE_ARTIFACT = (
+    "visualizations/track_kinematics_summary_track_0_interactive"
+)
+TRACK_KINEMATICS_INTERACTIVE_RENDERER = "palette-track-kinematics-summary-v1"
 
 
 @dataclass(frozen=True)
@@ -85,6 +91,11 @@ def stage_run_relative_path(stage_id: str, run_name: str) -> str:
     """Return the sole registered run path for an executable canonical stage."""
 
     canonical = canonical_stage_id(stage_id)
+    if canonical == TRACK_KINEMATICS_VISUALIZATION_STAGE:
+        return (
+            f"{TRACK_KINEMATICS_PARENT}/{_safe_run_name(run_name)}/"
+            f"{TRACK_KINEMATICS_INTERACTIVE_ARTIFACT}"
+        )
     parents = STAGE_RUN_PARENTS.get(canonical)
     if not parents:
         raise KeyError(f"no run parent is registered for stage {canonical!r}")
@@ -105,15 +116,168 @@ def _strict_completion_parent(attrs: Mapping[str, object]) -> bool:
         return False
 
 
+def _track_kinematics_visualization_availability(
+    root: Path,
+    *,
+    requested_run: str | None,
+    dependency_runs: Mapping[str, str] | None,
+) -> StageAvailability:
+    """Resolve the explorer contract embedded in one offline kinematics run."""
+
+    parent = root / TRACK_KINEMATICS_PARENT
+    if not (parent / "zarr.json").is_file():
+        return StageAvailability(
+            stage_id=TRACK_KINEMATICS_VISUALIZATION_STAGE,
+            available=False,
+            reason="persisted track-kinematics run parent is missing",
+        )
+    parent_attrs = _attrs(parent)
+    if requested_run and requested_run != "latest":
+        run_name = _safe_run_name(requested_run)
+    else:
+        run_name = ""
+        for key in POINTER_KEYS:
+            value = parent_attrs.get(key)
+            if isinstance(value, str) and value.strip():
+                run_name = _safe_run_name(value)
+                break
+        if not run_name:
+            return StageAvailability(
+                stage_id=TRACK_KINEMATICS_VISUALIZATION_STAGE,
+                available=False,
+                artifact_path=TRACK_KINEMATICS_PARENT,
+                reason="track-kinematics parent has no latest pointer",
+            )
+
+    run_path = parent / run_name
+    run_relative_path = f"{TRACK_KINEMATICS_PARENT}/{run_name}"
+    if not (run_path / "zarr.json").is_file():
+        return StageAvailability(
+            stage_id=TRACK_KINEMATICS_VISUALIZATION_STAGE,
+            available=False,
+            artifact_path=run_relative_path,
+            run_name=run_name,
+            reason="selected track-kinematics run metadata is missing",
+        )
+    run_attrs = _attrs(run_path)
+    status = _completion_status(run_attrs)
+    has_palette_contract = (
+        run_attrs.get(RUN_COMPLETION_CONTRACT_ATTR) == RUN_COMPLETION_CONTRACT
+    )
+    if status is not None and status not in COMPLETE_STATUSES:
+        return StageAvailability(
+            stage_id=TRACK_KINEMATICS_VISUALIZATION_STAGE,
+            available=False,
+            artifact_path=run_relative_path,
+            run_name=run_name,
+            reason=f"selected track-kinematics run is not complete ({status})",
+            completion_status=status,
+        )
+    if status is None and (
+        has_palette_contract or _strict_completion_parent(parent_attrs)
+    ):
+        return StageAvailability(
+            stage_id=TRACK_KINEMATICS_VISUALIZATION_STAGE,
+            available=False,
+            artifact_path=run_relative_path,
+            run_name=run_name,
+            reason="selected track-kinematics run lacks a required complete marker",
+        )
+
+    artifact_relative_path = stage_run_relative_path(
+        TRACK_KINEMATICS_VISUALIZATION_STAGE,
+        run_name,
+    )
+    artifact_path = root / artifact_relative_path
+    if not (artifact_path / "zarr.json").is_file():
+        return StageAvailability(
+            stage_id=TRACK_KINEMATICS_VISUALIZATION_STAGE,
+            available=False,
+            artifact_path=artifact_relative_path,
+            run_name=run_name,
+            reason="interactive track-kinematics contract is missing",
+            completion_status=status,
+        )
+    if not (artifact_path / "spec_json" / "zarr.json").is_file():
+        return StageAvailability(
+            stage_id=TRACK_KINEMATICS_VISUALIZATION_STAGE,
+            available=False,
+            artifact_path=artifact_relative_path,
+            run_name=run_name,
+            reason="interactive track-kinematics contract lacks spec_json",
+            completion_status=status,
+        )
+    artifact_attrs = _attrs(artifact_path)
+    renderer = str(artifact_attrs.get("renderer") or "").strip()
+    if renderer != TRACK_KINEMATICS_INTERACTIVE_RENDERER:
+        return StageAvailability(
+            stage_id=TRACK_KINEMATICS_VISUALIZATION_STAGE,
+            available=False,
+            artifact_path=artifact_relative_path,
+            run_name=run_name,
+            reason=(
+                "interactive track-kinematics contract has unsupported renderer "
+                f"{renderer!r}"
+            ),
+            completion_status=status,
+        )
+    expected_runs = dict(dependency_runs or {})
+    source_runs = artifact_attrs.get("source_runs")
+    source_runs = dict(source_runs) if isinstance(source_runs, Mapping) else {}
+    expected_track_run = expected_runs.get("track_kinematics")
+    persisted_track_run = str(source_runs.get("track_kinematics") or "").strip()
+    if expected_track_run and persisted_track_run not in {
+        expected_track_run,
+        f"offline/{expected_track_run}",
+    }:
+        return StageAvailability(
+            stage_id=TRACK_KINEMATICS_VISUALIZATION_STAGE,
+            available=False,
+            artifact_path=artifact_relative_path,
+            run_name=run_name,
+            reason="interactive contract track-kinematics lineage does not match",
+            completion_status=status,
+        )
+    parameters = artifact_attrs.get("parameters")
+    parameters = dict(parameters) if isinstance(parameters, Mapping) else {}
+    expected_swim_bout_run = expected_runs.get("swim_bouts")
+    persisted_swim_bout_run = str(parameters.get("swim_bout_run") or "").strip()
+    if expected_swim_bout_run and persisted_swim_bout_run != expected_swim_bout_run:
+        return StageAvailability(
+            stage_id=TRACK_KINEMATICS_VISUALIZATION_STAGE,
+            available=False,
+            artifact_path=artifact_relative_path,
+            run_name=run_name,
+            reason="interactive contract swim-bout lineage does not match",
+            completion_status=status,
+        )
+    return StageAvailability(
+        stage_id=TRACK_KINEMATICS_VISUALIZATION_STAGE,
+        available=True,
+        artifact_path=artifact_relative_path,
+        run_name=run_name,
+        reason="persisted interactive track-kinematics contract is available",
+        completion_status=status,
+    )
+
+
 def discover_stage_availability(
     zarr_path: str | Path,
     stage_id: str,
     *,
     requested_run: str | None = None,
+    dependency_runs: Mapping[str, str] | None = None,
 ) -> StageAvailability:
     """Resolve one persisted run using direct ``zarr.json`` reads only."""
 
     canonical = canonical_stage_id(stage_id)
+    root = Path(zarr_path)
+    if canonical == TRACK_KINEMATICS_VISUALIZATION_STAGE:
+        return _track_kinematics_visualization_availability(
+            root,
+            requested_run=requested_run,
+            dependency_runs=dependency_runs,
+        )
     parents = STAGE_RUN_PARENTS.get(canonical)
     if not parents:
         return StageAvailability(
@@ -121,7 +285,6 @@ def discover_stage_availability(
             available=False,
             reason="no metadata-only availability resolver is registered",
         )
-    root = Path(zarr_path)
     for relative_parent in parents:
         parent = root / relative_parent
         if not (parent / "zarr.json").is_file():

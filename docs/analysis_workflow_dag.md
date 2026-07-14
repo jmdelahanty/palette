@@ -105,10 +105,10 @@ The planner reports one of three actions for every selected node:
 - `blocked`: a required authority is absent or the node is deliberately not
   safe to execute under its declared policy.
 
-Availability inspection reads only the run-parent and selected-run
-`zarr.json` files. It prefers `latest_complete`, then `latest_materialized`,
-then `latest`. A parent without a pointer is not resolved by directory or
-lexicographic guessing; select the run explicitly:
+Availability inspection reads only the run-parent, selected-run, and declared
+embedded-artifact `zarr.json` files. It prefers `latest_complete`, then
+`latest_materialized`, then `latest`. A parent without a pointer is not
+resolved by directory or lexicographic guessing; select the run explicitly:
 
 ```bash
 scripts/plan_analysis_workflow /path/to/recording_analysis.zarr \
@@ -141,6 +141,7 @@ The executor supports these canonical analysis stages in the core profile:
 
 - `track_kinematics`;
 - `swim_bouts`;
+- `track_kinematics_visualization`;
 - `bout_kinematics`;
 - `eye_angles`;
 - `subject_shape`.
@@ -150,6 +151,14 @@ analysis-workflow output. Planning a new track-kinematics run therefore blocks
 when no `tracking_runs` authority is present. Create lineage-matched tracking
 from arena assignment first; an already complete track-kinematics run remains
 reusable without rerunning that prerequisite.
+
+The track-kinematics visualization stage writes the bounded PNG snapshot and
+interactive explorer contract inside its selected track-kinematics run. It
+inherits that run identity instead of inventing a separate visualization run,
+and records the exact swim-bout input. A `bout_kinematics` target includes this
+stage automatically, so a successful core workflow is immediately discoverable
+by the recording explorer. Planning reuses the artifact only when both its
+track-kinematics and swim-bout lineage match the selected dependency runs.
 
 Execution requires one or more explicit analysis targets. The default remains
 a read-only command render:
@@ -164,11 +173,12 @@ scripts/execute_analysis_workflow /path/to/recording_analysis.zarr \
   --num-workers 8
 ```
 
-The executor generates a safe output name for every analysis node that must
-run, such as `swim_bouts_recording_core_canary_01`. Use
+The executor generates a safe output name for every independent analysis node
+that must run, such as `swim_bouts_recording_core_canary_01`. Use
 `--output-run STAGE=RUN` to override a generated name. It refuses existing
-output metadata rather than overwriting it. Every downstream command receives
-the exact reused or newly generated dependency run name. Use
+output metadata rather than overwriting it. Embedded visualization stages
+inherit their authority run and reject independent `--output-run` names. Every
+downstream command receives the exact reused or newly generated dependency run name. Use
 `--force-stage STAGE` when a completed stage should intentionally be recomputed
 as a new immutable run.
 
