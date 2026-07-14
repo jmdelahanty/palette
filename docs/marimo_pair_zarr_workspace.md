@@ -74,13 +74,16 @@ exploration.attrs("tracks")
 exploration.handle("tracks/speed")
 ```
 
-The metadata inventory in the rendered notebook also supports single-row
-selection. Selecting an array or group reveals its metadata and attributes,
-drives the bounded preview, and updates `selected_path` for editable cells and
-Pair agents. Groups remain valid metadata selections but do not have directly
-previewable values; the preview controls enable only when the selected row is
-an array. To browse below a deep group, use its selected path as the inventory's
-**Group path** and adjust the bounded traversal depth.
+The metadata inventory uses a bounded master-detail selection pattern.
+Selecting an array reveals its metadata and makes it the active `selected_path`.
+Selecting a group reveals its metadata plus a second selectable table of its
+bounded descendants. Selecting an array from that contents table makes the
+descendant active and enables preview; selecting a nested group keeps it as a
+metadata selection while its array descendants remain available in the same
+table. Both tables use the inventory traversal-depth and node-limit controls,
+so opening a group does not trigger unbounded metadata discovery or array
+reads. The active path is available to editable cells and Pair agents as
+`selected_path`.
 
 These calls inspect handles and metadata. They do not materialize array values.
 Node paths are relative to the selected Zarr and reject absolute paths or

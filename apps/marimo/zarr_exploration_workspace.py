@@ -128,35 +128,144 @@ def _(inventory_depth, inventory_limit, inventory_path, mo, zarr_workspace):
 
 
 @app.cell(hide_code=True)
-def _(inventory_table, mo, zarr_workspace):
-    selected_rows = inventory_table.value if inventory_table is not None else []
-    selected_path = str(selected_rows[0]["path"]) if selected_rows else ""
-    selected_kind = ""
+def _(inventory_depth, inventory_limit, inventory_table, mo, zarr_workspace):
+    inventory_selected_rows = (
+        inventory_table.value if inventory_table is not None else []
+    )
+    inventory_selected_path = (
+        str(inventory_selected_rows[0]["path"]) if inventory_selected_rows else ""
+    )
+    inventory_selected_kind = ""
+    group_contents_table = None
+    if inventory_selected_path:
+        try:
+            inventory_selected_info = zarr_workspace.info(inventory_selected_path)
+            inventory_selected_kind = str(
+                inventory_selected_info.get("kind", "")
+            )
+            inventory_selected_attrs = zarr_workspace.attrs(inventory_selected_path)
+            selection_parts = inventory_selected_path.split("/")
+            selection_breadcrumb = " › ".join(["/"] + selection_parts)
+            selection_panels = [
+                mo.md(
+                    f"### Inventory selection: `{inventory_selected_path}`\n\n"
+                    f"**Path:** {selection_breadcrumb}"
+                ),
+                mo.hstack(
+                    [
+                        mo.tree(inventory_selected_info, label="Metadata"),
+                        mo.tree(inventory_selected_attrs, label="Attributes"),
+                    ],
+                    justify="start",
+                    gap=1,
+                    widths="equal",
+                ),
+            ]
+            if inventory_selected_kind == "group":
+                group_contents_rows = zarr_workspace.walk(
+                    inventory_selected_path,
+                    max_depth=max(1, int(inventory_depth.value or 2)),
+                    max_items=int(inventory_limit.value or 250),
+                )
+                group_prefix = f"{inventory_selected_path}/"
+                group_contents_display_rows = [
+                    {
+                        **row,
+                        "name": str(row["path"]).rsplit("/", 1)[-1],
+                        "relative_path": str(row["path"])[len(group_prefix) :],
+                        "shape": str(row.get("shape", "")),
+                        "chunks": str(row.get("chunks", "")),
+                    }
+                    for row in group_contents_rows
+                ]
+                if group_contents_display_rows:
+                    group_contents_table = mo.ui.table(
+                        group_contents_display_rows,
+                        selection="single",
+                        pagination=True,
+                        page_size=25,
+                        show_download=False,
+                        max_height=500,
+                        label="Select a descendant group or array",
+                    )
+                    selection_panels.extend(
+                        [
+                            mo.md(
+                                f"#### Contents of `{inventory_selected_path}` · "
+                                f"{len(group_contents_rows):,} bounded descendant(s)"
+                            ),
+                            mo.md(
+                                "This second table reveals the selected group's "
+                                "contents. Selecting one of its rows updates the "
+                                "active dataset used by preview and `selected_path`."
+                            ),
+                            group_contents_table,
+                        ]
+                    )
+                else:
+                    selection_panels.append(
+                        mo.callout("This group has no discoverable child nodes.", kind="info")
+                    )
+            inventory_selection_output = mo.vstack(selection_panels)
+        except Exception as exc:
+            inventory_selection_output = mo.callout(
+                mo.md(f"Could not reveal the selection: `{type(exc).__name__}: {exc}`"),
+                kind="danger",
+            )
+    else:
+        inventory_selection_output = mo.md(
+            "Select a dataset row above to reveal its metadata and contents."
+        )
+    inventory_selection_output
+    return group_contents_table, inventory_selected_kind, inventory_selected_path
+
+
+@app.cell(hide_code=True)
+def _(
+    group_contents_table,
+    inventory_selected_kind,
+    inventory_selected_path,
+    mo,
+    zarr_workspace,
+):
+    contents_selected_rows = (
+        group_contents_table.value if group_contents_table is not None else []
+    )
+    selected_path = (
+        str(contents_selected_rows[0]["path"])
+        if contents_selected_rows
+        else inventory_selected_path
+    )
+    selected_kind = inventory_selected_kind
     if selected_path:
         try:
             selected_info = zarr_workspace.info(selected_path)
             selected_kind = str(selected_info.get("kind", ""))
             selected_attrs = zarr_workspace.attrs(selected_path)
+            active_source = (
+                "group contents table"
+                if contents_selected_rows
+                else "main inventory table"
+            )
             if selected_kind == "group":
-                selected_guidance = mo.callout(
-                    mo.md(
-                        "This selection is a **group**: it has metadata and child "
-                        "nodes, but no array values to preview. Select a row whose "
-                        "kind is `array`. To inspect deeper children, enter this "
-                        "path in **Group path** above and adjust the traversal depth."
-                    ),
+                active_guidance = mo.callout(
+                    "The active node is a group. Select one of its descendant "
+                    "array rows in the contents table to preview values.",
                     kind="info",
                 )
             else:
-                selected_guidance = mo.md("")
-            selected_output = mo.vstack(
+                active_guidance = mo.md("")
+            active_selection_output = mo.vstack(
                 [
-                    mo.md(f"### Selected dataset: `{selected_path}`"),
-                    selected_guidance,
+                    mo.md(
+                        f"### Active dataset: `{selected_path}`\n\n"
+                        f"Selected from the {active_source}."
+                    ),
+                    active_guidance,
                     mo.hstack(
                         [
-                            mo.tree(selected_info, label="Metadata"),
-                            mo.tree(selected_attrs, label="Attributes"),
+                            mo.tree(selected_info, label="Active metadata"),
+                            mo.tree(selected_attrs, label="Active attributes"),
                         ],
                         justify="start",
                         gap=1,
@@ -165,13 +274,14 @@ def _(inventory_table, mo, zarr_workspace):
                 ]
             )
         except Exception as exc:
-            selected_output = mo.callout(
-                mo.md(f"Could not reveal the selection: `{type(exc).__name__}: {exc}`"),
+            selected_kind = ""
+            active_selection_output = mo.callout(
+                mo.md(f"Could not activate the selection: `{type(exc).__name__}: {exc}`"),
                 kind="danger",
             )
     else:
-        selected_output = mo.md("Select a dataset row above to reveal it.")
-    selected_output
+        active_selection_output = mo.md("")
+    active_selection_output
     return selected_kind, selected_path
 
 
