@@ -66,6 +66,10 @@ def _(mo, source_path, zarr_workspace):
 
 @app.cell(hide_code=True)
 def _(mo, zarr_workspace):
+    analysis_dataset_rows = zarr_workspace.analysis_datasets(
+        max_runs=100,
+        max_tracks_per_run=100,
+    )
     eye_angle_run_rows = [
         row
         for row in zarr_workspace.eye_angle_runs(max_runs=100)
@@ -73,7 +77,7 @@ def _(mo, zarr_workspace):
     ]
     workspace_mode_options = (
         ["Guided analyses", "Advanced storage"]
-        if eye_angle_run_rows
+        if eye_angle_run_rows or analysis_dataset_rows
         else ["Advanced storage"]
     )
     workspace_mode = mo.ui.dropdown(
@@ -81,11 +85,12 @@ def _(mo, zarr_workspace):
         value=workspace_mode_options[0],
         label="Workspace view",
     )
-    if eye_angle_run_rows:
+    if eye_angle_run_rows or analysis_dataset_rows:
         mode_guidance = mo.md(
-            f"Found **{len(eye_angle_run_rows)} eye-angle run(s)**. Guided mode "
-            "presents their scientific representations and named traces; Advanced "
-            "storage exposes physical groups and arrays."
+            f"Found **{len(analysis_dataset_rows)} analysis-ready track dataset(s)** "
+            f"and **{len(eye_angle_run_rows)} eye-angle run(s)**. Guided mode "
+            "presents semantic handles and named traces; Advanced storage exposes "
+            "physical groups and arrays."
         )
     else:
         mode_guidance = mo.callout(
@@ -94,13 +99,217 @@ def _(mo, zarr_workspace):
             kind="info",
         )
     mo.vstack([mo.md("## Choose a view"), workspace_mode, mode_guidance])
-    return eye_angle_run_rows, workspace_mode
+    return analysis_dataset_rows, eye_angle_run_rows, workspace_mode
 
 
 @app.cell(hide_code=True)
 def _(workspace_mode):
     advanced_storage_mode = workspace_mode.value == "Advanced storage"
     return (advanced_storage_mode,)
+
+
+@app.cell(hide_code=True)
+def _(advanced_storage_mode, analysis_dataset_rows, mo):
+    analysis_dataset_label_to_id = {}
+    analysis_dataset_picker = None
+    if not advanced_storage_mode and analysis_dataset_rows:
+        analysis_dataset_label_to_id = {
+            str(row["label"]): str(row["dataset_id"])
+            for row in analysis_dataset_rows
+        }
+        analysis_dataset_labels = list(analysis_dataset_label_to_id)
+        analysis_dataset_picker = mo.ui.dropdown(
+            options=analysis_dataset_labels,
+            value=analysis_dataset_labels[0],
+            label="Analysis-ready dataset",
+            searchable=True,
+        )
+        analysis_dataset_picker_output = mo.vstack(
+            [
+                mo.md("## Analysis data workspace"),
+                mo.md(
+                    "Select a scientific dataset rather than a physical Zarr array. "
+                    "The resulting `analysis_dataset` handle remains lazy until a "
+                    "bounded NumPy or Polars copy is requested."
+                ),
+                analysis_dataset_picker,
+            ]
+        )
+    else:
+        analysis_dataset_picker_output = mo.md("")
+    analysis_dataset_picker_output
+    return analysis_dataset_label_to_id, analysis_dataset_picker
+
+
+@app.cell(hide_code=True)
+def _(
+    advanced_storage_mode,
+    analysis_dataset_label_to_id,
+    analysis_dataset_picker,
+    analysis_dataset_rows,
+    mo,
+    zarr_workspace,
+):
+    analysis_dataset = None
+    if not advanced_storage_mode and analysis_dataset_picker is not None:
+        analysis_dataset_id = analysis_dataset_label_to_id[
+            analysis_dataset_picker.value
+        ]
+        analysis_dataset_descriptor = next(
+            row
+            for row in analysis_dataset_rows
+            if row["dataset_id"] == analysis_dataset_id
+        )
+        analysis_dataset = zarr_workspace.dataset(
+            analysis_dataset_descriptor
+        )
+        analysis_dataset_summary = analysis_dataset.summary()
+        analysis_dataset_output = mo.vstack(
+            [
+                mo.tree(
+                    {
+                        key: value
+                        for key, value in analysis_dataset_summary.items()
+                        if key
+                        not in {
+                            "dataset_id",
+                            "label",
+                            "track_path",
+                            "run_path",
+                        }
+                    },
+                    label="Semantic dataset",
+                ),
+                mo.md(
+                    f"Physical value source: `{analysis_dataset.value_path}`. "
+                    "Use `analysis_dataset.handles()` for lazy Zarr handles, "
+                    "`analysis_dataset.to_numpy(...)` for a writable array copy, or "
+                    "`analysis_dataset.to_polars(...)` for analysis-ready columns."
+                ),
+            ]
+        )
+    else:
+        analysis_dataset_output = mo.md("")
+    analysis_dataset_output
+    return (analysis_dataset,)
+
+
+@app.cell(hide_code=True)
+def _(advanced_storage_mode, analysis_dataset, mo):
+    analysis_copy_start = None
+    analysis_copy_stop = None
+    analysis_copy_stride = None
+    analysis_copy_run = None
+    if not advanced_storage_mode and analysis_dataset is not None:
+        analysis_copy_start = mo.ui.number(
+            start=0,
+            stop=max(0, analysis_dataset.row_count - 1),
+            step=1,
+            value=0,
+            label="Start row",
+        )
+        analysis_copy_stop = mo.ui.number(
+            start=1,
+            stop=analysis_dataset.row_count,
+            step=1,
+            value=min(analysis_dataset.row_count, 1_800),
+            label="Stop row (exclusive)",
+        )
+        analysis_copy_stride = mo.ui.number(
+            start=1,
+            stop=1_000,
+            step=1,
+            value=1,
+            label="Row stride",
+        )
+        analysis_copy_run = mo.ui.run_button(
+            label="Load bounded working copy",
+            kind="success",
+        )
+        analysis_copy_controls_output = mo.vstack(
+            [
+                mo.hstack(
+                    [
+                        analysis_copy_start,
+                        analysis_copy_stop,
+                        analysis_copy_stride,
+                        analysis_copy_run,
+                    ],
+                    justify="start",
+                    gap=1,
+                    wrap=True,
+                ),
+                mo.md(
+                    "The notebook copy is limited to 100,000 source rows. It is "
+                    "detached from the read-only Zarr and becomes available below as "
+                    "the Polars DataFrame `analysis_data`."
+                ),
+            ]
+        )
+    else:
+        analysis_copy_controls_output = mo.md("")
+    analysis_copy_controls_output
+    return (
+        analysis_copy_run,
+        analysis_copy_start,
+        analysis_copy_stop,
+        analysis_copy_stride,
+    )
+
+
+@app.cell(hide_code=True)
+def _(
+    advanced_storage_mode,
+    analysis_copy_run,
+    analysis_copy_start,
+    analysis_copy_stop,
+    analysis_copy_stride,
+    analysis_dataset,
+    mo,
+):
+    analysis_data = None
+    if advanced_storage_mode or analysis_dataset is None:
+        analysis_copy_output = mo.md("")
+    elif analysis_copy_run is None or not analysis_copy_run.value:
+        analysis_copy_output = mo.md(
+            "Select **Load bounded working copy** when you want a Polars object for "
+            "custom cells. Metadata and lazy handles above require no value read."
+        )
+    else:
+        try:
+            analysis_data = analysis_dataset.to_polars(
+                start=int(analysis_copy_start.value or 0),
+                stop=int(analysis_copy_stop.value or 0),
+                stride=int(analysis_copy_stride.value or 1),
+                max_source_rows=100_000,
+            )
+            analysis_copy_output = mo.vstack(
+                [
+                    mo.callout(
+                        f"Copied {analysis_data.height:,} row(s) and "
+                        f"{analysis_data.width:,} column(s) into memory. The source "
+                        "Zarr was not modified.",
+                        kind="success",
+                    ),
+                    mo.ui.table(
+                        analysis_data.head(25),
+                        selection=None,
+                        pagination=True,
+                        page_size=25,
+                        show_download=False,
+                        label="First 25 copied rows",
+                    ),
+                ]
+            )
+        except Exception as exc:
+            analysis_copy_output = mo.callout(
+                mo.md(
+                    f"Working copy refused: `{type(exc).__name__}: {exc}`"
+                ),
+                kind="danger",
+            )
+    analysis_copy_output
+    return (analysis_data,)
 
 
 @app.cell(hide_code=True)
@@ -395,6 +604,7 @@ def _(
 @app.cell(hide_code=True)
 def _(
     advanced_storage_mode,
+    analysis_dataset,
     guided_array_path,
     guided_coordinate_summary,
     mo,
@@ -886,8 +1096,12 @@ def _(
         selected_path = physical_selected_path
         selected_kind = physical_selected_kind
     else:
-        selected_path = guided_array_path
-        selected_kind = "array" if guided_array_path else ""
+        selected_path = (
+            analysis_dataset.value_path
+            if analysis_dataset is not None
+            else guided_array_path
+        )
+        selected_kind = "array" if selected_path else ""
     return selected_kind, selected_path
 
 
@@ -1238,9 +1452,29 @@ exploration.walk("tracks", max_depth=2)      # bounded recursive inventory
 exploration.find("speed")                     # bounded path search
 exploration.info("tracks/speed")              # shape, dtype, chunks, size
 exploration.attrs("tracks")                   # bounded attributes
+exploration.analysis_datasets()                # semantic track-data catalog
+speed = exploration.select_dataset(
+    "speed", variant="smoothed", units="mm/s", track_id=0
+)
 exploration.eye_angle_runs()                   # guided run discovery, metadata only
 exploration.channel_index(selected_path)       # named compact-dense columns
 exploration.coordinate_summary(selected_path)  # bounded matching-time summary
+
+# The guided selector exposes one semantic read-only handle. Array handles do
+# not read values; NumPy and Polars methods return detached working copies.
+analysis_dataset.summary()
+arrays = analysis_dataset.handles()
+writable_values = analysis_dataset.to_numpy(start=0, stop=1_800)
+working_frame = analysis_dataset.to_polars(start=0, stop=1_800)
+
+# Process a complete long recording without one giant browser allocation.
+for batch in analysis_dataset.iter_polars(batch_rows=100_000):
+    pass  # aggregate or write derived results beneath /workspace
+
+# `analysis_data` is the optional Polars copy loaded by the controls above.
+# Saving it creates a new derived file; it never writes back into the source.
+if analysis_data is not None:
+    analysis_data.write_parquet("/workspace/my_analysis_copy.parquet")
 
 # Explicit bounded NumPy reads (integers, slices, and ellipsis only):
 speed = exploration.read("tracks/speed", slice(0, 1_000))
@@ -1273,10 +1507,13 @@ for routine interactive work.
 
 
 @app.cell
-def _(exploration, selected_path):
+def _(analysis_dataset, exploration, selected_path):
     # Start here. Replace this expression or add cells below it; `exploration`
-    # is defined in a hidden cell and remains available. Source reads are bounded.
-    (exploration, selected_path)
+    # and the semantic dataset handle are defined in hidden cells and remain
+    # available. `analysis_data` is None until a bounded copy is requested.
+    # Do not output `analysis_data` here: a 100,000-row working copy would be
+    # needlessly serialized into the notebook output. It remains globally usable.
+    (exploration, analysis_dataset, selected_path)
     return
 
 

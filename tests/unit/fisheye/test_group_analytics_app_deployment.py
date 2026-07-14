@@ -542,7 +542,10 @@ def test_zarr_workspace_mounts_only_source_and_code_read_only(tmp_path: Path) ->
     assert len(notebook_copies) == 1
     notebook_source = notebook_copies[0].read_text(encoding="utf-8")
     assert "exploration = zarr_workspace" in notebook_source
-    assert "def _(exploration, selected_path):" in notebook_source
+    assert (
+        "def _(analysis_dataset, exploration, selected_path):"
+        in notebook_source
+    )
     assert "remains available" in notebook_source
     assert "exploration.to_polars" in notebook_source
     assert "exploration.read" in notebook_source
@@ -556,7 +559,13 @@ def test_zarr_workspace_mounts_only_source_and_code_read_only(tmp_path: Path) ->
     assert "if not advanced_storage_mode:" in notebook_source
     assert "inventory_rows = []" in notebook_source
     assert 'selection="single"' in notebook_source
-    assert "(exploration, selected_path)" in notebook_source
+    assert "(exploration, analysis_dataset, selected_path)" in notebook_source
+    assert "Do not output `analysis_data` here" in notebook_source
+    assert "zarr_workspace.analysis_datasets(" in notebook_source
+    assert "analysis_dataset = zarr_workspace.dataset(" in notebook_source
+    assert "Load bounded working copy" in notebook_source
+    assert "analysis_dataset.to_polars(" in notebook_source
+    assert "analysis_dataset.iter_polars(" in notebook_source
     assert "group_contents_table = mo.ui.table" in notebook_source
     assert "Contents of `{inventory_selected_path}`" in notebook_source
     assert "group contents table" in notebook_source

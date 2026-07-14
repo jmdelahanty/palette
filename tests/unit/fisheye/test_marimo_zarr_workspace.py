@@ -140,6 +140,69 @@ def _eye_angle_workspace() -> ZarrExplorationWorkspace:
     )
 
 
+def _track_kinematics_workspace() -> tuple[
+    ZarrExplorationWorkspace,
+    _FakeArray,
+    _FakeArray,
+]:
+    row_count = 12
+    speed_v2 = _FakeArray(np.arange(row_count, dtype=np.float32), chunks=(4,))
+    speed_flat_alias = _FakeArray(
+        np.full(row_count, 999, dtype=np.float32), chunks=(4,)
+    )
+    time_s = _FakeArray(np.arange(row_count, dtype=np.float64) / 10, chunks=(4,))
+    frame_indices = _FakeArray(np.arange(100, 100 + row_count, dtype=np.int64))
+    track = _FakeGroup(
+        {
+            "time_seconds": time_s,
+            "frame_indices": frame_indices,
+            "positions_mm": _FakeArray(
+                np.column_stack(
+                    [
+                        np.arange(row_count, dtype=np.float32),
+                        np.arange(row_count, dtype=np.float32) * -1,
+                    ]
+                )
+            ),
+            "smoothed_heading_degrees": _FakeArray(
+                np.linspace(0, 90, row_count, dtype=np.float32)
+            ),
+            "speed_smoothed_mm": speed_flat_alias,
+            "speed_filtered_mm": _FakeArray(
+                np.arange(row_count, dtype=np.float32) + 0.5
+            ),
+            "movement": _FakeGroup(
+                {
+                    "speed": _FakeGroup(
+                        {"smoothed": _FakeGroup({"mm": speed_v2})}
+                    )
+                }
+            ),
+        }
+    )
+    run = _FakeGroup(
+        {"tracks": _FakeGroup({"id_0": track})},
+        attrs={"status": "complete", "method": "track_kinematics_offline"},
+    )
+    scope = _FakeGroup({"run_b": run}, attrs={"latest_complete": "run_b"})
+    root = _FakeGroup(
+        {
+            "analysis": _FakeGroup(
+                {"track_kinematics_runs": _FakeGroup({"offline": scope})}
+            )
+        }
+    )
+    return (
+        ZarrExplorationWorkspace(
+            zarr_path=Path("/data/source.zarr"),
+            _root=root,
+            max_read_elements=1_000,
+        ),
+        speed_v2,
+        speed_flat_alias,
+    )
+
+
 def test_zarr_workspace_opens_source_read_only(monkeypatch, tmp_path: Path) -> None:
     root = _FakeGroup()
     calls: list[tuple[Path, str]] = []
@@ -186,6 +249,86 @@ def test_zarr_workspace_has_empty_guided_discovery_for_arbitrary_zarr() -> None:
     workspace, _, _ = _workspace()
 
     assert workspace.eye_angle_runs() == []
+    assert workspace.analysis_datasets() == []
+
+
+def test_zarr_workspace_discovers_analysis_ready_track_datasets_metadata_only() -> None:
+    workspace, speed_v2, speed_flat_alias = _track_kinematics_workspace()
+
+    catalog = workspace.analysis_datasets()
+
+    assert [
+        (row["measurement"], row["variant"], row["units"])
+        for row in catalog
+    ] == [
+        ("speed", "smoothed", "mm/s"),
+        ("speed", "filtered", "mm/s"),
+        ("position", "calibrated", "mm"),
+        ("heading", "smoothed", "deg"),
+    ]
+    assert catalog[0]["value_path"].endswith(
+        "/movement/speed/smoothed/mm"
+    )
+    assert catalog[0]["value_columns"] == ("speed_mm_s",)
+    assert catalog[0]["row_count"] == 12
+    assert catalog[0]["is_latest"] is True
+    assert speed_v2.reads == []
+    assert speed_flat_alias.reads == []
+
+
+def test_analysis_dataset_provides_bounded_writable_numpy_and_polars_copies() -> None:
+    workspace, speed_v2, _ = _track_kinematics_workspace()
+    descriptor = workspace.analysis_datasets()[0]
+    dataset = workspace.dataset(descriptor)
+    selected = workspace.select_dataset(
+        "speed", variant="smoothed", units="mm/s", track_id=0
+    )
+
+    frame = dataset.to_polars(start=2, stop=8, stride=2)
+
+    assert selected.dataset_id == dataset.dataset_id
+    assert frame.columns == ["row_index", "time_s", "frame_index", "speed_mm_s"]
+    assert frame["row_index"].to_list() == [2, 4, 6]
+    assert frame["time_s"].to_list() == pytest.approx([0.2, 0.4, 0.6])
+    assert frame["frame_index"].to_list() == [102, 104, 106]
+    assert frame["speed_mm_s"].to_list() == [2.0, 4.0, 6.0]
+    assert set(dataset.handles()) == {"values", "time_s", "frame_index"}
+
+    copied = dataset.to_numpy(start=0, stop=2)
+    copied[0] = -100
+    assert speed_v2.values[0] == 0
+    assert dataset.to_lazy(start=0, stop=2).collect().height == 2
+
+    with pytest.raises(ValueError, match="current copy limit"):
+        dataset.to_polars(start=0, stop=12, max_source_rows=5)
+
+
+def test_analysis_dataset_iterates_whole_recording_in_bounded_batches() -> None:
+    workspace, _, _ = _track_kinematics_workspace()
+    dataset = workspace.dataset(workspace.analysis_datasets()[0]["dataset_id"])
+
+    batches = list(dataset.iter_polars(batch_rows=5))
+
+    assert [batch.height for batch in batches] == [5, 5, 2]
+    assert pl.concat(batches)["speed_mm_s"].to_list() == list(
+        np.arange(12, dtype=np.float32)
+    )
+
+
+def test_analysis_dataset_projects_multicolumn_position_semantically() -> None:
+    workspace, _, _ = _track_kinematics_workspace()
+    position = workspace.select_dataset(
+        "position", variant="calibrated", units="mm", track_id=0
+    )
+
+    frame = position.to_polars(start=1, stop=4)
+
+    assert frame.columns == ["row_index", "time_s", "frame_index", "x_mm", "y_mm"]
+    assert frame.select("x_mm", "y_mm").rows() == [
+        (1.0, -1.0),
+        (2.0, -2.0),
+        (3.0, -3.0),
+    ]
 
 
 def test_zarr_workspace_enforces_bounded_explicit_reads() -> None:

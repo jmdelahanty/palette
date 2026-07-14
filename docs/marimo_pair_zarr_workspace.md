@@ -79,6 +79,72 @@ exploration.attrs("tracks")
 exploration.handle("tracks/speed")
 ```
 
+### Analysis-ready dataset handles
+
+For canonical track-kinematics runs, the guided workspace discovers semantic
+datasets without requiring users to navigate physical paths. The initial
+catalog includes:
+
+- raw, filtered, smoothed, and averaged speed in calibrated or pixel units;
+- calibrated or pixel position pairs;
+- raw and smoothed heading; and
+- raw and smoothed angular velocity and angular speed.
+
+The resolver prefers the v2
+`movement/speed/<level>/<unit>` hierarchy and falls back to flat compatibility
+arrays only when necessary. Every catalog entry records its owning run, track,
+variant, units, value columns, aligned time/frame coordinates, physical path,
+shape, chunks, and completion metadata. Catalog discovery is metadata-only.
+
+The selected entry is exposed to editable cells as `analysis_dataset`, a
+`ZarrAnalysisDataset` handle:
+
+```python
+analysis_dataset.summary()          # semantic metadata
+analysis_dataset.handles()          # lazy Zarr value/time/frame handles
+
+# Or select directly by scientific meaning without copying a physical path.
+speed = exploration.select_dataset(
+    "speed", variant="smoothed", units="mm/s", track_id=0
+)
+
+# Detached working copies; neither can mutate the source Zarr.
+values = analysis_dataset.to_numpy(start=0, stop=1_800)
+frame = analysis_dataset.to_polars(start=0, stop=1_800)
+query = analysis_dataset.to_lazy(start=0, stop=1_800)
+```
+
+`to_numpy` returns a writable NumPy copy. `to_polars` returns an in-memory
+Polars DataFrame containing `row_index`, aligned `time_s` and `frame_index`
+when available, and semantic value columns such as `speed_mm_s`. `to_lazy`
+provides lazy downstream Polars transformations after the bounded Zarr read;
+Polars does not scan Zarr lazily from storage.
+
+The notebook's **Load bounded working copy** control performs the same Polars
+projection and exposes it as `analysis_data`. The default copy is 1,800 source
+rows and the UI refuses windows above 100,000 source rows. Only the first 25
+rows are rendered, avoiding a large Marimo output payload.
+
+Long recordings can be processed without one giant browser allocation:
+
+```python
+for batch in analysis_dataset.iter_polars(batch_rows=100_000):
+    # Aggregate each batch or write a derived result beneath /workspace.
+    pass
+```
+
+The copy may be transformed freely and saved as a new workspace artifact:
+
+```python
+result = analysis_data.filter(pl.col("speed_mm_s") > 5.0)
+result.write_parquet("/workspace/high_speed_samples.parquet")
+```
+
+This creates a separate derived file. There is deliberately no method to write
+the result back into the mounted source Zarr. Ingesting a reviewed result into
+a canonical Palette analysis family remains a batch-pipeline responsibility,
+where schema, lineage, validation, and atomic completion can be enforced.
+
 ### Guided eye-angle analysis
 
 If `analysis/eye_angle_runs` contains a run with a persisted `frame_angles`

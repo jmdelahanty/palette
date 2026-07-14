@@ -14,7 +14,7 @@ from collections import deque
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 import numpy as np
 import polars as pl
@@ -67,6 +67,12 @@ def _is_group(node: Any) -> bool:
 
 def _shape_tuple(node: Any) -> tuple[int, ...]:
     return tuple(int(value) for value in getattr(node, "shape", ()))
+
+
+def _group_names(group: Any, *, max_items: int) -> list[str]:
+    if not _is_group(group):
+        return []
+    return sorted(str(name) for name in islice(group.keys(), int(max_items)))
 
 
 def _bounded_attrs(
@@ -142,6 +148,207 @@ def _expand_selection(
         element_count *= length
         normalised.append(slice(start, stop, step))
     return tuple(normalised), element_count
+
+
+@dataclass(frozen=True, repr=False)
+class ZarrAnalysisDataset:
+    """Semantic, read-only handle for one analysis-ready persisted dataset.
+
+    Array handles remain lazy. ``to_numpy`` and ``to_polars`` create bounded,
+    writable in-memory copies suitable for exploratory analysis; neither can
+    mutate the selected source Zarr.
+    """
+
+    _workspace: "ZarrExplorationWorkspace"
+    descriptor: Mapping[str, Any]
+
+    @property
+    def dataset_id(self) -> str:
+        return str(self.descriptor["dataset_id"])
+
+    @property
+    def value_path(self) -> str:
+        return str(self.descriptor["value_path"])
+
+    @property
+    def row_count(self) -> int:
+        return int(self.descriptor["row_count"])
+
+    def summary(self) -> dict[str, Any]:
+        """Return a detached metadata description safe for notebook display."""
+
+        return dict(self.descriptor)
+
+    def handles(self) -> dict[str, Any]:
+        """Return lazy physical array handles without reading array values."""
+
+        paths = {
+            "values": self.value_path,
+            "time_s": str(self.descriptor.get("time_path") or ""),
+            "frame_index": str(self.descriptor.get("frame_path") or ""),
+        }
+        return {
+            name: self._workspace.handle(path)
+            for name, path in paths.items()
+            if path
+        }
+
+    def _row_selection(
+        self,
+        *,
+        start: int,
+        stop: int | None,
+        stride: int,
+        max_source_rows: int,
+    ) -> tuple[slice, np.ndarray]:
+        if start < 0 or start >= self.row_count:
+            raise ValueError(
+                f"start must be between 0 and {max(0, self.row_count - 1):,}."
+            )
+        if stride < 1 or max_source_rows < 1:
+            raise ValueError("stride and max_source_rows must be positive.")
+        resolved_stop = (
+            min(self.row_count, int(stop))
+            if stop is not None
+            else min(self.row_count, int(start) + int(max_source_rows))
+        )
+        if resolved_stop <= start:
+            raise ValueError("stop must be greater than start.")
+        source_rows = resolved_stop - int(start)
+        if source_rows > max_source_rows:
+            raise ValueError(
+                f"Selection spans {source_rows:,} source rows; the current copy "
+                f"limit is {max_source_rows:,}. Use a smaller window, iterate in "
+                "batches, or explicitly raise max_source_rows."
+            )
+        rows = np.arange(start, resolved_stop, stride, dtype=np.int64)
+        return slice(start, resolved_stop, stride), rows
+
+    def to_numpy(
+        self,
+        *,
+        start: int = 0,
+        stop: int | None = None,
+        stride: int = 1,
+        max_source_rows: int = DEFAULT_MAX_READ_ELEMENTS,
+    ) -> np.ndarray:
+        """Copy a bounded value slice into a writable NumPy array."""
+
+        selection, rows = self._row_selection(
+            start=int(start),
+            stop=stop,
+            stride=int(stride),
+            max_source_rows=int(max_source_rows),
+        )
+        value_columns = tuple(self.descriptor.get("value_columns") or ("value",))
+        element_limit = max(1, int(rows.size) * max(1, len(value_columns)))
+        return np.array(
+            self._workspace.read(
+                self.value_path,
+                selection,
+                max_elements=element_limit,
+            ),
+            copy=True,
+        )
+
+    def to_polars(
+        self,
+        *,
+        start: int = 0,
+        stop: int | None = None,
+        stride: int = 1,
+        max_source_rows: int = DEFAULT_MAX_READ_ELEMENTS,
+    ) -> pl.DataFrame:
+        """Copy aligned values and coordinates into an in-memory Polars frame."""
+
+        selection, rows = self._row_selection(
+            start=int(start),
+            stop=stop,
+            stride=int(stride),
+            max_source_rows=int(max_source_rows),
+        )
+        values = self.to_numpy(
+            start=int(start),
+            stop=selection.stop,
+            stride=int(stride),
+            max_source_rows=int(max_source_rows),
+        )
+        value_columns = tuple(self.descriptor.get("value_columns") or ("value",))
+        data: dict[str, np.ndarray] = {"row_index": rows}
+        if values.ndim == 1 and len(value_columns) == 1:
+            data[value_columns[0]] = values
+        elif values.ndim == 2 and values.shape[1] == len(value_columns):
+            data.update(
+                {
+                    name: np.asarray(values[:, index])
+                    for index, name in enumerate(value_columns)
+                }
+            )
+        else:
+            raise ValueError(
+                f"Persisted shape {values.shape} does not match semantic columns "
+                f"{value_columns}."
+            )
+
+        for output_name, path_key, dtype in (
+            ("time_s", "time_path", np.float64),
+            ("frame_index", "frame_path", np.int64),
+        ):
+            path = str(self.descriptor.get(path_key) or "")
+            if not path:
+                continue
+            coordinate = np.asarray(
+                self._workspace.read(
+                    path,
+                    selection,
+                    max_elements=max(1, int(rows.size)),
+                ),
+                dtype=dtype,
+            ).reshape(-1)
+            if coordinate.shape == rows.shape:
+                data[output_name] = coordinate
+        ordered = [
+            name
+            for name in ("row_index", "time_s", "frame_index", *value_columns)
+            if name in data
+        ]
+        return pl.DataFrame({name: data[name] for name in ordered})
+
+    def to_lazy(self, **kwargs: Any) -> pl.LazyFrame:
+        """Return a LazyFrame over a bounded in-memory Zarr projection."""
+
+        return self.to_polars(**kwargs).lazy()
+
+    def iter_polars(
+        self,
+        *,
+        batch_rows: int = DEFAULT_MAX_READ_ELEMENTS,
+        stride: int = 1,
+    ) -> Iterator[pl.DataFrame]:
+        """Yield aligned copies in bounded source-row batches."""
+
+        if batch_rows < 1 or stride < 1:
+            raise ValueError("batch_rows and stride must be positive.")
+        effective_batch_rows = max(
+            int(stride),
+            (int(batch_rows) // int(stride)) * int(stride),
+        )
+        for start in range(0, self.row_count, effective_batch_rows):
+            stop = min(self.row_count, start + effective_batch_rows)
+            yield self.to_polars(
+                start=start,
+                stop=stop,
+                stride=int(stride),
+                max_source_rows=effective_batch_rows,
+            )
+
+    def __repr__(self) -> str:
+        return (
+            "ZarrAnalysisDataset("
+            f"dataset_id={self.dataset_id!r}, "
+            f"measurement={self.descriptor.get('measurement')!r}, "
+            f"rows={self.row_count:,}, read_only=True)"
+        )
 
 
 @dataclass(frozen=True, repr=False)
@@ -474,6 +681,367 @@ class ZarrExplorationWorkspace:
             for index in range(shape[1])
             if not available_only or bool(availability[index])
         ]
+
+    def track_kinematics_datasets(
+        self,
+        *,
+        max_runs: int = 100,
+        max_tracks_per_run: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Discover analysis-ready track datasets using metadata only.
+
+        Preferred v2 movement arrays are selected before flat compatibility
+        arrays. Each returned row is one semantic speed, position, heading, or
+        angular-motion dataset aligned to its track's time/frame coordinates.
+        """
+
+        if max_runs < 1 or max_tracks_per_run < 1:
+            raise ValueError("Discovery limits must be positive.")
+        parent_path = "analysis/track_kinematics_runs"
+        try:
+            parent = self._node(parent_path)
+        except (KeyError, TypeError, ValueError):
+            return []
+        if not _is_group(parent):
+            return []
+
+        descriptors: list[dict[str, Any]] = []
+        run_count = 0
+        for scope in _group_names(parent, max_items=max_runs):
+            if run_count >= max_runs:
+                break
+            scope_path = f"{parent_path}/{scope}"
+            try:
+                scope_group = self._node(scope_path)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not _is_group(scope_group):
+                continue
+            run_names = _group_names(
+                scope_group,
+                max_items=max_runs - run_count,
+            )
+            scope_attrs = getattr(scope_group, "attrs", {})
+            latest_run = str(
+                scope_attrs.get("latest_complete")
+                or scope_attrs.get("latest")
+                or (run_names[-1] if run_names else "")
+            )
+            for run_name in run_names:
+                if run_count >= max_runs:
+                    break
+                run_path = f"{scope_path}/{run_name}"
+                try:
+                    run_group = self._node(run_path)
+                    tracks_group = self._node(f"{run_path}/tracks")
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if not _is_group(run_group) or not _is_group(tracks_group):
+                    continue
+                run_count += 1
+                run_attrs = getattr(run_group, "attrs", {})
+                run_status = str(
+                    run_attrs.get("status")
+                    or run_attrs.get("completion_status")
+                    or ""
+                )
+                run_method = str(run_attrs.get("method") or "")
+                is_latest = str(run_name) == latest_run
+
+                for track_name in _group_names(
+                    tracks_group,
+                    max_items=max_tracks_per_run,
+                ):
+                    track_path = f"{run_path}/tracks/{track_name}"
+                    try:
+                        track_group = self._node(track_path)
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if not _is_group(track_group):
+                        continue
+                    track_token = str(track_name).removeprefix("id_")
+                    try:
+                        track_id: int | str = int(track_token)
+                    except ValueError:
+                        track_id = track_token
+                    time_path = f"{track_path}/time_seconds"
+                    frame_path = f"{track_path}/frame_indices"
+
+                    def _aligned_path(candidate: str, row_count: int) -> str:
+                        try:
+                            info = self.info(candidate)
+                        except (KeyError, TypeError, ValueError):
+                            return ""
+                        return (
+                            candidate
+                            if info.get("kind") == "array"
+                            and tuple(info.get("shape", ())) == (row_count,)
+                            else ""
+                        )
+
+                    def _add_dataset(
+                        *,
+                        measurement: str,
+                        variant: str,
+                        units: str,
+                        value_path: str,
+                        value_columns: Sequence[str],
+                    ) -> None:
+                        try:
+                            value_info = self.info(value_path)
+                        except (KeyError, TypeError, ValueError):
+                            return
+                        shape = tuple(value_info.get("shape", ()))
+                        expected_columns = tuple(str(name) for name in value_columns)
+                        shape_matches = (
+                            len(shape) == 1
+                            and len(expected_columns) == 1
+                            or len(shape) == 2
+                            and shape[1] == len(expected_columns)
+                        )
+                        if value_info.get("kind") != "array" or not shape_matches:
+                            return
+                        row_count = int(shape[0])
+                        if row_count < 1:
+                            return
+                        unit_token = (
+                            units.replace("/", "_per_")
+                            .replace(" ", "_")
+                            .replace("°", "deg")
+                        )
+                        dataset_id = ":".join(
+                            (
+                                "track_kinematics",
+                                str(scope),
+                                str(run_name),
+                                str(track_name),
+                                measurement,
+                                variant,
+                                unit_token,
+                            )
+                        )
+                        measurement_label = measurement.replace("_", " ").title()
+                        descriptors.append(
+                            {
+                                "dataset_id": dataset_id,
+                                "label": (
+                                    f"{measurement_label} · {variant} · {units} · "
+                                    f"{track_name} · {run_name}"
+                                    + (" · latest" if is_latest else "")
+                                ),
+                                "family": "track_kinematics",
+                                "measurement": measurement,
+                                "variant": variant,
+                                "units": units,
+                                "scope": str(scope),
+                                "run_name": str(run_name),
+                                "run_path": run_path,
+                                "run_status": run_status,
+                                "run_method": run_method,
+                                "is_latest": is_latest,
+                                "track_id": track_id,
+                                "track_path": track_path,
+                                "value_path": value_path,
+                                "time_path": _aligned_path(time_path, row_count),
+                                "frame_path": _aligned_path(frame_path, row_count),
+                                "value_columns": expected_columns,
+                                "row_count": row_count,
+                                "dtype": str(value_info.get("dtype") or ""),
+                                "chunks": tuple(value_info.get("chunks", ())),
+                                "read_only": True,
+                            }
+                        )
+
+                    for level in ("smoothed", "filtered", "raw", "averaged"):
+                        for unit, unit_label in (("mm", "mm/s"), ("px", "px/s")):
+                            candidates = (
+                                f"{track_path}/movement/speed/{level}/{unit}",
+                                f"{track_path}/speed_{level}_{unit}",
+                            )
+                            value_path = next(
+                                (
+                                    candidate
+                                    for candidate in candidates
+                                    if self._path_is_array(candidate)
+                                ),
+                                "",
+                            )
+                            if value_path:
+                                _add_dataset(
+                                    measurement="speed",
+                                    variant=level,
+                                    units=unit_label,
+                                    value_path=value_path,
+                                    value_columns=(f"speed_{unit}_s",),
+                                )
+
+                    for unit in ("mm", "px"):
+                        position_path = f"{track_path}/positions_{unit}"
+                        if self._path_is_array(position_path):
+                            _add_dataset(
+                                measurement="position",
+                                variant="calibrated" if unit == "mm" else "pixel",
+                                units=unit,
+                                value_path=position_path,
+                                value_columns=(f"x_{unit}", f"y_{unit}"),
+                            )
+
+                    heading_specs = (
+                        (
+                            "heading",
+                            "smoothed",
+                            "deg",
+                            "smoothed_heading_degrees",
+                            "heading_deg",
+                        ),
+                        ("heading", "raw", "deg", "heading_degrees", "heading_deg"),
+                        (
+                            "angular_velocity",
+                            "smoothed",
+                            "deg/s",
+                            "angular_velocity_smoothed_deg_s",
+                            "angular_velocity_deg_s",
+                        ),
+                        (
+                            "angular_velocity",
+                            "raw",
+                            "deg/s",
+                            "angular_velocity_raw_deg_s",
+                            "angular_velocity_deg_s",
+                        ),
+                        (
+                            "angular_speed",
+                            "smoothed",
+                            "deg/s",
+                            "angular_speed_smoothed_deg_s",
+                            "angular_speed_deg_s",
+                        ),
+                        (
+                            "angular_speed",
+                            "raw",
+                            "deg/s",
+                            "angular_speed_raw_deg_s",
+                            "angular_speed_deg_s",
+                        ),
+                    )
+                    for (
+                        measurement,
+                        variant,
+                        units,
+                        array_name,
+                        column_name,
+                    ) in heading_specs:
+                        heading_path = f"{track_path}/{array_name}"
+                        if self._path_is_array(heading_path):
+                            _add_dataset(
+                                measurement=measurement,
+                                variant=variant,
+                                units=units,
+                                value_path=heading_path,
+                                value_columns=(column_name,),
+                            )
+
+        measurement_rank = {
+            "speed": 0,
+            "position": 1,
+            "heading": 2,
+            "angular_velocity": 3,
+            "angular_speed": 4,
+        }
+        variant_rank = {
+            "smoothed": 0,
+            "filtered": 1,
+            "raw": 2,
+            "averaged": 3,
+            "calibrated": 0,
+            "pixel": 1,
+        }
+        return sorted(
+            descriptors,
+            key=lambda row: (
+                not bool(row["is_latest"]),
+                row["track_id"] != 0,
+                measurement_rank.get(str(row["measurement"]), 99),
+                variant_rank.get(str(row["variant"]), 99),
+                0 if row["units"] in {"mm", "mm/s"} else 1,
+                str(row["run_name"]),
+            ),
+        )
+
+    def _path_is_array(self, path: str) -> bool:
+        try:
+            return self.info(path).get("kind") == "array"
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def analysis_datasets(
+        self,
+        *,
+        max_runs: int = 100,
+        max_tracks_per_run: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return the semantic dataset catalog supported by this workspace."""
+
+        return self.track_kinematics_datasets(
+            max_runs=max_runs,
+            max_tracks_per_run=max_tracks_per_run,
+        )
+
+    def dataset(
+        self,
+        descriptor_or_id: Mapping[str, Any] | str,
+    ) -> ZarrAnalysisDataset:
+        """Create a semantic read-only handle from a catalog row or dataset ID."""
+
+        if isinstance(descriptor_or_id, Mapping):
+            descriptor = dict(descriptor_or_id)
+        else:
+            dataset_id = str(descriptor_or_id)
+            descriptor = next(
+                (
+                    row
+                    for row in self.analysis_datasets()
+                    if row["dataset_id"] == dataset_id
+                ),
+                {},
+            )
+            if not descriptor:
+                raise KeyError(f"Unknown analysis dataset: {dataset_id!r}")
+        value_path = str(descriptor.get("value_path") or "")
+        if not value_path or not self._path_is_array(value_path):
+            raise ValueError("Analysis dataset descriptor has no readable value array.")
+        return ZarrAnalysisDataset(self, descriptor)
+
+    def select_dataset(
+        self,
+        measurement: str,
+        *,
+        variant: str | None = None,
+        units: str | None = None,
+        track_id: int | str | None = 0,
+        run_name: str | None = None,
+    ) -> ZarrAnalysisDataset:
+        """Select the preferred semantic dataset matching scientific terms."""
+
+        candidates = [
+            row
+            for row in self.analysis_datasets()
+            if row["measurement"] == str(measurement)
+            and (variant is None or row["variant"] == str(variant))
+            and (units is None or row["units"] == str(units))
+            and (track_id is None or str(row["track_id"]) == str(track_id))
+            and (run_name is None or row["run_name"] == str(run_name))
+        ]
+        if not candidates:
+            requested = {
+                "measurement": measurement,
+                "variant": variant,
+                "units": units,
+                "track_id": track_id,
+                "run_name": run_name,
+            }
+            raise KeyError(f"No analysis dataset matches {requested!r}")
+        return self.dataset(candidates[0])
 
     def eye_angle_runs(
         self,
