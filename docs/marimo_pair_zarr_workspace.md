@@ -58,8 +58,11 @@ namespaces are unavailable.
 
 ## Stable exploration interface
 
-The visible bottom cell assigns a `ZarrExplorationWorkspace` to
-`exploration`. The helper is deliberately independent of Palette schemas:
+A hidden initialization cell assigns a `ZarrExplorationWorkspace` to the stable
+name `exploration`. The visible bottom cell only consumes that handle, so a
+person or Pair agent may replace or delete the starter expression without
+removing the interface. The helper is deliberately independent of Palette
+schemas:
 
 ```python
 exploration.summary()

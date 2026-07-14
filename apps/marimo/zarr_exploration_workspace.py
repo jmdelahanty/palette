@@ -31,7 +31,10 @@ def _(Path, ZarrExplorationWorkspace, mo):
     if not source_path.is_dir():
         raise ValueError(f"Source Zarr directory was not found: {source_path}")
     zarr_workspace = ZarrExplorationWorkspace.open(source_path)
-    return source_path, zarr_workspace
+    # This stable handle is defined in a hidden implementation cell so the
+    # visible starter cell can be freely replaced by a person or Pair agent.
+    exploration = zarr_workspace
+    return exploration, source_path, zarr_workspace
 
 
 @app.cell(hide_code=True)
@@ -308,12 +311,11 @@ for routine interactive work.
 
 
 @app.cell
-def _(selected_path, zarr_workspace):
-    # Start here. Ask a Marimo Pair agent to inspect `exploration`, or add cells
-    # below this one. The source dataset is read-only and all helper reads are bounded.
-    exploration = zarr_workspace
+def _(exploration, selected_path):
+    # Start here. Replace this expression or add cells below it; `exploration`
+    # is defined in a hidden cell and remains available. Source reads are bounded.
     (exploration, selected_path)
-    return (exploration,)
+    return
 
 
 if __name__ == "__main__":
