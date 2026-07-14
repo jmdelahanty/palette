@@ -104,7 +104,7 @@ implemented on 2026-07-10:
 - ordinary-batch, clipped-collection, and whole-recording keypoint submitters
   expose the same default/custom/opt-out storage controls. Plans record both
   `keypoint_storage.requested` and `keypoint_storage.effective`; immutable YOLO
-  outputs default to 65,536-row ROI shards and 262,144-row frame shards, while
+  outputs default to 262,144-row ROI shards and 262,144-row frame shards, while
   `--no-keypoint-sharding` remains an explicit compatibility override.
 
 Recovery behavior, a cross-family conformance scanner, and broad migration of

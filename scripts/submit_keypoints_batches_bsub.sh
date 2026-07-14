@@ -17,7 +17,7 @@ CROP_RUN=""
 OUTPUT_PARENT=""
 POSE_SCHEMA=""
 BATCH_SIZE_KP=256
-KEYPOINT_ROI_SHARD_ROWS=65536
+KEYPOINT_ROI_SHARD_ROWS=262144
 KEYPOINT_ROI_SHARD_ROWS_SET=0
 KEYPOINT_FRAME_SHARD_ROWS=262144
 NO_KEYPOINT_SHARDING=0
@@ -68,7 +68,7 @@ Options:
   --pose-schema NAME        Optional pose schema (for example: traditional_v2 for 5-keypoint models)
   --batch-size-kp N         Keypoint inference batch size (default: 256)
   --keypoint-roi-shard-rows N
-                            Outer rows for indexed-sharded ROI arrays (default: 65536)
+                            Outer rows for indexed-sharded ROI arrays (default: 262144)
   --keypoint-frame-shard-rows N
                             Outer rows for indexed-sharded frame arrays (default: 262144)
   --no-keypoint-sharding    Use ordinary chunks for keypoint outputs

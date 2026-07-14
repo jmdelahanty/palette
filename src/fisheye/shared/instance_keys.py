@@ -128,12 +128,24 @@ def mint_detection_instance_keys(
     return out
 
 
-def instance_key_attrs(recording_identity: str) -> dict[str, Any]:
+def instance_key_attrs(
+    recording_identity: str,
+    *,
+    frame_domain: str = "run_frame_index",
+    frame_mapping_source: str | None = None,
+    frame_mapping_sha256: str | None = None,
+) -> dict[str, Any]:
     """Return attrs documenting the instance-key minting policy."""
 
-    return {
+    attrs: dict[str, Any] = {
         "instance_key_algorithm": INSTANCE_KEY_ALGORITHM,
         "instance_key_recording_identity": str(recording_identity),
+        "instance_key_frame_domain": str(frame_domain),
         "instance_key_bbox_quantization": int(INSTANCE_KEY_BBOX_QUANTIZATION),
         "instance_key_duplicate_policy": INSTANCE_KEY_DUPLICATE_POLICY,
     }
+    if frame_mapping_source:
+        attrs["instance_key_frame_mapping_source"] = str(frame_mapping_source)
+    if frame_mapping_sha256:
+        attrs["instance_key_frame_mapping_sha256"] = str(frame_mapping_sha256)
+    return attrs

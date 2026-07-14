@@ -40,8 +40,19 @@ editing path better:
 - sharding reduces file count by packing many chunks into fewer files
 - updating one chunk inside a shard usually means rewriting the shard payload
 
-That means sharding is a good fit for large immutable or read-mostly arrays, but
-it is not the default answer for hot refinement/review outputs.
+That means sharding is a good fit for large immutable or read-mostly arrays.
+For tabular keypoint/detection review, the canonical refined surface is now an
+immutable sharded snapshot and hot edits belong in sparse delta partitions.
+Dense subject-mask editing remains a distinct chunked-authority workflow. See
+[`tabular_delta_compaction_contract.md`](tabular_delta_compaction_contract.md).
+
+The measured clipped-collection probability-mask case and proposed Zarr v3
+indexed-sharding benchmark are documented in
+[`diagnostics/sleepyfish_subject_mask_storage_sharding_strategy_2026-07-10.md`](diagnostics/sleepyfish_subject_mask_storage_sharding_strategy_2026-07-10.md).
+That case reinforces the distinction: `856.21 GiB` of logical `uint8`
+probabilities compresses to roughly hundreds of MiB per clip, while the regular
+layout still creates about `110k` tiny probability chunk objects across the
+collection.
 
 ## Current Measurements (2026-04-03)
 
@@ -175,6 +186,14 @@ Policy:
 - revisit spatial tiling if it multiplies file count without helping actual
   edits or reads
 
+Immutable, probability-first raw subject-mask arrays are a special case within
+this family: they are finalizer inputs, not display or edit surfaces. Benchmark
+Zarr v3 indexed sharding with `[32,1,H,W]` inner chunks and much larger outer
+storage shards. Do not promote a shard shape until finalizer reads, peak writer
+RSS, incremental-write amplification, PRFS object behavior, and whole-shard
+worker ownership have been validated. This exception does not change the
+default for editable refined `masks_roi`.
+
 ### Review / Manual-Authority Outputs
 
 Examples:
@@ -184,9 +203,12 @@ Examples:
 
 Policy:
 
-- keep chunked while edits are still expected
-- do not make sharded mutation the normal operator path
-- compact only once the artifact is genuinely finalized
+- keypoint/detection refined bases are immutable indexed-sharded snapshots;
+  write sparse review deltas and compact into a new snapshot
+- never mutate a large keypoint/detection shard for one interactive edit
+- keep dense refined subject-mask `masks_roi` physically present and chunked as
+  the authoritative editable pixel surface
+- compact deltas only through a validated maintenance publication job
 
 ### Compatibility / Regenerable Outputs
 

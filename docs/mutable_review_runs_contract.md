@@ -5,7 +5,12 @@ Date anchored: 2026-06-27
 Purpose: define how Palette should handle small human or automated review edits
 without creating a new full Zarr run for every changed row.
 
-Status: target contract. This is not yet the implemented write path.
+Status: compatibility contract for direct mutable surfaces. The implemented
+direction for refined keypoints and detections is now immutable sharded bases
+plus partitioned sparse deltas, documented in
+[`tabular_delta_compaction_contract.md`](tabular_delta_compaction_contract.md).
+Assignment/tracking and dense subject-mask review retain their family-specific
+mutable contracts.
 
 Current code has pieces of this model, but not the full machinery:
 

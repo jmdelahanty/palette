@@ -481,7 +481,7 @@ Keypoint storage note:
 - fixed-width triangle diagnostic arrays are compatibility/QC outputs for the
   traditional triangle and are not the general skeleton geometry contract
 - the serial YOLO writer defaults to indexed Zarr v3 shards while retaining its
-  existing inner chunk grid: ROI outer rows default to `65536` and frame-domain
+  existing inner chunk grid: ROI outer rows default to `262144` and frame-domain
   outer rows default to `262144`; use `--no-keypoint-sharding` for an explicit
   ordinary-chunk compatibility or benchmark run
 - sharded YOLO writes use exactly two buffers and write complete outer shards;
@@ -494,8 +494,10 @@ Keypoint storage note:
   `keypoint_shard_write` validation summary in run attrs/provenance
 - `keypoint_storage_policy` distinguishes `default_indexed_sharding_v1` from
   `explicit_regular_chunks_override`
-- refined keypoint outputs remain ordinarily chunked editable/review surfaces;
-  both ordinary and sharded source keypoint runs use the same Zarr array API
+- completed refined keypoint outputs may be published as immutable
+  `262144`-row indexed-sharded snapshots; sparse review changes belong in
+  `edit_delta_runs` partitions and are compacted into a new snapshot
+- both ordinary working runs and sharded snapshot runs use the same Zarr array API
 - traditional/Dask writers must not concurrently write disjoint logical slices
   inside the same physical shard
 

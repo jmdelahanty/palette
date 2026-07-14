@@ -3,6 +3,11 @@
 **Date:** 2026-07-12
 **Status:** clone and direct YOLO-writer canaries complete; candidate passed; default enabled
 
+> Superseded default note (2026-07-14): the `65,536`-row measurements below
+> remain historical canary evidence, but the production immutable-keypoint
+> default is now `262,144` outer rows. Canonical clipped collection finalization
+> uses the same larger grid.
+
 ## Scope
 
 The canary cloned one completed immutable clipped-collection keypoint run

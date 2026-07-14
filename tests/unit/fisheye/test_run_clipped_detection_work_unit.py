@@ -43,6 +43,7 @@ def test_work_unit_builds_imports_and_validates(monkeypatch, tmp_path: Path) -> 
         clip_id="clip_000000",
         clip_index=0,
         camera_serial="2010093",
+        recording_frame_index=tmp_path / "recording_frame_index.parquet",
         run_name="detect_run",
         report_path=report_path,
     )
@@ -51,6 +52,7 @@ def test_work_unit_builds_imports_and_validates(monkeypatch, tmp_path: Path) -> 
     assert report["model"]["registry_run_id"] == "detect_model_run"
     assert calls["build"]["model_sha256"] == "a" * 64
     assert calls["build"]["model_registry_set_id"] == "detect_set"
+    assert calls["build"]["recording_frame_index"] == tmp_path / "recording_frame_index.parquet"
     assert calls["import"]["use_intended_target"] is True
     assert calls["validate"]["target_group_path"].endswith("/detect_run")
     assert calls["validate"]["validate_source_tarball"] is True
@@ -87,6 +89,7 @@ def test_work_unit_revalidates_existing_without_build_or_import(monkeypatch, tmp
         clip_id="clip_000000",
         clip_index=0,
         camera_serial="2010093",
+        recording_frame_index=tmp_path / "recording_frame_index.parquet",
         run_name="detect_run",
         report_path=report_path,
         reuse_existing=True,

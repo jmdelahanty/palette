@@ -290,7 +290,7 @@ def test_whole_recording_plan_builds_independent_chains_and_serial_fanin(
     assert plan.keypoint_storage["effective"] == {
         "keypoint_storage_layout": "indexed_sharding_v1",
         "keypoint_storage_policy": "default_indexed_sharding_v1",
-        "keypoint_roi_shard_rows": 65536,
+        "keypoint_roi_shard_rows": 262144,
         "keypoint_frame_shard_rows": 262144,
     }
     assert len(plan.lsf_workflow.jobs) == 5
@@ -322,7 +322,7 @@ def test_whole_recording_plan_builds_independent_chains_and_serial_fanin(
         "pose_run"
     )
     assert "--stage-roi-cache-to-scratch" in prediction_command
-    assert prediction_command[prediction_command.index("--keypoint-roi-shard-rows") + 1] == "65536"
+    assert prediction_command[prediction_command.index("--keypoint-roi-shard-rows") + 1] == "262144"
     assert prediction_command[prediction_command.index("--keypoint-frame-shard-rows") + 1] == "262144"
     assert "--expected-output" in prediction_command
     assert (

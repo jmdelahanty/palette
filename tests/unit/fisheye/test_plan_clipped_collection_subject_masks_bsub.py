@@ -29,7 +29,7 @@ def _write_cache_manifest(path: Path, *, collection_id: str, clip_id: str, work_
         "row_index": {
             "path": path.with_suffix(".rows.parquet").name,
             "row_count": 3,
-            "schema": "palette_clipped_collection_flat_roi_cache_rows_v1",
+            "schema": "palette_clipped_collection_flat_roi_cache_rows_v2",
         },
         "source": {
             "source_kind": "finalized_clipped_refined_detect_collection",

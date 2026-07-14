@@ -13,6 +13,20 @@ from fisheye.shared.instance_keys import (
 )
 
 
+def test_instance_key_attrs_record_clipped_parent_frame_mapping() -> None:
+    attrs = instance_key_attrs(
+        "recording_a",
+        frame_domain="recording_parent_frame_index",
+        frame_mapping_source="/recording_frame_index.parquet",
+        frame_mapping_sha256="abc123",
+    )
+
+    assert attrs["instance_key_recording_identity"] == "recording_a"
+    assert attrs["instance_key_frame_domain"] == "recording_parent_frame_index"
+    assert attrs["instance_key_frame_mapping_source"] == "/recording_frame_index.parquet"
+    assert attrs["instance_key_frame_mapping_sha256"] == "abc123"
+
+
 def test_mint_detection_instance_keys_no_context_payload_digest_is_locked() -> None:
     """Determinism lock: payload `rec_a|5|0|500000|500000|200000|400000` must hash
     to this exact digest forever. If this test fails, detect-minted keys on

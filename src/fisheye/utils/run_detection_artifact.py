@@ -20,6 +20,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
+import numpy as np
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
+
+from fisheye.shared.instance_keys import resolve_recording_identity
 from fisheye.shared.run_provenance import build_run_provenance
 from fisheye.shared.system_metadata import get_environment_info, get_git_info
 
@@ -49,6 +54,7 @@ REQUIRED_DETECT_ARRAYS = (
     "bbox_norm_coords",
     "scores",
     "class_ids",
+    "instance_key",
     "n_detections",
     "frame_counts",
 )
@@ -236,6 +242,63 @@ def _extract_timing(source_run_group: Path) -> dict[str, Any]:
     return timing if isinstance(timing, dict) else {}
 
 
+def _canonical_recording_identity(target_zarr: Path) -> str:
+    root_metadata = target_zarr / "zarr.json"
+    payload = _read_json_strict(root_metadata)
+    attrs = payload.get("attributes") if isinstance(payload, dict) else None
+    if not isinstance(attrs, dict):
+        attrs = {}
+    return resolve_recording_identity(attrs, fallback_path=target_zarr)
+
+
+def _load_parent_frame_mapping(
+    path: Path,
+    *,
+    camera_serial: str,
+    clip_id: str,
+) -> np.ndarray:
+    """Load one dense clip-local -> recording-parent frame mapping."""
+
+    frame_index_path = path.expanduser().resolve()
+    if not frame_index_path.is_file():
+        raise FileNotFoundError(f"recording_frame_index.parquet not found: {frame_index_path}")
+    parquet = pq.ParquetFile(frame_index_path)
+    required = {
+        "camera_serial",
+        "clip_id",
+        "clip_local_frame_index",
+        "parent_frame_index",
+    }
+    missing = sorted(required - set(parquet.schema_arrow.names))
+    if missing:
+        raise ValueError(
+            f"recording_frame_index.parquet missing instance-key columns: {missing}"
+        )
+    table = pq.read_table(frame_index_path, columns=sorted(required)).combine_chunks()
+    camera = np.asarray(pc.cast(table["camera_serial"], "string").to_pylist(), dtype=object)
+    clips = np.asarray(pc.cast(table["clip_id"], "string").to_pylist(), dtype=object)
+    selected = (camera == str(camera_serial)) & (clips == str(clip_id))
+    if not np.any(selected):
+        raise ValueError(
+            "recording_frame_index.parquet has no rows for "
+            f"camera={camera_serial!r}, clip={clip_id!r}."
+        )
+    local = np.asarray(table["clip_local_frame_index"].to_numpy(), dtype=np.int64)[selected]
+    parent = np.asarray(table["parent_frame_index"].to_numpy(), dtype=np.int64)[selected]
+    order = np.argsort(local, kind="stable")
+    local = local[order]
+    parent = parent[order]
+    expected = np.arange(local.shape[0], dtype=np.int64)
+    if not np.array_equal(local, expected):
+        raise ValueError(
+            "recording_frame_index clip-local rows must be unique and contiguous from zero; "
+            f"observed first={local[:5].tolist()} rows={local.shape[0]}."
+        )
+    if np.any(parent < 0) or np.unique(parent).shape[0] != parent.shape[0]:
+        raise ValueError("recording parent-frame mapping must be non-negative and one-to-one.")
+    return parent
+
+
 def build_detection_artifact(
     *,
     video_path: Path,
@@ -261,6 +324,7 @@ def build_detection_artifact(
     clip_id: Optional[str] = None,
     clip_index: Optional[int] = None,
     camera_serial: Optional[str] = None,
+    recording_frame_index: Optional[Path] = None,
     run_name: Optional[str] = None,
     model_sha256: Optional[str] = None,
     model_registry_set_id: Optional[str] = None,
@@ -316,6 +380,24 @@ def build_detection_artifact(
         clip_index=clip_index,
         camera_serial=camera_serial,
     )
+    clipped_identity_context = bool(clip_id or camera_serial or recording_frame_index)
+    if clipped_identity_context and not (
+        clip_id and camera_serial and recording_frame_index is not None
+    ):
+        raise ValueError(
+            "Clipped detection artifacts require clip_id, camera_serial, and "
+            "recording_frame_index together for stable instance_key minting."
+        )
+    canonical_recording_identity = _canonical_recording_identity(target_zarr)
+    parent_frame_mapping = (
+        _load_parent_frame_mapping(
+            recording_frame_index,
+            camera_serial=str(camera_serial),
+            clip_id=str(clip_id),
+        )
+        if recording_frame_index is not None
+        else None
+    )
     _write_json(
         artifact_dir / "logs" / "job_context.json",
         {
@@ -326,6 +408,12 @@ def build_detection_artifact(
             "runtime": runtime_environment,
             "scratch_zarr": str(scratch_zarr),
             "clip_context": clip_context,
+            "canonical_recording_identity": canonical_recording_identity,
+            "recording_frame_index": (
+                str(recording_frame_index.expanduser().resolve())
+                if recording_frame_index is not None
+                else None
+            ),
         },
     )
     (artifact_dir / "logs" / "command.log").write_text(command_text + "\n", encoding="utf-8")
@@ -351,6 +439,12 @@ def build_detection_artifact(
             "latest_policy": latest_policy,
             "run_name": run_name,
             "clip_context": clip_context,
+            "canonical_recording_identity": canonical_recording_identity,
+            "recording_frame_index": (
+                str(recording_frame_index.expanduser().resolve())
+                if recording_frame_index is not None
+                else None
+            ),
         },
         input_run_ids={
             "model_registry_set_id": model_registry_set_id,
@@ -378,6 +472,13 @@ def build_detection_artifact(
             run_name=run_name,
             model_sha256=model_sha256,
             run_provenance=run_provenance,
+            instance_key_recording_identity=canonical_recording_identity,
+            instance_key_frame_indices=parent_frame_mapping,
+            instance_key_frame_mapping_source=(
+                str(recording_frame_index.expanduser().resolve())
+                if recording_frame_index is not None
+                else None
+            ),
         )
     artifact_timing["detect_yolo_seconds_total"] = time.perf_counter() - detect_start
 
@@ -440,6 +541,12 @@ def build_detection_artifact(
             "decoder_backend": decode_backend or "auto",
             "scratch_zarr": str(scratch_zarr),
             "clip_context": clip_context,
+            "canonical_recording_identity": canonical_recording_identity,
+            "recording_frame_index": (
+                str(recording_frame_index.expanduser().resolve())
+                if recording_frame_index is not None
+                else None
+            ),
         },
         "timing": timing,
         "artifact_timing": artifact_timing,
@@ -524,6 +631,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--clip-id", default=None, help="Optional source clip id, e.g. clip_000000")
     parser.add_argument("--clip-index", type=int, default=None, help="Optional zero-based source clip index")
     parser.add_argument("--camera-serial", default=None, help="Optional camera serial for clip-camera provenance")
+    parser.add_argument(
+        "--recording-frame-index",
+        type=Path,
+        default=None,
+        help="Canonical recording_frame_index.parquet used to mint clipped instance keys.",
+    )
     parser.add_argument("--run-name", default=None, help="Optional explicit detect run group name")
     return parser
 
@@ -556,6 +669,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             clip_id=args.clip_id,
             clip_index=args.clip_index,
             camera_serial=args.camera_serial,
+            recording_frame_index=args.recording_frame_index,
             run_name=args.run_name,
             model_sha256=args.model_sha256,
             model_registry_set_id=args.model_registry_set_id,

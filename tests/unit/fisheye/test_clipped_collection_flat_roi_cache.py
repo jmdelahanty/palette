@@ -47,6 +47,7 @@ def _make_clipped_collection_archive(tmp_path: Path) -> tuple[Path, Path, list[n
     instances.create_array("source_kind_codes", data=np.array([1, 1], dtype=np.int8), overwrite=True)
     instances.create_array("manual_edit_flags", data=np.array([False, True]), overwrite=True)
     instances.create_array("source_detect_row_index", data=np.array([7, 3], dtype=np.int32), overwrite=True)
+    instances.create_array("instance_key", data=np.array([2007, 2003], dtype=np.uint64), overwrite=True)
     instances.create_array("frame_counts", data=np.array([1, 0, 1], dtype=np.int32), overwrite=True)
 
     video_path = tmp_path / "clip_000000.mp4"
@@ -133,6 +134,7 @@ def test_build_clipped_collection_flat_roi_cache_writes_pixels_and_row_index(
     assert manifest["row_index"]["schema"] == CLIPPED_COLLECTION_ROW_INDEX_SCHEMA
     assert "bbox_norm_cx" in manifest["row_index"]["columns"]
     assert "source_detect_row_index" in manifest["row_index"]["columns"]
+    assert "instance_key" in manifest["row_index"]["columns"]
     assert manifest["array"]["shape"] == [2, 2, 2]
     assert manifest["builder"]["decode_backend_effective"] == "pynvvc_luma"
     assert manifest["builder"]["pixel_contract"]["name"] == "orange_mono_pynvvc_luma_uint8_v1"
@@ -153,5 +155,6 @@ def test_build_clipped_collection_flat_roi_cache_writes_pixels_and_row_index(
     assert [row["recording_frame_id"] for row in rows] == [12, 10]
     assert [row["refined_row_id"] for row in rows] == [20, 10]
     assert [row["source_detect_row_index"] for row in rows] == [7, 3]
+    assert [row["instance_key"] for row in rows] == [2007, 2003]
     assert rows[0]["roi_x"] == 3
     assert rows[0]["roi_y"] == 2

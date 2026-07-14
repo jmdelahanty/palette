@@ -33,6 +33,7 @@ from ..registry.inline_refresh import refresh_keypoint_performance_details
 from ..shared.crop_image_source import CropImageSource
 from ..shared.frame_domains import FrameDomain, FrameDomainError, FrameDomains
 from ..shared.inference_timing import InferenceTimingProfiler
+from ..shared.immutable_yolo_storage import validate_immutable_yolo_storage
 from ..shared.keypoint_summary import build_frame_keypoint_counts
 from ..shared.model_input_transform import MODEL_INPUT_TRANSFORM_CHOICES, ModelInputTransform, resolve_model_input_transform
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs, build_source_roi_pixel_attrs
@@ -51,6 +52,7 @@ from ..shared.zarr.schema import get_run_group
 from ..shared.zarr_run_completion import (
     COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     mark_run_complete,
+    mark_run_failed,
     mark_run_started,
     note_pending_latest,
     require_runs_parent,
@@ -72,7 +74,7 @@ _DISABLE_REGISTRY_WRITES_ENV = "PALETTE_DISABLE_REGISTRY_WRITES"
 DEFAULT_KEYPOINT_OUTPUT_PARENT = "keypoints_runs"
 KEYPOINT_OUTPUT_PARENTS = (DEFAULT_KEYPOINT_OUTPUT_PARENT, "keypoint_shard_runs")
 KEYPOINT_SHARD_WRITE_SCHEMA = "palette.keypoint_double_buffered_shards.v1"
-DEFAULT_KEYPOINT_ROI_SHARD_ROWS = 65_536
+DEFAULT_KEYPOINT_ROI_SHARD_ROWS = 262_144
 DEFAULT_KEYPOINT_FRAME_SHARD_ROWS = 262_144
 
 
@@ -1498,6 +1500,7 @@ def detect_keypoints_yolo(
         "source_roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
         "source_roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
         "source_detect_run": source_detect_run or "unknown",
+        "artifact_mutability": "raw_immutable",
         "keypoints_processed": total_rois,
         "success_rate": round(success_rate, 2),
         "keypoint_storage_layout": (
@@ -1726,6 +1729,25 @@ def detect_keypoints_yolo(
             run_group.attrs["refined_roi_decoder"] = override_data["decoder"]
         if override_data["duration"] is not None:
             run_group.attrs["refined_roi_generation_duration_seconds"] = float(override_data["duration"])
+
+    try:
+        validate_immutable_yolo_storage(
+            run_group,
+            stage="keypoints",
+            row_shard_rows=keypoint_roi_shard_rows,
+            frame_shard_rows=keypoint_frame_shard_rows,
+        )
+    except Exception as exc:
+        try:
+            mark_run_failed(
+                run_group,
+                parent_group=run_parent,
+                run_name=resolved_run_name,
+                error=f"immutable YOLO storage validation failed: {exc}",
+            )
+        finally:
+            crop_source.close()
+        raise
 
     status_details: Dict[str, object] = {
         "reason": "present",

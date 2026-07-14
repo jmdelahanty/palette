@@ -4,6 +4,7 @@ import hashlib
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 import zarr
 
@@ -16,6 +17,7 @@ from fisheye.detection.detect_keypoints_yolo import (
     detect_keypoints_yolo,
 )
 from fisheye.shared.run_provenance import RUN_PROVENANCE_ATTR, build_writer_run_provenance
+from fisheye.shared.immutable_yolo_storage import IMMUTABLE_YOLO_STORAGE_ATTR
 from fisheye.shared.model_input_transform import resolve_model_input_transform
 
 
@@ -178,6 +180,7 @@ def test_detect_keypoints_yolo_sizes_n_keypoints_to_run_frame_counts(monkeypatch
     crop.create_array("frame_counts", data=np.array([1, *([0] * 9), 1, *([0] * 8), 1], dtype=np.int32))
     crop.create_array("frame_indices", data=np.array([0, 10, 19], dtype=np.int32))
     crop.create_array("detection_indices", data=np.arange(3, dtype=np.int32))
+    crop.create_array("instance_key", data=np.arange(101, 104, dtype=np.uint64))
     crop_parent.attrs["latest"] = "crop_001"
 
     model_path = tmp_path / "pose.pt"
@@ -186,15 +189,8 @@ def test_detect_keypoints_yolo_sizes_n_keypoints_to_run_frame_counts(monkeypatch
     def _fake_open(root_group, **_kwargs):
         return _FakeCropSource(root_group["crop_runs"]["crop_001"])
 
-    def _fake_copy_row_lineage(dst, src, *, total_rois, **_kwargs):
-        dst.create_array("frame_counts", data=src["frame_counts"][:], overwrite=True)
-        dst.create_array("frame_indices", data=src["frame_indices"][:], overwrite=True)
-        dst.create_array("detection_indices", data=src["detection_indices"][:], overwrite=True)
-        return SimpleNamespace(copied={"frame_counts", "frame_indices", "detection_indices"})
-
     monkeypatch.setattr(yolo_mod, "YOLO", _FakeYOLO)
     monkeypatch.setattr(yolo_mod.CropImageSource, "open", staticmethod(_fake_open))
-    monkeypatch.setattr(yolo_mod, "copy_row_lineage_arrays", _fake_copy_row_lineage)
     monkeypatch.setattr(yolo_mod, "_prepare_refined_roi_overrides", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         yolo_mod,
@@ -234,6 +230,7 @@ def test_detect_keypoints_yolo_sizes_n_keypoints_to_run_frame_counts(monkeypatch
     run = zarr.open_group(store=str(zarr_path), mode="r")["keypoints_runs"][run_name]
     assert run.attrs["keypoint_storage_layout"] == "indexed_sharding_v1"
     assert run.attrs["keypoint_storage_policy"] == "default_indexed_sharding_v1"
+    assert run.attrs[IMMUTABLE_YOLO_STORAGE_ATTR]["status"] == "ok"
     actual = run["n_keypoints"][:]
     assert actual.shape == run["frame_counts"].shape == (20,)
     assert actual[0] == 10
@@ -265,6 +262,7 @@ def _make_keypoint_count_fixture(tmp_path, name: str):
     crop.create_array("frame_counts", data=np.array([1, 1, 1], dtype=np.int32))
     crop.create_array("frame_indices", data=np.array([0, 1, 2], dtype=np.int32))
     crop.create_array("detection_indices", data=np.arange(3, dtype=np.int32))
+    crop.create_array("instance_key", data=np.arange(101, 104, dtype=np.uint64))
     crop.create_array("roi_coordinates_full", data=np.zeros((3, 2), dtype=np.int32))
     crop_parent.attrs["latest"] = "crop_001"
     return zarr_path
@@ -274,14 +272,8 @@ def _patch_keypoint_writer_dependencies(monkeypatch, model_path) -> None:
     def _fake_open(root_group, **_kwargs):
         return _FakeCropSource(root_group["crop_runs"]["crop_001"])
 
-    def _fake_copy_row_lineage(dst, src, *, total_rois, **_kwargs):
-        dst.create_array("frame_indices", data=src["frame_indices"][:], overwrite=True)
-        dst.create_array("detection_indices", data=src["detection_indices"][:], overwrite=True)
-        return SimpleNamespace(copied={"frame_indices", "detection_indices"})
-
     monkeypatch.setattr(yolo_mod, "YOLO", _FakeYOLO)
     monkeypatch.setattr(yolo_mod.CropImageSource, "open", staticmethod(_fake_open))
-    monkeypatch.setattr(yolo_mod, "copy_row_lineage_arrays", _fake_copy_row_lineage)
     monkeypatch.setattr(yolo_mod, "_prepare_refined_roi_overrides", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         yolo_mod,
@@ -406,6 +398,42 @@ def test_detect_keypoints_yolo_can_opt_out_to_regular_chunks(monkeypatch, tmp_pa
     assert run["keypoints_roi"].shards is None
     assert run.attrs["keypoint_storage_layout"] == "regular_chunks_v1"
     assert run.attrs["keypoint_storage_policy"] == "explicit_regular_chunks_override"
+    assert run.attrs[IMMUTABLE_YOLO_STORAGE_ATTR]["status"] == "ok"
+
+
+def test_detect_keypoints_yolo_fails_closed_without_instance_key(monkeypatch, tmp_path) -> None:
+    zarr_path = _make_keypoint_count_fixture(tmp_path, "keyless")
+    model_path = tmp_path / "keyless.pt"
+    root = zarr.open_group(store=str(zarr_path), mode="a", use_consolidated=False)
+    del root["crop_runs/crop_001/instance_key"]
+
+    with monkeypatch.context() as patch:
+        _patch_keypoint_writer_dependencies(patch, model_path)
+        with pytest.raises(RuntimeError, match="missing required arrays.*instance_key"):
+            detect_keypoints_yolo(
+                zarr_path,
+                model_path,
+                run_provenance=build_writer_run_provenance(
+                    command="unit-keypoint-keyless",
+                    params={"model_path": model_path},
+                ),
+                run_name="keypoints_keyless",
+                pose_schema="traditional_v3",
+                batch_size=8,
+                imgsz=8,
+                input_mode="numpy-list",
+                keypoint_roi_shard_rows=8,
+                keypoint_frame_shard_rows=8,
+                registry=None,
+            )
+
+    root = zarr.open_group(store=str(zarr_path), mode="r", use_consolidated=False)
+    parent = root["keypoints_runs"]
+    failed = parent["keypoints_keyless"]
+    assert failed.attrs["palette_run_completion_status"] == "failed"
+    assert failed.attrs[IMMUTABLE_YOLO_STORAGE_ATTR]["status"] == "error"
+    assert parent.attrs.get("latest_complete") != "keypoints_keyless"
+    assert parent.attrs.get("latest") != "keypoints_keyless"
 
 
 def test_detect_keypoints_yolo_frame_count_writer_matches_legacy_arrays(monkeypatch, tmp_path) -> None:

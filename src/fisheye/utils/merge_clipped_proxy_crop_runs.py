@@ -40,6 +40,7 @@ REQUIRED_PROXY_ARRAYS: tuple[str, ...] = (
     "source_clip_local_frame_indices",
     "source_refined_row_ids",
     "source_detect_row_index",
+    "instance_key",
     "detection_indices",
     "source_crop_row_ids",
     "roi_coordinates_full",
@@ -220,6 +221,12 @@ def merge_clipped_proxy_crop_runs(
     repaired_bbox_source_count = int(sum(1 for _bbox, repaired in bbox_payloads if repaired))
     concatenated["source_crop_row_ids"] = direct_source_crop_row_ids(total_rows)
     concatenated["detection_indices"] = direct_source_crop_row_ids(total_rows)
+    merged_instance_keys = np.asarray(concatenated["instance_key"], dtype=np.uint64).reshape(-1)
+    if np.unique(merged_instance_keys).shape[0] != total_rows:
+        raise ValueError(
+            "Merged proxy instance_key values are not globally unique; clipped detections "
+            "were not minted in the canonical recording frame domain."
+        )
 
     source_proxy_crop_run_index = np.concatenate(
         [np.full(count, idx, dtype=np.int32) for idx, count in enumerate(row_counts)],

@@ -25,6 +25,7 @@ def _make_archive(path: Path) -> zarr.Group:
     crop = crop_parent.create_group("crop_proxy")
     crop.create_array("frame_indices", data=np.array([0, 1, 2, 3, 4], dtype=np.int64), chunks=(5,))
     crop.create_array("roi_coordinates_full", data=np.zeros((5, 2), dtype=np.int32), chunks=(5, 2))
+    crop.create_array("instance_key", data=np.arange(1, 6, dtype=np.uint64), chunks=(5,))
     return root
 
 
@@ -46,6 +47,11 @@ def _write_proxy_crop(
     crop.create_array("source_clip_local_frame_indices", data=local, chunks=(max(1, n_rows),))
     crop.create_array("source_refined_row_ids", data=local + refined_offset, chunks=(max(1, n_rows),))
     crop.create_array("source_detect_row_index", data=local + refined_offset + 1000, chunks=(max(1, n_rows),))
+    crop.create_array(
+        "instance_key",
+        data=(local + 1 + clip_index * 10_000).astype(np.uint64),
+        chunks=(max(1, n_rows),),
+    )
     crop.create_array("detection_indices", data=local, chunks=(max(1, n_rows),))
     crop.create_array(
         "bbox_norm_coords",
@@ -76,6 +82,10 @@ def _write_proxy_crop(
             "bbox_norm_coords_semantics": "bbox_xywh_normalized_to_full_frame",
             "roi_shape": [512, 512],
             "roi_size": [512, 512],
+            "source_video_width": 4512,
+            "source_video_height": 4512,
+            "width": 4512,
+            "height": 4512,
         }
     )
 
@@ -119,6 +129,7 @@ def _write_shard(
         if "source_detect_row_index" in crop
         else crop_rows_np + 200
     )
+    instance_key = np.asarray(crop["instance_key"][:], dtype=np.uint64)[crop_rows_np]
     n_kpts = 3
     success_np = np.ones(n_rows, dtype=bool) if success is None else np.asarray(success, dtype=bool)
     base = np.arange(n_rows * n_kpts * 2, dtype=np.float64).reshape(n_rows, n_kpts, 2)
@@ -136,6 +147,7 @@ def _write_shard(
     shard.create_array("source_clip_local_frame_indices", data=source_clip_local_frame_indices, chunks=(max(1, n_rows),))
     shard.create_array("source_refined_row_ids", data=source_refined_row_ids, chunks=(max(1, n_rows),))
     shard.create_array("source_detect_row_index", data=source_detect_row_index, chunks=(max(1, n_rows),))
+    shard.create_array("instance_key", data=instance_key, chunks=(max(1, n_rows),))
     shard.create_array("keypoints_roi", data=base + crop_rows_np[:, None, None], chunks=(max(1, n_rows), n_kpts, 2))
     shard.create_array("keypoints_img", data=base + 10 + crop_rows_np[:, None, None], chunks=(max(1, n_rows), n_kpts, 2))
     shard.create_array("keypoints_norm", data=(base + 10 + crop_rows_np[:, None, None]) / 100.0, chunks=(max(1, n_rows), n_kpts, 2))
@@ -197,6 +209,10 @@ def test_finalize_keypoint_shards_writes_canonical_keypoint_run(tmp_path: Path) 
     assert run.attrs["source_keypoint_shard_runs"] == ["shard_b", "shard_a"]
     assert run.attrs["source_crop_run"] == "crop_proxy"
     assert run.attrs["stage_selector_eligible"] is True
+    assert run.attrs["keypoint_storage_layout"] == "indexed_sharding_v1"
+    assert run.attrs["keypoint_roi_shard_rows"] == 262_144
+    assert run["keypoints_roi"].shards == (3, 3, 2)
+    assert run["instance_key"].shards == (3,)
     np.testing.assert_array_equal(run["source_crop_row_ids"][:], np.array([0, 1, 2], dtype=np.int64))
     np.testing.assert_array_equal(run["frame_indices"][:], np.array([0, 1, 2], dtype=np.int64))
     np.testing.assert_array_equal(run["frame_counts"][:], np.array([1, 1, 1, 0, 0], dtype=np.int32))
@@ -226,6 +242,7 @@ def test_finalize_keypoint_shards_rejects_mixed_source_crop_runs(tmp_path: Path)
     root = _make_archive(zarr_path)
     crop_other = root["crop_runs"].create_group("crop_other")
     crop_other.create_array("frame_indices", data=np.array([0, 1, 2, 3, 4], dtype=np.int64), chunks=(5,))
+    crop_other.create_array("instance_key", data=np.arange(101, 106, dtype=np.uint64), chunks=(5,))
     _write_shard(root, "shard_a", crop_rows=[0], source_crop_run="crop_proxy")
     _write_shard(root, "shard_b", crop_rows=[1], source_crop_run="crop_other")
 

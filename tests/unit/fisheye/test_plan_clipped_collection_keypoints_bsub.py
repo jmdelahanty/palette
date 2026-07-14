@@ -27,7 +27,7 @@ def _write_cache_manifest(path: Path, *, collection_id: str, clip_id: str) -> No
         "row_index": {
             "path": path.with_suffix(".rows.parquet").name,
             "row_count": 3,
-            "schema": "palette_clipped_collection_flat_roi_cache_rows_v1",
+            "schema": "palette_clipped_collection_flat_roi_cache_rows_v2",
         },
         "source": {
             "source_kind": "finalized_clipped_refined_detect_collection",
@@ -98,7 +98,7 @@ def test_build_plan_resolves_manifests_and_dependency_commands(tmp_path: Path) -
     assert plan.keypoint_storage["effective"] == {
         "keypoint_storage_layout": "indexed_sharding_v1",
         "keypoint_storage_policy": "default_indexed_sharding_v1",
-        "keypoint_roi_shard_rows": 65536,
+        "keypoint_roi_shard_rows": 262144,
         "keypoint_frame_shard_rows": 262144,
     }
     assert "lsf_workflow" not in plan.to_json()
@@ -118,7 +118,7 @@ def test_build_plan_resolves_manifests_and_dependency_commands(tmp_path: Path) -
     assert "--stage-roi-cache-to-scratch" in first.keypoint_command
     assert "--run-name" in first.keypoint_command
     assert "keypoint_shard_test_run_clip_000001" in first.keypoint_command
-    assert first.keypoint_command[first.keypoint_command.index("--keypoint-roi-shard-rows") + 1] == "65536"
+    assert first.keypoint_command[first.keypoint_command.index("--keypoint-roi-shard-rows") + 1] == "262144"
     assert first.keypoint_command[first.keypoint_command.index("--keypoint-frame-shard-rows") + 1] == "262144"
     assert first.keypoint_bsub_command is not None
     assert first.keypoint_bsub_command[:-3] == [

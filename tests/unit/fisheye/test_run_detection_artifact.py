@@ -4,6 +4,10 @@ import json
 import tarfile
 from pathlib import Path
 
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 from fisheye.utils import run_detection_artifact as mod
 
 
@@ -59,8 +63,22 @@ def test_build_detection_artifact_packages_detect_run_group(
     _write_group(target_zarr)
     artifact_dir = tmp_path / "palette_run_group_artifact"
     tarball = tmp_path / "artifact.tar.gz"
+    frame_index = tmp_path / "recording_frame_index.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "camera_serial": ["2010093"] * 4,
+                "clip_id": ["clip_000003"] * 4,
+                "clip_local_frame_index": np.arange(4, dtype=np.int64),
+                "parent_frame_index": np.arange(100, 104, dtype=np.int64),
+            }
+        ),
+        frame_index,
+    )
+    detect_kwargs: dict[str, object] = {}
 
     def fake_detect_yolo(**kwargs):
+        detect_kwargs.update(kwargs)
         print("model summary should not contaminate summary stdout")
         scratch_zarr = Path(kwargs["output_zarr"])
         run_group = scratch_zarr / "detect_runs" / "detect_fake"
@@ -122,6 +140,7 @@ def test_build_detection_artifact_packages_detect_run_group(
         clip_id="clip_000003",
         clip_index=3,
         camera_serial="2010093",
+        recording_frame_index=frame_index,
     )
 
     assert summary["status"] == "ok"
@@ -165,6 +184,12 @@ def test_build_detection_artifact_packages_detect_run_group(
         == "clips/clip_000003/cameras/2010093/detect_runs/detect_fake"
     )
     assert summary["artifact_timing"]["tarball_seconds_total"] >= 0.0
+    assert detect_kwargs["instance_key_recording_identity"] == "recording_analysis"
+    np.testing.assert_array_equal(
+        detect_kwargs["instance_key_frame_indices"],
+        np.arange(100, 104, dtype=np.int64),
+    )
+    assert detect_kwargs["instance_key_frame_mapping_source"] == str(frame_index.resolve())
     captured = capsys.readouterr()
     assert "model summary should not contaminate summary stdout" not in captured.out
     assert "model summary should not contaminate summary stdout" in captured.err

@@ -52,6 +52,7 @@ from fisheye.shared.instance_keys import (
     mint_detection_instance_keys,
     resolve_recording_identity,
 )
+from fisheye.shared.immutable_yolo_storage import validate_immutable_yolo_storage
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.artifact_fingerprint import fingerprint_artifact
 from fisheye.shared.run_provenance import (
@@ -68,6 +69,7 @@ from fisheye.shared.zarr.chunk_profiles import (
 from fisheye.shared.zarr_run_completion import (
     COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     mark_run_complete,
+    mark_run_failed,
     mark_run_started,
     note_pending_latest,
     require_runs_parent,
@@ -799,6 +801,9 @@ def detect_yolo(
     model_sha256: Optional[str] = None,
     detect_row_shard_rows: Optional[int] = DEFAULT_DETECT_ROW_SHARD_ROWS,
     detect_frame_shard_rows: int = DEFAULT_DETECT_FRAME_SHARD_ROWS,
+    instance_key_recording_identity: Optional[str] = None,
+    instance_key_frame_indices: Optional[np.ndarray] = None,
+    instance_key_frame_mapping_source: Optional[str] = None,
     cli_provenance: Optional[Mapping[str, Any]] = None,
     run_provenance: Optional[Mapping[str, Any]] = None,
 ) -> str:
@@ -831,6 +836,13 @@ def detect_yolo(
         detect_row_shard_rows: Optional outer shard rows for detection-domain arrays.
         detect_frame_shard_rows: Outer shard rows for frame-domain count arrays when
             detection sharding is enabled.
+        instance_key_recording_identity: Explicit canonical recording identity for
+            instance-key minting. Clipped scratch writers must provide this rather
+            than deriving identity from the scratch Zarr path.
+        instance_key_frame_indices: Optional dense mapping from run-local video
+            frame index to canonical recording-level parent frame index.
+        instance_key_frame_mapping_source: Provenance label or path for the dense
+            frame mapping.
         cli_provenance: Optional Palette CLI provenance block stamped before completion.
         
     Returns:
@@ -1778,10 +1790,35 @@ def detect_yolo(
         frame_counts = np.bincount(frame_indices, minlength=n_frames).astype(np.int32, copy=False)
     else:
         frame_counts = np.zeros(n_frames, dtype=np.int32)
-    recording_identity = resolve_recording_identity(root.attrs, fallback_path=output_zarr)
+    recording_identity = (
+        str(instance_key_recording_identity).strip()
+        if instance_key_recording_identity is not None
+        else resolve_recording_identity(root.attrs, fallback_path=output_zarr)
+    )
+    if not recording_identity:
+        raise ValueError("instance_key_recording_identity must not be blank.")
+    key_frame_indices = np.asarray(frame_indices, dtype=np.int64)
+    key_frame_domain = "run_frame_index"
+    key_frame_mapping_sha256: str | None = None
+    if instance_key_frame_indices is not None:
+        dense_frame_mapping = np.asarray(instance_key_frame_indices, dtype=np.int64).reshape(-1)
+        if dense_frame_mapping.shape[0] != int(n_frames):
+            raise ValueError(
+                "instance_key_frame_indices length does not match the source video: "
+                f"{dense_frame_mapping.shape[0]} != {n_frames}."
+            )
+        if np.any(dense_frame_mapping < 0):
+            raise ValueError("instance_key_frame_indices contains negative parent-frame values.")
+        if np.unique(dense_frame_mapping).shape[0] != dense_frame_mapping.shape[0]:
+            raise ValueError("instance_key_frame_indices must map run-local frames one-to-one.")
+        key_frame_indices = dense_frame_mapping[np.asarray(frame_indices, dtype=np.int64)]
+        key_frame_domain = "recording_parent_frame_index"
+        key_frame_mapping_sha256 = hashlib.sha256(
+            np.ascontiguousarray(dense_frame_mapping).view(np.uint8)
+        ).hexdigest()
     instance_keys = mint_detection_instance_keys(
         recording_identity=recording_identity,
-        frame_indices=frame_indices,
+        frame_indices=key_frame_indices,
         bbox_norm_coords=bbox_coords,
         class_ids=class_ids,
     )
@@ -1848,6 +1885,7 @@ def detect_yolo(
     detect_group.attrs.update({
         'detect_timestamp_utc': datetime.now(timezone.utc).isoformat(),
         'detection_method': 'yolo',  # 'blob' for traditional, 'yolo' for neural net
+        'artifact_mutability': 'raw_immutable',
         'detection_source': 'external_video',
         'model_type': 'yolo_object_detection',
         'model_path': str(model_path.absolute()),
@@ -1858,7 +1896,12 @@ def detect_yolo(
         'source_full_height': source_full_height,
         'inference_width': int(inference_width),
         'inference_height': int(inference_height),
-        **instance_key_attrs(recording_identity),
+        **instance_key_attrs(
+            recording_identity,
+            frame_domain=key_frame_domain,
+            frame_mapping_source=instance_key_frame_mapping_source,
+            frame_mapping_sha256=key_frame_mapping_sha256,
+        ),
         'parameters': {
             'conf_threshold': conf_threshold,
             'iou_threshold': iou_threshold,
@@ -2024,14 +2067,30 @@ def detect_yolo(
         detect_group.attrs[RUN_PROVENANCE_ATTR] = dict(effective_run_provenance)
         detect_group.attrs[CLI_RUN_PROVENANCE_ATTR] = dict(effective_run_provenance)
     write_stage_provenance(detect_group, provenance_record)
-    
+
+    try:
+        validate_immutable_yolo_storage(
+            detect_group,
+            stage="detect",
+            row_shard_rows=detect_row_shard_rows,
+            frame_shard_rows=detect_frame_shard_rows,
+        )
+    except Exception as exc:
+        mark_run_failed(
+            detect_group,
+            parent_group=parent_group,
+            run_name=run_name,
+            error=f"immutable YOLO storage validation failed: {exc}",
+        )
+        raise
+
     mark_run_complete(
         detect_group,
         parent_group=parent_group,
         run_name=run_name,
         run_provenance=effective_run_provenance,
     )
-    
+
     console.print(f"[green]✓[/green] Detections saved")
     
     # Calculate storage savings

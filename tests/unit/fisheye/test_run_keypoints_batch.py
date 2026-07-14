@@ -699,7 +699,7 @@ def test_run_yolo_prefers_model_path_override(monkeypatch: pytest.MonkeyPatch) -
     assert captured["model_path"] == "/models/from_registry.pt"
     assert captured["roi_cache_policy"] == "always"
     assert captured["roi_cache_dir"] == "/tmp/roi-cache"
-    assert captured["keypoint_roi_shard_rows"] == 65_536
+    assert captured["keypoint_roi_shard_rows"] == 262_144
     assert captured["keypoint_frame_shard_rows"] == 262_144
 
 

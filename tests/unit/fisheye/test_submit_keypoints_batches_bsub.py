@@ -45,12 +45,12 @@ def test_batch_submitter_defaults_to_indexed_keypoint_shards(tmp_path: Path) -> 
     result, summary = _run_dry_run(tmp_path)
 
     assert result.returncode == 0, result.stderr
-    assert "--keypoint-roi-shard-rows 65536" in result.stdout
+    assert "--keypoint-roi-shard-rows 262144" in result.stdout
     assert "--keypoint-frame-shard-rows 262144" in result.stdout
     assert summary["keypoint_storage"]["effective"] == {
         "keypoint_storage_layout": "indexed_sharding_v1",
         "keypoint_storage_policy": "default_indexed_sharding_v1",
-        "keypoint_roi_shard_rows": 65536,
+        "keypoint_roi_shard_rows": 262144,
         "keypoint_frame_shard_rows": 262144,
     }
 

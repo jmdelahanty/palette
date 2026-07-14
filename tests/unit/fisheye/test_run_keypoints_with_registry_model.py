@@ -355,7 +355,7 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
             "--pose-schema",
             "traditional_v2",
             "--keypoint-roi-shard-rows",
-            "65536",
+            "262144",
             "--keypoint-frame-shard-rows",
             "262144",
             "--include-non-success",
@@ -383,7 +383,7 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
     assert detect_kwargs.get("model_sha256") == "e" * 64
     assert detect_kwargs.get("output_parent") == "keypoint_shard_runs"
     assert detect_kwargs.get("pose_schema") == "traditional_v2"
-    assert detect_kwargs.get("keypoint_roi_shard_rows") == 65536
+    assert detect_kwargs.get("keypoint_roi_shard_rows") == 262144
     assert detect_kwargs.get("keypoint_frame_shard_rows") == 262144
     assert detect_kwargs.get("device") == "cpu"
     assert detect_kwargs.get("roi_cache_policy") == "always"

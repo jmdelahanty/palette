@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 from dataclasses import dataclass
@@ -19,7 +20,10 @@ from fisheye.shared.keypoint_summary import build_frame_keypoint_counts
 from fisheye.shared.row_lineage import ROW_IDENTITY_ARRAYS, SOURCE_CROP_ROW_IDS_ARRAY
 from fisheye.shared.run_provenance import build_writer_run_provenance, json_ready, stable_json
 from fisheye.shared.type_conversions import normalize_attr
-from fisheye.shared.zarr.chunk_profiles import create_geometry_preload_array
+from fisheye.shared.zarr.chunk_profiles import (
+    create_geometry_preload_array,
+    geometry_preload_chunks_for_data,
+)
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
     COMPLETION_EPOCH_REQUIRE_PROVENANCE,
@@ -36,11 +40,14 @@ from fisheye.shared.zarr_run_completion import (
 KEYPOINT_SHARD_PARENT = "keypoint_shard_runs"
 KEYPOINT_OUTPUT_PARENT = "keypoints_runs"
 FINALIZER_SCHEMA = "palette_keypoint_shard_collection_finalizer_v1"
+DEFAULT_CANONICAL_KEYPOINT_ROW_SHARD_ROWS = 262_144
+DEFAULT_CANONICAL_KEYPOINT_FRAME_SHARD_ROWS = 262_144
 
 REQUIRED_ROW_ARRAYS: tuple[str, ...] = (
     "frame_indices",
     SOURCE_CROP_ROW_IDS_ARRAY,
     "detection_indices",
+    "instance_key",
     "keypoints_roi",
     "keypoints_img",
     "keypoints_norm",
@@ -194,15 +201,35 @@ def _write_array_like(
     *,
     source: object | None = None,
     geometry_preload: bool = False,
+    shard_rows: int | None = None,
 ) -> None:
     data = np.asarray(data)
+    chunks = (
+        geometry_preload_chunks_for_data(data)
+        if geometry_preload
+        else _array_chunks(source, data)
+    )
+    shards: tuple[int, ...] | None = None
+    if chunks is not None and shard_rows is not None:
+        requested_rows = min(
+            int(shard_rows),
+            max(int(chunks[0]), int(data.shape[0]) if data.ndim else int(chunks[0])),
+        )
+        outer_rows = int(math.ceil(requested_rows / int(chunks[0])) * int(chunks[0]))
+        shards = (outer_rows, *chunks[1:])
     if geometry_preload:
-        create_geometry_preload_array(target, name, data=data, overwrite=True)
+        kwargs: dict[str, Any] = {}
+        if chunks is not None:
+            kwargs["chunks"] = chunks
+        if shards is not None:
+            kwargs["shards"] = shards
+        create_geometry_preload_array(target, name, data=data, overwrite=True, **kwargs)
         return
     kwargs: dict[str, Any] = {"data": data, "overwrite": True}
-    chunks = _array_chunks(source, data)
     if chunks is not None:
         kwargs["chunks"] = chunks
+    if shards is not None:
+        kwargs["shards"] = shards
     try:
         target.create_array(name, **kwargs)
     except TypeError:
@@ -471,6 +498,8 @@ def finalize_keypoint_shards(
     target_crop_run: str | None = None,
     overwrite: bool = False,
     dry_run: bool = False,
+    row_shard_rows: int = DEFAULT_CANONICAL_KEYPOINT_ROW_SHARD_ROWS,
+    frame_shard_rows: int = DEFAULT_CANONICAL_KEYPOINT_FRAME_SHARD_ROWS,
 ) -> dict[str, Any]:
     """Finalize completed ``keypoint_shard_runs`` into a normal keypoint run."""
 
@@ -517,6 +546,11 @@ def finalize_keypoint_shards(
         "sort_policy": "source_crop_row_ids_stable_ascending",
         "sort_changed_order": bool(not np.array_equal(sort_order, np.arange(sort_order.shape[0]))),
         "summary_statistics": summary_stats,
+        "storage": {
+            "layout": "indexed_sharding_v1",
+            "row_shard_rows": int(row_shard_rows),
+            "frame_shard_rows": int(frame_shard_rows),
+        },
     }
     if dry_run:
         return result
@@ -544,9 +578,17 @@ def finalize_keypoint_shards(
                 data,
                 source=source_array,
                 geometry_preload=name in GEOMETRY_PRELOAD_ROW_ARRAYS,
+                shard_rows=int(row_shard_rows),
             )
         for name, data in count_arrays.items():
-            create_geometry_preload_array(run_group, name, data=data, overwrite=True)
+            _write_array_like(
+                run_group,
+                name,
+                data,
+                source=shards[0].group.get(name),
+                geometry_preload=True,
+                shard_rows=int(frame_shard_rows),
+            )
 
         attrs = _consistent_attrs(shards)
         attrs.update(
@@ -554,6 +596,7 @@ def finalize_keypoint_shards(
                 "collection_finalizer_schema": FINALIZER_SCHEMA,
                 "method": "fisheye.utils.finalize_keypoint_shards",
                 "run_semantics": "finalized_keypoint_shard_collection",
+                "artifact_mutability": "raw_immutable",
                 "created_at_utc": created_at,
                 "keypoints_timestamp_utc": created_at,
                 "source_keypoint_shard_runs": [shard.name for shard in shards],
@@ -572,6 +615,10 @@ def finalize_keypoint_shards(
                 "keypoints_processed": total_rows,
                 "success_rate": summary_stats["success_rate_percent"],
                 "summary_statistics": summary_stats,
+                "keypoint_storage_layout": "indexed_sharding_v1",
+                "keypoint_storage_policy": "canonical_collection_indexed_sharding_v1",
+                "keypoint_roi_shard_rows": int(row_shard_rows),
+                "keypoint_frame_shard_rows": int(frame_shard_rows),
                 "sort_policy": "source_crop_row_ids_stable_ascending",
                 "sort_changed_order": bool(result["sort_changed_order"]),
                 "parameters": {
@@ -579,6 +626,8 @@ def finalize_keypoint_shards(
                     "output_run": resolved_output_run,
                     "target_crop_run": target_crop_run,
                     "overwrite": bool(overwrite),
+                    "row_shard_rows": int(row_shard_rows),
+                    "frame_shard_rows": int(frame_shard_rows),
                 },
             }
         )
@@ -591,6 +640,8 @@ def finalize_keypoint_shards(
                 "output_run": resolved_output_run,
                 "target_crop_run": target_crop_run,
                 "sort_policy": "source_crop_row_ids_stable_ascending",
+                "row_shard_rows": int(row_shard_rows),
+                "frame_shard_rows": int(frame_shard_rows),
             },
             input_run_ids={
                 "keypoint_shards": source_shard_paths,
@@ -631,6 +682,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing output run.")
     parser.add_argument("--dry-run", action="store_true", help="Validate and summarize without writing.")
+    parser.add_argument(
+        "--row-shard-rows",
+        type=int,
+        default=DEFAULT_CANONICAL_KEYPOINT_ROW_SHARD_ROWS,
+        help="Outer rows for canonical ROI-domain indexed shards.",
+    )
+    parser.add_argument(
+        "--frame-shard-rows",
+        type=int,
+        default=DEFAULT_CANONICAL_KEYPOINT_FRAME_SHARD_ROWS,
+        help="Outer rows for canonical frame-domain indexed shards.",
+    )
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     return parser
 
@@ -648,6 +711,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             target_crop_run=args.target_crop_run,
             overwrite=bool(args.overwrite),
             dry_run=bool(args.dry_run),
+            row_shard_rows=int(args.row_shard_rows),
+            frame_shard_rows=int(args.frame_shard_rows),
         )
     except Exception as exc:
         if args.json:

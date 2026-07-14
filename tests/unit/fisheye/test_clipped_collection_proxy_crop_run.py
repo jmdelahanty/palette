@@ -92,6 +92,7 @@ def test_create_clipped_collection_proxy_crop_run_writes_lineage_and_alias(
     np.testing.assert_array_equal(crop["source_clip_local_frame_indices"][:], np.array([2, 0], dtype=np.int64))
     np.testing.assert_array_equal(crop["source_refined_row_ids"][:], np.array([20, 10], dtype=np.int64))
     np.testing.assert_array_equal(crop["source_detect_row_index"][:], np.array([7, 3], dtype=np.int64))
+    np.testing.assert_array_equal(crop["instance_key"][:], np.array([2007, 2003], dtype=np.uint64))
     np.testing.assert_array_equal(crop["detection_indices"][:], np.array([0, 1], dtype=np.int64))
     np.testing.assert_allclose(
         crop["bbox_norm_coords"][:],

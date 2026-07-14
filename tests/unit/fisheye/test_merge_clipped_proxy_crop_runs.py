@@ -22,6 +22,11 @@ def _write_source_crop(root: zarr.Group, name: str, *, frames: list[int], clip_i
     crop.create_array("source_clip_local_frame_indices", data=local, chunks=(max(1, n_rows),))
     crop.create_array("source_refined_row_ids", data=local + clip_index * 100, chunks=(max(1, n_rows),))
     crop.create_array("source_detect_row_index", data=local + clip_index * 1000, chunks=(max(1, n_rows),))
+    crop.create_array(
+        "instance_key",
+        data=(local + 1 + clip_index * 10_000).astype(np.uint64),
+        chunks=(max(1, n_rows),),
+    )
     crop.create_array("detection_indices", data=local, chunks=(max(1, n_rows),))
     crop.create_array(
         "bbox_norm_coords",
@@ -128,6 +133,9 @@ def test_merge_clipped_proxy_crop_runs_writes_collection_proxy(tmp_path: Path) -
     )
     np.testing.assert_array_equal(merged["source_crop_row_ids"][:], np.arange(4, dtype=np.int64))
     np.testing.assert_array_equal(merged["detection_indices"][:], np.arange(4, dtype=np.int64))
+    np.testing.assert_array_equal(
+        merged["instance_key"][:], np.array([1, 2, 10001, 10002], dtype=np.uint64)
+    )
     np.testing.assert_array_equal(merged["source_proxy_crop_run_index"][:], np.array([0, 0, 1, 1], dtype=np.int32))
     np.testing.assert_array_equal(merged["source_proxy_crop_row_ids"][:], np.array([0, 1, 0, 1], dtype=np.int64))
 

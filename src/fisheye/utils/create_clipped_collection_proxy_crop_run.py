@@ -312,6 +312,9 @@ def create_clipped_collection_proxy_crop_run(
         else _column_np(table, "refined_instance_row_index", np.int64)
     )
     source_detect_row_index = _column_np(table, "source_detect_row_index", np.int64)
+    instance_key = _column_np(table, "instance_key", np.uint64)
+    if np.unique(instance_key).shape[0] != instance_key.shape[0]:
+        raise ValueError("Row-index instance_key values must be unique within one proxy run.")
     bbox_norm_coords = bbox_norm_from_clipped_collection_row_index(table)
     roi_row_index = _column_np(table, "roi_row_index", np.int64)
     clip_id = _single_unique(_column_pylist(table, "clip_id"), name="clip_id")
@@ -343,6 +346,7 @@ def create_clipped_collection_proxy_crop_run(
     _write_array(crop_group, "source_clip_local_frame_indices", clip_local_frame_indices)
     _write_array(crop_group, "source_refined_row_ids", refined_row_ids)
     _write_array(crop_group, "source_detect_row_index", source_detect_row_index)
+    _write_array(crop_group, "instance_key", instance_key)
     _write_array(crop_group, "detection_indices", roi_row_index)
     _write_array(crop_group, "bbox_norm_coords", bbox_norm_coords)
     _write_array(crop_group, "source_crop_row_ids", direct_source_crop_row_ids(int(table.num_rows)))

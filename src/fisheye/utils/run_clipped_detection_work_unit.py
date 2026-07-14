@@ -50,6 +50,7 @@ def run_work_unit(
     clip_id: str,
     clip_index: int,
     camera_serial: str,
+    recording_frame_index: Path,
     run_name: str,
     report_path: Path,
     batch_size: int = 16,
@@ -89,6 +90,7 @@ def run_work_unit(
             clip_id=clip_id,
             clip_index=int(clip_index),
             camera_serial=camera_serial,
+            recording_frame_index=recording_frame_index,
             run_name=run_name,
             command=[sys.executable, "-m", "fisheye.utils.run_clipped_detection_work_unit"],
         )
@@ -117,6 +119,7 @@ def run_work_unit(
         "clip_id": clip_id,
         "clip_index": int(clip_index),
         "camera_serial": camera_serial,
+        "recording_frame_index": str(recording_frame_index),
         "target_zarr": str(target_zarr),
         "target_group_path": target_group_path,
         "run_name": run_name,
@@ -151,6 +154,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--clip-id", required=True)
     parser.add_argument("--clip-index", required=True, type=int)
     parser.add_argument("--camera-serial", required=True)
+    parser.add_argument("--recording-frame-index", required=True, type=Path)
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--batch-size", type=int, default=16)
@@ -179,6 +183,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         clip_id=args.clip_id,
         clip_index=args.clip_index,
         camera_serial=args.camera_serial,
+        recording_frame_index=args.recording_frame_index.expanduser().resolve(),
         run_name=args.run_name,
         report_path=args.report.expanduser().resolve(),
         batch_size=args.batch_size,

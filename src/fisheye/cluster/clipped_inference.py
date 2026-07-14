@@ -676,6 +676,7 @@ def build_plan(
                 "--clip-id", clip_id,
                 "--clip-index", str(clip["clip_index"]),
                 "--camera-serial", str(clip["camera_serial"]),
+                "--recording-frame-index", str(target.recording_dir / "recording_frame_index.parquet"),
                 "--run-name", str(clip["detect_run"]),
                 "--report", str(report),
                 "--batch-size", "16",
@@ -808,7 +809,7 @@ def build_plan(
                 "--run-name", str(clip["keypoint_shard_run"]), "--output-parent", "keypoint_shard_runs",
                 "--crop-run", str(clip["proxy_crop_run"]), "--pose-schema", "traditional_v2",
                 "--batch-size", "256", "--device", "0", "--roi-cache-manifest", str(clip["alias_manifest"]),
-                "--stage-roi-cache-to-scratch", "--keypoint-roi-shard-rows", "65536",
+                "--stage-roi-cache-to-scratch", "--keypoint-roi-shard-rows", "262144",
                 "--keypoint-frame-shard-rows", "262144",
                 "--progress-jsonl", str(run_root / "progress" / f"keypoints_{target_safe}_{clip_id}.jsonl"),
             ]

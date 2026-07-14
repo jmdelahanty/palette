@@ -27,8 +27,8 @@ from fisheye.shared.roi_pixel_contract import orange_mono_pynvvc_luma_pixel_cont
 from fisheye.utils.resolve_clipped_refined_detect_collection import build_collection_frame_map
 
 
-CLIPPED_COLLECTION_ROW_INDEX_SCHEMA = "palette_clipped_collection_flat_roi_cache_rows_v1"
-CLIPPED_COLLECTION_CACHE_BUILDER_SCHEMA = "palette_clipped_collection_flat_roi_cache_builder_v1"
+CLIPPED_COLLECTION_ROW_INDEX_SCHEMA = "palette_clipped_collection_flat_roi_cache_rows_v2"
+CLIPPED_COLLECTION_CACHE_BUILDER_SCHEMA = "palette_clipped_collection_flat_roi_cache_builder_v2"
 
 
 def build_clipped_collection_flat_roi_cache(
@@ -380,6 +380,20 @@ def _build_row_index(
             default=np.nan,
         )
         class_ids = _read_optional_array(instances, "class_ids", np.int32, row_count, default=-1)
+        if "instance_key" not in instances:
+            raise ValueError(
+                f"{refined_path}: modern clipped cache sources require instances/instance_key; "
+                "repair the recording-scoped identity before rebuilding the cache"
+            )
+        instance_keys = _read_optional_array(
+            instances,
+            "instance_key",
+            np.uint64,
+            row_count,
+            default=0,
+        )
+        if np.unique(instance_keys).shape[0] != row_count:
+            raise ValueError(f"{refined_path}: instances/instance_key is not unique within the run")
         source = selected.get("source") if isinstance(selected.get("source"), Mapping) else {}
         video_path = str(source.get("video_path") or "")
         if not video_path:
@@ -405,6 +419,7 @@ def _build_row_index(
                 "manual_edit_flag": manual_edit_flags.astype(bool, copy=False),
                 "confidence_score": confidence_scores.astype(np.float32, copy=False),
                 "class_id": class_ids.astype(np.int32, copy=False),
+                "instance_key": instance_keys.astype(np.uint64, copy=False),
                 "bbox_norm_cx": bbox_norm[:, 0].astype(np.float32, copy=False),
                 "bbox_norm_cy": bbox_norm[:, 1].astype(np.float32, copy=False),
                 "bbox_norm_w": bbox_norm[:, 2].astype(np.float32, copy=False),
@@ -703,6 +718,7 @@ def _build_manifest(
         "recording_frame_id",
         "refined_row_id",
         "source_detect_row_index",
+        "instance_key",
         "bbox_norm_cx",
         "bbox_norm_cy",
         "bbox_norm_w",
