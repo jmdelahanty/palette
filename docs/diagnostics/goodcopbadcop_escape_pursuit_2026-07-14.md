@@ -213,7 +213,7 @@ Two checks rule out the geometric trap:
 | check | result |
 |---|---|
 | With **no chaser at all** (pre epoch), does the wall suppress fast bouts? | **No.** 3.72/min at the wall vs 3.16/min off it, **p=0.40** |
-| On **trial 1**, do fish that start *at* the wall escape less? | **No.** 0.82 vs 0.75, **p=0.68** |
+| On **trial 1**, do fish that start *at* the wall escape less? | **No.** 0.82 (n=11) vs 0.71 (n=21), **p=0.53** |
 
 A fish at the wall escapes perfectly well — when it still wants to. So a fish sitting at the wall
 on trial 5 and not fleeing is not a fish that *cannot* flee. **Wall position, freezing, and escape

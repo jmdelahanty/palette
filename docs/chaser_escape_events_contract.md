@@ -90,7 +90,8 @@ Two checks rule out the geometric trap:
   3.72/min at the wall vs 3.16/min off it, **p=0.40**. There is no kinematic reason a
   wall-adjacent fish cannot produce a fast bout.
 - **On trial 1**, fish that start *already at the wall* escape just as often as fish that do
-  not: **0.82 vs 0.75, p=0.68**. A fish at the wall escapes fine — when it still wants to.
+  not: **0.82 (n=11) vs 0.71 (n=21), p=0.53**. A fish at the wall escapes fine — when it still
+  wants to.
 
 So the wall does not *prevent* escape. Wall position, freezing, and escape failure are three
 faces of **one defensive state switch**, not three findings.
