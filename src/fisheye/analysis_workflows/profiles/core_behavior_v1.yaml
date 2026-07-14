@@ -1,0 +1,121 @@
+schema_id: palette.analysis_workflow
+schema_version: 1
+workflow_id: core_behavior_v1
+description: >-
+  Stimulus-independent core behavior workflow. Framewise Zarr arrays remain
+  authoritative; portable exports use configurable kinematic samples and
+  fixed activity/spatial time bins.
+
+temporal_policy:
+  kinematics:
+    sample_rate_hz: 10
+  activity_spatial:
+    bin_size_s: 5
+  eye_traces:
+    resolution: framewise
+  tail_traces:
+    resolution: framewise
+
+run_selection:
+  refined_keypoints: latest
+  refined_subject_masks: latest
+  track_kinematics: latest
+  swim_bouts: latest
+  bout_kinematics: latest
+  eye_angles: latest
+  subject_shape: latest
+  tail_kinematics: latest
+
+targets:
+  - kinematics_samples
+  - activity_spatial_summaries
+  - bout_kinematics
+  - eye_traces
+  - tail_traces
+
+nodes:
+  - id: refined_keypoints
+    kind: prerequisite
+    stage_id: refined_keypoints
+    runnable: false
+    description: Curated keypoint authority required by downstream kinematics and eyes.
+
+  - id: refined_subject_masks
+    kind: prerequisite
+    stage_id: refined_subject_masks
+    runnable: false
+    description: Curated dense subject-mask authority required by eyes and body shape.
+
+  - id: track_kinematics
+    kind: analysis
+    stage_id: track_kinematics
+    depends_on: [refined_keypoints]
+    execution_policy: whole_recording_temporal_state
+    description: Preserve smoothing, hysteresis, and derivatives across clip boundaries.
+
+  - id: swim_bouts
+    kind: analysis
+    stage_id: swim_bouts
+    depends_on: [track_kinematics]
+    execution_policy: whole_recording_temporal_state
+    description: Detect bouts on the continuous trace so events may cross clip boundaries.
+
+  - id: bout_kinematics
+    kind: analysis
+    stage_id: bout_kinematics
+    depends_on: [track_kinematics, swim_bouts]
+    execution_policy: recording_driver_single_writer
+    description: Compute sparse per-bout movement and heading metrics.
+
+  - id: eye_angles
+    kind: analysis
+    stage_id: eye_angles
+    depends_on: [refined_keypoints, refined_subject_masks]
+    execution_policy: chunk_aligned_workers_global_temporal_finalize
+    description: Compute framewise eye angles and convergence without downsampling.
+
+  - id: subject_shape
+    kind: analysis
+    stage_id: subject_shape
+    depends_on: [refined_subject_masks]
+    execution_policy: chunk_aligned_workers
+    description: Compute framewise body geometry and sampled tail splines.
+
+  - id: tail_kinematics
+    kind: analysis
+    stage_id: tail_kinematics
+    depends_on: [subject_shape]
+    runnable: false
+    execution_policy: chunk_aligned_backend_required
+    description: >-
+      Palette-native framewise tail angles, deflections, and curvature. The
+      current serial whole-array writer must gain a chunk-aligned backend
+      before full Sleepyfish execution.
+
+  - id: kinematics_samples
+    kind: export
+    depends_on: [track_kinematics]
+    temporal_product: kinematics
+    execution_policy: immutable_parquet_export
+    description: Portable sampled position, speed, heading, and validity rows.
+
+  - id: activity_spatial_summaries
+    kind: export
+    depends_on: [track_kinematics, swim_bouts]
+    temporal_product: activity_spatial
+    execution_policy: immutable_parquet_export
+    description: Fixed-bin activity, occupancy, distance, and bout summaries.
+
+  - id: eye_traces
+    kind: export
+    depends_on: [eye_angles]
+    temporal_product: eye_traces
+    execution_policy: immutable_framewise_export
+    description: Framewise eye-angle and convergence traces with validity.
+
+  - id: tail_traces
+    kind: export
+    depends_on: [subject_shape, tail_kinematics]
+    temporal_product: tail_traces
+    execution_policy: streaming_immutable_framewise_export
+    description: Framewise subject-shape spline points and Palette-native angle channels with validity.
