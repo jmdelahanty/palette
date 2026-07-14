@@ -125,11 +125,28 @@ the namespace. See
 [Marimo Pair Recording Workspace](marimo_pair_recording_workspace.md) for the
 complete trust boundary and Pair connection workflow.
 
-Keeping these as three manifests gives FileGlancer three app cards rather than
+## Generic source-Zarr workspace
+
+The **Palette Zarr Exploration Workspace** is a fourth independently discovered
+app declared in `apps/fileglancer/zarr_workspace/runnables.yaml`:
+
+```bash
+pixi run -e recording zarr-workspace -- --zarr-path /path/to/source.zarr
+```
+
+It accepts any single Zarr directory and does not run recording visualization
+contract discovery. Its editable notebook exposes bounded metadata, NumPy
+slice, and direct-to-Polars helpers for a person or Pair agent. The selected
+directory is mounted read-only at `/data/source.zarr`; only its per-session
+`/workspace` is writable. See
+[Marimo Pair Source-Zarr Workspace](marimo_pair_zarr_workspace.md).
+
+Keeping these as four manifests gives FileGlancer four app cards rather than
 one app with several launch modes. The group export viewer, locked recording
-viewer, and editable Pair workspace therefore communicate their different data
-and write authorities before a user starts a job. All three still resolve to
-the same Palette commit, Pixi lock, and reusable notebook/component code.
+viewer, analysis-aware Pair workspace, and generic Zarr workspace therefore
+communicate their different data and write authorities before a user starts a
+job. All four still resolve to the same Palette commit, Pixi lock, and reusable
+notebook/component code.
 
 ## Packaging boundary
 

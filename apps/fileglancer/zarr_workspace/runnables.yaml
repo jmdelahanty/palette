@@ -1,0 +1,34 @@
+name: Palette Zarr Exploration Workspace
+description: Explore one read-only-mounted source Zarr in editable Marimo cells with optional Pair access.
+requirements:
+  - pixi>=0.40
+
+runnables:
+  - id: zarr-workspace
+    name: Zarr Exploration Workspace
+    type: service
+    description: >-
+      Open any selected source Zarr in an editable Marimo notebook with bounded
+      metadata, NumPy, and Polars helpers. Palette code and the selected Zarr
+      are isolated in a Bubblewrap mount namespace and are read-only; only the
+      per-session notebook workspace is writable. Marimo Pair may connect to
+      the authenticated editor session.
+    command: pixi run --manifest-path ../../../pixi.toml -e recording zarr-workspace --
+    working_dir: repo
+    pre_run: 'export PATH="$HOME/.pixi/bin:$PATH"'
+    auto_url: true
+    service_url_suffix: "/?access_token=${FG_SERVICE_TOKEN}"
+    parameters:
+      - flag: --zarr-path
+        name: Source Zarr
+        type: directory
+        description: >-
+          Choose exactly one Zarr directory with FileGlancer's Browse selector.
+          It is exposed inside the editable workspace as the read-only
+          /data/source.zarr mount.
+        required: true
+        exists: true
+    resources:
+      cpus: 2
+      memory: "16 GB"
+      walltime: "08:00"

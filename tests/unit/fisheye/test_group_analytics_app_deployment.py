@@ -16,13 +16,21 @@ def test_pixi_exposes_group_recording_and_editable_workspace_tasks() -> None:
     config = tomllib.loads((REPO_ROOT / "pixi.toml").read_text(encoding="utf-8"))
 
     assert config["workspace"]["platforms"] == ["linux-64"]
-    assert set(config["tasks"]) == {"app", "recording-app", "recording-workspace"}
+    assert set(config["tasks"]) == {
+        "app",
+        "recording-app",
+        "recording-workspace",
+        "zarr-workspace",
+    }
     assert config["tasks"]["app"]["cmd"] == "bash scripts/run_group_analytics_app.sh"
     assert config["tasks"]["recording-app"]["cmd"] == (
         "bash scripts/run_recording_explorer_app.sh"
     )
     assert config["tasks"]["recording-workspace"]["cmd"] == (
         "bash scripts/run_recording_exploration_workspace.sh"
+    )
+    assert config["tasks"]["zarr-workspace"]["cmd"] == (
+        "bash scripts/run_zarr_exploration_workspace.sh"
     )
     assert config["environments"]["recording"]["features"] == ["recording"]
     assert set(config["feature"]["recording"]["dependencies"]) == {
@@ -56,6 +64,7 @@ import apps.marimo.components.core_behavior
 import apps.marimo.components.goodcopbadcop_chaser
 import apps.marimo.components.group_analytics
 import apps.marimo.components.registry
+import apps.marimo.components.zarr_workspace
 import fisheye.visualization.eye_angle_timeseries
 import fisheye.visualization.goodcopbadcop_interactive
 """
@@ -83,7 +92,7 @@ def _load_manifest(relative_path: str) -> dict:
     return yaml.safe_load((REPO_ROOT / relative_path).read_text(encoding="utf-8"))
 
 
-def test_fileglancer_exposes_three_independent_apps() -> None:
+def test_fileglancer_exposes_four_independent_apps() -> None:
     discovered_paths = sorted(
         str(path.relative_to(REPO_ROOT))
         for path in REPO_ROOT.rglob("runnables.yaml")
@@ -92,6 +101,7 @@ def test_fileglancer_exposes_three_independent_apps() -> None:
     assert discovered_paths == [
         "apps/fileglancer/recording_explorer/runnables.yaml",
         "apps/fileglancer/recording_workspace/runnables.yaml",
+        "apps/fileglancer/zarr_workspace/runnables.yaml",
         "runnables.yaml",
     ]
 
@@ -102,15 +112,24 @@ def test_fileglancer_exposes_three_independent_apps() -> None:
     workspace_manifest = _load_manifest(
         "apps/fileglancer/recording_workspace/runnables.yaml"
     )
+    zarr_workspace_manifest = _load_manifest(
+        "apps/fileglancer/zarr_workspace/runnables.yaml"
+    )
 
-    manifests = (group_manifest, recording_manifest, workspace_manifest)
+    manifests = (
+        group_manifest,
+        recording_manifest,
+        workspace_manifest,
+        zarr_workspace_manifest,
+    )
     assert {manifest["name"] for manifest in manifests} == {
         "Palette Group Analytics Explorer",
         "Palette Recording Explorer",
         "Palette Recording Exploration Workspace",
+        "Palette Zarr Exploration Workspace",
     }
     assert all(manifest["requirements"] == ["pixi>=0.40"] for manifest in manifests)
-    assert [len(manifest["runnables"]) for manifest in manifests] == [1, 1, 1]
+    assert [len(manifest["runnables"]) for manifest in manifests] == [1, 1, 1, 1]
 
     runnable = group_manifest["runnables"][0]
     assert runnable["id"] == "app"
@@ -165,6 +184,34 @@ def test_fileglancer_exposes_three_independent_apps() -> None:
             "description": (
                 "Exactly one Palette analysis Zarr. It is exposed inside the editable "
                 "workspace as the read-only /data/recording.zarr mount."
+            ),
+            "required": True,
+            "exists": True,
+        }
+    ]
+
+    zarr_workspace = zarr_workspace_manifest["runnables"][0]
+    assert zarr_workspace["id"] == "zarr-workspace"
+    assert zarr_workspace["type"] == "service"
+    assert zarr_workspace["command"] == (
+        "pixi run --manifest-path ../../../pixi.toml -e recording zarr-workspace --"
+    )
+    assert zarr_workspace["working_dir"] == "repo"
+    assert zarr_workspace["auto_url"] is True
+    assert zarr_workspace["service_url_suffix"] == (
+        "/?access_token=${FG_SERVICE_TOKEN}"
+    )
+    assert "Bubblewrap" in zarr_workspace["description"]
+    assert "read-only" in zarr_workspace["description"]
+    assert zarr_workspace["parameters"] == [
+        {
+            "flag": "--zarr-path",
+            "name": "Source Zarr",
+            "type": "directory",
+            "description": (
+                "Choose exactly one Zarr directory with FileGlancer's Browse "
+                "selector. It is exposed inside the editable workspace as the "
+                "read-only /data/source.zarr mount."
             ),
             "required": True,
             "exists": True,
@@ -340,6 +387,62 @@ def _run_workspace_launcher(
     )
 
 
+def _run_zarr_workspace_launcher(
+    tmp_path: Path,
+    *,
+    extra_args: tuple[str, ...] = (),
+    extra_env: dict[str, str] | None = None,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_bwrap = fake_bin / "bwrap"
+    fake_bwrap.write_text(
+        "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\"\n",
+        encoding="utf-8",
+    )
+    fake_bwrap.chmod(0o755)
+
+    fake_python = tmp_path / "fake-pixi" / "bin" / "python"
+    fake_python.parent.mkdir(parents=True)
+    fake_python.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_python.chmod(0o755)
+
+    zarr_path = tmp_path / "source.zarr"
+    zarr_path.mkdir()
+    workspace_root = tmp_path / "zarr-workspaces"
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "PALETTE_ZARR_WORKSPACE_PYTHON": str(fake_python),
+        "PALETTE_ZARR_WORKSPACE_ROOT": str(workspace_root),
+    }
+    for name in (
+        "FG_SERVICE_PORT",
+        "FG_SERVICE_TOKEN",
+        "PALETTE_ZARR_WORKSPACE_HOST",
+        "PALETTE_ZARR_WORKSPACE_PORT",
+        "PALETTE_ZARR_WORKSPACE_TOKEN",
+    ):
+        env.pop(name, None)
+    env.update(extra_env or {})
+    return subprocess.run(
+        [
+            "bash",
+            str(REPO_ROOT / "scripts/run_zarr_exploration_workspace.sh"),
+            "--",
+            "--zarr-path",
+            str(zarr_path),
+            *extra_args,
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        check=check,
+        capture_output=True,
+        text=True,
+    )
+
+
 def _mount_pairs(arguments: list[str], option: str) -> list[tuple[str, str]]:
     return [
         (arguments[index + 1], arguments[index + 2])
@@ -412,3 +515,64 @@ def test_recording_workspace_rejects_collection_paths(tmp_path: Path) -> None:
 
     assert completed.returncode == 2
     assert "unavailable in the single-recording read-only workspace" in completed.stderr
+
+
+def test_zarr_workspace_mounts_only_source_and_code_read_only(tmp_path: Path) -> None:
+    completed = _run_zarr_workspace_launcher(tmp_path)
+    arguments = completed.stdout.splitlines()
+
+    read_only = _mount_pairs(arguments, "--ro-bind")
+    writable = _mount_pairs(arguments, "--bind")
+    zarr_path = str((tmp_path / "source.zarr").resolve())
+    assert (zarr_path, "/data/source.zarr") in read_only
+    assert (str(REPO_ROOT), str(REPO_ROOT)) in read_only
+    assert {destination for _, destination in writable} == {"/tmp", "/workspace"}
+    assert all(source != zarr_path for source, _ in writable)
+
+    command_index = arguments.index("-m")
+    assert arguments[command_index : command_index + 3] == ["-m", "marimo", "edit"]
+    assert "--headless" in arguments[command_index:]
+    assert "--skip-update-check" in arguments[command_index:]
+    assert "--no-token" in arguments[command_index:]
+    assert arguments[-3:] == ["--", "--zarr-path", "/data/source.zarr"]
+
+    notebook_copies = list(
+        (tmp_path / "zarr-workspaces").glob("*/palette_zarr_workspace.py")
+    )
+    assert len(notebook_copies) == 1
+    notebook_source = notebook_copies[0].read_text(encoding="utf-8")
+    assert "exploration = zarr_workspace" in notebook_source
+    assert "exploration.to_polars" in notebook_source
+    assert "exploration.read" in notebook_source
+    assert 'selection="single"' in notebook_source
+    assert "(exploration, selected_path)" in notebook_source
+
+
+def test_zarr_workspace_uses_fileglancer_authentication(tmp_path: Path) -> None:
+    completed = _run_zarr_workspace_launcher(
+        tmp_path,
+        extra_env={"FG_SERVICE_PORT": "31879", "FG_SERVICE_TOKEN": "service-secret"},
+    )
+    arguments = completed.stdout.splitlines()
+
+    assert ["--host", "0.0.0.0"] == arguments[
+        arguments.index("--host") : arguments.index("--host") + 2
+    ]
+    assert ["--port", "31879"] == arguments[
+        arguments.index("--port") : arguments.index("--port") + 2
+    ]
+    assert ["--token-password", "service-secret"] == arguments[
+        arguments.index("--token-password") : arguments.index("--token-password") + 2
+    ]
+    assert "--no-token" not in arguments
+
+
+def test_zarr_workspace_rejects_unsupported_arguments(tmp_path: Path) -> None:
+    completed = _run_zarr_workspace_launcher(
+        tmp_path,
+        extra_args=("--registry", "/shared/palette.sqlite"),
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "Unsupported Zarr workspace argument" in completed.stderr

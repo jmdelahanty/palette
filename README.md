@@ -74,11 +74,20 @@ pixi run -e recording recording-workspace -- \
   --zarr-path /path/to/recording_analysis.zarr
 ```
 
+To open any source Zarr in a generic editable Marimo/Pair workspace, without
+requiring Palette visualization contracts:
+
+```bash
+pixi run -e recording zarr-workspace -- \
+  --zarr-path /path/to/source.zarr
+```
+
 The workspace uses read-only bind mounts for the selected Zarr and Palette
 code. Only its per-session notebook directory is writable. See
 `docs/marimo_pair_recording_workspace.md` before enabling Marimo Pair.
-FileGlancer publishes the group explorer, locked recording viewer, and editable
-recording workspace as three independent apps from this repository.
+FileGlancer publishes the group explorer, locked recording viewer,
+analysis-aware editable workspace, and generic source-Zarr workspace as four
+independent apps from this repository.
 
 ## Documentation
 
@@ -92,6 +101,7 @@ Useful starting points:
 - `docs/marimo_explorer_architecture.md` - interactive viewer structure.
 - `docs/palette_analytics_app_deployment.md` - Pixi and FileGlancer deployment.
 - `docs/marimo_pair_recording_workspace.md` - editable, read-only-mounted recording workspace.
+- `docs/marimo_pair_zarr_workspace.md` - generic editable workspace and bounded Zarr API.
 
 Historical investigations and one-off plans are under `docs/archive/` and
 `docs/diagnostics/`.

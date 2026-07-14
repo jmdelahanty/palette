@@ -12,12 +12,13 @@ The desired dataset-selection flow, provider navigation, scientific display
 defaults, and packaging gate are specified in
 [Group Analytics Marimo Application Design](group_analytics_marimo_application_design.md).
 
-FileGlancer presentation is split into three independently discovered app
+FileGlancer presentation is split into four independently discovered app
 manifests: the root group-analytics manifest, the locked recording viewer under
 `apps/fileglancer/recording_explorer/`, and the editable recording workspace
-under `apps/fileglancer/recording_workspace/`. They share Palette code and Pixi
-environments but do not share an app card because their authority contracts are
-different.
+under `apps/fileglancer/recording_workspace/`, plus the generic source-Zarr
+workspace under `apps/fileglancer/zarr_workspace/`. They share Palette code and
+Pixi environments but do not share an app card because their authority and
+loading contracts are different.
 
 ## Direction
 
@@ -174,6 +175,17 @@ pixi run -e recording recording-workspace -- --zarr-path <analysis.zarr>
 
 Its security and connection contract is documented in
 [Marimo Pair Recording Workspace](marimo_pair_recording_workspace.md).
+
+For generic exploration of a source, training, analysis, or other Zarr without
+a visualization-contract requirement:
+
+```bash
+pixi run -e recording zarr-workspace -- --zarr-path <source.zarr>
+```
+
+This notebook exposes bounded metadata traversal, explicit NumPy slices, and
+direct Polars construction through a stable `exploration` helper. See
+[Marimo Pair Source-Zarr Workspace](marimo_pair_zarr_workspace.md).
 
 For registry-backed recording discovery without opening every sibling Zarr:
 
