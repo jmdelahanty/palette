@@ -84,3 +84,34 @@ mark uncovered recording-tail frames unavailable. Persisted normalized role
 labels remain preferred; older components fall back to the authoritative source
 stimulus protocol and still refuse unresolved/unknown roles. Real-data
 read-only reruns passed both compatibility cases before recovery submission.
+
+Recovery array `153097439` reran those five recordings gaze-only and completed
+5/5. Because 27 first-pass components and five recovery components would have
+recorded different Git commits, they were retained as immutable diagnostics
+rather than used as the authoritative cohort surface.
+
+Final gaze-only array `153097444` wrote
+`chaser_gaze_tracking_cohort_v2_20260714` for the same 32-recording registry
+snapshot under exact commit `a20de93dbbfce7d46ed55cac064129989c88d60c`.
+The metadata-only audit found:
+
+- 32/32 component statuses complete under
+  `palette.chaser_gaze_tracking.v1`;
+- 32/32 convention and independent eye-body/track-heading gates passed;
+- 32/32 persisted summary PNGs declare
+  `palette.chaser_gaze_tracking.summary.v1`;
+- all recordings resolve the protocol-role pair `aggressive`, `inert`;
+- 31 recordings read normalized roles from the egocentric component and one
+  uses the authoritative source-protocol fallback;
+- 30 recordings use the common `eye_angles_chaser_gaze_v1_20260714` run and
+  the two canaries retain their separately validated eye runs;
+- two recordings have an uncovered dense eye-frame tail, at most 53 frames,
+  represented as unavailable rather than imputed;
+- 31 recordings retain ten rotated virtual references and one retains eight
+  after collision exclusion; and
+- 7,184 sustained candidate lock-on events were recorded across the cohort.
+
+The event count is descriptive and must not be treated as 7,184 independent
+replicates. Cohort inference remains one summary per recording/fish. The v2
+component is the authoritative cohort surface; v1 and canary components remain
+diagnostic lineage.
