@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
+from fisheye.shared.run_provenance import build_run_provenance
 from fisheye.shared.system_metadata import get_environment_info, get_git_info
 
 try:
@@ -261,6 +262,9 @@ def build_detection_artifact(
     clip_index: Optional[int] = None,
     camera_serial: Optional[str] = None,
     run_name: Optional[str] = None,
+    model_sha256: Optional[str] = None,
+    model_registry_set_id: Optional[str] = None,
+    model_registry_run_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Run YOLO into scratch and package only the completed detect run group."""
     video_path = video_path.expanduser().resolve()
@@ -327,6 +331,33 @@ def build_detection_artifact(
     (artifact_dir / "logs" / "command.log").write_text(command_text + "\n", encoding="utf-8")
 
     detect_start = time.perf_counter()
+    run_provenance = build_run_provenance(
+        command="fisheye.utils.run_detection_artifact",
+        params={
+            "video_path": str(video_path),
+            "target_zarr": str(target_zarr),
+            "model_path": str(model_path) if model_path is not None else None,
+            "model_sha256": model_sha256,
+            "model_registry_set_id": model_registry_set_id,
+            "model_registry_run_id": model_registry_run_id,
+            "config_path": str(config_path) if config_path is not None else None,
+            "conf_threshold": conf_threshold,
+            "iou_threshold": iou_threshold,
+            "max_det": max_det,
+            "batch_size": batch_size,
+            "resize_dims": list(resize_dims) if resize_dims is not None else None,
+            "imgsz": list(imgsz) if imgsz is not None else None,
+            "decode_backend": decode_backend,
+            "latest_policy": latest_policy,
+            "run_name": run_name,
+            "clip_context": clip_context,
+        },
+        input_run_ids={
+            "model_registry_set_id": model_registry_set_id,
+            "model_registry_run_id": model_registry_run_id,
+        },
+        cwd=Path.cwd(),
+    )
     with contextlib.redirect_stdout(sys.stderr):
         run_name = _detect_yolo(
             video_path=str(video_path),
@@ -345,6 +376,8 @@ def build_detection_artifact(
             write_raw_video_metadata=False,
             overwrite_raw_video_metadata=False,
             run_name=run_name,
+            model_sha256=model_sha256,
+            run_provenance=run_provenance,
         )
     artifact_timing["detect_yolo_seconds_total"] = time.perf_counter() - detect_start
 
@@ -467,6 +500,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--work-dir", type=Path, default=None, help="Scratch work dir for temporary detect output")
     parser.add_argument("--tarball-output", type=Path, default=None, help="Output .tar.gz path; default is beside artifact dir")
     parser.add_argument("--model", "--model-path", dest="model_path", type=Path, default=None)
+    parser.add_argument("--model-sha256", default=None)
+    parser.add_argument("--model-registry-set-id", default=None)
+    parser.add_argument("--model-registry-run-id", default=None)
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--conf", type=float, default=None)
     parser.add_argument("--iou", type=float, default=None)
@@ -521,6 +557,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             clip_index=args.clip_index,
             camera_serial=args.camera_serial,
             run_name=args.run_name,
+            model_sha256=args.model_sha256,
+            model_registry_set_id=args.model_registry_set_id,
+            model_registry_run_id=args.model_registry_run_id,
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)

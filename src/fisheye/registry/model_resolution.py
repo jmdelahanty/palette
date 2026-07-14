@@ -560,6 +560,8 @@ def _subject_mask_candidate_payload(candidate: SubjectMaskModelCandidate) -> dic
 def load_subject_mask_model_candidates(
     registry: Registry,
     *,
+    set_id: Optional[str] = None,
+    run_id: Optional[str] = None,
     coverage_class: Optional[str] = "dense_all_components",
     component_coverage_key: Optional[str] = None,
     label_schema_id: Optional[str] = None,
@@ -580,6 +582,12 @@ def load_subject_mask_model_candidates(
     params: list[Any] = []
     if not include_non_success:
         sql.append("AND LOWER(COALESCE(status, '')) = 'success'")
+    if set_id:
+        sql.append("AND set_id = ?")
+        params.append(str(set_id))
+    if run_id:
+        sql.append("AND run_id = ?")
+        params.append(str(run_id))
     if coverage_class:
         sql.append("AND coverage_class = ?")
         params.append(str(coverage_class))
@@ -627,6 +635,8 @@ def load_subject_mask_model_candidates(
 def resolve_best_subject_mask_model(
     registry: Registry,
     *,
+    set_id: Optional[str] = None,
+    run_id: Optional[str] = None,
     coverage_class: Optional[str] = "dense_all_components",
     component_coverage_key: Optional[str] = None,
     label_schema_id: Optional[str] = None,
@@ -636,6 +646,8 @@ def resolve_best_subject_mask_model(
 ) -> tuple[SubjectMaskModelCandidate, list[SubjectMaskModelCandidate]]:
     candidates = load_subject_mask_model_candidates(
         registry,
+        set_id=set_id,
+        run_id=run_id,
         coverage_class=coverage_class,
         component_coverage_key=component_coverage_key,
         label_schema_id=label_schema_id,

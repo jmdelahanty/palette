@@ -28,6 +28,8 @@ __all__ = [
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registry", type=Path, help="Optional registry SQLite path.")
+    parser.add_argument("--set-id", help="Optional exact registry set id.")
+    parser.add_argument("--run-id", help="Optional exact registry run id.")
     parser.add_argument("--coverage-class", default="dense_all_components")
     parser.add_argument("--component-coverage-key")
     parser.add_argument("--label-schema-id")
@@ -43,6 +45,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         best, candidates = resolve_best_subject_mask_model(
             registry,
+            set_id=args.set_id,
+            run_id=args.run_id,
             coverage_class=args.coverage_class,
             component_coverage_key=args.component_coverage_key,
             label_schema_id=args.label_schema_id,
@@ -59,6 +63,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         candidates=candidates,
         top_k=int(args.top_k),
         parameters={
+            "set_id": args.set_id,
+            "run_id": args.run_id,
             "coverage_class": args.coverage_class,
             "component_coverage_key": args.component_coverage_key,
             "label_schema_id": args.label_schema_id,

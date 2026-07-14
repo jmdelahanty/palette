@@ -99,3 +99,23 @@ def test_resolve_subject_mask_model_filters_missing_paths_by_default(tmp_path: P
 
     assert [candidate.run_id for candidate in candidates] == ["subject_masks_existing"]
     registry.close()
+
+
+def test_resolve_subject_mask_model_accepts_exact_set_and_run_filters(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    first = tmp_path / "first.pt"
+    second = tmp_path / "second.pt"
+    first.write_text("first", encoding="utf-8")
+    second.write_text("second", encoding="utf-8")
+    _record_model(registry, run_id="subject_masks_first", model_path=first, dice=0.8)
+    _record_model(registry, run_id="subject_masks_second", model_path=second, dice=0.9)
+
+    best, candidates = resolve_best_subject_mask_model(
+        registry,
+        set_id="subject_mask_set",
+        run_id="subject_masks_first",
+    )
+
+    assert best.run_id == "subject_masks_first"
+    assert [candidate.run_id for candidate in candidates] == ["subject_masks_first"]
+    registry.close()

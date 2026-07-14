@@ -124,7 +124,7 @@ def build_plan(
     quality_threshold: float = 100.0,
     quality_threshold_mode: str = "scaled",
     quality_threshold_reference_width: float = 640.0,
-    refine_config: str | Path = "pipeline_config.yaml",
+    refine_config: str | Path = "configs/fisheye/default.yaml",
     per_frame_top_k: int | None = 1,
     clip_ids: Optional[Sequence[str]] = None,
     camera_serials: Optional[Sequence[str]] = None,
@@ -425,7 +425,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--quality-threshold", type=float, default=100.0)
     parser.add_argument("--quality-threshold-mode", choices=["scaled", "pixels", "normalized"], default="scaled")
     parser.add_argument("--quality-threshold-reference-width", type=float, default=640.0)
-    parser.add_argument("--refine-config", default="pipeline_config.yaml")
+    parser.add_argument("--refine-config", default="configs/fisheye/default.yaml")
     parser.add_argument("--per-frame-top-k", type=int, default=1)
     parser.add_argument("--no-per-frame-top-k", action="store_true", help="Do not add --per-frame-top-k to refine commands")
     parser.add_argument("--clip-id", action="append", default=None, help="Limit to one or more clip ids")

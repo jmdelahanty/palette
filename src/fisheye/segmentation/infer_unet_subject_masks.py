@@ -1186,6 +1186,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--registry", type=Path, help="Registry SQLite path for --resolve-model-from-registry.")
     parser.add_argument(
+        "--model-set-id",
+        help="Require one exact subject-mask registry set id.",
+    )
+    parser.add_argument(
+        "--model-run-id",
+        help="Require one exact subject-mask registry run id.",
+    )
+    parser.add_argument(
         "--model-coverage-class",
         default="dense_all_components",
         help="Required subject-mask model coverage_class when resolving from registry.",
@@ -1389,6 +1397,8 @@ def _resolve_registry_checkpoint(
     try:
         selected, candidates = resolve_best_subject_mask_model(
             registry,
+            set_id=args.model_set_id,
+            run_id=args.model_run_id,
             coverage_class=args.model_coverage_class,
             component_coverage_key=args.model_component_coverage_key,
             label_schema_id=args.model_label_schema_id,
@@ -1405,6 +1415,8 @@ def _resolve_registry_checkpoint(
         candidates=candidates,
         top_k=int(args.model_top_k),
         parameters={
+            "set_id": args.model_set_id,
+            "run_id": args.model_run_id,
             "coverage_class": args.model_coverage_class,
             "component_coverage_key": args.model_component_coverage_key,
             "label_schema_id": args.model_label_schema_id,

@@ -27,6 +27,7 @@ PROGRESS_EVERY_BATCHES=0
 SHA256=0
 OVERWRITE=0
 DRY_RUN=0
+RUN_DIRECT=0
 
 usage() {
   cat <<'USAGE'
@@ -82,6 +83,8 @@ Logging:
 
 General:
   --dry-run                         Print files and submit command; do not submit
+  --run-direct                      Run the generated worker script in the current
+                                    LSF allocation instead of nesting another bsub
   -h, --help                        Show this message
 USAGE
 }
@@ -114,10 +117,16 @@ while [[ $# -gt 0 ]]; do
     --progress-interval-s) PROGRESS_INTERVAL_S="$2"; shift 2;;
     --progress-every-batches) PROGRESS_EVERY_BATCHES="$2"; shift 2;;
     --dry-run) DRY_RUN=1; shift;;
+    --run-direct) RUN_DIRECT=1; shift;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown arg: $1" >&2; usage; exit 2;;
   esac
 done
+
+if [[ "$DRY_RUN" == "1" && "$RUN_DIRECT" == "1" ]]; then
+  echo "Use either --dry-run or --run-direct, not both." >&2
+  exit 2
+fi
 
 if [[ -z "$ZARR_PATH" || -z "$COLLECTION_ID" ]]; then
   echo "Missing required --zarr PATH or --collection-id ID" >&2
@@ -663,6 +672,12 @@ echo "Submit command: $BSUB_CMD"
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "Dry run only; no submission."
   exit 0
+fi
+
+if [[ "$RUN_DIRECT" == "1" ]]; then
+  echo "Running generated bundle worker inside current allocation."
+  bash "$JOB_SCRIPT"
+  exit $?
 fi
 
 if ! command -v bsub >/dev/null 2>&1; then
