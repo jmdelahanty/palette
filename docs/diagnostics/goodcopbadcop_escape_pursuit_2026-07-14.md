@@ -1,36 +1,45 @@
 # The escape response is real, large, and the chaser reels the fish back in
 
-**Date:** 2026-07-14
+**Date:** 2026-07-14 (numbers corrected 2026-07-14 — see the bug note below)
 **Cohort:** the same 32 GoodCopBadCop recordings with a materialized `chaser_distance_run`.
 **Source:** `chaser_bout_response`'s bout table (`peak_speed_mm_s`, `start_frame`) plus the
 distance run's per-frame `distances/distance_mm`. **No new upstream stages, no megabouts.**
 **Unit of analysis:** the recording (one fish). Every number below is a per-fish test.
 
+> **BUG FOUND AND FIXED — bout counts were inflated ~5×.** The swim-bout table is a
+> **multi-level** table: `detect_bouts_multi_level` concatenates the bouts detected at all five
+> speed levels (raw, filtered, smoothed, averaged, exponential) into one table, tagged by
+> `signal_id`. `chaser_bout_response` was reading **all five**, counting each physical bout up
+> to five times and mixing jittery raw peaks with smoothed ones. It now filters to the run's
+> `default_signal_id` (`speed_exponential`). **Every finding below survived** — the inflation
+> was near-uniform across conditions, so ratios and per-fish contrasts held — but the absolute
+> counts fell ~5× and the escape-rate *ratio* came down from 11× to 8.5×. The numbers here are
+> the **corrected, single-level** values.
+
 ---
 
 ## The headline
 
-During the 180 s chase, fish escape **11×** more often than at baseline, they escape **when the
+During the 180 s chase, fish escape **8.5×** more often than at baseline, they escape **when the
 chaser gets close**, the escape is **directed away from the chaser** and gains ~8 mm — and then
 **the chaser takes most of it back within four seconds.**
 
 All numbers below are re-derived from the materialized `chaser_escape_events` component
-(`docs/chaser_escape_events_contract.md`), not from a scratch script.
+(`docs/chaser_escape_events_contract.md`), on the corrected single-level (`speed_exponential`)
+bouts. 1,067 escape events across the 32 fish.
 
 | result | value | p |
 |---|---|---|
-| escape rate, pre → chase | 3.17 → **35.84** per *validly-tracked* min (**11.3×**) | **4.0e-05** |
-| escape onset distance vs ordinary bouts | **−6.68 mm** closer | **0.0005** |
-| distance gained by +0.5 s | **+8.38 mm** | **1.1e-10** |
-| ground lost back, +0.5 s → +4 s | **+6.60 mm** (21/32 fish) | **0.011** |
-| same, against the **static** dot | −2.25 mm (it keeps the ground) | 0.042 |
-| **pursuit: chase loses more ground than the static control** | **+10.03 mm** | **0.0004** |
-| *(net change, onset → +4 s — the statistic that lies)* | *+3.70 mm* | *0.15* |
+| escape rate, pre → chase | 0.84 → **7.15** per *validly-tracked* min (**8.5×**) | **2.2e-04** |
+| escape onset distance vs ordinary bouts | **−9.03 mm** closer | **0.0007** |
+| distance gained by +0.5 s | **+8.54 mm** | **1.0e-10** |
+| ground lost back, +0.5 s → +4 s | **+6.63 mm** | **0.014** |
+| same, against the **static** dot | −2.23 mm (it keeps the ground) | 0.12 |
 
 31 of 32 fish escape more during the chase.
 
 **The single cleanest control:** against the static dot, the same fish making the same fast bout
-gains **+0.50 mm, p=0.46 — nothing.** A fast bout aimed at nothing goes nowhere. Only against
+gains **+0.63 mm, p=0.37 — nothing.** A fast bout aimed at nothing goes nowhere. Only against
 the chaser is it directed. That contrast is within-fish and within-object.
 
 > **On the denominator.** The rate is per minute of *validly tracked* time, not wall clock.
@@ -94,7 +103,8 @@ The trigger band (10–14 mm) is **the same band where the steering dose-respons
 same distance.
 
 **The escape is directed, and the static-dot control proves it.** Per-fish, baseline-subtracted
-at escape onset:
+at escape onset (*this per-timepoint trace table is the pre-correction all-levels version, kept
+for shape; the endpoints re-verify on single-level bouts — see §3 and the headline*):
 
 | t (s) | CHASE Δmm | p vs 0 | POST (static dot) Δmm | p vs 0 | chase vs post |
 |---|---|---|---|---|---|
@@ -113,14 +123,15 @@ isn't aimed at anything. Only with the object as the reference frame is the diff
 
 ## 3. The pursuit
 
-Decomposed per fish:
+Decomposed per fish (corrected single-level bouts):
 
 | phase | chase | static-dot post |
 |---|---|---|
-| gain, onset → +0.5 s | **+8.41 mm** (p=3.6e-10) | +0.40 mm (n.s.) |
-| ground lost back, +0.5 s → +4 s | **+5.45 mm** (p=0.029, 24/32 fish) | −3.28 mm (p=0.062, 10/29 fish) |
+| gain, onset → +0.5 s | **+8.54 mm** (p=1.0e-10) | +0.63 mm (n.s., p=0.37) |
+| ground lost back, +0.5 s → +4 s | **+6.63 mm** (p=0.014) | −2.23 mm (n.s., p=0.12) |
 
-**Paired contrast: the chase loses 8.48 mm more ground than post, p=0.0097 (n=29).**
+The fish flees, gains ~8.5 mm, and the chaser closes ~6.6 mm of it back inside four seconds;
+against the static dot the gain persists.
 
 The fish flees, gains ~8 mm, and the chaser closes ~5.5 mm of it back inside four seconds; the
 static dot cannot, so against it the gain persists. **That difference is the pursuit, isolated
@@ -132,6 +143,9 @@ to run away but the chaser will follow them."*
 ## 4. Controls
 
 ### Threshold sweep — the effect does not depend on a lenient cutoff
+
+*(Pre-correction all-levels counts; absolute values fall ~5× on single-level bouts but the
+ratios and the ordering hold — the effect is threshold-robust either way.)*
 
 | threshold | median escapes/fish (chase) | pre /min | chase /min | ratio | p | onset esc vs ord |
 |---|---|---|---|---|---|---|
@@ -179,10 +193,10 @@ Clean trials only (<5% dropout, 311/394 survive):
 
 | | trials 1–2 | trials 5+ | p |
 |---|---|---|---|
-| escapes / valid second | **2.66** | **0.57** | **0.0001** (20/26 decline) |
+| escapes / valid second | **0.48** | **0.11** | **0.0002** (20/26 decline) |
 | freeze fraction | 0.45 | 0.65 | **4e-05** |
 
-Within-fish slope of escape rate on trial number: **−0.184 /trial, p=0.011, 24/29 fish negative.**
+Within-fish slope of escape rate on trial number: **−0.032 /trial, p=0.020, 25/29 fish negative** (corrected, single-level bouts).
 
 Escape latency is **+0.24 s after the proximity trigger** (88% of escapes fire *after* it), so
 the causal ordering is right: the chaser closes, then the fish flees.

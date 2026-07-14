@@ -10,6 +10,28 @@ Bout-level object-relative kinematics, with wall-following and virtual-object co
 - Requires: an `egocentric_bearing` component on the same distance run (supplies fish heading
   on the camera-frame axis), and a `swim_bout_run`.
 
+## Which bout level (READ THIS — it was a bug once)
+
+The `swim_bout_run` table from `detect_bouts_multi_level` is **multi-level**: it concatenates
+the bouts detected at all five speed levels — `speed_raw`, `speed_filtered`, `speed_smoothed`,
+`speed_averaged`, `speed_exponential` — into one `tables/bouts`, tagged by a `signal_id` column.
+The run marks `default_signal_id` (`speed_exponential`) as the level downstream consumers should
+use.
+
+This module **filters to `default_signal_id`**. Reading the whole table counts each physical
+bout up to five times and mixes jittery raw peaks with smoothed ones; an early version did
+exactly that and inflated every bout and escape count ~5× (all findings survived because the
+inflation was near-uniform, but the magnitudes were wrong — see
+`docs/diagnostics/goodcopbadcop_escape_pursuit_2026-07-14.md`). A single-level table with no
+`signal_id` column is read whole. The chosen level is recorded in the component's diagnostics as
+`source_swim_bout_signal_id` / `source_swim_bout_level` / `bout_level_selection`, and pinned by
+`test_multi_level_bout_table_is_filtered_to_the_default_level`.
+
+`peak_speed_mm_s` in this component is `peak_physical_speed_mm_s` from the selected level. For
+`speed_exponential` that physical speed is estimated from the `speed_filtered` trace. At 100 fps
+it under-reads true C-start velocity (a C-start is 1.5–2 frames) — fine for the escape *contrast*,
+not comparable to high-speed-imaging absolute values.
+
 ## Why the bout is the unit
 
 What the fish does near a static object is an **event**, and events are rare: on a 600 s

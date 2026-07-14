@@ -140,6 +140,80 @@ def _bouts_every(n: int, step: int = 10, length: int = 4) -> tuple[np.ndarray, n
     return start, start + length
 
 
+def _make_multilevel_bout_table(zarr_path: Path, *, n_levels: int = 5, default_signal_id: int = 4) -> int:
+    """Rewrite the archive's single-level bout table as a multi-level one: the SAME bouts,
+    duplicated across `n_levels` signal_ids, exactly as detect_bouts_multi_level stores them.
+    Returns the per-level bout count. Only the default level should be ingested."""
+
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    parent = root["analysis/swim_bout_runs/bouts_1"]
+    old = parent["tables/bouts"]
+    start = np.asarray(old["start_frame"][:], dtype=np.int64)
+    end = np.asarray(old["end_frame"][:], dtype=np.int64)
+    per_level = int(start.size)
+
+    del parent["tables/bouts"]
+    bouts = parent.require_group("tables/bouts")
+    tiled_start = np.tile(start, n_levels)
+    tiled_end = np.tile(end, n_levels)
+    signal_id = np.repeat(np.arange(n_levels, dtype=np.int64), per_level)
+    # give each level a distinct peak speed so we can prove which one was read
+    peak = np.repeat(np.arange(n_levels, dtype=np.float64) * 100.0 + 10.0, per_level)
+    k = tiled_start.size
+    bouts.create_array("bout_id", data=np.arange(k, dtype=np.int64), overwrite=True)
+    bouts.create_array("start_frame", data=tiled_start, overwrite=True)
+    bouts.create_array("end_frame", data=tiled_end, overwrite=True)
+    bouts.create_array("signal_id", data=signal_id, overwrite=True)
+    bouts.create_array("peak_physical_speed_mm_s", data=peak, overwrite=True)
+    bouts.create_array("mean_speed_mm_s", data=np.full(k, 10.0), overwrite=True)
+    bouts.create_array("duration_s", data=np.full(k, 0.3), overwrite=True)
+    bouts.create_array("path_length_mm", data=np.full(k, 3.0), overwrite=True)
+    bouts.create_array("net_displacement_mm", data=np.full(k, 2.0), overwrite=True)
+    parent.attrs["default_signal_id"] = int(default_signal_id)
+    parent.attrs["default_level"] = "speed_exponential"
+    return per_level
+
+
+def test_multi_level_bout_table_is_filtered_to_the_default_level(tmp_path: Path) -> None:
+    """detect_bouts_multi_level concatenates bouts from all five speed levels into one table.
+    Ingesting all of them counts each physical bout five times and mixes jittery raw peaks with
+    smoothed ones. Only the run's default level (default_signal_id) must be read."""
+
+    n = 1200
+    fish, heading = _orbit(np.asarray([CX, CY]), radius=25.0, n=n, turns=6.0)
+    obj = np.tile(np.asarray([CX + 18.0, CY]), (n, 1)).reshape(n, 1, 2)
+    bs, be = _bouts_every(n)
+    z = _build_archive(tmp_path, fish_mm=fish, chaser_mm=obj, heading_deg=heading,
+                       bout_start=bs, bout_end=be, name="multilevel.zarr")
+    per_level = _make_multilevel_bout_table(z, n_levels=5, default_signal_id=4)
+
+    r = build_chaser_bout_response_result(z, chaser_distance_run="chaser_distance_1", min_bin_bouts=2)
+
+    # exactly one level's worth of bouts, not five
+    assert r.diagnostics["bouts_ingested"] == per_level
+    assert r.diagnostics["source_swim_bout_signal_id"] == 4
+    assert "filtered_to_default_signal_id_4" in r.diagnostics["bout_level_selection"]
+    # and it read the DEFAULT level's peak speed (410 mm/s for signal_id=4), not raw's (10)
+    valid = np.asarray(r.bout_valid, dtype=bool)
+    assert np.allclose(np.asarray(r.bout_peak_speed_mm_s)[valid], 410.0)
+
+
+def test_single_level_bout_table_is_kept_whole(tmp_path: Path) -> None:
+    """A plain single-level table has no signal_id column and must be read as-is -- the filter
+    must not silently drop it to zero."""
+
+    n = 800
+    fish, heading = _orbit(np.asarray([CX, CY]), radius=25.0, n=n)
+    obj = np.tile(np.asarray([CX + 18.0, CY]), (n, 1)).reshape(n, 1, 2)
+    bs, be = _bouts_every(n)
+    z = _build_archive(tmp_path, fish_mm=fish, chaser_mm=obj, heading_deg=heading,
+                       bout_start=bs, bout_end=be, name="single.zarr")
+    r = build_chaser_bout_response_result(z, chaser_distance_run="chaser_distance_1", min_bin_bouts=2)
+    assert r.diagnostics["bouts_ingested"] == int(bs.size)
+    assert r.diagnostics["source_swim_bout_signal_id"] == -1
+    assert "single_level" in r.diagnostics["bout_level_selection"]
+
+
 # --------------------------------------------------------------------------------------
 # The virtual controls: does the wall null work?
 # --------------------------------------------------------------------------------------

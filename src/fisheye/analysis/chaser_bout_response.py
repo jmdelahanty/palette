@@ -915,6 +915,25 @@ def build_chaser_bout_response_result(
     bout_start = np.asarray(table["start_frame"][:], dtype=np.int64).reshape(-1)
     bout_end = np.asarray(table["end_frame"][:], dtype=np.int64).reshape(-1)
     keep = (bout_start >= 0) & (bout_end < total_frames) & (bout_end >= bout_start)
+    # A multi-level bout table (detect_bouts_multi_level) concatenates bouts from EVERY speed
+    # level -- raw, filtered, smoothed, averaged, exponential -- in one table, tagged by
+    # signal_id. Ingesting all of them counts each physical bout up to five times (and mixes
+    # jittery raw peaks with smoothed ones). Select the run's default level, which it documents
+    # as the one downstream consumers should use. A single-level table has no signal_id column
+    # and is kept whole.
+    bout_level_note = "single_level_table_no_signal_id"
+    source_signal_id = -1
+    source_level_name = str(bout_group.attrs.get("default_level") or "")
+    if "signal_id" in table:
+        signal_id = np.asarray(table["signal_id"][:], dtype=np.int64).reshape(-1)
+        default_sid_raw = bout_group.attrs.get("default_signal_id")
+        if default_sid_raw is None:
+            source_signal_id = int(np.min(signal_id))
+            bout_level_note = f"multi_level_table_no_default_signal_id_attr_fell_back_to_{source_signal_id}"
+        else:
+            source_signal_id = int(default_sid_raw)
+            bout_level_note = f"multi_level_table_filtered_to_default_signal_id_{source_signal_id}"
+        keep &= signal_id == source_signal_id
     if not np.all(keep):
         bout_start, bout_end = bout_start[keep], bout_end[keep]
     take = lambda name, default=np.nan: (  # noqa: E731
@@ -975,6 +994,11 @@ def build_chaser_bout_response_result(
     qc = tuple(dict.fromkeys(list(qc) + ref_notes))
     diagnostics["virtual_reference_notes"] = ref_notes
     diagnostics["reference_labels"] = [ref.label for ref in references]
+    diagnostics["source_swim_bout_signal_id"] = int(source_signal_id)
+    diagnostics["source_swim_bout_level"] = source_level_name
+    diagnostics["bout_level_selection"] = bout_level_note
+    diagnostics["bouts_ingested"] = int(keep.sum())
+    qc = tuple(qc) + (bout_level_note,)
 
     recording_id = str(run_group.attrs.get("recording_id") or root.attrs.get("recording_id") or Path(zarr_path).stem)
     object_refs = [ref for ref in references if ref.kind == REFERENCE_KIND_OBJECT]

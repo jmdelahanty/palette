@@ -70,7 +70,7 @@ per fish:
 
 | | trials 1–2 | trials 5+ | p |
 |---|---|---|---|
-| escapes / valid second | **2.66** | **0.57** | **0.0001** (20/26 fish) |
+| escapes / valid second | **0.48** | **0.11** | **0.0002** (20/26 fish) |
 | freeze fraction | 0.45 | 0.65 | **4e-05** |
 | P(escape in trial) | 0.72 → 0.35 | ~0.10 | |
 | **wall distance at trigger** | **9.6 mm** | **~2.0 mm** | |
