@@ -60,7 +60,7 @@ def _workspace() -> tuple[ZarrExplorationWorkspace, _FakeArray, _FakeArray]:
     )
 
 
-def _fixed_width_rows(values: list[str], width: int = 32) -> np.ndarray:
+def _fixed_width_rows(values: list[str], width: int = 64) -> np.ndarray:
     result = np.zeros((len(values), width), dtype=np.uint8)
     for row, value in enumerate(values):
         encoded = value.encode("utf-8")[:width]
@@ -91,6 +91,22 @@ def _eye_angle_workspace() -> ZarrExplorationWorkspace:
                 )
             ),
             "units": _FakeArray(_fixed_width_rows(["deg", "deg", "deg"])),
+            "representation": _FakeArray(
+                _fixed_width_rows(["eye_frame", "eye_frame", "eye_frame"])
+            ),
+            "eye": _FakeArray(_fixed_width_rows(["left", "right", "binocular"])),
+            "value_kind": _FakeArray(
+                _fixed_width_rows(["angle", "angle", "vergence"])
+            ),
+            "source_channel": _FakeArray(
+                _fixed_width_rows(["left_raw", "right_raw", "derived"])
+            ),
+            "formula": _FakeArray(
+                _fixed_width_rows(["smooth(left_raw)", "smooth(right_raw)", "left-right"])
+            ),
+            "compatibility_alias_of": _FakeArray(
+                _fixed_width_rows(["", "", ""])
+            ),
             "frame_available": _FakeArray(np.array([True, True, False])),
         }
     )
@@ -102,7 +118,13 @@ def _eye_angle_workspace() -> ZarrExplorationWorkspace:
             "frame_angles": frame_angles,
             "angle_channel_index": channel_index,
             "support": support,
-        }
+        },
+        attrs={
+            "status": "complete",
+            "layout": "compact_dense_v2",
+            "method": "unified_subject_masks",
+            "schema_version": "2.0",
+        },
     )
     root = _FakeGroup(
         {
@@ -158,6 +180,12 @@ def test_zarr_workspace_inventory_uses_metadata_without_reading_arrays() -> None
     }
     assert speed.reads == []
     assert images.reads == []
+
+
+def test_zarr_workspace_has_empty_guided_discovery_for_arbitrary_zarr() -> None:
+    workspace, _, _ = _workspace()
+
+    assert workspace.eye_angle_runs() == []
 
 
 def test_zarr_workspace_enforces_bounded_explicit_reads() -> None:
@@ -220,18 +248,73 @@ def test_zarr_workspace_resolves_compact_dense_channel_names() -> None:
             "index": 0,
             "name": "left_eye_angle_deg_smoothed",
             "units": "deg",
+            "representation": "eye_frame",
+            "eye": "left",
+            "value_kind": "angle",
+            "source_channel": "left_raw",
+            "formula": "smooth(left_raw)",
+            "compatibility_alias_of": "",
             "available": True,
         },
         {
             "index": 1,
             "name": "right_eye_angle_deg_smoothed",
             "units": "deg",
+            "representation": "eye_frame",
+            "eye": "right",
+            "value_kind": "angle",
+            "source_channel": "right_raw",
+            "formula": "smooth(right_raw)",
+            "compatibility_alias_of": "",
             "available": True,
         },
     ]
     assert workspace.suggested_coordinate_path(path) == (
         "analysis/eye_angle_runs/canary/support/frame_time_seconds"
     )
+
+
+def test_zarr_workspace_discovers_eye_angle_runs_without_frame_reads() -> None:
+    workspace = _eye_angle_workspace()
+    frame_angles = workspace.handle(
+        "analysis/eye_angle_runs/canary/frame_angles"
+    )
+
+    assert workspace.eye_angle_runs() == [
+        {
+            "run_name": "canary",
+            "run_path": "analysis/eye_angle_runs/canary",
+            "status": "complete",
+            "layout": "compact_dense_v2",
+            "method": "unified_subject_masks",
+            "schema_version": "2.0",
+            "frame_count": 20,
+            "frame_channel_count": 3,
+            "frame_angles_path": "analysis/eye_angle_runs/canary/frame_angles",
+        }
+    ]
+    assert frame_angles.reads == []
+
+
+def test_zarr_workspace_summarizes_time_coordinate_with_scalar_reads() -> None:
+    workspace = _eye_angle_workspace()
+    path = "analysis/eye_angle_runs/canary/frame_angles"
+    coordinate = workspace.handle(
+        "analysis/eye_angle_runs/canary/support/frame_time_seconds"
+    )
+
+    summary = workspace.coordinate_summary(path)
+
+    assert summary is not None
+    assert summary["path"] == (
+        "analysis/eye_angle_runs/canary/support/frame_time_seconds"
+    )
+    assert summary["row_count"] == 20
+    assert summary["start_seconds"] == pytest.approx(0.0)
+    assert summary["stop_seconds"] == pytest.approx(1.9)
+    assert summary["sample_interval_seconds"] == pytest.approx(0.1)
+    assert summary["sample_rate_hz"] == pytest.approx(10.0)
+    assert coordinate.reads == [(0,), (19,), (1,)]
 
 
 def test_zarr_workspace_builds_bounded_time_trace() -> None:

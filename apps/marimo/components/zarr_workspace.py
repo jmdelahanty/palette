@@ -1,10 +1,11 @@
 """Bounded, read-only helpers for a generic Marimo Zarr workspace.
 
-This module deliberately knows nothing about Palette visualization contracts.
-It gives people and pairing agents a small vocabulary for inspecting an
-arbitrary selected Zarr without eagerly loading dense arrays.  The deployment
-launcher provides the actual write boundary by mounting the source directory
-read-only; these helpers consistently open it with ``mode="r"`` as well.
+This module provides a generic bounded inspection vocabulary plus small
+schema-aware adapters for recognized Palette analysis families. It never
+requires a visualization contract and never eagerly loads dense arrays. The
+deployment launcher provides the actual write boundary by mounting the source
+directory read-only; these helpers consistently open it with ``mode="r"`` as
+well.
 """
 
 from __future__ import annotations
@@ -33,6 +34,15 @@ _DENSE_CHANNEL_INDEX_LAYOUTS = {
     "frame_qa": ("qa_channel_index", "frame_available"),
     "roi_qa": ("qa_channel_index", "roi_available"),
 }
+
+_CHANNEL_INDEX_TEXT_FIELDS = (
+    "representation",
+    "eye",
+    "value_kind",
+    "source_channel",
+    "formula",
+    "compatibility_alias_of",
+)
 
 
 def _normalise_path(path: str | None) -> str:
@@ -443,23 +453,86 @@ class ZarrExplorationWorkspace:
         if availability.shape != (shape[1],):
             return []
 
-        units: list[str]
-        try:
-            units = self._fixed_width_strings(
-                f"{index_path}/units", expected_rows=shape[1]
-            )
-        except (KeyError, TypeError, ValueError):
-            units = [""] * shape[1]
+        text_columns: dict[str, list[str]] = {}
+        for field in ("units", *_CHANNEL_INDEX_TEXT_FIELDS):
+            try:
+                text_columns[field] = self._fixed_width_strings(
+                    f"{index_path}/{field}", expected_rows=shape[1]
+                )
+            except (KeyError, TypeError, ValueError):
+                text_columns[field] = [""] * shape[1]
         return [
             {
                 "index": index,
                 "name": names[index],
-                "units": units[index],
+                **{
+                    field: values[index]
+                    for field, values in text_columns.items()
+                },
                 "available": bool(availability[index]),
             }
             for index in range(shape[1])
             if not available_only or bool(availability[index])
         ]
+
+    def eye_angle_runs(
+        self,
+        *,
+        max_runs: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Discover persisted eye-angle runs without scanning the whole Zarr.
+
+        This is a schema-aware metadata adapter for the guided workspace. It
+        inspects only the direct children of ``analysis/eye_angle_runs`` and
+        the metadata of each run's dense frame array; it never reads frame
+        values or recursively inventories unrelated analysis families.
+        """
+
+        if max_runs < 1:
+            raise ValueError("max_runs must be positive.")
+        family_path = "analysis/eye_angle_runs"
+        try:
+            family = self._node(family_path)
+        except (KeyError, TypeError, ValueError):
+            return []
+        if not _is_group(family):
+            return []
+
+        rows: list[dict[str, Any]] = []
+        for run_name in islice(family.keys(), int(max_runs)):
+            run_path = f"{family_path}/{run_name}"
+            try:
+                run = self._node(run_path)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not _is_group(run):
+                continue
+            attrs = getattr(run, "attrs", {})
+            try:
+                frame_info = self.info(f"{run_path}/frame_angles")
+            except (KeyError, TypeError, ValueError):
+                frame_info = {}
+            frame_shape = tuple(frame_info.get("shape", ()))
+            rows.append(
+                {
+                    "run_name": str(run_name),
+                    "run_path": run_path,
+                    "status": str(attrs.get("status", attrs.get("completion_status", ""))),
+                    "layout": str(attrs.get("layout", attrs.get("storage_layout", ""))),
+                    "method": str(attrs.get("method", "")),
+                    "schema_version": str(
+                        attrs.get("schema_version", attrs.get("version", ""))
+                    ),
+                    "frame_count": int(frame_shape[0]) if len(frame_shape) == 2 else 0,
+                    "frame_channel_count": (
+                        int(frame_shape[1]) if len(frame_shape) == 2 else 0
+                    ),
+                    "frame_angles_path": (
+                        f"{run_path}/frame_angles" if len(frame_shape) == 2 else ""
+                    ),
+                }
+            )
+        return sorted(rows, key=lambda row: str(row["run_name"]))
 
     def suggested_coordinate_path(self, array_path: str) -> str | None:
         """Find a conventional one-dimensional coordinate matching axis zero."""
@@ -504,6 +577,34 @@ class ZarrExplorationWorkspace:
             ):
                 return candidate
         return None
+
+    def coordinate_summary(self, array_path: str) -> dict[str, Any] | None:
+        """Summarize a conventional time coordinate with at most three scalars."""
+
+        coordinate_path = self.suggested_coordinate_path(array_path)
+        if coordinate_path is None:
+            return None
+        info = self.info(coordinate_path)
+        shape = tuple(info.get("shape", ()))
+        if len(shape) != 1 or shape[0] < 1:
+            return None
+
+        def _scalar(index: int) -> float:
+            value = self.read(coordinate_path, index, max_elements=1)
+            return float(np.asarray(value).item())
+
+        start = _scalar(0)
+        stop = _scalar(shape[0] - 1)
+        interval = _scalar(1) - start if shape[0] > 1 else float("nan")
+        sample_rate = 1.0 / interval if np.isfinite(interval) and interval > 0 else None
+        return {
+            "path": coordinate_path,
+            "row_count": int(shape[0]),
+            "start_seconds": start,
+            "stop_seconds": stop,
+            "sample_interval_seconds": interval if np.isfinite(interval) else None,
+            "sample_rate_hz": sample_rate,
+        }
 
     def trace_frame(
         self,

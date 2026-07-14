@@ -546,6 +546,15 @@ def test_zarr_workspace_mounts_only_source_and_code_read_only(tmp_path: Path) ->
     assert "remains available" in notebook_source
     assert "exploration.to_polars" in notebook_source
     assert "exploration.read" in notebook_source
+    assert 'options=workspace_mode_options' in notebook_source
+    assert '"Guided analyses", "Advanced storage"' in notebook_source
+    assert "zarr_workspace.eye_angle_runs(max_runs=100)" in notebook_source
+    assert '"Per-eye angles and convergence"' in notebook_source
+    assert '"Nasal-gaze convergence"' in notebook_source
+    assert "guided_channel_label_to_index" in notebook_source
+    assert "Plot selected eye traces" in notebook_source
+    assert "if not advanced_storage_mode:" in notebook_source
+    assert "inventory_rows = []" in notebook_source
     assert 'selection="single"' in notebook_source
     assert "(exploration, selected_path)" in notebook_source
     assert "group_contents_table = mo.ui.table" in notebook_source

@@ -5,7 +5,12 @@
 The **Palette Zarr Exploration Workspace** opens any one selected Zarr in an
 editable Marimo session. Unlike the Recording Explorer and Recording
 Exploration Workspace, it does not require persisted Palette visualization
-specs and does not assume the selected directory is an analysis Zarr.
+specs and does not require the selected directory to be an analysis Zarr.
+
+When it recognizes a supported Palette analysis contract, it opens with a
+schema-aware **Guided analyses** view. The initial adapter covers compact-dense
+eye-angle runs. Arbitrary layouts and the underlying physical representation
+remain available through **Advanced storage**.
 
 This makes it the appropriate FileGlancer app for source, training, analysis,
 or other Zarr layouts when the goal is open-ended inspection with a person or
@@ -74,6 +79,44 @@ exploration.attrs("tracks")
 exploration.handle("tracks/speed")
 ```
 
+### Guided eye-angle analysis
+
+If `analysis/eye_angle_runs` contains a run with a persisted `frame_angles`
+matrix and channel index, the workspace presents it as an eye-angle analysis,
+not as a collection of storage arrays. The user selects:
+
+1. an eye-angle analysis run;
+2. a scientific representation such as per-eye angles, gaze direction,
+   nasal-gaze convergence, or major-axis orientation;
+3. one to six named traces; and
+4. a bounded time window in seconds.
+
+Per-eye angles default to the smoothed left-eye, right-eye, and vergence
+channels. Other representations use their corresponding smoothed semantic
+channels where available. The available-channel table reports eye, measurement
+kind, units, and persisted formula without making the user navigate the channel
+index arrays.
+
+Run discovery is metadata-only. Opening the guided view does not scan the whole
+Zarr or read frame values. Its coordinate summary reads at most the first,
+second, and final time values. Trace data is read only after the user selects
+**Plot selected eye traces**, with the same 100,000-source-frame and
+5,000-displayed-point defaults used by the generic trace path.
+
+The compact-dense-v2 physical layout remains authoritative. The guided adapter
+does not combine heterogeneous support, QA, vector, index, or compatibility
+arrays into a new monolithic array, and it does not write a second projection.
+It gives that defensible storage layout a semantic user interface.
+
+In guided mode, `selected_path` resolves to the selected run's physical
+`frame_angles` array for custom cells and Pair agents. This preserves a stable
+bridge from the semantic UI to bounded programmatic reads.
+
+### Advanced physical storage
+
+Selecting **Advanced storage** reveals the generic bounded hierarchy browser.
+Zarrs without a supported guided family open directly in this mode.
+
 The metadata inventory uses a bounded master-detail selection pattern.
 Selecting an array reveals its metadata and makes it the active `selected_path`.
 Selecting a group reveals its metadata plus a second selectable table of its
@@ -99,7 +142,7 @@ image_crop = exploration.read(
 )
 ```
 
-### Numeric trace plotting
+### Advanced numeric trace plotting
 
 Selecting a numeric one- or two-dimensional array reveals a **Numeric trace
 plot** panel. For known compact-dense Palette arrays such as `frame_angles`, the

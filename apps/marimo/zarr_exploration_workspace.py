@@ -53,9 +53,10 @@ def _(mo, source_path, zarr_workspace):
                 kind="info",
             ),
             mo.md(
-                "This notebook is intentionally independent of Palette visualization "
-                "contracts. Metadata browsing does not load array values, and preview "
-                "reads enforce an element limit."
+                "Known Palette analysis contracts open in a guided semantic view. "
+                "The physical Zarr hierarchy remains available under **Advanced "
+                "storage**. Metadata browsing does not load dense frame values, and "
+                "all preview and trace reads remain bounded."
             ),
             mo.tree(zarr_workspace.summary(), label="Dataset summary"),
         ]
@@ -64,7 +65,558 @@ def _(mo, source_path, zarr_workspace):
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _(mo, zarr_workspace):
+    eye_angle_run_rows = [
+        row
+        for row in zarr_workspace.eye_angle_runs(max_runs=100)
+        if row.get("frame_angles_path")
+    ]
+    workspace_mode_options = (
+        ["Guided analyses", "Advanced storage"]
+        if eye_angle_run_rows
+        else ["Advanced storage"]
+    )
+    workspace_mode = mo.ui.dropdown(
+        options=workspace_mode_options,
+        value=workspace_mode_options[0],
+        label="Workspace view",
+    )
+    if eye_angle_run_rows:
+        mode_guidance = mo.md(
+            f"Found **{len(eye_angle_run_rows)} eye-angle run(s)**. Guided mode "
+            "presents their scientific representations and named traces; Advanced "
+            "storage exposes physical groups and arrays."
+        )
+    else:
+        mode_guidance = mo.callout(
+            "No supported guided analysis family was discovered. The bounded "
+            "physical storage browser is active.",
+            kind="info",
+        )
+    mo.vstack([mo.md("## Choose a view"), workspace_mode, mode_guidance])
+    return eye_angle_run_rows, workspace_mode
+
+
+@app.cell(hide_code=True)
+def _(workspace_mode):
+    advanced_storage_mode = workspace_mode.value == "Advanced storage"
+    return (advanced_storage_mode,)
+
+
+@app.cell(hide_code=True)
+def _(advanced_storage_mode, eye_angle_run_rows, mo):
+    guided_run_label_to_path = {}
+    guided_run_picker = None
+    if not advanced_storage_mode and eye_angle_run_rows:
+        guided_run_label_to_path = {
+            (
+                f"{row['run_name']} · {row['status'] or 'status unknown'} · "
+                f"{row['frame_count']:,} frames"
+            ): str(row["run_path"])
+            for row in eye_angle_run_rows
+            if row.get("frame_angles_path")
+        }
+        guided_run_labels = list(guided_run_label_to_path)
+        complete_labels = [
+            label
+            for label in guided_run_labels
+            if next(
+                row
+                for row in eye_angle_run_rows
+                if row["run_path"] == guided_run_label_to_path[label]
+            )["status"].casefold()
+            == "complete"
+        ]
+        guided_default_run_label = (
+            complete_labels[-1] if complete_labels else guided_run_labels[-1]
+        )
+        guided_run_picker = mo.ui.dropdown(
+            options=guided_run_labels,
+            value=guided_default_run_label,
+            label="Eye-angle analysis run",
+            searchable=True,
+        )
+        guided_run_picker_output = mo.vstack(
+            [mo.md("## Eye angles and convergence"), guided_run_picker]
+        )
+    else:
+        guided_run_picker_output = mo.md("")
+    guided_run_picker_output
+    return guided_run_label_to_path, guided_run_picker
+
+
+@app.cell(hide_code=True)
+def _(
+    advanced_storage_mode,
+    eye_angle_run_rows,
+    guided_run_label_to_path,
+    guided_run_picker,
+    mo,
+    zarr_workspace,
+):
+    guided_array_path = ""
+    guided_channel_rows = []
+    guided_coordinate_summary = None
+    guided_representation_label_to_value = {}
+    guided_representation_picker = None
+    if not advanced_storage_mode and guided_run_picker is not None:
+        guided_run_path = guided_run_label_to_path[guided_run_picker.value]
+        guided_run_row = next(
+            row for row in eye_angle_run_rows if row["run_path"] == guided_run_path
+        )
+        guided_array_path = str(guided_run_row["frame_angles_path"])
+        guided_channel_rows = [
+            row
+            for row in zarr_workspace.channel_index(guided_array_path)
+            if not row.get("compatibility_alias_of")
+        ]
+        guided_coordinate_summary = zarr_workspace.coordinate_summary(
+            guided_array_path
+        )
+        guided_representation_order = [
+            "eye_frame",
+            "gaze",
+            "nasal_gaze",
+            "major",
+            "centroid",
+            "legacy",
+        ]
+        guided_available_representations = {
+            str(row.get("representation") or "all")
+            for row in guided_channel_rows
+        }
+        guided_representation_values = [
+            value
+            for value in guided_representation_order
+            if value in guided_available_representations
+        ]
+        guided_representation_values.extend(
+            sorted(
+                guided_available_representations
+                - set(guided_representation_values)
+            )
+        )
+        guided_representation_labels = {
+            "eye_frame": "Per-eye angles and convergence",
+            "gaze": "Gaze direction",
+            "nasal_gaze": "Nasal-gaze convergence",
+            "major": "Major-axis orientation",
+            "centroid": "Centroid diagnostics",
+            "legacy": "Legacy compatibility",
+            "legacy_minor": "Legacy minor-axis compatibility",
+            "all": "Available channels",
+        }
+        guided_representation_label_to_value = {
+            guided_representation_labels.get(value, value.replace("_", " ").title()): value
+            for value in guided_representation_values
+        }
+        guided_run_summary = {
+            key: value
+            for key, value in guided_run_row.items()
+            if key not in {"run_path", "frame_angles_path"}
+        }
+        guided_representation_options = list(guided_representation_label_to_value)
+        if guided_representation_options:
+            guided_representation_picker = mo.ui.dropdown(
+                options=guided_representation_options,
+                value=guided_representation_options[0],
+                label="Scientific representation",
+            )
+            guided_representation_output = mo.vstack(
+                [
+                    mo.hstack(
+                        [
+                            guided_representation_picker,
+                            mo.tree(guided_run_summary, label="Run summary"),
+                        ],
+                        justify="start",
+                        gap=1,
+                        widths=[1, 2],
+                    ),
+                    mo.md(
+                        "Representations are resolved from the persisted channel "
+                        "index; support arrays, indexes, and compatibility aliases "
+                        "are not shown as separate datasets here."
+                    ),
+                ]
+            )
+        else:
+            guided_representation_output = mo.callout(
+                "This run has a dense frame-angle array but no readable semantic "
+                "channel index. Use Advanced storage to inspect its contract.",
+                kind="warn",
+            )
+    else:
+        guided_representation_output = mo.md("")
+    guided_representation_output
+    return (
+        guided_array_path,
+        guided_channel_rows,
+        guided_coordinate_summary,
+        guided_representation_label_to_value,
+        guided_representation_picker,
+    )
+
+
+@app.cell(hide_code=True)
+def _(
+    advanced_storage_mode,
+    guided_channel_rows,
+    guided_representation_label_to_value,
+    guided_representation_picker,
+    mo,
+):
+    guided_channel_label_to_index = {}
+    guided_channel_picker = None
+    guided_selected_representation = ""
+    if not advanced_storage_mode and guided_representation_picker is not None:
+        guided_selected_representation = guided_representation_label_to_value[
+            guided_representation_picker.value
+        ]
+        guided_representation_channels = [
+            row
+            for row in guided_channel_rows
+            if str(row.get("representation") or "all")
+            == guided_selected_representation
+        ]
+        guided_channel_labels = [
+            (
+                f"{str(row.get('eye') or 'derived').title()} · {row['name']}"
+                + (f" [{row['units']}]" if row.get("units") else "")
+            )
+            for row in guided_representation_channels
+        ]
+        guided_channel_label_to_index = {
+            label: int(row["index"])
+            for label, row in zip(
+                guided_channel_labels,
+                guided_representation_channels,
+                strict=True,
+            )
+        }
+        guided_preferred_names = {
+            "eye_frame": (
+                "left_eye_angle_deg_smoothed",
+                "right_eye_angle_deg_smoothed",
+                "vergence_eye_angle_deg_smoothed",
+            ),
+            "gaze": (
+                "left_gaze_signed_deg_smoothed",
+                "right_gaze_signed_deg_smoothed",
+                "vergence_gaze_signed_deg_smoothed",
+            ),
+            "nasal_gaze": (
+                "left_nasal_gaze_deg_smoothed",
+                "right_nasal_gaze_deg_smoothed",
+                "mean_eye_vergence_gaze_deg_smoothed",
+            ),
+            "major": (
+                "left_major_signed_deg_smoothed",
+                "right_major_signed_deg_smoothed",
+                "vergence_major_signed_deg_smoothed",
+            ),
+            "centroid": (
+                "left_centroid_deg_smoothed",
+                "right_centroid_deg_smoothed",
+                "vergence_centroid_deg_smoothed",
+            ),
+            "legacy": (
+                "left_minor_signed_deg_smoothed",
+                "right_minor_signed_deg_smoothed",
+                "vergence_minor_signed_deg_smoothed",
+            ),
+        }
+        preferred_for_representation = guided_preferred_names.get(
+            guided_selected_representation, ()
+        )
+        guided_default_channel_labels = [
+            label
+            for label, row in zip(
+                guided_channel_labels,
+                guided_representation_channels,
+                strict=True,
+            )
+            if row["name"] in preferred_for_representation
+        ][:3]
+        if not guided_default_channel_labels:
+            guided_default_channel_labels = [
+                label
+                for label, row in zip(
+                    guided_channel_labels,
+                    guided_representation_channels,
+                    strict=True,
+                )
+                if "smoothed" in str(row["name"])
+            ][:3]
+        if not guided_default_channel_labels:
+            guided_default_channel_labels = guided_channel_labels[:3]
+        guided_channel_picker = mo.ui.multiselect(
+            options=guided_channel_labels,
+            value=guided_default_channel_labels,
+            label="Traces",
+            max_selections=6,
+        )
+        guided_channel_table_rows = [
+            {
+                "name": row["name"],
+                "eye": row.get("eye", ""),
+                "measurement": row.get("value_kind", ""),
+                "units": row.get("units", ""),
+                "formula": row.get("formula", ""),
+            }
+            for row in guided_representation_channels
+        ]
+        guided_channel_output = mo.vstack(
+            [
+                guided_channel_picker,
+                mo.accordion(
+                    {
+                        "Available named channels": mo.ui.table(
+                            guided_channel_table_rows,
+                            selection=None,
+                            pagination=True,
+                            page_size=12,
+                            show_download=False,
+                        )
+                    }
+                ),
+            ]
+        )
+    else:
+        guided_channel_output = mo.md("")
+    guided_channel_output
+    return (
+        guided_channel_label_to_index,
+        guided_channel_picker,
+        guided_selected_representation,
+    )
+
+
+@app.cell(hide_code=True)
+def _(
+    advanced_storage_mode,
+    guided_array_path,
+    guided_coordinate_summary,
+    mo,
+    zarr_workspace,
+):
+    guided_window_start = None
+    guided_window_stop = None
+    guided_max_points = None
+    guided_plot_run = None
+    guided_window_is_seconds = False
+    if not advanced_storage_mode and guided_array_path:
+        guided_array_info = zarr_workspace.info(guided_array_path)
+        guided_frame_count = int(guided_array_info["shape"][0])
+        if (
+            guided_coordinate_summary is not None
+            and guided_coordinate_summary.get("sample_interval_seconds")
+        ):
+            guided_window_is_seconds = True
+            guided_window_min = float(
+                guided_coordinate_summary["start_seconds"]
+            )
+            guided_window_max = float(guided_coordinate_summary["stop_seconds"])
+            guided_window_step = max(
+                0.001,
+                float(guided_coordinate_summary["sample_interval_seconds"]),
+            )
+            guided_window_max += guided_window_step
+            guided_window_default_stop = min(
+                guided_window_max, guided_window_min + 60.0
+            )
+            guided_window_start_label = "Start time (s)"
+            guided_window_stop_label = "Stop time (s)"
+        else:
+            guided_window_min = 0
+            guided_window_max = guided_frame_count
+            guided_window_step = 1
+            guided_window_default_stop = min(guided_frame_count, 1_800)
+            guided_window_start_label = "Start row"
+            guided_window_stop_label = "Stop row (exclusive)"
+        guided_window_start = mo.ui.number(
+            start=guided_window_min,
+            stop=guided_window_max,
+            step=guided_window_step,
+            value=guided_window_min,
+            label=guided_window_start_label,
+        )
+        guided_window_stop = mo.ui.number(
+            start=guided_window_min,
+            stop=guided_window_max,
+            step=guided_window_step,
+            value=guided_window_default_stop,
+            label=guided_window_stop_label,
+        )
+        guided_max_points = mo.ui.number(
+            start=100,
+            stop=20_000,
+            step=100,
+            value=5_000,
+            label="Maximum plotted points",
+        )
+        guided_plot_run = mo.ui.run_button(
+            label="Plot selected eye traces", kind="success"
+        )
+        guided_window_output = mo.vstack(
+            [
+                mo.hstack(
+                    [
+                        guided_window_start,
+                        guided_window_stop,
+                        guided_max_points,
+                        guided_plot_run,
+                    ],
+                    justify="start",
+                    gap=1,
+                    wrap=True,
+                ),
+                mo.md(
+                    "The default is the first 60 seconds. Each interaction is limited "
+                    "to 100,000 source frames, and the rendered trace is decimated to "
+                    "the selected point limit."
+                ),
+            ]
+        )
+    else:
+        guided_window_output = mo.md("")
+    guided_window_output
+    return (
+        guided_max_points,
+        guided_plot_run,
+        guided_window_is_seconds,
+        guided_window_start,
+        guided_window_stop,
+    )
+
+
+@app.cell(hide_code=True)
+def _(
+    advanced_storage_mode,
+    go,
+    guided_array_path,
+    guided_channel_label_to_index,
+    guided_channel_picker,
+    guided_coordinate_summary,
+    guided_max_points,
+    guided_plot_run,
+    guided_selected_representation,
+    guided_window_is_seconds,
+    guided_window_start,
+    guided_window_stop,
+    mo,
+    np,
+    zarr_workspace,
+):
+    if advanced_storage_mode or not guided_array_path:
+        guided_trace_output = mo.md("")
+    elif guided_plot_run is None or not guided_plot_run.value:
+        guided_trace_output = mo.md(
+            "Select **Plot selected eye traces** to read the bounded time window."
+        )
+    elif guided_channel_picker is None or not guided_channel_picker.value:
+        guided_trace_output = mo.callout(
+            "Select at least one named trace.", kind="warn"
+        )
+    else:
+        try:
+            if guided_window_is_seconds:
+                coordinate_start = float(
+                    guided_coordinate_summary["start_seconds"]
+                )
+                coordinate_interval = float(
+                    guided_coordinate_summary["sample_interval_seconds"]
+                )
+                guided_start_row = max(
+                    0,
+                    int(
+                        np.floor(
+                            (float(guided_window_start.value) - coordinate_start)
+                            / coordinate_interval
+                        )
+                    ),
+                )
+                guided_stop_row = min(
+                    int(guided_coordinate_summary["row_count"]),
+                    int(
+                        np.ceil(
+                            (float(guided_window_stop.value) - coordinate_start)
+                            / coordinate_interval
+                        )
+                    ),
+                )
+            else:
+                guided_start_row = int(guided_window_start.value or 0)
+                guided_stop_row = int(guided_window_stop.value or 0)
+            if guided_stop_row <= guided_start_row:
+                raise ValueError("Stop must be greater than start.")
+
+            guided_trace_figure = go.Figure()
+            for guided_trace_label in guided_channel_picker.value:
+                guided_trace_frame = zarr_workspace.trace_frame(
+                    guided_array_path,
+                    column=guided_channel_label_to_index[guided_trace_label],
+                    start=guided_start_row,
+                    stop=guided_stop_row,
+                    max_points=int(guided_max_points.value or 5_000),
+                    max_source_rows=100_000,
+                    coordinate_path=(
+                        str(guided_coordinate_summary["path"])
+                        if guided_coordinate_summary is not None
+                        else None
+                    ),
+                )
+                guided_x_column = (
+                    "time_seconds"
+                    if "time_seconds" in guided_trace_frame.columns
+                    else "row_index"
+                )
+                guided_trace_figure.add_trace(
+                    go.Scattergl(
+                        x=guided_trace_frame[guided_x_column].to_numpy(),
+                        y=guided_trace_frame["value"].to_numpy(),
+                        mode="lines",
+                        name=str(guided_trace_label),
+                        hovertemplate=(
+                            "%{x:.3f} s<br>%{y:.3f}<extra>%{fullData.name}</extra>"
+                            if guided_x_column == "time_seconds"
+                            else "row %{x}<br>%{y:.3f}<extra>%{fullData.name}</extra>"
+                        ),
+                    )
+                )
+            guided_trace_figure.update_layout(
+                title=(
+                    "Eye-angle traces · "
+                    f"{guided_selected_representation.replace('_', ' ')}"
+                ),
+                xaxis_title=(
+                    "Time (s)"
+                    if guided_coordinate_summary is not None
+                    else "Source row index"
+                ),
+                yaxis_title="Angle (deg)",
+                template="plotly_white",
+                hovermode="x unified",
+                legend_title="Named trace",
+                height=520,
+            )
+            guided_trace_output = mo.ui.plotly(
+                guided_trace_figure,
+                config={"displaylogo": False, "scrollZoom": True},
+            )
+        except Exception as exc:
+            guided_trace_output = mo.callout(
+                mo.md(
+                    f"Eye-angle plot refused: `{type(exc).__name__}: {exc}`"
+                ),
+                kind="danger",
+            )
+    guided_trace_output
+    return
+
+
+@app.cell(hide_code=True)
+def _(advanced_storage_mode, mo):
     inventory_path = mo.ui.text(
         value="", label="Group path", placeholder="root (leave blank)"
     )
@@ -74,63 +626,97 @@ def _(mo):
     inventory_limit = mo.ui.number(
         start=1, stop=2_000, step=25, value=250, label="Maximum nodes"
     )
-    mo.hstack(
-        [inventory_path, inventory_depth, inventory_limit],
-        justify="start",
-        gap=1,
-        wrap=True,
-    )
+    if advanced_storage_mode:
+        inventory_controls_output = mo.vstack(
+            [
+                mo.md("## Advanced physical storage"),
+                mo.callout(
+                    "This view exposes implementation arrays, indexes, support "
+                    "coordinates, and compatibility surfaces. Use it when the guided "
+                    "scientific adapter does not cover the question.",
+                    kind="info",
+                ),
+                mo.hstack(
+                    [inventory_path, inventory_depth, inventory_limit],
+                    justify="start",
+                    gap=1,
+                    wrap=True,
+                ),
+            ]
+        )
+    else:
+        inventory_controls_output = mo.md("")
+    inventory_controls_output
     return inventory_depth, inventory_limit, inventory_path
 
 
 @app.cell(hide_code=True)
-def _(inventory_depth, inventory_limit, inventory_path, mo, zarr_workspace):
-    try:
-        inventory_rows = zarr_workspace.walk(
-            inventory_path.value,
-            max_depth=int(inventory_depth.value or 0),
-            max_items=int(inventory_limit.value or 250),
-        )
-        inventory_display_rows = [
-            {
-                **row,
-                "shape": str(row.get("shape", "")),
-                "chunks": str(row.get("chunks", "")),
-            }
-            for row in inventory_rows
-        ]
-        inventory_table = mo.ui.table(
-            inventory_display_rows,
-            selection="single",
-            pagination=True,
-            page_size=25,
-            show_download=False,
-            max_height=600,
-            label="Select one group or array",
-        )
-        inventory_output = mo.vstack(
-            [
-                mo.md(f"## Metadata inventory · {len(inventory_rows):,} node(s)"),
-                mo.md(
-                    "Select a row to reveal its metadata and make its relative "
-                    "path available to the preview and exploration cells below."
-                ),
-                inventory_table,
-            ]
-        )
-    except Exception as exc:
+def _(
+    advanced_storage_mode,
+    inventory_depth,
+    inventory_limit,
+    inventory_path,
+    mo,
+    zarr_workspace,
+):
+    if not advanced_storage_mode:
         inventory_rows = []
         inventory_table = None
-        inventory_output = mo.callout(
-            mo.md(f"Could not inspect that group: `{type(exc).__name__}: {exc}`"),
-            kind="danger",
-        )
+        inventory_output = mo.md("")
+    else:
+        try:
+            inventory_rows = zarr_workspace.walk(
+                inventory_path.value,
+                max_depth=int(inventory_depth.value or 0),
+                max_items=int(inventory_limit.value or 250),
+            )
+            inventory_display_rows = [
+                {
+                    **row,
+                    "shape": str(row.get("shape", "")),
+                    "chunks": str(row.get("chunks", "")),
+                }
+                for row in inventory_rows
+            ]
+            inventory_table = mo.ui.table(
+                inventory_display_rows,
+                selection="single",
+                pagination=True,
+                page_size=25,
+                show_download=False,
+                max_height=600,
+                label="Select one group or array",
+            )
+            inventory_output = mo.vstack(
+                [
+                    mo.md(f"## Metadata inventory · {len(inventory_rows):,} node(s)"),
+                    mo.md(
+                        "Select a row to reveal its metadata and make its relative "
+                        "path available to the preview and exploration cells below."
+                    ),
+                    inventory_table,
+                ]
+            )
+        except Exception as exc:
+            inventory_rows = []
+            inventory_table = None
+            inventory_output = mo.callout(
+                mo.md(f"Could not inspect that group: `{type(exc).__name__}: {exc}`"),
+                kind="danger",
+            )
     inventory_output
     return inventory_rows, inventory_table
 
 
 @app.cell(hide_code=True)
-def _(inventory_depth, inventory_limit, inventory_table, mo, zarr_workspace):
+def _(
+    advanced_storage_mode,
+    inventory_depth,
+    inventory_limit,
+    inventory_table,
+    mo,
+    zarr_workspace,
+):
     inventory_selected_rows = (
         inventory_table.value if inventory_table is not None else []
     )
@@ -214,10 +800,12 @@ def _(inventory_depth, inventory_limit, inventory_table, mo, zarr_workspace):
                 mo.md(f"Could not reveal the selection: `{type(exc).__name__}: {exc}`"),
                 kind="danger",
             )
-    else:
+    elif advanced_storage_mode:
         inventory_selection_output = mo.md(
             "Select a dataset row above to reveal its metadata and contents."
         )
+    else:
+        inventory_selection_output = mo.md("")
     inventory_selection_output
     return group_contents_table, inventory_selected_kind, inventory_selected_path
 
@@ -233,23 +821,23 @@ def _(
     contents_selected_rows = (
         group_contents_table.value if group_contents_table is not None else []
     )
-    selected_path = (
+    physical_selected_path = (
         str(contents_selected_rows[0]["path"])
         if contents_selected_rows
         else inventory_selected_path
     )
-    selected_kind = inventory_selected_kind
-    if selected_path:
+    physical_selected_kind = inventory_selected_kind
+    if physical_selected_path:
         try:
-            selected_info = zarr_workspace.info(selected_path)
-            selected_kind = str(selected_info.get("kind", ""))
-            selected_attrs = zarr_workspace.attrs(selected_path)
+            physical_selected_info = zarr_workspace.info(physical_selected_path)
+            physical_selected_kind = str(physical_selected_info.get("kind", ""))
+            physical_selected_attrs = zarr_workspace.attrs(physical_selected_path)
             active_source = (
                 "group contents table"
                 if contents_selected_rows
                 else "main inventory table"
             )
-            if selected_kind == "group":
+            if physical_selected_kind == "group":
                 active_guidance = mo.callout(
                     "The active node is a group. Select one of its descendant "
                     "array rows in the contents table to preview values.",
@@ -260,14 +848,14 @@ def _(
             active_selection_output = mo.vstack(
                 [
                     mo.md(
-                        f"### Active dataset: `{selected_path}`\n\n"
+                        f"### Active dataset: `{physical_selected_path}`\n\n"
                         f"Selected from the {active_source}."
                     ),
                     active_guidance,
                     mo.hstack(
                         [
-                            mo.tree(selected_info, label="Active metadata"),
-                            mo.tree(selected_attrs, label="Active attributes"),
+                            mo.tree(physical_selected_info, label="Active metadata"),
+                            mo.tree(physical_selected_attrs, label="Active attributes"),
                         ],
                         justify="start",
                         gap=1,
@@ -276,7 +864,7 @@ def _(
                 ]
             )
         except Exception as exc:
-            selected_kind = ""
+            physical_selected_kind = ""
             active_selection_output = mo.callout(
                 mo.md(f"Could not activate the selection: `{type(exc).__name__}: {exc}`"),
                 kind="danger",
@@ -284,11 +872,27 @@ def _(
     else:
         active_selection_output = mo.md("")
     active_selection_output
+    return physical_selected_kind, physical_selected_path
+
+
+@app.cell(hide_code=True)
+def _(
+    advanced_storage_mode,
+    guided_array_path,
+    physical_selected_kind,
+    physical_selected_path,
+):
+    if advanced_storage_mode:
+        selected_path = physical_selected_path
+        selected_kind = physical_selected_kind
+    else:
+        selected_path = guided_array_path
+        selected_kind = "array" if guided_array_path else ""
     return selected_kind, selected_path
 
 
 @app.cell(hide_code=True)
-def _(mo, selected_kind, selected_path):
+def _(advanced_storage_mode, mo, selected_kind, selected_path):
     selected_is_array = selected_kind == "array"
     preview_rows = mo.ui.number(
         start=0,
@@ -315,25 +919,31 @@ def _(mo, selected_kind, selected_path):
             "still exceed the 100,000-element guard; use an explicit tuple of slices "
             "in the exploration cell below."
         )
-    mo.vstack(
-        [
-            mo.md("## Array preview"),
-            mo.md(
-                f"Selected path: `{selected_path or 'none'}`. {preview_instruction}"
-            ),
-            mo.hstack(
-                [preview_rows, preview_run],
-                justify="start",
-                gap=1,
-                wrap=True,
-            ),
-        ]
-    )
+    if advanced_storage_mode:
+        preview_controls_output = mo.vstack(
+            [
+                mo.md("## Array preview"),
+                mo.md(
+                    f"Selected path: `{selected_path or 'none'}`. "
+                    f"{preview_instruction}"
+                ),
+                mo.hstack(
+                    [preview_rows, preview_run],
+                    justify="start",
+                    gap=1,
+                    wrap=True,
+                ),
+            ]
+        )
+    else:
+        preview_controls_output = mo.md("")
+    preview_controls_output
     return preview_rows, preview_run
 
 
 @app.cell(hide_code=True)
 def _(
+    advanced_storage_mode,
     mo,
     preview_rows,
     preview_run,
@@ -341,7 +951,9 @@ def _(
     selected_path,
     zarr_workspace,
 ):
-    if not selected_path:
+    if not advanced_storage_mode:
+        preview_output = mo.md("")
+    elif not selected_path:
         preview_output = mo.callout("Select a dataset row first.", kind="warn")
     elif selected_kind != "array":
         preview_output = mo.callout(
@@ -373,7 +985,14 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(mo, np, selected_kind, selected_path, zarr_workspace):
+def _(
+    advanced_storage_mode,
+    mo,
+    np,
+    selected_kind,
+    selected_path,
+    zarr_workspace,
+):
     trace_supported = False
     trace_channel_lookup = {}
     trace_channel_picker = None
@@ -382,7 +1001,7 @@ def _(mo, np, selected_kind, selected_path, zarr_workspace):
     trace_max_points = None
     trace_run = None
     trace_coordinate_path = None
-    if selected_kind == "array":
+    if advanced_storage_mode and selected_kind == "array":
         try:
             trace_info = zarr_workspace.info(selected_path)
             trace_shape = tuple(trace_info.get("shape", ()))
@@ -514,6 +1133,7 @@ def _(mo, np, selected_kind, selected_path, zarr_workspace):
 
 @app.cell(hide_code=True)
 def _(
+    advanced_storage_mode,
     go,
     mo,
     selected_path,
@@ -527,7 +1147,9 @@ def _(
     trace_supported,
     zarr_workspace,
 ):
-    if not trace_supported or trace_run is None:
+    if advanced_storage_mode is False:
+        trace_plot_output = mo.md("")
+    elif not trace_supported or trace_run is None:
         trace_plot_output = mo.md("")
     elif not trace_run.value:
         trace_plot_output = mo.md("Select **Plot selected trace** to read the window.")
@@ -616,7 +1238,9 @@ exploration.walk("tracks", max_depth=2)      # bounded recursive inventory
 exploration.find("speed")                     # bounded path search
 exploration.info("tracks/speed")              # shape, dtype, chunks, size
 exploration.attrs("tracks")                   # bounded attributes
+exploration.eye_angle_runs()                   # guided run discovery, metadata only
 exploration.channel_index(selected_path)       # named compact-dense columns
+exploration.coordinate_summary(selected_path)  # bounded matching-time summary
 
 # Explicit bounded NumPy reads (integers, slices, and ellipsis only):
 speed = exploration.read("tracks/speed", slice(0, 1_000))
