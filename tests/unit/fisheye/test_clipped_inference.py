@@ -329,6 +329,43 @@ def test_import_recovery_reuses_packages_on_long_queue(
     assert jobs["nrs_cleanup"].dependency.upstream_job_keys == ("registry_finalize",)
 
 
+def test_import_recovery_can_resume_after_complete_import_validation_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _build_fixture_plan(tmp_path, monkeypatch)
+    source_plan = tmp_path / "source_complete_import_plan.json"
+    _write_json(source_plan, source.to_json())
+    monkeypatch.setattr(
+        import_recovery,
+        "_preflight",
+        lambda _source, **_kwargs: {
+            "status": "ok",
+            "target_count": 1,
+            "import_action": "reuse_complete_output",
+        },
+    )
+
+    plan = import_recovery.build_plan(
+        source_plan_path=source_plan,
+        run_root=tmp_path / "validation_only_recovery",
+        recovery_label="sleepyfish_validation_only_recovery",
+        validate_existing_complete_import=True,
+    )
+    jobs = {job.job_key: job for job in plan.workflow.jobs}
+    target_safe = workflow.safe_component(
+        str(source.target_plans[0]["target_id"]), default="target", max_length=56
+    )
+    validation_key = f"validate:{target_safe}"
+
+    assert len(plan.workflow.jobs) == 3
+    assert f"mask_import:{target_safe}" not in jobs
+    assert jobs[validation_key].dependency is None
+    assert jobs["registry_finalize"].dependency.upstream_job_keys == (validation_key,)
+    assert jobs["nrs_cleanup"].dependency.upstream_job_keys == ("registry_finalize",)
+    assert plan.payload["import_recovery"]["validation_only_complete_import"] is True
+
+
 def test_import_recovery_can_convert_v1_packages_to_encoded_v2(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

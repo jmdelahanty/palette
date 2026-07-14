@@ -59,7 +59,11 @@ def _group_attrs(path: Path) -> Mapping[str, Any] | None:
     return attrs if isinstance(attrs, Mapping) else {}
 
 
-def _preflight(source: Mapping[str, Any]) -> dict[str, Any]:
+def _preflight(
+    source: Mapping[str, Any],
+    *,
+    require_complete_import: bool = False,
+) -> dict[str, Any]:
     reports: list[dict[str, Any]] = []
     for target in source["targets"]:
         zarr_path = Path(str(target["analysis_zarr"])).expanduser().resolve()
@@ -92,8 +96,13 @@ def _preflight(source: Mapping[str, Any]) -> dict[str, Any]:
             if output_attrs is not None
             else "absent"
         )
-        if output_status == "complete":
+        if output_status == "complete" and not require_complete_import:
             raise RuntimeError(f"Refined subject-mask output is already complete: {output}")
+        if require_complete_import and output_status != "complete":
+            raise RuntimeError(
+                f"Validation-only recovery requires a complete refined subject-mask output: "
+                f"{output} (status={output_status!r})"
+            )
         reports.append(
             {
                 "target_id": str(target["target_id"]),
@@ -104,7 +113,11 @@ def _preflight(source: Mapping[str, Any]) -> dict[str, Any]:
                 "refined_keypoints_status": "complete",
                 "partial_output": str(output),
                 "partial_output_status": output_status,
-                "import_action": "overwrite_incomplete_output",
+                "import_action": (
+                    "reuse_complete_output"
+                    if require_complete_import
+                    else "overwrite_incomplete_output"
+                ),
             }
         )
     return {"status": "ok", "target_count": len(reports), "targets": reports}
@@ -138,7 +151,12 @@ def build_plan(
     run_root: Path,
     recovery_label: str,
     convert_packages_v2: bool = False,
+    validate_existing_complete_import: bool = False,
 ) -> ImportRecoveryPlan:
+    if convert_packages_v2 and validate_existing_complete_import:
+        raise ValueError(
+            "Package conversion and validation-only recovery are mutually exclusive."
+        )
     source_plan_path = source_plan_path.expanduser().resolve()
     run_root = run_root.expanduser().resolve()
     source = _read_json(source_plan_path)
@@ -159,7 +177,11 @@ def build_plan(
         for job in prior_jobs
         if isinstance(job, Mapping) and job.get("job_key")
     }
-    preflight = _preflight(source)
+    preflight = (
+        _preflight(source, require_complete_import=True)
+        if validate_existing_complete_import
+        else _preflight(source)
+    )
 
     jobs: list[LsfJob] = []
     validation_keys: list[str] = []
@@ -234,37 +256,40 @@ def build_plan(
                     )
                 )
             import_upstream = tuple(conversion_keys)
-        import_key = f"mask_import:{target_safe}"
-        import_prior = prior_by_key[import_key]
-        import_command = _with_overwrite(
-            _replace_run_root(
-                _inner_command(import_prior),
-                prior_run_root=prior_run_root,
-                recovery_run_root=run_root,
+        validation_upstream: tuple[str, ...] = ()
+        if not validate_existing_complete_import:
+            import_key = f"mask_import:{target_safe}"
+            import_prior = prior_by_key[import_key]
+            import_command = _with_overwrite(
+                _replace_run_root(
+                    _inner_command(import_prior),
+                    prior_run_root=prior_run_root,
+                    recovery_run_root=run_root,
+                )
             )
-        )
-        if convert_packages_v2:
-            import_command = _replace_package_paths(import_command, package_replacements)
-        jobs.append(
-            _job(
-                workflow_id=label,
-                repo=repo,
-                run_root=run_root,
-                job_key=import_key,
-                stage="subject_mask_collection_import_recovery",
-                command=import_command,
-                resources=LsfResources(
-                    queue="local", ncores=8, mem_gb=32, walltime="3:00"
-                ),
-                upstream=import_upstream,
-                expected_outputs=(
-                    zarr_path
-                    / "refined_subject_masks_runs"
-                    / str(target["refined_subject_mask_run"])
-                    / "zarr.json",
-                ),
+            if convert_packages_v2:
+                import_command = _replace_package_paths(import_command, package_replacements)
+            jobs.append(
+                _job(
+                    workflow_id=label,
+                    repo=repo,
+                    run_root=run_root,
+                    job_key=import_key,
+                    stage="subject_mask_collection_import_recovery",
+                    command=import_command,
+                    resources=LsfResources(
+                        queue="local", ncores=8, mem_gb=32, walltime="3:00"
+                    ),
+                    upstream=import_upstream,
+                    expected_outputs=(
+                        zarr_path
+                        / "refined_subject_masks_runs"
+                        / str(target["refined_subject_mask_run"])
+                        / "zarr.json",
+                    ),
+                )
             )
-        )
+            validation_upstream = (import_key,)
 
         validation_key = f"validate:{target_safe}"
         validation_prior = prior_by_key[validation_key]
@@ -288,7 +313,7 @@ def build_plan(
                     str(validation_report),
                 ),
                 resources=_resources(validation_prior),
-                upstream=(import_key,),
+                upstream=validation_upstream,
                 expected_outputs=(validation_report,),
             )
         )
@@ -346,6 +371,7 @@ def build_plan(
             "source_plan": str(source_plan_path),
             "reused_completed_mask_packages": True,
             "converted_mask_packages_v2": bool(convert_packages_v2),
+            "validation_only_complete_import": bool(validate_existing_complete_import),
         },
     )
     payload = {
@@ -361,6 +387,7 @@ def build_plan(
             "schema": RECOVERY_SCHEMA,
             "source_plan": str(source_plan_path),
             "preflight": preflight,
+            "validation_only_complete_import": bool(validate_existing_complete_import),
         },
     }
     return ImportRecoveryPlan(payload=payload, workflow=workflow, repo=repo, run_root=run_root)
@@ -403,6 +430,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--recovery-label", required=True)
     parser.add_argument("--submit-host", default="login1-citrus-poller")
     parser.add_argument("--convert-packages-v2", action="store_true")
+    parser.add_argument("--validate-existing-complete-import", action="store_true")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
@@ -413,6 +441,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_root=args.run_root,
         recovery_label=args.recovery_label,
         convert_packages_v2=bool(args.convert_packages_v2),
+        validate_existing_complete_import=bool(args.validate_existing_complete_import),
     )
     result = apply_plan(plan, submit_host=args.submit_host) if args.apply else materialize_plan(plan)
     summary = {
