@@ -67,8 +67,8 @@ def _add_hierarchical_swim_bouts(
 
     bouts = np.asarray(
         [
-            (1, 0.010, 0.020, 0.010, 0.009, 1.20, 0.90, False),
-            (2, 0.035, 0.045, 0.010, 0.010, 1.80, 1.10, True),
+            (1, 0.010, 0.020, 0.010, 0.009, 1.20, 0.90, 120.0, False),
+            (2, 0.035, 0.045, 0.010, 0.010, 1.80, 1.10, 180.0, True),
         ],
         dtype=[
             ("bout_id", "i4"),
@@ -78,6 +78,7 @@ def _add_hierarchical_swim_bouts(
             ("observed_duration_s", "f8"),
             ("path_length_mm", "f8"),
             ("net_displacement_mm", "f8"),
+            ("mean_speed_mm_s", "f8"),
             ("gap_censored", "?"),
         ],
     )

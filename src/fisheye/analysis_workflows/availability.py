@@ -13,6 +13,7 @@ from fisheye.registry.stage_catalog import canonical_stage_id
 STAGE_RUN_PARENTS: Mapping[str, tuple[str, ...]] = {
     "refined_keypoints": ("refined_keypoints_runs",),
     "refined_subject_masks": ("refined_subject_masks_runs",),
+    "tracks": ("tracking_runs",),
     "track_kinematics": ("analysis/track_kinematics_runs/offline",),
     "swim_bouts": ("analysis/swim_bout_runs",),
     "bout_kinematics": ("analysis/bout_kinematics_runs",),

@@ -46,6 +46,10 @@ def test_core_behavior_profile_declares_portable_and_framewise_resolutions() -> 
         "subject_shape",
         "tail_kinematics",
     )
+    assert workflow.node_by_id["track_kinematics"].depends_on == (
+        "refined_keypoints",
+        "tracks",
+    )
 
 
 def test_temporal_policy_allows_numeric_overrides_but_not_trace_downsampling() -> None:
@@ -96,6 +100,13 @@ def test_targeted_plan_reuses_authority_and_schedules_only_dependency_closure() 
             run_name="rkp_a",
             reason="complete",
         ),
+        "tracks": StageAvailability(
+            stage_id="tracks",
+            available=True,
+            artifact_path="tracking_runs/tracks_a",
+            run_name="tracks_a",
+            reason="complete",
+        ),
         "track_kinematics": StageAvailability(
             stage_id="track_kinematics",
             available=False,
@@ -112,11 +123,13 @@ def test_targeted_plan_reuses_authority_and_schedules_only_dependency_closure() 
     assert plan.ready is True
     assert plan.topological_order == (
         "refined_keypoints",
+        "tracks",
         "track_kinematics",
         "kinematics_samples",
     )
     assert plan.execution_order == ("track_kinematics", "kinematics_samples")
     assert plan.node_by_id["refined_keypoints"].action == "reuse"
+    assert plan.node_by_id["tracks"].action == "reuse"
     assert plan.node_by_id["kinematics_samples"].temporal_policy == {
         "resolution": "sampled",
         "sample_rate_hz": 10.0,
@@ -156,6 +169,39 @@ def test_tail_plan_blocks_when_safe_large_recording_backend_is_unavailable() -> 
     assert plan.node_by_id["tail_traces"].action == "blocked"
 
 
+def test_track_kinematics_plan_blocks_without_tracking_authority() -> None:
+    workflow = load_analysis_workflow(default_core_behavior_profile_path())
+    availability = {
+        "refined_keypoints": StageAvailability(
+            stage_id="refined_keypoints",
+            available=True,
+            run_name="rkp_a",
+            reason="complete",
+        ),
+        "tracks": StageAvailability(
+            stage_id="tracks",
+            available=False,
+            reason="persisted run parent is missing",
+        ),
+        "track_kinematics": StageAvailability(
+            stage_id="track_kinematics",
+            available=False,
+            reason="persisted run parent is missing",
+        ),
+    }
+
+    plan = plan_analysis_workflow(
+        workflow,
+        availability,
+        targets=("track_kinematics",),
+    )
+
+    assert plan.ready is False
+    assert plan.node_by_id["tracks"].action == "blocked"
+    assert plan.node_by_id["track_kinematics"].action == "blocked"
+    assert plan.node_by_id["track_kinematics"].reason == "blocked by tracks"
+
+
 def test_workflow_rejects_dependency_cycles() -> None:
     with pytest.raises(ValueError, match="dependency cycle"):
         AnalysisWorkflow(
@@ -185,6 +231,21 @@ def test_availability_resolver_uses_latest_complete_metadata_pointer(tmp_path: P
     assert status.run_name == "track_a"
     assert status.artifact_path == "analysis/track_kinematics_runs/offline/track_a"
     assert status.completion_status == "complete"
+
+
+def test_availability_resolver_discovers_tracking_authority(tmp_path: Path) -> None:
+    parent = tmp_path / "tracking_runs"
+    _write_zarr_metadata(parent, {"latest_complete": "tracking_a"})
+    _write_zarr_metadata(
+        parent / "tracking_a",
+        {"palette_run_completion_status": "complete"},
+    )
+
+    status = discover_stage_availability(tmp_path, "tracks")
+
+    assert status.available is True
+    assert status.run_name == "tracking_a"
+    assert status.artifact_path == "tracking_runs/tracking_a"
 
 
 def test_availability_resolver_requires_pointer_or_explicit_run(tmp_path: Path) -> None:

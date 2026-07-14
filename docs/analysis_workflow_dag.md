@@ -66,6 +66,7 @@ dependencies represented inside the profile, and dependency cycles.
 
 ```mermaid
 flowchart LR
+  TR[tracking identities] --> TK[track kinematics]
   RK[refined keypoints] --> TK[track kinematics]
   TK --> SB[swim bouts]
   TK --> KS[10 Hz kinematic samples]
@@ -143,6 +144,12 @@ The executor supports these canonical analysis stages in the core profile:
 - `bout_kinematics`;
 - `eye_angles`;
 - `subject_shape`.
+
+Track identities are a required persisted prerequisite rather than an
+analysis-workflow output. Planning a new track-kinematics run therefore blocks
+when no `tracking_runs` authority is present. Create lineage-matched tracking
+from arena assignment first; an already complete track-kinematics run remains
+reusable without rerunning that prerequisite.
 
 Execution requires one or more explicit analysis targets. The default remains
 a read-only command render:

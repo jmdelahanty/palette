@@ -53,6 +53,11 @@ def _analysis_execution_plan(tmp_path: Path):
             available=True,
             run_name="refined_masks_a",
         ),
+        "tracks": _status(
+            "tracks",
+            available=True,
+            run_name="tracking_a",
+        ),
         "track_kinematics": _status(
             "track_kinematics",
             available=True,

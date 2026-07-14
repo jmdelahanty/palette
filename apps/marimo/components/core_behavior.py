@@ -114,6 +114,77 @@ def _is_physical_speed_column(name: str) -> bool:
     )
 
 
+def _first_finite_metric_column(
+    frame: pl.DataFrame,
+    candidates: Sequence[str],
+) -> str | None:
+    """Choose the preferred persisted metric that contains usable values."""
+
+    for name in candidates:
+        if name not in frame.columns:
+            continue
+        values = frame.get_column(name).cast(pl.Float64, strict=False).to_numpy()
+        if np.isfinite(values).any():
+            return name
+    return None
+
+
+def _swim_bout_distribution_specs(
+    frame: pl.DataFrame,
+) -> tuple[tuple[str, str, str], ...]:
+    """Resolve compatible bout metrics in calibrated-to-pixel preference order."""
+
+    metric_families = (
+        (
+            ("duration_s", "bout_duration_s"),
+            "Swim-bout duration distribution",
+            "Duration (s)",
+        ),
+        (
+            (
+                "path_length_mm",
+                "distance_mm",
+                "distance",
+                "path_length_bl",
+                "distance_bl",
+                "path_length_px",
+                "distance_px",
+            ),
+            "Swim-bout distance distribution",
+            None,
+        ),
+        (
+            (
+                "mean_speed_mm_s",
+                "mean_speed",
+                "mean_speed_bl_s",
+                "mean_speed_px_s",
+            ),
+            "Swim-bout mean-speed distribution",
+            None,
+        ),
+    )
+    unit_labels = {
+        "path_length_mm": "Distance (mm)",
+        "distance_mm": "Distance (mm)",
+        "distance": "Distance (mm)",
+        "path_length_bl": "Distance (body lengths)",
+        "distance_bl": "Distance (body lengths)",
+        "path_length_px": "Distance (px)",
+        "distance_px": "Distance (px)",
+        "mean_speed_mm_s": "Mean speed (mm/s)",
+        "mean_speed": "Mean speed (mm/s)",
+        "mean_speed_bl_s": "Mean speed (body lengths/s)",
+        "mean_speed_px_s": "Mean speed (px/s)",
+    }
+    specs: list[tuple[str, str, str]] = []
+    for candidates, title, fixed_label in metric_families:
+        column = _first_finite_metric_column(frame, candidates)
+        if column is not None:
+            specs.append((column, title, fixed_label or unit_labels[column]))
+    return tuple(specs)
+
+
 class CoreBehaviorSource:
     """Metadata-first, read-only source for one track-kinematics spec."""
 
@@ -797,10 +868,6 @@ def build_core_behavior_output(
         else:
             body = mo.md("No position rows fall inside the selected interval.")
     elif projection.analysis_id == "swim_bouts":
-        duration_column = next(
-            (name for name in ("duration_s", "bout_duration_s") if name in frame.columns),
-            None,
-        )
         pieces: list[Any] = []
         speed_lazy = projection.related_frames.get("speed_trace")
         speed_frame = speed_lazy.collect() if speed_lazy is not None else pl.DataFrame()
@@ -874,14 +941,30 @@ def build_core_behavior_output(
                 legend=dict(orientation="h", yanchor="top", y=-0.14, xanchor="left", x=0.0),
             )
             pieces.append(segmentation_figure)
-        if duration_column and frame.height:
-            pieces.append(
-                px.histogram(
-                    frame.to_pandas(),
-                    x=duration_column,
+        distribution_specs = _swim_bout_distribution_specs(frame)
+        if distribution_specs:
+            bout_rows = frame.to_pandas()
+            distribution_figures = []
+            for column, title, xaxis_title in distribution_specs:
+                histogram = px.histogram(
+                    bout_rows,
+                    x=column,
                     nbins=40,
-                    title="Swim-bout duration distribution",
+                    title=title,
                 )
+                histogram.update_layout(
+                    xaxis_title=xaxis_title,
+                    yaxis_title="Bout count",
+                    height=360,
+                    margin=dict(l=55, r=25, t=60, b=50),
+                    showlegend=False,
+                )
+                distribution_figures.append(histogram)
+            pieces.extend(
+                [
+                    mo.md("### Swim-bout distributions"),
+                    mo.hstack(distribution_figures),
+                ]
             )
         pieces.extend([mo.md("### Persisted bout rows"), mo.ui.table(frame, selection=None, page_size=12)])
         body = mo.vstack(pieces)

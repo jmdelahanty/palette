@@ -122,6 +122,17 @@ def test_core_source_exposes_only_lineage_compatible_swim_bouts(tmp_path) -> Non
     assert [trace.type for trace in segmentation_figure.data] == ["scattergl", "bar"]
     assert segmentation_figure.data[1].name == "Persisted swim bouts"
     assert segmentation_figure.layout.yaxis2.overlaying == "y"
+    distribution_figures = output[2][2]
+    assert [figure.layout.title.text for figure in distribution_figures] == [
+        "Swim-bout duration distribution",
+        "Swim-bout distance distribution",
+        "Swim-bout mean-speed distribution",
+    ]
+    assert [figure.layout.xaxis.title.text for figure in distribution_figures] == [
+        "Duration (s)",
+        "Distance (mm)",
+        "Mean speed (mm/s)",
+    ]
 
     bounded = source.project_swim_bouts(start_s=0.0, stop_s=0.03)
     assert bounded.row_count == 1

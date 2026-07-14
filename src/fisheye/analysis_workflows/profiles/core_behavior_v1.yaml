@@ -19,6 +19,7 @@ temporal_policy:
 run_selection:
   refined_keypoints: latest
   refined_subject_masks: latest
+  tracks: latest
   track_kinematics: latest
   swim_bouts: latest
   bout_kinematics: latest
@@ -46,10 +47,16 @@ nodes:
     runnable: false
     description: Curated dense subject-mask authority required by eyes and body shape.
 
+  - id: tracks
+    kind: prerequisite
+    stage_id: tracks
+    runnable: false
+    description: Lineage-matched subject identities required by track kinematics.
+
   - id: track_kinematics
     kind: analysis
     stage_id: track_kinematics
-    depends_on: [refined_keypoints]
+    depends_on: [refined_keypoints, tracks]
     execution_policy: whole_recording_temporal_state
     description: Preserve smoothing, hysteresis, and derivatives across clip boundaries.
 
