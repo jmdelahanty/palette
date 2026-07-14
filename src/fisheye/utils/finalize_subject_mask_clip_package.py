@@ -18,6 +18,11 @@ from typing import Any, Sequence
 import zarr
 
 from fisheye.refinement.finalize_subject_masks import finalize_subject_mask_run
+from fisheye.shared.refined_subject_mask_encoded_chunks import (
+    ENCODED_MASK_PAYLOAD_NAME,
+    ENCODED_PACKAGE_SCHEMA_ID,
+    build_global_encoded_mask_payload,
+)
 from fisheye.shared.run_provenance import json_ready
 
 
@@ -77,6 +82,8 @@ def _write_package(
     package_path: Path,
     metadata: dict[str, Any],
     overwrite: bool,
+    schema_id: str = PACKAGE_SCHEMA_ID,
+    encoded_payload_path: Path | None = None,
 ) -> dict[str, Any]:
     run_path = staged_zarr / "refined_subject_masks_runs" / refined_run
     if not run_path.is_dir():
@@ -91,16 +98,21 @@ def _write_package(
         tmp_path.unlink()
 
     manifest = {
-        "schema_id": PACKAGE_SCHEMA_ID,
+        **metadata,
+        "schema_id": str(schema_id),
+        "package_completion_status": "complete",
         "created_at_utc": _utc_now(),
         "package_path": str(package_path),
         "run_group_path": f"refined_subject_masks_runs/{refined_run}",
-        **metadata,
     }
     manifest_bytes = (json.dumps(json_ready(manifest), indent=2, sort_keys=True) + "\n").encode("utf-8")
     try:
         with tarfile.open(tmp_path, "w:gz") as tar:
             tar.add(run_path, arcname=f"refined_subject_masks_runs/{refined_run}")
+            if encoded_payload_path is not None:
+                if not encoded_payload_path.is_dir():
+                    raise ValueError(f"Encoded mask payload is missing: {encoded_payload_path}")
+                tar.add(encoded_payload_path, arcname=ENCODED_MASK_PAYLOAD_NAME)
             info = tarfile.TarInfo("package.json")
             info.size = len(manifest_bytes)
             info.mtime = int(time.time())
@@ -111,7 +123,7 @@ def _write_package(
             tmp_path.unlink()
 
     return {
-        "schema_id": PACKAGE_SCHEMA_ID,
+        "schema_id": str(schema_id),
         "artifact_path": str(package_path),
         "run_group_path": f"refined_subject_masks_runs/{refined_run}",
         "created_at_utc": manifest["created_at_utc"],
@@ -144,6 +156,8 @@ def finalize_subject_mask_clip_package(
     write_component_contours: bool = True,
     write_sampled_component_contours: bool = True,
     retain_source_seeds: bool = False,
+    global_mask_grid_manifest: Path | None = None,
+    encoded_mask_copy_workers: int = 8,
     overwrite: bool = False,
     cleanup: bool = True,
 ) -> dict[str, Any]:
@@ -191,6 +205,19 @@ def finalize_subject_mask_clip_package(
         run.attrs["clip_package_target_crop_run"] = str(target_crop_run)
         run.attrs["clip_package_host"] = socket.gethostname()
         run.attrs["clip_package_lsb_jobid"] = os.environ.get("LSB_JOBID")
+        encoded_payload_summary: dict[str, Any] | None = None
+        encoded_payload_path: Path | None = None
+        package_schema_id = PACKAGE_SCHEMA_ID
+        if global_mask_grid_manifest is not None:
+            encoded_payload_path = staged_zarr / ENCODED_MASK_PAYLOAD_NAME
+            encoded_payload_summary = build_global_encoded_mask_payload(
+                run_path=staged_zarr / "refined_subject_masks_runs" / refined_run,
+                grid_manifest_path=global_mask_grid_manifest,
+                payload_path=encoded_payload_path,
+                copy_workers=int(encoded_mask_copy_workers),
+            )
+            package_schema_id = ENCODED_PACKAGE_SCHEMA_ID
+            run.attrs["encoded_global_masks_roi"] = dict(json_ready(encoded_payload_summary))
         package = _write_package(
             staged_zarr=staged_zarr,
             refined_run=refined_run,
@@ -203,13 +230,16 @@ def finalize_subject_mask_clip_package(
                 "host": socket.gethostname(),
                 "lsb_jobid": os.environ.get("LSB_JOBID"),
                 "summary": summary,
+                "encoded_global_masks_roi": encoded_payload_summary,
             },
             overwrite=bool(overwrite),
+            schema_id=package_schema_id,
+            encoded_payload_path=encoded_payload_path,
         )
         run.attrs["cluster_run_package"] = dict(package)
         duration_seconds = float(time.perf_counter() - started)
         return {
-            "schema_id": PACKAGE_SCHEMA_ID,
+            "schema_id": package_schema_id,
             "status": "ok",
             "source_zarr_path": str(source_zarr),
             "staged_zarr_path": str(staged_zarr),
@@ -219,6 +249,7 @@ def finalize_subject_mask_clip_package(
             "package": package,
             "duration_seconds": duration_seconds,
             "summary": summary,
+            "encoded_global_masks_roi": encoded_payload_summary,
             "cleanup": bool(cleanup),
         }
     finally:
@@ -256,6 +287,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--write-sampled-component-contours", action="store_true", default=True)
     parser.add_argument("--no-write-sampled-component-contours", action="store_true")
     parser.add_argument("--retain-source-seeds", action="store_true")
+    parser.add_argument("--global-mask-grid-manifest", type=Path)
+    parser.add_argument("--encoded-mask-copy-workers", type=int, default=8)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--no-cleanup", action="store_true")
     parser.add_argument("--json", action="store_true")
@@ -289,6 +322,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         write_sampled_component_contours=bool(args.write_sampled_component_contours)
         and not bool(args.no_write_sampled_component_contours),
         retain_source_seeds=bool(args.retain_source_seeds),
+        global_mask_grid_manifest=args.global_mask_grid_manifest,
+        encoded_mask_copy_workers=int(args.encoded_mask_copy_workers),
         overwrite=bool(args.overwrite),
         cleanup=not bool(args.no_cleanup),
     )

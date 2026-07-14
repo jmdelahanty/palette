@@ -95,6 +95,7 @@ class ClippedInferencePlan:
     max_active_targets: int
     cleanup_nrs_after_success: bool
     resume_existing_detections: bool
+    encoded_mask_packages: bool
     lsf_workflow: LsfWorkflow
 
     def to_json(self) -> dict[str, Any]:
@@ -113,6 +114,7 @@ class ClippedInferencePlan:
             "max_active_targets": self.max_active_targets,
             "cleanup_nrs_after_success": self.cleanup_nrs_after_success,
             "resume_existing_detections": self.resume_existing_detections,
+            "encoded_mask_packages": self.encoded_mask_packages,
             "lsf_workflow": self.lsf_workflow.to_json(),
         }
 
@@ -483,6 +485,7 @@ def build_plan(
     max_active_targets: int = 3,
     cleanup_nrs_after_success: bool = True,
     resume_existing_detections: bool = False,
+    encoded_mask_packages: bool = False,
 ) -> ClippedInferencePlan:
     if not targets:
         raise ValueError("At least one target is required.")
@@ -568,6 +571,7 @@ def build_plan(
         collection_id = f"refined_detect_collection_{target_label}"
         cache_dir = cache_root.expanduser().resolve() / label / target_safe
         package_dir = package_root.expanduser().resolve() / label / target_safe
+        global_mask_grid_manifest = package_dir / "global_mask_chunk_grid.json"
         detection_plan_path = run_root / "targets" / target_safe / "detection_plan.json"
         detection_plan = build_detection_plan(
             target.recording_dir,
@@ -625,6 +629,7 @@ def build_plan(
             "collection_id": collection_id,
             "cache_dir": str(cache_dir),
             "package_dir": str(package_dir),
+            "global_mask_grid_manifest": str(global_mask_grid_manifest),
             "merged_proxy_crop_run": merged_proxy,
             "keypoint_run": keypoint_run,
             "refined_keypoint_run": refined_keypoint_run,
@@ -889,6 +894,35 @@ def build_plan(
             )
         )
 
+        mask_grid_key: str | None = None
+        if encoded_mask_packages:
+            mask_grid_key = f"mask_grid:{target_safe}"
+            mask_grid_command = [
+                "scripts/py", "-m", "fisheye.utils.prepare_refined_subject_mask_chunk_grid",
+                "--zarr", str(target.analysis_zarr),
+                "--crop-run", merged_proxy,
+                "--output-manifest", str(global_mask_grid_manifest),
+                "--mask-label", "subject_body",
+                "--mask-label", "eye_left",
+                "--mask-label", "eye_right",
+                "--mask-label", "swim_bladder",
+                "--mask-height", "512", "--mask-width", "512",
+                "--dense-mask-row-chunk", "128", "--json",
+            ]
+            jobs.append(
+                _job(
+                    workflow_id=workflow_id,
+                    repo=repo,
+                    run_root=run_root,
+                    job_key=mask_grid_key,
+                    stage="subject_mask_global_chunk_grid",
+                    command=mask_grid_command,
+                    resources=cpu,
+                    upstream=(keypoint_finalize_key,),
+                    expected_outputs=(global_mask_grid_manifest,),
+                )
+            )
+
         package_keys: list[str] = []
         for clip, mask_key in zip(clips, mask_keys, strict=True):
             clip_id = str(clip["clip_id"])
@@ -911,12 +945,22 @@ def build_plan(
                 "--assignment-keypoints-run", refined_keypoint_run,
                 "--no-write-component-contours", "--json",
             ]
+            if encoded_mask_packages:
+                package_command.extend(
+                    [
+                        "--global-mask-grid-manifest", str(global_mask_grid_manifest),
+                        "--encoded-mask-copy-workers", "8",
+                    ]
+                )
+            package_upstream = [mask_key, keypoint_refine_key]
+            if mask_grid_key is not None:
+                package_upstream.append(mask_grid_key)
             jobs.append(
                 _job(
                     workflow_id=workflow_id, repo=repo, run_root=run_root,
                     job_key=package_key, stage="subject_mask_refine_package",
                     command=package_command, resources=final_cpu,
-                    upstream=(mask_key, keypoint_refine_key),
+                    upstream=tuple(package_upstream),
                     expected_outputs=(Path(str(clip["package_path"])),),
                 )
             )
@@ -925,7 +969,8 @@ def build_plan(
         mask_import = [
             "scripts/py", "-m", "fisheye.utils.import_refined_subject_mask_clip_packages",
             "--zarr", str(target.analysis_zarr), "--output-run", refined_subject_mask_run,
-            "--expected-target-crop-run", merged_proxy, "--array-copy-workers", "8", "--json",
+            "--expected-target-crop-run", merged_proxy, "--array-copy-workers", "8",
+            "--encoded-copy-workers", "32", "--json",
         ]
         for clip in clips:
             mask_import.extend(["--package", str(clip["package_path"])])
@@ -1013,6 +1058,7 @@ def build_plan(
         max_active_targets=max_active_targets,
         cleanup_nrs_after_success=cleanup_nrs_after_success,
         resume_existing_detections=resume_existing_detections,
+        encoded_mask_packages=encoded_mask_packages,
         lsf_workflow=workflow,
     )
 
@@ -1138,6 +1184,11 @@ def _parser() -> argparse.ArgumentParser:
             "validation; all later outputs must still be absent."
         ),
     )
+    parser.add_argument(
+        "--encoded-mask-packages",
+        action="store_true",
+        help="Emit v2 globally aligned encoded mask packages and use direct chunk publication.",
+    )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
@@ -1169,6 +1220,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_active_targets=args.max_active_targets,
         cleanup_nrs_after_success=not args.no_cleanup_nrs_after_success,
         resume_existing_detections=args.resume_existing_detections,
+        encoded_mask_packages=args.encoded_mask_packages,
     )
     result = (
         apply_plan(plan, runner=build_ssh_bsub_runner(args.submit_host))

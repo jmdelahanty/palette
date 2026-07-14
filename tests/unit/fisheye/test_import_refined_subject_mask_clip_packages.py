@@ -12,13 +12,16 @@ import zarr
 
 from fisheye.shared.subject_mask_chunks import refined_subject_mask_storage_chunks
 from fisheye.shared.detect_reason_codec import read_reason_labels, write_reason_columns
+from fisheye.shared.refined_subject_mask_encoded_chunks import prepare_global_mask_chunk_grid
 from fisheye.shared.zarr_run_completion import RUN_COMPLETION_STATUS_ATTR
+from fisheye.utils.convert_refined_subject_mask_clip_package_v2 import convert_package
 from fisheye.utils.finalize_subject_mask_clip_package import PACKAGE_SCHEMA_ID
 from fisheye.utils.import_refined_subject_mask_clip_packages import (
     ClipPackage,
     _build_row_chunk_copy_plan,
     import_refined_subject_mask_clip_packages,
 )
+from fisheye.utils.validate_encoded_subject_mask_import_canary import validate_canary
 
 
 def _write_package(
@@ -30,6 +33,7 @@ def _write_package(
     source_crop_run: str = "crop_proxy_collection",
     labels: list[str] | None = None,
     body_reason_labels: list[str] | None = None,
+    mask_row_chunk: int | None = None,
 ) -> Path:
     labels = labels or ["subject_body", "eye_left"]
     package_root = tmp_path / f"{package_name}_src"
@@ -53,7 +57,12 @@ def _write_package(
     masks = np.zeros((row_count, len(labels), 2, 3), dtype=np.uint8)
     for row_idx, crop_row_id in enumerate(crop_row_ids):
         masks[row_idx, :, :, :] = np.uint8(crop_row_id)
-    run.create_array("masks_roi", data=masks, chunks=(max(1, row_count), 1, 2, 3), overwrite=True)
+    run.create_array(
+        "masks_roi",
+        data=masks,
+        chunks=(mask_row_chunk or max(1, row_count), 1, 2, 3),
+        overwrite=True,
+    )
     run.create_array("source_crop_row_ids", data=np.asarray(crop_row_ids, dtype=np.int64), overwrite=True)
     run.create_array("frame_indices", data=np.asarray(crop_row_ids, dtype=np.int64) + 1000, overwrite=True)
     run.create_array("available_channels", data=np.ones((row_count, len(labels)), dtype=bool), overwrite=True)
@@ -147,6 +156,116 @@ def test_row_chunk_copy_plan_splits_misaligned_clip_boundary_once() -> None:
         ],
         [(package_b_path, 2, 4, 8, 10)],
     ]
+
+
+def test_encoded_v2_packages_copy_complete_chunks_and_decode_only_boundary(tmp_path: Path) -> None:
+    target_zarr = tmp_path / "target.zarr"
+    root = zarr.open_group(str(target_zarr), mode="w")
+    crop = root.require_group("crop_runs").create_group("crop_proxy_collection")
+    crop.create_array(
+        "source_crop_row_ids",
+        data=np.arange(10, 20, dtype=np.int64),
+        chunks=(4,),
+        overwrite=True,
+    )
+    grid_manifest = tmp_path / "global_mask_grid.json"
+    prepare_global_mask_chunk_grid(
+        zarr_path=target_zarr,
+        crop_run="crop_proxy_collection",
+        output_manifest=grid_manifest,
+        mask_labels=("subject_body", "eye_left"),
+        mask_height=2,
+        mask_width=3,
+        dense_mask_row_chunk=4,
+    )
+    package_a_v1 = _write_package(
+        tmp_path,
+        package_name="clip_a_v1",
+        run_name="refined_clip_a",
+        crop_row_ids=[10, 11, 12, 13, 14, 15],
+        mask_row_chunk=4,
+    )
+    package_b_v1 = _write_package(
+        tmp_path,
+        package_name="clip_b_v1",
+        run_name="refined_clip_b",
+        crop_row_ids=[16, 17, 18, 19],
+        mask_row_chunk=4,
+    )
+    import_refined_subject_mask_clip_packages(
+        zarr_path=target_zarr,
+        package_paths=[package_a_v1, package_b_v1],
+        output_run="refined_collection_v1_baseline",
+        expected_target_crop_run="crop_proxy_collection",
+        array_copy_workers=2,
+    )
+    package_a_v2 = tmp_path / "clip_a_v2.tar.gz"
+    package_b_v2 = tmp_path / "clip_b_v2.tar.gz"
+    convert_package(
+        source_package=package_a_v1,
+        output_package=package_a_v2,
+        grid_manifest=grid_manifest,
+        copy_workers=2,
+    )
+    convert_package(
+        source_package=package_b_v1,
+        output_package=package_b_v2,
+        grid_manifest=grid_manifest,
+        copy_workers=2,
+    )
+
+    result = import_refined_subject_mask_clip_packages(
+        zarr_path=target_zarr,
+        package_paths=[package_a_v2, package_b_v2],
+        output_run="refined_collection_v2",
+        expected_target_crop_run="crop_proxy_collection",
+        array_copy_workers=2,
+        encoded_copy_workers=2,
+    )
+
+    publication = result["encoded_mask_publication"]
+    assert publication["strategy"] == "encoded_global_chunk_copy_v1"
+    assert publication["row_chunk_count"] == 3
+    assert publication["direct_row_chunk_count"] == 2
+    assert publication["boundary_row_chunk_count"] == 1
+    run = zarr.open_group(str(target_zarr), mode="r", use_consolidated=False)[
+        "refined_subject_masks_runs"
+    ]["refined_collection_v2"]
+    baseline = zarr.open_group(str(target_zarr), mode="r", use_consolidated=False)[
+        "refined_subject_masks_runs"
+    ]["refined_collection_v1_baseline"]
+    assert run.attrs["masks_roi_publication_strategy"] == "encoded_global_chunk_copy_v1"
+    np.testing.assert_array_equal(
+        run["source_crop_row_ids"][:],
+        np.arange(10, 20, dtype=np.int64),
+    )
+    np.testing.assert_array_equal(
+        run["masks_roi"][:, 0, 0, 0],
+        np.arange(10, 20, dtype=np.uint8),
+    )
+    np.testing.assert_array_equal(
+        run["masks_roi"][:, 1, 1, 2],
+        np.arange(10, 20, dtype=np.uint8),
+    )
+    np.testing.assert_array_equal(run["masks_roi"][:], baseline["masks_roi"][:])
+    np.testing.assert_array_equal(run["frame_indices"][:], baseline["frame_indices"][:])
+    np.testing.assert_allclose(run["metrics"]["area_px"][:], baseline["metrics"]["area_px"][:])
+    canary = validate_canary(
+        zarr_path=target_zarr,
+        baseline_run="refined_collection_v1_baseline",
+        encoded_run="refined_collection_v2",
+        sample_row_chunks=3,
+    )
+    assert canary["status"] == "ok"
+    assert canary["boundary_row_chunk_indices"] == [1]
+    with pytest.raises(ValueError, match="Refusing to overwrite complete"):
+        import_refined_subject_mask_clip_packages(
+            zarr_path=target_zarr,
+            package_paths=[package_a_v2, package_b_v2],
+            output_run="refined_collection_v2",
+            expected_target_crop_run="crop_proxy_collection",
+            overwrite=True,
+        )
 
 
 def test_import_refined_subject_mask_clip_packages_merges_rows_and_contours(tmp_path: Path) -> None:

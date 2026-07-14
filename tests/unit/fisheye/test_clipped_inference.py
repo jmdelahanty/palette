@@ -11,6 +11,7 @@ import pytest
 from fisheye.cluster import clipped_inference as workflow
 from fisheye.cluster import clipped_inference_import_recovery as import_recovery
 from fisheye.cluster import clipped_inference_keypoint_recovery as recovery
+from fisheye.cluster import refined_subject_mask_encoded_chunk_canary as encoded_canary
 from fisheye.cluster.clipped_inference_cleanup import cleanup
 from fisheye.cluster.clipped_inference_validate import _instance_keys
 
@@ -66,6 +67,7 @@ def _build_fixture_plan(
     monkeypatch: pytest.MonkeyPatch,
     *,
     resume_existing_detections: bool = False,
+    encoded_mask_packages: bool = False,
 ) -> workflow.ClippedInferencePlan:
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True)
@@ -121,6 +123,7 @@ def _build_fixture_plan(
         cache_root=tmp_path / "cache_root",
         package_root=tmp_path / "package_root",
         resume_existing_detections=resume_existing_detections,
+        encoded_mask_packages=encoded_mask_packages,
     )
 
 
@@ -163,6 +166,53 @@ def test_materialized_dry_run_is_immutable_and_has_no_submission(tmp_path: Path,
     assert first["models"]["detection"]["run_id"] == "detect_run"
     assert first["models"]["pose"]["run_id"] == "pose_run"
     assert first["models"]["subject_masks"]["run_id"] == "mask_run"
+
+
+def test_encoded_mask_packages_add_global_grid_and_join(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    plan = _build_fixture_plan(tmp_path, monkeypatch, encoded_mask_packages=True)
+    jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
+    target = plan.target_plans[0]
+    target_safe = workflow.safe_component(str(target["target_id"]), default="target", max_length=56)
+    grid_key = f"mask_grid:{target_safe}"
+    package_key = f"mask_package:{target_safe}:clip_000000"
+    import_key = f"mask_import:{target_safe}"
+
+    assert plan.encoded_mask_packages is True
+    assert len(plan.lsf_workflow.jobs) == 125
+    assert jobs[grid_key].dependency.upstream_job_keys == (f"keypoint_finalize:{target_safe}",)
+    assert jobs[package_key].dependency.upstream_job_keys == (
+        f"subject_masks:{target_safe}:clip_000000",
+        f"keypoint_refine:{target_safe}",
+        grid_key,
+    )
+    assert "--global-mask-grid-manifest" in jobs[package_key].command
+    assert "--encoded-copy-workers" in jobs[import_key].command
+
+
+def test_encoded_chunk_canary_serializes_prfs_ab_imports(tmp_path: Path) -> None:
+    packages = [tmp_path / "clip_000000.tar.gz", tmp_path / "clip_000001.tar.gz"]
+    for package in packages:
+        package.write_bytes(b"package")
+    plan = encoded_canary.build_plan(
+        package_paths=packages,
+        run_root=tmp_path / "canary_run",
+        encoded_package_dir=tmp_path / "encoded_packages",
+        canary_label="encoded_canary",
+        repo=tmp_path / "repo",
+    )
+    jobs = {job.job_key: job for job in plan.workflow.jobs}
+
+    assert len(plan.workflow.jobs) == 6
+    assert jobs["baseline_import"].dependency.upstream_job_keys == ("prepare",)
+    assert jobs["encoded_import"].dependency.upstream_job_keys == (
+        "baseline_import",
+        "convert:00",
+        "convert:01",
+    )
+    assert jobs["validate"].dependency.upstream_job_keys == ("encoded_import",)
+    assert jobs["baseline_import"].resources.queue == "local"
+    assert jobs["encoded_import"].resources.queue == "local"
+    assert "--encoded-copy-workers" in jobs["encoded_import"].command
 
 
 def test_resume_plan_revalidates_detections_on_cpu_and_preserves_dependencies(
@@ -266,6 +316,42 @@ def test_import_recovery_reuses_packages_on_long_queue(
     assert jobs[validation_key].dependency.upstream_job_keys == (import_key,)
     assert jobs["registry_finalize"].dependency.upstream_job_keys == (validation_key,)
     assert jobs["nrs_cleanup"].dependency.upstream_job_keys == ("registry_finalize",)
+
+
+def test_import_recovery_can_convert_v1_packages_to_encoded_v2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _build_fixture_plan(tmp_path, monkeypatch)
+    source_plan = tmp_path / "source_import_plan.json"
+    _write_json(source_plan, source.to_json())
+    monkeypatch.setattr(
+        import_recovery,
+        "_preflight",
+        lambda _source: {"status": "ok", "target_count": 1},
+    )
+
+    plan = import_recovery.build_plan(
+        source_plan_path=source_plan,
+        run_root=tmp_path / "encoded_recovery",
+        recovery_label="sleepyfish_encoded_recovery",
+        convert_packages_v2=True,
+    )
+    jobs = {job.job_key: job for job in plan.workflow.jobs}
+    target = source.target_plans[0]
+    target_safe = workflow.safe_component(str(target["target_id"]), default="target", max_length=56)
+    grid_key = f"mask_grid:{target_safe}"
+    conversion_key = f"mask_package_v2:{target_safe}:clip_000000"
+    import_key = f"mask_import:{target_safe}"
+
+    assert len(plan.workflow.jobs) == 27
+    assert jobs[conversion_key].dependency.upstream_job_keys == (grid_key,)
+    assert jobs[import_key].dependency.upstream_job_keys[0].startswith(
+        f"mask_package_v2:{target_safe}:"
+    )
+    assert len(jobs[import_key].dependency.upstream_job_keys) == 22
+    assert "--encoded-copy-workers" in jobs[import_key].command
+    assert all("/encoded_v2/" in value for index, value in enumerate(jobs[import_key].command) if jobs[import_key].command[index - 1] == "--package")
 
 
 def test_existing_detection_resume_preflight_requires_exact_provenance(

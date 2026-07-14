@@ -115,11 +115,29 @@ def _with_overwrite(command: Sequence[str]) -> tuple[str, ...]:
     return values if "--overwrite" in values else (*values, "--overwrite")
 
 
+def _replace_package_paths(
+    command: Sequence[str],
+    replacements: Mapping[str, str],
+) -> tuple[str, ...]:
+    values = [str(value) for value in command]
+    index = 0
+    while index < len(values):
+        if values[index] == "--package" and index + 1 < len(values):
+            values[index + 1] = str(replacements.get(values[index + 1], values[index + 1]))
+            index += 2
+            continue
+        index += 1
+    if "--encoded-copy-workers" not in values:
+        values.extend(["--encoded-copy-workers", "32"])
+    return tuple(values)
+
+
 def build_plan(
     *,
     source_plan_path: Path,
     run_root: Path,
     recovery_label: str,
+    convert_packages_v2: bool = False,
 ) -> ImportRecoveryPlan:
     source_plan_path = source_plan_path.expanduser().resolve()
     run_root = run_root.expanduser().resolve()
@@ -145,9 +163,77 @@ def build_plan(
 
     jobs: list[LsfJob] = []
     validation_keys: list[str] = []
+    recovery_targets = json.loads(json.dumps(targets))
+    recovery_target_by_id = {
+        str(target["target_id"]): target
+        for target in recovery_targets
+    }
     for target in targets:
         target_safe = safe_component(str(target["target_id"]), default="target", max_length=56)
         zarr_path = Path(str(target["analysis_zarr"])).expanduser().resolve()
+        import_upstream: tuple[str, ...] = ()
+        package_replacements: dict[str, str] = {}
+        if convert_packages_v2:
+            package_dir = Path(str(target["package_dir"])).expanduser().resolve()
+            encoded_dir = package_dir / "encoded_v2"
+            grid_manifest = encoded_dir / "global_mask_chunk_grid.json"
+            grid_key = f"mask_grid:{target_safe}"
+            jobs.append(
+                _job(
+                    workflow_id=label,
+                    repo=repo,
+                    run_root=run_root,
+                    job_key=grid_key,
+                    stage="subject_mask_global_chunk_grid_recovery",
+                    command=(
+                        "scripts/py", "-m", "fisheye.utils.prepare_refined_subject_mask_chunk_grid",
+                        "--zarr", str(zarr_path),
+                        "--crop-run", str(target["merged_proxy_crop_run"]),
+                        "--output-manifest", str(grid_manifest),
+                        "--mask-label", "subject_body",
+                        "--mask-label", "eye_left",
+                        "--mask-label", "eye_right",
+                        "--mask-label", "swim_bladder",
+                        "--mask-height", "512", "--mask-width", "512",
+                        "--dense-mask-row-chunk", "128", "--json",
+                    ),
+                    resources=LsfResources(queue="short", ncores=2, mem_gb=16, walltime="1:00"),
+                    expected_outputs=(grid_manifest,),
+                )
+            )
+            conversion_keys: list[str] = []
+            payload_target = recovery_target_by_id[str(target["target_id"])]
+            payload_target["global_mask_grid_manifest"] = str(grid_manifest)
+            payload_target["encoded_mask_packages"] = True
+            for clip, payload_clip in zip(target["clips"], payload_target["clips"], strict=True):
+                source_package = Path(str(clip["package_path"])).expanduser().resolve()
+                output_package = encoded_dir / source_package.name
+                package_replacements[str(source_package)] = str(output_package)
+                payload_clip["source_package_path"] = str(source_package)
+                payload_clip["package_path"] = str(output_package)
+                clip_safe = safe_component(str(clip["clip_id"]), default="clip", max_length=40)
+                conversion_key = f"mask_package_v2:{target_safe}:{clip_safe}"
+                conversion_keys.append(conversion_key)
+                jobs.append(
+                    _job(
+                        workflow_id=label,
+                        repo=repo,
+                        run_root=run_root,
+                        job_key=conversion_key,
+                        stage="subject_mask_package_v2_conversion",
+                        command=(
+                            "scripts/py", "-m", "fisheye.utils.convert_refined_subject_mask_clip_package_v2",
+                            "--source-package", str(source_package),
+                            "--output-package", str(output_package),
+                            "--grid-manifest", str(grid_manifest),
+                            "--copy-workers", "8", "--json",
+                        ),
+                        resources=LsfResources(queue="short", ncores=8, mem_gb=32, walltime="1:00"),
+                        upstream=(grid_key,),
+                        expected_outputs=(output_package,),
+                    )
+                )
+            import_upstream = tuple(conversion_keys)
         import_key = f"mask_import:{target_safe}"
         import_prior = prior_by_key[import_key]
         import_command = _with_overwrite(
@@ -157,6 +243,8 @@ def build_plan(
                 recovery_run_root=run_root,
             )
         )
+        if convert_packages_v2:
+            import_command = _replace_package_paths(import_command, package_replacements)
         jobs.append(
             _job(
                 workflow_id=label,
@@ -168,6 +256,7 @@ def build_plan(
                 resources=LsfResources(
                     queue="local", ncores=8, mem_gb=32, walltime="3:00"
                 ),
+                upstream=import_upstream,
                 expected_outputs=(
                     zarr_path
                     / "refined_subject_masks_runs"
@@ -256,6 +345,7 @@ def build_plan(
             "recovery_schema": RECOVERY_SCHEMA,
             "source_plan": str(source_plan_path),
             "reused_completed_mask_packages": True,
+            "converted_mask_packages_v2": bool(convert_packages_v2),
         },
     )
     payload = {
@@ -266,6 +356,7 @@ def build_plan(
         "run_root": str(run_root),
         "repo": str(repo),
         "registry": str(registry),
+        "targets": recovery_targets,
         "import_recovery": {
             "schema": RECOVERY_SCHEMA,
             "source_plan": str(source_plan_path),
@@ -311,6 +402,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--run-root", required=True, type=Path)
     parser.add_argument("--recovery-label", required=True)
     parser.add_argument("--submit-host", default="login1-citrus-poller")
+    parser.add_argument("--convert-packages-v2", action="store_true")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
@@ -320,6 +412,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         source_plan_path=args.source_plan,
         run_root=args.run_root,
         recovery_label=args.recovery_label,
+        convert_packages_v2=bool(args.convert_packages_v2),
     )
     result = apply_plan(plan, submit_host=args.submit_host) if args.apply else materialize_plan(plan)
     summary = {
