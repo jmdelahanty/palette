@@ -24,6 +24,35 @@ It runs from the repository snapshot and adds only the repository root and
 Runtime table reads use Polars lazy Parquet scans. The full Palette processing
 environment may continue to use PyArrow for export writing and other workflows.
 
+### Pandas and PyArrow runtime boundary
+
+The lightweight Pixi application environment deliberately does not require
+PyArrow. Polars reads the immutable Parquet exports directly, and the recording
+explorer projects Zarr arrays through NumPy and Polars. Core-behavior plotting
+must pass bounded NumPy column mappings to Plotly; it must not call
+`Polars.to_pandas()` or `Polars.from_pandas()`, because both operations activate
+Polars' optional PyArrow interchange path even when the persisted source is a
+Zarr array.
+
+Pandas is still an intentional application dependency for now. An audit of the
+three published entry points found three remaining migration boundaries:
+
+- the group analytics component uses pandas DataFrames for numeric coercion,
+  pivots, and Plotly preparation;
+- the shared legacy track-kinematics and chaser visualization adapters construct
+  and return pandas DataFrames; and
+- the recording explorer's legacy chaser visualization contracts and component
+  APIs return and manipulate pandas DataFrames throughout.
+
+Removing pandas from `pixi.toml` is therefore a separate API migration, not a
+dependency cleanup. Migrate the group figures to Polars expressions and NumPy
+Plotly inputs first, then change the legacy track-kinematics and chaser
+visualization adapters to return Polars frames. Once the three app entry points
+and their imported components contain no pandas imports, remove pandas from the
+Pixi manifest, regenerate `pixi.lock`, and run all three application smokes.
+Until then, keeping pandas declared is required; adding PyArrow solely to bridge
+between Polars and pandas is not.
+
 Commit `pixi.lock` with changes to `pixi.toml`. FileGlancer and local launches
 therefore resolve the same runtime.
 

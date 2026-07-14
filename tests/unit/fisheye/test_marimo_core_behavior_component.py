@@ -78,7 +78,10 @@ def test_core_source_defers_zarr_open_until_projection(tmp_path, monkeypatch) ->
     assert collected.height == 1
 
 
-def test_core_source_exposes_only_lineage_compatible_swim_bouts(tmp_path) -> None:
+def test_core_source_exposes_only_lineage_compatible_swim_bouts(
+    tmp_path,
+    monkeypatch,
+) -> None:
     zarr_path = _make_archive_with_interactive_artifact(tmp_path)
     _add_hierarchical_swim_bouts(zarr_path)
     source = CoreBehaviorSource(zarr_path, _core_option(zarr_path))
@@ -117,6 +120,10 @@ def test_core_source_exposes_only_lineage_compatible_swim_bouts(tmp_path) -> Non
         def vstack(items):
             return list(items)
 
+    def _forbid_to_pandas(*args, **kwargs):
+        raise AssertionError("core plotting must not require Polars.to_pandas")
+
+    monkeypatch.setattr(pl.DataFrame, "to_pandas", _forbid_to_pandas)
     output = build_core_behavior_output(_Mo, go, px, projection=projection)
     segmentation_figure = output[2][0]
     assert [trace.type for trace in segmentation_figure.data] == ["scattergl", "bar"]
@@ -139,19 +146,74 @@ def test_core_source_exposes_only_lineage_compatible_swim_bouts(tmp_path) -> Non
     assert bounded.related_frames["speed_trace"].collect().height == 6
 
 
-def test_core_source_exposes_eye_angles_only_when_persisted(tmp_path) -> None:
+def test_core_source_exposes_eye_angles_only_when_persisted(
+    tmp_path,
+    monkeypatch,
+) -> None:
     zarr_path = _make_archive_with_interactive_artifact(tmp_path)
     source_without_eyes = CoreBehaviorSource(zarr_path, _core_option(zarr_path))
     assert "eye_angles" not in source_without_eyes.available_analysis_ids()
 
     _add_eye_angle_run(zarr_path)
     source = CoreBehaviorSource(zarr_path, _core_option(zarr_path))
+
+    def _forbid_from_pandas(*args, **kwargs):
+        raise AssertionError("eye projection must not require Polars.from_pandas")
+
+    monkeypatch.setattr(pl, "from_pandas", _forbid_from_pandas)
     projection = source.project_eye_angles(start_s=0.0, stop_s=0.01)
 
     assert "eye_angles" in source.available_analysis_ids()
     assert isinstance(projection.frame, pl.LazyFrame)
     assert projection.row_count == 3
     assert "mean_eye_vergence_gaze_deg_smoothed" in projection.columns
+
+
+def test_position_plot_avoids_arrow_backed_pandas_bridge(monkeypatch) -> None:
+    frame = pl.DataFrame(
+        {
+            "time_s": [0.0, 0.1, 0.2],
+            "x": [1.0, 2.0, 3.0],
+            "y": [4.0, 5.0, 6.0],
+        }
+    )
+    projection = CoreBehaviorProjection(
+        analysis_id="position",
+        frame=frame.lazy(),
+        columns=tuple(frame.columns),
+        source_paths=("test",),
+        start_s=0.0,
+        stop_s=0.2,
+        row_count=frame.height,
+        load_duration_ms=0.0,
+        note="test",
+    )
+
+    class _Mo:
+        @staticmethod
+        def md(text):
+            return text
+
+        @staticmethod
+        def stat(*, label, value):
+            return {"label": label, "value": value}
+
+        @staticmethod
+        def hstack(items):
+            return list(items)
+
+        @staticmethod
+        def vstack(items):
+            return list(items)
+
+    def _forbid_to_pandas(*args, **kwargs):
+        raise AssertionError("core plotting must not require Polars.to_pandas")
+
+    monkeypatch.setattr(pl.DataFrame, "to_pandas", _forbid_to_pandas)
+    figure = build_core_behavior_output(_Mo, go, px, projection=projection)[2]
+
+    assert figure.data[0].type == "scattergl"
+    assert list(figure.data[0].x) == [1.0, 2.0, 3.0]
 
 
 def test_export_parquet_uses_true_polars_lazy_scan(tmp_path) -> None:

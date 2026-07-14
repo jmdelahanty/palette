@@ -17,7 +17,6 @@ def _():
     import time
 
     import marimo as mo
-    import pandas as pd
     import plotly.express as px
     import plotly.graph_objects as go
 
@@ -92,7 +91,6 @@ def _():
         load_core_behavior_projection,
         load_goodcopbadcop_view,
         mo,
-        pd,
         px,
         resolve_time_window_from_widgets,
         resolve_time_windows_from_multiselect,
@@ -566,7 +564,6 @@ def _(
     chaser_window,
     go,
     mo,
-    pd,
     px,
     selected_analysis_id,
     selected_provider,

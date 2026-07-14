@@ -105,6 +105,30 @@ def _structured_lazy(records: np.ndarray) -> pl.LazyFrame:
     return pl.from_dicts(rows).lazy() if rows else pl.DataFrame().lazy()
 
 
+def _pandas_payload_to_polars(payload: Any) -> pl.DataFrame:
+    """Convert a numeric legacy payload without requiring the PyArrow bridge."""
+
+    return pl.DataFrame(
+        {
+            str(name): np.asarray(payload[name].to_numpy(copy=False))
+            for name in payload.columns
+        }
+    )
+
+
+def _plotly_columns(
+    frame: pl.DataFrame,
+    columns: Iterable[str],
+) -> dict[str, np.ndarray]:
+    """Expose bounded Polars columns to Plotly without converting to pandas."""
+
+    return {
+        name: frame.get_column(name).to_numpy()
+        for name in columns
+        if name in frame.columns
+    }
+
+
 def _is_physical_speed_column(name: str) -> bool:
     return (
         name.startswith("speed_")
@@ -558,7 +582,7 @@ class CoreBehaviorSource:
             run_name=selected.run_name,
             prefer_frame=True,
         )
-        frame = pl.from_pandas(payload.dataframe)
+        frame = _pandas_payload_to_polars(payload.dataframe)
         if "time_s" in frame.columns:
             if start_s is not None:
                 frame = frame.filter(pl.col("time_s") >= float(start_s))
@@ -814,7 +838,7 @@ def build_core_behavior_output(
                 max_total_values=75000,
             )
             figure = px.scatter(
-                display_frame.to_pandas(),
+                _plotly_columns(display_frame, ("x", "y", "time_s")),
                 x="x",
                 y="y",
                 color="time_s",
@@ -943,11 +967,10 @@ def build_core_behavior_output(
             pieces.append(segmentation_figure)
         distribution_specs = _swim_bout_distribution_specs(frame)
         if distribution_specs:
-            bout_rows = frame.to_pandas()
             distribution_figures = []
             for column, title, xaxis_title in distribution_specs:
                 histogram = px.histogram(
-                    bout_rows,
+                    _plotly_columns(frame, (column,)),
                     x=column,
                     nbins=40,
                     title=title,
