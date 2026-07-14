@@ -319,14 +319,19 @@ def render_recording_summary(zarr_path: Path, *, dpi: int = 130) -> bytes:
 # ======================================================================================
 
 
-def _cohort_records(registry: Path, pattern: str) -> list[Path]:
+def _cohort_records(registry: Path, pattern: str) -> tuple[list[Path], list[tuple[str, str]]]:
+    """(existing archives, missing rows). A registry row pointing at a file that is not there
+    is a real problem; dropping it silently is how a cohort quietly shrinks."""
+
     conn = sqlite3.connect(str(registry))
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         """SELECT DISTINCT recording_id, zarr_path FROM dataset_context_current
            WHERE recording_id LIKE ? AND zarr_use='analysis' AND dataset_status='active'
            ORDER BY recording_id""", (pattern,)).fetchall()
-    seen, out = set(), []
+    seen: set[str] = set()
+    out: list[Path] = []
+    missing: list[tuple[str, str]] = []
     for r in rows:                     # the registry can hold two paths for one recording_id
         if r["recording_id"] in seen:
             continue
@@ -334,18 +339,27 @@ def _cohort_records(registry: Path, pattern: str) -> list[Path]:
         p = Path(r["zarr_path"])
         if p.exists():
             out.append(p)
-    return out
+        else:
+            missing.append((str(r["recording_id"]), f"zarr_path does not exist: {p}"))
+    return out, missing
 
 
-def render_cohort_figures(registry: Path, pattern: str = "%GoodCopBadCop%") -> tuple[bytes, list[RecordingData]]:
+def render_cohort_figures(
+    registry: Path,
+    pattern: str = "%GoodCopBadCop%",
+) -> tuple[bytes, list[RecordingData], list[tuple[str, str]]]:
+    """Returns (png, included, skipped). A recording that silently vanishes from a cohort
+    figure is worse than one that errors, so skips are returned rather than swallowed."""
+
+    paths, skipped = _cohort_records(registry, pattern)
     data: list[RecordingData] = []
-    for p in _cohort_records(registry, pattern):
+    for p in paths:
         try:
             data.append(RecordingData(p))
-        except Exception:
-            continue
+        except Exception as exc:
+            skipped.append((p.name, f"{type(exc).__name__}: {exc}"))
     if not data:
-        raise ValueError("No usable recordings.")
+        raise ValueError(f"No usable recordings (skipped {len(skipped)}).")
 
     fig = plt.figure(figsize=(16.5, 9.6))
     gs = fig.add_gridspec(2, 3, hspace=0.34, wspace=0.28)
@@ -473,11 +487,14 @@ def render_cohort_figures(registry: Path, pattern: str = "%GoodCopBadCop%") -> t
     ax.legend(fontsize=8)
     ax.grid(alpha=0.2, axis="y")
 
-    fig.suptitle(f"GoodCopBadCop cohort — {len(data)} recordings", fontsize=13, fontweight="bold")
+    title = f"GoodCopBadCop cohort — {len(data)} recordings"
+    if skipped:
+        title += f"   ({len(skipped)} skipped)"
+    fig.suptitle(title, fontsize=13, fontweight="bold")
     buf = BytesIO()
     fig.savefig(buf, format="png", dpi=130, bbox_inches="tight")
     plt.close(fig)
-    return buf.getvalue(), data
+    return buf.getvalue(), data, skipped
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -503,10 +520,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     from fisheye.registry.db import RegistryPaths
     registry = (args.registry or RegistryPaths.from_env(Path.cwd()).path).expanduser().resolve()
-    png, data = render_cohort_figures(registry, str(args.recording_like))
+    png, data, skipped = render_cohort_figures(registry, str(args.recording_like))
     out = args.out_dir / "cohort_summary.png"
     out.write_bytes(png)
     print(f"wrote {out}   ({len(data)} recordings)")
+    for name, reason in skipped:
+        print(f"  SKIPPED {name}: {reason}")
 
     if args.per_recording:
         for d in data:
