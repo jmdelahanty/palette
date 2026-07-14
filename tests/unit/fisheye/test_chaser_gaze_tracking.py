@@ -1,13 +1,30 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from fisheye.analysis.chaser_gaze_tracking import (
+    _dense_frame_row_lookup,
     _virtual_positions,
     fit_dynamic_tracking_gain,
     fit_linear_tracking_gain,
     sustained_true_runs,
 )
+
+
+def test_dense_frame_row_lookup_marks_trailing_frames_unavailable() -> None:
+    row_index, present = _dense_frame_row_lookup(
+        5,
+        np.asarray([0, 2, 4, 7, 8, 9], dtype=np.int64),
+    )
+
+    np.testing.assert_array_equal(present, [True, True, True, False, False, False])
+    np.testing.assert_array_equal(row_index, [0, 2, 4, -1, -1, -1])
+
+
+def test_dense_frame_row_lookup_refuses_negative_row_count() -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        _dense_frame_row_lookup(-1, np.asarray([0, 1, 2], dtype=np.int64))
 
 
 def test_static_tracking_gain_distinguishes_eye_tracking_from_head_fixed_eye() -> None:

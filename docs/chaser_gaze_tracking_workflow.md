@@ -60,6 +60,14 @@ direction. Every newly introduced acquisition family therefore requires a
 bounded visual overlay review. The review image is a gate artifact, not a claim
 that all frames were manually inspected.
 
+Modern `compact_dense_v2` eye runs expose two row semantics. `roi_angles` is a
+sparse keypoint-detection-row table joined to camera frames through
+`support/frame_indices`. `frame_angles` is a dense camera-frame projection and
+is the source used for gaze tracking. That projection can end at the last frame
+represented by an eye-detection row, before the recording's final frame. Gaze
+tracking bounds-checks camera frame IDs and marks any uncovered tail frames
+unavailable; it never indexes beyond the shorter projection.
+
 ## Metrics and controls
 
 Eye-accessible bearing ranges are estimated separately for each recording and

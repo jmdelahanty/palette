@@ -591,14 +591,20 @@ run_json_step() {
   local step="$1"
   shift
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ${step}: ${zarr_path}"
-  "$@" > "$json_dir/${step}.json"
+  if ! "$@" > "$json_dir/${step}.json"; then
+    write_status failed
+    return 1
+  fi
 }
 
 run_log_step() {
   local step="$1"
   shift
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ${step}: ${zarr_path}"
-  "$@" > "$json_dir/${step}.log" 2>&1
+  if ! "$@" > "$json_dir/${step}.log" 2>&1; then
+    write_status failed
+    return 1
+  fi
 }
 
 trap 'write_status failed' ERR
@@ -726,14 +732,46 @@ if [[ "$RUN_EGOCENTRIC" == "1" ]]; then
 fi
 
 if [[ "$RUN_EYE_ANGLES" == "1" ]]; then
-  run_log_step eye_angles "$py" -m fisheye.utils.execute_analysis_workflow \
-    "$zarr_path" \
-    --execution-id "${GAZE_TRACKING_COMPONENT}_${index}" \
-    --num-workers "${LSB_DJOB_NUMPROC:-1}" \
-    --report "$json_dir/eye_angle_workflow_report.json" \
-    --apply \
-    --target eye_angles \
-    --output-run "eye_angles=${EYE_ANGLE_OUTPUT_RUN}"
+  if "$py" - "$zarr_path" "$EYE_ANGLE_RUN" <<'PY'
+import sys
+from pathlib import Path
+
+from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.shared.zarr_run_completion import (
+    is_run_complete_in_parent,
+    resolve_authoritative_run_name,
+)
+
+root = open_zarr_root(Path(sys.argv[1]), mode="r")
+parent = root.get("analysis/eye_angle_runs")
+requested = sys.argv[2]
+name = (
+    resolve_authoritative_run_name(parent)
+    if parent is not None and requested == "latest"
+    else requested
+)
+complete = bool(
+    parent is not None
+    and name
+    and name in parent
+    and is_run_complete_in_parent(parent, parent[name])
+)
+if complete:
+    print(f"reuse_complete_eye_angle_run={name}")
+raise SystemExit(0 if complete else 1)
+PY
+  then
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] eye_angles: reusing complete run"
+  else
+    run_log_step eye_angles "$py" -m fisheye.utils.execute_analysis_workflow \
+      "$zarr_path" \
+      --execution-id "${GAZE_TRACKING_COMPONENT}_${index}" \
+      --num-workers "${LSB_DJOB_NUMPROC:-1}" \
+      --report "$json_dir/eye_angle_workflow_report.json" \
+      --apply \
+      --target eye_angles \
+      --output-run "eye_angles=${EYE_ANGLE_OUTPUT_RUN}"
+  fi
 fi
 
 if [[ "$RUN_GAZE_TRACKING" == "1" ]]; then

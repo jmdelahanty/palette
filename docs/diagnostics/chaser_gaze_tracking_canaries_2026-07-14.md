@@ -64,3 +64,23 @@ Before interpreting a cohort result:
 5. Treat sparse eye/range/epoch cells as missing rather than zero.
 6. Aggregate at recording/fish level and retain rotated-reference counts and
    heading-gate diagnostics in the cohort table.
+
+## Initial cohort execution diagnostic
+
+LSF array `153097370` snapshotted exactly 32 source GoodCopBadCop recordings
+with the required modern mask, keypoint, and track-kinematics stages. Twenty-seven
+tasks completed the eye and gaze component on the first pass. Five exited
+without publishing a partial gaze component:
+
+- two were the established canaries, where the DAG correctly refused a second
+  differently named eye run;
+- two had a dense `frame_angles` projection ending shortly before the final
+  chaser-distance frame; and
+- one older egocentric component lacked persisted role labels.
+
+The newly generated eye runs and all convention reports from this array remain
+valid. The gaze consumer was hardened to bound the dense frame projection and
+mark uncovered recording-tail frames unavailable. Persisted normalized role
+labels remain preferred; older components fall back to the authoritative source
+stimulus protocol and still refuse unresolved/unknown roles. Real-data
+read-only reruns passed both compatibility cases before recovery submission.

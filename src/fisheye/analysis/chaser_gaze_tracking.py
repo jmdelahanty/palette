@@ -38,6 +38,7 @@ from fisheye.analysis.chaser_bout_response import (
 from fisheye.analysis.chaser_distance_runs import _bytes_array, _write_array
 from fisheye.analysis.chaser_egocentric_bearing import (
     ANGLE_CONVENTION,
+    _load_configured_chaser_behavior_labels,
     compute_egocentric_chaser_bearing,
     wrap_degrees_signed,
 )
@@ -305,6 +306,28 @@ def _packed_columns(run_group: zarr.Group, data_name: str, index_name: str, requ
     # read is faster over the network than requesting each logical channel.
     packed = np.asarray(data[:])
     return {name: np.asarray(packed[:, names.index(name)]) for name in requested}
+
+
+def _dense_frame_row_lookup(
+    source_row_count: int,
+    target_frame_id: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Map camera frames to the bounded dense ``frame_angles`` row axis.
+
+    ``roi_angles`` uses sparse detection rows and ``support/frame_indices``.
+    ``frame_angles`` is the dense camera-frame projection, but its length ends
+    at the last frame represented by a detection row. Recording-tail frames can
+    therefore be outside this array and must remain explicitly unavailable.
+    """
+
+    target = np.asarray(target_frame_id, dtype=np.int64).reshape(-1)
+    count = int(source_row_count)
+    if count < 0:
+        raise ValueError("source_row_count must be non-negative.")
+    matched = (target >= 0) & (target < count)
+    row_index = np.full(target.shape, -1, dtype=np.int64)
+    row_index[matched] = target[matched]
+    return row_index, matched
 
 
 def _metadata_eye_convention(run_group: zarr.Group) -> None:
@@ -719,19 +742,31 @@ def build_chaser_gaze_tracking_result(
         ("valid_frame", "major_axis_marginal"),
     )
     eye_frame_count = int(next(iter(eye_fields.values())).shape[0])
-    if camera_frame_id.size and int(np.max(camera_frame_id)) >= eye_frame_count:
-        raise ValueError(
-            f"Eye-angle frame rows ({eye_frame_count}) cannot cover chaser camera frame {int(np.max(camera_frame_id))}."
+    eye_row_index, eye_row_present = _dense_frame_row_lookup(
+        eye_frame_count,
+        camera_frame_id,
+    )
+    gaze = np.full((total_frames, 2), np.nan, dtype=np.float32)
+    vergence = np.full(total_frames, np.nan, dtype=np.float32)
+    frame_eye_valid = np.zeros(total_frames, dtype=bool)
+    marginal = np.zeros(total_frames, dtype=bool)
+    if np.any(eye_row_present):
+        source_rows = eye_row_index[eye_row_present]
+        gaze[eye_row_present, 0] = eye_fields[
+            "left_gaze_signed_deg_smoothed"
+        ][source_rows]
+        gaze[eye_row_present, 1] = eye_fields[
+            "right_gaze_signed_deg_smoothed"
+        ][source_rows]
+        vergence[eye_row_present] = eye_fields[
+            "vergence_eye_angle_deg_smoothed"
+        ][source_rows]
+        frame_eye_valid[eye_row_present] = np.asarray(
+            eye_qa["valid_frame"][source_rows], dtype=bool
         )
-    gaze = np.column_stack(
-        (
-            eye_fields["left_gaze_signed_deg_smoothed"][camera_frame_id],
-            eye_fields["right_gaze_signed_deg_smoothed"][camera_frame_id],
+        marginal[eye_row_present] = np.asarray(
+            eye_qa["major_axis_marginal"][source_rows], dtype=bool
         )
-    ).astype(np.float32)
-    vergence = np.asarray(eye_fields["vergence_eye_angle_deg_smoothed"][camera_frame_id], dtype=np.float32)
-    frame_eye_valid = np.asarray(eye_qa["valid_frame"][camera_frame_id], dtype=bool)
-    marginal = np.asarray(eye_qa["major_axis_marginal"][camera_frame_id], dtype=bool)
     eye_valid = np.isfinite(gaze) & frame_eye_valid[:, None] & ~marginal[:, None]
 
     ego_frames = ego_group["frames"]
@@ -755,6 +790,7 @@ def build_chaser_gaze_tracking_result(
     chaser_indices = np.asarray(chasers["chaser_index"][:], dtype=np.int64)
     if "behavior_class_label_bytes" in chasers:
         behavior_labels = tuple(_decode_text_column(np.asarray(chasers["behavior_class_label_bytes"][:])))
+        behavior_label_source = f"{distance_run_path}/chasers/behavior_class_label_bytes"
     elif "behavior_class_label_bytes" in ego_per_chaser:
         # Role labels were added to the egocentric component before every
         # historical distance run was regenerated.  They remain authoritative
@@ -762,13 +798,24 @@ def build_chaser_gaze_tracking_result(
         behavior_labels = tuple(
             _decode_text_column(np.asarray(ego_per_chaser["behavior_class_label_bytes"][:]))
         )
-    else:
-        raise ValueError(
-            "Neither the chaser-distance run nor its egocentric component contains "
-            "protocol-derived behavior_class_label_bytes; re-export the modern chaser contract."
+        behavior_label_source = (
+            f"{distance_run_path}/egocentric_bearing/{ego_name}/"
+            "per_chaser/behavior_class_label_bytes"
         )
+    else:
+        behavior_labels = _load_configured_chaser_behavior_labels(
+            root,
+            distance_run_group,
+            chaser_indices,
+        )
+        behavior_label_source = "source_stimulus_protocol_json_fallback"
     if len(behavior_labels) != int(chaser_indices.size):
         raise ValueError("Chaser behavior-role labels do not match the variable-length chaser axis.")
+    if any(str(label).strip().lower() in {"", "unknown"} for label in behavior_labels):
+        raise ValueError(
+            "Chaser roles are absent from persisted components and cannot be resolved "
+            "from the source stimulus protocol; refusing identity-based role guesses."
+        )
     if bearing.shape != (total_frames, int(chaser_indices.size)):
         raise ValueError("Egocentric bearing shape does not match frame/chaser axes.")
 
@@ -915,6 +962,7 @@ def build_chaser_gaze_tracking_result(
     diagnostics = {
         "eye_angle_source_field": "left/right_gaze_signed_deg_smoothed",
         "object_bearing_source_field": f"{distance_run_path}/egocentric_bearing/{ego_name}/per_chaser/bearing_deg",
+        "chaser_behavior_label_source": behavior_label_source,
         "coordinate_frame": "fish_body_frame",
         "zero_definition": "fish_forward",
         "positive_definition": "anatomical_left",
@@ -930,6 +978,17 @@ def build_chaser_gaze_tracking_result(
         ),
         "angle_convention": ANGLE_CONVENTION,
         "eye_range_quantiles": [float(value) for value in eye_range_quantiles],
+        "eye_dense_frame_alignment": {
+            "source_frame_row_count": int(eye_frame_count),
+            "target_frame_count": int(total_frames),
+            "matched_frame_count": int(np.sum(eye_row_present)),
+            "unmatched_frame_count": int(np.sum(~eye_row_present)),
+            "join_key": "frame_angles row index == chaser camera_frame_id",
+            "note": (
+                "roi_angles uses sparse detection rows keyed by support/frame_indices; "
+                "frame_angles is the dense frame projection used here"
+            ),
+        },
         "lock_threshold_deg": float(lock_threshold_deg),
         "lock_min_duration_s": float(lock_min_duration_s),
         "max_tracking_distance_mm": float(max_tracking_distance_mm),
