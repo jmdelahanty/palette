@@ -9,7 +9,9 @@ runnables:
     type: service
     description: >-
       Open one Palette analysis Zarr through bounded, capability-routed views.
-      The selected Zarr is opened read-only and no save actions are exposed.
+      Persisted scientific tables and analysis-owned PNGs, including completed
+      chaser-gaze summaries, can be viewed together. The selected Zarr is
+      opened read-only and no save actions are exposed.
     command: pixi run --manifest-path ../../../pixi.toml -e recording recording-app --
     working_dir: repo
     pre_run: 'export PATH="$HOME/.pixi/bin:$PATH"'

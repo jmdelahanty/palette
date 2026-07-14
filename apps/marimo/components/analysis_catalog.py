@@ -66,6 +66,11 @@ CHASER_PROVIDER = ProviderDefinition(
         AnalysisDefinition("cra_quadrant", "CRA quadrant relocation", "Chaser quadrant versus other quadrants."),
         AnalysisDefinition("cra_near_field", "CRA near-field", "Near-field avoidance and radial density."),
         AnalysisDefinition("escape_freeze", "Escape outcomes", "Successful escape and freezing diagnostics."),
+        AnalysisDefinition(
+            "gaze_tracking",
+            "Eye–chaser tracking",
+            "Body-frame gaze tracking, rotated controls, and sustained lock-on events.",
+        ),
         AnalysisDefinition("static_artifacts", "Persisted plots", "Analysis-owned PNG artifacts."),
         AnalysisDefinition("provenance", "Provenance and source rows", "Spec lineage and projected source rows."),
     ),

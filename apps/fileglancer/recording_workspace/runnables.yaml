@@ -9,10 +9,11 @@ runnables:
     type: service
     description: >-
       Open one Palette analysis Zarr in an editable Marimo notebook with the
-      rendered explorer above a live analysis cell. Palette code and the
-      selected recording are isolated in a Bubblewrap mount namespace and are
-      read-only; only the per-session notebook workspace is writable. Marimo
-      Pair may connect to the authenticated editor session.
+      rendered explorer, persisted scientific tables and PNGs above a live
+      analysis cell. Palette code and the selected recording are isolated in a
+      Bubblewrap mount namespace and are read-only; only the per-session
+      notebook workspace is writable. Marimo Pair may connect to the
+      authenticated editor session.
     command: pixi run --manifest-path ../../../pixi.toml -e recording recording-workspace --
     working_dir: repo
     pre_run: 'export PATH="$HOME/.pixi/bin:$PATH"'

@@ -64,6 +64,7 @@ def test_recording_workspace_exposes_compact_live_handles(tmp_path: Path) -> Non
             "position_df",
             "windows_df",
         ),
+        "persisted_pngs": (),
     }
     assert "recording-17" in repr(workspace)
     assert "object at" not in repr(workspace)
@@ -82,3 +83,35 @@ def test_recording_workspace_opens_zarr_read_only(monkeypatch, tmp_path: Path) -
 
     assert workspace.open_zarr() is sentinel
     assert calls == [(tmp_path / "recording_analysis.zarr", "r")]
+
+
+def test_recording_workspace_exposes_gaze_tables_and_persisted_png(tmp_path: Path) -> None:
+    payload = b"\x89PNG\r\n\x1a\nsummary"
+    gaze_view = SimpleNamespace(
+        recording_summary_df=object(),
+        object_vs_virtual_df=object(),
+        summary_png_path="analysis/chaser/gaze/visualizations/summary_png",
+        summary_png_bytes=payload,
+    )
+    workspace = RecordingExplorationWorkspace(
+        zarr_path=tmp_path / "recording_analysis.zarr",
+        selected_recording=SimpleNamespace(recording_id="recording-17"),
+        selected_provider=SimpleNamespace(provider_id="stimulus_chaser"),
+        selected_spec=SimpleNamespace(run_path="analysis/chaser"),
+        selected_analysis=SimpleNamespace(analysis_id="gaze_tracking"),
+        core_source=None,
+        core_projection=None,
+        chaser_view=gaze_view,
+    )
+
+    assert set(workspace.chaser_tables) == {
+        "recording_summary_df",
+        "object_vs_virtual_df",
+    }
+    assert workspace.persisted_pngs == {
+        "chaser_gaze_tracking_summary_png": {
+            "path": "analysis/chaser/gaze/visualizations/summary_png",
+            "media_type": "image/png",
+            "bytes": payload,
+        }
+    }

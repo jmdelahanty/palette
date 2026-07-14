@@ -9,8 +9,13 @@ from typing import Any, Mapping, Optional
 import numpy as np
 import polars as pl
 
+from fisheye.analysis.chaser_gaze_tracking import (
+    SCHEMA_ID as CHASER_GAZE_TRACKING_SCHEMA_ID,
+    SUMMARY_PNG_ARTIFACT_NAME as CHASER_GAZE_TRACKING_SUMMARY_PNG_ARTIFACT_NAME,
+)
 from fisheye.analysis.swim_bout_io import load_default_swim_bout_tables
 from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
+from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.utils.view_zarr_visualization import load_png_artifact_bytes
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.visualization.goodcopbadcop_interactive import (
@@ -113,6 +118,30 @@ class GoodCopBadCopLoadedView:
 
 
 @dataclass(frozen=True)
+class ChaserGazeTrackingView:
+    """Small persisted gaze summaries plus the analysis-owned PNG.
+
+    Framewise gaze, bearing, error, and lock arrays intentionally remain lazy
+    in the source Zarr; selecting this view reads only recording-level tables
+    and one requested PNG byte array.
+    """
+
+    component_path: str
+    component_name: str
+    recording_id: str
+    status: str
+    schema_id: str
+    recording_summary_df: pl.DataFrame
+    object_vs_virtual_df: pl.DataFrame
+    summary: Mapping[str, Any]
+    diagnostics: Mapping[str, Any]
+    source_refs: Mapping[str, Any]
+    summary_png_path: Optional[str]
+    summary_png_bytes: bytes
+    summary_png_error: Optional[str]
+
+
+@dataclass(frozen=True)
 class GoodCopBadCopControls:
     distance_series_picker: Any
     chaser_picker: Any
@@ -178,6 +207,11 @@ def available_chaser_analysis_ids(
         available.append("cra_near_field")
     if any("escape" in name or "freeze" in name for name in component_names):
         available.append("escape_freeze")
+    if discover_chaser_gaze_tracking_components(
+        zarr_path,
+        distance_run_path=run_path,
+    ):
+        available.append("gaze_tracking")
     available.extend(["static_artifacts", "provenance"])
     return tuple(dict.fromkeys(available))
 
@@ -188,6 +222,317 @@ def _owning_chaser_distance_run_path(option: InteractiveSpecOption) -> str:
         if parts[index] == "analysis" and parts[index + 1] == "chaser_distance_runs":
             return "/".join(parts[: index + 3])
     return option.run_path
+
+
+def _group_names(group: Any) -> tuple[str, ...]:
+    keys = getattr(group, "group_keys", None)
+    if callable(keys):
+        try:
+            return tuple(sorted(str(name) for name in keys()))
+        except Exception:
+            return ()
+    return ()
+
+
+def _mapping_attr(group: Any, name: str) -> Mapping[str, Any]:
+    value = getattr(group, "attrs", {}).get(name)
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def discover_chaser_gaze_tracking_components(
+    zarr_path: Path | str,
+    *,
+    distance_run_path: Optional[str] = None,
+    max_distance_runs: int = 100,
+    max_components_per_run: int = 100,
+) -> tuple[dict[str, Any], ...]:
+    """Discover complete gaze components through the bounded chaser family.
+
+    This does not recursively walk the recording and does not read array
+    values. The latest-complete component for each distance run sorts first.
+    """
+
+    if max_distance_runs < 1 or max_components_per_run < 1:
+        raise ValueError("Gaze discovery limits must be positive.")
+    root = open_zarr_root(Path(zarr_path), mode="r")
+    if distance_run_path:
+        requested_parts = [
+            part for part in str(distance_run_path).strip("/").split("/") if part
+        ]
+        normalized_run_path = str(distance_run_path).strip("/")
+        for index in range(len(requested_parts) - 2):
+            if (
+                requested_parts[index] == "analysis"
+                and requested_parts[index + 1] == "chaser_distance_runs"
+            ):
+                normalized_run_path = "/".join(requested_parts[: index + 3])
+                break
+        distance_paths = (normalized_run_path,)
+    else:
+        family_path = "analysis/chaser_distance_runs"
+        try:
+            family = root[family_path]
+        except Exception:
+            return ()
+        distance_paths = tuple(
+            f"{family_path}/{name}"
+            for name in _group_names(family)[: int(max_distance_runs)]
+        )
+
+    rows: list[dict[str, Any]] = []
+    for run_path in distance_paths:
+        gaze_parent_path = join_path(run_path, "gaze_tracking")
+        try:
+            gaze_parent = root[gaze_parent_path]
+        except Exception:
+            continue
+        component_names = _group_names(gaze_parent)[: int(max_components_per_run)]
+        latest_complete = str(
+            gaze_parent.attrs.get("latest_complete")
+            or gaze_parent.attrs.get("latest")
+            or ""
+        )
+        for component_name in component_names:
+            component_path = join_path(gaze_parent_path, component_name)
+            try:
+                component = root[component_path]
+            except Exception:
+                continue
+            attrs = getattr(component, "attrs", {})
+            status = str(attrs.get("status") or attrs.get("completion_status") or "")
+            schema_id = str(attrs.get("schema_id") or "")
+            if status.casefold() != "complete" or schema_id != CHASER_GAZE_TRACKING_SCHEMA_ID:
+                continue
+            required_groups = {"recording_summary", "object_vs_virtual"}
+            if not required_groups.issubset(set(_group_names(component))):
+                continue
+            artifact_path = join_path(
+                component_path,
+                "visualizations",
+                CHASER_GAZE_TRACKING_SUMMARY_PNG_ARTIFACT_NAME,
+            )
+            try:
+                artifact = root[artifact_path]
+                has_summary_png = str(
+                    getattr(artifact, "attrs", {}).get("media_type") or ""
+                ) == "image/png"
+            except Exception:
+                has_summary_png = False
+            summary = _mapping_attr(component, "summary")
+            rows.append(
+                {
+                    "component_path": component_path,
+                    "component_name": component_name,
+                    "distance_run_path": run_path,
+                    "recording_id": str(attrs.get("recording_id") or ""),
+                    "status": status,
+                    "schema_id": schema_id,
+                    "created_at_utc": str(attrs.get("created_at_utc") or ""),
+                    "frame_count": int(summary.get("frame_count") or 0),
+                    "chaser_count": int(summary.get("chaser_count") or 0),
+                    "lock_on_event_count": int(summary.get("lock_on_event_count") or 0),
+                    "virtual_reference_count": int(summary.get("virtual_reference_count") or 0),
+                    "summary_png_path": artifact_path,
+                    "has_summary_png": has_summary_png,
+                    "is_latest_complete": component_name == latest_complete,
+                }
+            )
+    return tuple(
+        sorted(
+            rows,
+            key=lambda row: (
+                not bool(row["is_latest_complete"]),
+                str(row["distance_run_path"]),
+                str(row["component_name"]),
+            ),
+        )
+    )
+
+
+def _decode_text_rows(values: np.ndarray) -> tuple[str, ...]:
+    array = np.asarray(values)
+    if array.ndim == 2 and array.dtype == np.uint8:
+        iterable = array
+    else:
+        iterable = array.reshape(-1)
+    return tuple(decode_null_terminated_text(value).strip() for value in iterable)
+
+
+def _array_mapping(group: Any) -> dict[str, np.ndarray]:
+    keys = getattr(group, "array_keys", None)
+    names = tuple(str(name) for name in keys()) if callable(keys) else ()
+    return {name: np.asarray(group[name][:]) for name in names}
+
+
+def load_chaser_gaze_tracking_view(
+    zarr_path: Path | str,
+    component_path: str,
+) -> ChaserGazeTrackingView:
+    """Load one complete gaze component without reading framewise arrays."""
+
+    normalized_path = str(component_path).strip("/")
+    root = open_zarr_root(Path(zarr_path), mode="r")
+    component = root[normalized_path]
+    attrs = getattr(component, "attrs", {})
+    status = str(attrs.get("status") or attrs.get("completion_status") or "")
+    schema_id = str(attrs.get("schema_id") or "")
+    if status.casefold() != "complete":
+        raise ValueError(f"Gaze component is not complete: {normalized_path}")
+    if schema_id != CHASER_GAZE_TRACKING_SCHEMA_ID:
+        raise ValueError(
+            f"Unsupported gaze schema at {normalized_path}: {schema_id or 'missing'}"
+        )
+
+    chaser_indices = np.asarray(component["objects/chaser_index"][:], dtype=np.int64)
+    behavior_labels = _decode_text_rows(
+        np.asarray(component["objects/behavior_class_label_bytes"][:])
+    )
+    epoch_ids = np.asarray(component["epochs/window_id"][:], dtype=np.int64)
+    epoch_labels = _decode_text_rows(np.asarray(component["epochs/label_bytes"][:]))
+    if len(behavior_labels) != int(chaser_indices.size):
+        raise ValueError("Gaze component chaser labels do not match the chaser axis.")
+    if len(epoch_labels) != int(epoch_ids.size):
+        raise ValueError("Gaze component epoch labels do not match the epoch axis.")
+
+    real_arrays = _array_mapping(component["recording_summary"])
+    comparison_arrays = _array_mapping(component["object_vs_virtual"])
+    expected_shape = (int(epoch_ids.size), int(chaser_indices.size), 2)
+
+    def _long_frame(arrays: Mapping[str, np.ndarray]) -> pl.DataFrame:
+        rows: list[dict[str, Any]] = []
+        metric_arrays = {
+            name: values
+            for name, values in arrays.items()
+            if np.asarray(values).shape == expected_shape
+        }
+        virtual_counts = np.asarray(
+            comparison_arrays.get(
+                "virtual_reference_count",
+                np.zeros(chaser_indices.size, dtype=np.int64),
+            )
+        ).reshape(-1)
+        for epoch_position, (window_id, window_label) in enumerate(
+            zip(epoch_ids.tolist(), epoch_labels, strict=True)
+        ):
+            for chaser_position, (chaser_index, behavior_class) in enumerate(
+                zip(chaser_indices.tolist(), behavior_labels, strict=True)
+            ):
+                for eye_index, eye in enumerate(("left", "right")):
+                    row: dict[str, Any] = {
+                        "window_id": int(window_id),
+                        "window_label": str(window_label),
+                        "chaser_index": int(chaser_index),
+                        "behavior_class": str(behavior_class),
+                        "eye": eye,
+                        "virtual_reference_count": (
+                            int(virtual_counts[chaser_position])
+                            if chaser_position < virtual_counts.size
+                            else 0
+                        ),
+                    }
+                    for name, values in metric_arrays.items():
+                        value = np.asarray(values)[epoch_position, chaser_position, eye_index]
+                        row[name] = value.item() if isinstance(value, np.generic) else value
+                    rows.append(row)
+        return _rows_frame(rows)
+
+    artifact_path = join_path(
+        normalized_path,
+        "visualizations",
+        CHASER_GAZE_TRACKING_SUMMARY_PNG_ARTIFACT_NAME,
+    )
+    try:
+        resolved_png_path, png_bytes = load_png_artifact_bytes(root, artifact_path)
+        png_error = None
+    except Exception as exc:
+        resolved_png_path, png_bytes, png_error = artifact_path, b"", str(exc)
+
+    return ChaserGazeTrackingView(
+        component_path=normalized_path,
+        component_name=normalized_path.rsplit("/", 1)[-1],
+        recording_id=str(attrs.get("recording_id") or ""),
+        status=status,
+        schema_id=schema_id,
+        recording_summary_df=_long_frame(real_arrays),
+        object_vs_virtual_df=_long_frame(comparison_arrays),
+        summary=_mapping_attr(component, "summary"),
+        diagnostics=_mapping_attr(component, "diagnostics"),
+        source_refs=_mapping_attr(component, "source_refs"),
+        summary_png_path=resolved_png_path,
+        summary_png_bytes=png_bytes,
+        summary_png_error=png_error,
+    )
+
+
+def build_chaser_gaze_tracking_output(
+    mo: Any,
+    *,
+    loaded: ChaserGazeTrackingView,
+) -> Any:
+    """Render persisted gaze evidence and expose its small source tables."""
+
+    summary = loaded.summary
+    image_output = (
+        png_bytes_to_markdown_image(
+            mo,
+            loaded.summary_png_bytes,
+            alt_text="Chaser gaze tracking real-versus-virtual summary and lock-event raster",
+        )
+        if loaded.summary_png_bytes
+        else mo.callout(
+            f"Persisted gaze PNG unavailable: {loaded.summary_png_error or 'not written'}",
+            kind="warn",
+        )
+    )
+    return mo.vstack(
+        [
+            mo.md(
+                f"## Eye–chaser tracking\n\n"
+                f"`{loaded.component_path}`"
+            ),
+            mo.hstack(
+                [
+                    mo.stat(label="Frames", value=f"{int(summary.get('frame_count') or 0):,}"),
+                    mo.stat(label="Chasers", value=f"{int(summary.get('chaser_count') or 0):,}"),
+                    mo.stat(
+                        label="Lock events",
+                        value=f"{int(summary.get('lock_on_event_count') or 0):,}",
+                    ),
+                    mo.stat(
+                        label="Virtual refs",
+                        value=f"{int(summary.get('virtual_reference_count') or 0):,}",
+                    ),
+                ]
+            ),
+            mo.callout(
+                "Tracking is measured in the fish body frame and compared with "
+                "rotated empty-location controls. Frame rows are descriptive; the "
+                "fish recording is the inference unit.",
+                kind="info",
+            ),
+            mo.md(
+                f"### Persisted analysis summary\n\n"
+                f"`{loaded.summary_png_path or 'PNG not available'}`"
+            ),
+            image_output,
+            mo.accordion(
+                {
+                    "Recording-level metrics": mo.ui.table(
+                        loaded.recording_summary_df,
+                        selection=None,
+                        page_size=15,
+                    ),
+                    "Real minus rotated controls": mo.ui.table(
+                        loaded.object_vs_virtual_df,
+                        selection=None,
+                        page_size=15,
+                    ),
+                    "Diagnostics": mo.tree(dict(loaded.diagnostics), label="Diagnostics"),
+                    "Source references": mo.tree(dict(loaded.source_refs), label="Sources"),
+                }
+            ),
+        ]
+    )
 
 
 def _dashboard_artifact_name_for_option(option: InteractiveSpecOption) -> Optional[str]:

@@ -20,6 +20,10 @@ import numpy as np
 import polars as pl
 
 from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.utils.view_zarr_visualization import (
+    iter_visualization_artifacts,
+    load_png_artifact_bytes,
+)
 
 
 DEFAULT_MAX_READ_ELEMENTS = 100_000
@@ -28,6 +32,7 @@ DEFAULT_MAX_TABLE_ROWS = 10_000
 DEFAULT_MAX_TRACE_POINTS = 5_000
 DEFAULT_MAX_TRACE_SOURCE_ROWS = 100_000
 DEFAULT_MAX_FULL_COPY_BYTES = 1_000_000_000
+DEFAULT_MAX_PNG_BYTES = 50_000_000
 
 _DENSE_CHANNEL_INDEX_LAYOUTS = {
     "frame_angles": ("angle_channel_index", "frame_available"),
@@ -1317,6 +1322,76 @@ class ZarrExplorationWorkspace:
                 raise ValueError("Coordinate and trace selections have different lengths.")
             data["time_seconds"] = coordinate
         return pl.DataFrame(data)
+
+    def visualization_artifacts(
+        self,
+        *,
+        max_artifacts: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Discover persisted PNGs when explicitly requested by the user.
+
+        The generic archive does not have a root-level visualization index, so
+        this operation walks visualization groups. Notebook startup never
+        invokes it automatically; FileGlancer users opt in with a button.
+        Array payloads are not read during discovery.
+        """
+
+        if max_artifacts < 1:
+            raise ValueError("max_artifacts must be positive.")
+        rows: list[dict[str, Any]] = []
+        for artifact in iter_visualization_artifacts(self._root):
+            if len(rows) >= int(max_artifacts):
+                break
+            if str(artifact.media_type or "") != "image/png":
+                continue
+            try:
+                info = self.info(artifact.path)
+                attrs = self.attrs(
+                    artifact.path,
+                    max_items=25,
+                    max_value_chars=500,
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            rows.append(
+                {
+                    "path": artifact.path,
+                    "name": artifact.path.rsplit("/", 1)[-1],
+                    "description": artifact.description or "",
+                    "artifact_role": artifact.artifact_role or "",
+                    "media_type": "image/png",
+                    "byte_length": int(
+                        attrs.get("byte_length")
+                        or info.get("elements")
+                        or info.get("nbytes")
+                        or 0
+                    ),
+                    "visualization_contract_id": str(
+                        attrs.get("visualization_contract_id") or ""
+                    ),
+                }
+            )
+        return sorted(rows, key=lambda row: str(row["path"]))
+
+    def load_png(
+        self,
+        artifact_path: str,
+        *,
+        max_bytes: int = DEFAULT_MAX_PNG_BYTES,
+    ) -> tuple[str, bytes]:
+        """Load one selected persisted PNG with an explicit size guard."""
+
+        relative = _normalise_path(artifact_path)
+        if max_bytes < 1:
+            raise ValueError("max_bytes must be positive.")
+        info = self.info(relative)
+        byte_length = int(info.get("elements") or info.get("nbytes") or 0)
+        if byte_length > int(max_bytes):
+            raise ValueError(
+                f"Persisted PNG is {byte_length:,} bytes; the current guard is "
+                f"{int(max_bytes):,} bytes."
+            )
+        return load_png_artifact_bytes(self._root, relative)
 
     def summary(self) -> dict[str, Any]:
         """Return a compact description safe for notebook display."""

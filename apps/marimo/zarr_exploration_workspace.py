@@ -16,9 +16,26 @@ def _():
     import plotly.graph_objects as go
     import polars as pl
 
+    from apps.marimo.components.common import png_bytes_to_markdown_image
+    from apps.marimo.components.goodcopbadcop_chaser import (
+        build_chaser_gaze_tracking_output,
+        discover_chaser_gaze_tracking_components,
+        load_chaser_gaze_tracking_view,
+    )
     from apps.marimo.components.zarr_workspace import ZarrExplorationWorkspace
 
-    return Path, ZarrExplorationWorkspace, go, mo, np, pl
+    return (
+        Path,
+        ZarrExplorationWorkspace,
+        build_chaser_gaze_tracking_output,
+        discover_chaser_gaze_tracking_components,
+        go,
+        load_chaser_gaze_tracking_view,
+        mo,
+        np,
+        pl,
+        png_bytes_to_markdown_image,
+    )
 
 
 @app.cell(hide_code=True)
@@ -66,7 +83,7 @@ def _(mo, source_path, zarr_workspace):
 
 
 @app.cell(hide_code=True)
-def _(mo, zarr_workspace):
+def _(discover_chaser_gaze_tracking_components, mo, source_path, zarr_workspace):
     analysis_dataset_rows = zarr_workspace.analysis_datasets(
         max_runs=100,
         max_tracks_per_run=100,
@@ -76,9 +93,12 @@ def _(mo, zarr_workspace):
         for row in zarr_workspace.eye_angle_runs(max_runs=100)
         if row.get("frame_angles_path")
     ]
+    gaze_tracking_rows = list(
+        discover_chaser_gaze_tracking_components(source_path)
+    )
     workspace_mode_options = (
         ["Guided analyses", "Advanced storage"]
-        if eye_angle_run_rows or analysis_dataset_rows
+        if eye_angle_run_rows or analysis_dataset_rows or gaze_tracking_rows
         else ["Advanced storage"]
     )
     workspace_mode = mo.ui.dropdown(
@@ -86,10 +106,11 @@ def _(mo, zarr_workspace):
         value=workspace_mode_options[0],
         label="Workspace view",
     )
-    if eye_angle_run_rows or analysis_dataset_rows:
+    if eye_angle_run_rows or analysis_dataset_rows or gaze_tracking_rows:
         mode_guidance = mo.md(
             f"Found **{len(analysis_dataset_rows)} analysis-ready track dataset(s)** "
-            f"and **{len(eye_angle_run_rows)} eye-angle run(s)**. Guided mode "
+            f"**{len(eye_angle_run_rows)} eye-angle run(s)**, and "
+            f"**{len(gaze_tracking_rows)} chaser-gaze component(s)**. Guided mode "
             "presents semantic handles and named traces; Advanced storage exposes "
             "physical groups and arrays."
         )
@@ -100,13 +121,204 @@ def _(mo, zarr_workspace):
             kind="info",
         )
     mo.vstack([mo.md("## Choose a view"), workspace_mode, mode_guidance])
-    return analysis_dataset_rows, eye_angle_run_rows, workspace_mode
+    return analysis_dataset_rows, eye_angle_run_rows, gaze_tracking_rows, workspace_mode
 
 
 @app.cell(hide_code=True)
 def _(workspace_mode):
     advanced_storage_mode = workspace_mode.value == "Advanced storage"
     return (advanced_storage_mode,)
+
+
+@app.cell(hide_code=True)
+def _(advanced_storage_mode, gaze_tracking_rows, mo):
+    gaze_component_label_to_path = {}
+    gaze_component_picker = None
+    if not advanced_storage_mode and gaze_tracking_rows:
+        gaze_component_label_to_path = {
+            (
+                f"{row['component_name']} · {row['frame_count']:,} frames"
+                + (" · latest" if row["is_latest_complete"] else "")
+            ): str(row["component_path"])
+            for row in gaze_tracking_rows
+        }
+        gaze_component_labels = list(gaze_component_label_to_path)
+        gaze_component_picker = mo.ui.dropdown(
+            options=gaze_component_labels,
+            value=gaze_component_labels[0],
+            label="Chaser-gaze analysis",
+            searchable=True,
+        )
+        gaze_component_picker_output = mo.vstack(
+            [
+                mo.md("## Eye–chaser tracking"),
+                mo.md(
+                    "Select a completed recording-level component. Its small "
+                    "epoch summaries and persisted PNG are loaded; framewise "
+                    "arrays remain lazy in `exploration`."
+                ),
+                gaze_component_picker,
+            ]
+        )
+    else:
+        gaze_component_picker_output = mo.md("")
+    gaze_component_picker_output
+    return gaze_component_label_to_path, gaze_component_picker
+
+
+@app.cell(hide_code=True)
+def _(
+    advanced_storage_mode,
+    build_chaser_gaze_tracking_output,
+    gaze_component_label_to_path,
+    gaze_component_picker,
+    load_chaser_gaze_tracking_view,
+    mo,
+    source_path,
+):
+    gaze_tracking_view = None
+    if not advanced_storage_mode and gaze_component_picker is not None:
+        try:
+            gaze_tracking_view = load_chaser_gaze_tracking_view(
+                source_path,
+                gaze_component_label_to_path[gaze_component_picker.value],
+            )
+            gaze_tracking_output = build_chaser_gaze_tracking_output(
+                mo,
+                loaded=gaze_tracking_view,
+            )
+        except Exception as exc:
+            gaze_tracking_output = mo.callout(
+                mo.md(
+                    f"Chaser-gaze view failed: `{type(exc).__name__}: {exc}`"
+                ),
+                kind="danger",
+            )
+    else:
+        gaze_tracking_output = mo.md("")
+    gaze_tracking_output
+    return (gaze_tracking_view,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    persisted_png_discover = mo.ui.run_button(
+        label="Discover persisted PNGs",
+        kind="neutral",
+    )
+    mo.vstack(
+        [
+            mo.md("## Persisted visualization gallery"),
+            mo.md(
+                "Discovery is opt-in because an arbitrary Zarr has no root-level "
+                "plot index and may require a metadata walk. No image payload is "
+                "read until you select **Load selected PNG**."
+            ),
+            persisted_png_discover,
+        ]
+    )
+    return (persisted_png_discover,)
+
+
+@app.cell(hide_code=True)
+def _(mo, persisted_png_discover, zarr_workspace):
+    persisted_png_rows = []
+    persisted_png_picker = None
+    if persisted_png_discover.value:
+        try:
+            persisted_png_rows = zarr_workspace.visualization_artifacts(
+                max_artifacts=500
+            )
+            persisted_png_label_to_path = {
+                f"{row['name']} · {row['path']}": str(row["path"])
+                for row in persisted_png_rows
+            }
+            if persisted_png_label_to_path:
+                persisted_png_labels = list(persisted_png_label_to_path)
+                persisted_png_picker = mo.ui.dropdown(
+                    options=persisted_png_labels,
+                    value=persisted_png_labels[0],
+                    label="Persisted PNG",
+                    searchable=True,
+                )
+                persisted_png_discovery_output = mo.vstack(
+                    [
+                        mo.md(
+                            f"Found **{len(persisted_png_rows):,}** persisted PNG(s)."
+                        ),
+                        persisted_png_picker,
+                        mo.ui.table(
+                            persisted_png_rows,
+                            selection=None,
+                            pagination=True,
+                            page_size=15,
+                            show_download=False,
+                        ),
+                    ]
+                )
+            else:
+                persisted_png_discovery_output = mo.callout(
+                    "No persisted PNG artifacts were found.", kind="info"
+                )
+        except Exception as exc:
+            persisted_png_label_to_path = {}
+            persisted_png_discovery_output = mo.callout(
+                mo.md(
+                    f"PNG discovery failed: `{type(exc).__name__}: {exc}`"
+                ),
+                kind="danger",
+            )
+    else:
+        persisted_png_label_to_path = {}
+        persisted_png_discovery_output = mo.md("")
+    persisted_png_discovery_output
+    return persisted_png_label_to_path, persisted_png_picker, persisted_png_rows
+
+
+@app.cell(hide_code=True)
+def _(mo, persisted_png_picker):
+    persisted_png_load = mo.ui.run_button(
+        label="Load selected PNG",
+        kind="success",
+        disabled=persisted_png_picker is None,
+    )
+    persisted_png_load if persisted_png_picker is not None else mo.md("")
+    return (persisted_png_load,)
+
+
+@app.cell(hide_code=True)
+def _(
+    mo,
+    persisted_png_label_to_path,
+    persisted_png_load,
+    persisted_png_picker,
+    png_bytes_to_markdown_image,
+    zarr_workspace,
+):
+    if persisted_png_picker is None or not persisted_png_load.value:
+        persisted_png_output = mo.md("")
+    else:
+        try:
+            persisted_png_path, persisted_png_bytes = zarr_workspace.load_png(
+                persisted_png_label_to_path[persisted_png_picker.value]
+            )
+            persisted_png_output = mo.vstack(
+                [
+                    mo.md(f"### Persisted PNG\n\n`{persisted_png_path}`"),
+                    png_bytes_to_markdown_image(
+                        mo,
+                        persisted_png_bytes,
+                        alt_text=persisted_png_path.rsplit("/", 1)[-1],
+                    ),
+                ]
+            )
+        except Exception as exc:
+            persisted_png_output = mo.callout(
+                mo.md(f"PNG load failed: `{type(exc).__name__}: {exc}`"),
+                kind="danger",
+            )
+    persisted_png_output
+    return
 
 
 @app.cell(hide_code=True)
@@ -1514,6 +1726,16 @@ speed = exploration.select_dataset(
 exploration.eye_angle_runs()                   # guided run discovery, metadata only
 exploration.channel_index(selected_path)       # named compact-dense columns
 exploration.coordinate_summary(selected_path)  # bounded matching-time summary
+exploration.visualization_artifacts()           # opt-in persisted-PNG metadata walk
+resolved_path, png = exploration.load_png(
+    "analysis/.../visualizations/example_summary_png"
+)
+
+# When present, the guided chaser-gaze selector exposes small Polars summaries
+# and the already-loaded persisted PNG without reading framewise gaze arrays.
+gaze_tracking_view.recording_summary_df
+gaze_tracking_view.object_vs_virtual_df
+gaze_tracking_view.summary_png_bytes
 
 # The guided selector exposes one semantic read-only handle. Array handles do
 # not read values; NumPy and Polars methods return detached working copies.

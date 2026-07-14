@@ -9,8 +9,9 @@ runnables:
     type: service
     description: >-
       Open any selected source Zarr in an editable Marimo notebook with bounded
-      metadata, NumPy, and Polars helpers. Palette code and the selected Zarr
-      are isolated in a Bubblewrap mount namespace and are read-only; only the
+      metadata, NumPy, and Polars helpers, guided scientific views, and an
+      opt-in persisted-PNG gallery. Palette code and the selected Zarr are
+      isolated in a Bubblewrap mount namespace and are read-only; only the
       per-session notebook workspace is writable. Marimo Pair may connect to
       the authenticated editor session.
     command: pixi run --manifest-path ../../../pixi.toml -e recording zarr-workspace --

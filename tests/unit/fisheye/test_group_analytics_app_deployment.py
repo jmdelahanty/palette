@@ -562,6 +562,10 @@ def test_zarr_workspace_mounts_only_source_and_code_read_only(tmp_path: Path) ->
     assert "(exploration, analysis_dataset, selected_path)" in notebook_source
     assert "Do not output `analysis_data` here" in notebook_source
     assert "zarr_workspace.analysis_datasets(" in notebook_source
+    assert "zarr_workspace.visualization_artifacts(" in notebook_source
+    assert "zarr_workspace.load_png(" in notebook_source
+    assert "discover_chaser_gaze_tracking_components" in notebook_source
+    assert "build_chaser_gaze_tracking_output" in notebook_source
     assert "analysis_dataset = zarr_workspace.dataset(" in notebook_source
     assert "Load bounded working copy" in notebook_source
     assert "Complete dataset" in notebook_source

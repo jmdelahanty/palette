@@ -15,6 +15,7 @@ from apps.marimo.components.goodcopbadcop_chaser import (
     _minmax_line_display_frame,
     available_chaser_analysis_ids,
     build_arena_heatmap,
+    discover_chaser_gaze_tracking_components,
     build_controls,
     build_controls_panel_from_widgets,
     build_cra_near_field_output,
@@ -28,6 +29,7 @@ from apps.marimo.components.goodcopbadcop_chaser import (
     build_fish_heading_output,
     build_spatial_occupancy_output,
     is_goodcopbadcop_option,
+    load_chaser_gaze_tracking_view,
     load_goodcopbadcop_view,
     resolve_time_windows_from_multiselect,
 )
@@ -49,6 +51,10 @@ from fisheye.analysis.cra_near_field import (
     write_cra_near_field_component,
 )
 from fisheye.analysis.chaser_distance_runs import write_chaser_distance_run
+from fisheye.analysis.chaser_gaze_tracking import (
+    SCHEMA_ID as CHASER_GAZE_TRACKING_SCHEMA_ID,
+    SUMMARY_PNG_ARTIFACT_NAME as CHASER_GAZE_TRACKING_SUMMARY_PNG_ARTIFACT_NAME,
+)
 from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
 from fisheye.visualization.goodcopbadcop_interactive import (
     CHASER_DASHBOARD_RENDERER,
@@ -65,6 +71,7 @@ from fisheye.analysis.goodcopbadcop_epoch_behavior_summary import (
     build_goodcopbadcop_epoch_behavior_summary_result,
     write_goodcopbadcop_epoch_behavior_summary_component,
 )
+from fisheye.shared.plot_artifacts import write_png_visualization_artifact
 from tests.unit.fisheye.test_chaser_egocentric_bearing import _add_track_kinematics_run
 from tests.unit.fisheye.test_cra_near_field import _add_circle_geometry
 from tests.unit.fisheye.test_goodcopbadcop_interactive import (
@@ -191,6 +198,91 @@ def _make_recording_archive_with_goodcopbadcop_spec(recordings_root, recording_i
     zarr_dir = recordings_root / recording_id / "zarr"
     zarr_dir.mkdir(parents=True)
     return _make_archive_with_goodcopbadcop_spec(zarr_dir)
+
+
+def _add_chaser_gaze_component(zarr_path):
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    distance_run = root["analysis/chaser_distance_runs/chaser_distance_1"]
+    parent = distance_run.require_group("gaze_tracking")
+    component_name = "gaze_canary"
+    component = parent.create_group(component_name)
+    parent.attrs["latest_complete"] = component_name
+
+    objects = component.create_group("objects")
+    objects.create_array(
+        "chaser_index",
+        data=np.asarray([0, 1], dtype=np.int32),
+        chunks=(2,),
+    )
+    role_bytes = np.zeros((2, 32), dtype=np.uint8)
+    role_bytes[0, :10] = np.frombuffer(b"aggressive", dtype=np.uint8)
+    role_bytes[1, :5] = np.frombuffer(b"inert", dtype=np.uint8)
+    objects.create_array(
+        "behavior_class_label_bytes",
+        data=role_bytes,
+        chunks=role_bytes.shape,
+    )
+
+    epochs = component.create_group("epochs")
+    epochs.create_array(
+        "window_id",
+        data=np.asarray([0, 1, 2], dtype=np.int32),
+        chunks=(3,),
+    )
+    epoch_bytes = np.zeros((3, 32), dtype=np.uint8)
+    for row, label in enumerate((b"pre_event", b"training_event", b"post_event")):
+        epoch_bytes[row, : len(label)] = np.frombuffer(label, dtype=np.uint8)
+    epochs.create_array("label_bytes", data=epoch_bytes, chunks=epoch_bytes.shape)
+
+    shape = (3, 2, 2)
+    summary_group = component.create_group("recording_summary")
+    summary_group.create_array(
+        "tracking_gain",
+        data=np.arange(np.prod(shape), dtype=np.float32).reshape(shape) / 10,
+        chunks=shape,
+    )
+    summary_group.create_array(
+        "lock_on_fraction",
+        data=np.full(shape, 0.25, dtype=np.float32),
+        chunks=shape,
+    )
+    comparison = component.create_group("object_vs_virtual")
+    comparison.create_array(
+        "tracking_gain_excess_vs_virtual",
+        data=np.full(shape, 0.1, dtype=np.float32),
+        chunks=shape,
+    )
+    comparison.create_array(
+        "virtual_reference_count",
+        data=np.asarray([3, 3], dtype=np.int32),
+        chunks=(2,),
+    )
+    component.attrs.update(
+        {
+            "status": "complete",
+            "schema_id": CHASER_GAZE_TRACKING_SCHEMA_ID,
+            "recording_id": "gaze-canary",
+            "summary": {
+                "frame_count": 900,
+                "chaser_count": 2,
+                "lock_on_event_count": 4,
+                "virtual_reference_count": 6,
+            },
+            "diagnostics": {"coordinate_frame": "fish_body_frame"},
+            "source_refs": {"eye_angle_run": "eyes_1"},
+        }
+    )
+    write_png_visualization_artifact(
+        component,
+        CHASER_GAZE_TRACKING_SUMMARY_PNG_ARTIFACT_NAME,
+        b"\x89PNG\r\n\x1a\nFAKEPNG",
+        description="Gaze summary",
+        created_by="test",
+    )
+    return (
+        "analysis/chaser_distance_runs/chaser_distance_1/gaze_tracking/"
+        f"{component_name}"
+    )
 
 
 def test_palette_explorer_registry_discovers_goodcopbadcop_interactive_spec(tmp_path) -> None:
@@ -420,6 +512,32 @@ def test_chaser_analysis_choices_follow_persisted_components(tmp_path) -> None:
     assert "cra_quadrant" in analysis_ids
     assert "cra_near_field" in analysis_ids
     assert "escape_freeze" not in analysis_ids
+
+
+def test_chaser_gaze_component_is_discovered_and_loaded_without_frame_arrays(
+    tmp_path,
+) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_spec(tmp_path)
+    component_path = _add_chaser_gaze_component(zarr_path)
+    option = discover_interactive_spec_options(zarr_path)[0]
+
+    rows = discover_chaser_gaze_tracking_components(
+        zarr_path,
+        distance_run_path=option.run_path,
+    )
+    loaded = load_chaser_gaze_tracking_view(zarr_path, component_path)
+
+    assert len(rows) == 1
+    assert rows[0]["component_path"] == component_path
+    assert rows[0]["has_summary_png"] is True
+    assert "gaze_tracking" in available_chaser_analysis_ids(zarr_path, option)
+    assert loaded.recording_summary_df.shape == (12, 8)
+    assert loaded.object_vs_virtual_df.shape == (12, 7)
+    assert set(loaded.recording_summary_df["behavior_class"]) == {
+        "aggressive",
+        "inert",
+    }
+    assert loaded.summary_png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
 
 
 def test_goodcopbadcop_component_summarizes_swim_bouts_by_epoch(tmp_path) -> None:

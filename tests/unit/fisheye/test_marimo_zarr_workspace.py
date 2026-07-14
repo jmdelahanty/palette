@@ -5,9 +5,11 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import pytest
+import zarr
 
 import apps.marimo.components.zarr_workspace as workspace_module
 from apps.marimo.components.zarr_workspace import ZarrExplorationWorkspace
+from fisheye.shared.plot_artifacts import write_png_visualization_artifact
 
 
 class _FakeArray:
@@ -499,3 +501,37 @@ def test_zarr_workspace_builds_bounded_time_trace() -> None:
             stop=20,
             max_source_rows=10,
         )
+
+
+def test_zarr_workspace_discovers_and_loads_selected_persisted_png(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "source.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w", use_consolidated=False)
+    run = root.create_group("analysis").create_group("example_runs").create_group("run_1")
+    payload = b"\x89PNG\r\n\x1a\nworkspace"
+    write_png_visualization_artifact(
+        run,
+        "example_summary_png",
+        payload,
+        description="Example persisted summary",
+        created_by="test_marimo_zarr_workspace",
+    )
+    workspace = ZarrExplorationWorkspace.open(zarr_path)
+
+    rows = workspace.visualization_artifacts()
+    resolved, loaded = workspace.load_png(rows[0]["path"])
+
+    assert rows == [
+        {
+            "path": "analysis/example_runs/run_1/visualizations/example_summary_png",
+            "name": "example_summary_png",
+            "description": "Example persisted summary",
+            "artifact_role": "snapshot",
+            "media_type": "image/png",
+            "byte_length": len(payload),
+            "visualization_contract_id": "",
+        }
+    ]
+    assert resolved == rows[0]["path"]
+    assert loaded == payload
+    with pytest.raises(ValueError, match="current guard"):
+        workspace.load_png(rows[0]["path"], max_bytes=len(payload) - 1)

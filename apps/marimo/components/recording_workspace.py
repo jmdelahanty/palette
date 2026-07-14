@@ -57,8 +57,8 @@ class RecordingExplorationWorkspace:
     def chaser_tables(self) -> Mapping[str, Any]:
         """Already-loaded chaser tables for the selected analysis.
 
-        These retain their viewer-native Pandas or Polars representation.  No
-        additional arrays are loaded merely by inspecting this mapping.
+        These retain their viewer-native Polars representation. No additional
+        arrays are loaded merely by inspecting this mapping.
         """
 
         if self.chaser_view is None:
@@ -73,11 +73,31 @@ class RecordingExplorationWorkspace:
             "egocentric_alignment_df",
             "egocentric_heading_df",
             "epoch_summary_df",
+            "recording_summary_df",
+            "object_vs_virtual_df",
         )
         return {
             name: getattr(self.chaser_view, name)
             for name in names
             if getattr(self.chaser_view, name, None) is not None
+        }
+
+    @property
+    def persisted_pngs(self) -> Mapping[str, Mapping[str, Any]]:
+        """Already-loaded persisted PNGs for the selected analysis."""
+
+        if self.chaser_view is None:
+            return {}
+        payload = getattr(self.chaser_view, "summary_png_bytes", b"")
+        path = getattr(self.chaser_view, "summary_png_path", None)
+        if not payload or not path:
+            return {}
+        return {
+            "chaser_gaze_tracking_summary_png": {
+                "path": str(path),
+                "media_type": "image/png",
+                "bytes": payload,
+            }
         }
 
     def open_zarr(self) -> Any:
@@ -96,6 +116,7 @@ class RecordingExplorationWorkspace:
             "core_frame_available": self.core_frame is not None,
             "related_core_frames": tuple(sorted(self.related_core_frames)),
             "chaser_tables": tuple(sorted(self.chaser_tables)),
+            "persisted_pngs": tuple(sorted(self.persisted_pngs)),
         }
 
     def __repr__(self) -> str:

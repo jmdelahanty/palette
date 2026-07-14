@@ -33,6 +33,7 @@ def _():
     from apps.marimo.components.goodcopbadcop_chaser import (
         available_chaser_analysis_ids,
         build_arena_heatmap,
+        build_chaser_gaze_tracking_output,
         build_controls as build_chaser_controls,
         build_cra_near_field_output,
         build_cra_primary_endpoint_output,
@@ -46,6 +47,8 @@ def _():
         build_escape_freeze_output,
         build_fish_heading_output,
         build_spatial_occupancy_output,
+        discover_chaser_gaze_tracking_components,
+        load_chaser_gaze_tracking_view,
         load_goodcopbadcop_view,
         resolve_time_window_from_widgets,
         resolve_time_windows_from_multiselect,
@@ -68,6 +71,7 @@ def _():
         analyses_for_provider,
         available_chaser_analysis_ids,
         build_arena_heatmap,
+        build_chaser_gaze_tracking_output,
         build_chaser_controls,
         build_core_behavior_output,
         build_cra_near_field_output,
@@ -86,9 +90,11 @@ def _():
         build_static_artifacts_panel,
         discover_recording_explorer_spec_options,
         discover_protocol_recording_options,
+        discover_chaser_gaze_tracking_components,
         go,
         group_specs_by_provider,
         load_core_behavior_projection,
+        load_chaser_gaze_tracking_view,
         load_goodcopbadcop_view,
         mo,
         px,
@@ -430,6 +436,8 @@ def _(build_core_behavior_output, core_error, core_projection, go, mo, px):
 
 @app.cell(hide_code=True)
 def _(
+    discover_chaser_gaze_tracking_components,
+    load_chaser_gaze_tracking_view,
     load_goodcopbadcop_view,
     selected_analysis_id,
     selected_provider,
@@ -437,30 +445,53 @@ def _(
     time,
     zarr_path,
 ):
-    chaser_needs_loaded = selected_analysis_id not in {"", "static_artifacts", "provenance"}
+    chaser_gaze_view = None
+    chaser_needs_loaded = selected_analysis_id not in {
+        "",
+        "gaze_tracking",
+        "static_artifacts",
+        "provenance",
+    }
     if (
         selected_provider is not None
         and selected_provider.provider_id == "stimulus_chaser"
         and selected_spec is not None
-        and chaser_needs_loaded
     ):
         try:
-            chaser_loaded = load_goodcopbadcop_view(
-                zarr_path,
-                selected_spec,
-                timer=time,
-                include_companion_analyses=selected_analysis_id
-                in {"cra_quadrant", "cra_near_field", "escape_freeze"},
-                analysis_id=selected_analysis_id,
-            )
+            if selected_analysis_id == "gaze_tracking":
+                gaze_rows = discover_chaser_gaze_tracking_components(
+                    zarr_path,
+                    distance_run_path=selected_spec.run_path,
+                )
+                if not gaze_rows:
+                    raise ValueError(
+                        "No complete chaser-gaze component is attached to this run."
+                    )
+                chaser_gaze_view = load_chaser_gaze_tracking_view(
+                    zarr_path,
+                    str(gaze_rows[0]["component_path"]),
+                )
+                chaser_loaded = None
+            elif chaser_needs_loaded:
+                chaser_loaded = load_goodcopbadcop_view(
+                    zarr_path,
+                    selected_spec,
+                    timer=time,
+                    include_companion_analyses=selected_analysis_id
+                    in {"cra_quadrant", "cra_near_field", "escape_freeze"},
+                    analysis_id=selected_analysis_id,
+                )
+            else:
+                chaser_loaded = None
             chaser_error = None
         except Exception as exc:
             chaser_loaded = None
+            chaser_gaze_view = None
             chaser_error = str(exc)
     else:
         chaser_loaded = None
         chaser_error = None
-    return chaser_error, chaser_loaded
+    return chaser_error, chaser_gaze_view, chaser_loaded
 
 
 @app.cell(hide_code=True)
@@ -543,6 +574,7 @@ def _(chaser_controls, chaser_loaded, resolve_time_windows_from_multiselect, sel
 @app.cell(hide_code=True)
 def _(
     build_arena_heatmap,
+    build_chaser_gaze_tracking_output,
     build_cra_near_field_output,
     build_cra_primary_endpoint_output,
     build_debug_tables,
@@ -560,6 +592,7 @@ def _(
     chaser_controls,
     chaser_egocentric_windows,
     chaser_error,
+    chaser_gaze_view,
     chaser_loaded,
     chaser_window,
     go,
@@ -584,6 +617,11 @@ def _(
             spec=selected_spec.spec,
             artifact_attrs=selected_spec.attrs,
             option=selected_spec,
+        )
+    elif selected_analysis_id == "gaze_tracking" and chaser_gaze_view is not None:
+        chaser_output = build_chaser_gaze_tracking_output(
+            mo,
+            loaded=chaser_gaze_view,
         )
     elif chaser_loaded is None:
         chaser_output = mo.md("")
@@ -649,6 +687,7 @@ def _(
 @app.cell(hide_code=True)
 def _(
     RecordingExplorationWorkspace,
+    chaser_gaze_view,
     chaser_loaded,
     core_projection,
     core_source,
@@ -666,7 +705,9 @@ def _(
         selected_analysis=selected_analysis,
         core_source=core_source,
         core_projection=core_projection,
-        chaser_view=chaser_loaded,
+        chaser_view=(
+            chaser_gaze_view if chaser_gaze_view is not None else chaser_loaded
+        ),
     )
     return (recording_workspace,)
 
@@ -702,7 +743,8 @@ def _(mo, workspace_mode):
 def _(recording_workspace, workspace_mode):
     # Start here. `exploration` follows the recording and analysis selected above.
     # Try `exploration.summary()`, `exploration.core_frame`,
-    # `exploration.chaser_tables`, or `exploration.open_zarr()`.
+    # `exploration.chaser_tables`, `exploration.persisted_pngs`,
+    # or `exploration.open_zarr()`.
     exploration = recording_workspace if workspace_mode else None
     exploration
     return (exploration,)
