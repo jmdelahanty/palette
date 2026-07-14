@@ -59,7 +59,12 @@ def _detection_plan(target: workflow.CampaignTarget, workflow_id: str) -> dict[s
     return {"work_unit_count": 22, "work_units": work_units}
 
 
-def _build_fixture_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> workflow.ClippedInferencePlan:
+def _build_fixture_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    resume_existing_detections: bool = False,
+) -> workflow.ClippedInferencePlan:
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True)
     (repo / "scripts" / "py").write_text("#!/bin/sh\n", encoding="utf-8")
@@ -89,6 +94,16 @@ def _build_fixture_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> work
         "build_detection_plan",
         lambda recording_dir, **kwargs: _detection_plan(target, str(kwargs["workflow_id"])),
     )
+    if resume_existing_detections:
+        monkeypatch.setattr(
+            workflow,
+            "_validate_existing_detection_for_resume",
+            lambda **kwargs: {
+                "status": "ok",
+                "clip_id": str(kwargs["clip"]["clip_id"]),
+                "target_group_path": str(kwargs["clip"]["detect_group_path"]),
+            },
+        )
     return workflow.build_plan(
         targets=(target,),
         run_label="sleepyfish_full_20260714",
@@ -103,6 +118,7 @@ def _build_fixture_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> work
         subject_mask_run_id="mask_run",
         cache_root=tmp_path / "cache_root",
         package_root=tmp_path / "package_root",
+        resume_existing_detections=resume_existing_detections,
     )
 
 
@@ -142,6 +158,125 @@ def test_materialized_dry_run_is_immutable_and_has_no_submission(tmp_path: Path,
     assert first["models"]["detection"]["run_id"] == "detect_run"
     assert first["models"]["pose"]["run_id"] == "pose_run"
     assert first["models"]["subject_masks"]["run_id"] == "mask_run"
+
+
+def test_resume_plan_revalidates_detections_on_cpu_and_preserves_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _build_fixture_plan(tmp_path, monkeypatch, resume_existing_detections=True)
+    jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
+    target = plan.target_plans[0]
+    target_safe = workflow.safe_component(str(target["target_id"]), default="target", max_length=56)
+    clip_id = "clip_000000"
+    detect = jobs[f"detect:{target_safe}:{clip_id}"]
+    refine = jobs[f"detect_refine:{target_safe}:{clip_id}"]
+
+    assert plan.resume_existing_detections is True
+    assert len(target["detection_resume_preflight"]) == 22
+    assert detect.metadata["stage"] == "detect_reuse"
+    assert detect.resources.queue == "short"
+    assert detect.resources.gpus == 0
+    assert "--reuse-existing" in detect.command
+    assert refine.dependency.upstream_job_keys == (detect.job_key,)
+
+
+def test_existing_detection_resume_preflight_requires_exact_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = _target(tmp_path)
+    binding = workflow.ModelBinding(
+        "detect", "detect_set", "detect_run", (tmp_path / "model.pt").resolve(), "a" * 64
+    )
+    clip = _detection_plan(target, "campaign")["work_units"][0]
+    planned_clip = {
+        "clip_id": clip["clip_id"],
+        "clip_index": clip["clip_index"],
+        "camera_serial": clip["camera_serial"],
+        "video_path": clip["source"]["video_path"],
+        "detect_run": clip["run_names"]["detect"],
+        "detect_group_path": clip["zarr_paths"]["detect_target_group_path"],
+    }
+    group_metadata = target.analysis_zarr / planned_clip["detect_group_path"] / "zarr.json"
+    provenance = {
+        "command": "fisheye.utils.run_detection_artifact",
+        "params": {
+            "run_name": planned_clip["detect_run"],
+            "video_path": planned_clip["video_path"],
+            "target_zarr": str(target.analysis_zarr),
+            "model_path": str(binding.path),
+            "model_sha256": binding.sha256,
+            "model_registry_set_id": binding.set_id,
+            "model_registry_run_id": binding.run_id,
+            "clip_context": {
+                "workflow_id": "campaign",
+                "recording_id": target.recording_id,
+                "clip_id": planned_clip["clip_id"],
+                "clip_index": planned_clip["clip_index"],
+                "camera_serial": planned_clip["camera_serial"],
+            },
+        },
+        "input_run_ids": {
+            "model_registry_set_id": binding.set_id,
+            "model_registry_run_id": binding.run_id,
+        },
+        "input_artifacts": [
+            {
+                "role": "detect_model",
+                "path": str(binding.path),
+                "sha256": binding.sha256,
+            }
+        ],
+    }
+    _write_json(
+        group_metadata,
+        {
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "palette_run_completion_status": "complete",
+                "run_provenance": provenance,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        workflow,
+        "validate_imported_run_group",
+        lambda **_kwargs: {
+            "status": "ok",
+            "receipt_path": "/archive/.imports/detect_run.json",
+        },
+    )
+
+    report = workflow._validate_existing_detection_for_resume(
+        target=target,
+        target_label="campaign",
+        clip=planned_clip,
+        binding=binding,
+    )
+    assert report["status"] == "ok"
+    assert report["model_sha256"] == "a" * 64
+
+    provenance["params"]["clip_context"]["workflow_id"] = "wrong_campaign"
+    _write_json(
+        group_metadata,
+        {
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "palette_run_completion_status": "complete",
+                "run_provenance": provenance,
+            },
+        },
+    )
+    with pytest.raises(ValueError, match="provenance mismatch"):
+        workflow._validate_existing_detection_for_resume(
+            target=target,
+            target_label="campaign",
+            clip=planned_clip,
+            binding=binding,
+        )
 
 
 def test_instance_key_validation_rejects_duplicates() -> None:

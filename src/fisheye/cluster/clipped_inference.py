@@ -36,6 +36,7 @@ from fisheye.registry.model_resolution import (
     verify_deployment_artifact_content,
 )
 from fisheye.utils.plan_clipped_detect_refine_workflow import build_plan as build_detection_plan
+from fisheye.utils.validate_imported_run_group import validate_imported_run_group
 
 
 PLAN_SCHEMA = "palette.clipped_inference_bsub_plan.v1"
@@ -93,6 +94,7 @@ class ClippedInferencePlan:
     model_bindings: Mapping[str, ModelBinding]
     max_active_targets: int
     cleanup_nrs_after_success: bool
+    resume_existing_detections: bool
     lsf_workflow: LsfWorkflow
 
     def to_json(self) -> dict[str, Any]:
@@ -110,6 +112,7 @@ class ClippedInferencePlan:
             },
             "max_active_targets": self.max_active_targets,
             "cleanup_nrs_after_success": self.cleanup_nrs_after_success,
+            "resume_existing_detections": self.resume_existing_detections,
             "lsf_workflow": self.lsf_workflow.to_json(),
         }
 
@@ -306,13 +309,18 @@ def _job(
     )
 
 
-def _refuse_output_collisions(target_plan: Mapping[str, Any]) -> None:
+def _refuse_output_collisions(
+    target_plan: Mapping[str, Any],
+    *,
+    allow_existing_detections: bool = False,
+) -> None:
     zarr = Path(str(target_plan["analysis_zarr"]))
     outputs: list[Path] = []
     for clip in target_plan["clips"]:
+        if not allow_existing_detections:
+            outputs.append(zarr / str(clip["detect_group_path"]))
         outputs.extend(
             [
-                zarr / str(clip["detect_group_path"]),
                 zarr / str(clip["refined_detect_group_path"]),
                 zarr / "crop_runs" / str(clip["proxy_crop_run"]),
                 zarr / "keypoint_shard_runs" / str(clip["keypoint_shard_run"]),
@@ -337,6 +345,122 @@ def _refuse_output_collisions(target_plan: Mapping[str, Any]) -> None:
         )
 
 
+def _read_strict_json(path: Path) -> Any:
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON constant {value!r}")
+
+    return json.loads(path.read_text(encoding="utf-8"), parse_constant=reject_constant)
+
+
+def _validate_existing_detection_for_resume(
+    *,
+    target: CampaignTarget,
+    target_label: str,
+    clip: Mapping[str, Any],
+    binding: ModelBinding,
+) -> dict[str, Any]:
+    """Fail closed unless an imported detection exactly matches the planned work unit."""
+
+    group_path = str(clip["detect_group_path"])
+    validation = validate_imported_run_group(
+        zarr_path=target.analysis_zarr,
+        target_group_path=group_path,
+        validate_source_tarball=False,
+    )
+    if validation.get("status") not in {"ok", "pass"}:
+        raise ValueError(
+            f"Existing detection failed import validation for {clip['clip_id']}: "
+            + json.dumps(validation, sort_keys=True, default=str)
+        )
+
+    metadata_path = target.analysis_zarr / group_path / "zarr.json"
+    payload = _read_strict_json(metadata_path)
+    attrs = payload.get("attributes") if isinstance(payload, Mapping) else None
+    if not isinstance(attrs, Mapping):
+        raise ValueError(f"Existing detection has no attributes object: {metadata_path}")
+    if attrs.get("palette_run_completion_status") != "complete":
+        raise ValueError(f"Existing detection is not complete: {metadata_path}")
+    provenance = attrs.get("run_provenance")
+    if not isinstance(provenance, Mapping):
+        raise ValueError(f"Existing detection has no run_provenance: {metadata_path}")
+    params = provenance.get("params")
+    input_run_ids = provenance.get("input_run_ids")
+    clip_context = params.get("clip_context") if isinstance(params, Mapping) else None
+    if not isinstance(params, Mapping) or not isinstance(input_run_ids, Mapping):
+        raise ValueError(f"Existing detection has incomplete run provenance: {metadata_path}")
+    if not isinstance(clip_context, Mapping):
+        raise ValueError(f"Existing detection has no clip context: {metadata_path}")
+
+    expected = {
+        "command": "fisheye.utils.run_detection_artifact",
+        "params.run_name": str(clip["detect_run"]),
+        "params.video_path": str(clip["video_path"]),
+        "params.target_zarr": str(target.analysis_zarr),
+        "params.model_path": str(binding.path),
+        "params.model_sha256": binding.sha256,
+        "params.model_registry_set_id": binding.set_id,
+        "params.model_registry_run_id": binding.run_id,
+        "params.clip_context.workflow_id": target_label,
+        "params.clip_context.recording_id": target.recording_id,
+        "params.clip_context.clip_id": str(clip["clip_id"]),
+        "params.clip_context.clip_index": int(clip["clip_index"]),
+        "params.clip_context.camera_serial": str(clip["camera_serial"]),
+        "input_run_ids.model_registry_set_id": binding.set_id,
+        "input_run_ids.model_registry_run_id": binding.run_id,
+    }
+    observed = {
+        "command": provenance.get("command"),
+        "params.run_name": params.get("run_name"),
+        "params.video_path": params.get("video_path"),
+        "params.target_zarr": params.get("target_zarr"),
+        "params.model_path": params.get("model_path"),
+        "params.model_sha256": params.get("model_sha256"),
+        "params.model_registry_set_id": params.get("model_registry_set_id"),
+        "params.model_registry_run_id": params.get("model_registry_run_id"),
+        "params.clip_context.workflow_id": clip_context.get("workflow_id"),
+        "params.clip_context.recording_id": clip_context.get("recording_id"),
+        "params.clip_context.clip_id": clip_context.get("clip_id"),
+        "params.clip_context.clip_index": clip_context.get("clip_index"),
+        "params.clip_context.camera_serial": clip_context.get("camera_serial"),
+        "input_run_ids.model_registry_set_id": input_run_ids.get("model_registry_set_id"),
+        "input_run_ids.model_registry_run_id": input_run_ids.get("model_registry_run_id"),
+    }
+    mismatches = {
+        key: {"expected": value, "observed": observed.get(key)}
+        for key, value in expected.items()
+        if observed.get(key) != value
+    }
+    artifacts = provenance.get("input_artifacts")
+    matching_artifacts = [
+        artifact
+        for artifact in artifacts
+        if isinstance(artifact, Mapping)
+        and artifact.get("role") == "detect_model"
+        and artifact.get("path") == str(binding.path)
+        and artifact.get("sha256") == binding.sha256
+    ] if isinstance(artifacts, list) else []
+    if not matching_artifacts:
+        mismatches["input_artifacts.detect_model"] = {
+            "expected": {"path": str(binding.path), "sha256": binding.sha256},
+            "observed": artifacts,
+        }
+    if mismatches:
+        raise ValueError(
+            f"Existing detection provenance mismatch for {clip['clip_id']}: "
+            + json.dumps(mismatches, sort_keys=True, default=str)
+        )
+
+    return {
+        "status": "ok",
+        "clip_id": str(clip["clip_id"]),
+        "target_group_path": group_path,
+        "receipt_path": validation.get("receipt_path"),
+        "validator_status": validation.get("status"),
+        "completion_status": "complete",
+        "model_sha256": binding.sha256,
+    }
+
+
 def build_plan(
     *,
     targets: Sequence[CampaignTarget],
@@ -358,6 +482,7 @@ def build_plan(
     cache_bundle_size: int = 4,
     max_active_targets: int = 3,
     cleanup_nrs_after_success: bool = True,
+    resume_existing_detections: bool = False,
 ) -> ClippedInferencePlan:
     if not targets:
         raise ValueError("At least one target is required.")
@@ -420,6 +545,7 @@ def build_plan(
 
     gpu = LsfResources(queue="gpu_l4", ncores=8, mem_gb=48, gpus=1, walltime="4:00")
     detect_gpu = LsfResources(queue="gpu_l4", ncores=8, mem_gb=120, gpus=1, walltime="2:00")
+    detect_reuse_cpu = LsfResources(queue="short", ncores=1, mem_gb=8, walltime="1:00")
     cpu = LsfResources(queue="short", ncores=4, mem_gb=32, walltime="1:00")
     final_cpu = LsfResources(queue="short", ncores=8, mem_gb=32, walltime="1:00")
     cache_gpu = LsfResources(
@@ -504,7 +630,20 @@ def build_plan(
             "refined_subject_mask_run": refined_subject_mask_run,
             "clips": clips,
         }
-        _refuse_output_collisions(target_payload)
+        _refuse_output_collisions(
+            target_payload,
+            allow_existing_detections=resume_existing_detections,
+        )
+        if resume_existing_detections:
+            target_payload["detection_resume_preflight"] = [
+                _validate_existing_detection_for_resume(
+                    target=target,
+                    target_label=target_label,
+                    clip=clip,
+                    binding=detection_binding,
+                )
+                for clip in clips
+            ]
         target_payloads.append(target_payload)
 
         gate: tuple[str, ...] = ()
@@ -536,18 +675,26 @@ def build_plan(
                 "--batch-size", "16",
                 "--decode-backend", "pynvvc_luma_rgb",
             ]
+            if resume_existing_detections:
+                detect_command.append("--reuse-existing")
             jobs.append(
                 _job(
                     workflow_id=workflow_id,
                     repo=repo,
                     run_root=run_root,
                     job_key=detect_key,
-                    stage="detect",
+                    stage="detect_reuse" if resume_existing_detections else "detect",
                     command=detect_command,
-                    resources=detect_gpu,
+                    resources=detect_reuse_cpu if resume_existing_detections else detect_gpu,
                     upstream=gate,
                     expected_outputs=(target.analysis_zarr / str(clip["detect_group_path"]) / "zarr.json", report),
-                    cleanup_paths=(f"/scratch/__PALETTE_LSF_USER__/{RUNTIME_JOB_ID_TOKEN}/palette_clipped_detection",),
+                    cleanup_paths=(
+                        ()
+                        if resume_existing_detections
+                        else (
+                            f"/scratch/__PALETTE_LSF_USER__/{RUNTIME_JOB_ID_TOKEN}/palette_clipped_detection",
+                        )
+                    ),
                 )
             )
             refine_key = f"detect_refine:{target_safe}:{clip_id}"
@@ -846,6 +993,7 @@ def build_plan(
             "clip_count": sum(len(target["clips"]) for target in target_payloads),
             "model_bindings_are_exact": True,
             "all_compute_runs_under_lsf": True,
+            "resume_existing_detections": resume_existing_detections,
         },
     )
     return ClippedInferencePlan(
@@ -863,6 +1011,7 @@ def build_plan(
         },
         max_active_targets=max_active_targets,
         cleanup_nrs_after_success=cleanup_nrs_after_success,
+        resume_existing_detections=resume_existing_detections,
         lsf_workflow=workflow,
     )
 
@@ -980,6 +1129,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--cache-bundle-size", type=int, default=4)
     parser.add_argument("--max-active-targets", type=int, default=3)
     parser.add_argument("--no-cleanup-nrs-after-success", action="store_true")
+    parser.add_argument(
+        "--resume-existing-detections",
+        action="store_true",
+        help=(
+            "Reuse complete imported detection groups after exact receipt and provenance "
+            "validation; all later outputs must still be absent."
+        ),
+    )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
@@ -1010,6 +1167,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         cache_bundle_size=args.cache_bundle_size,
         max_active_targets=args.max_active_targets,
         cleanup_nrs_after_success=not args.no_cleanup_nrs_after_success,
+        resume_existing_detections=args.resume_existing_detections,
     )
     result = (
         apply_plan(plan, runner=build_ssh_bsub_runner(args.submit_host))

@@ -20,6 +20,12 @@ from fisheye.utils.validate_imported_run_group import validate_imported_run_grou
 REPORT_SCHEMA = "palette.clipped_detection_work_unit_report.v1"
 
 
+def _validation_succeeded(validation: dict[str, Any]) -> bool:
+    """Accept validator success vocabularies used by current and older callers."""
+
+    return validation.get("status") in {"ok", "pass"}
+
+
 def _scratch_root() -> Path:
     user = os.environ.get("USER") or "palette"
     job_id = os.environ.get("LSB_JOBID") or "local"
@@ -48,49 +54,56 @@ def run_work_unit(
     report_path: Path,
     batch_size: int = 16,
     decode_backend: str = "pynvvc_luma_rgb",
+    reuse_existing: bool = False,
 ) -> dict[str, Any]:
-    """Build the artifact locally, atomically import it, and validate the import."""
+    """Build and import a detection, or revalidate an already imported run."""
 
-    scratch = _scratch_root()
-    if scratch.exists():
-        shutil.rmtree(scratch)
-    artifact_dir = scratch / "artifact"
-    work_dir = scratch / "work"
-    tarball = scratch / "detect_run.tar.gz"
+    artifact: dict[str, Any] | None
+    if reuse_existing:
+        artifact = None
+        imported = {"status": "existing", "applied": False}
+    else:
+        scratch = _scratch_root()
+        if scratch.exists():
+            shutil.rmtree(scratch)
+        artifact_dir = scratch / "artifact"
+        work_dir = scratch / "work"
+        tarball = scratch / "detect_run.tar.gz"
 
-    artifact = build_detection_artifact(
-        video_path=video_path,
-        target_zarr=target_zarr,
-        artifact_dir=artifact_dir,
-        work_dir=work_dir,
-        tarball_output=tarball,
-        model_path=model_path,
-        model_sha256=model_sha256,
-        model_registry_set_id=model_registry_set_id,
-        model_registry_run_id=model_registry_run_id,
-        config_path=config_path,
-        batch_size=int(batch_size),
-        decode_backend=decode_backend,
-        latest_policy="do_not_set_latest",
-        workflow_id=workflow_id,
-        recording_id=recording_id,
-        clip_id=clip_id,
-        clip_index=int(clip_index),
-        camera_serial=camera_serial,
-        run_name=run_name,
-        command=[sys.executable, "-m", "fisheye.utils.run_clipped_detection_work_unit"],
-    )
-    imported = apply_import(tarball_path=tarball, use_intended_target=True)
-    if imported.get("status") != "ok" or not imported.get("applied"):
-        raise RuntimeError(
-            "Detection artifact import failed: "
-            + json.dumps(imported, sort_keys=True, default=str)
+        artifact = build_detection_artifact(
+            video_path=video_path,
+            target_zarr=target_zarr,
+            artifact_dir=artifact_dir,
+            work_dir=work_dir,
+            tarball_output=tarball,
+            model_path=model_path,
+            model_sha256=model_sha256,
+            model_registry_set_id=model_registry_set_id,
+            model_registry_run_id=model_registry_run_id,
+            config_path=config_path,
+            batch_size=int(batch_size),
+            decode_backend=decode_backend,
+            latest_policy="do_not_set_latest",
+            workflow_id=workflow_id,
+            recording_id=recording_id,
+            clip_id=clip_id,
+            clip_index=int(clip_index),
+            camera_serial=camera_serial,
+            run_name=run_name,
+            command=[sys.executable, "-m", "fisheye.utils.run_clipped_detection_work_unit"],
         )
+        imported = apply_import(tarball_path=tarball, use_intended_target=True)
+        if imported.get("status") != "ok" or not imported.get("applied"):
+            raise RuntimeError(
+                "Detection artifact import failed: "
+                + json.dumps(imported, sort_keys=True, default=str)
+            )
     validation = validate_imported_run_group(
         zarr_path=target_zarr,
         target_group_path=target_group_path,
+        validate_source_tarball=not reuse_existing,
     )
-    if validation.get("status") != "pass":
+    if not _validation_succeeded(validation):
         raise RuntimeError(
             "Imported detection validation failed: "
             + json.dumps(validation, sort_keys=True, default=str)
@@ -107,6 +120,7 @@ def run_work_unit(
         "target_zarr": str(target_zarr),
         "target_group_path": target_group_path,
         "run_name": run_name,
+        "mode": "reuse_existing" if reuse_existing else "build_import",
         "model": {
             "path": str(model_path),
             "sha256": model_sha256,
@@ -141,6 +155,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--decode-backend", default="pynvvc_luma_rgb")
+    parser.add_argument(
+        "--reuse-existing",
+        action="store_true",
+        help="Revalidate the already imported target group without rerunning inference.",
+    )
     return parser
 
 
@@ -164,6 +183,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         report_path=args.report.expanduser().resolve(),
         batch_size=args.batch_size,
         decode_backend=args.decode_backend,
+        reuse_existing=args.reuse_existing,
     )
     print(json.dumps(report, indent=2, sort_keys=True, default=str))
     return 0

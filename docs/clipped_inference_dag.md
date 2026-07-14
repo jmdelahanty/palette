@@ -12,6 +12,16 @@ analysis Zarr. The command also requires exact registry set and run identifiers
 for detection, pose, and subject-mask models. Planning verifies the registered
 paths and model SHA-256 values and refuses output collisions.
 
+If a campaign stops after its detection artifacts were atomically imported,
+`--resume-existing-detections` permits a new immutable run root to reuse those
+groups without rerunning YOLO. The run label must remain unchanged so the
+planned detection identities remain unchanged. Planning validates every import
+receipt and run-group tree (excluding the ephemeral source tarball), requires a
+complete run, and compares the embedded model, workflow, recording, clip,
+camera, video, target, and run-name provenance to the new plan. Every later
+output must still be absent. The DAG then submits short CPU revalidation jobs
+in place of GPU inference jobs and continues through detection refinement.
+
 ## Execution contract
 
 All production work is represented as structured `LsfJob` objects and wrapped
@@ -55,6 +65,10 @@ defaults. Raw subject-mask probabilities are `uint8` encoded probabilities
 with 32-row inner chunks and 2,048-row storage shards. Refined subject masks
 are imported as authoritative dense binary `uint8 masks_roi`, with sampled
 contours and eye geometry enabled and full ragged contours disabled.
+
+The imported-run validator reports top-level success as `status=ok`; nested
+checks report `status=pass`. Detection work-unit orchestration accepts both
+success vocabularies so it does not reject an otherwise valid atomic import.
 
 Validation requires all planned collection/cache/run identities, modern unique
 `instance_key` arrays, equal row counts across refined detections, caches,
