@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import polars as pl
 import zarr
 
 from fisheye.analysis.chaser_distance_runs import (
@@ -334,17 +335,17 @@ def test_chaser_protocol_interactive_loader_builds_plot_dataframes(tmp_path: Pat
     assert [zone_set.zone_set_id for zone_set in data.spatial_occupancy] == ["image_quadrants_v1"]
 
     windows_df = to_window_dataframe(data)
-    assert windows_df["label"].tolist() == ["pre_event", "training_event", "post_event"]
+    assert windows_df["label"].to_list() == ["pre_event", "training_event", "post_event"]
     spatial_df = to_spatial_occupancy_dataframe(data)
-    assert spatial_df["zone_id"].tolist()[:4] == ["top_left", "top_right", "bottom_left", "bottom_right"]
-    assert spatial_df[["x_min", "y_min", "x_max", "y_max"]].iloc[0].tolist() == [0.0, 0.0, 10.0, 10.0]
-    assert spatial_df.loc[spatial_df["window_label"] == "training_event", "frame_count"].tolist() == [5, 6, 7, 8]
-    assert spatial_df.loc[spatial_df["window_label"] == "post_event", "frame_count"].tolist() == [9, 10, 11, 12]
+    assert spatial_df["zone_id"].to_list()[:4] == ["top_left", "top_right", "bottom_left", "bottom_right"]
+    assert list(spatial_df.select(["x_min", "y_min", "x_max", "y_max"]).row(0)) == [0.0, 0.0, 10.0, 10.0]
+    assert spatial_df.filter(pl.col("window_label") == "training_event")["frame_count"].to_list() == [5, 6, 7, 8]
+    assert spatial_df.filter(pl.col("window_label") == "post_event")["frame_count"].to_list() == [9, 10, 11, 12]
 
     distance_df = to_distance_timeseries_dataframe(data)
     assert "distance_mm_chaser_0" in distance_df.columns
     assert "distance_mm_chaser_1" in distance_df.columns
-    assert distance_df["time_s"].tolist() == [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    assert distance_df["time_s"].to_list() == [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
 
     legacy_options = discover_goodcopbadcop_chaser_dashboard_options(zarr_path)
     assert [option.run_name for option in legacy_options] == ["chaser_distance_1"]
@@ -352,5 +353,5 @@ def test_chaser_protocol_interactive_loader_builds_plot_dataframes(tmp_path: Pat
     assert legacy_data.run_name == data.run_name
 
     position_df = to_position_dataframe(data)
-    assert position_df["fish_valid"].tolist() == [True, True, True, True, False, True, True, True, True]
-    assert position_df.loc[0, "unit"] == "arena_relative_canvas_px"
+    assert position_df["fish_valid"].to_list() == [True, True, True, True, False, True, True, True, True]
+    assert position_df["unit"][0] == "arena_relative_canvas_px"

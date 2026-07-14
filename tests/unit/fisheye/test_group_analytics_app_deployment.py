@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tomllib
 
 import yaml
@@ -33,7 +34,49 @@ def test_pixi_exposes_group_recording_and_editable_workspace_tasks() -> None:
     }
     assert "pyarrow" not in config["dependencies"]
     assert "pyarrow" not in config["feature"]["recording"]["dependencies"]
+    assert "pandas" not in config["dependencies"]
+    assert "pandas" not in config["feature"]["recording"]["dependencies"]
     assert config["dependencies"]["polars"] == "==1.40.0"
+
+
+def test_deployed_app_components_import_when_pandas_is_unavailable() -> None:
+    code = """
+import builtins
+
+real_import = builtins.__import__
+
+def guarded_import(name, *args, **kwargs):
+    if name == "pandas" or name.startswith("pandas."):
+        raise ModuleNotFoundError("pandas intentionally unavailable")
+    return real_import(name, *args, **kwargs)
+
+builtins.__import__ = guarded_import
+
+import apps.marimo.components.core_behavior
+import apps.marimo.components.goodcopbadcop_chaser
+import apps.marimo.components.group_analytics
+import apps.marimo.components.registry
+import fisheye.visualization.eye_angle_timeseries
+import fisheye.visualization.goodcopbadcop_interactive
+"""
+    env = {
+        **os.environ,
+        "PYTHONPATH": f"{REPO_ROOT / 'src'}:{REPO_ROOT}",
+        "PYTHONPYCACHEPREFIX": "/tmp/palette-pandas-free-import-pycache",
+    }
+    subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_pixi_lock_does_not_resolve_pandas() -> None:
+    lock_text = (REPO_ROOT / "pixi.lock").read_text(encoding="utf-8").lower()
+    assert "/pandas-" not in lock_text
 
 
 def _load_manifest(relative_path: str) -> dict:

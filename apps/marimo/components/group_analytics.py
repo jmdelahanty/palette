@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 import zlib
 
-import pandas as pd
+import numpy as np
+import polars as pl
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -194,6 +195,80 @@ PANEL_CONTROL_SPECS = {
 }
 
 
+def _frame_from_rows(rows: Sequence[Mapping[str, Any]]) -> pl.DataFrame:
+    records = [dict(row) for row in rows]
+    return (
+        pl.from_dicts(records, infer_schema_length=None)
+        if records
+        else pl.DataFrame()
+    )
+
+
+def _finite_numeric_values(frame: pl.DataFrame, column: str) -> np.ndarray:
+    if column not in frame.columns:
+        return np.empty(0, dtype=np.float64)
+    values = (
+        frame.get_column(column)
+        .cast(pl.Float64, strict=False)
+        .to_numpy()
+        .astype(np.float64, copy=False)
+    )
+    return values[np.isfinite(values)]
+
+
+def _coerce_float(value: object) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if np.isfinite(number) else None
+
+
+def _group_frames(
+    frame: pl.DataFrame,
+    keys: Sequence[str],
+) -> list[tuple[tuple[object, ...], pl.DataFrame]]:
+    if not keys:
+        return [(('all',), frame)]
+    groups = frame.partition_by(list(keys), maintain_order=True)
+    return [
+        (tuple(group.get_column(key)[0] for key in keys), group)
+        for group in groups
+    ]
+
+
+def _heatmap_grid(
+    frame: pl.DataFrame,
+    *,
+    x_key: str,
+    y_key: str,
+    value_key: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    numeric = frame.select(
+        pl.col(x_key).cast(pl.Float64, strict=False),
+        pl.col(y_key).cast(pl.Float64, strict=False),
+        pl.col(value_key).cast(pl.Float64, strict=False),
+    ).drop_nulls()
+    numeric = numeric.filter(
+        pl.col(x_key).is_finite()
+        & pl.col(y_key).is_finite()
+        & pl.col(value_key).is_finite()
+    )
+    if numeric.is_empty():
+        return None
+    aggregated = numeric.group_by([y_key, x_key]).agg(pl.col(value_key).sum())
+    x_values = np.sort(aggregated.get_column(x_key).unique().to_numpy())
+    y_values = np.sort(aggregated.get_column(y_key).unique().to_numpy())
+    x_index = {float(value): index for index, value in enumerate(x_values)}
+    y_index = {float(value): index for index, value in enumerate(y_values)}
+    z_values = np.zeros((len(y_values), len(x_values)), dtype=np.float64)
+    for row in aggregated.iter_rows(named=True):
+        z_values[y_index[float(row[y_key])], x_index[float(row[x_key])]] = float(
+            row[value_key]
+        )
+    return x_values, y_values, z_values
+
+
 def available_group_panels(
     capabilities: Iterable[str],
     *,
@@ -347,14 +422,17 @@ def egocentric_probability_color_max(
 ) -> float:
     """Return one robust positive color maximum shared by polar panels."""
 
-    frame = pd.DataFrame(rows)
-    if frame.empty or "pooled_probability" not in frame.columns:
+    frame = _frame_from_rows(rows)
+    if frame.is_empty() or "pooled_probability" not in frame.columns:
         return 1.0
-    values = pd.to_numeric(frame["pooled_probability"], errors="coerce")
-    positive = values[values.notna() & (values > 0.0)]
-    if positive.empty:
+    values = _finite_numeric_values(frame, "pooled_probability")
+    positive = values[values > 0.0]
+    if positive.size == 0:
         return 1.0
-    return max(float(positive.quantile(float(quantile))), float.fromhex("0x1p-52"))
+    return max(
+        float(np.quantile(positive, float(quantile))),
+        float.fromhex("0x1p-52"),
+    )
 
 
 def grouped_bar_figure(
@@ -367,34 +445,37 @@ def grouped_bar_figure(
     yaxis_title: str,
     color_key: str | None = None,
 ) -> go.Figure | None:
-    frame = pd.DataFrame(rows)
-    if frame.empty or x_key not in frame or y_key not in frame:
+    frame = _frame_from_rows(rows)
+    if frame.is_empty() or x_key not in frame.columns or y_key not in frame.columns:
         return None
     fig = go.Figure()
-    if series_key not in frame:
-        frame[series_key] = "all"
-    grouped = list(frame.groupby(series_key, sort=False, dropna=False))
+    if series_key not in frame.columns:
+        frame = frame.with_columns(pl.lit("all").alias(series_key))
+    grouped = _group_frames(frame, (series_key,))
     colors = []
     for _series, group in grouped:
         values = (
             sorted(
                 {
                     str(value).strip().lower()
-                    for value in group[color_key].dropna().tolist()
+                    for value in group.get_column(color_key).drop_nulls().to_list()
                     if str(value).strip()
                 }
             )
-            if color_key and color_key in group
+            if color_key and color_key in group.columns
             else []
         )
         colors.append(values[0] if len(values) == 1 else None)
     color_counts = Counter(color for color in colors if color)
     pattern_shapes = ("", "/", "\\", "x", ".", "+")
-    for series_index, ((series, group), series_color) in enumerate(zip(grouped, colors)):
+    for series_index, ((series_values, group), series_color) in enumerate(
+        zip(grouped, colors)
+    ):
+        series = series_values[0]
         custom_columns = [
             column
             for column in ("recording_count", "mean", "median", "sem", "n")
-            if column in group
+            if column in group.columns
         ]
         marker: dict[str, Any] | None = None
         if series_color:
@@ -405,10 +486,14 @@ def grouped_bar_figure(
                 }
         fig.add_trace(
             go.Bar(
-                x=group[x_key],
-                y=group[y_key],
+                x=group.get_column(x_key).to_numpy(),
+                y=group.get_column(y_key).to_numpy(),
                 name=str(series),
-                customdata=group[custom_columns] if custom_columns else None,
+                customdata=(
+                    group.select(custom_columns).to_numpy()
+                    if custom_columns
+                    else None
+                ),
                 marker=marker,
             )
         )
@@ -434,41 +519,31 @@ def line_figure(
     yaxis_title: str,
     color_key: str | None = None,
 ) -> go.Figure | None:
-    frame = pd.DataFrame(rows)
-    if frame.empty or x_key not in frame or y_key not in frame:
+    frame = _frame_from_rows(rows)
+    if frame.is_empty() or x_key not in frame.columns or y_key not in frame.columns:
         return None
     fig = go.Figure()
-    keys = [key for key in series_keys if key in frame]
-    if keys:
-        grouped = list(
-            frame.groupby(
-                keys[0] if len(keys) == 1 else keys,
-                sort=False,
-                dropna=False,
-            )
-        )
-    else:
-        grouped = [("all", frame)]
+    keys = [key for key in series_keys if key in frame.columns]
+    grouped = _group_frames(frame, keys)
     colors = []
     for _raw_series, group in grouped:
         values = (
             sorted(
                 {
                     str(value).strip().lower()
-                    for value in group[color_key].dropna().tolist()
+                    for value in group.get_column(color_key).drop_nulls().to_list()
                     if str(value).strip()
                 }
             )
-            if color_key and color_key in group
+            if color_key and color_key in group.columns
             else []
         )
         colors.append(values[0] if len(values) == 1 else None)
     color_counts = Counter(color for color in colors if color)
     dash_styles = ("solid", "dash", "dot", "dashdot")
-    for series_index, ((raw_series, group), series_color) in enumerate(zip(grouped, colors)):
-        values = raw_series if isinstance(raw_series, tuple) else (raw_series,)
+    for series_index, ((values, group), series_color) in enumerate(zip(grouped, colors)):
         label = " · ".join(str(value) for value in values)
-        group = group.sort_values(x_key)
+        group = group.sort(x_key)
         line: dict[str, Any] | None = None
         if series_color:
             line = {"color": series_color}
@@ -476,8 +551,8 @@ def line_figure(
                 line["dash"] = dash_styles[series_index % len(dash_styles)]
         fig.add_trace(
             go.Scatter(
-                x=group[x_key],
-                y=group[y_key],
+                x=group.get_column(x_key).to_numpy(),
+                y=group.get_column(y_key).to_numpy(),
                 mode="lines",
                 name=label,
                 line=line,
@@ -498,26 +573,28 @@ def egocentric_heatmap_figure(
     *,
     title: str,
 ) -> go.Figure | None:
-    frame = pd.DataFrame(rows)
+    frame = _frame_from_rows(rows)
     required = {
         "distance_bin_center_mm",
         "bearing_bin_center_deg",
         "pooled_probability",
     }
-    if frame.empty or not required.issubset(frame.columns):
+    if frame.is_empty() or not required.issubset(frame.columns):
         return None
-    pivot = frame.pivot_table(
-        index="bearing_bin_center_deg",
-        columns="distance_bin_center_mm",
-        values="pooled_probability",
-        aggfunc="sum",
-        fill_value=0.0,
-    ).sort_index()
+    grid = _heatmap_grid(
+        frame,
+        x_key="distance_bin_center_mm",
+        y_key="bearing_bin_center_deg",
+        value_key="pooled_probability",
+    )
+    if grid is None:
+        return None
+    x_values, y_values, z_values = grid
     fig = go.Figure(
         data=go.Heatmap(
-            x=list(pivot.columns),
-            y=list(pivot.index),
-            z=pivot.to_numpy(),
+            x=x_values,
+            y=y_values,
+            z=z_values,
             colorscale="Viridis",
             colorbar=dict(title="Probability"),
         )
@@ -540,36 +617,33 @@ def position_occupancy_heatmap_figure(
 ) -> go.Figure | None:
     """Render pooled normalized position-occupancy bins in source-image orientation."""
 
-    frame = pd.DataFrame(rows)
+    frame = _frame_from_rows(rows)
     required = {
         "x_bin_center_fraction",
         "y_bin_center_fraction",
         "pooled_probability",
     }
-    if frame.empty or not required.issubset(frame.columns):
+    if frame.is_empty() or not required.issubset(frame.columns):
         return None
-    for column in required:
-        frame[column] = pd.to_numeric(frame[column], errors="coerce")
-    frame = frame.dropna(subset=sorted(required))
-    if frame.empty:
+    grid = _heatmap_grid(
+        frame,
+        x_key="x_bin_center_fraction",
+        y_key="y_bin_center_fraction",
+        value_key="pooled_probability",
+    )
+    if grid is None:
         return None
-    pivot = frame.pivot_table(
-        index="y_bin_center_fraction",
-        columns="x_bin_center_fraction",
-        values="pooled_probability",
-        aggfunc="sum",
-        fill_value=0.0,
-    ).sort_index()
+    x_values, y_values, z_values = grid
     effective_color_max = (
         float(color_max)
         if color_max is not None and float(color_max) > 0.0
-        else egocentric_probability_color_max(frame.to_dict("records"))
+        else egocentric_probability_color_max(frame.to_dicts())
     )
     fig = go.Figure(
         data=go.Heatmap(
-            x=list(pivot.columns),
-            y=list(pivot.index),
-            z=pivot.to_numpy(),
+            x=x_values,
+            y=y_values,
+            z=z_values,
             colorscale="Inferno",
             zmin=0.0,
             zmax=effective_color_max,
@@ -658,9 +732,9 @@ def cra_quadrant_occupancy_figure(
             y_values = []
             customdata = []
             for row in selected:
-                value = pd.to_numeric(row.get("occupancy_fraction"), errors="coerce")
+                value = _coerce_float(row.get("occupancy_fraction"))
                 quadrant_id = str(row.get("quadrant_id") or "")
-                if pd.isna(value) or quadrant_id not in display_order_by_id:
+                if value is None or quadrant_id not in display_order_by_id:
                     continue
                 recording_id = str(row.get("recording_id") or "")
                 jitter_key = f"{recording_id}|{phase_label}|{quadrant_id}".encode()
@@ -804,7 +878,7 @@ def egocentric_polar_figure(
 ) -> go.Figure | None:
     """Render pooled exported distance-by-bearing bins on a polar axis."""
 
-    frame = pd.DataFrame(rows)
+    frame = _frame_from_rows(rows)
     required = {
         "distance_bin_left_mm",
         "distance_bin_width_mm",
@@ -812,37 +886,45 @@ def egocentric_polar_figure(
         "bearing_bin_width_deg",
         "pooled_probability",
     }
-    if frame.empty or not required.issubset(frame.columns):
+    if frame.is_empty() or not required.issubset(frame.columns):
         return None
     numeric_columns = sorted(required)
-    for column in numeric_columns:
-        frame[column] = pd.to_numeric(frame[column], errors="coerce")
-    frame = frame.dropna(subset=numeric_columns)
-    frame = frame[
-        (frame["distance_bin_width_mm"] > 0.0)
-        & (frame["bearing_bin_width_deg"] > 0.0)
-        & (frame["pooled_probability"] >= 0.0)
-    ]
-    if frame.empty:
+    frame = frame.with_columns([
+        pl.col(column).cast(pl.Float64, strict=False).alias(column)
+        for column in numeric_columns
+    ]).drop_nulls(numeric_columns)
+    frame = frame.filter(
+        pl.col("distance_bin_width_mm").is_finite()
+        & pl.col("bearing_bin_width_deg").is_finite()
+        & pl.col("pooled_probability").is_finite()
+        & (pl.col("distance_bin_width_mm") > 0.0)
+        & (pl.col("bearing_bin_width_deg") > 0.0)
+        & (pl.col("pooled_probability") >= 0.0)
+    )
+    if frame.is_empty():
         return None
     effective_color_max = (
         float(color_max)
         if color_max is not None and float(color_max) > 0.0
-        else egocentric_probability_color_max(frame.to_dict("records"))
+        else egocentric_probability_color_max(frame.to_dicts())
     )
     pooled_counts = (
-        pd.to_numeric(frame["pooled_count"], errors="coerce").fillna(0).to_numpy()
+        frame.get_column("pooled_count")
+        .cast(pl.Float64, strict=False)
+        .fill_null(0.0)
+        .fill_nan(0.0)
+        .to_numpy()
         if "pooled_count" in frame.columns
-        else [0] * len(frame)
+        else np.zeros(frame.height, dtype=np.float64)
     )
     fig = go.Figure(
         data=go.Barpolar(
-            theta=frame["bearing_bin_center_deg"].to_numpy(),
-            r=frame["distance_bin_width_mm"].to_numpy(),
-            base=frame["distance_bin_left_mm"].to_numpy(),
-            width=frame["bearing_bin_width_deg"].to_numpy(),
+            theta=frame.get_column("bearing_bin_center_deg").to_numpy(),
+            r=frame.get_column("distance_bin_width_mm").to_numpy(),
+            base=frame.get_column("distance_bin_left_mm").to_numpy(),
+            width=frame.get_column("bearing_bin_width_deg").to_numpy(),
             marker=dict(
-                color=frame["pooled_probability"].to_numpy(),
+                color=frame.get_column("pooled_probability").to_numpy(),
                 colorscale="Viridis",
                 cmin=0.0,
                 cmax=effective_color_max,
@@ -853,19 +935,19 @@ def egocentric_polar_figure(
             customdata=list(
                 zip(
                     pooled_counts,
-                    frame["pooled_probability"].to_numpy(),
-                    frame["distance_bin_left_mm"].to_numpy(),
+                    frame.get_column("pooled_probability").to_numpy(),
+                    frame.get_column("distance_bin_left_mm").to_numpy(),
                     (
-                        frame["distance_bin_left_mm"]
-                        + frame["distance_bin_width_mm"]
+                        frame.get_column("distance_bin_left_mm")
+                        + frame.get_column("distance_bin_width_mm")
                     ).to_numpy(),
                     (
-                        frame["bearing_bin_center_deg"]
-                        - frame["bearing_bin_width_deg"] / 2.0
+                        frame.get_column("bearing_bin_center_deg")
+                        - frame.get_column("bearing_bin_width_deg") / 2.0
                     ).to_numpy(),
                     (
-                        frame["bearing_bin_center_deg"]
-                        + frame["bearing_bin_width_deg"] / 2.0
+                        frame.get_column("bearing_bin_center_deg")
+                        + frame.get_column("bearing_bin_width_deg") / 2.0
                     ).to_numpy(),
                 )
             ),

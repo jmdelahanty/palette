@@ -21,7 +21,7 @@ def _():
     from pathlib import Path
 
     import marimo as mo
-    import pandas as pd
+    import polars as pl
 
     from apps.marimo.components.group_analytics import (
         available_group_panels,
@@ -93,7 +93,7 @@ def _():
         mo,
         os,
         panel_control_spec,
-        pd,
+        pl,
         position_occupancy_heatmap_figure,
         position_occupancy_rebin_options,
         query_chaser_histogram,
@@ -125,7 +125,7 @@ def _():
 
 
 @app.cell
-def _(Path, discover_export_catalog, mo, os, pd, select_export_run_id):
+def _(Path, discover_export_catalog, mo, os, pl, select_export_run_id):
     cli_args = mo.cli_args()
     default_export_root = os.environ.get(
         "PALETTE_ANALYTICS_EXPORT_ROOT",
@@ -142,7 +142,7 @@ def _(Path, discover_export_catalog, mo, os, pd, select_export_run_id):
     )
 
     export_catalog = discover_export_catalog(export_root)
-    catalog_diagnostics = pd.DataFrame(
+    catalog_diagnostics = pl.DataFrame(
         [diagnostic.to_dict() for diagnostic in export_catalog.diagnostics]
     )
     if not export_catalog.entries:
@@ -160,7 +160,7 @@ def _(Path, discover_export_catalog, mo, os, pd, select_export_run_id):
                     ),
                     (
                         mo.ui.table(catalog_diagnostics, selection=None, page_size=10)
-                        if not catalog_diagnostics.empty
+                        if not catalog_diagnostics.is_empty()
                         else mo.md("No manifest diagnostics were produced.")
                     ),
                 ]
@@ -207,13 +207,13 @@ def _(Path, discover_export_catalog, mo, os, pd, select_export_run_id):
         mo.accordion(
             {
                 "Available exports": mo.ui.table(
-                    pd.DataFrame([entry.to_dict() for entry in export_catalog.entries]),
+                    pl.DataFrame([entry.to_dict() for entry in export_catalog.entries]),
                     selection=None,
                     page_size=10,
                 ),
                 "Rejected manifests": (
                     mo.ui.table(catalog_diagnostics, selection=None, page_size=10)
-                    if not catalog_diagnostics.empty
+                    if not catalog_diagnostics.is_empty()
                     else mo.md("No manifests were rejected.")
                 ),
             }
@@ -254,7 +254,7 @@ def _(
     context,
     export_catalog,
     mo,
-    pd,
+    pl,
     query_export_summary,
     sample_grain_status_rows,
     selected_export_run_id,
@@ -312,7 +312,7 @@ def _(
                                 "or absent."
                             ),
                             mo.ui.table(
-                                pd.DataFrame(sample_grain_rows),
+                                pl.DataFrame(sample_grain_rows),
                                 selection=None,
                                 page_size=8,
                             ),
@@ -935,7 +935,7 @@ def _(
     panel_labels,
     panel_picker,
     payloads,
-    pd,
+    pl,
     position_occupancy_heatmap_figure,
     sample_grain_rows,
     selected_chasers,
@@ -945,10 +945,10 @@ def _(
     selected_panel = panel_labels[panel_picker.value]
 
     def _rows_table(rows, page_size=12):
-        frame = pd.DataFrame(rows)
+        frame = pl.DataFrame(rows)
         return (
             mo.ui.table(frame, selection=None, page_size=page_size)
-            if not frame.empty
+            if not frame.is_empty()
             else mo.md("No rows are available for the selected filters.")
         )
 

@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 import numpy as np
-import pandas as pd
 import polars as pl
 
 from fisheye.analysis.swim_bout_io import load_default_swim_bout_tables
@@ -66,6 +65,25 @@ CHASER_PROTOCOL_COMPANION_RENDERERS = (
 CHASER_PROTOCOL_RENDERERS = tuple(CHASER_DASHBOARD_RENDERERS) + CHASER_PROTOCOL_COMPANION_RENDERERS
 
 
+def _plotly_columns(
+    frame: pl.DataFrame,
+    columns: tuple[str, ...],
+) -> dict[str, np.ndarray]:
+    return {
+        column: frame.get_column(column).to_numpy()
+        for column in columns
+        if column in frame.columns
+    }
+
+
+def _rows_frame(rows: list[dict[str, Any]]) -> pl.DataFrame:
+    return (
+        pl.from_dicts(rows, infer_schema_length=None)
+        if rows
+        else pl.DataFrame()
+    )
+
+
 @dataclass(frozen=True)
 class GoodCopBadCopLoadedView:
     data: GoodCopBadCopInteractiveData
@@ -73,11 +91,11 @@ class GoodCopBadCopLoadedView:
     cra_near_field: Optional[GoodCopBadCopCRANearFieldData]
     escape_freeze: Optional[GoodCopBadCopEscapeFreezeData]
     epoch_behavior: Optional[GoodCopBadCopEpochBehaviorData]
-    distance_df: pd.DataFrame
-    position_df: pd.DataFrame
-    windows_df: pd.DataFrame
-    chaser_position_df: pd.DataFrame
-    spatial_occupancy_df: pd.DataFrame
+    distance_df: pl.DataFrame
+    position_df: pl.DataFrame
+    windows_df: pl.DataFrame
+    chaser_position_df: pl.DataFrame
+    spatial_occupancy_df: pl.DataFrame
     egocentric_bearing_df: pl.DataFrame
     egocentric_alignment_df: pl.DataFrame
     egocentric_heading_df: pl.DataFrame
@@ -280,7 +298,7 @@ def _first_nonnegative_frame(records: np.ndarray, *field_names: str) -> Optional
 def _load_epoch_summary_dataframe(
     zarr_path: Path | str,
     data: GoodCopBadCopInteractiveData,
-    windows_df: pd.DataFrame,
+    windows_df: pl.DataFrame,
 ) -> tuple[pl.DataFrame, Optional[str], Optional[str]]:
     if not len(windows_df):
         return _empty_epoch_summary_frame(), None, "No epoch windows are available."
@@ -348,7 +366,7 @@ def _load_epoch_summary_dataframe(
     camera_frames = np.asarray(data.camera_frame_id[:n_frames], dtype=np.int64)
 
     rows: list[dict[str, object]] = []
-    for window_row in windows_df.to_dict("records"):
+    for window_row in windows_df.iter_rows(named=True):
         window_id = int(window_row["window_id"])
         label = str(window_row["label"])
         start_frame = int(window_row["start_frame"])
@@ -567,12 +585,12 @@ def load_goodcopbadcop_view(
     distance_df = (
         to_distance_timeseries_dataframe(data)
         if analysis_id is None or analysis_id == "distance"
-        else pd.DataFrame()
+        else pl.DataFrame()
     )
     position_df = (
         to_position_dataframe(data)
         if analysis_id is None or analysis_id == "position_heatmap"
-        else pd.DataFrame()
+        else pl.DataFrame()
     )
     windows_df = to_window_dataframe(data)
     chaser_position_df = (
@@ -581,12 +599,12 @@ def load_goodcopbadcop_view(
             sample_step=max(1, int(data.fps // 2) or 1),
         )
         if analysis_id is None or analysis_id == "position_heatmap"
-        else pd.DataFrame()
+        else pl.DataFrame()
     )
     spatial_occupancy_df = (
         to_spatial_occupancy_dataframe(data)
         if analysis_id is None or analysis_id == "spatial_occupancy"
-        else pd.DataFrame()
+        else pl.DataFrame()
     )
     egocentric_bearing_df = (
         to_egocentric_bearing_dataframe(data, valid_only=True)
@@ -742,7 +760,7 @@ def build_controls(mo: Any, *, loaded: GoodCopBadCopLoadedView) -> GoodCopBadCop
         label="Time window (s)",
     )
     epoch_options: dict[str, Optional[int]] = {"Custom time window": None}
-    for row in loaded.windows_df.to_dict("records"):
+    for row in loaded.windows_df.iter_rows(named=True):
         label = f'{row["label"]} ({row["start_time_s"]:.1f}-{row["end_time_s"]:.1f}s)'
         epoch_options[label] = int(row["window_id"])
     epoch_picker = mo.ui.dropdown(
@@ -761,7 +779,13 @@ def build_controls(mo: Any, *, loaded: GoodCopBadCopLoadedView) -> GoodCopBadCop
     heatmap_bins = mo.ui.slider(start=20, stop=160, value=80, step=10, label="Heatmap bins")
     chaser_overlay = mo.ui.checkbox(value=True, label="Chaser overlay")
     zone_set_options = (
-        sorted(str(value) for value in loaded.spatial_occupancy_df["zone_set_id"].dropna().unique())
+        sorted(
+            str(value)
+            for value in loaded.spatial_occupancy_df.get_column("zone_set_id")
+            .drop_nulls()
+            .unique()
+            .to_list()
+        )
         if len(loaded.spatial_occupancy_df)
         else []
     )
@@ -843,7 +867,7 @@ def build_controls_panel(mo: Any, *, controls: GoodCopBadCopControls) -> Any:
 def resolve_time_window(
     *,
     controls: GoodCopBadCopControls,
-    windows_df: pd.DataFrame,
+    windows_df: pl.DataFrame,
 ) -> GoodCopBadCopTimeWindow:
     return resolve_time_window_from_widgets(
         epoch_options=controls.epoch_options,
@@ -858,14 +882,17 @@ def resolve_time_window_from_widgets(
     epoch_options: Mapping[str, Optional[int]],
     epoch_picker: Any,
     time_window: Any,
-    windows_df: pd.DataFrame,
+    windows_df: pl.DataFrame,
 ) -> GoodCopBadCopTimeWindow:
     selected_epoch_id = epoch_options[epoch_picker.value]
     if selected_epoch_id is None or not len(windows_df):
         start_s, stop_s = [float(value) for value in time_window.value]
         selected_epoch_label = "custom"
     else:
-        row = windows_df[windows_df["window_id"].astype(int) == int(selected_epoch_id)].iloc[0]
+        selected = windows_df.filter(
+            pl.col("window_id").cast(pl.Int64) == int(selected_epoch_id)
+        )
+        row = selected.row(0, named=True)
         start_s = float(row["start_time_s"])
         stop_s = float(row["end_time_s"])
         selected_epoch_label = str(row["label"])
@@ -881,7 +908,7 @@ def resolve_time_windows_from_multiselect(
     *,
     epoch_options: Mapping[str, Optional[int]],
     epoch_picker: Any,
-    windows_df: pd.DataFrame,
+    windows_df: pl.DataFrame,
 ) -> tuple[GoodCopBadCopTimeWindow, ...]:
     """Resolve one or more persisted epochs in recording order."""
 
@@ -893,33 +920,35 @@ def resolve_time_windows_from_multiselect(
     }
     if not selected_ids or not len(windows_df):
         return ()
-    rows = windows_df[windows_df["window_id"].astype(int).isin(selected_ids)].sort_values(
+    rows = windows_df.filter(
+        pl.col("window_id").cast(pl.Int64).is_in(sorted(selected_ids))
+    ).sort(
         ["start_time_s", "window_id"]
     )
     return tuple(
         GoodCopBadCopTimeWindow(
-            selected_epoch_id=int(row.window_id),
-            selected_epoch_label=str(row.label),
-            start_s=float(row.start_time_s),
-            stop_s=float(row.end_time_s),
+            selected_epoch_id=int(row["window_id"]),
+            selected_epoch_label=str(row["label"]),
+            start_s=float(row["start_time_s"]),
+            stop_s=float(row["end_time_s"]),
         )
-        for row in rows.itertuples(index=False)
+        for row in rows.iter_rows(named=True)
     )
 
 
 def _minmax_line_display_frame(
-    frame: pd.DataFrame,
+    frame: pl.DataFrame,
     *,
     value_column: str,
     max_points: int,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """Select real samples while preserving local extrema for line display."""
 
     if len(frame) <= int(max_points) or int(max_points) < 4:
-        return frame[["time_s", value_column]]
+        return frame.select(["time_s", value_column])
     target_bins = max(1, int(max_points) // 4)
     bucket_size = max(1, int(np.ceil(len(frame) / float(target_bins))))
-    values = frame[value_column].to_numpy(dtype=np.float64, copy=False)
+    values = frame.get_column(value_column).to_numpy().astype(np.float64, copy=False)
     selected: list[int] = []
     for start in range(0, len(frame), bucket_size):
         stop = min(len(frame), start + bucket_size)
@@ -936,7 +965,7 @@ def _minmax_line_display_frame(
             )
         selected.extend(sorted(set(indexes)))
     selected = sorted(set(selected))
-    return frame.iloc[selected][["time_s", value_column]]
+    return frame[selected].select(["time_s", value_column])
 
 
 def build_distance_figure(
@@ -945,14 +974,15 @@ def build_distance_figure(
     loaded: GoodCopBadCopLoadedView,
     distance_series_picker: Any,
     window: GoodCopBadCopTimeWindow,
-) -> tuple[Any, pd.DataFrame]:
-    visible = loaded.distance_df[
-        (loaded.distance_df["time_s"] >= window.start_s)
-        & (loaded.distance_df["time_s"] <= window.stop_s)
-    ].copy()
+) -> tuple[Any, pl.DataFrame]:
+    visible = loaded.distance_df.filter(
+        pl.col("time_s").is_between(window.start_s, window.stop_s, closed="both")
+    )
     fig = go.Figure()
     add_epoch_overlays(fig, loaded.windows_df)
-    selected_columns = [column for column in distance_series_picker.value if column in visible]
+    selected_columns = [
+        column for column in distance_series_picker.value if column in visible.columns
+    ]
     points_per_trace = max(4000, 24000 // max(1, len(selected_columns)))
     for column in selected_columns:
         display = _minmax_line_display_frame(
@@ -962,8 +992,8 @@ def build_distance_figure(
         )
         fig.add_trace(
             go.Scattergl(
-                x=display["time_s"],
-                y=display[column],
+                x=display.get_column("time_s").to_numpy(),
+                y=display.get_column(column).to_numpy(),
                 mode="lines",
                 name=column,
                 connectgaps=False,
@@ -1602,10 +1632,11 @@ def build_epoch_summary_output(
         "inter_bout_interval_rate_per_min",
     ]
     display = visible.select([column for column in display_columns if column in visible.columns])
-    display_pd = pd.DataFrame(display.to_dicts())
-    if len(display_pd):
-        numeric_cols = display_pd.select_dtypes(include=[np.number]).columns
-        display_pd[numeric_cols] = display_pd[numeric_cols].round(4)
+    numeric_columns = [
+        name for name, dtype in display.schema.items() if dtype.is_numeric()
+    ]
+    if numeric_columns:
+        display = display.with_columns(pl.col(numeric_columns).round(4))
 
     items: list[Any] = [
         mo.md(f"## Epoch Kinematics Summary\n\n`{source}`\n\nSource: **{source_label}**{warning}"),
@@ -1643,7 +1674,7 @@ def build_epoch_summary_output(
         if ibi_distribution_plots:
             items.append(mo.md("## Inter-Bout Interval Distributions"))
             items.append(_two_column_plot_grid(mo, ibi_distribution_plots))
-    items.append(mo.ui.table(display_pd, selection=None, page_size=12))
+    items.append(mo.ui.table(display, selection=None, page_size=12))
     return mo.vstack(items)
 
 
@@ -2158,16 +2189,15 @@ def build_arena_heatmap(
     heatmap_bins: Any,
     chaser_overlay: Any,
     window: GoodCopBadCopTimeWindow,
-) -> tuple[Any, pd.DataFrame]:
-    visible_positions = loaded.position_df[
-        (loaded.position_df["time_s"] >= window.start_s)
-        & (loaded.position_df["time_s"] <= window.stop_s)
-        & loaded.position_df["fish_valid"].astype(bool)
-    ].copy()
+) -> tuple[Any, pl.DataFrame]:
+    visible_positions = loaded.position_df.filter(
+        pl.col("time_s").is_between(window.start_s, window.stop_s, closed="both")
+        & pl.col("fish_valid").cast(pl.Boolean)
+    )
     if not len(visible_positions):
         return "No valid fish positions in the selected window.", visible_positions
     arena_heatmap = px.density_heatmap(
-        visible_positions,
+        _plotly_columns(visible_positions, ("x", "y")),
         x="x",
         y="y",
         nbinsx=int(heatmap_bins.value),
@@ -2176,29 +2206,32 @@ def build_arena_heatmap(
         labels={"x": "Arena X (px)", "y": "Arena Y (px, down)"},
     )
     if chaser_overlay.value and len(loaded.chaser_position_df):
-        visible_chasers = loaded.chaser_position_df[
-            (loaded.chaser_position_df["time_s"] >= window.start_s)
-            & (loaded.chaser_position_df["time_s"] <= window.stop_s)
-            & loaded.chaser_position_df["chaser_valid"].astype(bool)
-        ].copy()
+        visible_chasers = loaded.chaser_position_df.filter(
+            pl.col("time_s").is_between(
+                window.start_s, window.stop_s, closed="both"
+            )
+            & pl.col("chaser_valid").cast(pl.Boolean)
+        )
         if len(visible_chasers):
-            for chaser_index, rows in visible_chasers.groupby("chaser_index"):
-                chaser_i = int(chaser_index)
+            for rows in visible_chasers.partition_by(
+                "chaser_index", maintain_order=True
+            ):
+                chaser_i = int(rows.get_column("chaser_index")[0])
                 color = loaded.data.chaser_color_hex.get(
                     chaser_i,
                     CHASER_MARKER_COLORS[chaser_i % len(CHASER_MARKER_COLORS)],
                 )
                 arena_heatmap.add_scattergl(
-                    x=rows["x"],
-                    y=rows["y"],
+                    x=rows.get_column("x").to_numpy(),
+                    y=rows.get_column("y").to_numpy(),
                     mode="markers",
                     marker=dict(size=5, opacity=0.35, color=color),
                     name=f"chaser {chaser_i} trace",
                 )
-                finite = rows[np.isfinite(rows["x"]) & np.isfinite(rows["y"])]
+                finite = rows.filter(pl.col("x").is_finite() & pl.col("y").is_finite())
                 if len(finite):
-                    marker_x = float(finite["x"].median())
-                    marker_y = float(finite["y"].median())
+                    marker_x = float(finite.get_column("x").median())
+                    marker_y = float(finite.get_column("y").median())
                     arena_heatmap.add_scatter(
                         x=[marker_x],
                         y=[marker_y],
@@ -2239,12 +2272,15 @@ def build_detection_occupancy_output(
     window_idx = 0
     if window.selected_epoch_id is not None:
         matches = np.flatnonzero(
-            loaded.windows_df["window_id"].to_numpy(dtype=int) == int(window.selected_epoch_id)
+            loaded.windows_df.get_column("window_id")
+            .cast(pl.Int64)
+            .to_numpy()
+            == int(window.selected_epoch_id)
         )
         window_idx = int(matches[0]) if matches.size else 0
     window_idx = max(0, min(window_idx, int(data.occupancy_normalized.shape[0]) - 1))
     label = (
-        str(loaded.windows_df.iloc[window_idx]["label"])
+        str(loaded.windows_df.get_column("label")[window_idx])
         if window_idx < len(loaded.windows_df)
         else f"window {window_idx}"
     )
@@ -2301,7 +2337,7 @@ def _format_chaser_zone_presence(chaser_indices: tuple[int, ...]) -> str:
     return ", ".join(f"chaser {int(index)}" for index in chaser_indices)
 
 
-def _point_in_zone(row: pd.Series, point_xy: np.ndarray) -> bool:
+def _point_in_zone(row: Mapping[str, Any], point_xy: np.ndarray) -> bool:
     x_min = float(row["x_min"])
     y_min = float(row["y_min"])
     x_max = float(row["x_max"])
@@ -2316,12 +2352,15 @@ def _point_in_zone(row: pd.Series, point_xy: np.ndarray) -> bool:
 def _chaser_zone_presence_by_epoch(
     *,
     loaded: GoodCopBadCopLoadedView,
-    zone_df: pd.DataFrame,
+    zone_df: pl.DataFrame,
 ) -> dict[tuple[int, str], tuple[int, ...]]:
     data = loaded.data
     if data.chaser_source_img_xy is None or not len(zone_df):
         return {}
-    if not (zone_df["coordinate_frame"].astype(str) == "source_image_px").all():
+    if not (
+        zone_df.get_column("coordinate_frame").cast(pl.Utf8)
+        == "source_image_px"
+    ).all():
         return {}
 
     positions = np.asarray(data.chaser_source_img_xy, dtype=float)
@@ -2331,11 +2370,13 @@ def _chaser_zone_presence_by_epoch(
 
     time_s = data.time_seconds[:n]
     zones_by_window = {
-        int(window_id): rows.sort_values(["display_order", "zone_label"]).copy()
-        for window_id, rows in zone_df.groupby("window_id", sort=False)
+        int(rows.get_column("window_id")[0]): rows.sort(
+            ["display_order", "zone_label"]
+        )
+        for rows in zone_df.partition_by("window_id", maintain_order=True)
     }
     out: dict[tuple[int, str], set[int]] = {}
-    for window_row in loaded.windows_df.to_dict("records"):
+    for window_row in loaded.windows_df.iter_rows(named=True):
         window_id = int(window_row["window_id"])
         if window_id not in zones_by_window:
             continue
@@ -2357,7 +2398,7 @@ def _chaser_zone_presence_by_epoch(
             if not np.any(valid):
                 continue
             point_xy = np.nanmedian(chaser_points[valid], axis=0)
-            for _, zone_row in zones_by_window[window_id].iterrows():
+            for zone_row in zones_by_window[window_id].iter_rows(named=True):
                 if _point_in_zone(zone_row, point_xy):
                     key = (window_id, str(zone_row["zone_id"]))
                     out.setdefault(key, set()).add(int(chaser_index))
@@ -2395,11 +2436,11 @@ def _build_spatial_occupancy_epoch_bar(
     *,
     zone_set_id: str,
     window_label: str,
-    rows: pd.DataFrame,
+    rows: pl.DataFrame,
     chaser_presence: Mapping[tuple[int, str], tuple[int, ...]],
     y_axis_max: Optional[float],
 ) -> Any:
-    row_records = rows.sort_values(["display_order", "zone_label"]).to_dict("records")
+    row_records = rows.sort(["display_order", "zone_label"]).to_dicts()
     pattern_shapes = [
         _chaser_pattern_shape(
             chaser_presence.get((int(row["window_id"]), str(row["zone_id"])), ())
@@ -2483,31 +2524,37 @@ def build_spatial_occupancy_output(
     zone_set_id = (
         str(spatial_zone_set_picker.value)
         if spatial_zone_set_picker is not None
-        else str(loaded.spatial_occupancy_df["zone_set_id"].iloc[0])
+        else str(loaded.spatial_occupancy_df.get_column("zone_set_id")[0])
     )
-    zone_df = loaded.spatial_occupancy_df[
-        loaded.spatial_occupancy_df["zone_set_id"].astype(str) == zone_set_id
-    ].copy()
+    zone_df = loaded.spatial_occupancy_df.filter(
+        pl.col("zone_set_id").cast(pl.Utf8) == zone_set_id
+    )
     if not len(zone_df):
         return mo.md(f"No spatial occupancy rows found for `{zone_set_id}`.")
 
-    zone_df = zone_df[zone_df["window_label"].map(_is_chaser_zone_marker_epoch)].copy()
+    zone_df = zone_df.filter(
+        pl.col("window_label").map_elements(
+            _is_chaser_zone_marker_epoch,
+            return_dtype=pl.Boolean,
+        )
+    )
     if not len(zone_df):
         return mo.md(f"No pre/post spatial occupancy rows found for `{zone_set_id}`.")
 
-    zone_df = zone_df.sort_values(["window_index", "display_order", "zone_label"]).copy()
+    zone_df = zone_df.sort(["window_index", "display_order", "zone_label"])
     chaser_presence = _chaser_zone_presence_by_epoch(loaded=loaded, zone_df=zone_df)
-    y_values = zone_df["time_s"].to_numpy(dtype=float)
+    y_values = zone_df.get_column("time_s").cast(pl.Float64).to_numpy()
     finite_y = y_values[np.isfinite(y_values)]
     y_axis_max = float(np.max(finite_y) * 1.08) if finite_y.size else None
 
     figures = []
-    for window_label, rows in zone_df.groupby("window_label", sort=False):
+    for rows in zone_df.partition_by("window_label", maintain_order=True):
+        window_label = str(rows.get_column("window_label")[0])
         figures.append(
             _build_spatial_occupancy_epoch_bar(
                 go,
                 zone_set_id=zone_set_id,
-                window_label=str(window_label),
+                window_label=window_label,
                 rows=rows,
                 chaser_presence=chaser_presence,
                 y_axis_max=y_axis_max,
@@ -2517,10 +2564,6 @@ def build_spatial_occupancy_output(
     if len(figures) == 1:
         return figures[0]
     return mo.vstack(figures)
-
-
-def _pl_to_pandas(frame: pl.DataFrame) -> pd.DataFrame:
-    return pd.DataFrame(frame.to_dicts())
 
 
 def _metric_text(value: object, *, digits: int = 3, suffix: str = "") -> str:
@@ -2753,7 +2796,7 @@ def build_cra_primary_endpoint_output(mo: Any, go: Any, *, loaded: GoodCopBadCop
             ]
         ),
         mo.md(f"QC warnings: `{warnings_text}`"),
-        mo.ui.table(pd.DataFrame(summary_rows), selection=None, page_size=10),
+        mo.ui.table(_rows_frame(summary_rows), selection=None, page_size=10),
     ]
     if distance_fig is not None:
         items.append(distance_fig)
@@ -2763,18 +2806,18 @@ def build_cra_primary_endpoint_output(mo: Any, go: Any, *, loaded: GoodCopBadCop
     items.append(
         mo.accordion(
             {
-                "Phase windows": mo.ui.table(_pl_to_pandas(endpoint.phases_df), selection=None, page_size=10),
+                "Phase windows": mo.ui.table(endpoint.phases_df, selection=None, page_size=10),
                 "Object positions and drift": mo.ui.table(
-                    _pl_to_pandas(endpoint.object_phase_df),
+                    endpoint.object_phase_df,
                     selection=None,
                     page_size=10,
                 ),
                 "Per-object phase metrics": mo.ui.table(
-                    _pl_to_pandas(endpoint.per_object_phase_df),
+                    endpoint.per_object_phase_df,
                     selection=None,
                     page_size=10,
                 ),
-                "Object roles": mo.ui.table(_pl_to_pandas(endpoint.objects_df), selection=None, page_size=10),
+                "Object roles": mo.ui.table(endpoint.objects_df, selection=None, page_size=10),
             }
         )
     )
@@ -3258,43 +3301,43 @@ def build_cra_near_field_output(mo: Any, go: Any, *, loaded: GoodCopBadCopLoaded
             ]
         ),
         mo.md(f"QC warnings: `{warnings_text}`"),
-        mo.ui.table(pd.DataFrame(summary_rows), selection=None, page_size=12),
+        mo.ui.table(_rows_frame(summary_rows), selection=None, page_size=12),
         *figures,
         mo.accordion(
             {
                 "Near-field phase metrics": mo.ui.table(
-                    _pl_to_pandas(near_field.per_object_phase_df),
+                    near_field.per_object_phase_df,
                     selection=None,
                     page_size=10,
                 ),
                 "Radial occupancy density": mo.ui.table(
-                    _pl_to_pandas(near_field.radial_density_df),
+                    near_field.radial_density_df,
                     selection=None,
                     page_size=15,
                 ),
-                "Distance CDF": mo.ui.table(_pl_to_pandas(near_field.cdf_df), selection=None, page_size=15),
+                "Distance CDF": mo.ui.table(near_field.cdf_df, selection=None, page_size=15),
                 "Global-state QC": mo.ui.table(
-                    _pl_to_pandas(near_field.thigmotaxis_df),
+                    near_field.thigmotaxis_df,
                     selection=None,
                     page_size=10,
                 ),
                 "Control reference radial density": mo.ui.table(
-                    _pl_to_pandas(near_field.control_reference_radial_density_df),
+                    near_field.control_reference_radial_density_df,
                     selection=None,
                     page_size=15,
                 ),
                 "Control reference CDF": mo.ui.table(
-                    _pl_to_pandas(near_field.control_reference_cdf_df),
+                    near_field.control_reference_cdf_df,
                     selection=None,
                     page_size=15,
                 ),
                 "Control reference phase metrics": mo.ui.table(
-                    _pl_to_pandas(near_field.control_reference_phase_df),
+                    near_field.control_reference_phase_df,
                     selection=None,
                     page_size=10,
                 ),
-                "Object roles": mo.ui.table(_pl_to_pandas(near_field.objects_df), selection=None, page_size=10),
-                "Phase windows": mo.ui.table(_pl_to_pandas(near_field.phases_df), selection=None, page_size=10),
+                "Object roles": mo.ui.table(near_field.objects_df, selection=None, page_size=10),
+                "Phase windows": mo.ui.table(near_field.phases_df, selection=None, page_size=10),
             }
         ),
     ]
@@ -3488,16 +3531,16 @@ def build_escape_freeze_output(mo: Any, *, loaded: GoodCopBadCopLoadedView) -> A
             *image_items,
             mo.accordion(
                 {
-                    "Summary": mo.ui.table(pd.DataFrame(summary_rows), selection=None, page_size=12),
-                    "Diagnostics": mo.ui.table(pd.DataFrame(diagnostic_rows), selection=None, page_size=12),
-                    "Trials": mo.ui.table(_pl_to_pandas(escape_freeze.trials_df), selection=None, page_size=15),
+                    "Summary": mo.ui.table(_rows_frame(summary_rows), selection=None, page_size=12),
+                    "Diagnostics": mo.ui.table(_rows_frame(diagnostic_rows), selection=None, page_size=12),
+                    "Trials": mo.ui.table(escape_freeze.trials_df, selection=None, page_size=15),
                     "Trial metrics": mo.ui.table(
-                        _pl_to_pandas(escape_freeze.trial_metrics_df),
+                        escape_freeze.trial_metrics_df,
                         selection=None,
                         page_size=15,
                     ),
                     "Trajectory samples": mo.ui.table(
-                        _pl_to_pandas(escape_freeze.trial_trajectories_df.head(1000)),
+                        escape_freeze.trial_trajectories_df.head(1000),
                         selection=None,
                         page_size=15,
                     ),
@@ -3511,8 +3554,8 @@ def build_debug_tables(
     mo: Any,
     *,
     loaded: GoodCopBadCopLoadedView,
-    visible_distance_df: pd.DataFrame,
-    visible_position_df: pd.DataFrame,
+    visible_distance_df: pl.DataFrame,
+    visible_position_df: pl.DataFrame,
 ) -> Any:
     return mo.accordion(
         {
@@ -3520,6 +3563,6 @@ def build_debug_tables(
             "Visible distance rows": mo.ui.table(visible_distance_df.head(1000), selection=None, page_size=15),
             "Visible position rows": mo.ui.table(visible_position_df.head(1000), selection=None, page_size=15),
             "Spatial occupancy": mo.ui.table(loaded.spatial_occupancy_df, selection=None, page_size=15),
-            "Epoch kinematics summary": mo.ui.table(_pl_to_pandas(loaded.epoch_summary_df), selection=None, page_size=15),
+            "Epoch kinematics summary": mo.ui.table(loaded.epoch_summary_df, selection=None, page_size=15),
         }
     )

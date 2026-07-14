@@ -34,24 +34,17 @@ must pass bounded NumPy column mappings to Plotly; it must not call
 Polars' optional PyArrow interchange path even when the persisted source is a
 Zarr array.
 
-Pandas is still an intentional application dependency for now. An audit of the
-three published entry points found three remaining migration boundaries:
+The three published FileGlancer entry points are pandas-free. Group analytics
+uses Polars expressions and NumPy Plotly inputs; the recording chaser adapters
+and component expose Polars frames; and core eye-angle projections use a
+dedicated pandas-free loader. Neither pandas nor PyArrow is present in the Pixi
+manifest or lockfile.
 
-- the group analytics component uses pandas DataFrames for numeric coercion,
-  pivots, and Plotly preparation;
-- the shared legacy track-kinematics and chaser visualization adapters construct
-  and return pandas DataFrames; and
-- the recording explorer's legacy chaser visualization contracts and component
-  APIs return and manipulate pandas DataFrames throughout.
-
-Removing pandas from `pixi.toml` is therefore a separate API migration, not a
-dependency cleanup. Migrate the group figures to Polars expressions and NumPy
-Plotly inputs first, then change the legacy track-kinematics and chaser
-visualization adapters to return Polars frames. Once the three app entry points
-and their imported components contain no pandas imports, remove pandas from the
-Pixi manifest, regenerate `pixi.lock`, and run all three application smokes.
-Until then, keeping pandas declared is required; adding PyArrow solely to bridge
-between Polars and pandas is not.
+Older development-only notebooks such as the focused track-kinematics explorer
+may continue to use pandas through Palette's full processing environment. They
+are not imported by the three deployed applications and are not part of the
+lightweight Pixi runtime contract. Adding either pandas or PyArrow back to Pixi
+requires a concrete deployed feature that cannot use the Polars/NumPy boundary.
 
 Commit `pixi.lock` with changes to `pixi.toml`. FileGlancer and local launches
 therefore resolve the same runtime.

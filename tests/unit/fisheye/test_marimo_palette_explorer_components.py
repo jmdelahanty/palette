@@ -5,7 +5,6 @@ import time
 
 import apps.marimo.components.registry as registry_component
 import numpy as np
-import pandas as pd
 import polars as pl
 import plotly.express as px
 import plotly.graph_objects as go
@@ -381,11 +380,11 @@ def test_goodcopbadcop_component_loads_selected_registry_option(tmp_path) -> Non
 
     assert loaded.data.run_name == "chaser_distance_1"
     assert loaded.data.distance_mm.shape == (9, 2)
-    assert loaded.windows_df["label"].tolist() == ["pre_event", "training_event", "post_event"]
+    assert loaded.windows_df["label"].to_list() == ["pre_event", "training_event", "post_event"]
     assert "distance_mm_chaser_0" in loaded.distance_df.columns
-    assert loaded.position_df["fish_valid"].tolist() == [True, True, True, True, False, True, True, True, True]
-    assert loaded.spatial_occupancy_df["zone_set_id"].unique().tolist() == ["image_quadrants_v1"]
-    assert loaded.spatial_occupancy_df["frame_count"].tolist() == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    assert loaded.position_df["fish_valid"].to_list() == [True, True, True, True, False, True, True, True, True]
+    assert loaded.spatial_occupancy_df["zone_set_id"].unique().to_list() == ["image_quadrants_v1"]
+    assert loaded.spatial_occupancy_df["frame_count"].to_list() == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     assert loaded.epoch_summary_df.height == 6
     assert loaded.load_duration_ms >= 0.0
 
@@ -402,8 +401,8 @@ def test_goodcopbadcop_component_projects_only_selected_analysis_family(tmp_path
         analysis_id="distance",
     )
 
-    assert not loaded.distance_df.empty
-    assert loaded.position_df.empty
+    assert not loaded.distance_df.is_empty()
+    assert loaded.position_df.is_empty()
     assert loaded.egocentric_bearing_df.is_empty()
     assert loaded.epoch_summary_df.is_empty()
     assert loaded.data.egocentric_bearing_deg is None
@@ -470,8 +469,8 @@ def test_goodcopbadcop_component_summarizes_swim_bouts_by_epoch(tmp_path) -> Non
 
     output = build_epoch_summary_output(_Mo, loaded=loaded, chaser_picker=_ChaserPicker())
     table = output[-1]
-    assert table["chaser_index"].tolist() == [1, 1, 1]
-    assert table["bout_count"].tolist() == [2, 1, 1]
+    assert table["chaser_index"].to_list() == [1, 1, 1]
+    assert table["bout_count"].to_list() == [2, 1, 1]
 
 
 def test_goodcopbadcop_component_prefers_persisted_epoch_behavior_summary(tmp_path) -> None:
@@ -576,7 +575,7 @@ def test_goodcopbadcop_component_prefers_persisted_epoch_behavior_summary(tmp_pa
     assert "mean_bout_net_heading_change_deg" in output[-1].columns
     assert "mean_abs_bout_net_heading_change_deg" in output[-1].columns
     assert "mean_inter_bout_interval_s" in output[-1].columns
-    assert output[-1]["mean_inter_bout_interval_s"].tolist()[0] == 0.06
+    assert output[-1]["mean_inter_bout_interval_s"].to_list()[0] == 0.06
 
 
 def test_goodcopbadcop_component_loads_and_renders_egocentric_static_polar_png(tmp_path) -> None:
@@ -879,14 +878,15 @@ def test_goodcopbadcop_spatial_figures_use_image_y_axis(tmp_path) -> None:
 
 def test_distance_line_display_budget_preserves_real_extrema() -> None:
     row_count = 10000
-    frame = pd.DataFrame(
+    distances = np.sin(np.arange(row_count, dtype=np.float64) / 100.0)
+    distances[4321] = 50.0
+    distances[6789] = -25.0
+    frame = pl.DataFrame(
         {
             "time_s": np.arange(row_count, dtype=np.float64) / 100.0,
-            "distance_mm": np.sin(np.arange(row_count, dtype=np.float64) / 100.0),
+            "distance_mm": distances,
         }
     )
-    frame.loc[4321, "distance_mm"] = 50.0
-    frame.loc[6789, "distance_mm"] = -25.0
 
     display = _minmax_line_display_frame(
         frame,
@@ -895,10 +895,10 @@ def test_distance_line_display_budget_preserves_real_extrema() -> None:
     )
 
     assert len(display) <= 1000
-    assert display["time_s"].is_monotonic_increasing
+    assert display["time_s"].is_sorted()
     assert display["distance_mm"].max() == 50.0
     assert display["distance_mm"].min() == -25.0
-    assert set(display.index).issubset(set(frame.index))
+    assert set(display["time_s"].to_list()).issubset(set(frame["time_s"].to_list()))
 
 
 def test_goodcopbadcop_spatial_occupancy_panel_renders_zone_summary(tmp_path) -> None:
@@ -1059,15 +1059,15 @@ def test_goodcopbadcop_egocentric_panels_render_from_linked_component(tmp_path) 
         window=window,
         chaser_picker=_ChaserPicker(),
     )
-    epoch_labels = list(loaded.windows_df["label"])
+    epoch_labels = loaded.windows_df["label"].to_list()
     epoch_windows = tuple(
         GoodCopBadCopTimeWindow(
-            selected_epoch_id=int(row.window_id),
-            selected_epoch_label=str(row.label),
-            start_s=float(row.start_time_s),
-            stop_s=float(row.end_time_s),
+            selected_epoch_id=int(row["window_id"]),
+            selected_epoch_label=str(row["label"]),
+            start_s=float(row["start_time_s"]),
+            stop_s=float(row["end_time_s"]),
         )
-        for row in loaded.windows_df.itertuples(index=False)
+        for row in loaded.windows_df.iter_rows(named=True)
     )
     multi_epoch_output = build_egocentric_bearing_output(
         _Mo,

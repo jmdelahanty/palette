@@ -21,7 +21,7 @@ def _():
 
     import marimo as mo
     import numpy as np
-    import pandas as pd
+    import polars as pl
     import plotly.express as px
     import plotly.graph_objects as go
 
@@ -49,7 +49,7 @@ def _():
     def add_epoch_overlays(fig, windows_df):
         if not len(windows_df):
             return
-        for row in windows_df.to_dict("records"):
+        for row in windows_df.iter_rows(named=True):
             fig.add_vrect(
                 x0=float(row["start_time_s"]),
                 x1=float(row["end_time_s"]),
@@ -69,7 +69,7 @@ def _():
         mo,
         np,
         open_zarr_root,
-        pd,
+        pl,
         png_bytes_to_markdown_image,
         px,
         time,
@@ -197,7 +197,7 @@ def _(data, distance_df, mo, np, windows_df):
         label="Time window (s)",
     )
     epoch_options = {"Custom time window": None}
-    for _row in windows_df.to_dict("records"):
+    for _row in windows_df.iter_rows(named=True):
         epoch_options[f'{_row["label"]} ({_row["start_time_s"]:.1f}-{_row["end_time_s"]:.1f}s)'] = int(_row["window_id"])
     epoch_picker = mo.ui.dropdown(
         options=list(epoch_options),
@@ -220,13 +220,15 @@ def _(chaser_overlay, distance_series_picker, epoch_options, epoch_picker, heatm
 
 
 @app.cell
-def _(epoch_options, epoch_picker, time_window, windows_df):
+def _(epoch_options, epoch_picker, pl, time_window, windows_df):
     selected_epoch_id = epoch_options[epoch_picker.value]
     if selected_epoch_id is None or not len(windows_df):
         start_s, stop_s = [float(value) for value in time_window.value]
         selected_epoch_label = "custom"
     else:
-        _row = windows_df[windows_df["window_id"].astype(int) == int(selected_epoch_id)].iloc[0]
+        _row = windows_df.filter(
+            pl.col("window_id").cast(pl.Int64) == int(selected_epoch_id)
+        ).row(0, named=True)
         start_s = float(_row["start_time_s"])
         stop_s = float(_row["end_time_s"])
         selected_epoch_label = str(_row["label"])
@@ -239,21 +241,24 @@ def _(
     distance_df,
     distance_series_picker,
     go,
+    pl,
     selected_epoch_label,
     start_s,
     stop_s,
     windows_df,
 ):
-    visible = distance_df[(distance_df["time_s"] >= start_s) & (distance_df["time_s"] <= stop_s)].copy()
+    visible = distance_df.filter(
+        pl.col("time_s").is_between(start_s, stop_s, closed="both")
+    )
     distance_fig = go.Figure()
     add_epoch_overlays(distance_fig, windows_df)
     for column in distance_series_picker.value:
-        if column not in visible:
+        if column not in visible.columns:
             continue
         distance_fig.add_trace(
             go.Scattergl(
-                x=visible["time_s"],
-                y=visible[column],
+                x=visible.get_column("time_s").to_numpy(),
+                y=visible.get_column(column).to_numpy(),
                 mode="lines",
                 name=column,
             )
@@ -277,19 +282,22 @@ def _(
     chaser_position_df,
     heatmap_bins,
     position_df,
+    pl,
     px,
     selected_epoch_label,
     start_s,
     stop_s,
 ):
-    visible_positions = position_df[
-        (position_df["time_s"] >= start_s)
-        & (position_df["time_s"] <= stop_s)
-        & position_df["fish_valid"].astype(bool)
-    ].copy()
+    visible_positions = position_df.filter(
+        pl.col("time_s").is_between(start_s, stop_s, closed="both")
+        & pl.col("fish_valid").cast(pl.Boolean)
+    )
     if len(visible_positions):
         arena_heatmap = px.density_heatmap(
-            visible_positions,
+            {
+                "x": visible_positions.get_column("x").to_numpy(),
+                "y": visible_positions.get_column("y").to_numpy(),
+            },
             x="x",
             y="y",
             nbinsx=int(heatmap_bins.value),
@@ -298,16 +306,18 @@ def _(
             labels={"x": "Arena X (px)", "y": "Arena Y (px, down)"},
         )
         if chaser_overlay.value and len(chaser_position_df):
-            visible_chasers = chaser_position_df[
-                (chaser_position_df["time_s"] >= start_s)
-                & (chaser_position_df["time_s"] <= stop_s)
-                & chaser_position_df["chaser_valid"].astype(bool)
-            ].copy()
+            visible_chasers = chaser_position_df.filter(
+                pl.col("time_s").is_between(start_s, stop_s, closed="both")
+                & pl.col("chaser_valid").cast(pl.Boolean)
+            )
             if len(visible_chasers):
-                for chaser_index, rows in visible_chasers.groupby("chaser_index"):
+                for rows in visible_chasers.partition_by(
+                    "chaser_index", maintain_order=True
+                ):
+                    chaser_index = int(rows.get_column("chaser_index")[0])
                     arena_heatmap.add_scattergl(
-                        x=rows["x"],
-                        y=rows["y"],
+                        x=rows.get_column("x").to_numpy(),
+                        y=rows.get_column("y").to_numpy(),
                         mode="markers",
                         marker=dict(size=5, opacity=0.5),
                         name=f"chaser {int(chaser_index)}",
@@ -321,7 +331,7 @@ def _(
 
 
 @app.cell
-def _(data, go, mo, np, selected_epoch_id, windows_df):
+def _(data, go, mo, np, pl, selected_epoch_id, windows_df):
     if data.occupancy_normalized is None or data.occupancy_x_edges is None or data.occupancy_y_edges is None:
         occupancy_output = mo.md("No persisted detection-occupancy heatmap cube is linked to this spec.")
     elif not len(windows_df):
@@ -329,10 +339,13 @@ def _(data, go, mo, np, selected_epoch_id, windows_df):
     else:
         window_idx = 0
         if selected_epoch_id is not None:
-            matches = np.flatnonzero(windows_df["window_id"].to_numpy(dtype=int) == int(selected_epoch_id))
+            matches = np.flatnonzero(
+                windows_df.get_column("window_id").cast(pl.Int64).to_numpy()
+                == int(selected_epoch_id)
+            )
             window_idx = int(matches[0]) if matches.size else 0
         window_idx = max(0, min(window_idx, int(data.occupancy_normalized.shape[0]) - 1))
-        label = str(windows_df.iloc[window_idx]["label"]) if window_idx < len(windows_df) else f"window {window_idx}"
+        label = str(windows_df.get_column("label")[window_idx]) if window_idx < len(windows_df) else f"window {window_idx}"
         x_edges = np.asarray(data.occupancy_x_edges, dtype=float)
         y_edges = np.asarray(data.occupancy_y_edges, dtype=float)
         x_centers = (x_edges[:-1] + x_edges[1:]) / 2.0 if x_edges.size > 1 else np.arange(data.occupancy_normalized.shape[2])

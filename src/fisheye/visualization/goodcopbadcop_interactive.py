@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
-import pandas as pd
 import polars as pl
 import zarr
 
@@ -2718,24 +2717,23 @@ def load_goodcopbadcop_interactive_data(*args: Any, **kwargs: Any) -> GoodCopBad
     return load_chaser_dashboard_data(*args, **kwargs)
 
 
-def to_window_dataframe(data: GoodCopBadCopInteractiveData) -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {
-                "window_id": window.window_id,
-                "label": window.label,
-                "start_frame": window.start_frame,
-                "end_frame": window.end_frame,
-                "start_time_s": window.start_time_s,
-                "end_time_s": window.end_time_s,
-                "duration_s": window.duration_s,
-            }
-            for window in data.windows
-        ]
-    )
+def to_window_dataframe(data: GoodCopBadCopInteractiveData) -> pl.DataFrame:
+    rows = [
+        {
+            "window_id": window.window_id,
+            "label": window.label,
+            "start_frame": window.start_frame,
+            "end_frame": window.end_frame,
+            "start_time_s": window.start_time_s,
+            "end_time_s": window.end_time_s,
+            "duration_s": window.duration_s,
+        }
+        for window in data.windows
+    ]
+    return pl.from_dicts(rows) if rows else pl.DataFrame()
 
 
-def to_distance_timeseries_dataframe(data: GoodCopBadCopInteractiveData) -> pd.DataFrame:
+def to_distance_timeseries_dataframe(data: GoodCopBadCopInteractiveData) -> pl.DataFrame:
     n = min(data.time_seconds.shape[0], data.distance_mm.shape[0])
     frame: dict[str, Any] = {
         "time_s": data.time_seconds[:n],
@@ -2751,10 +2749,10 @@ def to_distance_timeseries_dataframe(data: GoodCopBadCopInteractiveData) -> pd.D
         if col_idx >= data.distance_mm.shape[1]:
             continue
         frame[f"distance_mm_chaser_{int(chaser_index)}"] = data.distance_mm[:n, col_idx]
-    return pd.DataFrame(frame)
+    return pl.DataFrame(frame)
 
 
-def to_position_dataframe(data: GoodCopBadCopInteractiveData) -> pd.DataFrame:
+def to_position_dataframe(data: GoodCopBadCopInteractiveData) -> pl.DataFrame:
     n = min(data.time_seconds.shape[0], data.fish_centroid_arena_xy.shape[0], data.fish_valid.shape[0])
     frame: dict[str, Any] = {
         "time_s": data.time_seconds[:n],
@@ -2762,26 +2760,39 @@ def to_position_dataframe(data: GoodCopBadCopInteractiveData) -> pd.DataFrame:
         "x": data.fish_centroid_arena_xy[:n, 0],
         "y": data.fish_centroid_arena_xy[:n, 1],
         "fish_valid": data.fish_valid[:n],
-        "unit": "arena_relative_canvas_px",
+        "unit": np.full(n, "arena_relative_canvas_px", dtype=object),
     }
     if data.nearest_distance_mm is not None and data.nearest_distance_mm.shape[0] >= n:
         frame["nearest_distance_mm"] = data.nearest_distance_mm[:n]
     if data.stimulus_epoch_window_id is not None and data.stimulus_epoch_window_id.shape[0] >= n:
         frame["stimulus_epoch_window_id"] = data.stimulus_epoch_window_id[:n]
-    return pd.DataFrame(frame)
+    return pl.DataFrame(frame)
+
+
+def _empty_chaser_position_frame() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "time_s": pl.Float64,
+            "frame_index": pl.Int64,
+            "chaser_index": pl.Int64,
+            "x": pl.Float64,
+            "y": pl.Float64,
+            "chaser_valid": pl.Boolean,
+        }
+    )
 
 
 def to_chaser_position_dataframe(
     data: GoodCopBadCopInteractiveData,
     *,
     sample_step: int = 1,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     if data.chaser_arena_xy is None:
-        return pd.DataFrame(columns=["time_s", "frame_index", "chaser_index", "x", "y", "chaser_valid"])
+        return _empty_chaser_position_frame()
     step = max(1, int(sample_step))
     n = min(data.time_seconds.shape[0], data.chaser_arena_xy.shape[0])
     row_indices = np.arange(0, n, step, dtype=np.int64)
-    frames: list[pd.DataFrame] = []
+    frames: list[pl.DataFrame] = []
     for col_idx, chaser_index in enumerate(data.chaser_indices.tolist()):
         if col_idx >= data.chaser_arena_xy.shape[1]:
             continue
@@ -2791,11 +2802,13 @@ def to_chaser_position_dataframe(
             else np.isfinite(data.chaser_arena_xy[row_indices, col_idx, :]).all(axis=1)
         )
         frames.append(
-            pd.DataFrame(
+            pl.DataFrame(
                 {
                     "time_s": data.time_seconds[row_indices],
                     "frame_index": data.camera_frame_id[row_indices],
-                    "chaser_index": int(chaser_index),
+                    "chaser_index": np.full(
+                        row_indices.shape[0], int(chaser_index), dtype=np.int64
+                    ),
                     "x": data.chaser_arena_xy[row_indices, col_idx, 0],
                     "y": data.chaser_arena_xy[row_indices, col_idx, 1],
                     "chaser_valid": valid,
@@ -2803,11 +2816,11 @@ def to_chaser_position_dataframe(
             )
         )
     if not frames:
-        return pd.DataFrame(columns=["time_s", "frame_index", "chaser_index", "x", "y", "chaser_valid"])
-    return pd.concat(frames, ignore_index=True)
+        return _empty_chaser_position_frame()
+    return pl.concat(frames, how="vertical")
 
 
-def to_spatial_occupancy_dataframe(data: GoodCopBadCopInteractiveData) -> pd.DataFrame:
+def to_spatial_occupancy_dataframe(data: GoodCopBadCopInteractiveData) -> pl.DataFrame:
     rows: list[dict[str, Any]] = []
     for zone_set in data.spatial_occupancy:
         n_windows, n_zones = zone_set.frame_count.shape
@@ -2861,7 +2874,7 @@ def to_spatial_occupancy_dataframe(data: GoodCopBadCopInteractiveData) -> pd.Dat
                         else 0.0,
                     }
                 )
-    return pd.DataFrame(rows)
+    return pl.from_dicts(rows, infer_schema_length=None) if rows else pl.DataFrame()
 
 
 def _empty_egocentric_bearing_frame() -> pl.DataFrame:

@@ -29,7 +29,13 @@ def png_bytes_to_markdown_image(mo: Any, png_bytes: bytes, *, alt_text: str) -> 
 def add_epoch_overlays(fig: Any, windows_df: Any) -> None:
     if not len(windows_df):
         return
-    for row in windows_df.to_dict("records"):
+    if hasattr(windows_df, "iter_rows"):
+        rows = windows_df.iter_rows(named=True)
+    elif hasattr(windows_df, "to_dict"):
+        rows = windows_df.to_dict("records")
+    else:
+        rows = windows_df
+    for row in rows:
         fig.add_vrect(
             x0=float(row["start_time_s"]),
             x1=float(row["end_time_s"]),
@@ -65,4 +71,3 @@ def finite_time_extent(values: Any) -> tuple[float, float]:
     if not finite.size:
         return 0.0, 0.0
     return float(finite.min()), float(finite.max())
-

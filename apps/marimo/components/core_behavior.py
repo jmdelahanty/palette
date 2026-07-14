@@ -26,7 +26,7 @@ from fisheye.analysis.swim_bout_io import (
 from fisheye.analytics_exports.baseline import is_baseline_label
 from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.shared.zarr_io import open_zarr_root
-from fisheye.visualization.interactive_track_kinematics import (
+from fisheye.visualization.eye_angle_timeseries import (
     discover_eye_angle_run_options,
     load_eye_angle_timeseries_data,
 )
@@ -103,17 +103,6 @@ def _finite_bounds(values: np.ndarray) -> tuple[float, float]:
 def _structured_lazy(records: np.ndarray) -> pl.LazyFrame:
     rows = structured_records_to_dicts(np.asarray(records))
     return pl.from_dicts(rows).lazy() if rows else pl.DataFrame().lazy()
-
-
-def _pandas_payload_to_polars(payload: Any) -> pl.DataFrame:
-    """Convert a numeric legacy payload without requiring the PyArrow bridge."""
-
-    return pl.DataFrame(
-        {
-            str(name): np.asarray(payload[name].to_numpy(copy=False))
-            for name in payload.columns
-        }
-    )
 
 
 def _plotly_columns(
@@ -582,7 +571,7 @@ class CoreBehaviorSource:
             run_name=selected.run_name,
             prefer_frame=True,
         )
-        frame = _pandas_payload_to_polars(payload.dataframe)
+        frame = payload.dataframe
         if "time_s" in frame.columns:
             if start_s is not None:
                 frame = frame.filter(pl.col("time_s") >= float(start_s))
