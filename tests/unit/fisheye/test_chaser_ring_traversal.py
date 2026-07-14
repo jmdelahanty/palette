@@ -1,0 +1,216 @@
+"""Tests for the responsive-ring traversal figures.
+
+Mostly "renders without crashing", but three things here are not cosmetic:
+
+  * Each bout must be attached to the entry whose frame window contains its onset, and to no
+    other. Getting this wrong would draw a bout on the wrong approach.
+  * Escape bouts (peak > threshold) must be distinguished from ordinary ones, and the peak
+    speed must come from the chaser_bout_response bout table -- the SAME table the escape
+    counts come from -- so the red stars here and the escape rate in chaser_escape_events
+    cannot disagree.
+  * The animation must bound each entry to a fixed number of display frames, so a fish that
+    lingers near a wall-adjacent object for 130 s does not produce a 13000-frame movie.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pytest
+import zarr
+
+from fisheye.visualization.chaser_ring_traversal import (
+    RESPONSIVE_BAND_MM,
+    RING_EDGES_MM,
+    _ordered_entries,
+    collect_ring_entries,
+    render_ring_entries_png,
+    write_ring_traversal_gif,
+)
+from tests.unit.fisheye.test_chaser_visualization import _archive_with_components
+
+
+PNG_MAGIC = b"\x89PNG"
+ESCAPE_SPEED = 250.0
+ORDINARY_SPEED = 20.0
+
+
+def _set_bout_peaks(zarr_path: Path, escape_every: int = 4) -> int:
+    """Mark every Nth valid bout in the chaser_bout_response table as an escape.
+
+    collect_ring_entries reads peak speed from THIS table, so this is the knob the escape
+    colouring must respond to. Returns how many escapes were planted.
+    """
+
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    bouts = root["analysis/chaser_distance_runs/chaser_distance_1/chaser_bout_response/"
+                 "chaser_bout_response_v1/bouts"]
+    peak = np.full(int(bouts["start_frame"].shape[0]), ORDINARY_SPEED, dtype=np.float64)
+    peak[::escape_every] = ESCAPE_SPEED
+    bouts["peak_speed_mm_s"][:] = peak
+    return int(np.count_nonzero(peak > 100.0))
+
+
+def _collect(zarr_path: Path, **kw):
+    return collect_ring_entries(zarr_path, chaser_distance_run="chaser_distance_1",
+                                epochs_wanted=("post_event",), **kw)
+
+
+# --------------------------------------------------------------------------------------
+# Bout -> entry assignment
+# --------------------------------------------------------------------------------------
+
+
+def test_bouts_are_attached_to_the_entry_that_contains_them(tmp_path: Path) -> None:
+    _set_bout_peaks(tmp_path_archive := _archive_with_components(tmp_path, name="a.zarr"))
+    scenes, _meta = _collect(tmp_path_archive)
+    entries = [(s, v) for s in scenes if s.is_object for v in s.visits]
+    assert entries, "fixture should produce object entries"
+
+    seen_any = False
+    for _scene, visit in entries:
+        lo, hi = int(visit["frames"][0]), int(visit["frames"][-1])
+        for bout in visit["bouts"]:
+            seen_any = True
+            # the bout's drawn segment indexes into this visit's xy...
+            assert 0 <= bout["i0"] <= bout["i1"] < len(visit["xy"])
+            # ...and its frames lie inside this entry's window, not a neighbour's
+            gframes = visit["frames"][bout["i0"] : bout["i1"] + 1]
+            assert int(gframes[0]) >= lo and int(gframes[-1]) <= hi
+    assert seen_any, "entries should carry bouts"
+
+
+def test_a_bout_is_not_double_counted_across_entries(tmp_path: Path) -> None:
+    z = _archive_with_components(tmp_path, name="dbl.zarr")
+    _set_bout_peaks(z)
+    scenes, _meta = _collect(z)
+    # collect the (epoch, onset-frame) of every drawn bout; the same onset must not appear in
+    # two different entries of the same reference.
+    per_ref: dict[tuple[str, str], list[int]] = {}
+    for s in scenes:
+        for v in s.visits:
+            key = (s.epoch_label, s.ref_label)
+            for b in v["bouts"]:
+                per_ref.setdefault(key, []).append(int(v["frames"][b["i0"]]))
+    for onsets in per_ref.values():
+        assert len(onsets) == len(set(onsets)), "a bout onset appears in two entries"
+
+
+# --------------------------------------------------------------------------------------
+# Escape distinction, sourced from the bout-response table
+# --------------------------------------------------------------------------------------
+
+
+def test_escape_bouts_are_flagged_and_track_the_bout_response_table(tmp_path: Path) -> None:
+    z = _archive_with_components(tmp_path, name="esc.zarr")
+    planted = _set_bout_peaks(z, escape_every=3)
+    scenes, meta = _collect(z)
+
+    flagged = [b for s in scenes for v in s.visits for b in v["bouts"] if b["is_escape"]]
+    ordinary = [b for s in scenes for v in s.visits for b in v["bouts"] if not b["is_escape"]]
+    assert flagged, "escapes planted in the table must surface as is_escape bouts"
+    assert ordinary, "not every bout is an escape"
+    assert all(b["peak_speed_mm_s"] > meta["peak_speed_threshold_mm_s"] for b in flagged)
+    assert all(b["peak_speed_mm_s"] <= meta["peak_speed_threshold_mm_s"] for b in ordinary)
+    assert planted > 0
+
+
+def test_no_escapes_when_no_bout_clears_the_threshold(tmp_path: Path) -> None:
+    z = _archive_with_components(tmp_path, name="noesc.zarr")   # all bouts at 20 mm/s
+    scenes, _meta = _collect(z)
+    assert not any(b["is_escape"] for s in scenes for v in s.visits for b in v["bouts"])
+    assert any(v["bouts"] for s in scenes for v in s.visits)     # but bouts are still attached
+
+
+def test_missing_bout_response_degrades_to_no_segments_rather_than_crashing(tmp_path: Path) -> None:
+    z = _archive_with_components(tmp_path, name="nobr.zarr")
+    root = zarr.open_group(str(z), mode="a", use_consolidated=False)
+    del root["analysis/chaser_distance_runs/chaser_distance_1/chaser_bout_response"]
+    scenes, _meta = _collect(z)
+    # visits still exist (the trajectory), they just carry no bout segments
+    assert any(s.visits for s in scenes)
+    assert all(v["bouts"] == [] for s in scenes for v in s.visits)
+    assert render_ring_entries_png(scenes, _meta).startswith(PNG_MAGIC)
+
+
+# --------------------------------------------------------------------------------------
+# Ordering
+# --------------------------------------------------------------------------------------
+
+
+def test_escape_containing_entries_are_ordered_first(tmp_path: Path) -> None:
+    z = _archive_with_components(tmp_path, name="ord.zarr")
+    _set_bout_peaks(z, escape_every=5)
+    scenes, _meta = _collect(z)
+    ordered = _ordered_entries(scenes, object_only=True)
+    if len(ordered) < 2:
+        pytest.skip("need at least two object entries to test ordering")
+    esc_counts = [sum(int(b["is_escape"]) for b in v["bouts"]) for _s, v in ordered]
+    # non-increasing escape count: escape-rich entries lead
+    assert esc_counts == sorted(esc_counts, reverse=True)
+
+
+# --------------------------------------------------------------------------------------
+# Rendering
+# --------------------------------------------------------------------------------------
+
+
+def test_ring_constants_are_coherent(tmp_path: Path) -> None:
+    inner, outer = RESPONSIVE_BAND_MM
+    assert inner in RING_EDGES_MM and outer in RING_EDGES_MM   # the shell edges are real rings
+    assert inner < outer
+
+
+def test_static_figure_renders(tmp_path: Path) -> None:
+    z = _archive_with_components(tmp_path, name="fig.zarr")
+    _set_bout_peaks(z)
+    scenes, meta = _collect(z)
+    png = render_ring_entries_png(scenes, meta)
+    assert png.startswith(PNG_MAGIC)
+    assert len(png) > 20_000
+
+
+def test_animation_writes_a_bounded_file(tmp_path: Path) -> None:
+    z = _archive_with_components(tmp_path, name="anim.zarr")
+    _set_bout_peaks(z)
+    scenes, meta = _collect(z)
+    out = write_ring_traversal_gif(scenes, meta, tmp_path / "ring.gif",
+                                   fps=10, frames_per_entry=12, max_entries=3)
+    assert out.exists()
+    assert out.read_bytes().startswith(b"GIF")
+
+
+def test_animation_caps_entries_and_frames_per_entry(tmp_path: Path, monkeypatch) -> None:
+    """A wall-dwelling fish makes very long entries. Each entry must be bound to
+    frames_per_entry display frames, and the number of entries to max_entries, or a real
+    recording would produce a movie tens of thousands of frames long."""
+
+    z = _archive_with_components(tmp_path, name="cap.zarr")
+    _set_bout_peaks(z)
+    scenes, meta = _collect(z)
+
+    captured: dict[str, int] = {}
+    import fisheye.visualization.chaser_ring_traversal as mod
+    real = mod.FuncAnimation
+
+    def spy(fig, func, frames, **kw):
+        captured["frames"] = int(frames)
+        return real(fig, func, frames=frames, **kw)
+
+    monkeypatch.setattr(mod, "FuncAnimation", spy)
+    fpe, hold_s, fps, maxe = 8, 0.5, 10, 2
+    write_ring_traversal_gif(scenes, meta, tmp_path / "cap.gif",
+                             fps=fps, frames_per_entry=fpe, max_entries=maxe, hold_s=hold_s)
+    hold = max(1, int(hold_s * fps))
+    # at most max_entries entries, each contributing at most fpe move-frames + hold-frames
+    assert captured["frames"] <= maxe * (fpe + hold)
+
+
+def test_animation_with_no_entries_raises(tmp_path: Path) -> None:
+    z = _archive_with_components(tmp_path, name="empty.zarr")
+    scenes, meta = _collect(z, virtual_rotations_deg=())
+    for s in scenes:
+        s.visits.clear()
+    with pytest.raises(ValueError, match="No entries"):
+        write_ring_traversal_gif(scenes, meta, tmp_path / "x.gif")
