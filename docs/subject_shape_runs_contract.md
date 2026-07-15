@@ -333,11 +333,20 @@ arc reads back at ≈1/20). On the one re-materialized recording this moved the 
 radius from **1.1 px → 60 px**. Pinned by `test_tail_curvature_uses_a_smoothing_spline...` and
 `test_smoothing_preserves_a_real_body_bend`.
 
-**Residual caveats (the fit is fixed; the masks are not):** after the fix, the highest-curvature
-frames are dominated by (a) the **tail tip**, where curvature is both genuinely highest during a
-tail beat *and* least reliable (thin mask, spline endpoint curl), and (b) **truncated/jagged tail
-masks** (`tail_sample_valid` fails ~10% of frames). For a trustworthy body-bend / C-bend metric,
-exclude the terminal tail points and QC-reject physically impossible radii (< ~5 px). See
+**Residual caveats (the fit is fixed; the masks are not).** After the fix, whole-body curvature
+has a U-shaped profile along the body: a rigid straight trunk (~500 px radius) with the bend
+concentrated at **both ends**. Both ends are artifact-prone as well as genuinely flexible:
+
+- **tail tip** — highest curvature during a real tail beat, but also least reliable (thin mask,
+  spline endpoint curl);
+- **snout join** — the centerline snout-extension/join heuristic can leave a kink at the anterior
+  end (the anterior analogue of the tip artifact).
+
+On the one recording, the endpoints contribute ~27% of the integrated whole-body bend (≈10% snout
++ ≈17% tip); trimming both drops the median from 31.7° → 22.8°. For a trustworthy body-bend /
+C-bend metric: **integrate over a trimmed body** (drop the anterior ~8 and posterior ~4 points),
+**summarize by the integrated angle not the max**, and QC-reject physically impossible radii
+(< ~5 px). Also note `tail_sample_valid` fails ~10% of frames (truncated/jagged tail masks). See
 `docs/diagnostics/subject_shape_tail_curvature_2026-07-15.md`.
 
 The low-dimensional behavior-facing representation should be written by

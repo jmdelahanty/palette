@@ -123,3 +123,25 @@ so there are no C-starts to capture here regardless of tracking quality.
 6. Even then: this resolves C-bend *shape*, not *kinematics* (angular velocity, stage-1 latency),
    which stay behind the 100 fps wall. See `docs/chaser_escape_events_contract.md`
    "Can we see C-starts?".
+
+## Whole-body curvature added (method v10, 2026-07-15)
+
+`centerline_curvature_px_inv` (N, K_centerline) is now emitted alongside the tail-only array —
+signed curvature over the full snout→tail midline, from the same smoothing spline, available even
+without a valid tail base. A C-start is a whole-body coil, so this is the array for a whole-body
+bend metric; `tail_curvature_px_inv` remains the tail-beat array.
+
+Re-materialized as `subject_shape_goodcopbadcop_arena1_wholebody` (v10). Integrated bend (Σ|κ|·ds,
+deg), whole-body vs tail:
+
+| | median | p90 | p99 |
+|---|---|---|---|
+| whole-body \|bend\| | 31.7° (22.8° trimmed) | 43° | 61° |
+| tail \|bend\| | 6.0° | 11° | 17° |
+
+The whole-body curvature is **U-shaped along the body**: rigid straight trunk (~500 px radius),
+bend concentrated at both ends. The ends are both genuinely flexible and artifact-prone — the
+**tail tip** (curl) and the **snout join** (extension-heuristic kink) — and together contribute
+~27% of the integrated bend (≈10% snout + ≈17% tip). So the whole-body metric captures real
+swimming undulation (S-shaped body: trunk straight, ends curved), but should be **integrated over
+a trimmed body** (drop ~8 anterior + ~4 posterior points) to exclude both endpoint artifacts.
