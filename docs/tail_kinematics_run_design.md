@@ -440,14 +440,20 @@ a read-only plan. With `--apply`, it:
 6. copies the completed run into a hidden authoritative sibling, validates the
    copied physical inventory and logical run, and atomically renames that
    sibling to the final run name;
-7. marks the authoritative run complete and advances the latest-complete
-   pointer only after that rename.
+7. reopens and validates the published run before changing any parent pointer,
+   then persists that pre-pointer validation result in the run provenance;
+8. marks the authoritative run complete, advances the latest and
+   latest-complete pointers, performs final run and pointer validation, and
+   persists that final validation result in the run provenance.
 
 Existing authoritative run names are never replaced. Scratch is removed only
 after successful publication and is retained after failure for diagnosis. The
 authoritative run-group rename and parent latest-complete update are serialized
 per recording with an advisory file lock, so two materializers cannot race the
-same parent metadata. The
+same parent metadata. Any failure after the authoritative rename removes the
+new target and restores the parent attrs captured before publication, including
+the previous latest and latest-complete pointers. The rollback policy and both
+validation results are recorded under `cluster_output_staging`. The
 corresponding LSF entrypoint is
 `scripts/submit_tail_kinematics_materialization_bsub.sh`; it pins a clean Palette
 commit, refuses compute outside an LSF allocation, selects `/scratch` or a
@@ -480,6 +486,15 @@ implemented and unit tested. The million-frame staged canary validated source
 transfer, bounded computation, local/final inventories, and completion-last
 publication, so the general workflow DAG now enables `tail_kinematics`. Direct
 use of the dedicated materializer remains available for focused operations.
+
+The sharded-subject-shape downstream benchmark also measured the worker-count
+tradeoff on the 1,169,010-row Sleepyfish source. Eight requested LSF slots
+yielded five effective shard workers and completed local materialization in
+32.04 seconds; two requested/effective workers completed it in 56.65 seconds.
+The larger allocation saved about 25 seconds while reserving four times as many
+slots. Two workers are therefore the routine operational recommendation for
+this short, I/O-heavy stage; the larger allocation is an opt-in latency choice,
+not a required correctness or throughput setting.
 
 ## Megabouts Compatibility
 
@@ -645,6 +660,10 @@ internal schema, model versions, dependency stack, or classifier taxonomy.
 - [x] Add shared-storage copy validation and completion-last publication. The
   publisher refuses overwrite, validates a hidden sibling, atomically renames
   the run group, and advances completion metadata last.
+- [x] Harden post-rename publication: validate the authoritative target before
+  changing pointers, persist pre-pointer and final validation results, and
+  remove the new target plus restore the exact prior parent attrs on any
+  post-rename failure.
 - [x] Add a fail-closed Citrus LSF wrapper that pins a clean shared checkout,
   allocates node-local scratch, and records submission, status, and report
   paths on shared storage.
@@ -656,6 +675,11 @@ internal schema, model versions, dependency stack, or classifier taxonomy.
   71,049 invalid rows, and atomically published a 285 MB run. Source staging,
   local output, temporary publication, and final authoritative validation all
   matched their inventories.
+- [x] The hardened two-worker downstream canary
+  `tail_kinematics_hardened_w2_canary_20260715_01` completed all five physical
+  shard tasks, persisted valid pre-pointer and final validation reports, and
+  advanced both parent pointers only after validation. LSF job `153102493`
+  completed in 74 seconds with about 1 GB peak memory and no swap.
 - [x] Run the writer on the feeding canary subject-shape run:
   `tail_kinematics_k10_canary_20260430` from
   `subject_shape_v3_snout_medialjoin_canary_20260429` wrote 17,495 valid rows
