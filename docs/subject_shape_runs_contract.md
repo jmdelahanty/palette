@@ -48,6 +48,13 @@ follow-up shape methods under this same run family. The same run family is also
 the preferred materialized home for shared body-frame arrays derived from
 refined masks, centerlines, B-splines, keypoints, or hybrid estimators.
 
+Storage and execution tuning are tracked separately in
+[subject_shape_performance_benchmark.md](subject_shape_performance_benchmark.md).
+Logical compute/read chunks need not be physical Zarr file boundaries. Any
+parallel writer using indexed physical shards must assign one complete,
+non-overlapping shard to a writer, or compute into temporary block artifacts
+and assemble final shards deterministically before publication.
+
 ## Boundary Rule
 
 Use `refined_subject_masks_runs/<run>` for mask-local primitives:

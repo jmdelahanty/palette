@@ -157,7 +157,14 @@ class ArrayPlan:
     decoded_nbytes: int
 
 
-def _resolve_row_count(source: zarr.Group) -> int:
+def _resolve_row_count(source: zarr.Group, *, row_count_array: str | None = None) -> int:
+    if row_count_array is not None:
+        node = source.get(str(row_count_array))
+        if not isinstance(node, zarr.Array) or int(node.ndim) < 1:
+            raise ValueError(
+                f"Configured row-count array {row_count_array!r} is missing or not row-aligned."
+            )
+        return int(node.shape[0])
     for name in ("frame_index", "valid"):
         node = source.get(name)
         if isinstance(node, zarr.Array) and int(node.ndim) >= 1:
@@ -169,6 +176,8 @@ def build_plan(
     source_group: Path | str,
     *,
     shard_rows: int,
+    row_count_array: str | None = None,
+    source_label: str = "Tail-kinematics",
 ) -> tuple[ArrayPlan, ...]:
     source = zarr.open_group(
         str(Path(source_group).expanduser()),
@@ -178,10 +187,10 @@ def build_plan(
     completion = str(source.attrs.get("palette_run_completion_status", ""))
     if completion != "complete":
         raise ValueError(
-            "Tail-kinematics sharding benchmark requires a completed immutable run; "
+            f"{source_label} sharding benchmark requires a completed immutable run; "
             f"found palette_run_completion_status={completion!r}."
         )
-    row_count = _resolve_row_count(source)
+    row_count = _resolve_row_count(source, row_count_array=row_count_array)
     plans: list[ArrayPlan] = []
     for path, array in _iter_arrays(source):
         chunks = getattr(array, "chunks", None)
@@ -208,7 +217,7 @@ def build_plan(
             )
         )
     if not plans:
-        raise ValueError("Tail-kinematics source contains no arrays.")
+        raise ValueError(f"{source_label} source contains no arrays.")
     return tuple(plans)
 
 
@@ -284,6 +293,7 @@ def _build_candidate(
     *,
     plans: Sequence[ArrayPlan],
     workers: int,
+    report_schema: str = REPORT_SCHEMA,
 ) -> dict[str, Any]:
     source = zarr.open_group(str(source_path), mode="r", use_consolidated=False)
     destination = zarr.open_group(str(destination_path), mode="w", zarr_format=3)
@@ -292,7 +302,7 @@ def _build_candidate(
     destination.attrs.update(
         {
             "benchmark_only": True,
-            "benchmark_schema": REPORT_SCHEMA,
+            "benchmark_schema": str(report_schema),
             "benchmark_source_group": str(source_path),
             "benchmark_created_at_utc": _utc_now(),
         }
@@ -573,6 +583,9 @@ def run_benchmark(
     report_path: Path | str | None = None,
     transfer_root: Path | str | None = None,
     remove_transfer_copies: bool = True,
+    row_count_array: str | None = None,
+    source_label: str = "Tail-kinematics",
+    report_schema: str = REPORT_SCHEMA,
     apply: bool = False,
     overwrite: bool = False,
 ) -> dict[str, Any]:
@@ -584,7 +597,13 @@ def run_benchmark(
     if int(workers) <= 0:
         raise ValueError("workers must be positive.")
     plans_by_candidate = {
-        candidate: build_plan(source_path, shard_rows=candidate) for candidate in candidates
+        candidate: build_plan(
+            source_path,
+            shard_rows=candidate,
+            row_count_array=row_count_array,
+            source_label=source_label,
+        )
+        for candidate in candidates
     }
     chosen_report_path = (
         Path(report_path).expanduser()
@@ -595,10 +614,12 @@ def run_benchmark(
         Path(transfer_root).expanduser().resolve() if transfer_root is not None else None
     )
     report: dict[str, Any] = {
-        "schema": REPORT_SCHEMA,
+        "schema": str(report_schema),
         "created_at_utc": _utc_now(),
         "status": "planned",
         "source_group": str(source_path),
+        "source_label": str(source_label),
+        "row_count_array": str(row_count_array) if row_count_array is not None else None,
         "output_root": str(output_path),
         "report_path": str(chosen_report_path),
         "candidate_shard_rows": list(candidates),
@@ -662,6 +683,7 @@ def run_benchmark(
                 destination_path,
                 plans=plans,
                 workers=int(workers),
+                report_schema=str(report_schema),
             )
             destination = zarr.open_group(
                 str(destination_path),
