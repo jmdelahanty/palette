@@ -34,7 +34,7 @@ Options:
   --shard-rows N           Candidate physical row shard; repeatable
                            Defaults: 16384 through 1048576
   --ncores N               Parallel shard-copy workers (default: 16)
-  --mem-gb N               Memory request (default: 64)
+  --mem-gb N               Approximate total memory request (default: 64)
   --walltime H:MM          Walltime (default: 8:00)
   --palette-repo PATH      Clean cluster-visible Palette checkout
   --submit-host HOST       SSH poller when bsub is unavailable locally
@@ -79,6 +79,7 @@ done
 [[ "$BENCHMARK_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "unsafe --benchmark-id"
 [[ "$NCORES" =~ ^[1-9][0-9]*$ ]] || fail "--ncores must be positive"
 [[ "$MEM_GB" =~ ^[1-9][0-9]*$ ]] || fail "--mem-gb must be positive"
+MEM_GB_PER_SLOT=$(( (MEM_GB + NCORES - 1) / NCORES ))
 [[ -f "$SOURCE_RUN_PATH/zarr.json" || -f "$SOURCE_RUN_PATH/.zgroup" ]] || fail "source run metadata not found"
 if [[ ${#SHARD_ROWS[@]} -eq 0 ]]; then
   SHARD_ROWS=(16384 32768 65536 131072 262144 524288 1048576)
@@ -144,6 +145,7 @@ cd "\${PALETTE_REPO}"
 ACTUAL_COMMIT="\$(git rev-parse HEAD)"
 [[ "\${ACTUAL_COMMIT}" == "\${EXPECTED_COMMIT}" ]] || { printf 'Palette commit mismatch.\n' >&2; exit 2; }
 [[ -z "\$(git status --porcelain)" ]] || { printf 'Refusing dirty Palette checkout.\n' >&2; exit 2; }
+export PYTHONPATH="\${PALETTE_REPO}/src:\${PALETTE_REPO}\${PYTHONPATH:+:\${PYTHONPATH}}"
 
 if [[ -n "\${CONFIGURED_SCRATCH_BASE}" ]]; then
   scratch_base="\${CONFIGURED_SCRATCH_BASE}"
@@ -161,6 +163,7 @@ staged_source="\${scratch_root}/source.zarr"
 output_root="\${scratch_root}/variants"
 transfer_root="\${RUN_DIR}/transfer_tmp"
 mkdir -p "\${scratch_root}"
+export PYTHONPYCACHEPREFIX="\${scratch_root}/pycache"
 cleanup() {
   rm -rf -- "\${transfer_root}"
   if [[ "\${KEEP_SCRATCH}" != "1" ]]; then rm -rf -- "\${scratch_root}"; fi
@@ -214,7 +217,7 @@ BSUB_ARGS=(
   -J "subject_shape_sharding_${BENCHMARK_ID}"
   -n "$NCORES"
   -W "$WALLTIME"
-  -R "span[hosts=1] rusage[mem=${MEM_GB}G]"
+  -R "span[hosts=1] rusage[mem=${MEM_GB_PER_SLOT}G]"
   -oo "${RUN_DIR}/%J.out"
   -eo "${RUN_DIR}/%J.err"
 )
@@ -224,6 +227,8 @@ BSUB_COMMAND=(bsub "${BSUB_ARGS[@]}" bash "$JOB_SCRIPT")
 printf 'mode=%s\n' "$([[ "$SUBMIT" == "1" ]] && printf submit || printf render-only)"
 printf 'palette_commit=%s\n' "$EXPECTED_COMMIT"
 printf 'benchmark_id=%s\n' "$BENCHMARK_ID"
+printf 'memory_request_gb_total_target=%s\n' "$MEM_GB"
+printf 'memory_request_gb_per_slot=%s\n' "$MEM_GB_PER_SLOT"
 printf 'run_dir=%s\n' "$RUN_DIR"
 printf 'job_script=%s\n' "$JOB_SCRIPT"
 printf 'report=%s\n' "$REPORT_PATH"

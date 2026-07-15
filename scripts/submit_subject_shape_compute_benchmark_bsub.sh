@@ -39,7 +39,7 @@ Options:
   --source-start-row N     Aligned first source row (default: 524288)
   --row-count N            Bounded rows (default: 32768)
   --ncores N               Allocated slots (default: 32)
-  --mem-gb N               Memory request (default: 64)
+  --mem-gb N               Approximate total memory request (default: 64)
   --walltime H:MM          Walltime (default: 4:00)
   --palette-repo PATH      Clean cluster-visible Palette checkout
   --submit-host HOST       SSH poller when bsub is unavailable locally
@@ -95,6 +95,7 @@ for value_name in "ncores:$NCORES" "mem-gb:$MEM_GB" "source-start-row:$SOURCE_ST
 done
 (( NCORES > 0 && MEM_GB > 0 && ROW_COUNT > 0 )) || fail "resource and row counts must be positive"
 (( SOURCE_START_ROW % 256 == 0 )) || fail "--source-start-row must align to 256 rows"
+MEM_GB_PER_SLOT=$(( (MEM_GB + NCORES - 1) / NCORES ))
 
 if [[ ${#VARIANTS[@]} -eq 0 ]]; then
   VARIANTS=(
@@ -174,6 +175,7 @@ cd "\${PALETTE_REPO}"
 ACTUAL_COMMIT="\$(git rev-parse HEAD)"
 [[ "\${ACTUAL_COMMIT}" == "\${EXPECTED_COMMIT}" ]] || { printf 'Palette commit mismatch.\n' >&2; exit 2; }
 [[ -z "\$(git status --porcelain)" ]] || { printf 'Refusing dirty Palette checkout.\n' >&2; exit 2; }
+export PYTHONPATH="\${PALETTE_REPO}/src:\${PALETTE_REPO}\${PYTHONPATH:+:\${PYTHONPATH}}"
 
 if [[ -n "\${CONFIGURED_SCRATCH_BASE}" ]]; then
   scratch_base="\${CONFIGURED_SCRATCH_BASE}"
@@ -189,6 +191,7 @@ case "\${scratch_base}" in /groups/*) printf 'Refusing shared scratch.\n' >&2; e
 scratch_root="\${scratch_base}/subject_shape_compute_\${BENCHMARK_ID}"
 output_root="\${scratch_root}/outputs"
 mkdir -p "\${scratch_root}"
+export PYTHONPYCACHEPREFIX="\${scratch_root}/pycache"
 cleanup() {
   if [[ "\${KEEP_SCRATCH}" != "1" ]]; then rm -rf -- "\${scratch_root}"; fi
 }
@@ -235,7 +238,7 @@ BSUB_ARGS=(
   -J "subject_shape_compute_${BENCHMARK_ID}"
   -n "$NCORES"
   -W "$WALLTIME"
-  -R "span[hosts=1] rusage[mem=${MEM_GB}G]"
+  -R "span[hosts=1] rusage[mem=${MEM_GB_PER_SLOT}G]"
   -oo "${RUN_DIR}/%J.out"
   -eo "${RUN_DIR}/%J.err"
 )
@@ -245,6 +248,8 @@ BSUB_COMMAND=(bsub "${BSUB_ARGS[@]}" bash "$JOB_SCRIPT")
 printf 'mode=%s\n' "$([[ "$SUBMIT" == "1" ]] && printf submit || printf render-only)"
 printf 'palette_commit=%s\n' "$EXPECTED_COMMIT"
 printf 'benchmark_id=%s\n' "$BENCHMARK_ID"
+printf 'memory_request_gb_total_target=%s\n' "$MEM_GB"
+printf 'memory_request_gb_per_slot=%s\n' "$MEM_GB_PER_SLOT"
 printf 'run_dir=%s\n' "$RUN_DIR"
 printf 'job_script=%s\n' "$JOB_SCRIPT"
 printf 'report=%s\n' "$REPORT_PATH"
