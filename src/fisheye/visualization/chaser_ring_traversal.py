@@ -137,6 +137,50 @@ def _aggressive_chaser_index(run_group) -> tuple[int, str]:
     return 0, "fallback_chaser_0_no_cra_endpoint"
 
 
+def _fish_body_heading_deg(run_group) -> np.ndarray | None:
+    """The tracked fish body heading, from the egocentric_bearing component (None if absent)."""
+
+    ego = run_group.get("egocentric_bearing")
+    if ego is None or not len(list(ego.keys())):
+        return None
+    frames = ego[sorted(ego.keys())[-1]].get("frames")
+    if frames is None or "fish_heading_deg" not in frames:
+        return None
+    return np.asarray(frames["fish_heading_deg"][:], dtype=np.float64).reshape(-1)
+
+
+def _chase_frame_heading(
+    run_group, fish_px, chaser_px, heading_rad, frame_xy, *, pixels_per_mm: float
+) -> np.ndarray:
+    """Fish body-heading angle, per frame, in the chaser-centric drawn frame.
+
+    Computed by transforming a point one mm ahead of the fish (along its arena heading) through
+    the SAME chaser_frame_transform as its position, then taking the difference -- so it inherits
+    the frame's rotation with no angle-convention reasoning. Returned as the angle H for which the
+    drawing's (cos H, -sin H) reproduces that vector. Frames without a tracked heading fall back
+    to the direction of travel in the drawn frame.
+    """
+
+    n = int(fish_px.shape[0])
+    body = _fish_body_heading_deg(run_group)
+    head = np.full(n, np.nan)
+    if body is not None and body.shape[0] == n:
+        # arena heading unit vector, y-down convention (matches (cos h, -sin h))
+        hv = np.stack([np.cos(np.radians(body)), -np.sin(np.radians(body))], axis=1)
+        ahead_px = np.asarray(fish_px, dtype=np.float64) + float(pixels_per_mm) * hv
+        frame_ahead, _r, _b = chaser_frame_transform(ahead_px, chaser_px, heading_rad, pixels_per_mm=float(pixels_per_mm))
+        vec = np.asarray(frame_ahead, dtype=np.float64) - np.asarray(frame_xy, dtype=np.float64)
+        ok = np.isfinite(body) & np.isfinite(vec).all(axis=1) & (np.linalg.norm(vec, axis=1) > 1e-9)
+        head[ok] = np.degrees(np.arctan2(-vec[ok, 1], vec[ok, 0]))
+    # fall back to travel direction where body heading is missing
+    missing = ~np.isfinite(head)
+    if np.any(missing):
+        dxy = np.gradient(np.asarray(frame_xy, dtype=np.float64), axis=0)
+        travel = np.degrees(np.arctan2(-dxy[:, 1], dxy[:, 0]))
+        head[missing] = travel[missing]
+    return head
+
+
 def collect_chase_ring_entries(
     zarr_path: Path,
     *,
@@ -187,6 +231,15 @@ def collect_chase_ring_entries(
     dist = np.asarray(radius_mm, dtype=np.float64)
     frame_valid = fish_valid & chaser_valid & np.isfinite(dist) & np.isfinite(frame_xy).all(axis=1)
 
+    # The heading arrow is the fish's tracked BODY heading, transformed into the chaser frame
+    # by the SAME transform as its position (offset the fish one mm along its heading, transform
+    # that point too, take the difference). Deriving the arrow from the transformed vector rather
+    # than a rotated angle is convention-proof -- it is why the pre/post arrow bug cannot recur
+    # here. Where body heading is untracked we fall back to the direction of travel.
+    frame_head_deg = _chase_frame_heading(
+        run_group, fish_px, chaser_px, heading_rad, frame_xy, pixels_per_mm=float(ppm)
+    )
+
     # the training epoch window, settle-trimmed the same way every other component trims it
     epochs = _read_epochs(run_group, total_frames=total_frames)
     epochs = _apply_settle_trim(
@@ -231,13 +284,7 @@ def collect_chase_ring_entries(
             continue
         g = window + lo
         xy = frame_xy[g]
-        # heading arrow = the fish's motion direction in the DRAWN frame, so it is always
-        # consistent with the trajectory regardless of frame convention (the drawing code
-        # negates y, so store atan2(-dy, dx) of the drawn deltas).
-        head = np.full(xy.shape[0], np.nan)
-        if xy.shape[0] >= 3:
-            dxy = np.gradient(xy, axis=0)
-            head = np.degrees(np.arctan2(-dxy[:, 1], dxy[:, 0]))
+        head = frame_head_deg[g]
         scene.visits.append(
             {
                 "visit_id": v,
@@ -442,9 +489,10 @@ def render_ring_entries_png(
     extra = f"   (showing {len(shown)} of {len(rows)} entries)" if dropped else ""
     is_chase = meta.get("frame") == "chaser_centric"
     frame_line = (
-        "MOVING chaser at origin, rotated so pursuit points up · no fixed wall (nothing is fixed but the chaser)"
+        "MOVING chaser at origin, rotated so pursuit points up · no fixed wall · arrow = fish body "
+        "heading (the path is relative to the moving chaser, so the two need not coincide)"
         if is_chase else
-        "static object at origin, arena centre rotated to +x · grey arc = wall"
+        "static object at origin, arena centre rotated to +x · grey arc = wall · arrow = fish body heading"
     )
     fig.suptitle(
         f"Bouts per entry through the responsive rings — {meta['recording_id']}{extra}\n"

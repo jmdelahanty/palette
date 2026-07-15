@@ -208,7 +208,11 @@ def collect_visits(
                             "xy": canon[window],
                             "distance_mm": dist[window],
                             "t_s": (window - idx[0]) / fps,
-                            "heading_deg": heading[g] - math.degrees(
+                            # arena heading is y-down when drawn as (cos h, -sin h); the
+                            # canonical frame rotates positions by -theta, so the heading angle
+                            # must rotate by +theta to stay aligned with the drawn trajectory.
+                            # (Subtracting it, the earlier bug, left the arrow ~perpendicular.)
+                            "heading_deg": heading[g] + math.degrees(
                                 math.atan2(*(center - ref_pos)[::-1])
                             ),
                             "cpa_mm": float(np.nanmin(dist[idx])),

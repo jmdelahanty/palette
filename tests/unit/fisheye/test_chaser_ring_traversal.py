@@ -284,7 +284,36 @@ def test_training_figure_and_animation_render(tmp_path: Path) -> None:
     assert out.read_bytes().startswith(b"GIF")
 
 
-def test_aggressive_chaser_falls_back_cleanly_without_a_cra_endpoint(tmp_path: Path) -> None:
+def _arrow_follows_motion(scenes) -> float:
+    """Mean cos between the drawn heading arrow (cos H, -sin H) and the fish's motion in the
+    drawn frame, over all entries. A correct body-heading arrow is strongly positive; the sign
+    bug this guards against gave ~0 (perpendicular)."""
+
+    cs = []
+    for s in scenes:
+        for v in s.visits:
+            xy = np.asarray(v["xy"]); h = np.asarray(v["heading_deg"])
+            if xy.shape[0] < 8:
+                continue
+            mv = np.gradient(xy, axis=0)
+            arv = np.stack([np.cos(np.radians(h)), -np.sin(np.radians(h))], axis=1)
+            n = np.linalg.norm(mv, axis=1) * np.linalg.norm(arv, axis=1)
+            ok = (n > 1e-6) & np.isfinite(h)
+            if ok.sum() >= 3:
+                cs.append(float(np.nanmean((mv[ok] * arv[ok]).sum(1) / n[ok])))
+    return float(np.nanmean(cs)) if cs else float("nan")
+
+
+def test_static_frame_heading_arrow_points_along_the_motion(tmp_path: Path) -> None:
+    """Regression for a sign bug that left the heading arrow ~perpendicular to the fish's
+    motion. In the static (pre/post) frame the drawn path IS the fish's real motion, so a
+    correct body-heading arrow must point strongly along it -- not sideways."""
+
+    z = _archive_with_components(tmp_path, name="head.zarr")
+    _set_bout_peaks(z)
+    scenes, _meta = _collect(z)
+    cos = _arrow_follows_motion(scenes)
+    assert cos > 0.5, f"heading arrow does not follow motion (cos={cos:.2f}); the sign bug is back"
     """With a single chaser and no cra_primary_endpoint, the collector must not crash -- it
     falls back to chaser 0 and says so."""
 
