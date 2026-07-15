@@ -353,6 +353,13 @@ def _extract_detect_performance_rows(
         frames_zero_detections = _as_int(summary.get("frames_with_zero_detections"))
         total_frames = _as_int(summary.get("total_frames"))
         coverage_fallback = _extract_detect_coverage_summary(detect_group)
+        if not summary and not coverage_fallback:
+            # A historical writer could leave an empty run group behind before
+            # producing any arrays or summary attrs.  Such a placeholder is not
+            # a performance observation.  Projecting it gives the null-created
+            # row a fresh registry ``updated_utc`` and can incorrectly make it
+            # win ``detect_performance_latest`` over a valid legacy run.
+            continue
         if coverage_percent is None:
             coverage_percent = _as_float(coverage_fallback.get("coverage_percent"))
         if frames_with_detections is None:

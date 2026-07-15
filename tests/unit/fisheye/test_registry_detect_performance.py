@@ -700,6 +700,43 @@ def test_register_from_root_handles_archive_without_detect_runs(tmp_path: Path) 
     registry.close()
 
 
+def test_detect_performance_ignores_empty_legacy_run_group(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_empty" / "zarr" / "rec_empty_analysis.zarr"
+    _create_detect_archive(zarr_path, session_uuid="rec_empty_uuid")
+    root = zarr.open_group(str(zarr_path), mode="a")
+    root["detect_runs"].create_group("detect_empty_placeholder")
+
+    dataset_id = registry.register_from_root(
+        zarr.open_group(str(zarr_path), mode="r"),
+        zarr_path,
+    )
+
+    rows = registry.conn.execute(
+        """
+        SELECT detect_run
+        FROM detect_performance
+        WHERE dataset_id = ?
+        ORDER BY detect_run;
+        """,
+        (dataset_id,),
+    ).fetchall()
+    assert [str(row["detect_run"]) for row in rows] == ["detect_new", "detect_old"]
+
+    latest = registry.conn.execute(
+        """
+        SELECT detect_run, coverage_percent
+        FROM detect_performance_latest
+        WHERE dataset_id = ?;
+        """,
+        (dataset_id,),
+    ).fetchone()
+    assert latest is not None
+    assert str(latest["detect_run"]) == "detect_new"
+    assert float(latest["coverage_percent"]) == 75.0
+    registry.close()
+
+
 def test_model_only_views_select_latest_model_backed_run(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_b" / "zarr" / "rec_b_analysis.zarr"
