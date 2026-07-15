@@ -114,3 +114,61 @@ contract validation rather than rereading historical runs.
 - Final production design should retain small logical blocks, assemble large
   physical shards on node-local scratch, validate there, and publish the
   completed run atomically.
+
+## Sleepyfish benchmark evidence (2026-07-15)
+
+The bounded compute matrix ran as Citrus job `153101220` from Palette commit
+`c910935895b30d72da82dd603e6f1600c0ebc06e`. It processed source rows
+524,288–557,055 (32,768 rows); every output array from all eight variants had
+the same decoded SHA-256 digest as the baseline.
+
+| Variant | Wall seconds | Rows/s | Result |
+| --- | ---: | ---: | --- |
+| per-task open, 8 workers, 256 rows, 1 native thread | 61.89 | 529 | exact |
+| persistent, 8 workers, 256 rows, 1 native thread | 60.65 | 540 | exact |
+| persistent, 8 workers, 512 rows, 1 native thread | 59.97 | 546 | exact |
+| persistent, 8 workers, 1,024 rows, 1 native thread | 59.98 | 546 | exact |
+| persistent, 8 workers, 1,024 rows, 2 native threads | 60.21 | 544 | exact |
+| persistent, 16 workers, 1,024 rows, 1 native thread | 31.41 | 1,043 | exact |
+| persistent, 32 workers, 1,024 rows, 1 native thread | 18.60 | 1,762 | exact |
+| cropped centerline, 32 workers, 1,024 rows, 1 native thread | 14.37 | 2,281 | exact |
+
+Foreground cropping reduced summed centerline compute from 222.32 to 90.82
+worker-seconds (59%) and reduced variant wall time by 23%, or increased
+throughput by 29%. Two native threads did not help. Persistent handles and
+larger compute blocks helped only modestly, while 16 and 32 single-threaded
+workers scaled well. The job peaked at 36.7 GB. Its LSF record also exposed
+retained native-library thread pools despite active `threadpoolctl` limits, so
+the wrapper now sets an import-time native-thread ceiling before Python starts.
+
+The physical-shard matrix ran as Citrus job `153101250`. The authoritative
+source was read-only, the node-local stage was checksum-verified, and every one
+of 102 arrays matched exactly in every candidate. Copying the existing 421,379
+files to node-local storage took 922 seconds before independent checksum
+validation. The source occupied 3.84 GB of allocated filesystem space for
+2.39 GB of apparent data because most payload files were tiny.
+
+| Outer row shard | Payload files | Largest shard | Random trial | 1,024-row windows | Full scan |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| unsharded source | 421,264 | 0.11 MB | 0.148 s | 0.098 s | 9.94 s |
+| 16,384 | 6,913 | 7 MB | 0.185 s | 0.123 s | 8.41 s |
+| 65,536 | 1,729 | 28 MB | 0.186 s | 0.121 s | 10.61 s |
+| 131,072 | 865 | 55 MB | 0.185 s | 0.120 s | 10.61 s |
+| 262,144 | 481 | 107 MB | 0.187 s | 0.121 s | 10.62 s |
+| 524,288 | 289 | 212 MB | 0.186 s | 0.122 s | 10.63 s |
+| 1,048,576 | 193 | 418 MB | 0.187 s | 0.122 s | 10.66 s |
+
+The indexed sharding codec preserved 256-row inner-chunk access: interactive
+timings were nearly flat as outer shards grew. The recommended balanced layout
+is therefore 131,072 outer rows with 256-row inner chunks. It reduces payload
+files about 487-fold and allocated space to 2.39 GB while keeping the largest
+retry/rewrite unit near 55 MB. A 262,144-row layout is reasonable for
+bulk-oriented immutable products, but 524,288 and 1,048,576 rows provide too
+little additional benefit for their 212–418 MB retry units.
+
+For production, use 1,024-row logical compute blocks, single-threaded native
+libraries, and up to 32 worker processes on a 32-core node. Compute blocks must
+not independently write into a shared 131,072-row physical shard. Either one
+writer must own the complete outer shard, or workers must create temporary
+block outputs that are assembled deterministically on node-local storage before
+validation and atomic publication.
