@@ -106,8 +106,10 @@ nodes:
     execution_policy: chunk_aligned_backend_required
     description: >-
       Palette-native framewise tail angles, deflections, and curvature. The
-      current serial whole-array writer must gain a chunk-aligned backend
-      before full Sleepyfish execution.
+      dedicated bounded materializer now provides node-local source staging,
+      physically sharded output, and validated completion-last publication.
+      A real million-frame staged canary and optional local-worker ownership
+      remain required before general DAG execution.
 
   - id: kinematics_samples
     kind: export

@@ -1,8 +1,8 @@
 # Tail Kinematics Run Design
 <!-- contract-meta
-version: 1
+version: 2
 status: active
-last_verified: 2026-05-01
+last_verified: 2026-07-15
 -->
 
 Purpose: define the first Palette-native tail-angle, tail-deflection, and
@@ -51,7 +51,6 @@ segmentations, or external classifier outputs.
 The current implementation requires a valid subject-shape run with:
 
 ```text
-components/subject_body/bspline_sample_xy
 components/subject_body/bspline_valid
 components/subject_body/tail_sample_s
 components/subject_body/tail_sample_xy
@@ -59,7 +58,6 @@ components/subject_body/tail_tangent_xy
 components/subject_body/tail_curvature_px_inv
 components/subject_body/tail_sample_valid
 components/subject_body/tail_base_xy
-components/subject_body/tail_tip_xy
 body_frame/forward_axis_xy
 body_frame/left_axis_xy
 body_frame/valid
@@ -278,6 +276,197 @@ analysis/bout_kinematics_runs/<run>/
 This keeps raw bout segmentation, frame-level tail traces, and per-bout
 biological summaries separable and re-runnable.
 
+## Million-Frame Materialization Strategy
+
+The subject-shape run is the immediate materialized input to native tail
+kinematics:
+
+```text
+refined subject masks
+  -> analysis/subject_shape_runs/<shape_run>
+  -> analysis/tail_kinematics_runs/<tail_run>
+```
+
+The subject-shape run remains the geometry authority. Tail kinematics must not
+return to dense masks, crops, or source video when the required subject-shape
+geometry is already materialized. This makes tail kinematics a relatively
+inexpensive, repeatable interpretation layer: its sample count, angle
+convention, and summaries can change without rerunning segmentation, contour
+extraction, or B-spline fitting.
+
+For the current implementation, the required subject-shape staging surface is:
+
+```text
+components/subject_body/
+  tail_sample_s
+  tail_sample_xy
+  tail_tangent_xy
+  tail_curvature_px_inv
+  tail_sample_valid
+  bspline_valid
+  tail_base_xy
+  tail_sample_failure_reason_bytes
+  bspline_failure_reason_bytes
+
+body_frame/
+  forward_axis_xy
+  left_axis_xy
+  valid
+  failure_reason_bytes
+
+row_index/
+  frame_indices
+  detection_indices
+  source_refined_row_ids
+  source_detect_row_index
+  source_crop_row_ids
+  instance_key
+
+source_refined_subject_masks/         optional revision snapshot
+```
+
+The row-index and revision arrays preserve provenance; the body and body-frame
+arrays drive the calculation. Unrelated subject-shape components, dense
+refined masks, eye-angle data, video, and other analysis-run families are not
+tail-kinematics staging inputs.
+
+### Preferred cluster topology
+
+The preferred large-recording topology is one LSF job per recording, not one
+scheduler job per Zarr chunk:
+
+```text
+one recording job
+  -> resolve and fingerprint the exact subject-shape source run
+  -> stage its required physical shards to node-local scratch
+  -> process bounded row blocks with a modest local worker pool
+  -> assemble and validate a complete local tail-kinematics run
+  -> copy the run to its authoritative Zarr location
+  -> publish completion metadata and latest-complete pointers last
+  -> clean ephemeral node-local data
+```
+
+Node-local staging is an execution cache, not another data authority. The
+recording Zarr on shared storage remains authoritative. A failed or preempted
+job may discard its local state without changing the selected subject-shape run
+or exposing a partially completed tail run as current.
+
+A reasonable first benchmark is 8, 16, and 32 local workers. Worker count must
+remain configurable because vectorized tail calculations may become limited by
+memory bandwidth before all CPUs are useful. For a cohort, the scheduler may
+run several per-recording jobs concurrently while retaining this intra-node
+topology within each job.
+
+### Shard-aware staging
+
+For an all-frame calculation that fits in node-local scratch, stage all
+physical shards of the required arrays in one explicit, resumable transfer
+before starting workers. "All" here means all shards of the narrow input
+surface above, not all shards in the recording Zarr. This avoids repeated
+network reads and keeps local workers off shared storage during computation.
+
+The staging manifest must record at least:
+
+- exact source Zarr and subject-shape run;
+- source schema/method versions and a metadata fingerprint;
+- selected array paths;
+- requested frame or row interval;
+- physical shards selected for each array;
+- byte/file totals and verification outcome.
+
+Selective shard staging is reserved for bounded time ranges, multi-node
+partitioning, insufficient local capacity, or resuming unfinished output
+ranges. Because one physical Zarr shard may contain several logical chunks,
+selection and worker ownership must follow the physical shard/chunk layout
+rather than arbitrary row boundaries. Touching one logical chunk can require
+reading its enclosing physical shard.
+
+A manifest-driven transfer such as a single resumable file-copy operation is
+preferred to workers fetching shards independently. The transfer still opens
+the physical files internally, but operationally it is one bounded and
+auditable staging phase.
+
+### Local parallel computation and safe publication
+
+The writer now resolves lazy subject-shape array handles, copies row lineage
+and revision snapshots in bounded slices, and computes/writes one row block at
+a time. Requested block rows are rounded up to the physical output row-chunk
+grid and both values are recorded in provenance. This single-writer streaming
+backend is the first safe milestone: memory is bounded without requiring
+parallel writes. The block-local kernel now vectorizes shared-grid
+interpolation, body-frame projection, validity classification, and summary
+reductions. New runs record `compute_kernel = "vectorized_shared_grid_v1"`.
+Sparse failure-label normalization remains rowwise because it operates only on
+invalid rows.
+
+On the first 16,384-row Sleepyfish block, the scalar kernel took about 0.998
+seconds and the vectorized kernel took about 0.070 seconds, approximately a
+14-fold compute speedup. All 15 floating-point output arrays had zero maximum
+absolute difference against the persisted scalar reference; validity and
+failure bytes were also exact. Network source reads took roughly 1.4--2.4
+seconds in those spot measurements, so node-local staging remains the larger
+end-to-end optimization target.
+
+Local parallel execution may then assign each worker one or more consecutive
+blocks. Every worker must exclusively own complete, non-overlapping physical
+output chunks for every array it writes. Disjoint logical row slices are not
+sufficient when they share a physical Zarr chunk. Requested and effective
+block boundaries, worker count, and physical chunk alignment must be recorded
+in provenance. See [dask_zarr_write_safety.md](dask_zarr_write_safety.md) for
+the repository-wide write rule.
+
+The local result is not publishable until a single coordinator verifies:
+
+- exact, gap-free row coverage;
+- no overlapping worker ownership;
+- expected shapes, dtypes, and sample count;
+- validity and failure-reason accounting;
+- source fingerprint equality;
+- required row lineage and revision snapshots;
+- successful completion of every output array.
+
+The implemented materializer lives in
+`fisheye.analysis_workflows.materializers.tail_kinematics`. Its default mode is
+a read-only plan. With `--apply`, it:
+
+1. resolves and inventories the exact source run without creating scratch;
+2. copies only the required physical files through one `rsync --files-from`
+   operation;
+3. validates the staged file inventory and opens the staged logical run;
+4. computes the complete result against the node-local subset Zarr;
+5. validates schema, shapes, row accounting, block accounting, and the compute
+   kernel;
+6. copies the completed run into a hidden authoritative sibling, validates the
+   copied physical inventory and logical run, and atomically renames that
+   sibling to the final run name;
+7. marks the authoritative run complete and advances the latest-complete
+   pointer only after that rename.
+
+Existing authoritative run names are never replaced. Scratch is removed only
+after successful publication and is retained after failure for diagnosis. The
+authoritative run-group rename and parent latest-complete update are serialized
+per recording with an advisory file lock, so two materializers cannot race the
+same parent metadata. The
+corresponding LSF entrypoint is
+`scripts/submit_tail_kinematics_materialization_bsub.sh`; it pins a clean Palette
+commit, refuses compute outside an LSF allocation, selects `/scratch` or a
+node-local `$TMPDIR`, and records an atomic status file on shared storage.
+
+New tail-kinematics outputs use Zarr v3 physical shards whose outer row span is
+the effective compute block size (16,384 rows by default), while preserving the
+smaller established inner chunk grid. This reduces the number of files copied
+back to shared storage and ensures future workers can own complete physical
+output shards. Current subject-shape sources are still physically chunked, so
+the first staging implementation copies all required source chunk files. It
+will naturally copy fewer physical files when upstream subject-shape arrays are
+sharded without changing the logical staging contract.
+
+The node-local single-writer topology and atomic publication path are now
+implemented and unit tested. The million-frame workflow DAG remains blocked by
+`chunk_aligned_backend_required` until a real large-recording staged canary is
+validated and optional intra-node worker ownership is implemented. Direct use
+of the dedicated materializer does not require enabling the general DAG node.
+
 ## Megabouts Compatibility
 
 Megabouts should be treated as an adapter and classifier consumer, not as the
@@ -429,10 +618,33 @@ internal schema, model versions, dependency stack, or classifier taxonomy.
   samples.
 - [x] Add unit tests for sign convention, straight-tail zero angle, left/right
   sign, and invalid-row propagation.
+- [x] Replace whole-array source, lineage, and revision loading with a bounded
+  single-writer block calculation and validate equivalent output in unit tests.
+- [x] Vectorize block-local interpolation, projection, angle, and summary
+  operations. Real-data comparison against the persisted scalar Sleepyfish
+  reference was exact for floating outputs, validity, and failure bytes.
+- [x] Add a manifest-driven node-local staging adapter that copies all physical
+  shards of only the required subject-shape arrays for an all-frame run.
+- [ ] Add configurable intra-node workers with exclusive, complete output-chunk
+  ownership and record requested/effective worker blocking in provenance.
+- [x] Add shared-storage copy validation and completion-last publication. The
+  publisher refuses overwrite, validates a hidden sibling, atomically renames
+  the run group, and advances completion metadata last.
+- [x] Add a fail-closed Citrus LSF wrapper that pins a clean shared checkout,
+  allocates node-local scratch, and records submission, status, and report
+  paths on shared storage.
+- [ ] Run the node-local materializer on the million-frame Sleepyfish source and
+  inspect its staging, local-compute, publish, and final-validation reports
+  before enabling `tail_kinematics` in the general workflow DAG.
 - [x] Run the writer on the feeding canary subject-shape run:
   `tail_kinematics_k10_canary_20260430` from
   `subject_shape_v3_snout_medialjoin_canary_20260429` wrote 17,495 valid rows
   and 1,740 invalid rows from 19,235 ROI rows.
+- [x] Preserve the first whole-array Sleepyfish reference run for streaming
+  parity: `tail_kinematics_sleepyfish_core_canary_20260715_01` wrote 1,097,961
+  valid and 71,049 invalid rows from 1,169,010 rows in about 500 seconds. A
+  bounded dry run over the same source resolves 72 blocks at 16,384 effective
+  rows with 256-row output chunks.
 - [ ] Persist PNG summaries for tail angles, tail-tip deflection, curvature,
   and validity/failure reasons.
 - [ ] Add tail traces to the Marimo kinematics explorer after the Zarr schema
