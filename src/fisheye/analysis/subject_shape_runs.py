@@ -1651,13 +1651,32 @@ def _reconstruct_path(prev: np.ndarray, start_idx: int, end_idx: int) -> Optiona
     return path
 
 
-def _longest_skeleton_endpoint_path_xy(mask: np.ndarray) -> tuple[Optional[np.ndarray], str]:
+def _longest_skeleton_endpoint_path_xy(
+    mask: np.ndarray,
+    *,
+    crop_to_foreground: bool = False,
+) -> tuple[Optional[np.ndarray], str]:
     mask_bool = np.asarray(mask, dtype=bool)
     if int(np.count_nonzero(mask_bool)) == 0:
         return None, "missing_subject_body_mask"
-    if _single_component_count(mask_bool) != 1:
+    coordinate_offset_xy = np.zeros((2,), dtype=np.float64)
+    working_mask = mask_bool
+    if bool(crop_to_foreground):
+        foreground_yx = np.argwhere(mask_bool)
+        y0, x0 = np.min(foreground_yx, axis=0).astype(np.int64)
+        y1, x1 = (np.max(foreground_yx, axis=0) + 1).astype(np.int64)
+        # A one-pixel zero border preserves the full-frame outside-mask
+        # boundary condition even when the foreground touches an ROI edge.
+        working_mask = np.pad(
+            mask_bool[int(y0) : int(y1), int(x0) : int(x1)],
+            pad_width=1,
+            mode="constant",
+            constant_values=False,
+        )
+        coordinate_offset_xy = np.asarray([float(x0) - 1.0, float(y0) - 1.0])
+    if _single_component_count(working_mask) != 1:
         return None, "fragmented_subject_body_mask"
-    skeleton = skeletonize(mask_bool)
+    skeleton = skeletonize(working_mask)
     coords_yx = np.argwhere(skeleton)
     if int(coords_yx.shape[0]) < 2:
         return None, "skeleton_empty"
@@ -1678,6 +1697,7 @@ def _longest_skeleton_endpoint_path_xy(mask: np.ndarray) -> tuple[Optional[np.nd
         return None, "centerline_order_failed"
     path_yx = coords_yx[np.asarray(path_indices, dtype=np.int64)]
     path_xy = np.stack([path_yx[:, 1], path_yx[:, 0]], axis=1).astype(np.float64)
+    path_xy += coordinate_offset_xy.reshape(1, 2)
     return path_xy, "ok"
 
 
@@ -1938,6 +1958,7 @@ def _compute_centerline_batch(
     snout_tip: Optional[SnoutTipBatch] = None,
     source_body_qc: Optional[SourceBodyMaskQcBatch] = None,
     sample_count: int = CENTERLINE_SAMPLE_COUNT,
+    crop_to_foreground: bool = False,
 ) -> CenterlineBatch:
     masks_bool = np.asarray(body_masks, dtype=np.uint8) > 0
     row_count = int(masks_bool.shape[0])
@@ -1962,7 +1983,10 @@ def _compute_centerline_batch(
             centerline_reasons[row_idx] = "missing_body_frame"
             tail_base_reasons[row_idx] = "missing_body_frame"
             continue
-        path_xy, reason = _longest_skeleton_endpoint_path_xy(masks_bool[row_idx])
+        path_xy, reason = _longest_skeleton_endpoint_path_xy(
+            masks_bool[row_idx],
+            crop_to_foreground=bool(crop_to_foreground),
+        )
         if path_xy is None:
             centerline_reasons[row_idx] = reason
             tail_base_reasons[row_idx] = "missing_centerline"
@@ -2238,71 +2262,127 @@ def _process_and_write_subject_shape_chunk_groups(
     stop_row: int,
     chunk_index: int,
     execution_backend: str,
+    output_start_row: Optional[int] = None,
+    centerline_crop_to_foreground: bool = False,
 ) -> dict[str, object]:
-    row_slice = slice(int(start_row), int(stop_row))
+    source_row_slice = slice(int(start_row), int(stop_row))
+    output_start = int(start_row) if output_start_row is None else int(output_start_row)
+    output_stop = output_start + int(stop_row) - int(start_row)
+    output_row_slice = slice(output_start, output_stop)
     row_indices = np.arange(int(start_row), int(stop_row), dtype=np.int64)
     chunk_start = time.perf_counter()
     chunk_timing: dict[str, object] = {
         "chunk_index": int(chunk_index),
         "start_row": int(start_row),
         "stop_row": int(stop_row),
+        "output_start_row": output_start,
+        "output_stop_row": output_stop,
         "row_count": int(stop_row) - int(start_row),
         "execution_backend": execution_backend,
+        "centerline_crop_to_foreground": bool(centerline_crop_to_foreground),
     }
+    source_read_seconds = 0.0
+    compute_seconds = 0.0
+    write_seconds = 0.0
     batches: dict[str, ComponentBatch] = {}
     component_masks_by_name: dict[str, np.ndarray] = {}
     rows_with_component: dict[str, int] = {}
     source_body_qc: SourceBodyMaskQcBatch | None = None
     for component_name, component_idx in component_indices:
         phase_start = time.perf_counter()
+        read_start = time.perf_counter()
         component_masks = np.asarray(
             mask_store.read_dense(rows=row_indices, channels=[int(component_idx)])[:, 0],
             dtype=np.uint8,
         )
+        read_elapsed = float(time.perf_counter() - read_start)
+        source_read_seconds += read_elapsed
+        compute_start = time.perf_counter()
         batch = _compute_component_batch(component_masks, str(component_name))
-        _write_component_batch(run_group, str(component_name), row_slice, batch)
+        compute_elapsed = float(time.perf_counter() - compute_start)
+        compute_seconds += compute_elapsed
+        write_start = time.perf_counter()
+        _write_component_batch(run_group, str(component_name), output_row_slice, batch)
+        write_elapsed = float(time.perf_counter() - write_start)
+        write_seconds += write_elapsed
         batches[str(component_name)] = batch
         if str(component_name) in {"subject_body", "swim_bladder"}:
             component_masks_by_name[str(component_name)] = component_masks
         if str(component_name) == "subject_body":
-            source_body_qc = _read_source_body_mask_qc_batch(refined_group, row_slice)
-            _write_source_body_mask_qc_batch(run_group, row_slice, source_body_qc)
+            read_start = time.perf_counter()
+            source_body_qc = _read_source_body_mask_qc_batch(refined_group, source_row_slice)
+            qc_read_elapsed = float(time.perf_counter() - read_start)
+            source_read_seconds += qc_read_elapsed
+            write_start = time.perf_counter()
+            _write_source_body_mask_qc_batch(run_group, output_row_slice, source_body_qc)
+            qc_write_elapsed = float(time.perf_counter() - write_start)
+            write_seconds += qc_write_elapsed
+            chunk_timing["read_source_body_mask_qc_seconds"] = qc_read_elapsed
+            chunk_timing["write_source_body_mask_qc_seconds"] = qc_write_elapsed
             rows_with_component["source_body_mask_qc_severe"] = int(
                 np.count_nonzero(source_body_qc.severe_qc_failure)
             )
         rows_with_component[str(component_name)] = int(np.count_nonzero(batch.mask_present))
         chunk_timing[f"write_{component_name}_seconds"] = float(time.perf_counter() - phase_start)
+        chunk_timing[f"read_{component_name}_seconds"] = read_elapsed
+        chunk_timing[f"compute_{component_name}_seconds"] = compute_elapsed
+        chunk_timing[f"persist_{component_name}_seconds"] = write_elapsed
 
     body_frame: Optional[BodyFrameBatch] = None
     if set(BODY_FRAME_COMPONENTS).issubset(batches):
         phase_start = time.perf_counter()
+        compute_start = time.perf_counter()
         body_frame = _compute_body_frame_batch(batches)
-        _write_body_frame_batch(run_group, row_slice, body_frame)
+        compute_elapsed = float(time.perf_counter() - compute_start)
+        compute_seconds += compute_elapsed
+        write_start = time.perf_counter()
+        _write_body_frame_batch(run_group, output_row_slice, body_frame)
+        write_elapsed = float(time.perf_counter() - write_start)
+        write_seconds += write_elapsed
         chunk_timing["write_body_frame_seconds"] = float(time.perf_counter() - phase_start)
+        chunk_timing["compute_body_frame_seconds"] = compute_elapsed
+        chunk_timing["persist_body_frame_seconds"] = write_elapsed
         rows_with_component["body_frame_valid"] = int(np.count_nonzero(body_frame.valid))
 
     snout_tip: Optional[SnoutTipBatch] = None
     if body_frame is not None and "subject_body" in component_masks_by_name:
         phase_start = time.perf_counter()
+        compute_start = time.perf_counter()
         snout_tip = _compute_snout_tip_batch(
             component_masks_by_name["subject_body"],
             body_frame,
             source_body_qc=source_body_qc,
         )
-        _write_snout_tip_batch(run_group, row_slice, snout_tip)
+        compute_elapsed = float(time.perf_counter() - compute_start)
+        compute_seconds += compute_elapsed
+        write_start = time.perf_counter()
+        _write_snout_tip_batch(run_group, output_row_slice, snout_tip)
+        write_elapsed = float(time.perf_counter() - write_start)
+        write_seconds += write_elapsed
         chunk_timing["write_snout_tip_seconds"] = float(time.perf_counter() - phase_start)
+        chunk_timing["compute_snout_tip_seconds"] = compute_elapsed
+        chunk_timing["persist_snout_tip_seconds"] = write_elapsed
         rows_with_component["snout_tip_valid"] = int(np.count_nonzero(snout_tip.valid))
 
     caudal_anchor: Optional[CaudalAnchorBatch] = None
     if body_frame is not None and "swim_bladder" in component_masks_by_name:
         phase_start = time.perf_counter()
+        compute_start = time.perf_counter()
         caudal_anchor = _compute_caudal_anchor_batch(component_masks_by_name["swim_bladder"], body_frame)
-        _write_caudal_anchor_batch(run_group, row_slice, caudal_anchor)
+        compute_elapsed = float(time.perf_counter() - compute_start)
+        compute_seconds += compute_elapsed
+        write_start = time.perf_counter()
+        _write_caudal_anchor_batch(run_group, output_row_slice, caudal_anchor)
+        write_elapsed = float(time.perf_counter() - write_start)
+        write_seconds += write_elapsed
         chunk_timing["write_caudal_anchor_seconds"] = float(time.perf_counter() - phase_start)
+        chunk_timing["compute_caudal_anchor_seconds"] = compute_elapsed
+        chunk_timing["persist_caudal_anchor_seconds"] = write_elapsed
         rows_with_component["caudal_contour_valid"] = int(np.count_nonzero(caudal_anchor.valid))
 
     if body_frame is not None and caudal_anchor is not None and "subject_body" in component_masks_by_name:
         phase_start = time.perf_counter()
+        compute_start = time.perf_counter()
         centerline = _compute_centerline_batch(
             component_masks_by_name["subject_body"],
             body_frame,
@@ -2310,20 +2390,37 @@ def _process_and_write_subject_shape_chunk_groups(
             snout_tip=snout_tip,
             source_body_qc=source_body_qc,
             sample_count=CENTERLINE_SAMPLE_COUNT,
+            crop_to_foreground=bool(centerline_crop_to_foreground),
         )
-        _write_centerline_batch(run_group, row_slice, centerline)
+        compute_elapsed = float(time.perf_counter() - compute_start)
+        compute_seconds += compute_elapsed
+        write_start = time.perf_counter()
+        _write_centerline_batch(run_group, output_row_slice, centerline)
+        write_elapsed = float(time.perf_counter() - write_start)
+        write_seconds += write_elapsed
         chunk_timing["write_centerline_seconds"] = float(time.perf_counter() - phase_start)
+        chunk_timing["compute_centerline_seconds"] = compute_elapsed
+        chunk_timing["persist_centerline_seconds"] = write_elapsed
         rows_with_component["centerline_valid"] = int(np.count_nonzero(centerline.centerline_valid))
         rows_with_component["tail_base_valid"] = int(np.count_nonzero(centerline.tail_base_valid))
 
         if snout_tip is not None:
             phase_start = time.perf_counter()
+            compute_start = time.perf_counter()
             snout_check = _compute_centerline_snout_check_batch(snout_tip, centerline)
-            _write_centerline_snout_check_batch(run_group, row_slice, snout_check)
+            compute_elapsed = float(time.perf_counter() - compute_start)
+            compute_seconds += compute_elapsed
+            write_start = time.perf_counter()
+            _write_centerline_snout_check_batch(run_group, output_row_slice, snout_check)
+            write_elapsed = float(time.perf_counter() - write_start)
+            write_seconds += write_elapsed
             chunk_timing["write_centerline_snout_check_seconds"] = float(time.perf_counter() - phase_start)
+            chunk_timing["compute_centerline_snout_check_seconds"] = compute_elapsed
+            chunk_timing["persist_centerline_snout_check_seconds"] = write_elapsed
             rows_with_component["centerline_reaches_snout"] = int(np.count_nonzero(snout_check.reaches_snout))
 
         phase_start = time.perf_counter()
+        compute_start = time.perf_counter()
         spline = fit_subject_body_spline_batch(
             centerline.centerline_xy,
             centerline.centerline_valid,
@@ -2338,14 +2435,29 @@ def _process_and_write_subject_shape_chunk_groups(
             arclength_sample_count=DEFAULT_BSPLINE_ARCLENGTH_SAMPLE_COUNT,
             curvature_smoothing_px=DEFAULT_TAIL_CURVATURE_SMOOTHING_PX,
         )
-        _write_subject_body_spline_batch(run_group, row_slice, spline)
+        compute_elapsed = float(time.perf_counter() - compute_start)
+        compute_seconds += compute_elapsed
+        write_start = time.perf_counter()
+        _write_subject_body_spline_batch(run_group, output_row_slice, spline)
+        write_elapsed = float(time.perf_counter() - write_start)
+        write_seconds += write_elapsed
         chunk_timing["write_subject_body_spline_seconds"] = float(time.perf_counter() - phase_start)
+        chunk_timing["compute_subject_body_spline_seconds"] = compute_elapsed
+        chunk_timing["persist_subject_body_spline_seconds"] = write_elapsed
         rows_with_component["bspline_valid"] = int(np.count_nonzero(spline.bspline_valid))
         rows_with_component["tail_sample_valid"] = int(np.count_nonzero(spline.tail_sample_valid))
 
     phase_start = time.perf_counter()
-    _write_relations(run_group, row_slice, batches)
-    chunk_timing["write_relations_seconds"] = float(time.perf_counter() - phase_start)
+    _write_relations(run_group, output_row_slice, batches)
+    relations_elapsed = float(time.perf_counter() - phase_start)
+    chunk_timing["write_relations_seconds"] = relations_elapsed
+    chunk_timing["relations_compute_write_seconds"] = relations_elapsed
+    chunk_timing["source_read_seconds"] = source_read_seconds
+    chunk_timing["compute_seconds"] = compute_seconds
+    chunk_timing["persist_seconds"] = write_seconds
+    chunk_timing["combined_compute_write_seconds"] = (
+        compute_seconds + write_seconds + relations_elapsed
+    )
     chunk_timing["total_seconds"] = float(time.perf_counter() - chunk_start)
     return {
         "chunk_timing": chunk_timing,
@@ -2415,6 +2527,30 @@ def _compute_dask_tasks(
         if cluster is not None:
             cluster.close()
     return [dict(result) for result in results]
+
+
+def _summarize_subject_shape_chunk_timings(
+    chunk_timings: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    totals = [float(item.get("total_seconds") or 0.0) for item in chunk_timings]
+    numeric_keys = sorted(
+        {
+            str(key)
+            for item in chunk_timings
+            for key, value in item.items()
+            if str(key).endswith("_seconds") and isinstance(value, (int, float))
+        }
+    )
+    return {
+        "chunk_count": len(chunk_timings),
+        "mean_chunk_seconds": float(np.mean(totals)) if totals else 0.0,
+        "median_chunk_seconds": float(np.median(totals)) if totals else 0.0,
+        "p95_chunk_seconds": float(np.percentile(totals, 95.0)) if totals else 0.0,
+        "summed_timing_seconds": {
+            key: float(sum(float(item.get(key) or 0.0) for item in chunk_timings))
+            for key in numeric_keys
+        },
+    }
 
 
 def write_subject_shape_run_group(
@@ -2551,8 +2687,14 @@ def write_subject_shape_run_group(
         "dask_num_workers": int(num_workers) if num_workers is not None else None,
         "dask_chunk_size": max(1, int(chunk_size)),
         "dask_version": getattr(dask, "__version__", "unknown"),
+        "chunk_timings": _summarize_subject_shape_chunk_timings(chunk_timings),
     }
-    run_group.attrs["subject_shape_chunk_timings"] = list(_json_safe(chunk_timings))
+    run_group.attrs["subject_shape_chunk_timing_count"] = len(chunk_timings)
+    run_group.attrs["subject_shape_chunk_timing_storage"] = (
+        "embedded_full_records" if include_chunk_timings else "summary_only"
+    )
+    if include_chunk_timings:
+        run_group.attrs["subject_shape_chunk_timings"] = list(_json_safe(chunk_timings))
     parent = root["analysis"]["subject_shape_runs"]
     mark_run_complete(
         run_group,
@@ -2658,7 +2800,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--include-chunk-timings",
         action="store_true",
-        help="Include full per-chunk timing records in stdout. They are always stored in zarr attrs.",
+        help=(
+            "Include full per-chunk timing records in stdout and Zarr attrs. "
+            "Production runs otherwise persist only a compact timing summary."
+        ),
     )
     parser.add_argument("--json", action="store_true", help="Emit compact JSON.")
     return parser

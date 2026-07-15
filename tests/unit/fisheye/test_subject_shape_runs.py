@@ -134,6 +134,7 @@ def test_write_subject_shape_run_group_creates_coherent_components_and_relations
         refined_run="refined_001",
         run_name="shape_001",
         chunk_size=2,
+        include_chunk_timings=True,
     )
 
     assert summary["status"] == "updated"
@@ -233,6 +234,8 @@ def test_write_subject_shape_run_group_creates_coherent_components_and_relations
     )
     assert np.all(np.asarray(body["bspline_arc_length_px"][:], dtype=np.float32) > 0)
     assert run.attrs["provenance"]["stage"] == "analysis.subject_shape_runs"
+    assert run.attrs["subject_shape_chunk_timing_storage"] == "embedded_full_records"
+    assert len(run.attrs["subject_shape_chunk_timings"]) == 2
 
 
 def test_write_subject_shape_run_group_reads_compact_mask_store_without_dense_masks(monkeypatch) -> None:
@@ -306,7 +309,10 @@ def test_write_subject_shape_run_uses_dask_worker_chunks(tmp_path: Path, monkeyp
     assert run.attrs["provenance"]["parameters"]["worker_chunk_size"] == 3
     assert run.attrs["provenance"]["scheduler"]["dask_requested_chunk_size"] == 1
     assert run.attrs["provenance"]["scheduler"]["dask_chunk_size"] == 3
-    assert len(run.attrs["subject_shape_chunk_timings"]) == 1
+    assert run.attrs["subject_shape_chunk_timing_count"] == 1
+    assert run.attrs["subject_shape_chunk_timing_storage"] == "summary_only"
+    assert "subject_shape_chunk_timings" not in run.attrs
+    assert run.attrs["subject_shape_timing_summary"]["chunk_timings"]["chunk_count"] == 1
     assert run["components"]["eye_left"]["ellipse_success"][:].tolist() == [True, True, True]
     assert run["relations"]["eye_pair"]["separation_valid"][:].tolist() == [True, True, True]
     assert run["body_frame"]["valid"][:].tolist() == [True, True, True]
