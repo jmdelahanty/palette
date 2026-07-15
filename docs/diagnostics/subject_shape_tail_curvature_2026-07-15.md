@@ -108,8 +108,10 @@ so there are no C-starts to capture here regardless of tracking quality.
    an outlier that tracks the noisy tip; the integral averages over all points and is the actual
    tail-bend in degrees (`tail_kinematics_runs.integrated_abs_tail_curvature`).
 2. For a whole-body C-coil, use **`centerline_curvature_px_inv`** (v10, snout→tail), not the
-   tail-only array. Integrate it over a **trimmed body** (drop ~8 anterior + ~4 posterior points)
-   to exclude the snout-join and tail-tip endpoint artifacts (see the last section).
+   tail-only array. But the head region is noisy (unstable construction, not a clean artifact —
+   see the last section), so prefer curvature **change over time** in the trunk+tail (a C-start is
+   a transient deviation from resting posture) over absolute whole-body curvature; trimming the
+   head (~8 anterior points) helps pragmatically.
 3. Use the **v9+** (smoothed) curvature — the v8 arrays are unusable.
 4. **QC-reject physically impossible radii** (< ~5 px) — these flag the bad-mask frames.
 5. Materialize `subject_shape_runs` on **recordings that contain escapes** (i.e. the chaser
