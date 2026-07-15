@@ -253,7 +253,7 @@ analysis/subject_shape_runs/
         tail_sample_failure_reason_bytes (N, width) optional
         tail_width_px              (N, K) optional
         tail_width_valid           (N, K) optional
-        curvature                  (N, P) optional whole-centerline curvature
+        centerline_curvature_px_inv (N, P) whole-body (snout->tail) curvature [smoothing spline]
         validity/
         quality/
           preferred_body_length_px (N,) optional selected centerline/spline length
@@ -308,11 +308,22 @@ behavioral tail-angle vector.
 ### Two-spline tail geometry (method v9+, 2026-07-15)
 
 Positions (`tail_sample_xy`) and arc length come from the **interpolating** spline
-(`bspline_smoothing = 0`), which faithfully follows the mask skeleton. The **differentiated**
-quantities — `tail_tangent_xy`, `tail_normal_xy`, and `tail_curvature_px_inv` — come from a
-**separate smoothing spline** (`tail_curvature_method = separate_smoothing_spline_v1`,
-`s = n_points * tail_curvature_smoothing_px^2`, default 0.75 px). Recorded in the component/run
-attrs `tail_curvature_method` and `tail_curvature_smoothing_px`.
+(`bspline_smoothing = 0`), which faithfully follows the mask skeleton. Every **differentiated**
+quantity comes from a single **separate smoothing spline** fit to the same points
+(`tail_curvature_method = separate_smoothing_spline_v1`,
+`s = n_points * tail_curvature_smoothing_px^2`, default 0.75 px; recorded in attrs
+`tail_curvature_method` / `tail_curvature_smoothing_px`):
+
+- **`centerline_curvature_px_inv` (N, K_centerline)** — whole-body (snout→tail) signed curvature,
+  available whenever the spline is valid (does not need a valid tail base). This is the array for a
+  **whole-body bend / C-coil** metric.
+- **`tail_curvature_px_inv` (N, K_tail)**, `tail_tangent_xy`, `tail_normal_xy` — the same, over the
+  **tail segment** (tail base → tip, the posterior ~half). This is the array for a **tail-beat**
+  metric.
+
+Summarize either by the **integrated angle** — Σ of the between-point curvature × arclength
+(= ∫|κ|ds, degrees) — not the max, which is an outlier that tracks the noisy tail tip. Signed
+curvature also gives net turn (∫κ ds).
 
 **Why:** curvature is the second derivative of the centerline, and an interpolating spline
 through the ±0.5–1 px pixel-quantization jitter of the mask skeleton produces meaningless

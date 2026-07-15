@@ -158,3 +158,50 @@ def test_smoothing_preserves_a_real_body_bend() -> None:
     assert k.size
     # the recovered curvature should sit near 1/radius, not be smoothed to zero
     assert 0.6 / radius < np.median(k) < 1.6 / radius
+
+
+def test_whole_body_curvature_is_emitted_and_smoothed() -> None:
+    """A whole-body (snout->tail) curvature array is emitted alongside the tail-only one, from
+    the same smoothing spline, so jitter on a straight body reads as nearly straight over the
+    FULL centerline -- not just the tail segment."""
+
+    rng = np.random.default_rng(2)
+    n = 64
+    x = np.linspace(0.0, 75.0, n)
+    y = rng.normal(0.0, 0.6, n)                    # straight body + sub-pixel jitter
+    line = np.stack([x, y], axis=1)
+
+    b = _batch(line, curvature_smoothing_px=0.75)
+    cc = np.asarray(b.centerline_curvature_px_inv)
+    assert cc.shape == (1, n)                       # one value per centerline sample, whole body
+    finite = cc[0][np.isfinite(cc[0])]
+    assert finite.size > n // 2
+    # integrated whole-body bend (sum |curvature| * ds) is small for a straight body
+    ds = 75.0 / (n - 1)
+    integrated_deg = np.degrees(np.nansum(np.abs(cc[0])) * ds)
+    assert integrated_deg < 20.0                    # nearly straight over the whole body
+
+    # and it is smoothed: the interpolating version integrates to a much larger fake bend
+    b0 = _batch(line, curvature_smoothing_px=0.0)
+    integrated0 = np.degrees(np.nansum(np.abs(np.asarray(b0.centerline_curvature_px_inv)[0])) * ds)
+    assert integrated0 > 3 * integrated_deg
+
+
+def test_whole_body_curvature_available_without_a_valid_tail_base() -> None:
+    """Whole-body curvature depends only on the centerline spline, not the tail base -- so it is
+    present even when the tail segment is not resolved."""
+
+    n = 64
+    x = np.linspace(0.0, 75.0, n); y = np.zeros(n)
+    line = np.stack([x, y], axis=1)
+    b = fit_subject_body_spline_batch(
+        line[None, :, :].astype(np.float32),
+        np.asarray([True], dtype=bool),
+        np.asarray([False], dtype=bool),          # tail base INVALID
+        np.asarray([np.nan], dtype=np.float32),
+        centerline_failure_reasons=["ok"], tail_base_failure_reasons=["missing_tail_base"],
+        centerline_sample_count=n, tail_sample_count=32,
+        degree=DEFAULT_BSPLINE_DEGREE, smoothing=0.0,
+    )
+    assert not bool(b.tail_sample_valid[0])                     # tail not resolved
+    assert np.isfinite(np.asarray(b.centerline_curvature_px_inv)[0]).any()  # but whole-body is

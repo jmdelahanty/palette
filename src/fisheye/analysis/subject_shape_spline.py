@@ -39,6 +39,7 @@ class SubjectBodySplineBatch:
     bspline_valid: np.ndarray
     bspline_failure_reasons: np.ndarray
     bspline_arc_length_px: np.ndarray
+    centerline_curvature_px_inv: np.ndarray
     tail_sample_s: np.ndarray
     tail_sample_xy: np.ndarray
     tail_tangent_xy: np.ndarray
@@ -99,6 +100,14 @@ def _unit_vectors(vectors_xy: np.ndarray) -> Optional[np.ndarray]:
     return vectors / norms[:, None]
 
 
+def _signed_curvature(first_derivative: np.ndarray, second_derivative: np.ndarray) -> np.ndarray:
+    """Signed curvature kappa = (x' y'' - y' x'') / (x'^2 + y'^2)^1.5, per sample point."""
+    numerator = first_derivative[:, 0] * second_derivative[:, 1] - first_derivative[:, 1] * second_derivative[:, 0]
+    denominator = np.power(np.sum(first_derivative * first_derivative, axis=1), 1.5)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return numerator / denominator
+
+
 def _fit_one(
     centerline_xy: np.ndarray,
     *,
@@ -121,6 +130,7 @@ def _fit_one(
     tail_tangent = np.full((int(tail_sample_count), 2), np.nan, dtype=np.float32)
     tail_normal = np.full((int(tail_sample_count), 2), np.nan, dtype=np.float32)
     tail_curvature = np.full((int(tail_sample_count),), np.nan, dtype=np.float32)
+    centerline_curvature = np.full((int(centerline_sample_count),), np.nan, dtype=np.float32)
 
     result: dict[str, object] = {
         "control": control,
@@ -130,6 +140,7 @@ def _fit_one(
         "bspline_valid": False,
         "bspline_reason": str(centerline_invalid_reason or "missing_centerline"),
         "arc_length": np.float32(np.nan),
+        "centerline_curvature": centerline_curvature,
         "tail_xy": tail_xy,
         "tail_tangent": tail_tangent,
         "tail_normal": tail_normal,
@@ -188,6 +199,34 @@ def _fit_one(
     result["bspline_reason"] = "ok"
     result["arc_length"] = np.float32(dense_total)
 
+    # A single SEPARATE smoothing spline fit to the same points drives every DIFFERENTIATED
+    # quantity (whole-centerline curvature here, and tail tangent/normal/curvature below).
+    # Positions and arc length keep the interpolating spline. s = n * px^2 removes ~this many px
+    # of mask-skeleton jitter without flattening a real, coherent bend. Falls back to the
+    # interpolating spline if the smoothed fit fails (noisy, but never worse than before).
+    n_pts = int(fitted_points.shape[0])
+    curv_s = float(max(0.0, float(curvature_smoothing_px))) ** 2 * float(n_pts)
+    deriv_tck = tck
+    used_smoothing = False
+    if curv_s > 0.0:
+        try:
+            deriv_tck, _uc = interpolate.splprep(
+                [fitted_points[:, 0], fitted_points[:, 1]], u=u, k=int(degree), s=curv_s
+            )
+            used_smoothing = True
+        except Exception:
+            deriv_tck = tck
+    # whole-body (snout->tail) curvature at the centerline sample positions -- available whenever
+    # the spline is valid, independent of the tail base.
+    try:
+        cl_d1 = np.stack(interpolate.splev(eval_u, deriv_tck, der=1), axis=1)
+        cl_d2 = np.stack(interpolate.splev(eval_u, deriv_tck, der=2), axis=1)
+        cl_curv = _signed_curvature(cl_d1, cl_d2)
+        if np.all(np.isfinite(cl_curv)):
+            centerline_curvature[:] = cl_curv.astype(np.float32)
+    except Exception:
+        pass  # leave NaN; tail path below still runs
+
     if not bool(tail_base_valid):
         result["tail_reason"] = str(tail_base_invalid_reason or "missing_tail_base")
         return result
@@ -202,30 +241,10 @@ def _fit_one(
     tail_s = tail_sample_positions(int(tail_sample_count)).astype(np.float64)
     tail_u = tail_base_u + tail_s * (1.0 - tail_base_u)
 
-    # Positions come from the faithful interpolating spline. The differentiated quantities
-    # (tangent, normal, curvature) come from a SEPARATE smoothing spline fit to the same points,
-    # so the second derivative is not dominated by mask-skeleton pixel jitter. s = n * px^2 removes
-    # ~curvature_smoothing_px of per-point noise; a real, coherent body bend is far larger than the
-    # residual budget and survives. Falls back to the interpolating spline if the smoothed fit fails.
+    # Positions from the faithful interpolating spline; tangent/normal/curvature from the shared
+    # smoothing spline (deriv_tck) fit above.
     try:
         tail_points = np.stack(interpolate.splev(tail_u, tck, der=0), axis=1)
-    except Exception:
-        result["tail_reason"] = "spline_eval_failed"
-        return result
-
-    n_pts = int(fitted_points.shape[0])
-    curv_s = float(max(0.0, float(curvature_smoothing_px))) ** 2 * float(n_pts)
-    deriv_tck = tck
-    used_smoothing = False
-    if curv_s > 0.0:
-        try:
-            deriv_tck, _uc = interpolate.splprep(
-                [fitted_points[:, 0], fitted_points[:, 1]], u=u, k=int(degree), s=curv_s
-            )
-            used_smoothing = True
-        except Exception:
-            deriv_tck = tck  # noisy, but never worse than before
-    try:
         first_derivative = np.stack(interpolate.splev(tail_u, deriv_tck, der=1), axis=1)
         second_derivative = np.stack(interpolate.splev(tail_u, deriv_tck, der=2), axis=1)
     except Exception:
@@ -237,10 +256,7 @@ def _fit_one(
         result["tail_reason"] = "tail_spline_derivative_failed"
         return result
     normals = np.stack([-tangents[:, 1], tangents[:, 0]], axis=1)
-    numerator = first_derivative[:, 0] * second_derivative[:, 1] - first_derivative[:, 1] * second_derivative[:, 0]
-    denominator = np.power(np.sum(first_derivative * first_derivative, axis=1), 1.5)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        curvature = numerator / denominator
+    curvature = _signed_curvature(first_derivative, second_derivative)
     if np.any(~np.isfinite(curvature)):
         result["tail_reason"] = "tail_curvature_failed"
         return result
@@ -302,6 +318,7 @@ def fit_subject_body_spline_batch(
     bspline_valid = np.zeros((row_count,), dtype=bool)
     bspline_reasons = np.full((row_count,), "missing_centerline", dtype=object)
     arc_length = np.full((row_count,), np.nan, dtype=np.float32)
+    centerline_curvature = np.full((row_count, int(centerline_sample_count)), np.nan, dtype=np.float32)
     tail_s = tail_sample_positions(int(tail_sample_count))
     tail_xy = np.full((row_count, int(tail_sample_count), 2), np.nan, dtype=np.float32)
     tail_tangent = np.full((row_count, int(tail_sample_count), 2), np.nan, dtype=np.float32)
@@ -332,6 +349,7 @@ def fit_subject_body_spline_batch(
         bspline_valid[row_idx] = bool(fitted["bspline_valid"])
         bspline_reasons[row_idx] = str(fitted["bspline_reason"])
         arc_length[row_idx] = fitted["arc_length"]  # type: ignore[assignment]
+        centerline_curvature[row_idx] = fitted["centerline_curvature"]  # type: ignore[assignment]
         tail_xy[row_idx] = fitted["tail_xy"]  # type: ignore[assignment]
         tail_tangent[row_idx] = fitted["tail_tangent"]  # type: ignore[assignment]
         tail_normal[row_idx] = fitted["tail_normal"]  # type: ignore[assignment]
@@ -347,6 +365,7 @@ def fit_subject_body_spline_batch(
         bspline_valid=bspline_valid,
         bspline_failure_reasons=bspline_reasons,
         bspline_arc_length_px=arc_length,
+        centerline_curvature_px_inv=centerline_curvature,
         tail_sample_s=tail_s,
         tail_sample_xy=tail_xy,
         tail_tangent_xy=tail_tangent,

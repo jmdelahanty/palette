@@ -66,8 +66,8 @@ from .subject_shape_spline import (
 SUBJECT_SHAPE_SCHEMA_ID = "analysis.subject_shape_runs"
 SUBJECT_SHAPE_SCHEMA_VERSION = 3
 SOURCE_REFINED_SUBJECT_MASKS_SCHEMA_ID = "analysis.subject_shape.source_refined_subject_masks_v1"
-SUBJECT_SHAPE_METHOD = "subject_shape_from_refined_masks_v9"
-SUBJECT_SHAPE_METHOD_VERSION = 9
+SUBJECT_SHAPE_METHOD = "subject_shape_from_refined_masks_v10"
+SUBJECT_SHAPE_METHOD_VERSION = 10
 SUBJECT_SHAPE_STAGE_NAME = "analysis.subject_shape_runs"
 COMPONENT_ORDER = ("subject_body", "swim_bladder", "eye_left", "eye_right")
 ELLIPSE_COMPONENTS = ("swim_bladder", "eye_left", "eye_right")
@@ -485,6 +485,14 @@ def _prepare_component_group(run_group: zarr.Group, component_name: str, *, tota
             shape=(total_rows,),
             dtype=np.float32,
             chunks=chunks_1d,
+            fill_value=np.nan,
+        )
+        _create_array(
+            component_group,
+            "centerline_curvature_px_inv",
+            shape=(total_rows, CENTERLINE_SAMPLE_COUNT),
+            dtype=np.float32,
+            chunks=_metric_chunks_lastdim(total_rows, CENTERLINE_SAMPLE_COUNT),
             fill_value=np.nan,
         )
         if "tail_sample_s" in component_group:
@@ -2131,6 +2139,7 @@ def _write_subject_body_spline_batch(
     group["bspline_valid"][row_slice] = batch.bspline_valid
     group["bspline_failure_reason_bytes"][row_slice, :] = _encode_reasons(batch.bspline_failure_reasons)
     group["bspline_arc_length_px"][row_slice] = batch.bspline_arc_length_px
+    group["centerline_curvature_px_inv"][row_slice, :] = batch.centerline_curvature_px_inv
     group["tail_sample_xy"][row_slice, :, :] = batch.tail_sample_xy
     group["tail_tangent_xy"][row_slice, :, :] = batch.tail_tangent_xy
     group["tail_normal_xy"][row_slice, :, :] = batch.tail_normal_xy

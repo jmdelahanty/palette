@@ -141,8 +141,8 @@ def test_write_subject_shape_run_group_creates_coherent_components_and_relations
     assert root["analysis"]["subject_shape_runs"].attrs["latest"] == "shape_001"
     assert run.attrs["schema_id"] == "analysis.subject_shape_runs"
     assert run.attrs["schema_version"] == 3
-    assert run.attrs["method"] == "subject_shape_from_refined_masks_v9"
-    assert run.attrs["method_version"] == 9
+    assert run.attrs["method"] == "subject_shape_from_refined_masks_v10"
+    assert run.attrs["method_version"] == 10
     assert run.attrs["snout_tip_estimator"] == "subject_body_contour_max_forward_projection_v1"
     assert run.attrs["centerline_method"] == "snout_anchored_skeleton_longest_endpoint_path_v1"
     assert run.attrs["centerline_skeleton_method"] == "skeleton_longest_endpoint_path_v1"
