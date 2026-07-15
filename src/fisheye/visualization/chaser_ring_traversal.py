@@ -526,7 +526,7 @@ def render_ring_entries_png(
     )
     fig.suptitle(
         f"Bouts per entry through the responsive rings — {meta['recording_id']} · {epoch_line}{extra}\n"
-        f"amber shell = 8–16 mm responsive band · red dashed = {ESCAPE_TRIGGER_MM:g} mm escape trigger · "
+        f"amber shell = 8–16 mm responsive band · red dashed ring = {ESCAPE_TRIGGER_MM:g} mm escape trigger · "
         f"{frame_line}\n"
         "each panel is labelled with its object and its distance to the dish edge — the wall arc differs "
         "because aggressive and inert dots sit at different distances from it\n"
@@ -574,7 +574,14 @@ def write_ring_traversal_gif(
         for _ in range(hold_frames):                 # pause on the completed entry
             timeline.append((r_idx, n - 1, True))
 
-    fig, ax = plt.subplots(figsize=(6.0, 6.4))
+    fig, ax = plt.subplots(figsize=(6.0, 6.8))
+    fig.subplots_adjust(top=0.82, bottom=0.12)
+    # figure-level legend: it persists across frames (ax.clear() does not touch fig text)
+    fig.text(0.5, 0.065, f"amber = 8–16 mm responsive shell   ·   red dashed ring = "
+             f"{ESCAPE_TRIGGER_MM:g} mm escape trigger   ·   red dot = object",
+             ha="center", va="center", fontsize=7, color="#334155")
+    fig.text(0.5, 0.028, "blue = ordinary bout   ·   red ★ = escape bout   ·   "
+             "red ○ = closest approach", ha="center", va="center", fontsize=7, color="#334155")
 
     def draw(i: int) -> None:
         r_idx, f, is_hold = timeline[i]

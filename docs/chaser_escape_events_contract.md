@@ -33,6 +33,16 @@ Missing parent → a `ValueError` naming `chaser_bout_response`. It does not fal
 
 A valid bout whose `peak_speed_mm_s` exceeds `peak_speed_threshold_mm_s` (default **100.0**).
 
+**This is a pure velocity cut — nothing else.** No turn angle, no C-start shape, no acceleration,
+no proximity. A fast *forward* swim and a true C-start both count if they clear the threshold; the
+13.5 mm trigger ring is *descriptive* (where these fast bouts happen to fire), not part of the
+classification. What makes the population behave like escapes is the surrounding evidence — the
+bouts are directed away from the chaser (+8.5 mm gained), fire when it is close, and survive
+raising the cut to 150/200 mm/s — not the label. A stricter "escape = C-start" definition would
+need turn angle and sub-10 ms latency, which **100 fps cannot resolve** (a C-start is 1.5–2
+frames). So read `escape` as "high-speed bout," and lean on the directedness/proximity/threshold-
+sweep results, not the word, when the distinction matters.
+
 **Why a threshold and not a cluster.** K-means on 322,781 pooled bouts (K=4, on turn / speed /
 displacement / duration / tortuosity) reported the escape-like cluster rising from 0.167 to
 0.198 during the chase — **p=0.057, a null**. Escapes are **1.45%** of bouts; k-means minimizes
