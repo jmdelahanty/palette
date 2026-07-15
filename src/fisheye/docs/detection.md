@@ -5,6 +5,12 @@
 `fisheye.refinement.detect_quality` analyzes a raw detect run and writes
 artifact labels under `detect_runs/<run>/quality_reports/<quality_run>`.
 
+For modern recording-level or clipped-collection sources,
+`fisheye.refinement.detect_quality_collection` runs shard workers followed by
+a deterministic boundary reconciler and writes keyed, indexed-sharded outputs
+under `detect_quality_runs/<quality_run>`. See
+`docs/detect_quality_collection_reconciliation_contract.md`.
+
 Those labels are consumed by `fisheye.refinement.refine_detect` to filter raw
 detections before writing the sparse curated refined surface at
 `refined_detect_runs/<run>/instances`.
