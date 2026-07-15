@@ -292,14 +292,15 @@ editable, non-sharded canonical `masks_roi` array.
 
 - [x] Build a two-clip canary whose boundary is deliberately not divisible by
   the 128-row dense-mask chunk size.
-- [ ] A/B the v1 decoded importer and v2 encoded publisher for exact row
-  identity, decoded mask equality, metrics, sampled contours, eye geometry,
-  provenance, completion pointers, and Crimson/`MaskStore` reads.
-- [ ] Validate every boundary row plus deterministic samples from every
+- [x] A/B the v1 decoded importer and v2 encoded publisher for exact row
+  identity, sampled decoded-mask equality, all non-mask arrays, provenance,
+  and completion state.
+- [x] Validate every boundary row plus deterministic samples from every
   package and channel; verify copied encoded-object digests before decode
   checks.
 - [ ] Record wall time, CPU time, peak RSS, bytes read/written, and PRFS object
   operations for both paths.
+- [ ] Validate the first full-recording result through Crimson and `MaskStore`.
 - [x] Keep v2 behind an explicit feature flag for the first full recording and
   fall back closed to the v1 importer on any contract mismatch.
 - [ ] Enable v2 by default only after a full recording passes validation,
@@ -309,12 +310,33 @@ Independent of package v2, the v1 importer must pre-index package row
 placements once per destination chunk grid. It must not rescan all recording
 rows for every destination chunk.
 
-As of 2026-07-14, the checked implementation items above are covered by the
-v2 grid/package/publisher code and a deliberately misaligned in-memory two-clip
-A/B test. The production flag `--encoded-mask-packages` remains off by default.
-The unchecked retry-accounting, cluster performance, full scientific parity,
-Crimson, and default-rollout gates require the PRFS two-clip canary and then one
-complete recording.
+As of 2026-07-15, the deliberately misaligned two-clip PRFS A/B canary passed
+for 107,472 rows. The encoded publisher took 58.6 seconds versus 717.8 seconds
+for the decoded v1 importer, a 12.25x client-observed speedup. LSF reported
+53.5 versus 898.9 CPU seconds, 507 MiB versus 2,778 MiB peak memory, and 78
+versus 747 seconds of scheduler runtime. The validator compared all 134
+non-mask arrays exactly (80,550,532 values), decoded 2,128 mask rows across 17
+deterministic row chunks and all four channels, and included every row of the
+single cross-package boundary chunk. The encoded publisher copied 3,356 stored
+objects totaling 69,828,072 bytes, verified each destination digest, directly
+owned 839 row chunks, and decoded/reassembled only the one boundary row chunk.
+The retained report is
+`/groups/johnson/johnsonlab/jeremy/palette_smoke/sleepyfish_cam2010093_encoded_import_ab_20260715_v003/validation/ab_report.json`.
+
+The performance-instrumentation item remains open because the canary did not
+measure complete filesystem bytes and operation counts for the decoded v1
+path. Full-mask parity, Crimson loading, retry accounting, and default rollout
+remain gates for the first complete recording.
+
+The canary's standalone v1-to-v2 conversion jobs are compatibility-only. New
+clipped workflows must use `--encoded-mask-packages`: the recording-level grid
+is frozen before the package array, and each subject-mask finalizer emits its
+v2 package directly. This removes old-package extraction and second-package
+rewriting from the production DAG. The finalizer still performs the necessary
+global-chunk encoding, digest calculation, and one package seal from its fresh
+node-local dense output; those package-creation costs are not eliminated. The
+production flag remains off by default until the first full recording passes
+the remaining gates.
 
 ## Sleepyfish pre-array dry run, 2026-07-14
 
