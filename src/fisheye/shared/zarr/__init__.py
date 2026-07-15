@@ -1,1 +1,1 @@
-"""Zarr schema definitions."""
+"""Shared Zarr storage and schema helpers."""

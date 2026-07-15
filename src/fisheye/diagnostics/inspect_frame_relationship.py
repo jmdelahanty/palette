@@ -17,7 +17,7 @@ import zarr
 from rich.console import Console
 from rich.table import Table
 
-from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
+from fisheye.shared.zarr.columnar import load_structured_dataset
 from fisheye.shared.zarr_helpers import resolve_zarr_run
 
 

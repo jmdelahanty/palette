@@ -1,13 +1,23 @@
 import numpy as np
 import zarr
 
-from fisheye.analysis.chaser_state_interpolator import (
-    analyze_frame_gaps,
-    interpolate_metadata,
+from fisheye.analysis.chaser_state_interpolator import analyze_frame_gaps, interpolate_metadata
+from fisheye.shared.zarr.columnar import (
     load_structured_dataset,
     pick_chunks,
     write_columnar_dataset,
 )
+
+
+def test_chaser_interpolator_reexports_historical_storage_names():
+    from fisheye.analysis import chaser_state_interpolator
+    from fisheye.shared.zarr import columnar
+
+    assert chaser_state_interpolator.load_structured_dataset is columnar.load_structured_dataset
+    assert chaser_state_interpolator.pick_chunks is columnar.pick_chunks
+    assert chaser_state_interpolator.read_columnar_dataset is columnar.read_columnar_dataset
+    assert chaser_state_interpolator.store_array is columnar.store_array
+    assert chaser_state_interpolator.write_columnar_dataset is columnar.write_columnar_dataset
 
 
 def test_write_columnar_dataset_roundtrip(tmp_path):

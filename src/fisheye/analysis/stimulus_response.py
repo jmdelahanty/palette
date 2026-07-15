@@ -58,7 +58,7 @@ from fisheye.shared.system_metadata import get_git_info
 from fisheye.shared.zarr_io import open_zarr_root
 
 from fisheye.analysis.swim_bout_io import load_default_swim_bout_tables
-from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
+from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.analysis.track_kinematics_io import (
     list_track_ids,
     load_track_kinematics_track,

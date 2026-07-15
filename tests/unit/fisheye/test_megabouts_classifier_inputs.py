@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import zarr
 
-from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
+from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.analysis.megabouts_classifier_inputs import (
     build_megabouts_classifier_input_pack,
     diagnose_input_pack_invalid_windows,

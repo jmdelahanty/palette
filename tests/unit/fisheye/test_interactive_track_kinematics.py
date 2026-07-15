@@ -6,7 +6,7 @@ import numpy as np
 import zarr
 
 from fisheye.analysis import plot_track_kinematics as plot_mod
-from fisheye.analysis.chaser_state_interpolator import store_array, write_columnar_dataset
+from fisheye.shared.zarr.columnar import store_array, write_columnar_dataset
 from fisheye.visualization.interactive_track_kinematics import (
     DEFAULT_INTERACTIVE_ARTIFACT,
     bout_classification_records_to_dataframe,

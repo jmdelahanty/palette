@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import zarr
 
-from fisheye.analysis.chaser_state_interpolator import (
+from fisheye.shared.zarr.columnar import (
     load_structured_dataset,
     write_columnar_dataset,
 )

@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import zarr
 
-from fisheye.analysis.chaser_state_interpolator import store_array, write_columnar_dataset
+from fisheye.shared.zarr.columnar import store_array, write_columnar_dataset
 from fisheye.analysis.swim_bout_io import (
     SwimBoutIOError,
     discover_swim_bout_candidates,

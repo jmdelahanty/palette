@@ -6,7 +6,7 @@ import numpy as np
 import zarr
 
 from fisheye.analysis.chaser_metrics_loader import load_chaser_metrics
-from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
+from fisheye.shared.zarr.columnar import write_columnar_dataset
 
 
 def _write_minimal_stimulus_run(zarr_path: Path) -> None:

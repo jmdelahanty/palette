@@ -6,7 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import zarr
 
-from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
+from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.analysis.swim_bout_visualization import (
     _load_swim_bout_run,
     create_swim_bout_dashboard,

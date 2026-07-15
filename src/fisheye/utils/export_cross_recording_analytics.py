@@ -69,7 +69,7 @@ from fisheye.analytics_exports.baseline import (
 from fisheye.analysis.bout_kinematics import resolve_bout_kinematics_tables
 from fisheye.analysis.chaser_behavior import canonical_behavior_label
 from fisheye.analysis.cra_primary_endpoint import QUADRANT_LABELS, quadrant_code_for_xy
-from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
+from fisheye.shared.zarr.columnar import load_structured_dataset
 from fisheye.analysis.swim_bout_io import (
     SwimBoutIOError,
     load_default_swim_bout_tables,

@@ -17,7 +17,7 @@ import polars as pl
 import zarr
 
 from fisheye.analysis.chaser_behavior import canonical_behavior_label
-from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
+from fisheye.shared.zarr.columnar import load_structured_dataset
 from fisheye.shared.coordinate_transform import load_calibration_transform, projector_to_camera_px
 from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.utils.view_zarr_visualization import load_png_artifact_bytes

@@ -16,7 +16,7 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 import zarr
 
-from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
+from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.analysis.bout_classification_runs import (
     BOUT_CLASSIFICATION_SCHEMA_ID,
     BOUT_CLASSIFICATION_SCHEMA_VERSION,

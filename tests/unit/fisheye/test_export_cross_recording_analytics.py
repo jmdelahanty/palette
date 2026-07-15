@@ -34,7 +34,7 @@ from fisheye.analysis.goodcopbadcop_epoch_behavior_summary import (
     build_goodcopbadcop_epoch_behavior_summary_result,
     write_goodcopbadcop_epoch_behavior_summary_component,
 )
-from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
+from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.analysis.stimulus_response import (
     ConcentricStepData,
     GratingStepData,

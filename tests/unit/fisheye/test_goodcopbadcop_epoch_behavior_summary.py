@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import zarr
 
-from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
+from fisheye.shared.zarr.columnar import load_structured_dataset
 from fisheye.analysis.goodcopbadcop_epoch_behavior_summary import (
     DEFAULT_COMPONENT_NAME,
     SCHEMA_ID,

@@ -66,7 +66,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 import numpy as np
 from scipy import signal
 
-from fisheye.analysis.chaser_state_interpolator import store_array, write_columnar_dataset
+from fisheye.shared.zarr.columnar import store_array, write_columnar_dataset
 from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
 from fisheye.shared.json_safety import json_attr_safe, json_attr_safe_mapping, strict_json_dumps
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs

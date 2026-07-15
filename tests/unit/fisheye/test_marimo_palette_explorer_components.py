@@ -55,7 +55,7 @@ from fisheye.analysis.chaser_gaze_tracking import (
     SCHEMA_ID as CHASER_GAZE_TRACKING_SCHEMA_ID,
     SUMMARY_PNG_ARTIFACT_NAME as CHASER_GAZE_TRACKING_SUMMARY_PNG_ARTIFACT_NAME,
 )
-from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
+from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.visualization.goodcopbadcop_interactive import (
     CHASER_DASHBOARD_RENDERER,
     DEFAULT_CHASER_DASHBOARD_INTERACTIVE_ARTIFACT,

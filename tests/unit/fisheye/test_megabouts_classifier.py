@@ -5,7 +5,7 @@ from dataclasses import replace
 import numpy as np
 import zarr
 
-from fisheye.analysis.chaser_state_interpolator import read_columnar_dataset
+from fisheye.shared.zarr.columnar import read_columnar_dataset
 from fisheye.analysis.megabouts_classifier import (
     MEGABOUTS_PREPROCESSED_INPUT_MODE,
     PALETTE_PREPARED_INPUT_MODE,

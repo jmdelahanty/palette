@@ -9,7 +9,7 @@ from typing import Dict, Optional, Sequence, Tuple, Union
 import numpy as np
 import zarr
 
-from .chaser_state_interpolator import load_structured_dataset
+from fisheye.shared.zarr.columnar import load_structured_dataset
 
 
 PathLike = Union[str, Path]

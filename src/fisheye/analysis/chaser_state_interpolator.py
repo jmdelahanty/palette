@@ -12,10 +12,16 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 import zarr
 from rich.console import Console
-from zarr.core.dtype import VariableLengthUTF8
-from zarr import Array as ZarrArray, Group as ZarrGroup
 
-from fisheye.shared.json_safety import decode_null_terminated_text
+# Compatibility re-exports for callers of the historical analysis-module path.
+# New code should import these storage helpers from the shared module directly.
+from fisheye.shared.zarr.columnar import (
+    load_structured_dataset,
+    pick_chunks,
+    read_columnar_dataset,
+    store_array,
+    write_columnar_dataset,
+)
 
 
 DEFAULT_TIMESTAMP_DELTA_NS = 8_333_333  # ~8.33ms for 120 Hz stimulus rendering
@@ -76,196 +82,6 @@ def _resolve_field(names: Sequence[str], candidates: Sequence[str], *, required:
         raise KeyError(f"None of the expected fields {candidates} found in {list(names)}")
     return None
 
-
-def _pick_chunks(shape: Tuple[int, ...]) -> Optional[Tuple[int, ...]]:
-    """Choose a reasonable chunk layout for storing data."""
-
-    if len(shape) == 0:
-        return None
-    if shape[0] == 0:
-        return (1,) + shape[1:]
-    if len(shape) == 1:
-        return (min(4096, shape[0]),)
-    first_dim = min(1024, shape[0])
-    if first_dim <= 0:
-        return None
-    return (first_dim,) + shape[1:]
-
-
-def _to_string_list(data: np.ndarray) -> List[str]:
-    """Convert a string-like numpy array to a list of text values."""
-
-    strings: List[str] = []
-    for value in data:
-        if isinstance(value, (bytes, np.bytes_, str)):
-            strings.append(decode_null_terminated_text(value, errors="ignore"))
-        elif value is None:
-            strings.append("")
-        else:
-            strings.append(str(value))
-    return strings
-
-
-def pick_chunks(shape: Tuple[int, ...]) -> Optional[Tuple[int, ...]]:
-    """Public wrapper around the chunk picker."""
-
-    return _pick_chunks(shape)
-
-
-def store_array(
-    parent: zarr.Group,
-    name: str,
-    data: np.ndarray,
-    attrs: Optional[Dict[str, object]] = None,
-) -> zarr.Array:
-    """Store numpy array (structured or standard) into Zarr, replacing any existing entry."""
-
-    if name in parent:
-        del parent[name]
-
-    if data.dtype.names:
-        chunks = _pick_chunks(data.shape)
-        arr = parent.create_array(
-            name,
-            data=data,
-            chunks=chunks,
-            overwrite=True,
-        )
-        if attrs:
-            for attr_name, attr_value in attrs.items():
-                arr.attrs[attr_name] = attr_value
-        return arr
-
-    if data.dtype.kind in ("S", "O", "U"):
-        values = _to_string_list(data)
-
-        # Encode strings as 2D uint8 array for TensorStore compatibility
-        # Determine max length needed (with reasonable upper bound)
-        if values:
-            max_len = min(max(len(str(v).encode('utf-8')) for v in values), 512)
-            # Round up to next power of 2 for efficiency
-            max_len = 2 ** (max_len - 1).bit_length()
-        else:
-            max_len = 128
-
-        # Create 2D uint8 array (num_strings, max_len)
-        encoded = np.zeros((len(values), max_len), dtype=np.uint8)
-        for i, v in enumerate(values):
-            byte_data = str(v).encode('utf-8')[:max_len]
-            encoded[i, :len(byte_data)] = np.frombuffer(byte_data, dtype=np.uint8)
-
-        # Store as 2D uint8 array - TensorStore can read this directly
-        arr = parent.create_array(
-            name,
-            data=encoded,
-            chunks=_pick_chunks(encoded.shape),
-            overwrite=True,
-        )
-    else:
-        chunks = _pick_chunks(data.shape)
-        arr = parent.create_array(
-            name,
-            data=data,
-            chunks=chunks,
-            overwrite=True,
-        )
-
-    if attrs:
-        for attr_name, attr_value in attrs.items():
-            arr.attrs[attr_name] = attr_value
-
-    return arr
-
-
-def write_columnar_dataset(
-    parent: zarr.Group,
-    name: str,
-    data: np.ndarray,
-    attrs: Optional[Dict[str, object]] = None,
-) -> zarr.Group:
-    """Store a structured array as a columnar Zarr group."""
-    if data.dtype.names is None:
-        raise ValueError("write_columnar_dataset requires a structured dtype.")
-
-    if name in parent:
-        del parent[name]
-
-    group = parent.create_group(name)
-    field_names = list(data.dtype.names)
-    group.attrs["storage_layout"] = "columnar"
-    group.attrs["field_names"] = field_names
-
-    # Store the original dtype string for each field to preserve exact type information
-    field_dtypes = {}
-    for field in field_names:
-        field_dtypes[field] = str(data.dtype.fields[field][0])
-    group.attrs["field_dtypes"] = field_dtypes
-
-    if attrs:
-        for attr_name, attr_value in attrs.items():
-            group.attrs[attr_name] = attr_value
-
-    for field in field_names:
-        field_data = np.asarray(data[field])
-        store_array(group, field, field_data, None)
-
-    return group
-
-
-def read_columnar_dataset(group: zarr.Group) -> np.ndarray:
-    """Load a columnar Zarr group into a structured numpy array."""
-    if not isinstance(group, ZarrGroup):
-        raise TypeError("Expected a Zarr group for columnar dataset.")
-    field_names = list(group.attrs.get("field_names", []))
-    if not field_names:
-        raise ValueError("Columnar group missing 'field_names' attribute.")
-
-    # Get stored field dtypes if available
-    field_dtypes = group.attrs.get("field_dtypes", {})
-
-    arrays = []
-    dtype = []
-    for field in field_names:
-        arr = group[field][:]
-
-        # Use stored dtype if available, otherwise infer from loaded array
-        if field in field_dtypes:
-            field_dtype = np.dtype(field_dtypes[field])
-            dtype.append((field, field_dtype))
-
-            # Special handling for fixed-length byte strings stored as 2D uint8
-            if field_dtype.kind == 'S' and arr.ndim == 2 and arr.dtype == np.uint8:
-                # Decode 2D uint8 array back to fixed-length byte strings
-                # Each row is a string encoded as uint8 bytes
-                n_strings = arr.shape[0]
-                decoded = np.empty(n_strings, dtype=field_dtype)
-                for i in range(n_strings):
-                    # Convert uint8 row to bytes, strip null bytes
-                    byte_string = arr[i].tobytes().rstrip(b'\x00')
-                    decoded[i] = byte_string
-                arrays.append(decoded)
-            else:
-                arrays.append(arr)
-        else:
-            dtype.append((field, arr.dtype))
-            arrays.append(arr)
-
-    structured = np.empty(len(arrays[0]), dtype=dtype)
-    for field, arr in zip(field_names, arrays):
-        structured[field] = arr
-    return structured
-
-
-def load_structured_dataset(parent: zarr.Group, name: str) -> Tuple[np.ndarray, Dict[str, object]]:
-    """Load a dataset that may be stored as columnar group or structured array."""
-    node = parent.get(name)
-    if node is None:
-        raise KeyError(f"Dataset '{name}' not found in group '{parent.path}'.")
-    if isinstance(node, ZarrArray):
-        return node[:], dict(node.attrs)
-    if isinstance(node, ZarrGroup):
-        return read_columnar_dataset(node), dict(node.attrs)
-    raise TypeError(f"Unsupported node type for '{name}': {type(node)}")
 
 
 def analyze_frame_gaps(
@@ -665,7 +481,7 @@ def _interpolate_run(
             metadata_attrs["total_records"] = int(combined_metadata.shape[0])
             write_columnar_dataset(meta_group, "frame_metadata", combined_metadata, metadata_attrs)
             if combined_metadata_mask is not None:
-                mask_chunks = _pick_chunks(combined_metadata_mask.shape)
+                mask_chunks = pick_chunks(combined_metadata_mask.shape)
                 arr = run_group.create_array(
                     "interpolation_mask",
                     data=combined_metadata_mask,
@@ -708,7 +524,7 @@ def _interpolate_run(
             chaser_attrs["total_records"] = int(combined_chaser.shape[0])
             write_columnar_dataset(tracking_group, "chaser_states", combined_chaser, chaser_attrs)
             if combined_chaser_mask is not None:
-                mask_chunks = _pick_chunks(combined_chaser_mask.shape)
+                mask_chunks = pick_chunks(combined_chaser_mask.shape)
                 arr = tracking_group.create_array(
                     "chaser_interpolation_mask",
                     data=combined_chaser_mask,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import zarr
 
-from fisheye.analysis.chaser_state_interpolator import store_array, write_columnar_dataset
+from fisheye.shared.zarr.columnar import store_array, write_columnar_dataset
 from fisheye.utils.compare_swim_bout_layouts import (
     compare_swim_bout_layouts,
     comparison_to_dict,

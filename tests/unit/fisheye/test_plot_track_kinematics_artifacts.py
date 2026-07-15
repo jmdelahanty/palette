@@ -8,7 +8,7 @@ import zarr
 from rich.console import Console
 
 from fisheye.analysis import plot_track_kinematics as mod
-from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
+from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.shared.plot_artifacts import INTERACTIVE_SPEC_SCHEMA_ID, PNG_ARTIFACT_SCHEMA_ID
 
 

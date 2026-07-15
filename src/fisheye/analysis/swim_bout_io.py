@@ -14,7 +14,7 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 import zarr
 
-from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
+from fisheye.shared.zarr.columnar import load_structured_dataset
 from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.shared.zarr_helpers import (
     normalize_zarr_path as _normalize_path,

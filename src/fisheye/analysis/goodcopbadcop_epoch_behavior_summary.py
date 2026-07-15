@@ -15,7 +15,7 @@ import zarr
 from fisheye.analysis.chaser_distance_runs import (
     ChaserDistanceWindow,
 )
-from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
+from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.analysis.epoch_segments import (
     HistogramMetricSpec,
     histogram_table,

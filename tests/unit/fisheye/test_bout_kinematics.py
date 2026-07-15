@@ -17,7 +17,7 @@ from fisheye.analysis.bout_kinematics import (
     normalize_heading_level,
     resolve_bout_kinematics_tables,
 )
-from fisheye.analysis.chaser_state_interpolator import load_structured_dataset, write_columnar_dataset
+from fisheye.shared.zarr.columnar import load_structured_dataset, write_columnar_dataset
 
 
 def _write_array(group: zarr.Group, name: str, data: np.ndarray) -> None:

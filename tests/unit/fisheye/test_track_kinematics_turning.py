@@ -8,7 +8,7 @@ import zarr
 from rich.console import Console
 
 from fisheye.analysis import track_kinematics as mod
-from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
+from fisheye.shared.zarr.columnar import write_columnar_dataset
 from fisheye.analysis.compute_speed import (
     TRANSITION_REASON_FIRST_SAMPLE,
     TRANSITION_REASON_FRAME_GAP,

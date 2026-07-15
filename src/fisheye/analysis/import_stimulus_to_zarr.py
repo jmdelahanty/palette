@@ -98,6 +98,8 @@ from .chaser_state_interpolator import (
     analyze_frame_gaps,
     interpolate_metadata,
     interpolate_run,
+)
+from fisheye.shared.zarr.columnar import (
     pick_chunks,
     store_array,
     write_columnar_dataset,

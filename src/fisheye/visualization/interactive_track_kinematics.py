@@ -515,7 +515,7 @@ def _spans_from_structured_bouts(bouts: np.ndarray, fps: Optional[float]) -> np.
 
 
 def _load_structured_or_empty(group: zarr.Group, name: str) -> np.ndarray:
-    from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
+    from fisheye.shared.zarr.columnar import load_structured_dataset
 
     try:
         records, _attrs = load_structured_dataset(group, name)
