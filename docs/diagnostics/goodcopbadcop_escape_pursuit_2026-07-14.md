@@ -159,9 +159,12 @@ recollection of "once or twice." The rate ratio and the proximity trigger hold a
 usable range.
 
 **Caveat:** nothing exceeds ~300 mm/s. Larval C-starts peak at 100–500 mm/s, and a C-start lasts
-~15–20 ms = **1.5–2 frames at 100 fps**. Centroid-differenced peak speed almost certainly
-*under-reads* true escape velocity, and the absolute mm/s values here should not be compared to
-the high-speed-imaging literature. The **contrasts** are unaffected.
+~15–20 ms = **1.5–2 frames at 100 fps** — enough to *detect* the event, not to *resolve* its
+kinematics (the peak coil, angular velocity, stage-1 latency). Centroid-differenced peak speed
+therefore *under-reads* true escape velocity (it averages over the 10 ms window), and the absolute
+mm/s values here should not be compared to the high-speed-imaging literature. The **contrasts**
+are unaffected. (A per-frame midline exists in `subject_shape_runs` but is materialized on only 1
+of 40 recordings, none in this cohort, with unvetted tail masks — see the escape-events contract.)
 
 ### Tracking dropout does not explain it
 

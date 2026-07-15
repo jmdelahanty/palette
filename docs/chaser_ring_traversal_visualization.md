@@ -19,8 +19,10 @@ picture:
   turn-away), **orange ▶ = dash escape** (fast but nearly straight), **thin blue = ordinary
   bout**. In the animation each bout lights up as it is executed and stays lit, so the *set* of
   bouts builds up as you watch. The turn threshold is `high_turn_threshold_deg` (default 45°),
-  read from `chaser_escape_events`; at 100 fps `turn_deg` is a net heading change, not a resolved
-  C-start bend, so this is a coarse turn-away/dash split (see the escape-events contract).
+  read from `chaser_escape_events`; `turn_deg` is a net heading change (centroid), not a body coil,
+  so this is a coarse turn-away/dash split — a real C-start's shape lives in the midline
+  (`subject_shape_runs`), and its *kinematics* are unresolvable at 100 fps regardless. See the
+  escape-events contract's "Can we see C-starts?" for the full detect-vs-resolve breakdown.
 
 ## Entry points
 

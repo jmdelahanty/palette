@@ -52,11 +52,40 @@ at ≥60°), and the high-turn sub-population is *if anything more chase-specifi
 cut alone (~6× pre→chase at 45° vs ~5.7× for all escapes). About a third of escapes are
 high-turn; the rest are forward dashes.
 
-**Caveat, stated plainly:** at 100 fps `turn_deg` is a *net heading change over the bout*, not a
-resolved C-start bend (a C-start is 1.5–2 frames). So the tier is a coarse "turn-away vs forward
-dash" split, **not** a kinematic C-start classifier. Read the tiers accordingly, and lean on the
-directedness/proximity/threshold-sweep evidence — not the word "escape" or the tier label — when
-the distinction carries weight.
+### Can we see C-starts? Detect yes, resolve no
+
+Keep three things separate — conflating them is the mistake:
+
+1. **Detect that a fast event happened — yes, at 100 fps.** An escape is impulsive and
+   net-displacing, so it leaves a large sample-to-sample jump no matter how coarsely you sample.
+   This is *not* a Nyquist problem; the peak-speed threshold keys on exactly this. We do not
+   systematically miss escapes.
+2. **Measure the C-bend *shape* — possible in principle, not from this component.** `turn_deg`
+   is a *net heading change over the whole bout* (centroid), not a body coil. The body coil lives
+   in the midline, which `subject_shape_runs` fits per frame (see below) — so the *spatial* C
+   signature is measurable, just not here.
+3. **Resolve the C-bend *kinematics* (angular-velocity profile, stage-1 latency, peak coil) —
+   no, at 100 fps.** The stage-1 bend is ~10–15 ms = 1–1.5 frames, so you get 1–2 samples on the
+   event: enough to know it happened, not enough to reconstruct its waveform. This *is* the
+   Nyquist/undersampling wall, and no amount of mask quality fixes it. It is also why
+   `peak_speed_mm_s` under-reads true C-start velocity (frame-differencing averages over the
+   10 ms window) — trust the *contrasts*, not the absolute mm/s.
+
+So the tier is a coarse "turn-away vs forward dash" split, **not** a kinematic C-start classifier.
+Read it accordingly, and lean on the directedness/proximity/threshold-sweep evidence — not the
+word "escape" or the tier label — when the distinction carries weight.
+
+**On the midline (`analysis/subject_shape_runs`).** It exists and fits a per-frame 64-point
+B-spline midline, an anatomical body frame, snout/tail landmarks, and tail geometry — so a body
+*bend* angle is computable and would spatially distinguish a C-start coil from a forward dash.
+But as of 2026-07-15 it is materialized on **1 of 40** GoodCopBadCop recordings, and that one
+(`2026-05-29_arena_1`) is **not** in the 32-fish escape cohort (no chaser distance run), so it
+cannot yet be crossed with the escape analysis. Two quality caveats before trusting it: mask-truth
+QC was not run (`source_mask_qc_available = False`, so `requires_review`/`severe_failure` are
+vacuously 0), and the **tail specifically** is invalid ~10% of frames (`tail_sample_valid` ≈ 0.90
+vs `centerline_valid` ≈ 0.98) — truncated/unsegmented tails, plausibly worst at peak coil. A real
+C-start classifier would need `subject_shape_runs` materialized on the escape cohort *and* the
+tail masks vetted — and even then would resolve shape, not kinematics.
 
 **Why a threshold and not a cluster.** K-means on 322,781 pooled bouts (K=4, on turn / speed /
 displacement / duration / tortuosity) reported the escape-like cluster rising from 0.167 to
@@ -185,11 +214,13 @@ per-recording median and are the safe things to aggregate across recordings. Do 
 
 ## Measurement ceiling
 
-At 100 fps a larval C-start (~15–20 ms) spans **1.5–2 frames**, so centroid-differenced
-`peak_speed_mm_s` **under-reads** true escape velocity. Nothing in this cohort exceeds
-~300 mm/s where the literature reports 100–500 mm/s. **Absolute values are not comparable to
-high-speed-imaging work.** The contrasts (epoch, reference) are unaffected — the same
-under-reading applies to every condition — and `threshold_sweep/` exists so this can be checked
+At 100 fps a larval C-start (~15–20 ms) spans **1.5–2 frames** — enough to *detect* it (see
+"Can we see C-starts?" above), not to *resolve* its kinematics. So centroid-differenced
+`peak_speed_mm_s` **under-reads** true escape velocity (it averages over the 10 ms window).
+Nothing in this cohort exceeds ~300 mm/s where the literature reports 100–500 mm/s. **Absolute
+values are not comparable to high-speed-imaging work.** The contrasts (epoch, reference) are
+unaffected — the same under-reading applies to every condition — and `threshold_sweep/` exists
+so this can be checked
 rather than assumed. On the cohort the rate ratio holds at 7.8× (100 mm/s), 16.0× (150), and
 11.7× (200); at 200 mm/s the median fish shows 3 escapes in the chase.
 
