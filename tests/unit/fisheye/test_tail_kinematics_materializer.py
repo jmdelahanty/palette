@@ -246,6 +246,11 @@ def test_materialize_tail_kinematics_stages_computes_and_atomically_publishes(
     assert run.attrs["palette_run_completion_status"] == "complete"
     assert run.attrs["compute_kernel"] == "vectorized_shared_grid_v1"
     assert run.attrs["cluster_output_staging"]["schema_id"] == mod.PUBLISH_SCHEMA_ID
+    assert run.attrs["cluster_output_staging"]["pre_pointer_validation"]["valid"] is True
+    assert run.attrs["cluster_output_staging"]["final_validation"]["valid"] is True
+    assert run.attrs["cluster_output_staging"]["rollback_policy"] == (
+        "remove_new_target_and_restore_parent_attrs_on_post_rename_failure"
+    )
     assert (
         run.attrs["cluster_output_staging"]["serialization_policy"]
         == "per_recording_advisory_file_lock"
@@ -319,6 +324,69 @@ def test_process_shard_slice_validation_rejects_partial_shared_shards() -> None:
             output_row_chunk=2,
             output_shard_rows=4,
         )
+
+
+def test_tail_publish_rolls_back_target_and_parent_pointers_after_rename_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _patch_provenance(monkeypatch)
+    monkeypatch.setattr(tail_mod, "refined_subject_mask_metric_row_chunk", lambda _rows: 2)
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source_zarr(source)
+    root = zarr.open_group(str(source), mode="a", use_consolidated=False)
+    parent = root["analysis"].create_group("tail_kinematics_runs")
+    parent.attrs.update(
+        {
+            "latest": "tail_existing",
+            "latest_complete": "tail_existing",
+            "custom_parent_attr": "preserve-me",
+        }
+    )
+    existing = parent.create_group("tail_existing")
+    existing.attrs["palette_run_completion_status"] = "complete"
+    parent_attrs_before = dict(parent.attrs)
+    target = source / "analysis" / "tail_kinematics_runs" / "tail_rollback"
+
+    real_validate = mod._validate_tail_run
+
+    def fail_target_validation(path: Path, *, row_count: int, sample_count: int):
+        if Path(path).resolve() == target.resolve():
+            return {
+                "valid": False,
+                "errors": ["injected post-rename validation failure"],
+                "row_count": row_count,
+                "sample_count": sample_count,
+            }
+        return real_validate(path, row_count=row_count, sample_count=sample_count)
+
+    monkeypatch.setattr(mod, "_validate_tail_run", fail_target_validation)
+
+    with pytest.raises(RuntimeError, match="pre-pointer validation"):
+        mod.materialize_tail_kinematics(
+            source,
+            scratch_root=scratch,
+            shape_run="shape_001",
+            run_name="tail_rollback",
+            block_rows=3,
+            output_shard_rows=7,
+            execution_backend="process_shards",
+            num_workers=2,
+            copy_backend="python",
+            apply=True,
+            keep_scratch=True,
+            check_capacity=False,
+            stage_command="unit-test-publish-rollback",
+        )
+
+    assert not target.exists()
+    root = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    parent = root["analysis"]["tail_kinematics_runs"]
+    assert dict(parent.attrs) == parent_attrs_before
+    assert "tail_existing" in parent
+    assert "tail_rollback" not in parent
+    assert scratch.is_dir()
 
 
 def test_materializer_refuses_to_replace_existing_authoritative_run(monkeypatch, tmp_path: Path) -> None:

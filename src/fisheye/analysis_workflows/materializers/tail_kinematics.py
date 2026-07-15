@@ -582,6 +582,11 @@ def _serialized_authoritative_publish(function):
     return wrapped
 
 
+def _restore_attrs(group: zarr.Group, attrs: dict[str, Any]) -> None:
+    group.attrs.clear()
+    group.attrs.update(attrs)
+
+
 @_serialized_authoritative_publish
 def publish_tail_kinematics_run(
     plan: TailKinematicsMaterializationPlan,
@@ -607,6 +612,7 @@ def publish_tail_kinematics_run(
     parent = require_runs_parent(analysis, "tail_kinematics_runs")
     if plan.run_name in parent or plan.target_run_path.exists():
         raise FileExistsError(f"Refusing to replace existing authoritative run: {plan.target_run_path}")
+    parent_attrs_before = dict(parent.attrs)
 
     target_parent = plan.target_run_path.parent
     target_parent.mkdir(parents=True, exist_ok=True)
@@ -616,6 +622,7 @@ def publish_tail_kinematics_run(
 
     source_files, source_digest = _tree_inventory(source_run)
     copy_started = time.perf_counter()
+    published = False
     try:
         _copy_run_tree(source_run, temporary, copy_backend=copy_backend)
         temporary_validation = _validate_file_inventory(temporary, source_files)
@@ -630,53 +637,87 @@ def publish_tail_kinematics_run(
                 f"inventory={temporary_validation}, logical={logical_validation}"
             )
         os.replace(temporary, plan.target_run_path)
+        published = True
+        copy_duration = float(time.perf_counter() - copy_started)
+
+        canonical_root = open_zarr_root(plan.source_zarr, mode="a")
+        parent = require_runs_parent(
+            canonical_root.require_group("analysis"),
+            "tail_kinematics_runs",
+        )
+        run_group = parent[plan.run_name]
+        publish_payload = {
+            "schema_id": PUBLISH_SCHEMA_ID,
+            "policy": "node_local_source_and_output_atomic_run_group_publish",
+            "serialization_policy": "per_recording_advisory_file_lock",
+            "rollback_policy": "remove_new_target_and_restore_parent_attrs_on_post_rename_failure",
+            "published_at_utc": _utc_now(),
+            "host": socket.gethostname(),
+            "lsb_jobid": os.environ.get("LSB_JOBID"),
+            "source_zarr": str(plan.source_zarr),
+            "staged_zarr": str(plan.staged_zarr),
+            "source_run_path": str(source_run),
+            "target_run_path": str(plan.target_run_path),
+            "copy_backend": copy_backend,
+            "copy_duration_seconds": copy_duration,
+            "physical_file_count": len(source_files),
+            "physical_bytes": sum(int(item.size_bytes) for item in source_files),
+            "inventory_sha256": source_digest,
+            "source_staging": staging_payload,
+            "local_validation": local_validation,
+            "temporary_physical_validation": temporary_validation,
+            "temporary_logical_validation": logical_validation,
+        }
+        run_group.attrs["cluster_output_staging"] = publish_payload
+        pre_pointer_validation = _validate_tail_run(
+            plan.target_run_path,
+            row_count=plan.row_count,
+            sample_count=plan.tail_angle_sample_count,
+        )
+        if not bool(pre_pointer_validation["valid"]):
+            raise RuntimeError(
+                f"Published tail run failed pre-pointer validation: {pre_pointer_validation}"
+            )
+        publish_payload["pre_pointer_validation"] = pre_pointer_validation
+        run_group.attrs["cluster_output_staging"] = publish_payload
+
+        command = " ".join(sys.argv) if sys.argv else "unknown"
+        mark_run_complete(
+            run_group,
+            parent_group=parent,
+            run_name=plan.run_name,
+            run_provenance=build_run_provenance_from_stage_record(
+                run_group.attrs.get("provenance", {}),
+                fallback_command=command,
+            ),
+        )
+        final_validation = _validate_tail_run(
+            plan.target_run_path,
+            row_count=plan.row_count,
+            sample_count=plan.tail_angle_sample_count,
+        )
+        if not bool(final_validation["valid"]):
+            raise RuntimeError(f"Published tail run validation failed: {final_validation}")
+        if str(parent.attrs.get("latest")) != plan.run_name or str(
+            parent.attrs.get("latest_complete")
+        ) != plan.run_name:
+            raise RuntimeError("Tail-kinematics parent pointers were not updated to the published run.")
+        publish_payload["final_validation"] = final_validation
+        run_group.attrs["cluster_output_staging"] = publish_payload
+        return publish_payload
+    except BaseException:
+        if published and plan.target_run_path.exists():
+            shutil.rmtree(plan.target_run_path)
+        canonical_root = open_zarr_root(plan.source_zarr, mode="a")
+        parent = require_runs_parent(
+            canonical_root.require_group("analysis"),
+            "tail_kinematics_runs",
+        )
+        _restore_attrs(parent, parent_attrs_before)
+        raise
     finally:
         if temporary.exists():
             shutil.rmtree(temporary)
-    copy_duration = float(time.perf_counter() - copy_started)
-
-    canonical_root = open_zarr_root(plan.source_zarr, mode="a")
-    parent = require_runs_parent(canonical_root.require_group("analysis"), "tail_kinematics_runs")
-    run_group = parent[plan.run_name]
-    publish_payload = {
-        "schema_id": PUBLISH_SCHEMA_ID,
-        "policy": "node_local_source_and_output_atomic_run_group_publish",
-        "serialization_policy": "per_recording_advisory_file_lock",
-        "published_at_utc": _utc_now(),
-        "host": socket.gethostname(),
-        "lsb_jobid": os.environ.get("LSB_JOBID"),
-        "source_zarr": str(plan.source_zarr),
-        "staged_zarr": str(plan.staged_zarr),
-        "source_run_path": str(source_run),
-        "target_run_path": str(plan.target_run_path),
-        "copy_backend": copy_backend,
-        "copy_duration_seconds": copy_duration,
-        "physical_file_count": len(source_files),
-        "physical_bytes": sum(int(item.size_bytes) for item in source_files),
-        "inventory_sha256": source_digest,
-        "source_staging": staging_payload,
-        "local_validation": local_validation,
-    }
-    run_group.attrs["cluster_output_staging"] = publish_payload
-    command = " ".join(sys.argv) if sys.argv else "unknown"
-    mark_run_complete(
-        run_group,
-        parent_group=parent,
-        run_name=plan.run_name,
-        run_provenance=build_run_provenance_from_stage_record(
-            run_group.attrs.get("provenance", {}),
-            fallback_command=command,
-        ),
-    )
-    final_validation = _validate_tail_run(
-        plan.target_run_path,
-        row_count=plan.row_count,
-        sample_count=plan.tail_angle_sample_count,
-    )
-    if not bool(final_validation["valid"]):
-        raise RuntimeError(f"Published tail run validation failed: {final_validation}")
-    publish_payload["final_validation"] = final_validation
-    return publish_payload
 
 
 def materialize_tail_kinematics(
