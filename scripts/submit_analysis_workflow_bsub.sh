@@ -45,7 +45,7 @@ Options:
   --log-dir PATH               Submission root; defaults beside the recording
   --queue NAME                 LSF queue; default is the cluster default
   --ncores N                   CPU slots and Dask workers (default: 8)
-  --mem-gb N                   LSF memory request (default: 32)
+  --mem-gb N                   LSF memory request per slot (default: 32)
   --walltime H:MM              LSF walltime (default: 24:00)
   --submit                     Render and submit; default reserves a render-only directory
   -h, --help                   Show this help

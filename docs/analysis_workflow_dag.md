@@ -237,11 +237,13 @@ scripts/submit_analysis_workflow_bsub.sh \
   --execution-id subject_shape_production_YYYYMMDD_01 \
   --target subject_shape \
   --ncores 32 \
-  --mem-gb 48 \
+  --mem-gb 2 \
   --walltime 24:00
 ```
 
-The generated job pins all requested CPU slots to one host, sets the native
+Here `--mem-gb` is per slot, so 32 slots at 2 GB request 64 GB nominally for
+the job, above the measured 36.7 GB peak. The generated job pins all requested
+CPU slots to one host, sets the native
 BLAS/OpenMP thread ceilings before Python starts, and therefore keeps every
 process on the same node-local scratch. The materializer is dry-run by default
 when invoked directly; the DAG adds `--apply` only inside the verified LSF
