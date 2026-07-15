@@ -263,6 +263,52 @@ def test_escape_events_are_the_fast_bouts_and_nothing_else(tmp_path: Path) -> No
     assert int(r.ordinary_bout_count.sum()) == 2 * N_CYCLES * len(ORDINARY_OFFSETS)
 
 
+def test_high_turn_tier_flags_turny_escapes_without_changing_which_bouts_are_escapes(tmp_path: Path) -> None:
+    """The turn tier is a sub-classification: an escape is 'high_turn' when it is fast AND its
+    |turn| clears the angle threshold. It must NEVER change the set of escapes."""
+
+    z = _build(tmp_path, name="turn.zarr")
+    # give every other bout a 90 deg turn, the rest 0 -- the fish fixture swims straight otherwise
+    root = zarr.open_group(str(z), mode="a", use_consolidated=False)
+    bouts = root["analysis/chaser_distance_runs/chaser_distance_1/chaser_bout_response/"
+                 "chaser_bout_response_v1/bouts"]
+    turn = np.zeros(int(bouts["turn_deg"].shape[0]), dtype=np.float64)
+    turn[::2] = 90.0
+    bouts["turn_deg"][:] = turn
+
+    r = build_chaser_escape_events_result(z, chaser_distance_run="chaser_distance_1",
+                                          peak_speed_threshold_mm_s=THRESHOLD, high_turn_threshold_deg=45.0)
+    esc = int(r.summary["escape_event_count"])
+    hi = int(r.summary["high_turn_escape_event_count"])
+    assert esc == 2 * N_CYCLES                          # unchanged: escape is still speed-only
+    assert 0 < hi < esc                                 # some but not all escapes are turny
+    # every flagged event really has a large turn; every unflagged one does not
+    turns = np.abs(np.asarray(r.event_turn_deg))
+    flag = np.asarray(r.event_is_high_turn, dtype=bool)
+    assert np.all(turns[flag] >= 45.0) and np.all(turns[~flag] < 45.0)
+    # per-epoch high-turn count never exceeds the escape count
+    assert np.all(np.asarray(r.high_turn_escape_count) <= np.asarray(r.escape_count))
+
+
+def test_high_turn_threshold_moves_the_tier_but_not_the_escapes(tmp_path: Path) -> None:
+    z = _build(tmp_path, name="turn2.zarr")
+    root = zarr.open_group(str(z), mode="a", use_consolidated=False)
+    bouts = root["analysis/chaser_distance_runs/chaser_distance_1/chaser_bout_response/"
+                 "chaser_bout_response_v1/bouts"]
+    turn = np.full(int(bouts["turn_deg"].shape[0]), 50.0)   # all bouts turn 50 deg
+    bouts["turn_deg"][:] = turn
+
+    lenient = build_chaser_escape_events_result(z, chaser_distance_run="chaser_distance_1",
+                                                peak_speed_threshold_mm_s=THRESHOLD, high_turn_threshold_deg=45.0)
+    strict = build_chaser_escape_events_result(z, chaser_distance_run="chaser_distance_1",
+                                               peak_speed_threshold_mm_s=THRESHOLD, high_turn_threshold_deg=60.0)
+    # same escapes either way...
+    assert lenient.summary["escape_event_count"] == strict.summary["escape_event_count"]
+    # ...but 50 deg clears 45 and not 60
+    assert lenient.summary["high_turn_escape_event_count"] == lenient.summary["escape_event_count"]
+    assert strict.summary["high_turn_escape_event_count"] == 0
+
+
 def test_escapes_fire_closer_to_the_object_than_ordinary_bouts(tmp_path: Path) -> None:
     """The proximity trigger. Escape onsets sit at 8 mm; ordinary bouts at 10-13 mm."""
 

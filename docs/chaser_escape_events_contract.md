@@ -1,6 +1,6 @@
 # `chaser_escape_events` contract
 
-**Schema:** `palette.chaser_escape_events.v2`
+**Schema:** `palette.chaser_escape_events.v3`
 **Path:** `analysis/chaser_distance_runs/<run>/chaser_escape_events/<component>`
 **Module:** `src/fisheye/analysis/chaser_escape_events.py`
 **Runner:** `python -m fisheye.utils.run_goodcopbadcop_chaser_escape_events`
@@ -33,15 +33,30 @@ Missing parent → a `ValueError` naming `chaser_bout_response`. It does not fal
 
 A valid bout whose `peak_speed_mm_s` exceeds `peak_speed_threshold_mm_s` (default **100.0**).
 
-**This is a pure velocity cut — nothing else.** No turn angle, no C-start shape, no acceleration,
-no proximity. A fast *forward* swim and a true C-start both count if they clear the threshold; the
-13.5 mm trigger ring is *descriptive* (where these fast bouts happen to fire), not part of the
-classification. What makes the population behave like escapes is the surrounding evidence — the
-bouts are directed away from the chaser (+8.5 mm gained), fire when it is close, and survive
-raising the cut to 150/200 mm/s — not the label. A stricter "escape = C-start" definition would
-need turn angle and sub-10 ms latency, which **100 fps cannot resolve** (a C-start is 1.5–2
-frames). So read `escape` as "high-speed bout," and lean on the directedness/proximity/threshold-
-sweep results, not the word, when the distinction matters.
+**The escape classification is a pure velocity cut — nothing else.** No proximity, no C-start
+shape. A fast *forward* swim and a turn-away both count if they clear the threshold; the 13.5 mm
+trigger ring is *descriptive*, not classificatory.
+
+### The turn tier (on by default)
+
+Because velocity alone conflates two things, every escape is additionally tagged with a **turn
+tier**: an escape is **`high_turn`** (a C-start-like reorientation) when its `|turn_deg|` also
+reaches `high_turn_threshold_deg` (default **45°**); otherwise it is a straight forward
+**`dash`**. This is reported by default (`events/is_high_turn`, `rates/high_turn_escape_count`,
+`rates/high_turn_escape_rate_per_valid_min`, `rates/high_turn_fraction`) and **never changes
+which bouts are escapes** — escape stays speed-only, so the headline rate/pursuit/habituation
+numbers are untouched.
+
+The tier is well-motivated: high turn is ~4× enriched in escapes over ordinary bouts (21% vs 5%
+at ≥60°), and the high-turn sub-population is *if anything more chase-specific* than the velocity
+cut alone (~6× pre→chase at 45° vs ~5.7× for all escapes). About a third of escapes are
+high-turn; the rest are forward dashes.
+
+**Caveat, stated plainly:** at 100 fps `turn_deg` is a *net heading change over the bout*, not a
+resolved C-start bend (a C-start is 1.5–2 frames). So the tier is a coarse "turn-away vs forward
+dash" split, **not** a kinematic C-start classifier. Read the tiers accordingly, and lean on the
+directedness/proximity/threshold-sweep evidence — not the word "escape" or the tier label — when
+the distinction carries weight.
 
 **Why a threshold and not a cluster.** K-means on 322,781 pooled bouts (K=4, on turn / speed /
 displacement / duration / tortuosity) reported the escape-like cluster rising from 0.167 to
@@ -60,8 +75,8 @@ the wrong instrument for a rare, nameable, high-amplitude class.
 | `config/` | — | threshold, windows, dropout tolerance |
 | `epochs/` | epoch | inherited verbatim from the parent (already settle-trimmed) |
 | `references/` | reference | inherited verbatim: objects, virtual twins, dish centre |
-| `events/` | escape_event (× reference) | one row per escape: `bout_id`, `epoch_index`, `start_frame`, `peak_speed_mm_s`, `turn_deg`, `trace_usable`; per reference `distance_at_onset_mm`, `gain_mm`, `recapture_mm`, `net_mm` |
-| `rates/` | epoch | `escape_count`, `epoch_duration_s`, `valid_duration_s`, `tracking_dropout_fraction`, `escape_rate_per_min`, **`escape_rate_per_valid_min`**, `escape_bout_fraction` |
+| `events/` | escape_event (× reference) | one row per escape: `bout_id`, `epoch_index`, `start_frame`, `peak_speed_mm_s`, `turn_deg`, **`is_high_turn`**, `trace_usable`; per reference `distance_at_onset_mm`, `gain_mm`, `recapture_mm`, `net_mm` |
+| `rates/` | epoch | `escape_count`, **`high_turn_escape_count`**, `epoch_duration_s`, `valid_duration_s`, `tracking_dropout_fraction`, `escape_rate_per_min`, **`escape_rate_per_valid_min`**, **`high_turn_escape_rate_per_valid_min`**, **`high_turn_fraction`**, `escape_bout_fraction` |
 | `trigger/` | epoch × reference | `escape_onset_distance_mm`, `ordinary_onset_distance_mm`, **`proximity_shift_mm`** |
 | `pursuit/` | epoch × reference | **`gain_mm`**, **`recapture_mm`**, `net_mm`, `event_count` |
 | `traces/` | epoch × reference × time | `time_s`, `delta_distance_mm` (median, baseline-subtracted at onset), `event_count` |

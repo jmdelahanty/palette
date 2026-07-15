@@ -104,16 +104,17 @@ from fisheye.shared.system_metadata import get_git_info
 from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
 
 
-SCHEMA_ID = "palette.chaser_escape_events.v2"
-SCHEMA_VERSION = 2
-METHOD = "peak_speed_escape_events_with_pursuit_decomposition_and_trial_habituation"
-METHOD_VERSION = "2"
+SCHEMA_ID = "palette.chaser_escape_events.v3"
+SCHEMA_VERSION = 3
+METHOD = "peak_speed_escape_events_with_turn_tier_pursuit_decomposition_and_trial_habituation"
+METHOD_VERSION = "3"
 COMPONENT_PARENT_NAME = "chaser_escape_events"
 DEFAULT_COMPONENT_NAME = "chaser_escape_events_v1"
 
 BOUT_RESPONSE_PARENT = "chaser_bout_response"
 
 DEFAULT_PEAK_SPEED_THRESHOLD_MM_S = 100.0
+DEFAULT_HIGH_TURN_THRESHOLD_DEG = 45.0    # a fast bout with |turn| >= this is a "turn" escape
 DEFAULT_THRESHOLD_SWEEP_MM_S = (60.0, 100.0, 150.0, 200.0, 300.0)
 DEFAULT_PRE_WINDOW_S = 1.0
 DEFAULT_POST_WINDOW_S = 5.0
@@ -138,6 +139,7 @@ class ChaserEscapeEventsResult:
     total_frames: int
     pixels_per_mm_projector: float
     peak_speed_threshold_mm_s: float
+    high_turn_threshold_deg: float
     threshold_sweep_mm_s: np.ndarray
     pre_window_s: float
     post_window_s: float
@@ -153,6 +155,7 @@ class ChaserEscapeEventsResult:
     event_start_frame: np.ndarray
     event_peak_speed_mm_s: np.ndarray
     event_turn_deg: np.ndarray
+    event_is_high_turn: np.ndarray          # (n_events,) fast AND |turn| >= high_turn_threshold_deg
     event_trace_usable: np.ndarray          # (n_events,) window in-bounds and low dropout
     # per escape event, per reference (n_events, n_refs)
     event_distance_at_onset_mm: np.ndarray
@@ -161,12 +164,15 @@ class ChaserEscapeEventsResult:
     event_net_mm: np.ndarray                # d(+recapture_window) - d(onset)
     # per epoch (n_epochs,)
     escape_count: np.ndarray
+    high_turn_escape_count: np.ndarray
     ordinary_bout_count: np.ndarray
     epoch_duration_s: np.ndarray
     valid_duration_s: np.ndarray
     tracking_dropout_fraction: np.ndarray
     escape_rate_per_min: np.ndarray
     escape_rate_per_valid_min: np.ndarray
+    high_turn_escape_rate_per_valid_min: np.ndarray
+    high_turn_fraction: np.ndarray          # high-turn escapes / all escapes, per epoch
     escape_bout_fraction: np.ndarray
     # per (epoch, reference)
     escape_onset_distance_mm: np.ndarray    # median over escape events
@@ -333,6 +339,7 @@ def build_chaser_escape_events_result(
     bout_response_component: str = "latest",
     component_name: str = DEFAULT_COMPONENT_NAME,
     peak_speed_threshold_mm_s: float = DEFAULT_PEAK_SPEED_THRESHOLD_MM_S,
+    high_turn_threshold_deg: float = DEFAULT_HIGH_TURN_THRESHOLD_DEG,
     threshold_sweep_mm_s: Sequence[float] = DEFAULT_THRESHOLD_SWEEP_MM_S,
     pre_window_s: float = DEFAULT_PRE_WINDOW_S,
     post_window_s: float = DEFAULT_POST_WINDOW_S,
@@ -395,6 +402,12 @@ def build_chaser_escape_events_result(
     usable = bout_valid & np.isfinite(bout_peak)
     is_escape = usable & (bout_peak > float(peak_speed_threshold_mm_s))
     is_ordinary = usable & ~is_escape
+    # An escape is classified by SPEED alone; the turn tier is an added sub-classification that
+    # never changes which bouts are escapes. A "turn" escape is fast AND high-angle (C-start-like
+    # reorientation); a "dash" escape is fast but nearly straight (a forward sprint). Turn is
+    # ~4x enriched in escapes over ordinary bouts, and the high-turn tier is if anything MORE
+    # chase-specific than the velocity cut alone.
+    is_high_turn = is_escape & np.isfinite(bout_turn) & (np.abs(bout_turn) >= float(high_turn_threshold_deg))
 
     n_epochs = len(epochs)
     n_refs = len(references)
@@ -404,6 +417,7 @@ def build_chaser_escape_events_result(
     # Wall-clock rate is the wrong denominator when a third of the cohort drops >10% of the
     # chase epoch: it would report a fish that vanished for 80 s as having escaped less.
     escape_count = np.zeros(n_epochs, dtype=np.int64)
+    high_turn_count = np.zeros(n_epochs, dtype=np.int64)
     ordinary_count = np.zeros(n_epochs, dtype=np.int64)
     epoch_duration = np.zeros(n_epochs, dtype=np.float64)
     valid_duration = np.zeros(n_epochs, dtype=np.float64)
@@ -416,11 +430,16 @@ def build_chaser_escape_events_result(
         valid_duration[e] = float(n_valid) / float(fps)
         dropout[e] = 1.0 - (float(n_valid) / float(span)) if span else math.nan
         escape_count[e] = int(np.count_nonzero(is_escape & (bout_epoch == e)))
+        high_turn_count[e] = int(np.count_nonzero(is_high_turn & (bout_epoch == e)))
         ordinary_count[e] = int(np.count_nonzero(is_ordinary & (bout_epoch == e)))
 
     with np.errstate(divide="ignore", invalid="ignore"):
         rate_per_min = np.where(epoch_duration > 0, escape_count / epoch_duration * 60.0, np.nan)
         rate_per_valid_min = np.where(valid_duration > 0, escape_count / valid_duration * 60.0, np.nan)
+        high_turn_rate_per_valid_min = np.where(
+            valid_duration > 0, high_turn_count / valid_duration * 60.0, np.nan
+        )
+        high_turn_fraction = np.where(escape_count > 0, high_turn_count / np.maximum(escape_count, 1), np.nan)
         total_bouts = escape_count + ordinary_count
         escape_fraction = np.where(total_bouts > 0, escape_count / np.maximum(total_bouts, 1), np.nan)
 
@@ -664,13 +683,18 @@ def build_chaser_escape_events_result(
     labels = [e.label for e in epochs]
     summary: dict[str, Any] = {
         "peak_speed_threshold_mm_s": float(peak_speed_threshold_mm_s),
+        "high_turn_threshold_deg": float(high_turn_threshold_deg),
         "escape_event_count": int(n_events),
+        "high_turn_escape_event_count": int(np.count_nonzero(is_high_turn)),
         "escape_event_count_with_clean_window": int(np.count_nonzero(trace_usable)),
         "max_peak_speed_mm_s": max_peak,
     }
     for e, label in enumerate(labels):
         summary[f"escape_rate_per_valid_min_{label}"] = float(rate_per_valid_min[e])
         summary[f"escape_count_{label}"] = int(escape_count[e])
+        summary[f"high_turn_escape_rate_per_valid_min_{label}"] = float(high_turn_rate_per_valid_min[e])
+        summary[f"high_turn_escape_count_{label}"] = int(high_turn_count[e])
+        summary[f"high_turn_fraction_{label}"] = float(high_turn_fraction[e])
         summary[f"tracking_dropout_{label}"] = float(dropout[e])
     for e, label in enumerate(labels):
         for r in object_refs:
@@ -699,6 +723,14 @@ def build_chaser_escape_events_result(
         "escape_definition": (
             f"a valid bout whose peak_speed_mm_s exceeds {peak_speed_threshold_mm_s:g} mm/s. Not a "
             "cluster: escapes are ~1.5% of bouts and k-means will not allocate a centroid to them."
+        ),
+        "turn_tier": (
+            f"an escape is 'high_turn' (a C-start-like reorientation) when its |turn_deg| also "
+            f">= {high_turn_threshold_deg:g} deg; otherwise it is a straight forward 'dash'. The tier "
+            "NEVER changes which bouts are escapes -- escape is peak-speed only. Turn is ~4x enriched "
+            "in escapes vs ordinary bouts, and the high-turn tier is if anything more chase-specific. "
+            "At 100 fps turn_deg is a net heading change, not a resolved C-start bend, so this is a "
+            "coarse split (forward dash vs turn-away), not a kinematic C-start classifier."
         ),
         "rate_denominator": (
             "valid_duration_s = validly-tracked frames / fps. Wall-clock rate is also written, but "
@@ -776,6 +808,7 @@ def build_chaser_escape_events_result(
         total_frames=int(total_frames),
         pixels_per_mm_projector=float(pixels_per_mm),
         peak_speed_threshold_mm_s=float(peak_speed_threshold_mm_s),
+        high_turn_threshold_deg=float(high_turn_threshold_deg),
         threshold_sweep_mm_s=sweep.astype(np.float32),
         pre_window_s=float(pre_window_s),
         post_window_s=float(post_window_s),
@@ -790,18 +823,22 @@ def build_chaser_escape_events_result(
         event_start_frame=bout_start[ev].astype(np.int64),
         event_peak_speed_mm_s=bout_peak[ev].astype(np.float32),
         event_turn_deg=bout_turn[ev].astype(np.float32),
+        event_is_high_turn=is_high_turn[ev] if n_events else np.zeros(0, dtype=bool),
         event_trace_usable=trace_usable,
         event_distance_at_onset_mm=event_onset_distance.astype(np.float32),
         event_gain_mm=event_gain.astype(np.float32),
         event_recapture_mm=event_recapture.astype(np.float32),
         event_net_mm=event_net.astype(np.float32),
         escape_count=escape_count,
+        high_turn_escape_count=high_turn_count,
         ordinary_bout_count=ordinary_count,
         epoch_duration_s=epoch_duration.astype(np.float32),
         valid_duration_s=valid_duration.astype(np.float32),
         tracking_dropout_fraction=dropout.astype(np.float32),
         escape_rate_per_min=rate_per_min.astype(np.float32),
         escape_rate_per_valid_min=rate_per_valid_min.astype(np.float32),
+        high_turn_escape_rate_per_valid_min=high_turn_rate_per_valid_min.astype(np.float32),
+        high_turn_fraction=high_turn_fraction.astype(np.float32),
         escape_bout_fraction=escape_fraction.astype(np.float32),
         escape_onset_distance_mm=esc_onset.astype(np.float32),
         ordinary_onset_distance_mm=ord_onset.astype(np.float32),
@@ -850,11 +887,17 @@ def render_escape_events_png(result: ChaserEscapeEventsResult, *, dpi: int = 150
     axes = np.atleast_1d(axes)
 
     ax = axes[0]
-    ax.bar(range(len(epochs)), result.escape_rate_per_valid_min, color="#dc2626", alpha=0.85)
-    ax.set_xticks(range(len(epochs)))
+    x = range(len(epochs))
+    total = np.asarray(result.escape_rate_per_valid_min, dtype=float)
+    hi = np.asarray(result.high_turn_escape_rate_per_valid_min, dtype=float)
+    ax.bar(x, total, color="#fca5a5", alpha=0.9, label="dash (fast, straight)")
+    ax.bar(x, hi, color="#b91c1c", alpha=0.95,
+           label=f"turn (|turn| ≥ {result.high_turn_threshold_deg:g}°)")
+    ax.set_xticks(list(x))
     ax.set_xticklabels(epochs, rotation=30, ha="right", fontsize=8)
     ax.set_ylabel("escapes / min of tracked time")
     ax.set_title(f"escape rate  (peak > {result.peak_speed_threshold_mm_s:g} mm/s)", fontsize=9)
+    ax.legend(fontsize=6, loc="upper left")
 
     ax = axes[1]
     for r in objects:
@@ -923,6 +966,7 @@ def write_chaser_escape_events_component(
     config.attrs.update(
         {
             "peak_speed_threshold_mm_s": float(result.peak_speed_threshold_mm_s),
+            "high_turn_threshold_deg": float(result.high_turn_threshold_deg),
             "pre_window_s": float(result.pre_window_s),
             "post_window_s": float(result.post_window_s),
             "gain_window_s": float(result.gain_window_s),
@@ -948,7 +992,7 @@ def write_chaser_escape_events_component(
 
     events = component.require_group("events")
     for name in ("event_bout_id", "event_epoch_index", "event_start_frame", "event_peak_speed_mm_s",
-                 "event_turn_deg", "event_trace_usable"):
+                 "event_turn_deg", "event_is_high_turn", "event_trace_usable"):
         _write_array(events, name.removeprefix("event_"), getattr(result, name))
     for name in ("event_distance_at_onset_mm", "event_gain_mm", "event_recapture_mm", "event_net_mm"):
         _write_array(events, name.removeprefix("event_"), getattr(result, name))
@@ -957,16 +1001,23 @@ def write_chaser_escape_events_component(
             "row_axis": "escape_event",
             "per_reference_axis_order": ["escape_event", "reference"],
             "escape_definition": result.diagnostics.get("escape_definition"),
+            "turn_tier": result.diagnostics.get("turn_tier"),
             "pseudoreplication_note": result.diagnostics.get("pseudoreplication_note"),
         }
     )
 
     rates = component.require_group("rates")
-    for name in ("escape_count", "ordinary_bout_count", "epoch_duration_s", "valid_duration_s",
-                 "tracking_dropout_fraction", "escape_rate_per_min", "escape_rate_per_valid_min",
-                 "escape_bout_fraction"):
+    for name in ("escape_count", "high_turn_escape_count", "ordinary_bout_count", "epoch_duration_s",
+                 "valid_duration_s", "tracking_dropout_fraction", "escape_rate_per_min",
+                 "escape_rate_per_valid_min", "high_turn_escape_rate_per_valid_min",
+                 "high_turn_fraction", "escape_bout_fraction"):
         _write_array(rates, name, getattr(result, name))
-    rates.attrs.update({"row_axis": "epoch", "rate_denominator": result.diagnostics.get("rate_denominator")})
+    rates.attrs.update({
+        "row_axis": "epoch",
+        "rate_denominator": result.diagnostics.get("rate_denominator"),
+        "turn_tier": result.diagnostics.get("turn_tier"),
+        "high_turn_threshold_deg": float(result.high_turn_threshold_deg),
+    })
 
     trigger = component.require_group("trigger")
     for name in ("escape_onset_distance_mm", "ordinary_onset_distance_mm", "proximity_shift_mm"):
@@ -1069,6 +1120,7 @@ def write_chaser_escape_events_component(
             },
             parameters={
                 "peak_speed_threshold_mm_s": float(result.peak_speed_threshold_mm_s),
+                "high_turn_threshold_deg": float(result.high_turn_threshold_deg),
                 "threshold_sweep_mm_s": [float(v) for v in np.asarray(result.threshold_sweep_mm_s)],
                 "pre_window_s": float(result.pre_window_s),
                 "post_window_s": float(result.post_window_s),
@@ -1107,6 +1159,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--bout-response-component", default="latest")
     p.add_argument("--component-name", default=DEFAULT_COMPONENT_NAME)
     p.add_argument("--peak-speed-threshold-mm-s", type=float, default=DEFAULT_PEAK_SPEED_THRESHOLD_MM_S)
+    p.add_argument("--high-turn-threshold-deg", type=float, default=DEFAULT_HIGH_TURN_THRESHOLD_DEG)
     p.add_argument("--pre-window-s", type=float, default=DEFAULT_PRE_WINDOW_S)
     p.add_argument("--post-window-s", type=float, default=DEFAULT_POST_WINDOW_S)
     p.add_argument("--gain-window-s", type=float, default=DEFAULT_GAIN_WINDOW_S)
@@ -1126,6 +1179,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         bout_response_component=args.bout_response_component,
         component_name=args.component_name,
         peak_speed_threshold_mm_s=args.peak_speed_threshold_mm_s,
+        high_turn_threshold_deg=args.high_turn_threshold_deg,
         pre_window_s=args.pre_window_s,
         post_window_s=args.post_window_s,
         gain_window_s=args.gain_window_s,
