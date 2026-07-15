@@ -255,21 +255,33 @@ def _eye_angle_command(context: StageCommandContext) -> tuple[str, ...]:
 
 
 def _subject_shape_command(context: StageCommandContext) -> tuple[str, ...]:
-    command = _module_command(context, "fisheye.analysis.subject_shape_runs")
+    command = _module_command(
+        context,
+        "fisheye.analysis_workflows.materializers.subject_shape",
+    )
     command.extend(
         (
             "--refined-run",
             context.dependency_run("refined_subject_masks"),
             "--run-name",
             context.output_run,
-            "--chunk-size",
-            "256",
+            "--block-rows",
+            "1024",
+            "--output-shard-rows",
+            "131072",
             "--execution-backend",
             "dask_worker_chunks",
             "--scheduler",
             "processes",
             "--num-workers",
             str(context.num_workers),
+            "--shard-copy-workers",
+            str(min(context.num_workers, 16)),
+            "--native-threads",
+            "1",
+            "--copy-backend",
+            "rsync",
+            "--apply",
             "--json",
         )
     )

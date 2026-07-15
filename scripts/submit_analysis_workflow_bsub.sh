@@ -51,8 +51,8 @@ Options:
   -h, --help                   Show this help
 
 Export-product targets remain unsupported until their immutable streaming
-execution adapters are implemented. Tail kinematics uses its dedicated
-node-local staged process-shard materializer.
+execution adapters are implemented. Subject shape and tail kinematics use
+dedicated node-local, sharded, atomic-publication materializers.
 USAGE
 }
 
@@ -170,6 +170,13 @@ fi
   printf 'Refusing analysis execution outside an LSF allocation.\n' >&2
   exit 2
 }
+
+# Multi-process analysis stages own CPU parallelism at the process level.
+# Keep BLAS/OpenMP/OpenCV-adjacent native pools from multiplying that count.
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
 
 cmd=(
   scripts/py -m fisheye.utils.execute_analysis_workflow

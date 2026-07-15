@@ -172,3 +172,30 @@ not independently write into a shared 131,072-row physical shard. Either one
 writer must own the complete outer shard, or workers must create temporary
 block outputs that are assembled deterministically on node-local storage before
 validation and atomic publication.
+
+## Production activation
+
+`fisheye.analysis_workflows.materializers.subject_shape` implements the chosen
+second design. It keeps the refined subject-mask authority read-only on shared
+storage, writes 1,024-row compute blocks to a node-local ordinary Zarr, and then
+copies that completed run into a second node-local Zarr where each copy task
+owns one complete, non-overlapping 131,072-row outer shard for one array. Every
+outer shard is reread and checked against the source decoded SHA-256 before it
+can be published.
+
+Publication is fail-closed and immutable:
+
+1. validate the complete local compute run;
+2. assemble and exactly validate the local indexed-sharded run;
+3. copy it to a hidden sibling of the authoritative target and checksum the
+   physical transfer;
+4. validate the hidden run logically;
+5. atomically rename it under a per-recording advisory lock;
+6. update `latest`/`latest_complete` only after the rename and final validation.
+
+The legacy `fisheye.analysis.subject_shape_runs` entry point remains available
+as the explicit direct-write compatibility path. The core analysis DAG now
+uses the materializer for new subject-shape runs. Production provenance records
+requested and effective compute blocks, native threads, the foreground-crop
+optimization, outer-shard layout, worker ownership, exact validation, and the
+atomic publication policy.

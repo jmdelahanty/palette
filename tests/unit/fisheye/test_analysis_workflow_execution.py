@@ -141,9 +141,19 @@ def test_execution_plan_renders_exact_dependency_runs_and_parallel_backends(
     assert eyes[eyes.index("--num-workers") + 1] == "8"
 
     shape = commands["subject_shape"].argv
+    assert shape[:4] == (
+        "/palette/python",
+        "-m",
+        "fisheye.analysis_workflows.materializers.subject_shape",
+        str(tmp_path / "recording_analysis.zarr"),
+    )
     assert shape[shape.index("--refined-run") + 1] == "refined_masks_a"
     assert shape[shape.index("--execution-backend") + 1] == "dask_worker_chunks"
     assert shape[shape.index("--num-workers") + 1] == "8"
+    assert shape[shape.index("--block-rows") + 1] == "1024"
+    assert shape[shape.index("--output-shard-rows") + 1] == "131072"
+    assert shape[shape.index("--native-threads") + 1] == "1"
+    assert "--apply" in shape
 
 
 def test_output_run_override_is_used_by_downstream_commands(tmp_path: Path) -> None:

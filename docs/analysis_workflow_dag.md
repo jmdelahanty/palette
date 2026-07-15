@@ -212,8 +212,12 @@ The executor preserves these large-recording constraints:
 - track smoothing, derivatives, and bout segmentation have temporal boundary
   state and must not be split into independent clips without overlap and a
   deterministic finalize step;
-- eye-angle and subject-shape stages already have worker-chunk designs that can
-  preserve non-overlapping physical Zarr chunk ownership;
+- eye angles preserve non-overlapping physical Zarr chunk ownership;
+- subject shape reads refined masks from the authoritative Zarr without
+  mutation, computes into node-local 1,024-row logical blocks, assembles
+  131,072-row indexed outer shards while preserving 256-row inner chunks,
+  validates every decoded shard, and publishes the completed run group under a
+  per-recording lock and atomic rename;
 - Palette-native tail kinematics uses its dedicated staged materializer: it
   transfers only the required subject-shape arrays to node-local scratch,
   assigns complete non-overlapping 262,144-row output shards to process
@@ -222,6 +226,24 @@ The executor preserves these large-recording constraints:
   therefore execute the `tail_kinematics` node with `--num-workers`;
 - framewise eye and tail exports must stream row groups or array chunks. They
   must not accumulate the complete recording as one in-memory table.
+
+For a subject-shape-only cluster run, render and then submit the DAG target. A
+32-core node matches the measured canary configuration; request enough memory
+for the observed 36.7 GB peak:
+
+```bash
+scripts/submit_analysis_workflow_bsub.sh \
+  --zarr /groups/path/to/recording_analysis.zarr \
+  --execution-id subject_shape_production_YYYYMMDD_01 \
+  --target subject_shape \
+  --ncores 32 \
+  --mem-gb 48 \
+  --walltime 24:00
+```
+
+The generated job sets the native BLAS/OpenMP thread ceilings before Python
+starts. The materializer is dry-run by default when invoked directly; the DAG
+adds `--apply` only inside the verified LSF allocation.
 
 The 10 Hz kinematic samples, 5-second activity/spatial summaries, and framewise
 trace exports remain planning-only nodes. The executor rejects them instead of
