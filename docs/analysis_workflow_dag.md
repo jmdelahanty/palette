@@ -242,8 +242,9 @@ scripts/submit_analysis_workflow_bsub.sh \
 ```
 
 Here `--mem-gb` is per slot, so 32 slots at 2 GB request 64 GB nominally for
-the job, above the measured 36.7 GB peak. The generated job pins all requested
-CPU slots to one host, sets the native
+the job, above the measured 36.7 GB peak. The site's `serial` application may
+apply a higher per-slot floor; inspect the effective `bjobs -l` reservation.
+The generated job pins all requested CPU slots to one host, sets the native
 BLAS/OpenMP thread ceilings before Python starts, and therefore keeps every
 process on the same node-local scratch. The materializer is dry-run by default
 when invoked directly; the DAG adds `--apply` only inside the verified LSF

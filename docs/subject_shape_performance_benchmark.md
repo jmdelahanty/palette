@@ -199,3 +199,23 @@ uses the materializer for new subject-shape runs. Production provenance records
 requested and effective compute blocks, native threads, the foreground-crop
 optimization, outer-shard layout, worker ownership, exact validation, and the
 atomic publication policy.
+
+## First production materialization (2026-07-15)
+
+Citrus job `153101747` ran the activated workflow at Palette commit
+`cc86b0e564d7736eed781c33672df2d11ad30b9c` on the 1,169,010-row Sleepyfish
+recording. All 32 slots ran on one host. Subject-shape compute completed in
+466.19 seconds at 2,507.6 rows/s, exceeding the bounded benchmark's 2,281
+rows/s. LSF reported 39.3 GB peak memory, no swap, and 14,994 CPU-seconds.
+
+The node-local assembly copied 104 arrays through 918 complete outer-shard
+tasks. Exact decoded validation passed, and the published run contained 1,000
+files occupying 2.65 GB apparent. Checksum-validated `rsync` publication took
+33.40 seconds. The refined-mask revision audit remained `current`, both the
+pre-pointer and final run validations passed, stderr was empty, and
+`latest`/`latest_complete` advanced only to the validated run.
+
+The wrapper requested 2 GB per slot, but the site's `serial` application
+applied its 15 GB per-slot floor, yielding a 480 GB effective reservation. This
+is scheduler accounting rather than observed demand; the measured peak remained
+39.3 GB.

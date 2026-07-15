@@ -44,6 +44,8 @@ def test_copy_completed_run_to_sharded_preserves_values_and_owns_outer_shards(
 
     assert report["status"] == "complete"
     assert report["exact_decoded_validation"] is True
+    assert report["duration_seconds"] >= 0.0
+    assert report["decoded_mib_per_second"] > 0.0
     assert report["worker_ownership"] == (
         "one_complete_nonoverlapping_outer_row_shard_per_array_task"
     )

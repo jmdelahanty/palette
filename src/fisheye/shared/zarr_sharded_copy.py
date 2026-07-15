@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import math
 import shutil
+import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -200,6 +201,7 @@ def copy_completed_run_to_sharded(
             raise FileExistsError(f"Destination run already exists: {destination_path}")
         shutil.rmtree(destination_path)
     destination_path.parent.mkdir(parents=True, exist_ok=True)
+    started = time.perf_counter()
 
     plans = build_sharded_copy_plan(
         source_path,
@@ -250,6 +252,10 @@ def copy_completed_run_to_sharded(
     effective_values = sorted(
         {int(plan.effective_shard_rows) for plan in plans if plan.effective_shard_rows is not None}
     )
+    decoded_bytes_copied = sum(
+        int(item["decoded_bytes"]) for item in (*static_results, *shard_results)
+    )
+    duration_seconds = float(time.perf_counter() - started)
     report = {
         "schema_id": SHARDED_COPY_SCHEMA_ID,
         "status": "complete",
@@ -264,8 +270,12 @@ def copy_completed_run_to_sharded(
         "array_count": len(plans),
         "row_aligned_array_count": sum(1 for plan in plans if plan.row_aligned),
         "static_array_count": sum(1 for plan in plans if not plan.row_aligned),
-        "decoded_bytes_copied": sum(
-            int(item["decoded_bytes"]) for item in (*static_results, *shard_results)
+        "decoded_bytes_copied": decoded_bytes_copied,
+        "duration_seconds": duration_seconds,
+        "decoded_mib_per_second": (
+            float(decoded_bytes_copied / (1024.0**2) / duration_seconds)
+            if duration_seconds > 0.0
+            else None
         ),
         "exact_decoded_validation": True,
         "arrays": [asdict(plan) for plan in plans],
