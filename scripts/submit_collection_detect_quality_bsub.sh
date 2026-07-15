@@ -13,7 +13,7 @@ FRAME_COUNT=""
 WIDTH=""
 HEIGHT=""
 EXPECTED_SUBJECT_COUNT=""
-WORKERS=8
+WORKERS=4
 MEM_GB_PER_CORE=2
 QUEUE="short"
 WALLTIME="1:00"
@@ -40,7 +40,7 @@ Options:
   --recording-frame-count N
   --width N --height N
   --expected-subject-count N
-  --workers N                         Default: 8
+  --workers N                         Default: 4 (Citrus per-slot memory floor)
   --shard-rows N                      Default: 131072
   --row-chunk-rows N                  Default: 16384
   --frame-chunk-rows N                Default: 16384
