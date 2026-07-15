@@ -109,6 +109,7 @@ if [[ ${#VARIANTS[@]} -eq 0 ]]; then
     "crop_1024_w32_t1:32:1024:1:crop"
   )
 fi
+MAX_NATIVE_THREADS=1
 for spec in "${VARIANTS[@]}"; do
   [[ "$spec" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*:[1-9][0-9]*:[1-9][0-9]*:[1-9][0-9]*(:[A-Za-z0-9,-]+)?$ ]] || \
     fail "invalid --variant: $spec"
@@ -116,6 +117,7 @@ for spec in "${VARIANTS[@]}"; do
   (( block % 256 == 0 )) || fail "variant block rows must align to 256: $spec"
   (( workers <= NCORES )) || fail "variant workers exceed --ncores: $spec"
   (( workers * native <= NCORES )) || fail "variant native thread budget exceeds --ncores: $spec"
+  if (( native > MAX_NATIVE_THREADS )); then MAX_NATIVE_THREADS="$native"; fi
 done
 
 [[ -f "$ZARR_PATH/zarr.json" || -f "$ZARR_PATH/.zgroup" ]] || fail "analysis Zarr metadata not found"
@@ -169,6 +171,7 @@ CONFIGURED_SCRATCH_BASE=${q_scratch}
 SOURCE_START_ROW=${SOURCE_START_ROW}
 ROW_COUNT=${ROW_COUNT}
 KEEP_SCRATCH=${KEEP_SCRATCH}
+NATIVE_THREAD_IMPORT_CEILING=${MAX_NATIVE_THREADS}
 
 [[ -n "\${LSB_JOBID:-}" ]] || { printf 'Refusing execution outside LSF.\n' >&2; exit 2; }
 cd "\${PALETTE_REPO}"
@@ -176,6 +179,10 @@ ACTUAL_COMMIT="\$(git rev-parse HEAD)"
 [[ "\${ACTUAL_COMMIT}" == "\${EXPECTED_COMMIT}" ]] || { printf 'Palette commit mismatch.\n' >&2; exit 2; }
 [[ -z "\$(git status --porcelain)" ]] || { printf 'Refusing dirty Palette checkout.\n' >&2; exit 2; }
 export PYTHONPATH="\${PALETTE_REPO}/src:\${PALETTE_REPO}\${PYTHONPATH:+:\${PYTHONPATH}}"
+export OMP_NUM_THREADS="\${NATIVE_THREAD_IMPORT_CEILING}"
+export OPENBLAS_NUM_THREADS="\${NATIVE_THREAD_IMPORT_CEILING}"
+export MKL_NUM_THREADS="\${NATIVE_THREAD_IMPORT_CEILING}"
+export NUMEXPR_NUM_THREADS="\${NATIVE_THREAD_IMPORT_CEILING}"
 
 if [[ -n "\${CONFIGURED_SCRATCH_BASE}" ]]; then
   scratch_base="\${CONFIGURED_SCRATCH_BASE}"
@@ -250,6 +257,7 @@ printf 'palette_commit=%s\n' "$EXPECTED_COMMIT"
 printf 'benchmark_id=%s\n' "$BENCHMARK_ID"
 printf 'memory_request_gb_total_target=%s\n' "$MEM_GB"
 printf 'memory_request_gb_per_slot=%s\n' "$MEM_GB_PER_SLOT"
+printf 'native_thread_import_ceiling=%s\n' "$MAX_NATIVE_THREADS"
 printf 'run_dir=%s\n' "$RUN_DIR"
 printf 'job_script=%s\n' "$JOB_SCRIPT"
 printf 'report=%s\n' "$REPORT_PATH"
