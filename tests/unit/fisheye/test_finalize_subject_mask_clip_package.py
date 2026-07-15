@@ -5,6 +5,7 @@ from pathlib import Path
 import tarfile
 
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.shared.refined_subject_mask_encoded_chunks import (
@@ -13,6 +14,19 @@ from fisheye.shared.refined_subject_mask_encoded_chunks import (
     prepare_global_mask_chunk_grid,
 )
 from fisheye.utils import finalize_subject_mask_clip_package as mod
+
+
+def test_default_staging_root_is_unique_per_lsf_array_element(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setenv("LSB_JOBID", "123")
+    monkeypatch.setenv("LSB_JOBINDEX", "7")
+
+    assert mod._default_staging_root() == (  # noqa: SLF001
+        tmp_path / "palette_refined_subject_mask_clip_package_123_7"
+    )
 
 
 def test_finalize_subject_mask_clip_package_writes_tar_and_cleans_staging(

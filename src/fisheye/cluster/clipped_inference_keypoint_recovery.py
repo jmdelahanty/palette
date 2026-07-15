@@ -11,11 +11,17 @@ from typing import Any, Mapping, Sequence
 from fisheye.cluster.clipped_inference import (
     FAMILY,
     PLAN_SCHEMA,
-    _job,
     build_ssh_bsub_runner,
+)
+from fisheye.cluster.clipped_lsf import (
+    build_execution_task as _execution_task,
+    build_job as _job,
+    build_task_group_job as _task_group_job,
 )
 from fisheye.cluster.keypoints.common import safe_component
 from fisheye.cluster.lsf import (
+    LsfExecutionMode,
+    LsfExecutionTask,
     LsfJob,
     LsfResources,
     LsfWorkflow,
@@ -48,13 +54,47 @@ def _read_json(path: Path) -> Any:
 
 def _inner_command(job: Mapping[str, Any]) -> tuple[str, ...]:
     command = job.get("command")
-    if not isinstance(command, list) or "--" not in command:
-        raise ValueError(f"Prior job has no runtime-wrapped command: {job.get('job_key')}")
-    separator = command.index("--")
-    inner = tuple(str(value) for value in command[separator + 1 :])
+    if not isinstance(command, list) or not command:
+        raise ValueError(f"Prior job has no command: {job.get('job_key')}")
+    inner = (
+        tuple(str(value) for value in command[command.index("--") + 1 :])
+        if "--" in command
+        else tuple(str(value) for value in command)
+    )
     if not inner:
         raise ValueError(f"Prior job has an empty inner command: {job.get('job_key')}")
     return inner
+
+
+def _prior_jobs_by_task_key(prior_jobs: Sequence[object]) -> dict[str, Mapping[str, Any]]:
+    """Index standalone scheduler jobs and grouped tasks through one view."""
+
+    indexed: dict[str, Mapping[str, Any]] = {}
+    for raw_job in prior_jobs:
+        if not isinstance(raw_job, Mapping) or not raw_job.get("job_key"):
+            continue
+        job = dict(raw_job)
+        indexed[str(job["job_key"])] = job
+        group = job.get("execution_group")
+        tasks = group.get("tasks") if isinstance(group, Mapping) else None
+        if not isinstance(tasks, list):
+            continue
+        for raw_task in tasks:
+            if not isinstance(raw_task, Mapping) or not raw_task.get("task_key"):
+                continue
+            task = dict(raw_task)
+            task["job_key"] = str(task["task_key"])
+            task["resources"] = job.get("resources")
+            task["parent_execution_group"] = dict(group)
+            indexed[str(task["task_key"])] = task
+    return indexed
+
+
+def _prior_group_limit(job: Mapping[str, Any], *, default: int) -> int:
+    group = job.get("parent_execution_group")
+    if not isinstance(group, Mapping):
+        return int(default)
+    return max(1, int(group.get("max_concurrent") or default))
 
 
 def _resources(job: Mapping[str, Any]) -> LsfResources:
@@ -67,6 +107,11 @@ def _resources(job: Mapping[str, Any]) -> LsfResources:
         mem_gb=int(payload["mem_gb"]),
         gpus=int(payload.get("gpus") or 0),
         walltime=str(payload["walltime"]) if payload.get("walltime") is not None else None,
+        span_hosts=(
+            int(payload["span_hosts"])
+            if payload.get("span_hosts") is not None
+            else None
+        ),
         extra_lsf_args=tuple(str(value) for value in payload.get("extra_lsf_args") or ()),
     )
 
@@ -102,11 +147,7 @@ def build_plan(
     repo = Path(str(source["repo"])).expanduser().resolve()
     registry = Path(str(source["registry"])).expanduser().resolve()
     prior_run_root = Path(str(source["run_root"])).expanduser().resolve()
-    prior_by_key = {
-        str(job["job_key"]): job
-        for job in prior_jobs
-        if isinstance(job, Mapping) and job.get("job_key")
-    }
+    prior_by_key = _prior_jobs_by_task_key(prior_jobs)
     preflight = prepare_keypoint_recovery(source_plan_path, apply=False)
     if preflight.get("status") != "ok":
         raise RuntimeError("Keypoint recovery preflight did not pass.")
@@ -142,7 +183,8 @@ def build_plan(
             raise ValueError("Source plan target must be an object.")
         target_safe = safe_component(str(target["target_id"]), default="target", max_length=56)
         zarr_path = Path(str(target["analysis_zarr"])).expanduser().resolve()
-        keypoint_keys: list[str] = []
+        keypoint_tasks: list[LsfExecutionTask] = []
+        keypoint_priors: list[Mapping[str, Any]] = []
         for clip in target["clips"]:
             clip_id = str(clip["clip_id"])
             key = f"keypoints:{target_safe}:{clip_id}"
@@ -152,25 +194,37 @@ def build_plan(
                 prior_run_root=prior_run_root,
                 recovery_run_root=run_root,
             )
-            jobs.append(
-                _job(
-                    workflow_id=label,
-                    repo=repo,
+            keypoint_tasks.append(
+                _execution_task(
                     run_root=run_root,
-                    job_key=key,
+                    task_key=key,
                     stage="keypoints",
                     command=command,
-                    resources=_resources(prior),
-                    upstream=(preparation_key,),
                     expected_outputs=(
                         zarr_path
                         / "keypoint_shard_runs"
                         / str(clip["keypoint_shard_run"])
                         / "zarr.json",
                     ),
+                    array_indexed=True,
                 )
             )
-            keypoint_keys.append(key)
+            keypoint_priors.append(prior)
+        keypoint_array_key = f"keypoints_array:{target_safe}"
+        jobs.append(
+            _task_group_job(
+                workflow_id=label,
+                repo=repo,
+                run_root=run_root,
+                job_key=keypoint_array_key,
+                stage="keypoints",
+                tasks=keypoint_tasks,
+                mode=LsfExecutionMode.ARRAY,
+                max_concurrent=_prior_group_limit(keypoint_priors[0], default=4),
+                resources=_resources(keypoint_priors[0]),
+                upstream=(preparation_key,),
+            )
+        )
 
         finalize_key = f"keypoint_finalize:{target_safe}"
         finalize_prior = prior_by_key[finalize_key]
@@ -187,7 +241,7 @@ def build_plan(
                     recovery_run_root=run_root,
                 ),
                 resources=_resources(finalize_prior),
-                upstream=tuple(keypoint_keys),
+                upstream=(keypoint_array_key,),
                 expected_outputs=(
                     zarr_path / "keypoints_runs" / str(target["keypoint_run"]) / "zarr.json",
                 ),
@@ -218,29 +272,42 @@ def build_plan(
             )
         )
 
-        package_keys: list[str] = []
+        package_tasks: list[LsfExecutionTask] = []
+        package_priors: list[Mapping[str, Any]] = []
         for clip in target["clips"]:
             clip_id = str(clip["clip_id"])
             key = f"mask_package:{target_safe}:{clip_id}"
             prior = prior_by_key[key]
-            jobs.append(
-                _job(
-                    workflow_id=label,
-                    repo=repo,
+            package_tasks.append(
+                _execution_task(
                     run_root=run_root,
-                    job_key=key,
+                    task_key=key,
                     stage="subject_mask_refine_package",
                     command=_replace_run_root(
                         _inner_command(prior),
                         prior_run_root=prior_run_root,
                         recovery_run_root=run_root,
                     ),
-                    resources=_resources(prior),
-                    upstream=(refine_key,),
                     expected_outputs=(Path(str(clip["package_path"])),),
+                    array_indexed=True,
                 )
             )
-            package_keys.append(key)
+            package_priors.append(prior)
+        package_array_key = f"mask_package_array:{target_safe}"
+        jobs.append(
+            _task_group_job(
+                workflow_id=label,
+                repo=repo,
+                run_root=run_root,
+                job_key=package_array_key,
+                stage="subject_mask_refine_package",
+                tasks=package_tasks,
+                mode=LsfExecutionMode.ARRAY,
+                max_concurrent=_prior_group_limit(package_priors[0], default=4),
+                resources=_resources(package_priors[0]),
+                upstream=(refine_key,),
+            )
+        )
 
         import_key = f"mask_import:{target_safe}"
         import_prior = prior_by_key[import_key]
@@ -259,7 +326,7 @@ def build_plan(
                 resources=LsfResources(
                     queue="local", ncores=8, mem_gb=32, walltime="3:00"
                 ),
-                upstream=tuple(package_keys),
+                upstream=(package_array_key,),
                 expected_outputs=(
                     zarr_path
                     / "refined_subject_masks_runs"

@@ -336,14 +336,19 @@ WORK_UNIT_IDS=(${WORK_UNIT_IDS_SHELL})
 ROI_SIZE=(${ROI_SIZE_SHELL})
 
 JOB_ID="\${LSB_JOBID:-manual}"
+JOB_INDEX="\${LSB_JOBINDEX:-}"
+WORK_ID="\${JOB_ID}"
+if [[ -n "\${JOB_INDEX}" ]]; then
+  WORK_ID="\${JOB_ID}_\${JOB_INDEX}"
+fi
 HOST="\$(hostname)"
-BUNDLE_STATUS_JSON="\${RUN_DIR}/\${RUN_LABEL}.\${JOB_ID}.bundle.json"
+BUNDLE_STATUS_JSON="\${RUN_DIR}/\${RUN_LABEL}.\${WORK_ID}.bundle.json"
 
 scratch_user="\${USER:-\$(id -un)}"
 if [[ -n "\${LSB_JOBID:-}" && -d "/scratch/\${scratch_user}" && -w "/scratch/\${scratch_user}" && -x "/scratch/\${scratch_user}" ]]; then
-  SCRATCH_ROOT="/scratch/\${scratch_user}/\${LSB_JOBID}"
+  SCRATCH_ROOT="/scratch/\${scratch_user}/\${WORK_ID}"
 else
-  SCRATCH_ROOT="\${TMPDIR:-/tmp}/palette_clipped_collection_flat_roi_cache_bundle_\${JOB_ID}"
+  SCRATCH_ROOT="\${TMPDIR:-/tmp}/palette_clipped_collection_flat_roi_cache_bundle_\${WORK_ID}"
 fi
 export PALETTE_JOB_CACHE="\${SCRATCH_ROOT}/palette_cache"
 export MPLBACKEND=Agg
@@ -470,6 +475,7 @@ publisher.update({
     "published_at_utc": datetime.now(timezone.utc).isoformat(),
     "publish_host": socket.gethostname(),
     "lsb_jobid": os.environ.get("LSB_JOBID"),
+    "lsb_jobindex": os.environ.get("LSB_JOBINDEX"),
     "source_manifest_path": str(local_manifest),
     "published_manifest_path": str(final_manifest),
     "published_bin_path": str(final_bin),
@@ -521,6 +527,7 @@ status = {
     "schema": manifest.get("schema"),
     "layout": manifest.get("layout"),
     "job_id": os.environ.get("LSB_JOBID"),
+    "job_index": os.environ.get("LSB_JOBINDEX"),
     "host": socket.gethostname(),
     "finished_at_utc": datetime.now(timezone.utc).isoformat(),
     "published_manifest": str(final_manifest),
@@ -611,6 +618,7 @@ summary = {
     "status": "ok" if ok_count == len(requested_clips) and len(exitcodes) == len(requested_clips) and all(v == 0 for v in exitcodes.values()) else "failed",
     "stage": "clipped_collection_flat_roi_cache_bundle_publish",
     "job_id": os.environ.get("LSB_JOBID"),
+    "job_index": os.environ.get("LSB_JOBINDEX"),
     "host": socket.gethostname(),
     "finished_at_utc": datetime.now(timezone.utc).isoformat(),
     "run_label": run_label,

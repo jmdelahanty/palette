@@ -62,9 +62,11 @@ def _infer_roi_cache_source_tier(path: Optional[Path]) -> Optional[str]:
 def _default_roi_cache_staging_dir() -> Path:
     user = os.environ.get("USER") or "unknown"
     job_id = os.environ.get("LSB_JOBID")
+    job_index = os.environ.get("LSB_JOBINDEX")
     user_scratch = Path(f"/scratch/{user}")
     if job_id and user_scratch.is_dir() and os.access(user_scratch, os.W_OK | os.X_OK):
-        return user_scratch / job_id / "palette_roi_cache_stage"
+        work_unit = f"{job_id}_{job_index}" if job_index else job_id
+        return user_scratch / work_unit / "palette_roi_cache_stage"
     return Path(os.environ.get("TMPDIR") or "/tmp") / f"palette_roi_cache_stage_{os.getpid()}"
 
 
@@ -204,6 +206,7 @@ def _stage_flat_roi_cache_manifest(
         "staging_dir": str(target_dir),
         "host": socket.gethostname(),
         "lsb_jobid": os.environ.get("LSB_JOBID"),
+        "lsb_jobindex": os.environ.get("LSB_JOBINDEX"),
         "payload_copy": {
             **bin_copy,
             "destination_path": str(local_bin),

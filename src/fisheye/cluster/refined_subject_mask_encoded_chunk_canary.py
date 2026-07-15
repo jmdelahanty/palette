@@ -8,7 +8,8 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from fisheye.cluster.clipped_inference import DEFAULT_REPO, _job, build_ssh_bsub_runner
+from fisheye.cluster.clipped_inference import DEFAULT_REPO, build_ssh_bsub_runner
+from fisheye.cluster.clipped_lsf import build_job as _job
 from fisheye.cluster.keypoints.common import safe_component
 from fisheye.cluster.lsf import (
     LsfJob,

@@ -8,7 +8,12 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
-from fisheye.cluster.lsf.models import LsfDependency, LsfJob, LsfResources
+from fisheye.cluster.lsf.models import (
+    LsfDependency,
+    LsfExecutionMode,
+    LsfJob,
+    LsfResources,
+)
 
 
 class CompletedProcessLike(Protocol):
@@ -101,10 +106,13 @@ def build_bsub_prefix(
     ]
     if resources.walltime is not None:
         args.extend(["-W", resources.walltime])
+    resource_requirement = f"rusage[mem={resources.mem_gb}G]"
+    if resources.span_hosts is not None:
+        resource_requirement += f" span[hosts={resources.span_hosts}]"
     args.extend(
         [
             "-R",
-            f"rusage[mem={resources.mem_gb}G]",
+            resource_requirement,
             "-oo",
             str(stdout_path),
             "-eo",
@@ -132,9 +140,21 @@ def build_bsub_command(
         if job.dependency is not None
         else None
     )
+    job_name = job.job_name
+    if (
+        job.execution_group is not None
+        and job.execution_group.mode is LsfExecutionMode.ARRAY
+    ):
+        task_count = len(job.execution_group.tasks)
+        limit = (
+            f"%{job.execution_group.max_concurrent}"
+            if job.execution_group.max_concurrent < task_count
+            else ""
+        )
+        job_name = f"{job_name}[1-{task_count}]{limit}"
     return [
         *build_bsub_prefix(
-            job_name=job.job_name,
+            job_name=job_name,
             resources=job.resources,
             stdout_path=job.stdout_path,
             stderr_path=job.stderr_path,

@@ -55,6 +55,14 @@ Family planners may share family-local helpers. For example, whole-recording
 and clipped-collection keypoint planners should share keypoint command and run
 name construction without forcing those details into the LSF kernel.
 
+Stage-scoped planners are permanent first-class interfaces, not transitional
+wrappers around a monolithic DAG. A full analysis DAG exists to automate the
+usual registry-backed dependency chain over a dataset. Operators must still be
+able to request keypoints, masks, detections, refinement, validation, or repair
+independently. The planner chooses ordinary jobs, arrays, or bounded bundles
+according to work cardinality and resource ownership; those are scheduler
+representations, not different scientific workflows.
+
 ### Implementation status
 
 The Phase 1 extraction and the first Phase 2 keypoint-family slice were
@@ -82,6 +90,22 @@ implemented on 2026-07-10:
 - `fisheye.cluster.lsf.runtime` now owns the common per-job runtime envelope,
   LSF token expansion, signal forwarding, atomic running/final status,
   expected-output checks, and fail-closed job-local scratch cleanup;
+- `LsfExecutionGroup` and `LsfExecutionTask` now represent repeated work as
+  either an LSF array or a bounded in-allocation bundle. The backend renders
+  `name[1-N]%limit`, while `fisheye.cluster.lsf.task_group` selects array
+  elements from the immutable plan or runs bundle children with a fixed
+  concurrency limit. Every child retains its own command, status, cleanup,
+  and expected-output contract;
+- `LsfWorkflowFragment` and `compose_lsf_workflow` validate logical artifact
+  requirements across independently built subgraphs. The clipped full-analysis
+  planner now uses this contract rather than merely grouping jobs after the
+  fact;
+- `fisheye.cluster.clipped_detection` is the first extracted clipped domain
+  module. It returns both its LSF fragment and typed outputs for raw groups,
+  recording-quality groups, refined groups, finalized collection, terminal
+  job, and logical artifact. The same builder composes into the full campaign
+  or a detection-only workflow, while `fisheye.cluster.clipped_lsf` holds the
+  shared clipped runtime-envelope construction;
 - `fisheye.cluster.keypoints.common` owns exact pose-model, flat-cache, run-name,
   live crop-DAG capability, prediction-job, and refinement-job bindings used
   within the keypoint family;
@@ -300,9 +324,13 @@ suggested layout is:
 │   └── ...
 ├── logs/
 │   ├── <job-key>.%J.out
+│   ├── <array-key>.%J.%I.out
 │   └── <job-key>.%J.err
 ├── status/
 │   ├── <job-key>.<job-id>.json
+│   ├── <array-task>.<job-id>.<array-index>.json
+│   ├── <bundle-task>.<job-id>.json
+│   ├── <bundle-key>.<job-id>.bundle.json
 │   └── ...
 └── progress/                     # optional family-specific live progress
 ```
@@ -321,6 +349,8 @@ first `bsub` call and contain:
 - commands as argument arrays, not only display strings;
 - resource requests, queues, and walltimes;
 - dependency references by stable job key;
+- typed array/bundle execution groups with stable task keys, commands,
+  concurrency limits, and per-task output contracts;
 - stdout, stderr, status, and progress paths;
 - collision/precondition results;
 - hashes for target manifests and important immutable inputs when practical;
@@ -410,6 +440,12 @@ JobSpec
   job_key, work_unit_key, stage, resources, commands,
   dependency, log paths, status path, expected outputs
 
+ExecutionTask
+  task_key, stage, command, status path, cleanup paths, expected outputs
+
+ExecutionGroup
+  mode=array|bundle, tasks, max_concurrent, optional bundle summary path
+
 WorkflowPlan
   schema, family, workflow_id, jobs, targets, preflight, metadata
 ```
@@ -431,6 +467,12 @@ The shared implementation should:
 8. support plan-only mode without `bsub` in `PATH`;
 9. preserve enough raw evidence to reproduce or diagnose every submission;
 10. expose fake-runner seams for unit tests.
+11. render array indices and slot limits without expanding them into repeated
+    `bsub` calls;
+12. preserve one status/output-validation envelope per array element or bundle
+    child;
+13. require array scratch namespaces to include both `LSB_JOBID` and
+    `LSB_JOBINDEX`.
 
 ### Kernel non-responsibilities
 

@@ -6,6 +6,23 @@ from pathlib import Path
 from fisheye.utils import run_clipped_detection_work_unit as worker
 
 
+def test_detection_scratch_is_unique_per_lsf_array_element(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("USER", "palette_array_fixture_user")
+    monkeypatch.setenv("LSB_JOBID", "123")
+    monkeypatch.setenv("LSB_JOBINDEX", "7")
+    monkeypatch.setattr(worker.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    assert worker._scratch_root() == (  # noqa: SLF001
+        tmp_path
+        / "palette_array_fixture_user"
+        / "123_7"
+        / "palette_clipped_detection"
+    )
+
+
 def test_work_unit_builds_imports_and_validates(monkeypatch, tmp_path: Path) -> None:
     calls: dict[str, object] = {}
     scratch = tmp_path / "scratch"

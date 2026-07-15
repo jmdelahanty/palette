@@ -11,9 +11,9 @@ from typing import Any, Mapping, Sequence
 from fisheye.cluster.clipped_inference import (
     FAMILY,
     PLAN_SCHEMA,
-    _job,
     build_ssh_bsub_runner,
 )
+from fisheye.cluster.clipped_lsf import build_job as _job
 from fisheye.cluster.clipped_inference_keypoint_recovery import (
     _inner_command,
     _replace_run_root,

@@ -6,6 +6,53 @@ collection creation, flat ROI cache construction, proxy crop binding,
 keypoints, keypoint refinement, subject-mask inference, refined subject masks,
 content validation, registry reconciliation, and optional NRS cleanup.
 
+This full DAG is the registry-backed default-processing orchestrator, not the
+only supported execution surface. Detection-only, cache-only, keypoint-only,
+mask-only, refinement-only, recovery, and validation workflows remain
+first-class operator entry points. Their stage runners and artifact contracts
+are the reusable units composed by this DAG. A user should not need to launch
+the complete DAG to run or rerun one stage.
+
+Scheduler packaging is independent of workflow scope. One explicitly selected
+work unit may be one ordinary LSF job. Repeated same-resource work should use an
+LSF array, and independently safe CPU work may use a bounded in-allocation
+bundle. Neither representation makes the underlying stage or standalone job
+contract obsolete.
+
+## Composable workflow modules
+
+The detection path is the first extracted domain module. The
+`fisheye.cluster.clipped_detection` builder accepts typed target, clip, model,
+quality-policy, scheduler, and upstream-gate inputs and returns two things:
+
+- an `LsfWorkflowFragment` containing the detect array, recording-order
+  quality-source materialization, collection quality reconciliation,
+  detect-refine bundle, and finalized-collection publication;
+- typed `DetectionFragmentOutputs` naming every raw/refined group, the quality
+  groups, the finalized collection, the terminal LSF job key, and the logical
+  artifact key supplied to downstream fragments.
+
+The full planner consumes those outputs when it constructs the cache and mask
+commands; it does not independently reconstruct the collection path or
+terminal dependency. `compose_detection_workflow(...)` can compose the same
+module by itself for a detection-only workflow. This keeps workflow scope
+(detection-only versus full analysis) separate from scheduler packaging
+(ordinary job, array, or bounded bundle).
+
+For each target, the full campaign now composes a `detection:<target>` fragment
+with an `analysis:<target>` fragment. The analysis fragment explicitly requires
+the detection module's finalized-collection artifact and provides a validated
+analysis artifact. Cross-recording concurrency gates are also expressed as
+fragment requirements: a later detection fragment may require the earlier
+target's validated-analysis artifact. The campaign finalizer requires every
+target validation artifact before registry reconciliation and cleanup.
+
+These logical artifact keys validate composition; concrete LSF dependencies
+still enforce execution order. All fragments are resolved into one immutable
+workflow before any `bsub` call, so compute jobs never create more scheduler
+jobs dynamically. Cache, keypoint, and subject-mask extraction can follow the
+same pattern without changing their existing stage-only operator interfaces.
+
 The target manifest schema is `palette.clipped_inference_targets.v1`. Every
 target must pin its registry `recording_id`, recording directory, and canonical
 analysis Zarr. The command also requires exact registry set and run identifiers
@@ -24,11 +71,15 @@ in place of GPU inference jobs and continues through detection refinement.
 
 ## Execution contract
 
-All production work is represented as structured `LsfJob` objects and wrapped
-by the durable LSF runtime-status envelope. `--dry-run` writes `plan.json`,
-`lsf_plan.json`, and per-target detection plans without calling `bsub`.
-`--apply` performs the same planning on the workstation and sends only the
-individual `bsub` commands through `login1-citrus-poller` (or
+All production work is represented as structured `LsfJob` objects. Repeated
+same-resource clip work is represented as typed execution tasks inside one LSF
+job array, and bounded CPU fan-out is represented as a typed in-allocation
+bundle. Every array element and bundle child still receives its own durable
+runtime-status envelope, exact command, expected-output checks, and task key.
+`--dry-run` writes `plan.json`, `lsf_plan.json`, and per-target detection plans
+without calling `bsub`. `--apply` performs the same planning on the workstation
+and sends only scheduler-level `bsub` commands through
+`login1-citrus-poller` (or
 `--submit-host`). No inference, finalization, validation, or Zarr mutation runs
 on the workstation or login poller.
 
@@ -42,29 +93,54 @@ before importing the planner itself.
 For each recording, the dependency structure is:
 
 ```text
-22 detect -> sharded recording-order quality source
-          -> collection quality reconcile -> 22 keyed detect refine
-                                          -> finalized detection collection
+detect array[22] -> sharded recording-order quality source
+                 -> collection quality reconcile
+                 -> keyed detect-refine CPU bundle[22, max 4]
+                 -> finalized detection collection
                                       |
-                               6 cache bundles
+                         cache array[6 four-clip bundles]
                                       |
-                              proxy crop binding
-                                /             \
-                       22 keypoints       22 subject masks
+                             proxy crop binding
+                               /              \
+                    keypoint array[22]   subject-mask array[22]
                               |                  |
                     keypoint finalize           |
                               |                  |
                      keypoint refine            |
                                \                /
-                           22 mask packages
+                          mask-package array[22]
                                   |
                          refined-mask import
                                   |
                        exact content validation
 ```
 
-The cache is the physical crop materialization. The proxy crop runs bind its
+The default limits are eight concurrent detection elements, four concurrent
+keypoint elements, four concurrent subject-mask elements, two concurrent cache
+elements, four concurrent mask-package elements, and four concurrent
+detect-refine bundle children. Keypoint and subject-mask arrays are independent
+branches, so up to eight GPU elements for one recording may be active after
+proxy creation. These limits are configurable with the corresponding
+`--*-concurrency` options and are frozen into the immutable plan.
+
+For a 22-clip recording this is 14 recording-specific `bsub` submissions while
+retaining 124 independently identified execution tasks. Registry finalization
+and optional NRS cleanup add two campaign-wide submissions. LSF receives array
+names in the form `name[1-N]%limit`; array logs contain both `%J` and `%I`.
+Downstream stages use a whole-array `done(<job-id>)` barrier, so one failed
+element prevents publication. Detection and keypoint node-local scratch paths
+also include `LSB_JOBINDEX`, preventing two elements of the same array on one
+host from sharing a work directory.
+
+The cache is the physical crop materialization. Each cache array element owns
+up to four clips and keeps the cache builder's bounded parallel workers within
+one node. The proxy crop runs bind its
 rows to the canonical Zarr; there is no redundant standalone crop-image write.
+Proxy creation remains one serial recording-level job because the clip proxies
+share the same `crop_runs` parent metadata; parallelizing those writes would
+need an explicit parent-metadata transaction. Mask-package finalizers remain
+array elements rather than a multi-package CPU bundle because each element
+already owns eight process workers and its own package artifact.
 Keypoints and masks safely read the same immutable cache concurrently. Each
 mask package waits for both its clip-local probability shard and the exact
 recording-level refined-keypoint run used for left/right eye assignment.
@@ -136,13 +212,13 @@ groups named by the source plan, and clears `latest_pending` only if it selects
 one of those incomplete groups. The remaining DAG is:
 
 ```text
-repair/cleanup -> 22 keypoints -> keypoint finalize -> keypoint refine
-                                                        |
-                                  completed raw masks -> 22 mask packages
-                                                        |
-                                          refined-mask import
-                                                        |
-                                      validation -> registry -> NRS cleanup
+repair/cleanup -> keypoint array[22] -> keypoint finalize -> keypoint refine
+                                                                |
+                                      completed raw masks -> mask-package array[22]
+                                                                |
+                                                  refined-mask import
+                                                                |
+                                              validation -> registry -> NRS cleanup
 ```
 
 The merged proxy may legitimately be absent during preflight because the
@@ -240,7 +316,7 @@ The unchecked retry-accounting, cluster performance, full scientific parity,
 Crimson, and default-rollout gates require the PRFS two-clip canary and then one
 complete recording.
 
-## Sleepyfish dry run, 2026-07-14
+## Sleepyfish pre-array dry run, 2026-07-14
 
 The reviewed three-recording plan covers cams 2010093, 2010094, and 2010096,
 22 clips each. It pins:
@@ -255,10 +331,43 @@ The reviewed three-recording plan covers cams 2010093, 2010094, and 2010096,
   `subject_mask_cedar_shadow_omnifin0_gray_subject_v1_union_c6ff03ae_v001`,
   run `subject_masks_union_all_components_v001`.
 
-The dry run rendered 368 LSF jobs: 122 jobs per target, one all-target registry
-job, and one NRS cleanup job. The audit confirmed 66 clips, exact two-way mask
+This historical dry run predates the array refactor. It rendered 368 LSF
+submissions: 122 jobs per target, one all-target registry job, and one NRS
+cleanup job. The audit confirmed 66 clips, exact two-way mask
 package joins, shared proxy gates for the parallel keypoint/mask branches,
 direct cache execution with no nested `bsub`, runtime wrapping on every job,
 and no submission evidence. The reviewed snapshot is under
 `/tmp/sleepyfish_clipped_full_20260714_v001_dryrun`; it is diagnostic evidence,
 not a durable campaign directory.
+
+## Sleepyfish array dry run, 2026-07-15
+
+The post-refactor three-recording dry run covers the same 66 clips and retains
+374 task-level status/output contracts, but requires only 44 scheduler
+submissions: 14 per recording plus registry finalization and NRS cleanup. It
+contains 15 arrays and three bounded CPU bundles. Per recording the array shapes
+are detection `[1-22]%8`, cache `[1-6]%2`, keypoints `[1-22]%4`, subject masks
+`[1-22]%4`, and mask packages `[1-22]%4`. The detect-refine bundle runs at most
+four children in one 16-core, `span[hosts=1]` allocation with four BLAS/OpenMP
+threads per child.
+
+The matching one-recording dry run has 16 scheduler submissions and 126 task
+envelopes, confirming that one- and multi-recording campaigns use the same DAG
+implementation. Neither dry run has an `lsf_submission.json`; no jobs were
+submitted. Diagnostic evidence is retained under:
+
+- `/tmp/sleepyfish_lsf_arrays_dryrun_20260715_v003`;
+- `/tmp/sleepyfish_lsf_arrays_single_dryrun_20260715_v001`.
+
+The subsequent detection-module extraction was rerun against the same live
+registry and recording metadata. Scheduler behavior remained unchanged: the
+single-recording plan has 16 submissions, 126 task envelopes, five arrays, and
+one bundle; the three-recording plan has 44 submissions, 374 task envelopes,
+15 arrays, and three bundles. The immutable plans additionally expose three
+logical fragments for one target and seven for three targets. With
+`max_active_targets=2`, cam2010096's detection fragment requires cam2010093's
+validated-analysis artifact, matching its concrete LSF dependency. No
+submission evidence was created. These diagnostic snapshots are retained at:
+
+- `/tmp/sleepyfish_composable_dag_single_dryrun_20260715_v001`;
+- `/tmp/sleepyfish_composable_dag_multi_dryrun_20260715_v001`.

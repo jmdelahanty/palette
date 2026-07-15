@@ -29,10 +29,12 @@ def _validation_succeeded(validation: dict[str, Any]) -> bool:
 def _scratch_root() -> Path:
     user = os.environ.get("USER") or "palette"
     job_id = os.environ.get("LSB_JOBID") or "local"
-    preferred = Path("/scratch") / user / job_id / "palette_clipped_detection"
+    job_index = os.environ.get("LSB_JOBINDEX")
+    work_unit = f"{job_id}_{job_index}" if job_index else job_id
+    preferred = Path("/scratch") / user / work_unit / "palette_clipped_detection"
     if preferred.parent.parent.exists():
         return preferred
-    return Path(tempfile.gettempdir()) / user / job_id / "palette_clipped_detection"
+    return Path(tempfile.gettempdir()) / user / work_unit / "palette_clipped_detection"
 
 
 def run_work_unit(

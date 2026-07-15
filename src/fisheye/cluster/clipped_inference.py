@@ -11,6 +11,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from fisheye.cluster.clipped_detection import (
+    DetectionClipSpec,
+    DetectionFragmentInputs,
+    DetectionModelSpec,
+    build_detection_fragment,
+)
+from fisheye.cluster.clipped_lsf import (
+    build_execution_task as _execution_task,
+    build_job as _job,
+    build_task_group_job as _task_group_job,
+    chain_commands as _chain,
+)
 from fisheye.cluster.keypoints.common import (
     resolve_pose_model_binding,
     safe_component,
@@ -18,15 +30,20 @@ from fisheye.cluster.keypoints.common import (
 )
 from fisheye.cluster.lsf import (
     CommandRunner,
-    LsfDependency,
+    LsfExecutionMode,
+    LsfExecutionTask,
     LsfJob,
     LsfResources,
     LsfWorkflow,
+    LsfWorkflowFragment,
+    compose_lsf_workflow,
     shell_join,
     submit_lsf_workflow,
     write_json_snapshot,
 )
-from fisheye.cluster.lsf.runtime import RUNTIME_JOB_ID_TOKEN, build_runtime_command
+from fisheye.cluster.lsf.runtime import (
+    RUNTIME_JOB_ID_TOKEN,
+)
 from fisheye.registry.db import Registry
 from fisheye.registry.model_resolution import (
     load_candidates,
@@ -98,6 +115,11 @@ class ClippedInferencePlan:
     cleanup_nrs_after_success: bool
     resume_existing_detections: bool
     encoded_mask_packages: bool
+    detect_array_concurrency: int
+    gpu_array_concurrency: int
+    cache_array_concurrency: int
+    mask_package_array_concurrency: int
+    detect_refine_bundle_concurrency: int
     lsf_workflow: LsfWorkflow
 
     def to_json(self) -> dict[str, Any]:
@@ -117,6 +139,13 @@ class ClippedInferencePlan:
             "cleanup_nrs_after_success": self.cleanup_nrs_after_success,
             "resume_existing_detections": self.resume_existing_detections,
             "encoded_mask_packages": self.encoded_mask_packages,
+            "scheduler_concurrency": {
+                "detect_array": self.detect_array_concurrency,
+                "gpu_array_per_stage": self.gpu_array_concurrency,
+                "cache_array": self.cache_array_concurrency,
+                "mask_package_array": self.mask_package_array_concurrency,
+                "detect_refine_bundle": self.detect_refine_bundle_concurrency,
+            },
             "lsf_workflow": self.lsf_workflow.to_json(),
         }
 
@@ -279,54 +308,6 @@ def _assert_same_binding(name: str, bindings: Sequence[ModelBinding]) -> ModelBi
     if len(identities) != 1:
         raise ValueError(f"The target cohort does not resolve one common {name} model: {identities}")
     return bindings[0]
-
-
-def _chain(commands: Sequence[Sequence[str]]) -> tuple[str, ...]:
-    return ("bash", "-lc", " && ".join(shell_join(command) for command in commands))
-
-
-def _job(
-    *,
-    workflow_id: str,
-    repo: Path,
-    run_root: Path,
-    job_key: str,
-    stage: str,
-    command: Sequence[str],
-    resources: LsfResources,
-    upstream: Sequence[str] = (),
-    expected_outputs: Sequence[Path] = (),
-    cleanup_paths: Sequence[str] = (),
-) -> LsfJob:
-    safe = safe_component(job_key.replace(":", "_"), default="job", max_length=110)
-    deployed_pythonpath = str(repo / "src")
-    runtime_command = build_runtime_command(
-        command,
-        status_path_template=run_root / "status" / f"{safe}.{RUNTIME_JOB_ID_TOKEN}.json",
-        workflow_id=workflow_id,
-        family=FAMILY,
-        job_key=job_key,
-        stage=stage,
-        cwd=repo,
-        cleanup_path_templates=cleanup_paths,
-        expected_output_templates=tuple(str(path) for path in expected_outputs),
-        environment_overrides={"PYTHONPATH": deployed_pythonpath},
-        python_launcher=(
-            "env",
-            f"PYTHONPATH={deployed_pythonpath}",
-            str(repo / "scripts" / "py"),
-        ),
-    )
-    return LsfJob(
-        job_key=job_key,
-        job_name=safe_component(f"ci_{workflow_id}_{safe}", default=safe, max_length=120),
-        command=runtime_command,
-        resources=resources,
-        stdout_path=run_root / "logs" / f"{safe}.%J.out",
-        stderr_path=run_root / "logs" / f"{safe}.%J.err",
-        dependency=LsfDependency(tuple(upstream)) if upstream else None,
-        metadata={"stage": stage},
-    )
 
 
 def _refuse_output_collisions(
@@ -506,11 +487,28 @@ def build_plan(
     cleanup_nrs_after_success: bool = True,
     resume_existing_detections: bool = False,
     encoded_mask_packages: bool = False,
+    detect_array_concurrency: int = 8,
+    gpu_array_concurrency: int = 4,
+    cache_array_concurrency: int = 2,
+    mask_package_array_concurrency: int = 4,
+    detect_refine_bundle_concurrency: int = 4,
 ) -> ClippedInferencePlan:
     if not targets:
         raise ValueError("At least one target is required.")
-    if cache_bundle_size <= 0 or max_active_targets <= 0:
-        raise ValueError("cache_bundle_size and max_active_targets must be positive.")
+    concurrency_values = {
+        "cache_bundle_size": cache_bundle_size,
+        "max_active_targets": max_active_targets,
+        "detect_array_concurrency": detect_array_concurrency,
+        "gpu_array_concurrency": gpu_array_concurrency,
+        "cache_array_concurrency": cache_array_concurrency,
+        "mask_package_array_concurrency": mask_package_array_concurrency,
+        "detect_refine_bundle_concurrency": detect_refine_bundle_concurrency,
+    }
+    if any(int(value) <= 0 for value in concurrency_values.values()):
+        raise ValueError(
+            "Workflow bundle sizes and concurrency limits must be positive: "
+            f"{concurrency_values}"
+        )
     label = safe_component(run_label, default="clipped_inference", max_length=72)
     workflow_id = label
     repo = repo.expanduser().resolve()
@@ -567,8 +565,6 @@ def build_plan(
     )
 
     gpu = LsfResources(queue="gpu_l4", ncores=8, mem_gb=48, gpus=1, walltime="4:00")
-    detect_gpu = LsfResources(queue="gpu_l4", ncores=8, mem_gb=120, gpus=1, walltime="2:00")
-    detect_reuse_cpu = LsfResources(queue="short", ncores=1, mem_gb=8, walltime="1:00")
     cpu = LsfResources(queue="short", ncores=4, mem_gb=32, walltime="1:00")
     final_cpu = LsfResources(queue="short", ncores=8, mem_gb=32, walltime="1:00")
     import_cpu = LsfResources(queue="local", ncores=8, mem_gb=32, walltime="3:00")
@@ -582,6 +578,7 @@ def build_plan(
     )
 
     jobs: list[LsfJob] = []
+    fragments: list[LsfWorkflowFragment] = []
     target_payloads: list[dict[str, Any]] = []
     target_validation_keys: list[str] = []
 
@@ -684,156 +681,58 @@ def build_plan(
         if target_index >= max_active_targets:
             gate = (target_validation_keys[target_index - max_active_targets],)
 
-        detect_keys: list[str] = []
-        refine_keys: list[str] = []
-        for unit, clip in zip(work_units, clips, strict=True):
-            clip_id = str(clip["clip_id"])
-            detect_key = f"detect:{target_safe}:{clip_id}"
-            detect_keys.append(detect_key)
-            report = run_root / "targets" / target_safe / "detection_reports" / f"{clip_id}.json"
-            detect_command = [
-                "scripts/py", "-m", "fisheye.utils.run_clipped_detection_work_unit",
-                "--video", str(clip["video_path"]),
-                "--target-zarr", str(target.analysis_zarr),
-                "--target-group-path", str(clip["detect_group_path"]),
-                "--model", str(detection_binding.path),
-                "--model-sha256", detection_binding.sha256,
-                "--model-registry-set-id", detection_binding.set_id,
-                "--model-registry-run-id", detection_binding.run_id,
-                "--config", str(config_path),
-                "--workflow-id", target_label,
-                "--recording-id", target.recording_id,
-                "--clip-id", clip_id,
-                "--clip-index", str(clip["clip_index"]),
-                "--camera-serial", str(clip["camera_serial"]),
-                "--recording-frame-index", str(target.recording_dir / "recording_frame_index.parquet"),
-                "--run-name", str(clip["detect_run"]),
-                "--report", str(report),
-                "--batch-size", "16",
-                "--decode-backend", "pynvvc_luma_rgb",
-            ]
-            if resume_existing_detections:
-                detect_command.append("--reuse-existing")
-            jobs.append(
-                _job(
-                    workflow_id=workflow_id,
-                    repo=repo,
-                    run_root=run_root,
-                    job_key=detect_key,
-                    stage="detect_reuse" if resume_existing_detections else "detect",
-                    command=detect_command,
-                    resources=detect_reuse_cpu if resume_existing_detections else detect_gpu,
-                    upstream=gate,
-                    expected_outputs=(target.analysis_zarr / str(clip["detect_group_path"]) / "zarr.json", report),
-                    cleanup_paths=(
-                        ()
-                        if resume_existing_detections
-                        else (
-                            f"/scratch/__PALETTE_LSF_USER__/{RUNTIME_JOB_ID_TOKEN}/palette_clipped_detection",
-                        )
-                    ),
-                )
+        gate_artifacts: tuple[str, ...] = ()
+        if target_index >= max_active_targets:
+            gated_target = target_payloads[target_index - max_active_targets]
+            gated_safe = safe_component(
+                str(gated_target["target_id"]), default="target", max_length=56
             )
-        quality_source_key = f"detect_quality_source:{target_safe}"
-        quality_source_command = [
-            "scripts/py", "-m", "fisheye.utils.materialize_clipped_detect_quality_source",
-            str(target.analysis_zarr), "--plan", str(detection_plan_path),
-            "--output-run", detect_quality_source_run,
-            "--recording-frame-index", str(target.recording_dir / "recording_frame_index.parquet"),
-            "--shard-rows", "131072", "--inner-rows", "16384", "--apply", "--json",
-        ]
-        jobs.append(
-            _job(
-                workflow_id=workflow_id, repo=repo, run_root=run_root,
-                job_key=quality_source_key, stage="detect_quality_source",
-                command=quality_source_command, resources=cpu,
-                upstream=tuple(detect_keys),
-                expected_outputs=(
-                    target.analysis_zarr / "detect_collection_sources" / detect_quality_source_run / "zarr.json",
+            gate_artifacts = (f"validated_analysis:{gated_safe}",)
+        detection_module = build_detection_fragment(
+            DetectionFragmentInputs(
+                workflow_id=workflow_id,
+                family=FAMILY,
+                target_id=target.target_id,
+                target_label=target_label,
+                recording_id=target.recording_id,
+                recording_dir=target.recording_dir,
+                analysis_zarr=target.analysis_zarr,
+                repo=repo,
+                run_root=run_root,
+                detection_plan_path=detection_plan_path,
+                collection_id=collection_id,
+                quality_source_run=detect_quality_source_run,
+                quality_run=detect_quality_run,
+                clips=tuple(DetectionClipSpec.from_mapping(clip) for clip in clips),
+                model=DetectionModelSpec(
+                    set_id=detection_binding.set_id,
+                    run_id=detection_binding.run_id,
+                    path=detection_binding.path,
+                    sha256=detection_binding.sha256,
                 ),
+                expected_subject_count=target.expected_subject_count,
+                resume_existing_detections=resume_existing_detections,
+                detect_array_concurrency=detect_array_concurrency,
+                refine_bundle_concurrency=detect_refine_bundle_concurrency,
+                upstream_job_keys=gate,
+                required_artifacts=gate_artifacts,
             )
         )
-        quality_key = f"detect_quality:{target_safe}"
-        quality_command = [
-            "scripts/py", "-m", "fisheye.refinement.detect_quality_collection",
-            str(target.analysis_zarr),
-            "--source-group", f"detect_collection_sources/{detect_quality_source_run}",
-            "--output-run", detect_quality_run,
-            "--expected-subject-count", str(target.expected_subject_count),
-            "--threshold-mode", "scaled", "--jump-threshold", "100.0",
-            "--threshold-reference-width", "640.0", "--blip-gap-threshold", "10",
-            "--shard-rows", "131072", "--row-chunk-rows", "16384",
-            "--frame-chunk-rows", "16384", "--workers", "4",
-            "--work-dir", f"/scratch/__PALETTE_LSF_USER__/{RUNTIME_JOB_ID_TOKEN}/detect_quality",
-            "--apply", "--json",
-        ]
-        jobs.append(
-            _job(
-                workflow_id=workflow_id, repo=repo, run_root=run_root,
-                job_key=quality_key, stage="detect_quality",
-                command=quality_command, resources=cpu, upstream=(quality_source_key,),
-                expected_outputs=(
-                    target.analysis_zarr / "detect_quality_runs" / detect_quality_run / "zarr.json",
-                ),
-                cleanup_paths=(
-                    f"/scratch/__PALETTE_LSF_USER__/{RUNTIME_JOB_ID_TOKEN}/detect_quality",
-                ),
-            )
-        )
+        jobs.extend(detection_module.fragment.jobs)
+        fragments.append(detection_module.fragment)
+        detection_outputs = detection_module.outputs
+        target_payload["detection_module"] = detection_outputs.to_json()
+        downstream_job_start = len(jobs)
 
-        for clip in clips:
-            clip_id = str(clip["clip_id"])
-            refine_key = f"detect_refine:{target_safe}:{clip_id}"
-            refine_keys.append(refine_key)
-            refine = [
-                "scripts/py", "-m", "fisheye.refinement.refine_detect",
-                str(target.analysis_zarr), "--detect-run", str(clip["detect_run"]),
-                "--detect-family-path", str(Path(str(clip["detect_group_path"])).parent),
-                "--refined-family-path", str(Path(str(clip["refined_detect_group_path"])).parent),
-                "--quality-group-path", f"detect_quality_runs/{detect_quality_run}",
-                "--config", str(refine_config),
-                "--run-name", str(clip["refined_detect_run"]), "--per-frame-top-k", "1",
-            ]
-            validate = [
-                "scripts/py", "-m", "fisheye.utils.validate_refined_detect_run",
-                str(target.analysis_zarr), "--target-group-path", str(clip["refined_detect_group_path"]),
-            ]
-            jobs.append(
-                _job(
-                    workflow_id=workflow_id, repo=repo, run_root=run_root,
-                    job_key=refine_key, stage="detect_refine",
-                    command=_chain((refine, validate)), resources=cpu,
-                    upstream=(quality_key,),
-                    expected_outputs=(target.analysis_zarr / str(clip["refined_detect_group_path"]) / "zarr.json",),
-                )
-            )
-
-        collection_key = f"detect_collection:{target_safe}"
-        collection_report = run_root / "targets" / target_safe / "detection_collection.json"
-        collection_command = [
-            "scripts/py", "-m", "fisheye.utils.finalize_clipped_detect_refine_workflow",
-            str(detection_plan_path), "--collection-id", collection_id,
-            "--detect-quality-run", detect_quality_run,
-            "--detect-quality-group-path", f"detect_quality_runs/{detect_quality_run}",
-            "--no-require-stage-status", "--apply", "--output-json", str(collection_report),
-        ]
-        jobs.append(
-            _job(
-                workflow_id=workflow_id, repo=repo, run_root=run_root,
-                job_key=collection_key, stage="detect_collection", command=collection_command,
-                resources=cpu, upstream=tuple(refine_keys),
-                expected_outputs=(target.analysis_zarr / "experiment_index" / "finalized_runs" / collection_id / "zarr.json", collection_report),
-            )
-        )
-
-        cache_keys: list[str] = []
+        cache_array_key = f"cache_array:{target_safe}"
+        cache_tasks: list[LsfExecutionTask] = []
         for bundle_index, start in enumerate(range(0, len(clips), cache_bundle_size)):
             bundle_clips = clips[start : start + cache_bundle_size]
             cache_key = f"cache:{target_safe}:{bundle_index:02d}"
-            cache_keys.append(cache_key)
             cache_command = [
                 "bash", "scripts/submit_clipped_collection_flat_roi_cache_bundle_bsub.sh",
-                "--zarr", str(target.analysis_zarr), "--collection-id", collection_id,
+                "--zarr", str(target.analysis_zarr),
+                "--collection-id", detection_outputs.collection_id,
                 "--recording-frame-index", str(target.recording_dir / "recording_frame_index.parquet"),
                 "--public-cache-dir", str(cache_dir), "--run-id", f"{target_label}_{bundle_index:02d}",
                 "--run-label", f"roi_cache_{target_label}", "--log-dir", str(run_root / "cache_jobs" / target_safe),
@@ -841,14 +740,30 @@ def build_plan(
             ]
             for clip in bundle_clips:
                 cache_command.extend(["--clip-id", str(clip["clip_id"])])
-            jobs.append(
-                _job(
-                    workflow_id=workflow_id, repo=repo, run_root=run_root,
-                    job_key=cache_key, stage="roi_cache", command=cache_command,
-                    resources=cache_gpu, upstream=(collection_key,),
+            cache_tasks.append(
+                _execution_task(
+                    run_root=run_root,
+                    task_key=cache_key,
+                    stage="roi_cache",
+                    command=cache_command,
                     expected_outputs=tuple(Path(str(clip["cache_manifest"])) for clip in bundle_clips),
+                    array_indexed=True,
                 )
             )
+        jobs.append(
+            _task_group_job(
+                workflow_id=workflow_id,
+                repo=repo,
+                run_root=run_root,
+                job_key=cache_array_key,
+                stage="roi_cache",
+                tasks=cache_tasks,
+                mode=LsfExecutionMode.ARRAY,
+                max_concurrent=cache_array_concurrency,
+                resources=cache_gpu,
+                upstream=(detection_outputs.terminal_job_key,),
+            )
+        )
 
         proxy_key = f"proxy:{target_safe}"
         proxy_commands: list[list[str]] = []
@@ -865,17 +780,18 @@ def build_plan(
             _job(
                 workflow_id=workflow_id, repo=repo, run_root=run_root,
                 job_key=proxy_key, stage="proxy_crop", command=_chain(proxy_commands),
-                resources=cpu, upstream=tuple(cache_keys),
+                resources=cpu, upstream=(cache_array_key,),
                 expected_outputs=tuple(Path(str(clip["alias_manifest"])) for clip in clips),
             )
         )
 
-        keypoint_keys: list[str] = []
-        mask_keys: list[str] = []
+        keypoint_array_key = f"keypoints_array:{target_safe}"
+        subject_mask_array_key = f"subject_masks_array:{target_safe}"
+        keypoint_tasks: list[LsfExecutionTask] = []
+        mask_tasks: list[LsfExecutionTask] = []
         for clip in clips:
             clip_id = str(clip["clip_id"])
             keypoint_key = f"keypoints:{target_safe}:{clip_id}"
-            keypoint_keys.append(keypoint_key)
             keypoint_command = [
                 "scripts/py", "-m", "fisheye.utils.run_keypoints_with_registry_model",
                 "--recording-dir", str(target.recording_dir), "--output", str(target.analysis_zarr),
@@ -888,17 +804,18 @@ def build_plan(
                 "--keypoint-frame-shard-rows", "131072",
                 "--progress-jsonl", str(run_root / "progress" / f"keypoints_{target_safe}_{clip_id}.jsonl"),
             ]
-            jobs.append(
-                _job(
-                    workflow_id=workflow_id, repo=repo, run_root=run_root,
-                    job_key=keypoint_key, stage="keypoints", command=keypoint_command,
-                    resources=gpu, upstream=(proxy_key,),
+            keypoint_tasks.append(
+                _execution_task(
+                    run_root=run_root,
+                    task_key=keypoint_key,
+                    stage="keypoints",
+                    command=keypoint_command,
                     expected_outputs=(target.analysis_zarr / "keypoint_shard_runs" / str(clip["keypoint_shard_run"]) / "zarr.json",),
+                    array_indexed=True,
                 )
             )
 
             mask_key = f"subject_masks:{target_safe}:{clip_id}"
-            mask_keys.append(mask_key)
             mask_command = [
                 "scripts/py", "-m", "fisheye.segmentation.infer_unet_subject_masks",
                 str(target.analysis_zarr), "--resolve-model-from-registry", "--registry", str(registry_path),
@@ -907,8 +824,9 @@ def build_plan(
                 "--model-component-coverage-key", subject_mask_component_coverage_key,
                 "--model-label-schema-id", subject_mask_label_schema_id, "--model-require-unique",
                 "--run-name", str(clip["subject_mask_shard_run"]), "--output-parent", "subject_mask_shard_runs",
-                "--crop-run", str(clip["proxy_crop_run"]), "--source-collection-id", collection_id,
-                "--source-collection-path", f"experiment_index/finalized_runs/{collection_id}",
+                "--crop-run", str(clip["proxy_crop_run"]),
+                "--source-collection-id", detection_outputs.collection_id,
+                "--source-collection-path", detection_outputs.finalized_collection_group_path,
                 "--source-clip-id", clip_id, "--source-clip-index", str(clip["clip_index"]),
                 "--source-work-unit-id", str(clip["work_unit_id"]),
                 "--source-roi-cache-alias-manifest", str(clip["alias_manifest"]),
@@ -919,14 +837,44 @@ def build_plan(
                 "--no-write-masks-roi", "--async-output", "--output-queue-size", "2",
                 "--no-progress", "--defer-registry-status",
             ]
-            jobs.append(
-                _job(
-                    workflow_id=workflow_id, repo=repo, run_root=run_root,
-                    job_key=mask_key, stage="subject_mask_inference", command=mask_command,
-                    resources=gpu, upstream=(proxy_key,),
+            mask_tasks.append(
+                _execution_task(
+                    run_root=run_root,
+                    task_key=mask_key,
+                    stage="subject_mask_inference",
+                    command=mask_command,
                     expected_outputs=(target.analysis_zarr / "subject_mask_shard_runs" / str(clip["subject_mask_shard_run"]) / "zarr.json",),
+                    array_indexed=True,
                 )
             )
+        jobs.append(
+            _task_group_job(
+                workflow_id=workflow_id,
+                repo=repo,
+                run_root=run_root,
+                job_key=keypoint_array_key,
+                stage="keypoints",
+                tasks=keypoint_tasks,
+                mode=LsfExecutionMode.ARRAY,
+                max_concurrent=gpu_array_concurrency,
+                resources=gpu,
+                upstream=(proxy_key,),
+            )
+        )
+        jobs.append(
+            _task_group_job(
+                workflow_id=workflow_id,
+                repo=repo,
+                run_root=run_root,
+                job_key=subject_mask_array_key,
+                stage="subject_mask_inference",
+                tasks=mask_tasks,
+                mode=LsfExecutionMode.ARRAY,
+                max_concurrent=gpu_array_concurrency,
+                resources=gpu,
+                upstream=(proxy_key,),
+            )
+        )
 
         keypoint_finalize_key = f"keypoint_finalize:{target_safe}"
         merge_proxy = [
@@ -947,7 +895,7 @@ def build_plan(
                 workflow_id=workflow_id, repo=repo, run_root=run_root,
                 job_key=keypoint_finalize_key, stage="keypoint_finalize",
                 command=_chain((merge_proxy, finalize_keypoints)), resources=final_cpu,
-                upstream=tuple(keypoint_keys),
+                upstream=(keypoint_array_key,),
                 expected_outputs=(
                     target.analysis_zarr / "crop_runs" / merged_proxy / "zarr.json",
                     target.analysis_zarr / "keypoints_runs" / keypoint_run / "zarr.json",
@@ -999,11 +947,11 @@ def build_plan(
                 )
             )
 
-        package_keys: list[str] = []
-        for clip, mask_key in zip(clips, mask_keys, strict=True):
+        package_array_key = f"mask_package_array:{target_safe}"
+        package_tasks: list[LsfExecutionTask] = []
+        for clip in clips:
             clip_id = str(clip["clip_id"])
             package_key = f"mask_package:{target_safe}:{clip_id}"
-            package_keys.append(package_key)
             package_command = [
                 "scripts/py", "-m", "fisheye.utils.finalize_subject_mask_clip_package",
                 "--source-zarr", str(target.analysis_zarr),
@@ -1028,18 +976,33 @@ def build_plan(
                         "--encoded-mask-copy-workers", "8",
                     ]
                 )
-            package_upstream = [mask_key, keypoint_refine_key]
-            if mask_grid_key is not None:
-                package_upstream.append(mask_grid_key)
-            jobs.append(
-                _job(
-                    workflow_id=workflow_id, repo=repo, run_root=run_root,
-                    job_key=package_key, stage="subject_mask_refine_package",
-                    command=package_command, resources=final_cpu,
-                    upstream=tuple(package_upstream),
+            package_tasks.append(
+                _execution_task(
+                    run_root=run_root,
+                    task_key=package_key,
+                    stage="subject_mask_refine_package",
+                    command=package_command,
                     expected_outputs=(Path(str(clip["package_path"])),),
+                    array_indexed=True,
                 )
             )
+        package_upstream = [subject_mask_array_key, keypoint_refine_key]
+        if mask_grid_key is not None:
+            package_upstream.append(mask_grid_key)
+        jobs.append(
+            _task_group_job(
+                workflow_id=workflow_id,
+                repo=repo,
+                run_root=run_root,
+                job_key=package_array_key,
+                stage="subject_mask_refine_package",
+                tasks=package_tasks,
+                mode=LsfExecutionMode.ARRAY,
+                max_concurrent=mask_package_array_concurrency,
+                resources=final_cpu,
+                upstream=tuple(package_upstream),
+            )
+        )
 
         mask_import_key = f"mask_import:{target_safe}"
         mask_import = [
@@ -1054,7 +1017,7 @@ def build_plan(
             _job(
                 workflow_id=workflow_id, repo=repo, run_root=run_root,
                 job_key=mask_import_key, stage="subject_mask_collection_import",
-                command=mask_import, resources=import_cpu, upstream=tuple(package_keys),
+                command=mask_import, resources=import_cpu, upstream=(package_array_key,),
                 expected_outputs=(target.analysis_zarr / "refined_subject_masks_runs" / refined_subject_mask_run / "zarr.json",),
             )
         )
@@ -1074,7 +1037,23 @@ def build_plan(
             )
         )
         target_validation_keys.append(validation_key)
+        validated_artifact = f"validated_analysis:{target_safe}"
+        fragments.append(
+            LsfWorkflowFragment(
+                fragment_id=f"analysis:{target_safe}",
+                jobs=tuple(jobs[downstream_job_start:]),
+                requires=(detection_outputs.artifact_key,),
+                provides=(validated_artifact,),
+                metadata={
+                    "module": "clipped_analysis",
+                    "target_id": target.target_id,
+                    "detection_inputs": detection_outputs.to_json(),
+                    "terminal_job_key": validation_key,
+                },
+            )
+        )
 
+    campaign_job_start = len(jobs)
     registry_key = "registry_finalize"
     registry_report = run_root / "registry" / "reconcile.json"
     registry_command = [
@@ -1105,17 +1084,54 @@ def build_plan(
                 upstream=(registry_key,), expected_outputs=(cleanup_report,),
             )
         )
+    fragments.append(
+        LsfWorkflowFragment(
+            fragment_id="campaign_finalize",
+            jobs=tuple(jobs[campaign_job_start:]),
+            requires=tuple(
+                f"validated_analysis:{safe_component(target.target_id, default='target', max_length=56)}"
+                for target in targets
+            ),
+            provides=(
+                ("registry_reconciled", "nrs_cache_cleaned")
+                if cleanup_nrs_after_success
+                else ("registry_reconciled",)
+            ),
+            metadata={
+                "module": "campaign_finalize",
+                "target_count": len(targets),
+                "cleanup_nrs_after_success": cleanup_nrs_after_success,
+            },
+        )
+    )
 
-    workflow = LsfWorkflow(
+    workflow = compose_lsf_workflow(
         workflow_id=workflow_id,
         family=FAMILY,
-        jobs=tuple(jobs),
+        fragments=tuple(fragments),
         metadata={
             "target_count": len(targets),
             "clip_count": sum(len(target["clips"]) for target in target_payloads),
             "model_bindings_are_exact": True,
             "all_compute_runs_under_lsf": True,
             "resume_existing_detections": resume_existing_detections,
+            "scheduler_submission_count": len(jobs),
+            "execution_task_count": sum(
+                len(job.execution_group.tasks) if job.execution_group else 1
+                for job in jobs
+            ),
+            "array_submission_count": sum(
+                1
+                for job in jobs
+                if job.execution_group is not None
+                and job.execution_group.mode is LsfExecutionMode.ARRAY
+            ),
+            "bundle_submission_count": sum(
+                1
+                for job in jobs
+                if job.execution_group is not None
+                and job.execution_group.mode is LsfExecutionMode.BUNDLE
+            ),
         },
     )
     return ClippedInferencePlan(
@@ -1135,6 +1151,11 @@ def build_plan(
         cleanup_nrs_after_success=cleanup_nrs_after_success,
         resume_existing_detections=resume_existing_detections,
         encoded_mask_packages=encoded_mask_packages,
+        detect_array_concurrency=int(detect_array_concurrency),
+        gpu_array_concurrency=int(gpu_array_concurrency),
+        cache_array_concurrency=int(cache_array_concurrency),
+        mask_package_array_concurrency=int(mask_package_array_concurrency),
+        detect_refine_bundle_concurrency=int(detect_refine_bundle_concurrency),
         lsf_workflow=workflow,
     )
 
@@ -1251,6 +1272,19 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--cache-bundle-size", type=int, default=4)
     parser.add_argument("--max-active-targets", type=int, default=3)
+    parser.add_argument("--detect-array-concurrency", type=int, default=8)
+    parser.add_argument(
+        "--gpu-array-concurrency",
+        type=int,
+        default=4,
+        help=(
+            "Per-array GPU task limit. Keypoint and subject-mask arrays may run "
+            "together, so their combined recording-level maximum is twice this value."
+        ),
+    )
+    parser.add_argument("--cache-array-concurrency", type=int, default=2)
+    parser.add_argument("--mask-package-array-concurrency", type=int, default=4)
+    parser.add_argument("--detect-refine-bundle-concurrency", type=int, default=4)
     parser.add_argument("--no-cleanup-nrs-after-success", action="store_true")
     parser.add_argument(
         "--resume-existing-detections",
@@ -1297,6 +1331,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         cleanup_nrs_after_success=not args.no_cleanup_nrs_after_success,
         resume_existing_detections=args.resume_existing_detections,
         encoded_mask_packages=args.encoded_mask_packages,
+        detect_array_concurrency=args.detect_array_concurrency,
+        gpu_array_concurrency=args.gpu_array_concurrency,
+        cache_array_concurrency=args.cache_array_concurrency,
+        mask_package_array_concurrency=args.mask_package_array_concurrency,
+        detect_refine_bundle_concurrency=args.detect_refine_bundle_concurrency,
     )
     result = (
         apply_plan(plan, runner=build_ssh_bsub_runner(args.submit_host))
@@ -1310,6 +1349,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "target_count": len(plan.targets),
         "clip_count": sum(len(target["clips"]) for target in plan.target_plans),
         "job_count": len(plan.lsf_workflow.jobs),
+        "execution_task_count": int(
+            plan.lsf_workflow.metadata["execution_task_count"]
+            if plan.lsf_workflow.metadata is not None
+            else len(plan.lsf_workflow.jobs)
+        ),
         "models": {name: binding.to_json() for name, binding in plan.model_bindings.items()},
         "result": result if args.apply else None,
     }
@@ -1318,7 +1362,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         print(
             f"{summary['status']}: {summary['target_count']} targets, "
-            f"{summary['clip_count']} clips, {summary['job_count']} LSF jobs"
+            f"{summary['clip_count']} clips, {summary['job_count']} LSF submissions, "
+            f"{summary['execution_task_count']} execution tasks"
         )
         print(f"Plan: {summary['plan_path']}")
     return 0

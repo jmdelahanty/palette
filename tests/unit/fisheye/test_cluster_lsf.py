@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,9 @@ import pytest
 from fisheye.cluster.lsf import (
     LsfDependency,
     LsfDependencyCondition,
+    LsfExecutionGroup,
+    LsfExecutionMode,
+    LsfExecutionTask,
     LsfJob,
     LsfResources,
     LsfWorkflow,
@@ -27,6 +31,7 @@ from fisheye.cluster.lsf.runtime import (
     expand_runtime_tokens,
     run_with_status,
 )
+from fisheye.cluster.lsf.task_group import run_task_group
 
 
 def _job(
@@ -52,7 +57,8 @@ def test_lsf_resources_validate_scheduler_values() -> None:
         mem_gb=32,
         gpus=1,
         walltime="2:00",
-        extra_lsf_args=("-R", "span[hosts=1]"),
+        span_hosts=1,
+        extra_lsf_args=("-R", "select[type==any]"),
     )
 
     assert resources.to_json() == {
@@ -61,7 +67,8 @@ def test_lsf_resources_validate_scheduler_values() -> None:
         "mem_gb": 32,
         "gpus": 1,
         "walltime": "2:00",
-        "extra_lsf_args": ["-R", "span[hosts=1]"],
+        "span_hosts": 1,
+        "extra_lsf_args": ["-R", "select[type==any]"],
     }
     with pytest.raises(ValueError, match="ncores"):
         LsfResources(queue="short", ncores=0, mem_gb=8)
@@ -131,6 +138,65 @@ def test_build_bsub_command_renders_resources_dependency_and_argv() -> None:
     ]
     resolved = build_bsub_command(job, {"predict:a": "123"})
     assert resolved[resolved.index("-w") + 1] == "done(123)"
+
+
+def test_build_bsub_command_renders_one_lsf_array_with_slot_limit() -> None:
+    tasks = tuple(
+        LsfExecutionTask(
+            task_key=f"predict:{index}",
+            stage="predict",
+            command=("/bin/true",),
+            status_path=Path(f"/status/predict_{index}.%J.%I.json"),
+        )
+        for index in range(3)
+    )
+    job = LsfJob(
+        job_key="predict_array",
+        job_name="predict_array",
+        command=("scripts/py", "-m", "fisheye.cluster.lsf.task_group"),
+        resources=LsfResources(
+            queue="gpu_l4", ncores=4, mem_gb=32, gpus=1, span_hosts=1
+        ),
+        stdout_path=Path("/logs/predict.%J.%I.out"),
+        stderr_path=Path("/logs/predict.%J.%I.err"),
+        execution_group=LsfExecutionGroup(
+            mode=LsfExecutionMode.ARRAY,
+            tasks=tasks,
+            max_concurrent=2,
+        ),
+    )
+
+    command = build_bsub_command(job)
+
+    assert command[command.index("-J") + 1] == "predict_array[1-3]%2"
+    assert command[command.index("-R") + 1] == (
+        "rusage[mem=32G] span[hosts=1]"
+    )
+    assert command[command.index("-oo") + 1] == "/logs/predict.%J.%I.out"
+    assert job.to_json()["execution_group"]["task_count"] == 3
+
+
+def test_lsf_array_requires_element_specific_log_paths() -> None:
+    task = LsfExecutionTask(
+        task_key="predict:1",
+        stage="predict",
+        command=("/bin/true",),
+        status_path=Path("/status/predict.json"),
+    )
+    with pytest.raises(ValueError, match="%I"):
+        LsfJob(
+            job_key="predict_array",
+            job_name="predict_array",
+            command=("/bin/true",),
+            resources=LsfResources(queue="short", ncores=1, mem_gb=8),
+            stdout_path=Path("/logs/predict.%J.out"),
+            stderr_path=Path("/logs/predict.%J.err"),
+            execution_group=LsfExecutionGroup(
+                mode=LsfExecutionMode.ARRAY,
+                tasks=(task,),
+                max_concurrent=1,
+            ),
+        )
 
 
 def test_job_id_parsing_and_placeholder_resolution() -> None:
@@ -506,3 +572,108 @@ def test_runtime_turns_missing_expected_output_into_failure(tmp_path: Path) -> N
     assert saved["status"] == "failed"
     assert saved["expected_outputs"][0]["exists"] is False
     assert "expected outputs are missing" in saved["error"]
+
+
+def test_task_group_selects_array_element_and_writes_task_status(tmp_path: Path) -> None:
+    output_a = tmp_path / "a.done"
+    output_b = tmp_path / "b.done"
+    tasks = []
+    for index, output in enumerate((output_a, output_b), start=1):
+        tasks.append(
+            LsfExecutionTask(
+                task_key=f"task:{index}",
+                stage="fixture",
+                command=("/usr/bin/touch", str(output)),
+                status_path=tmp_path / "status" / f"task_{index}.<jobid>.<jobindex>.json",
+                expected_outputs=(str(output),),
+            )
+        )
+    job = LsfJob(
+        job_key="fixture_array",
+        job_name="fixture_array",
+        command=("/bin/true",),
+        resources=LsfResources(queue="short", ncores=1, mem_gb=8),
+        stdout_path=tmp_path / "logs" / "fixture.%J.%I.out",
+        stderr_path=tmp_path / "logs" / "fixture.%J.%I.err",
+        execution_group=LsfExecutionGroup(
+            mode=LsfExecutionMode.ARRAY,
+            tasks=tuple(tasks),
+            max_concurrent=2,
+        ),
+    )
+    workflow = LsfWorkflow(workflow_id="fixture", family="test", jobs=(job,))
+    plan_path = tmp_path / "lsf_plan.json"
+    write_json_snapshot(plan_path, workflow.to_json())
+
+    returncode = run_task_group(
+        plan_path=plan_path,
+        job_key="fixture_array",
+        cwd=tmp_path,
+        environment={
+            "USER": "tester",
+            "LSB_JOBID": "900",
+            "LSB_JOBINDEX": "2",
+            "PATH": "/usr/bin:/bin",
+        },
+    )
+
+    assert returncode == 0
+    assert not output_a.exists()
+    assert output_b.exists()
+    status = json.loads(
+        (tmp_path / "status" / "task_2.900.2.json").read_text(encoding="utf-8")
+    )
+    assert status["job_key"] == "task:2"
+    assert status["status"] == "succeeded"
+
+
+def test_task_group_runs_bounded_bundle_and_writes_summary(tmp_path: Path) -> None:
+    tasks = tuple(
+        LsfExecutionTask(
+            task_key=f"refine:{index}",
+            stage="refine",
+            command=("/usr/bin/touch", str(tmp_path / f"refine_{index}.done")),
+            status_path=tmp_path / "status" / f"refine_{index}.<jobid>.json",
+            expected_outputs=(str(tmp_path / f"refine_{index}.done"),),
+        )
+        for index in range(4)
+    )
+    summary_path = tmp_path / "status" / "refine.<jobid>.bundle.json"
+    job = LsfJob(
+        job_key="refine_bundle",
+        job_name="refine_bundle",
+        command=("/bin/true",),
+        resources=LsfResources(queue="short", ncores=8, mem_gb=64),
+        stdout_path=tmp_path / "logs" / "refine.%J.out",
+        stderr_path=tmp_path / "logs" / "refine.%J.err",
+        execution_group=LsfExecutionGroup(
+            mode=LsfExecutionMode.BUNDLE,
+            tasks=tasks,
+            max_concurrent=2,
+            summary_path=summary_path,
+        ),
+    )
+    workflow = LsfWorkflow(workflow_id="bundle", family="test", jobs=(job,))
+    plan_path = tmp_path / "lsf_plan.json"
+    write_json_snapshot(plan_path, workflow.to_json())
+
+    returncode = run_task_group(
+        plan_path=plan_path,
+        job_key="refine_bundle",
+        cwd=tmp_path,
+        environment={
+            **os.environ,
+            "USER": "tester",
+            "LSB_JOBID": "901",
+            "PATH": "/usr/bin:/bin",
+        },
+    )
+
+    assert returncode == 0
+    assert all((tmp_path / f"refine_{index}.done").is_file() for index in range(4))
+    summary = json.loads(
+        (tmp_path / "status" / "refine.901.bundle.json").read_text(encoding="utf-8")
+    )
+    assert summary["status"] == "succeeded"
+    assert summary["max_concurrent"] == 2
+    assert [task["status"] for task in summary["tasks"]] == ["succeeded"] * 4

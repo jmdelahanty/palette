@@ -36,7 +36,9 @@ def _utc_now() -> str:
 def _default_staging_root() -> Path:
     base = os.environ.get("TMPDIR") or os.environ.get("LOCAL_SCRATCH") or "/tmp"
     job_id = os.environ.get("LSB_JOBID") or str(os.getpid())
-    return Path(base) / f"palette_refined_subject_mask_clip_package_{job_id}"
+    job_index = os.environ.get("LSB_JOBINDEX")
+    work_unit = f"{job_id}_{job_index}" if job_index else job_id
+    return Path(base) / f"palette_refined_subject_mask_clip_package_{work_unit}"
 
 
 def _remove_path(path: Path) -> None:
@@ -205,6 +207,7 @@ def finalize_subject_mask_clip_package(
         run.attrs["clip_package_target_crop_run"] = str(target_crop_run)
         run.attrs["clip_package_host"] = socket.gethostname()
         run.attrs["clip_package_lsb_jobid"] = os.environ.get("LSB_JOBID")
+        run.attrs["clip_package_lsb_jobindex"] = os.environ.get("LSB_JOBINDEX")
         encoded_payload_summary: dict[str, Any] | None = None
         encoded_payload_path: Path | None = None
         package_schema_id = PACKAGE_SCHEMA_ID
@@ -229,6 +232,7 @@ def finalize_subject_mask_clip_package(
                 "target_crop_run": str(target_crop_run),
                 "host": socket.gethostname(),
                 "lsb_jobid": os.environ.get("LSB_JOBID"),
+                "lsb_jobindex": os.environ.get("LSB_JOBINDEX"),
                 "summary": summary,
                 "encoded_global_masks_roi": encoded_payload_summary,
             },

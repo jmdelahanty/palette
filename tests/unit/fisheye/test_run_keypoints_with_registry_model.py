@@ -66,6 +66,20 @@ def test_default_roi_cache_staging_dir_falls_back_when_user_scratch_missing(
     )
 
 
+def test_default_roi_cache_staging_dir_is_unique_per_lsf_array_element(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("USER", "palette_array_fixture_user")
+    monkeypatch.setenv("LSB_JOBID", "123")
+    monkeypatch.setenv("LSB_JOBINDEX", "7")
+    monkeypatch.setattr(mod.Path, "is_dir", lambda _path: True)
+    monkeypatch.setattr(mod.os, "access", lambda *_args: True)
+
+    assert mod._default_roi_cache_staging_dir() == (  # noqa: SLF001
+        Path("/scratch/palette_array_fixture_user/123_7/palette_roi_cache_stage")
+    )
+
+
 def test_write_model_resolution_provenance_updates_keypoint_run_attrs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

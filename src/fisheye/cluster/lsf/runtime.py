@@ -78,6 +78,7 @@ def _cleanup_job_scratch(
     expanded = Path(expand_runtime_tokens(path_template, environment)).expanduser()
     user = str(environment.get("USER") or "")
     job_id = str(environment.get("LSB_JOBID") or "")
+    job_index = str(environment.get("LSB_JOBINDEX") or "").strip()
     result: dict[str, Any] = {
         "requested_path": str(path_template),
         "expanded_path": str(expanded),
@@ -88,7 +89,8 @@ def _cleanup_job_scratch(
             "status": "refused",
             "reason": "LSB_JOBID and USER are required for job-scratch cleanup",
         }
-    allowed_root = Path("/scratch") / user / job_id
+    work_unit = f"{job_id}_{job_index}" if job_index else job_id
+    allowed_root = Path("/scratch") / user / work_unit
     resolved = expanded.resolve(strict=False)
     resolved_root = allowed_root.resolve(strict=False)
     if resolved == resolved_root or resolved_root not in resolved.parents:

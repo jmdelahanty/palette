@@ -12,6 +12,13 @@ from fisheye.cluster import clipped_inference as workflow
 from fisheye.cluster import clipped_inference_import_recovery as import_recovery
 from fisheye.cluster import clipped_inference_keypoint_recovery as recovery
 from fisheye.cluster import refined_subject_mask_encoded_chunk_canary as encoded_canary
+from fisheye.cluster.clipped_detection import (
+    DetectionClipSpec,
+    DetectionFragmentInputs,
+    DetectionModelSpec,
+    build_detection_fragment,
+    compose_detection_workflow,
+)
 from fisheye.cluster.clipped_inference_cleanup import cleanup
 from fisheye.cluster.clipped_inference_validate import _instance_keys, _refined_instance_keys
 
@@ -150,6 +157,12 @@ def _build_fixture_plan(
     )
 
 
+def _execution_tasks(job: object) -> dict[str, object]:
+    group = getattr(job, "execution_group", None)
+    assert group is not None
+    return {task.task_key: task for task in group.tasks}
+
+
 def test_build_plan_has_parallel_keypoint_mask_branch_and_join(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     plan = _build_fixture_plan(tmp_path, monkeypatch)
     jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
@@ -157,43 +170,142 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(tmp_path: Path, m
     target_safe = workflow.safe_component(str(target["target_id"]), default="target", max_length=56)
     clip_id = "clip_000000"
 
-    assert len(plan.lsf_workflow.jobs) == 126
-    assert jobs[f"keypoints:{target_safe}:{clip_id}"].dependency.upstream_job_keys == (
+    assert len(plan.lsf_workflow.jobs) == 16
+    keypoint_array = jobs[f"keypoints_array:{target_safe}"]
+    subject_mask_array = jobs[f"subject_masks_array:{target_safe}"]
+    package_array = jobs[f"mask_package_array:{target_safe}"]
+    assert keypoint_array.dependency.upstream_job_keys == (
         f"proxy:{target_safe}",
     )
-    assert jobs[f"subject_masks:{target_safe}:{clip_id}"].dependency.upstream_job_keys == (
+    assert subject_mask_array.dependency.upstream_job_keys == (
         f"proxy:{target_safe}",
     )
-    assert jobs[f"mask_package:{target_safe}:{clip_id}"].dependency.upstream_job_keys == (
-        f"subject_masks:{target_safe}:{clip_id}",
+    assert package_array.dependency.upstream_job_keys == (
+        f"subject_masks_array:{target_safe}",
         f"keypoint_refine:{target_safe}",
     )
-    cache_job = jobs[f"cache:{target_safe}:00"]
+    assert f"keypoints:{target_safe}:{clip_id}" in _execution_tasks(keypoint_array)
+    assert f"subject_masks:{target_safe}:{clip_id}" in _execution_tasks(subject_mask_array)
+    assert f"mask_package:{target_safe}:{clip_id}" in _execution_tasks(package_array)
+    cache_job = jobs[f"cache_array:{target_safe}"]
+    cache_tasks = _execution_tasks(cache_job)
     import_job = jobs[f"mask_import:{target_safe}"]
-    assert "--run-direct" in cache_job.command
+    assert "--run-direct" in cache_tasks[f"cache:{target_safe}:00"].command
     assert "bsub" not in cache_job.command
     assert import_job.resources.queue == "local"
     assert import_job.resources.walltime == "3:00"
     assert all(
-        job.command[:3]
+        job.command[:2]
         == (
             "env",
             f"PYTHONPATH={plan.repo / 'src'}",
-            str(plan.repo / "scripts" / "py"),
         )
         for job in jobs.values()
     )
     assert all(
         f"PYTHONPATH={plan.repo / 'src'}" in job.command
+        and str(plan.repo / "scripts" / "py") in job.command
         for job in jobs.values()
     )
     quality_source = jobs[f"detect_quality_source:{target_safe}"]
     quality = jobs[f"detect_quality:{target_safe}"]
-    refine = jobs[f"detect_refine:{target_safe}:{clip_id}"]
-    assert len(quality_source.dependency.upstream_job_keys) == 22
+    refine_bundle = jobs[f"detect_refine_bundle:{target_safe}"]
+    refine = _execution_tasks(refine_bundle)[f"detect_refine:{target_safe}:{clip_id}"]
+    assert quality_source.dependency.upstream_job_keys == (
+        f"detect_array:{target_safe}",
+    )
     assert quality.dependency.upstream_job_keys == (quality_source.job_key,)
-    assert refine.dependency.upstream_job_keys == (quality.job_key,)
+    assert refine_bundle.dependency.upstream_job_keys == (quality.job_key,)
     assert "--quality-group-path" in " ".join(refine.command)
+    assert jobs[f"detect_array:{target_safe}"].metadata["max_concurrent"] == 8
+    assert keypoint_array.metadata["max_concurrent"] == 4
+    assert subject_mask_array.metadata["max_concurrent"] == 4
+    assert len(_execution_tasks(jobs[f"detect_array:{target_safe}"])) == 22
+    assert len(_execution_tasks(refine_bundle)) == 22
+    assert len(cache_tasks) == 6
+    assert refine_bundle.resources.ncores == 16
+    assert refine_bundle.resources.mem_gb == 32
+    assert refine_bundle.resources.span_hosts == 1
+    assert "OMP_NUM_THREADS=4" in refine_bundle.command
+
+    fragments = plan.lsf_workflow.to_json()["metadata"]["fragments"]
+    assert [fragment["fragment_id"] for fragment in fragments] == [
+        f"detection:{target_safe}",
+        f"analysis:{target_safe}",
+        "campaign_finalize",
+    ]
+    detection_output = target["detection_module"]
+    assert detection_output["terminal_job_key"] == f"detect_collection:{target_safe}"
+    assert fragments[0]["provides"] == [detection_output["artifact_key"]]
+    assert fragments[1]["requires"] == [detection_output["artifact_key"]]
+    assert fragments[2]["provides"] == [
+        "registry_reconciled",
+        "nrs_cache_cleaned",
+    ]
+
+
+def test_detection_module_composes_as_a_first_class_detection_only_workflow(
+    tmp_path: Path,
+) -> None:
+    clips = tuple(
+        DetectionClipSpec(
+            clip_id=f"clip_{index:06d}",
+            clip_index=index,
+            camera_serial="2010093",
+            video_path=tmp_path / "clips" / f"clip_{index:06d}.mp4",
+            detect_run=f"detect_{index}",
+            detect_group_path=f"clips/{index}/detect_runs/detect_{index}",
+            refined_detect_run=f"refined_{index}",
+            refined_detect_group_path=(
+                f"clips/{index}/refined_detect_runs/refined_{index}"
+            ),
+        )
+        for index in range(2)
+    )
+    module = build_detection_fragment(
+        DetectionFragmentInputs(
+            workflow_id="detection_only_fixture",
+            family="clipped_inference",
+            target_id="sleepyfish_cam2010093",
+            target_label="fixture_target",
+            recording_id="sleepyfish_cam2010093:zfixture",
+            recording_dir=tmp_path / "recording",
+            analysis_zarr=tmp_path / "analysis.zarr",
+            repo=tmp_path / "repo",
+            run_root=tmp_path / "run",
+            detection_plan_path=tmp_path / "run" / "detection_plan.json",
+            collection_id="refined_detect_collection_fixture",
+            quality_source_run="detect_quality_source_fixture",
+            quality_run="detect_quality_fixture",
+            clips=clips,
+            model=DetectionModelSpec(
+                set_id="detect_set",
+                run_id="detect_run",
+                path=tmp_path / "model.pt",
+                sha256="a" * 64,
+            ),
+            detect_array_concurrency=2,
+            refine_bundle_concurrency=2,
+        )
+    )
+    detection_only = compose_detection_workflow(
+        workflow_id="detection_only_fixture",
+        family="clipped_inference",
+        modules=(module,),
+    )
+
+    assert [job.job_key for job in detection_only.topological_jobs()] == [
+        "detect_array:sleepyfish_cam2010093",
+        "detect_quality_source:sleepyfish_cam2010093",
+        "detect_quality:sleepyfish_cam2010093",
+        "detect_refine_bundle:sleepyfish_cam2010093",
+        "detect_collection:sleepyfish_cam2010093",
+    ]
+    assert module.outputs.collection_id == "refined_detect_collection_fixture"
+    assert module.outputs.terminal_job_key == "detect_collection:sleepyfish_cam2010093"
+    assert detection_only.metadata["workflow_scope"] == "detection_only"
+    assert len(_execution_tasks(detection_only.jobs[0])) == 2
+    assert len(_execution_tasks(detection_only.jobs[3])) == 2
 
 
 def test_materialized_dry_run_is_immutable_and_has_no_submission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -216,18 +328,21 @@ def test_encoded_mask_packages_add_global_grid_and_join(tmp_path: Path, monkeypa
     target = plan.target_plans[0]
     target_safe = workflow.safe_component(str(target["target_id"]), default="target", max_length=56)
     grid_key = f"mask_grid:{target_safe}"
-    package_key = f"mask_package:{target_safe}:clip_000000"
+    package_key = f"mask_package_array:{target_safe}"
     import_key = f"mask_import:{target_safe}"
 
     assert plan.encoded_mask_packages is True
-    assert len(plan.lsf_workflow.jobs) == 127
+    assert len(plan.lsf_workflow.jobs) == 17
     assert jobs[grid_key].dependency.upstream_job_keys == (f"keypoint_finalize:{target_safe}",)
     assert jobs[package_key].dependency.upstream_job_keys == (
-        f"subject_masks:{target_safe}:clip_000000",
+        f"subject_masks_array:{target_safe}",
         f"keypoint_refine:{target_safe}",
         grid_key,
     )
-    assert "--global-mask-grid-manifest" in jobs[package_key].command
+    package_task = _execution_tasks(jobs[package_key])[
+        f"mask_package:{target_safe}:clip_000000"
+    ]
+    assert "--global-mask-grid-manifest" in package_task.command
     assert "--encoded-copy-workers" in jobs[import_key].command
 
 
@@ -266,16 +381,17 @@ def test_resume_plan_revalidates_detections_on_cpu_and_preserves_dependencies(
     target = plan.target_plans[0]
     target_safe = workflow.safe_component(str(target["target_id"]), default="target", max_length=56)
     clip_id = "clip_000000"
-    detect = jobs[f"detect:{target_safe}:{clip_id}"]
-    refine = jobs[f"detect_refine:{target_safe}:{clip_id}"]
+    detect_array = jobs[f"detect_array:{target_safe}"]
+    detect = _execution_tasks(detect_array)[f"detect:{target_safe}:{clip_id}"]
+    refine_bundle = jobs[f"detect_refine_bundle:{target_safe}"]
 
     assert plan.resume_existing_detections is True
     assert len(target["detection_resume_preflight"]) == 22
     assert detect.metadata["stage"] == "detect_reuse"
-    assert detect.resources.queue == "short"
-    assert detect.resources.gpus == 0
+    assert detect_array.resources.queue == "short"
+    assert detect_array.resources.gpus == 0
     assert "--reuse-existing" in detect.command
-    assert refine.dependency.upstream_job_keys == (
+    assert refine_bundle.dependency.upstream_job_keys == (
         f"detect_quality:{target_safe}",
     )
 
@@ -300,15 +416,27 @@ def test_same_dag_plans_multiple_recordings_with_bounded_target_concurrency(
     )
 
     assert len(plan.targets) == 2
-    assert len(plan.lsf_workflow.jobs) == 250
-    assert jobs[f"detect:{first_safe}:clip_000000"].dependency is None
-    assert jobs[f"detect:{second_safe}:clip_000000"].dependency.upstream_job_keys == (
+    assert len(plan.lsf_workflow.jobs) == 30
+    assert jobs[f"detect_array:{first_safe}"].dependency is None
+    assert jobs[f"detect_array:{second_safe}"].dependency.upstream_job_keys == (
         f"validate:{first_safe}",
     )
     assert jobs["registry_finalize"].dependency.upstream_job_keys == (
         f"validate:{first_safe}",
         f"validate:{second_safe}",
     )
+    fragments = {
+        fragment["fragment_id"]: fragment
+        for fragment in plan.lsf_workflow.to_json()["metadata"]["fragments"]
+    }
+    assert fragments[f"detection:{first_safe}"]["requires"] == []
+    assert fragments[f"detection:{second_safe}"]["requires"] == [
+        f"validated_analysis:{first_safe}"
+    ]
+    assert fragments["campaign_finalize"]["requires"] == [
+        f"validated_analysis:{first_safe}",
+        f"validated_analysis:{second_safe}",
+    ]
 
 
 def test_keypoint_recovery_reuses_cache_and_raw_masks(
@@ -335,11 +463,11 @@ def test_keypoint_recovery_reuses_cache_and_raw_masks(
     target_safe = workflow.safe_component(
         str(target["target_id"]), default="target", max_length=56
     )
-    keypoint_key = f"keypoints:{target_safe}:clip_000000"
+    keypoint_key = f"keypoints_array:{target_safe}"
     refine_key = f"keypoint_refine:{target_safe}"
-    package_key = f"mask_package:{target_safe}:clip_000000"
+    package_key = f"mask_package_array:{target_safe}"
 
-    assert len(plan.workflow.jobs) == 51
+    assert len(plan.workflow.jobs) == 9
     assert jobs[keypoint_key].dependency.upstream_job_keys == (
         "prepare_keypoint_recovery",
     )
@@ -351,8 +479,11 @@ def test_keypoint_recovery_reuses_cache_and_raw_masks(
         for job in plan.workflow.jobs
         if job.metadata is not None
     }.isdisjoint({"detect", "detect_reuse", "detect_refine", "roi_cache", "subject_masks"})
-    assert any(str(recovery_root) in value for value in jobs[keypoint_key].command)
-    assert all(str(source.run_root) not in value for value in jobs[keypoint_key].command)
+    keypoint_task = _execution_tasks(jobs[keypoint_key])[
+        f"keypoints:{target_safe}:clip_000000"
+    ]
+    assert any(str(recovery_root) in value for value in keypoint_task.command)
+    assert all(str(source.run_root) not in value for value in keypoint_task.command)
     assert plan.payload["targets"] == source.to_json()["targets"]
 
 
