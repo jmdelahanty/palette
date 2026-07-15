@@ -299,6 +299,7 @@ def _job(
     cleanup_paths: Sequence[str] = (),
 ) -> LsfJob:
     safe = safe_component(job_key.replace(":", "_"), default="job", max_length=110)
+    deployed_pythonpath = str(repo / "src")
     runtime_command = build_runtime_command(
         command,
         status_path_template=run_root / "status" / f"{safe}.{RUNTIME_JOB_ID_TOKEN}.json",
@@ -309,6 +310,12 @@ def _job(
         cwd=repo,
         cleanup_path_templates=cleanup_paths,
         expected_output_templates=tuple(str(path) for path in expected_outputs),
+        environment_overrides={"PYTHONPATH": deployed_pythonpath},
+        python_launcher=(
+            "env",
+            f"PYTHONPATH={deployed_pythonpath}",
+            str(repo / "scripts" / "py"),
+        ),
     )
     return LsfJob(
         job_key=job_key,

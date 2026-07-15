@@ -174,7 +174,19 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(tmp_path: Path, m
     assert "bsub" not in cache_job.command
     assert import_job.resources.queue == "local"
     assert import_job.resources.walltime == "3:00"
-    assert all(job.command[:3] == ("scripts/py", "-m", "fisheye.cluster.lsf.runtime") for job in jobs.values())
+    assert all(
+        job.command[:3]
+        == (
+            "env",
+            f"PYTHONPATH={plan.repo / 'src'}",
+            str(plan.repo / "scripts" / "py"),
+        )
+        for job in jobs.values()
+    )
+    assert all(
+        f"PYTHONPATH={plan.repo / 'src'}" in job.command
+        for job in jobs.values()
+    )
     quality_source = jobs[f"detect_quality_source:{target_safe}"]
     quality = jobs[f"detect_quality:{target_safe}"]
     refine = jobs[f"detect_refine:{target_safe}:{clip_id}"]
