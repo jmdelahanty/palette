@@ -80,6 +80,14 @@ underlying object count. Sharding can reduce chunk-file count for large dense
 arrays, but it does not fix schema fanout from thousands of groups and small
 arrays.
 
+A 2026-07-10 sleepyfish audit provides the large-dense-array counterpart to
+this schema audit: `22` raw subject-mask clip runs contain `1,169,010` rows and
+about `109,632` regular probability chunk objects, even though internal Zstd
+compression reduces a representative `39.55 GiB` logical clip tensor to
+`168.60 MiB` of chunk payloads. The proposed indexed-sharding benchmark and
+parallel-write constraints are recorded in
+[`diagnostics/sleepyfish_subject_mask_storage_sharding_strategy_2026-07-10.md`](diagnostics/sleepyfish_subject_mask_storage_sharding_strategy_2026-07-10.md).
+
 ## Main Anti-Patterns
 
 ### 1. Parameter-Sweep Fanout

@@ -486,11 +486,10 @@ scripts/py -m fisheye.refinement.finalize_subject_masks \
   path/to/zarr/..._analysis.zarr \
   --source-run <subject_mask_run> \
   --refined-run <refined_subject_mask_run> \
-  --chunk-size 64 \
+  --chunk-size 256 \
   --metric-level cheap \
-  --execution-backend dask_worker_chunks \
-  --scheduler processes \
-  --num-workers 48
+  --execution-backend process_shards \
+  --num-workers 16
 ```
 
 This writes `refined_subject_masks_runs/<run>` with
