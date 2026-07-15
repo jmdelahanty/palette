@@ -14,9 +14,13 @@ picture:
 - **Entries** — a "visit" is entering 15 mm and not leaving until the fish passes 20 mm. Each
   entry is drawn separately, because a median over 4–10 entries is noise; the honest object is
   the trajectory.
-- **Bouts per entry** — each bout is its own segment. **Escape bouts (peak > 100 mm/s) are red
-  and thick with a ★; ordinary bouts are thin blue.** In the animation each bout lights up as
-  it is executed and stays lit, so the *set* of bouts builds up as you watch.
+- **Bouts per entry** — each bout is its own segment, coloured by tier (matching
+  `chaser_escape_events`): **red ★ = turn escape** (fast *and* |turn| ≥ 45° — a C-start-like
+  turn-away), **orange ▶ = dash escape** (fast but nearly straight), **thin blue = ordinary
+  bout**. In the animation each bout lights up as it is executed and stays lit, so the *set* of
+  bouts builds up as you watch. The turn threshold is `high_turn_threshold_deg` (default 45°),
+  read from `chaser_escape_events`; at 100 fps `turn_deg` is a net heading change, not a resolved
+  C-start bend, so this is a coarse turn-away/dash split (see the escape-events contract).
 
 ## Entry points
 

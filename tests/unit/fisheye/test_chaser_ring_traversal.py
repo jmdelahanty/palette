@@ -54,6 +54,17 @@ def _set_bout_peaks(zarr_path: Path, escape_every: int = 4) -> int:
     return int(np.count_nonzero(peak > 100.0))
 
 
+def _set_bout_turns(zarr_path: Path, high_turn_every: int = 2) -> None:
+    """Give every Nth bout a 90 deg turn, the rest 0, in the chaser_bout_response table."""
+
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    bouts = root["analysis/chaser_distance_runs/chaser_distance_1/chaser_bout_response/"
+                 "chaser_bout_response_v1/bouts"]
+    turn = np.zeros(int(bouts["start_frame"].shape[0]), dtype=np.float64)
+    turn[::high_turn_every] = 90.0
+    bouts["turn_deg"][:] = turn
+
+
 def _collect(zarr_path: Path, **kw):
     return collect_ring_entries(zarr_path, chaser_distance_run="chaser_distance_1",
                                 epochs_wanted=("post_event",), **kw)
@@ -116,6 +127,30 @@ def test_escape_bouts_are_flagged_and_track_the_bout_response_table(tmp_path: Pa
     assert all(b["peak_speed_mm_s"] > meta["peak_speed_threshold_mm_s"] for b in flagged)
     assert all(b["peak_speed_mm_s"] <= meta["peak_speed_threshold_mm_s"] for b in ordinary)
     assert planted > 0
+
+
+def test_escapes_split_into_turn_and_dash_tiers(tmp_path: Path) -> None:
+    """An escape is 'high_turn' (drawn as a red star) when it is fast AND its |turn| clears the
+    angle threshold; otherwise it is a 'dash' (drawn orange). The tier must match the peak/turn
+    of the underlying bout, and must never make a non-escape into a high-turn bout."""
+
+    z = _archive_with_components(tmp_path, name="tiers.zarr")
+    _set_bout_peaks(z, escape_every=2)      # every other bout is an escape
+    _set_bout_turns(z, high_turn_every=4)   # every 4th bout has a 90 deg turn
+
+    scenes, meta = collect_ring_entries(z, chaser_distance_run="chaser_distance_1",
+                                        epochs_wanted=("post_event",), high_turn_threshold_deg=45.0)
+    bouts = [b for s in scenes for v in s.visits for b in v["bouts"]]
+    turn = [b for b in bouts if b["is_high_turn"]]
+    dash = [b for b in bouts if b["is_escape"] and not b["is_high_turn"]]
+    assert turn and dash, "the fixture should produce both tiers"
+    # a high-turn bout is always an escape with a large turn
+    assert all(b["is_escape"] and abs(b["turn_deg"]) >= 45.0 for b in turn)
+    # a dash is an escape with a small turn
+    assert all(abs(b["turn_deg"]) < 45.0 for b in dash)
+    # an ordinary (non-escape) bout is never tagged high-turn, even if it turns sharply
+    assert not any(b["is_high_turn"] for b in bouts if not b["is_escape"])
+    assert meta["high_turn_threshold_deg"] == 45.0
 
 
 def test_no_escapes_when_no_bout_clears_the_threshold(tmp_path: Path) -> None:

@@ -48,7 +48,10 @@ from matplotlib.collections import LineCollection  # noqa: E402
 import numpy as np  # noqa: E402
 
 from fisheye.analysis.chaser_bout_response import _segment_visits
-from fisheye.analysis.chaser_escape_events import DEFAULT_PEAK_SPEED_THRESHOLD_MM_S
+from fisheye.analysis.chaser_escape_events import (
+    DEFAULT_HIGH_TURN_THRESHOLD_DEG,
+    DEFAULT_PEAK_SPEED_THRESHOLD_MM_S,
+)
 from fisheye.analysis.chaser_escape_freeze import (
     _heading_angles_from_chaser,
     chaser_frame_transform,
@@ -74,8 +77,9 @@ from fisheye.visualization.chaser_visit_trajectories import (
 RING_EDGES_MM = (4.0, 8.0, 12.0, 16.0, 20.0, 25.0)
 RESPONSIVE_BAND_MM = (8.0, 16.0)       # steering dose-response peak + escape trigger live here
 ESCAPE_TRIGGER_MM = 13.5               # median escape onset distance, cohort
-ESCAPE_C = "#dc2626"
-BOUT_C = "#2563eb"
+ESCAPE_C = "#dc2626"     # turn escape (fast + high-angle turn-away)
+DASH_C = "#ea580c"       # dash escape (fast + straight forward sprint)
+BOUT_C = "#2563eb"       # ordinary bout
 RESP_C = "#f59e0b"
 
 
@@ -88,17 +92,18 @@ def collect_ring_entries(
     epochs_wanted: Sequence[str] = DEFAULT_EPOCHS,
     virtual_rotations_deg: Sequence[float] = DEFAULT_VIRTUAL_ROTATIONS_DEG,
     peak_speed_threshold_mm_s: float = DEFAULT_PEAK_SPEED_THRESHOLD_MM_S,
+    high_turn_threshold_deg: float = DEFAULT_HIGH_TURN_THRESHOLD_DEG,
     **visit_kwargs: Any,
 ) -> tuple[list[VisitScene], dict[str, Any]]:
-    """collect_visits, then attach the bout SEGMENTS of each entry (with peak speed).
+    """collect_visits, then attach the bout SEGMENTS of each entry (speed + turn tier).
 
     The base collector marks bout *onsets*; here each visit also gets a ``bouts`` list, one
     entry per bout that starts inside the visit window:
 
-        {"xy": (m, 2) canonical-frame segment, "peak_speed_mm_s", "is_escape",
-         "i0", "i1"}  # i0/i1 index into visit["xy"]
+        {"xy": (m, 2) canonical-frame segment, "peak_speed_mm_s", "turn_deg",
+         "is_escape", "is_high_turn", "i0", "i1"}  # i0/i1 index into visit["xy"]
 
-    so the animation can light bouts up one at a time and colour escapes.
+    so the animation can light bouts up one at a time and colour turn/dash escapes.
     """
 
     scenes, meta = collect_visits(
@@ -110,8 +115,9 @@ def collect_ring_entries(
         **visit_kwargs,
     )
 
-    bs, be, peak = _load_bout_segments(zarr_path, chaser_distance_run, bout_response_component)
+    bs, be, peak, turn = _load_bout_segments(zarr_path, chaser_distance_run, bout_response_component)
     meta["peak_speed_threshold_mm_s"] = float(peak_speed_threshold_mm_s)
+    meta["high_turn_threshold_deg"] = float(high_turn_threshold_deg)
     meta["responsive_band_mm"] = list(RESPONSIVE_BAND_MM)
     meta["ring_edges_mm"] = list(RING_EDGES_MM)
 
@@ -130,7 +136,8 @@ def collect_ring_entries(
         idx = int(m.group(1)) if m else None
         scene.role = ("aggressive" if idx == agg else "inert") if (agg is not None and idx is not None) else None
         for visit in scene.visits:
-            visit["bouts"] = _bouts_in_visit(visit, bs, be, peak, float(peak_speed_threshold_mm_s))
+            visit["bouts"] = _bouts_in_visit(visit, bs, be, peak, turn,
+                                             float(peak_speed_threshold_mm_s), float(high_turn_threshold_deg))
     return scenes, meta
 
 
@@ -215,6 +222,7 @@ def collect_chase_ring_entries(
     swim_bout_run: str = "latest",
     bout_response_component: str = "latest",
     peak_speed_threshold_mm_s: float = DEFAULT_PEAK_SPEED_THRESHOLD_MM_S,
+    high_turn_threshold_deg: float = DEFAULT_HIGH_TURN_THRESHOLD_DEG,
     epoch_label: str = "training_event",
     visit_enter_mm: float = 15.0,
     visit_exit_mm: float = 20.0,
@@ -326,15 +334,17 @@ def collect_chase_ring_entries(
             }
         )
 
-    bs, be, peak = _load_bout_segments(zarr_path, chaser_distance_run, bout_response_component)
+    bs, be, peak, turn = _load_bout_segments(zarr_path, chaser_distance_run, bout_response_component)
     for visit in scene.visits:
-        visit["bouts"] = _bouts_in_visit(visit, bs, be, peak, float(peak_speed_threshold_mm_s))
+        visit["bouts"] = _bouts_in_visit(visit, bs, be, peak, turn,
+                                         float(peak_speed_threshold_mm_s), float(high_turn_threshold_deg))
 
     meta = {
         "recording_id": str(run_group.attrs.get("recording_id") or Path(zarr_path).stem),
         "run": run_name,
         "fps": float(fps),
         "peak_speed_threshold_mm_s": float(peak_speed_threshold_mm_s),
+        "high_turn_threshold_deg": float(high_turn_threshold_deg),
         "responsive_band_mm": list(RESPONSIVE_BAND_MM),
         "ring_edges_mm": list(RING_EDGES_MM),
         "frame": "chaser_centric",
@@ -346,34 +356,37 @@ def collect_chase_ring_entries(
 
 def _load_bout_segments(
     zarr_path: Path, chaser_distance_run: str, component: str
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """(start_frame, end_frame, peak_speed_mm_s) from the chaser_bout_response bout table.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """(start_frame, end_frame, peak_speed_mm_s, turn_deg) from the chaser_bout_response table.
 
-    That table is the single source of both the bout boundaries and the peak speed used to
-    call escapes, so the segments here and the escape counts in chaser_escape_events cannot
-    drift apart. If it is absent, return empty arrays and the animation shows onsets only.
+    That table is the single source of the bout boundaries, the peak speed used to call escapes,
+    AND the turn angle used to split them into turn/dash tiers, so the segments here and the
+    tiered counts in chaser_escape_events cannot drift apart. If it is absent, return empties.
     """
 
+    empty = (np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros(0, np.float64), np.zeros(0, np.float64))
     root = _open_root(zarr_path, mode="r")
     run_group, _name, _path = _resolve_chaser_distance_run(root, chaser_distance_run)
     parent = run_group.get("chaser_bout_response")
     if parent is None or not len(list(parent.keys())):
-        return (np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros(0, np.float64))
+        return empty
     name = str(component).strip()
     if not name or name == "latest":
         name = sorted(parent.keys())[-1]
     if name not in parent:
-        return (np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros(0, np.float64))
+        return empty
     bouts = parent[name]["bouts"]
     valid = np.asarray(bouts["valid"][:], dtype=bool)
     bs = np.asarray(bouts["start_frame"][:], dtype=np.int64)
     be = np.asarray(bouts["end_frame"][:], dtype=np.int64)
     peak = np.asarray(bouts["peak_speed_mm_s"][:], dtype=np.float64)
-    return bs[valid], be[valid], peak[valid]
+    turn = np.abs(np.asarray(bouts["turn_deg"][:], dtype=np.float64))
+    return bs[valid], be[valid], peak[valid], turn[valid]
 
 
 def _bouts_in_visit(
-    visit: dict[str, Any], bs: np.ndarray, be: np.ndarray, peak: np.ndarray, threshold: float
+    visit: dict[str, Any], bs: np.ndarray, be: np.ndarray, peak: np.ndarray, turn: np.ndarray,
+    threshold: float, high_turn_threshold_deg: float,
 ) -> list[dict[str, Any]]:
     frames = np.asarray(visit["frames"], dtype=np.int64)
     xy = np.asarray(visit["xy"], dtype=np.float64)
@@ -388,11 +401,17 @@ def _bouts_in_visit(
         if seg.size < 2:
             continue
         i0, i1 = int(seg[0]), int(seg[-1])
+        is_escape = bool(peak[k] > threshold)
+        # tier matches chaser_escape_events: an escape is high-turn (a C-start-like turn-away)
+        # when its |turn| also clears the angle threshold; otherwise a straight forward dash.
+        is_high_turn = bool(is_escape and np.isfinite(turn[k]) and turn[k] >= float(high_turn_threshold_deg))
         out.append(
             {
                 "xy": xy[i0 : i1 + 1],
                 "peak_speed_mm_s": float(peak[k]),
-                "is_escape": bool(peak[k] > threshold),
+                "turn_deg": float(turn[k]),
+                "is_escape": is_escape,
+                "is_high_turn": is_high_turn,
                 "i0": i0,
                 "i1": i1,
             }
@@ -446,11 +465,15 @@ def _draw_rings(ax, scene: VisitScene, *, limit: float) -> None:
 
 def _draw_bout_segment(ax, bout: dict[str, Any], *, alpha: float = 1.0, zorder: int = 4) -> None:
     xy = bout["xy"]
-    if bout["is_escape"]:
-        ax.plot(xy[:, 0], xy[:, 1], color=ESCAPE_C, lw=2.6, alpha=alpha, solid_capstyle="round",
+    if bout.get("is_high_turn"):                       # turn escape: fast AND high-angle turn-away
+        ax.plot(xy[:, 0], xy[:, 1], color=ESCAPE_C, lw=2.8, alpha=alpha, solid_capstyle="round",
+                zorder=zorder + 2)
+        ax.plot(xy[-1, 0], xy[-1, 1], marker="*", ms=12, color=ESCAPE_C, alpha=alpha, zorder=zorder + 3)
+    elif bout["is_escape"]:                            # dash escape: fast but nearly straight
+        ax.plot(xy[:, 0], xy[:, 1], color=DASH_C, lw=2.4, alpha=alpha, solid_capstyle="round",
                 zorder=zorder + 1)
-        ax.plot(xy[-1, 0], xy[-1, 1], marker="*", ms=11, color=ESCAPE_C, alpha=alpha, zorder=zorder + 2)
-    else:
+        ax.plot(xy[-1, 0], xy[-1, 1], marker=">", ms=7, color=DASH_C, alpha=alpha, zorder=zorder + 2)
+    else:                                              # ordinary bout
         ax.plot(xy[:, 0], xy[:, 1], color=BOUT_C, lw=1.7, alpha=alpha, solid_capstyle="round",
                 zorder=zorder)
         ax.plot(xy[0, 0], xy[0, 1], marker=".", ms=5, color=BOUT_C, alpha=alpha, zorder=zorder)
@@ -462,14 +485,15 @@ def _draw_bout_segment(ax, bout: dict[str, Any], *, alpha: float = 1.0, zorder: 
 
 
 def _entry_sort_key(row: tuple[VisitScene, dict[str, Any]]) -> tuple:
-    """Escape-containing entries first, then closer approaches, then shorter (more legible)
-    ones. A wall-dwelling fish produces a few 200-bout lingering entries that swamp the
-    genuine approach-and-leave passes; this floats the readable ones to the top."""
+    """Turn-escape entries first, then any-escape, then closer approaches, then shorter (more
+    legible) ones. A wall-dwelling fish produces a few 200-bout lingering entries that swamp the
+    genuine approach-and-leave passes; this floats the readable, interesting ones to the top."""
 
     scene, visit = row
     bouts = visit.get("bouts", [])
+    n_turn = sum(int(b.get("is_high_turn", False)) for b in bouts)
     n_esc = sum(int(b["is_escape"]) for b in bouts)
-    return (-n_esc, float(visit.get("cpa_mm", math.inf)), len(visit["xy"]))
+    return (-n_turn, -n_esc, float(visit.get("cpa_mm", math.inf)), len(visit["xy"]))
 
 
 def _ordered_entries(scenes: Sequence[VisitScene], object_only: bool) -> list[tuple[VisitScene, dict]]:
@@ -498,18 +522,21 @@ def render_ring_entries_png(
         _draw_rings(ax, scene, limit=limit)
         xy = visit["xy"]
         ax.plot(xy[:, 0], xy[:, 1], color="#cbd5e1", lw=0.8, alpha=0.9, zorder=2)   # coast path
-        n_esc = 0
+        n_esc = n_turn = 0
         for bout in visit.get("bouts", []):
             _draw_bout_segment(ax, bout)
             n_esc += int(bout["is_escape"])
+            n_turn += int(bout.get("is_high_turn", False))
         ax.plot(xy[0, 0], xy[0, 1], marker="s", ms=5, color="#16a34a", zorder=6)     # entry
         j = int(np.argmin(visit["distance_mm"]))
         ax.plot(xy[j, 0], xy[j, 1], marker="o", ms=7, mfc="none", mec="#b91c1c", mew=1.4, zorder=6)
         nb = len(visit.get("bouts", []))
+        esc_txt = ""
+        if n_esc:
+            esc_txt = f" · {n_esc} escape" + (f" ({n_turn} turn)" if n_turn else "")
         ax.set_title(f"{_scene_object_tag(scene)}\n"
-                     f"entry {visit['visit_id']} · CPA {visit['cpa_mm']:.1f} mm · {nb} bouts"
-                     + (f" · {n_esc} escape" if n_esc else ""),
-                     fontsize=7, color=ESCAPE_C if n_esc else "#334155")
+                     f"entry {visit['visit_id']} · CPA {visit['cpa_mm']:.1f} mm · {nb} bouts{esc_txt}",
+                     fontsize=7, color=ESCAPE_C if n_turn else (DASH_C if n_esc else "#334155"))
     for k in range(len(shown), n_rows * n_cols):
         axes[k // n_cols][k % n_cols].axis("off")
 
@@ -530,7 +557,9 @@ def render_ring_entries_png(
         f"{frame_line}\n"
         "each panel is labelled with its object and its distance to the dish edge — the wall arc differs "
         "because aggressive and inert dots sit at different distances from it\n"
-        "green square = entry · blue = ordinary bout · red ★ = escape bout · red circle = closest approach",
+        f"green ▪ = entry · blue = ordinary bout · red ★ = turn escape (|turn| ≥ "
+        f"{meta.get('high_turn_threshold_deg', DEFAULT_HIGH_TURN_THRESHOLD_DEG):g}°) · "
+        "orange ▶ = dash escape (fast, straight) · red ○ = closest approach",
         fontsize=9.5,
     )
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.93))
@@ -580,8 +609,10 @@ def write_ring_traversal_gif(
     fig.text(0.5, 0.065, f"amber = 8–16 mm responsive shell   ·   red dashed ring = "
              f"{ESCAPE_TRIGGER_MM:g} mm escape trigger   ·   red dot = object",
              ha="center", va="center", fontsize=7, color="#334155")
-    fig.text(0.5, 0.028, "blue = ordinary bout   ·   red ★ = escape bout   ·   "
-             "red ○ = closest approach", ha="center", va="center", fontsize=7, color="#334155")
+    fig.text(0.5, 0.028, f"blue = ordinary bout   ·   red ★ = turn escape (|turn| ≥ "
+             f"{meta.get('high_turn_threshold_deg', DEFAULT_HIGH_TURN_THRESHOLD_DEG):g}°)   ·   "
+             "orange ▶ = dash escape   ·   red ○ = closest approach",
+             ha="center", va="center", fontsize=7, color="#334155")
 
     def draw(i: int) -> None:
         r_idx, f, is_hold = timeline[i]
@@ -597,6 +628,7 @@ def write_ring_traversal_gif(
         # every bout already begun by frame f, lit and persisting
         n_done = 0
         n_esc = 0
+        n_turn = 0
         for bout in bouts:
             if bout["i0"] <= f:
                 clipped = dict(bout)
@@ -605,6 +637,7 @@ def write_ring_traversal_gif(
                 if bout["i1"] <= f:
                     n_done += 1
                     n_esc += int(bout["is_escape"])
+                    n_turn += int(bout.get("is_high_turn", False))
         # the fish
         ax.plot(xy[max(0, f - trail_n):f + 1, 0], xy[max(0, f - trail_n):f + 1, 1],
                 color="#1d4ed8", lw=1.2, alpha=0.4, zorder=3)
@@ -620,12 +653,14 @@ def write_ring_traversal_gif(
 
         d = float(visit["distance_mm"][f])
         in_shell = RESPONSIVE_BAND_MM[0] <= d <= RESPONSIVE_BAND_MM[1]
-        esc_tag = f"  ·  {n_esc} escape" if n_esc else ""
+        esc_tag = ""
+        if n_esc:
+            esc_tag = f"  ·  {n_esc} escape" + (f" ({n_turn} turn)" if n_turn else "")
         ax.set_title(
             f"{meta['recording_id']}  ·  {scene.epoch_label.replace('_',' ')}  ·  {_scene_object_tag(scene)}\n"
             f"entry {visit['visit_id']}  ·  d = {d:5.1f} mm {'‹ in responsive shell ›' if in_shell else ''}\n"
             f"bouts this entry: {n_done}/{len(bouts)}{esc_tag}",
-            fontsize=9, color=ESCAPE_C if n_esc else ("#b45309" if in_shell else "#334155"),
+            fontsize=9, color=ESCAPE_C if n_turn else (DASH_C if n_esc else ("#b45309" if in_shell else "#334155")),
         )
 
     anim = FuncAnimation(fig, draw, frames=len(timeline), interval=1000 // fps)
