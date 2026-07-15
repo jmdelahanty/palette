@@ -9,6 +9,7 @@ from fisheye.shared.instance_keys import mint_detection_instance_keys
 from fisheye.utils.backfill_legacy_instance_keys import (
     _atomic_add_array,
     _keys_for_stable_row_ids,
+    _uses_clipped_collection_lineage,
     build_plan,
 )
 
@@ -221,6 +222,31 @@ def test_build_plan_inherits_selected_raw_run_sharding() -> None:
     assert plan.array("detect_runs/detect_1", "instance_key").shard_rows == 262_144
     assert plan.array("keypoints_runs/keypoints_1", "instance_key").shard_rows == 65_536
     assert plan.array("crop_runs/crop_1", "instance_key").shard_rows is None
+
+
+def test_historical_finalized_collection_selects_clipped_lineage_without_root_marker() -> None:
+    root = _Group(
+        {
+            "refined_detect_runs": _Group(
+                attrs={
+                    "latest_collection": "collection_001",
+                    "latest_collection_path": "experiment_index/finalized_runs/collection_001",
+                }
+            )
+        },
+        attrs={"source_layout": "rolling_clips"},
+    )
+
+    assert _uses_clipped_collection_lineage(root) is True
+
+
+def test_dense_lineage_is_not_inferred_from_source_layout_alone() -> None:
+    root = _Group(
+        {"refined_detect_runs": _Group(attrs={})},
+        attrs={"source_layout": "rolling_clips"},
+    )
+
+    assert _uses_clipped_collection_lineage(root) is False
 
 
 def test_atomic_add_array_writes_sharded_identity_grid(tmp_path: Path) -> None:

@@ -929,10 +929,27 @@ def _build_clipped_plan(root: Any, *, zarr_path: Path) -> InstanceKeyBackfillPla
     return plan
 
 
+def _uses_clipped_collection_lineage(root: Any) -> bool:
+    """Resolve clipped shells from either modern or historical metadata.
+
+    Historical finalized clipped archives can predate the root-level
+    ``analysis_layout=clipped_recording_shell`` marker. The finalized
+    collection pointer is itself an unambiguous structural contract and must
+    take precedence over unrelated legacy root ``detect_runs`` groups.
+    """
+
+    if str(root.attrs.get("analysis_layout") or "") == "clipped_recording_shell":
+        return True
+    refined_parent = root.get("refined_detect_runs")
+    if refined_parent is None:
+        return False
+    return bool(str(refined_parent.attrs.get("latest_collection_path") or "").strip("/"))
+
+
 def build_plan(root: Any, *, zarr_path: Path) -> InstanceKeyBackfillPlan:
     """Build and fully validate an additive migration plan for one archive."""
 
-    if str(root.attrs.get("analysis_layout") or "") == "clipped_recording_shell":
+    if _uses_clipped_collection_lineage(root):
         return _build_clipped_plan(root, zarr_path=zarr_path)
     return _build_dense_plan(root, zarr_path=zarr_path)
 
