@@ -233,6 +233,7 @@ BSUB_ARGS=(
   -J "analysis_workflow_${EXECUTION_ID}"
   -n "$NCORES"
   -W "$WALLTIME"
+  -R "span[hosts=1]"
   -R "rusage[mem=${MEM_GB}G]"
   -oo "${RUN_DIR}/%J.out"
   -eo "${RUN_DIR}/%J.err"

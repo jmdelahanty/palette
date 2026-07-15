@@ -241,9 +241,11 @@ scripts/submit_analysis_workflow_bsub.sh \
   --walltime 24:00
 ```
 
-The generated job sets the native BLAS/OpenMP thread ceilings before Python
-starts. The materializer is dry-run by default when invoked directly; the DAG
-adds `--apply` only inside the verified LSF allocation.
+The generated job pins all requested CPU slots to one host, sets the native
+BLAS/OpenMP thread ceilings before Python starts, and therefore keeps every
+process on the same node-local scratch. The materializer is dry-run by default
+when invoked directly; the DAG adds `--apply` only inside the verified LSF
+allocation.
 
 The 10 Hz kinematic samples, 5-second activity/spatial summaries, and framewise
 trace exports remain planning-only nodes. The executor rejects them instead of
