@@ -5611,6 +5611,16 @@ def _extract_refined_detect_coverage_pct(refined_group: object) -> Optional[floa
                 cov = _coerce_float_value(payload.get("coverage_percent"))
                 if cov is not None:
                     return cov
+        instance_count = _coerce_float_value(comparison.get("instance_count"))
+        recording_frame_count = _coerce_float_value(
+            comparison.get("recording_frame_count")
+        )
+        if (
+            instance_count is not None
+            and recording_frame_count is not None
+            and recording_frame_count > 0
+        ):
+            return 100.0 * instance_count / recording_frame_count
 
     stats = _coerce_mapping_value(
         refined_group.attrs.get("coverage_stats")  # type: ignore[attr-defined]
@@ -6011,6 +6021,11 @@ def _build_recording_step_rows_from_root(
     detect_quality_details = _extract_detect_quality_details(detect_group)
 
     refined_detect_parent = root.get("refined_detect_runs") or root.get("refined_runs")  # type: ignore[attr-defined]
+    refined_detect_collection = _extract_source_ref(
+        refined_detect_parent,
+        "latest_collection",
+    )
+    refined_detect_expected_source = refined_detect_collection or detect_run
     (
         refined_detect_run,
         refined_detect_group,
@@ -6019,7 +6034,7 @@ def _build_recording_step_rows_from_root(
         refined_detect_latest_source_run,
     ) = _resolve_group_for_source_run(
         refined_detect_parent,
-        source_run=detect_run,
+        source_run=refined_detect_expected_source,
         source_run_extractor=_extract_source_detect_run,
     )
     refined_detect_status, refined_detect_reason = _step_status_from_presence(
@@ -6027,9 +6042,17 @@ def _build_recording_step_rows_from_root(
         is_production=is_production,
         prerequisite_statuses=(detect_status,),
     )
-    if refined_detect_group is None and detect_run and refined_detect_parent is not None:
+    if (
+        refined_detect_group is None
+        and refined_detect_expected_source
+        and refined_detect_parent is not None
+    ):
         if refined_detect_selection == "source_mismatch":
-            refined_detect_reason = "stale_vs_latest_detect"
+            refined_detect_reason = (
+                "stale_vs_latest_detect_collection"
+                if refined_detect_collection
+                else "stale_vs_latest_detect"
+            )
         elif refined_detect_selection == "source_mismatch_missing_attr":
             refined_detect_reason = "missing_source_detect_run"
     refined_detect_method = _decode_text(
@@ -6039,6 +6062,10 @@ def _build_recording_step_rows_from_root(
         parameters = _coerce_mapping_value(refined_detect_group.attrs.get("parameters"))  # type: ignore[attr-defined]
         if parameters is not None:
             refined_detect_method = _decode_text(parameters.get("refine_mode"))
+    if not refined_detect_method and refined_detect_group is not None:
+        refined_detect_method = _decode_text(
+            refined_detect_group.attrs.get("palette_run_stage")  # type: ignore[attr-defined]
+        )
     refined_detect_coverage = _extract_refined_detect_coverage_pct(refined_detect_group)
     detect_review_status = (
         _coerce_mapping_value(refined_detect_group.attrs.get("detect_review_status"))  # type: ignore[attr-defined]
@@ -6570,8 +6597,14 @@ def _build_recording_step_rows_from_root(
         "latest_selector": refined_detect_selection,
         "upstream": {"detect": detect_status},
     }
-    if detect_run:
+    if refined_detect_collection:
+        refined_detect_details["expected_source_detect_collection"] = (
+            refined_detect_collection
+        )
+        refined_detect_details["source_detect_identity_kind"] = "collection"
+    elif detect_run:
         refined_detect_details["expected_source_detect_run"] = detect_run
+        refined_detect_details["source_detect_identity_kind"] = "run"
     refined_detect_source_run = _extract_source_detect_run(refined_detect_group)
     if refined_detect_source_run:
         refined_detect_details["source_detect_run"] = refined_detect_source_run

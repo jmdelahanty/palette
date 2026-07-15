@@ -9265,6 +9265,74 @@ def test_backfill_recording_step_status_marks_refined_detect_stale_when_source_m
     registry.close()
 
 
+def test_backfill_recording_step_status_accepts_current_refined_detect_collection_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_step_collection" / "zarr" / "rec_step_collection_analysis.zarr"
+    fake_root = _create_recording_step_status_zarr(zarr_path)
+    refined_parent = fake_root["refined_detect_runs"]
+    refined_parent.attrs["latest_collection"] = "detect_collection_001"
+    refined = refined_parent["refined_detect_001"]
+    refined.attrs.pop("parameters", None)
+    refined.attrs.update(
+        {
+            "source_detect_run": "detect_collection_001",
+            "source_detect_collection_id": "detect_collection_001",
+            "snapshot_schema": "palette.refined_detect_collection_snapshot.v1",
+            "palette_run_stage": "refined_detect_collection_snapshot",
+            "coverage_comparison": {
+                "instance_count": 3,
+                "recording_frame_count": 4,
+                "complete_parent_frame_timeline": True,
+            },
+        }
+    )
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
+    )
+
+    registry.upsert_dataset(
+        dataset_id="dataset_step_collection",
+        session_uuid="session_step_collection",
+        zarr_path=zarr_path,
+        recording_id="recording_step_collection",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+
+    _backfill_recording_step_status(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        recording_ids=None,
+        zarr_use_filter="all",
+    )
+
+    row = registry.conn.execute(
+        """
+        SELECT status, run_name, method, coverage_pct, details_json
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'refined_detect';
+        """,
+        ("dataset_step_collection",),
+    ).fetchone()
+    assert row is not None
+    assert str(row["status"]) == "ok"
+    assert str(row["run_name"]) == "refined_detect_001"
+    assert str(row["method"]) == "refined_detect_collection_snapshot"
+    assert float(row["coverage_pct"]) == pytest.approx(75.0)
+    details = json.loads(str(row["details_json"]))
+    assert details["reason"] == "present"
+    assert details["latest_selector"] == "source_match_latest_attr"
+    assert details["expected_source_detect_collection"] == "detect_collection_001"
+    assert details["source_detect_run"] == "detect_collection_001"
+    assert details["source_detect_identity_kind"] == "collection"
+    registry.close()
+
+
 def test_backfill_recording_step_status_marks_eye_masks_stale_when_source_mismatches_latest_keypoints(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
