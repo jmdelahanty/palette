@@ -80,12 +80,10 @@ view, not the analysis metric:
 roughly mid-body) to tail tip, i.e. the posterior ~half of the body. It does **not** include the
 anterior trunk. Summarizing a frame by its max tail curvature is therefore effectively a
 **tail-tip** measure. A C-start is a **whole-body** coil (the anterior trunk curls in stage 1), so
-this metric structurally misses the defining feature. The whole-body midline (`centerline_xy`,
-snout→tail, 64 pts) IS stored, but there is no clean stored whole-body-curvature metric: the run
-outputs tail-only curvature, and an ad-hoc gross head→tail bend computed on the *raw* (unsmoothed)
-centerline is itself jitter-corrupted (it returned impossible >360° values on straight fish). The
-smoothing fix here is scoped to the **tail** spline; a trustworthy C-bend metric needs the same
-smoothing applied to the **full centerline**, which is not yet done.
+this metric structurally misses the defining feature. **This was fixed in v10** — a whole-body
+`centerline_curvature_px_inv` is now emitted (see the last section); before v10 the only options
+were the tail-only array or an ad-hoc gross head→tail bend on the *raw* (unsmoothed) centerline,
+which was jitter-corrupted (impossible >360° values on straight fish).
 
 ## What this recording does and does not contain
 
@@ -109,15 +107,11 @@ so there are no C-starts to capture here regardless of tracking quality.
 1. **Summarize by the integrated tail angle (Σ between-point angle change), not the max.** Max is
    an outlier that tracks the noisy tip; the integral averages over all points and is the actual
    tail-bend in degrees (`tail_kinematics_runs.integrated_abs_tail_curvature`).
-2. **Compute smoothed curvature over the FULL centerline** (snout→tail), not the tail-only array.
-   A C-start coil is whole-body; the current `tail_curvature` (posterior half, tip-dominated)
-   misses the anterior bend. Apply the same separate-smoothing-spline approach to the full
-   centerline, or integrate the total head→tail turning of the *smoothed* midline (the raw one is
-   too noisy). This is the main gap — it is not yet done.
-3. Use the **v9** (smoothed) tail curvature if you do use the tail — the v8 array is unusable.
-4. **Exclude the terminal tail points** (the tip is where mask/spline is least reliable) when using
-   pointwise curvature.
-5. **QC-reject physically impossible radii** (< ~5 px) — these flag the bad-mask frames.
+2. For a whole-body C-coil, use **`centerline_curvature_px_inv`** (v10, snout→tail), not the
+   tail-only array. Integrate it over a **trimmed body** (drop ~8 anterior + ~4 posterior points)
+   to exclude the snout-join and tail-tip endpoint artifacts (see the last section).
+3. Use the **v9+** (smoothed) curvature — the v8 arrays are unusable.
+4. **QC-reject physically impossible radii** (< ~5 px) — these flag the bad-mask frames.
 5. Materialize `subject_shape_runs` on **recordings that contain escapes** (i.e. the chaser
    cohort) — this recording has none.
 6. Even then: this resolves C-bend *shape*, not *kinematics* (angular velocity, stage-1 latency),
