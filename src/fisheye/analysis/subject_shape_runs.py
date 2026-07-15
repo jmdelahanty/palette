@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import heapq
 import json
 import math
@@ -19,6 +20,7 @@ import numpy as np
 from skimage.measure import find_contours, label as label_components
 from skimage.morphology import skeletonize
 import zarr
+from threadpoolctl import threadpool_limits
 
 try:
     from dask.distributed import Client, LocalCluster
@@ -98,6 +100,30 @@ SUPPORTED_SCHEDULERS = ("single-threaded", "threads", "processes", "distributed"
 EXECUTION_BACKENDS = ("serial_driver", "dask_worker_chunks")
 SERIAL_EXECUTION_BACKEND = "serial_driver"
 DASK_WORKER_EXECUTION_BACKEND = "dask_worker_chunks"
+
+
+@contextmanager
+def _native_thread_limit(num_threads: Optional[int]):
+    """Bound native kernels inside one subject-shape worker process."""
+
+    if num_threads is None:
+        yield
+        return
+    limit = max(1, int(num_threads))
+    try:
+        import cv2
+
+        previous_cv2_threads = int(cv2.getNumThreads())
+        cv2.setNumThreads(limit)
+    except (ImportError, AttributeError):  # pragma: no cover - optional implementation detail
+        cv2 = None
+        previous_cv2_threads = None
+    try:
+        with threadpool_limits(limits=limit):
+            yield
+    finally:
+        if cv2 is not None and previous_cv2_threads is not None:
+            cv2.setNumThreads(previous_cv2_threads)
 
 
 @dataclass(frozen=True)
@@ -970,6 +996,8 @@ def _prepare_subject_shape_run(
     execution_backend: str,
     scheduler: str,
     num_workers: Optional[int],
+    centerline_crop_to_foreground: bool,
+    native_threads: Optional[int],
     stage_command: str,
     overwrite: bool,
 ) -> zarr.Group:
@@ -1127,6 +1155,10 @@ def _prepare_subject_shape_run(
             "chunk_size": max(1, int(requested_chunk_size)),
             "worker_chunk_size": max(1, int(worker_chunk_size)),
             "chunk_count": len(_row_chunks(total_rows, max(1, int(worker_chunk_size)))),
+            "centerline_crop_to_foreground": bool(centerline_crop_to_foreground),
+            "native_threads_per_worker": (
+                max(1, int(native_threads)) if native_threads is not None else None
+            ),
             **dask_metadata,
         }
     )
@@ -1180,6 +1212,10 @@ def _prepare_subject_shape_run(
             "tail_sample_domain": "tail_segment_normalized_arclength",
             "chunk_size": max(1, int(requested_chunk_size)),
             "worker_chunk_size": max(1, int(worker_chunk_size)),
+            "centerline_crop_to_foreground": bool(centerline_crop_to_foreground),
+            "native_threads_per_worker": (
+                max(1, int(native_threads)) if native_threads is not None else None
+            ),
         },
         inputs={
             "source_refined_subject_masks_run": refined_run_name,
@@ -2466,32 +2502,38 @@ def _process_and_write_subject_shape_chunk_groups(
 
 
 def _process_and_write_subject_shape_chunk(
-    zarr_path: str,
+    source_zarr_path: str,
     *,
+    output_zarr_path: str,
     refined_run: str,
     shape_run: str,
     component_indices: Sequence[tuple[str, int]],
     start_row: int,
     stop_row: int,
     chunk_index: int,
+    centerline_crop_to_foreground: bool = False,
+    native_threads: Optional[int] = None,
 ) -> dict[str, object]:
-    root = open_zarr_root(zarr_path, mode="a")
-    refined_group = root["refined_subject_masks_runs"][refined_run]
+    source_root = open_zarr_root(source_zarr_path, mode="r")
+    output_root = open_zarr_root(output_zarr_path, mode="a")
+    refined_group = source_root["refined_subject_masks_runs"][refined_run]
     mask_store = open_mask_store(
         refined_group,
         source_path=f"refined_subject_masks_runs/{refined_run}",
         prefer="dense",
     )
-    return _process_and_write_subject_shape_chunk_groups(
-        refined_group,
-        root["analysis"]["subject_shape_runs"][shape_run],
-        mask_store=mask_store,
-        component_indices=component_indices,
-        start_row=start_row,
-        stop_row=stop_row,
-        chunk_index=chunk_index,
-        execution_backend=DASK_WORKER_EXECUTION_BACKEND,
-    )
+    with _native_thread_limit(native_threads):
+        return _process_and_write_subject_shape_chunk_groups(
+            refined_group,
+            output_root["analysis"]["subject_shape_runs"][shape_run],
+            mask_store=mask_store,
+            component_indices=component_indices,
+            start_row=start_row,
+            stop_row=stop_row,
+            chunk_index=chunk_index,
+            execution_backend=DASK_WORKER_EXECUTION_BACKEND,
+            centerline_crop_to_foreground=bool(centerline_crop_to_foreground),
+        )
 
 
 def _compute_dask_tasks(
@@ -2557,6 +2599,8 @@ def write_subject_shape_run_group(
     root: zarr.Group,
     *,
     zarr_path: str | Path | None = None,
+    output_root: zarr.Group | None = None,
+    output_zarr_path: str | Path | None = None,
     refined_run: Optional[str] = None,
     run_name: Optional[str] = None,
     components: Optional[Sequence[str]] = None,
@@ -2567,14 +2611,20 @@ def write_subject_shape_run_group(
     overwrite: bool = False,
     dry_run: bool = False,
     include_chunk_timings: bool = False,
+    centerline_crop_to_foreground: bool = False,
+    native_threads: Optional[int] = None,
     stage_command: Optional[str] = None,
 ) -> dict[str, object]:
     """Write one row-aligned subject-shape analysis run."""
 
     scheduler_key = _normalize_scheduler(scheduler)
     backend = _normalize_execution_backend(execution_backend)
-    if backend == DASK_WORKER_EXECUTION_BACKEND and zarr_path is None:
-        raise ValueError("execution_backend='dask_worker_chunks' requires a filesystem zarr_path.")
+    destination_root = output_root if output_root is not None else root
+    destination_zarr_path = output_zarr_path if output_zarr_path is not None else zarr_path
+    if backend == DASK_WORKER_EXECUTION_BACKEND and (zarr_path is None or destination_zarr_path is None):
+        raise ValueError(
+            "execution_backend='dask_worker_chunks' requires filesystem source and output Zarr paths."
+        )
     refined_run_name, refined_group = _resolve_refined_run(root, refined_run)
     refined_tables = load_refined_subject_masks_run_tables(
         root,
@@ -2611,6 +2661,11 @@ def write_subject_shape_run_group(
             if backend == DASK_WORKER_EXECUTION_BACKEND
             else "requested_chunk_size"
         ),
+        "centerline_crop_to_foreground": bool(centerline_crop_to_foreground),
+        "native_threads_per_worker": (
+            max(1, int(native_threads)) if native_threads is not None else None
+        ),
+        "separate_output_root": destination_root is not root,
         "mutates_archive": not bool(dry_run),
     }
     if dry_run:
@@ -2619,7 +2674,7 @@ def write_subject_shape_run_group(
     stage_start = time.perf_counter()
     command = stage_command or (" ".join(sys.argv) if sys.argv else "unknown")
     run_group = _prepare_subject_shape_run(
-        root,
+        destination_root,
         target_run=target_run,
         refined_run_name=refined_run_name,
         refined_group=refined_group,
@@ -2631,6 +2686,8 @@ def write_subject_shape_run_group(
         execution_backend=backend,
         scheduler=scheduler_key,
         num_workers=num_workers,
+        centerline_crop_to_foreground=bool(centerline_crop_to_foreground),
+        native_threads=native_threads,
         stage_command=command,
         overwrite=overwrite,
     )
@@ -2642,12 +2699,15 @@ def write_subject_shape_run_group(
         tasks = [
             delayed(_process_and_write_subject_shape_chunk)(
                 str(zarr_path),
+                output_zarr_path=str(destination_zarr_path),
                 refined_run=refined_run_name,
                 shape_run=target_run,
                 component_indices=tuple(component_indices),
                 start_row=start_row,
                 stop_row=stop_row,
                 chunk_index=chunk_index,
+                centerline_crop_to_foreground=bool(centerline_crop_to_foreground),
+                native_threads=native_threads,
             )
             for chunk_index, (start_row, stop_row) in enumerate(chunks)
         ]
@@ -2658,16 +2718,18 @@ def write_subject_shape_run_group(
                 rows_with_component[str(component_name)] = int(rows_with_component.get(str(component_name), 0)) + int(count)
     else:
         for chunk_index, (start_row, stop_row) in enumerate(chunks):
-            result = _process_and_write_subject_shape_chunk_groups(
-                refined_group,
-                run_group,
-                mask_store=mask_store,
-                component_indices=tuple(component_indices),
-                start_row=start_row,
-                stop_row=stop_row,
-                chunk_index=chunk_index,
-                execution_backend=SERIAL_EXECUTION_BACKEND,
-            )
+            with _native_thread_limit(native_threads):
+                result = _process_and_write_subject_shape_chunk_groups(
+                    refined_group,
+                    run_group,
+                    mask_store=mask_store,
+                    component_indices=tuple(component_indices),
+                    start_row=start_row,
+                    stop_row=stop_row,
+                    chunk_index=chunk_index,
+                    execution_backend=SERIAL_EXECUTION_BACKEND,
+                    centerline_crop_to_foreground=bool(centerline_crop_to_foreground),
+                )
             chunk_timing = dict(result["chunk_timing"])
             chunk_timings.append(chunk_timing)
             for component_name, count in dict(result.get("rows_with_component") or {}).items():
@@ -2686,6 +2748,10 @@ def write_subject_shape_run_group(
         "dask_scheduler": scheduler_key,
         "dask_num_workers": int(num_workers) if num_workers is not None else None,
         "dask_chunk_size": max(1, int(chunk_size)),
+        "centerline_crop_to_foreground": bool(centerline_crop_to_foreground),
+        "native_threads_per_worker": (
+            max(1, int(native_threads)) if native_threads is not None else None
+        ),
         "dask_version": getattr(dask, "__version__", "unknown"),
         "chunk_timings": _summarize_subject_shape_chunk_timings(chunk_timings),
     }
@@ -2695,7 +2761,7 @@ def write_subject_shape_run_group(
     )
     if include_chunk_timings:
         run_group.attrs["subject_shape_chunk_timings"] = list(_json_safe(chunk_timings))
-    parent = root["analysis"]["subject_shape_runs"]
+    parent = destination_root["analysis"]["subject_shape_runs"]
     mark_run_complete(
         run_group,
         parent_group=parent,
@@ -2732,6 +2798,8 @@ def write_subject_shape_run(
     overwrite: bool = False,
     dry_run: bool = False,
     include_chunk_timings: bool = False,
+    centerline_crop_to_foreground: bool = False,
+    native_threads: Optional[int] = None,
 ) -> dict[str, object]:
     root = open_zarr_root(zarr_path, mode="a")
     return write_subject_shape_run_group(
@@ -2747,6 +2815,8 @@ def write_subject_shape_run(
         overwrite=overwrite,
         dry_run=dry_run,
         include_chunk_timings=include_chunk_timings,
+        centerline_crop_to_foreground=centerline_crop_to_foreground,
+        native_threads=native_threads,
     )
 
 

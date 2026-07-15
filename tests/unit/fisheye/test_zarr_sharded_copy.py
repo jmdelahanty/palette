@@ -1,0 +1,55 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pytest
+import zarr
+
+from fisheye.shared.zarr_sharded_copy import copy_completed_run_to_sharded
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_copy_completed_run_to_sharded_preserves_values_and_owns_outer_shards(
+    tmp_path: Path,
+    workers: int,
+) -> None:
+    source_path = tmp_path / "source-run"
+    destination_path = tmp_path / "destination-run"
+    source = zarr.open_group(str(source_path), mode="w", zarr_format=3)
+    source.attrs.update(
+        {
+            "schema_id": "fixture.run",
+            "palette_run_completion_status": "complete",
+            "custom": {"preserved": True},
+        }
+    )
+    row_index = source.create_group("row_index")
+    row_index.create_array(
+        "frame_indices",
+        data=np.arange(10, dtype=np.int32),
+        chunks=(2,),
+    )
+    values = np.arange(30, dtype=np.float32).reshape(10, 3)
+    source.create_array("values", data=values, chunks=(2, 3), fill_value=np.nan)
+    source.create_array("sample_s", data=np.linspace(0.0, 1.0, 3), chunks=(3,))
+
+    report = copy_completed_run_to_sharded(
+        source_path,
+        destination_path,
+        row_count_array="row_index/frame_indices",
+        shard_rows=5,
+        workers=workers,
+    )
+
+    assert report["status"] == "complete"
+    assert report["exact_decoded_validation"] is True
+    assert report["worker_ownership"] == (
+        "one_complete_nonoverlapping_outer_row_shard_per_array_task"
+    )
+    destination = zarr.open_group(str(destination_path), mode="r", use_consolidated=False)
+    np.testing.assert_array_equal(np.asarray(destination["values"][:]), values)
+    assert tuple(destination["values"].chunks) == (2, 3)
+    assert tuple(destination["values"].shards) == (6, 3)
+    assert destination.attrs["custom"] == {"preserved": True}
+    assert destination.attrs["physical_storage_layout"]["requested_outer_shard_rows"] == 5

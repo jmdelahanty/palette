@@ -6,6 +6,7 @@ import numpy as np
 import zarr
 
 from fisheye.analysis import subject_shape_runs as mod
+from fisheye.analysis_workflows.materializers import subject_shape as materializer
 from fisheye.refinement.subject_body_mask_qc import write_subject_body_mask_qc_group
 from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 
@@ -236,6 +237,112 @@ def test_write_subject_shape_run_group_creates_coherent_components_and_relations
     assert run.attrs["provenance"]["stage"] == "analysis.subject_shape_runs"
     assert run.attrs["subject_shape_chunk_timing_storage"] == "embedded_full_records"
     assert len(run.attrs["subject_shape_chunk_timings"]) == 2
+
+
+def test_write_subject_shape_run_group_can_read_source_and_write_separate_root(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _patch_provenance(monkeypatch)
+    source_path = tmp_path / "source.zarr"
+    output_path = tmp_path / "output.zarr"
+    source = _build_refined_root(source_path)
+    output = zarr.open_group(str(output_path), mode="w", zarr_format=3)
+
+    summary = mod.write_subject_shape_run_group(
+        source,
+        zarr_path=source_path,
+        output_root=output,
+        output_zarr_path=output_path,
+        refined_run="refined_001",
+        run_name="shape_separate",
+        chunk_size=2,
+        execution_backend="dask_worker_chunks",
+        scheduler="single-threaded",
+        centerline_crop_to_foreground=True,
+        native_threads=1,
+    )
+
+    assert summary["status"] == "updated"
+    assert "analysis" not in source
+    run = output["analysis"]["subject_shape_runs"]["shape_separate"]
+    assert run.attrs["palette_run_completion_status"] == "complete"
+    assert run.attrs["centerline_crop_to_foreground"] is True
+    assert run.attrs["native_threads_per_worker"] == 1
+    assert run["row_index"]["frame_indices"][:].tolist() == [10, 11, 12]
+
+
+def test_subject_shape_materializer_computes_shards_and_publishes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _patch_provenance(monkeypatch)
+    monkeypatch.setattr(
+        materializer,
+        "write_best_effort_run_lineage_attrs",
+        lambda *args, **kwargs: None,
+    )
+    source_path = tmp_path / "source.zarr"
+    source = _build_refined_root(source_path)
+    masks_before = np.asarray(
+        source["refined_subject_masks_runs"]["refined_001"]["masks_roi"][:]
+    ).copy()
+    scratch = tmp_path / "scratch"
+
+    planned = materializer.materialize_subject_shape(
+        source_path,
+        scratch_root=scratch,
+        refined_run="refined_001",
+        run_name="shape_materialized",
+        block_rows=2,
+        output_shard_rows=4,
+        execution_backend="serial_driver",
+        scheduler="single-threaded",
+        num_workers=1,
+        shard_copy_workers=1,
+        native_threads=1,
+        copy_backend="python",
+        apply=False,
+    )
+    assert planned["status"] == "planned"
+    assert planned["plan"]["source_access_policy"] == "authoritative_shared_read_only"
+    assert not scratch.exists()
+
+    result = materializer.materialize_subject_shape(
+        source_path,
+        scratch_root=scratch,
+        refined_run="refined_001",
+        run_name="shape_materialized",
+        block_rows=2,
+        output_shard_rows=4,
+        execution_backend="serial_driver",
+        scheduler="single-threaded",
+        num_workers=1,
+        shard_copy_workers=1,
+        native_threads=1,
+        copy_backend="python",
+        apply=True,
+        keep_scratch=True,
+        check_capacity=False,
+        stage_command="unit-test-subject-shape-materializer",
+    )
+
+    assert result["status"] == "complete"
+    assert result["local_materialization"]["node_local_sharding"]["exact_decoded_validation"] is True
+    root = zarr.open_group(str(source_path), mode="r", use_consolidated=False)
+    np.testing.assert_array_equal(
+        np.asarray(root["refined_subject_masks_runs"]["refined_001"]["masks_roi"][:]),
+        masks_before,
+    )
+    parent = root["analysis"]["subject_shape_runs"]
+    assert parent.attrs["latest"] == "shape_materialized"
+    run = parent["shape_materialized"]
+    assert run.attrs["palette_run_completion_status"] == "complete"
+    assert run.attrs["centerline_crop_to_foreground"] is True
+    assert run.attrs["physical_storage_layout"]["layout"] == "zarr_v3_indexed_sharding"
+    assert tuple(run["components"]["subject_body"]["centerline_xy"].shards) == (6, 64, 2)
+    assert run.attrs["cluster_output_staging"]["schema_id"] == materializer.PUBLISH_SCHEMA_ID
+    assert scratch.is_dir()
 
 
 def test_write_subject_shape_run_group_reads_compact_mask_store_without_dense_masks(monkeypatch) -> None:
