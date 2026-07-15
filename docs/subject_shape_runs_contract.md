@@ -333,20 +333,26 @@ arc reads back at ≈1/20). On the one re-materialized recording this moved the 
 radius from **1.1 px → 60 px**. Pinned by `test_tail_curvature_uses_a_smoothing_spline...` and
 `test_smoothing_preserves_a_real_body_bend`.
 
-**Residual caveats (the fit is fixed; the masks are not).** After the fix, whole-body curvature
-has a U-shaped profile along the body: a rigid straight trunk (~500 px radius) with the bend
-concentrated at **both ends**. Both ends are artifact-prone as well as genuinely flexible:
+**Residual caveats (the fit is fixed; the masks/construction are not).** Whole-body curvature is
+U-shaped along the body: a rigid straight trunk (~500 px radius) with curvature elevated at **both
+ends**. The endpoints are *not* a spline-endpoint or snout-join artifact — the spline reaches the
+real snout tip (centerline point 0 = the anatomical snout tip, distance 0), and the anterior
+curvature is a smooth ramp (only ~1.2× the just-inside value at the endpoint), not a spike or a
+corner. Instead:
 
-- **tail tip** — highest curvature during a real tail beat, but also least reliable (thin mask,
-  spline endpoint curl);
-- **snout join** — the centerline snout-extension/join heuristic can leave a kink at the anterior
-  end (the anterior analogue of the tip artifact).
+- **trunk** — genuinely rigid and stable over time (temporal std 0.0035);
+- **tail** — variable curvature = real tail flexing (and, in the extreme <5 px-radius outliers,
+  bad masks / tip curl);
+- **head** — elevated curvature that is *variable in sign frame-to-frame* (curvature is
+  rotation-invariant, so a rigid head would be sign-stable). This is a mix of real head shape and
+  **instability in the head-region centerline construction** (the medial/bridge path near the head
+  blob and eyes wanders), not a clean artifact.
 
-On the one recording, the endpoints contribute ~27% of the integrated whole-body bend (≈10% snout
-+ ≈17% tip); trimming both drops the median from 31.7° → 22.8°. For a trustworthy body-bend /
-C-bend metric: **integrate over a trimmed body** (drop the anterior ~8 and posterior ~4 points),
-**summarize by the integrated angle not the max**, and QC-reject physically impossible radii
-(< ~5 px). Also note `tail_sample_valid` fails ~10% of frames (truncated/jagged tail masks). See
+The endpoints contribute ~27% of the integrated whole-body bend, so for a robust metric: **work in
+the trunk+tail and use curvature *change over time* (a C-start is a transient deviation from the
+resting posture), not absolute whole-body curvature**; trimming the head region helps pragmatically
+because it is noisier. Summarize by the integrated angle not the max, and QC-reject impossible radii
+(< ~5 px). Note `tail_sample_valid` fails ~10% of frames. See
 `docs/diagnostics/subject_shape_tail_curvature_2026-07-15.md`.
 
 The low-dimensional behavior-facing representation should be written by

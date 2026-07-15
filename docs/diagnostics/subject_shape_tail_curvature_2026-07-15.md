@@ -134,8 +134,24 @@ deg), whole-body vs tail:
 | tail \|bend\| | 6.0° | 11° | 17° |
 
 The whole-body curvature is **U-shaped along the body**: rigid straight trunk (~500 px radius),
-bend concentrated at both ends. The ends are both genuinely flexible and artifact-prone — the
-**tail tip** (curl) and the **snout join** (extension-heuristic kink) — and together contribute
-~27% of the integrated bend (≈10% snout + ≈17% tip). So the whole-body metric captures real
-swimming undulation (S-shaped body: trunk straight, ends curved), but should be **integrated over
-a trimmed body** (drop ~8 anterior + ~4 posterior points) to exclude both endpoint artifacts.
+curvature elevated at both ends. NOTE — an earlier draft called the anterior end a "snout-join
+kink artifact"; that was wrong. The spline reaches the real snout tip (centerline point 0 = the
+anatomical snout tip, distance 0), and the anterior curvature is a smooth ramp (only ~1.2x the
+just-inside value at the endpoint), not a spike or corner. The rotation-invariance test (curvature
+does not change as the fish turns, so a rigid part is temporally stable):
+
+| region | mean signed curv | temporal std | reading |
+|---|---|---|---|
+| trunk | +0.0008 | 0.0035 | rigid, stable |
+| head | +0.0019 | 0.022 | elevated, sign flips ~43% -> NOT a stable rigid shape |
+| tail | +0.0003 | 0.016 | variable -> real flexing |
+
+So: the trunk is truly rigid; the tail's variable curvature is real flexing (plus bad-mask outliers
+at <5 px radius); the head's elevated-but-sign-flipping curvature is a mix of real head shape and
+**instability in the head-region centerline construction** (the bridge/medial path near the head
+blob and eyes wanders frame to frame), not a clean spline/join artifact. The endpoints contribute
+~27% of the integrated whole-body bend. There is no one-line fix. For a robust bend/C-bend metric:
+work in the trunk+tail and use curvature CHANGE over time (a C-start is a transient deviation from
+resting posture), not absolute whole-body curvature; trimming the head helps pragmatically because
+it is noisier. Actually cleaning the head would mean stabilizing the head-region centerline
+construction -- a subject-shape-stage project, not a spline tweak.
