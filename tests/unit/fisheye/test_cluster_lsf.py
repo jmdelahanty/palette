@@ -522,6 +522,37 @@ def test_runtime_status_records_success_without_exposing_environment_values(
     assert "secret-value" not in json.dumps(saved)
 
 
+def test_runtime_treats_lsf_jobindex_zero_as_an_ordinary_job(tmp_path: Path) -> None:
+    status_path = tmp_path / "status.json"
+    returncode = run_with_status(
+        ("/bin/sh", "-c", "exit 0"),
+        status_path_template=status_path,
+        workflow_id="workflow_a",
+        family="test",
+        job_key="quality:a",
+        stage="quality",
+        cwd=tmp_path,
+        cleanup_path_templates=("/scratch/tester/321/cache",),
+        base_environment={
+            "USER": "tester",
+            "LSB_JOBID": "321",
+            "LSB_JOBINDEX": "0",
+            "PATH": "/usr/bin:/bin",
+        },
+    )
+
+    assert returncode == 0
+    saved = json.loads(status_path.read_text(encoding="utf-8"))
+    assert saved["status"] == "succeeded"
+    assert saved["cleanup"] == [
+        {
+            "expanded_path": "/scratch/tester/321/cache",
+            "requested_path": "/scratch/tester/321/cache",
+            "status": "not_found",
+        }
+    ]
+
+
 def test_runtime_status_propagates_worker_failure_and_refuses_unsafe_cleanup(
     tmp_path: Path,
 ) -> None:

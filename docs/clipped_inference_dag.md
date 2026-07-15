@@ -233,6 +233,15 @@ immutable plan, logs, statuses, and submission receipt, and runs against an
 explicit deployed repository checkout rather than the obsolete source-run
 repository snapshot.
 
+If detection quality completed but its scheduler wrapper failed afterward,
+`--reuse-complete-quality` accepts it only after checking completion, exact
+source binding, row/frame counts, geometry, indexed-sharded array contracts,
+and the stored instance-key/trace validation. The continuation begins at the
+refine bundle. Recovery also normalizes inherited `short`-queue walltimes to
+the queue's one-hour hard limit. Runtime scratch cleanup treats
+`LSB_JOBINDEX=0` as a non-array job; positive indices remain isolated array
+scratch roots.
+
 ## Keypoint-stage recovery
 
 `fisheye.cluster.clipped_inference_keypoint_recovery` resumes a failed campaign

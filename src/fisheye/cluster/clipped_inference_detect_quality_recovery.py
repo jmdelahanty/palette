@@ -8,8 +8,8 @@ workflow tail from collection detection quality onward.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass, replace
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -110,7 +110,100 @@ def _runtime_values(job: Mapping[str, Any], flag: str) -> tuple[str, ...]:
     )
 
 
-def _preflight(source: Mapping[str, Any]) -> dict[str, Any]:
+def _quality_array_contract(path: Path, *, shape: tuple[int, ...], dtype: str) -> None:
+    payload = _read_json(path / "zarr.json")
+    if payload.get("shape") != list(shape) or payload.get("data_type") != dtype:
+        raise RuntimeError(
+            f"Completed quality array contract mismatch at {path}: "
+            f"shape={payload.get('shape')!r}, data_type={payload.get('data_type')!r}."
+        )
+
+
+def _validate_complete_quality(
+    target: Mapping[str, Any],
+    *,
+    zarr_path: Path,
+    source_attrs: Mapping[str, Any],
+) -> dict[str, Any]:
+    quality_path = zarr_path / str(target["detect_quality_group_path"])
+    metadata = quality_path / "zarr.json"
+    if not metadata.is_file():
+        raise FileNotFoundError(f"Completed quality output is missing: {metadata}")
+    payload = _read_json(metadata)
+    attrs = payload.get("attributes") if isinstance(payload, Mapping) else None
+    if not isinstance(attrs, Mapping):
+        raise RuntimeError(f"Completed quality output has no attributes: {metadata}")
+    expected_source_path = str(target["detect_quality_source_group_path"])
+    expected_rows = int(source_attrs.get("source_row_count") or -1)
+    expected_frames = int(source_attrs.get("recording_frame_count") or -1)
+    expected = {
+        "palette_run_completion_status": "complete",
+        "schema_id": "palette.detect_quality_collection.v2",
+        "source_detection_group_path": expected_source_path,
+        "source_row_count": expected_rows,
+        "recording_frame_count": expected_frames,
+        "source_video_width": int(source_attrs.get("source_video_width") or -1),
+        "source_video_height": int(source_attrs.get("source_video_height") or -1),
+    }
+    mismatches = {
+        key: {"expected": value, "observed": attrs.get(key)}
+        for key, value in expected.items()
+        if attrs.get(key) != value
+    }
+    validation = attrs.get("collection_quality_validation")
+    if not isinstance(validation, Mapping):
+        mismatches["collection_quality_validation"] = {
+            "expected": "complete validation object",
+            "observed": validation,
+        }
+    else:
+        required_validation = {
+            "status": "complete",
+            "instance_key_exact": True,
+            "instance_key_unique": True,
+            "arrays_indexed_sharded": True,
+            "trace_ranges_complete_nonoverlapping": True,
+            "source_rows_canonical_frame_order": True,
+            "row_count": expected_rows,
+            "recording_frame_count": expected_frames,
+        }
+        for key, value in required_validation.items():
+            if validation.get(key) != value:
+                mismatches[f"collection_quality_validation.{key}"] = {
+                    "expected": value,
+                    "observed": validation.get(key),
+                }
+    if mismatches:
+        raise RuntimeError(
+            "Completed quality output failed recovery validation: "
+            + json.dumps(mismatches, sort_keys=True)
+        )
+    _quality_array_contract(
+        quality_path / "instance_key", shape=(expected_rows,), dtype="uint64"
+    )
+    _quality_array_contract(
+        quality_path / "detection_quality_labels", shape=(expected_rows,), dtype="int8"
+    )
+    _quality_array_contract(
+        quality_path / "quality_flags", shape=(expected_frames,), dtype="int8"
+    )
+    return {
+        "status": "complete",
+        "quality_group_path": str(quality_path.relative_to(zarr_path)),
+        "source_group_path": expected_source_path,
+        "row_count": expected_rows,
+        "recording_frame_count": expected_frames,
+        "instance_key_exact": True,
+        "instance_key_unique": True,
+        "arrays_indexed_sharded": True,
+    }
+
+
+def _preflight(
+    source: Mapping[str, Any],
+    *,
+    reuse_complete_quality: bool = False,
+) -> dict[str, Any]:
     targets = source.get("targets")
     if not isinstance(targets, list) or len(targets) != 1 or not isinstance(targets[0], Mapping):
         raise ValueError("Detect-quality recovery currently requires one source-plan target.")
@@ -133,6 +226,22 @@ def _preflight(source: Mapping[str, Any]) -> dict[str, Any]:
         "palette.clipped_detect_quality_source.v2",
     }:
         raise RuntimeError(f"Unsupported detect-quality source schema: {attrs.get('schema_id')!r}")
+    if reuse_complete_quality:
+        width = int(attrs.get("source_video_width") or -1)
+        height = int(attrs.get("source_video_height") or -1)
+        if width <= 0 or height <= 0:
+            raise RuntimeError("Complete-quality reuse requires repaired source geometry.")
+        if attrs.get("schema_id") == "palette.clipped_detect_quality_source.v1":
+            repair = attrs.get("full_frame_geometry_repair")
+            if not isinstance(repair, Mapping) or repair.get("status") != "complete":
+                raise RuntimeError(
+                    "Historical v1 source has no complete full-frame geometry repair."
+                )
+    quality_validation = (
+        _validate_complete_quality(target, zarr_path=zarr_path, source_attrs=attrs)
+        if reuse_complete_quality
+        else None
+    )
 
     planned_outputs: list[Path] = []
     for clip in target["clips"]:
@@ -147,7 +256,11 @@ def _preflight(source: Mapping[str, Any]) -> dict[str, Any]:
         )
     planned_outputs.extend(
         [
-            zarr_path / str(target["detect_quality_group_path"]),
+            *(
+                ()
+                if reuse_complete_quality
+                else (zarr_path / str(target["detect_quality_group_path"]),)
+            ),
             zarr_path / "experiment_index" / "finalized_runs" / str(target["collection_id"]),
             zarr_path / "crop_runs" / str(target["merged_proxy_crop_run"]),
             zarr_path / "keypoints_runs" / str(target["keypoint_run"]),
@@ -170,7 +283,16 @@ def _preflight(source: Mapping[str, Any]) -> dict[str, Any]:
         "source_completion_status": "complete",
         "downstream_output_count_checked": len(planned_outputs),
         "downstream_outputs_absent": True,
+        "reused_complete_quality": bool(reuse_complete_quality),
+        "quality_validation": quality_validation,
     }
+
+
+def _resources_with_current_queue_limits(job: Mapping[str, Any]) -> LsfResources:
+    resources = _resources(job)
+    if resources.queue == "short" and resources.walltime != "1:00":
+        return replace(resources, walltime="1:00")
+    return resources
 
 
 def _clone_prior_job(
@@ -186,7 +308,7 @@ def _clone_prior_job(
     job_key = str(prior["job_key"])
     metadata = prior.get("metadata")
     stage = str(metadata.get("stage") if isinstance(metadata, Mapping) else job_key)
-    resources = _resources(prior)
+    resources = _resources_with_current_queue_limits(prior)
     group = prior.get("execution_group")
     if isinstance(group, Mapping):
         raw_tasks = group.get("tasks")
@@ -289,6 +411,7 @@ def build_plan(
     run_root: Path,
     recovery_label: str,
     repo: Path = DEFAULT_REPO,
+    reuse_complete_quality: bool = False,
 ) -> DetectQualityRecoveryPlan:
     source_plan_path = source_plan_path.expanduser().resolve()
     run_root = run_root.expanduser().resolve()
@@ -302,7 +425,7 @@ def build_plan(
         raise ValueError("Source plan has no LSF workflow jobs.")
     if not (repo / "scripts" / "py").is_file():
         raise FileNotFoundError(f"Recovery repository is not deployed: {repo}")
-    preflight = _preflight(source)
+    preflight = _preflight(source, reuse_complete_quality=reuse_complete_quality)
     target = source["targets"][0]
     target_safe = safe_component(str(target["target_id"]), default="target", max_length=56)
     label = safe_component(recovery_label, default="detect_quality_recovery", max_length=72)
@@ -316,8 +439,9 @@ def build_plan(
     repair_key = f"detect_quality_source_geometry_repair:{target_safe}"
     repair_report = run_root / "recovery" / f"{target_safe}.geometry.json"
     zarr_path = Path(str(target["analysis_zarr"])).expanduser().resolve()
-    jobs: list[LsfJob] = [
-        _job(
+    jobs: list[LsfJob] = []
+    if not reuse_complete_quality:
+        jobs.append(_job(
             workflow_id=label,
             repo=repo,
             run_root=run_root,
@@ -341,16 +465,20 @@ def build_plan(
             ),
             resources=LsfResources(queue="short", ncores=2, mem_gb=16, walltime="1:00"),
             expected_outputs=(repair_report,),
-        )
-    ]
+        ))
 
     quality_key = f"detect_quality:{target_safe}"
+    start_key = (
+        f"detect_refine_bundle:{target_safe}"
+        if reuse_complete_quality
+        else quality_key
+    )
     start = next(
-        (index for index, job in enumerate(prior_jobs) if isinstance(job, Mapping) and job.get("job_key") == quality_key),
+        (index for index, job in enumerate(prior_jobs) if isinstance(job, Mapping) and job.get("job_key") == start_key),
         None,
     )
     if start is None:
-        raise ValueError(f"Source workflow has no {quality_key!r} job.")
+        raise ValueError(f"Source workflow has no {start_key!r} job.")
     selected = [job for job in prior_jobs[start:] if isinstance(job, Mapping)]
     selected_keys = {str(job["job_key"]) for job in selected}
     source_key = f"detect_quality_source:{target_safe}"
@@ -361,7 +489,11 @@ def build_plan(
             if isinstance(dependency, Mapping)
             else ()
         )
-        upstream = tuple(repair_key if value == source_key else value for value in prior_upstream)
+        upstream = tuple(
+            repair_key if value == source_key else value
+            for value in prior_upstream
+            if not (reuse_complete_quality and value == quality_key)
+        )
         unknown = set(upstream) - selected_keys - {repair_key}
         if unknown:
             raise ValueError(
@@ -388,7 +520,10 @@ def build_plan(
             "source_plan": str(source_plan_path),
             "reused_completed_raw_detections": True,
             "reused_completed_quality_source_arrays": True,
-            "first_recomputed_stage": "detect_quality",
+            "reused_completed_detect_quality": bool(reuse_complete_quality),
+            "first_recomputed_stage": (
+                "detect_refine" if reuse_complete_quality else "detect_quality"
+            ),
         },
     )
     recovery_target = json.loads(json.dumps(target))
@@ -408,6 +543,7 @@ def build_plan(
             "preflight": preflight,
             "preserved_artifact_names": True,
             "source_array_payload_rewritten": False,
+            "reused_complete_quality": bool(reuse_complete_quality),
         },
     }
     return DetectQualityRecoveryPlan(
@@ -478,6 +614,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--recovery-label", required=True)
     parser.add_argument("--repo", type=Path, default=DEFAULT_REPO)
     parser.add_argument("--submit-host", default="login1-citrus-poller")
+    parser.add_argument("--reuse-complete-quality", action="store_true")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
@@ -488,6 +625,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_root=args.run_root,
         recovery_label=args.recovery_label,
         repo=args.repo,
+        reuse_complete_quality=args.reuse_complete_quality,
     )
     result = apply_plan(plan, submit_host=args.submit_host) if args.apply else materialize_plan(plan)
     summary = {

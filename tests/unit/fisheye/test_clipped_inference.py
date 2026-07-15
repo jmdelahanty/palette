@@ -502,6 +502,11 @@ def test_detect_quality_recovery_reuses_source_and_clones_complete_dag_tail(
     source = _build_fixture_plan(tmp_path, monkeypatch)
     workflow.materialize_plan_bundle(source)
     source_plan = source.run_root / "plan.json"
+    source_payload = json.loads(source_plan.read_text(encoding="utf-8"))
+    for prior_job in source_payload["lsf_workflow"]["jobs"]:
+        if str(prior_job["job_key"]).startswith("detect_refine_bundle:"):
+            prior_job["resources"]["walltime"] = "2:00"
+    _write_json(source_plan, source_payload)
     target = source.target_plans[0]
     source_metadata = (
         Path(str(target["analysis_zarr"]))
@@ -542,6 +547,7 @@ def test_detect_quality_recovery_reuses_source_and_clones_complete_dag_tail(
     assert jobs[f"detect_refine_bundle:{target_safe}"].dependency.upstream_job_keys == (
         quality_key,
     )
+    assert jobs[f"detect_refine_bundle:{target_safe}"].resources.walltime == "1:00"
     assert jobs["nrs_cleanup"].dependency.upstream_job_keys == ("registry_finalize",)
     assert plan.payload["detect_quality_recovery"]["source_array_payload_rewritten"] is False
     assert plan.payload["targets"][0]["detect_quality_source_run"] == target[
@@ -556,6 +562,80 @@ def test_detect_quality_recovery_reuses_source_and_clones_complete_dag_tail(
     assert json.loads(plan.recovery_detection_plan.read_text(encoding="utf-8")) == json.loads(
         plan.source_detection_plan.read_text(encoding="utf-8")
     )
+
+    _write_json(
+        source_metadata,
+        {
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "schema_id": "palette.clipped_detect_quality_source.v1",
+                "palette_run_completion_status": "complete",
+                "source_row_count": 4,
+                "recording_frame_count": 6,
+                "source_video_width": 4512,
+                "source_video_height": 4512,
+                "full_frame_geometry_repair": {"status": "complete"},
+            },
+        },
+    )
+    quality_path = Path(str(target["analysis_zarr"])) / str(
+        target["detect_quality_group_path"]
+    )
+    _write_json(
+        quality_path / "zarr.json",
+        {
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "palette_run_completion_status": "complete",
+                "schema_id": "palette.detect_quality_collection.v2",
+                "source_detection_group_path": target["detect_quality_source_group_path"],
+                "source_row_count": 4,
+                "recording_frame_count": 6,
+                "source_video_width": 4512,
+                "source_video_height": 4512,
+                "collection_quality_validation": {
+                    "status": "complete",
+                    "instance_key_exact": True,
+                    "instance_key_unique": True,
+                    "arrays_indexed_sharded": True,
+                    "trace_ranges_complete_nonoverlapping": True,
+                    "source_rows_canonical_frame_order": True,
+                    "row_count": 4,
+                    "recording_frame_count": 6,
+                },
+            },
+        },
+    )
+    for name, shape, dtype in (
+        ("instance_key", [4], "uint64"),
+        ("detection_quality_labels", [4], "int8"),
+        ("quality_flags", [6], "int8"),
+    ):
+        _write_json(
+            quality_path / name / "zarr.json",
+            {"zarr_format": 3, "node_type": "array", "shape": shape, "data_type": dtype},
+        )
+
+    continuation = quality_recovery.build_plan(
+        source_plan_path=source_plan,
+        run_root=tmp_path / "quality_continuation",
+        recovery_label="sleepyfish_quality_continuation",
+        repo=source.repo,
+        reuse_complete_quality=True,
+    )
+    continuation_jobs = {job.job_key: job for job in continuation.workflow.jobs}
+    refine_key = f"detect_refine_bundle:{target_safe}"
+    assert len(continuation.workflow.jobs) == len(source.lsf_workflow.jobs) - 3
+    assert repair_key not in continuation_jobs
+    assert quality_key not in continuation_jobs
+    assert continuation_jobs[refine_key].dependency is None
+    assert continuation_jobs[refine_key].resources.walltime == "1:00"
+    assert continuation.payload["detect_quality_recovery"]["reused_complete_quality"] is True
+    assert continuation.payload["detect_quality_recovery"]["preflight"][
+        "quality_validation"
+    ]["instance_key_exact"] is True
 
 
 def test_import_recovery_reuses_packages_on_long_queue(

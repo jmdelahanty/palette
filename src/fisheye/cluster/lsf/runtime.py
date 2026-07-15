@@ -89,7 +89,9 @@ def _cleanup_job_scratch(
             "status": "refused",
             "reason": "LSB_JOBID and USER are required for job-scratch cleanup",
         }
-    work_unit = f"{job_id}_{job_index}" if job_index else job_id
+    # LSF exposes LSB_JOBINDEX=0 for ordinary (non-array) jobs. Array elements
+    # are one-based, so only a positive index belongs in the scratch root.
+    work_unit = f"{job_id}_{job_index}" if job_index not in {"", "0"} else job_id
     allowed_root = Path("/scratch") / user / work_unit
     resolved = expanded.resolve(strict=False)
     resolved_root = allowed_root.resolve(strict=False)
