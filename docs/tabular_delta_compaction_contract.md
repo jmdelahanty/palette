@@ -197,6 +197,13 @@ for example:
   freezes generations.
 - `fisheye.utils.finalize_keypoint_shards` now publishes canonical clipped
   keypoints directly as indexed shards.
+- `fisheye.utils.publish_clipped_refined_detect_snapshot` materializes one
+  recording-level refined-detection snapshot from a finalized clip collection,
+  retaining both parent-video and clip-local frame/row lineage. The detailed
+  contract is in `docs/clipped_refined_detection_snapshot_contract.md`.
+- `fisheye.utils.backfill_refined_subject_mask_instance_keys` performs an
+  additive mask-key repair only after exact blockwise equality across the ten
+  shared keypoint/mask lineage arrays.
 
 Until Crimson and the review backends are routed through this layer, existing
 in-place review writers remain compatibility paths and must not be used to edit
@@ -234,11 +241,12 @@ identity and immutable-snapshot canary. No inference or refinement was rerun.
   select the new snapshot. The shared registry refresh completed from the same
   canonical Zarr after taking a SQLite backup.
 
-The selected refined detections remain a finalized 22-clip collection rather
-than one root table. A representative 54,000-row clip run has 53 physical files
-and its coordinate columns are already one data object apiece. Republishing
-those runs as indexed shards would not materially reduce object count, so the
-canary intentionally left that collection unchanged after adding stable keys.
+The original selected refined detections remain a finalized 22-clip collection
+and immutable source evidence. A recording-level snapshot publisher was added
+after this first canary to expose the same collection as one validated,
+indexed-sharded consumer table without deleting or rewriting those source
+runs. Its production application is tracked separately from this completed
+keypoint canary.
 
 `immutable_snapshot` is an application contract, not a filesystem write lock.
 Low-level Zarr or PRFS writes remain physically possible for an account with
