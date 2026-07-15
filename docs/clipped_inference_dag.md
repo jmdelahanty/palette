@@ -36,6 +36,8 @@ Every LSF envelope pins `PYTHONPATH` to the planned cluster-visible
 `<repo>/src` for both the runtime wrapper and its child command. This prevents
 an editable conda installation from silently importing a different workstation
 checkout than the clean `/groups` commit recorded by the plan.
+The `run_clipped_inference_dag.sh` planner entry point applies the same pin
+before importing the planner itself.
 
 For each recording, the dependency structure is:
 
