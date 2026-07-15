@@ -18,6 +18,7 @@ class _FakeArray:
     def __init__(self, data: np.ndarray) -> None:
         self._data = data
         self.shape = data.shape
+        self.dtype = data.dtype
 
     def __getitem__(self, item):
         return self._data[item]
@@ -121,9 +122,12 @@ def test_resolve_detection_quality_labels_requires_quality_by_default() -> None:
 
     with pytest.raises(ValueError, match="Missing usable detect_quality context"):
         _resolve_detection_quality_labels(
+            root,
             detect_group,
             detect_run="detect_001",
+            source_detect_path="detect_runs/detect_001",
             quality_run=None,
+            quality_group_path=None,
             total_detections=3,
             require_quality=True,
             allow_missing_reason="test",
@@ -136,9 +140,12 @@ def test_resolve_detection_quality_labels_allows_explicit_opt_out() -> None:
     detect_group = root.create_group("detect_runs").create_group("detect_001")
 
     labels, resolved_run, quality_group = _resolve_detection_quality_labels(
+        root,
         detect_group,
         detect_run="detect_001",
+        source_detect_path="detect_runs/detect_001",
         quality_run=None,
+        quality_group_path=None,
         total_detections=4,
         require_quality=False,
         allow_missing_reason="explicit opt-out",
@@ -159,9 +166,12 @@ def test_resolve_detection_quality_labels_uses_latest_quality_run() -> None:
     quality_group.create_array("detection_quality_labels", data=np.array([0, 2, 0], dtype=np.int8))
 
     labels, resolved_run, resolved_group = _resolve_detection_quality_labels(
+        root,
         detect_group,
         detect_run="detect_001",
+        source_detect_path="detect_runs/detect_001",
         quality_run=None,
+        quality_group_path=None,
         total_detections=3,
         require_quality=True,
         allow_missing_reason="test",
@@ -183,14 +193,66 @@ def test_resolve_detection_quality_labels_rejects_length_mismatch() -> None:
 
     with pytest.raises(ValueError, match="does not match detections"):
         _resolve_detection_quality_labels(
+            root,
             detect_group,
             detect_run="detect_001",
+            source_detect_path="detect_runs/detect_001",
             quality_run=None,
+            quality_group_path=None,
             total_detections=3,
             require_quality=True,
             allow_missing_reason="test",
             console=None,
         )
+
+
+def test_resolve_detection_quality_labels_uses_exact_collection_key_slice() -> None:
+    root = _fake_root()
+    detect_parent = root.create_group("detect_runs")
+    detect = detect_parent.create_group("clip_detect")
+    detect.create_array("instance_key", data=np.asarray([21, 22], dtype=np.uint64))
+    source_parent = root.create_group("detect_collection_sources")
+    source = source_parent.create_group("source_001")
+    source.attrs["source_slices"] = [
+        {
+            "detect_group_path": "detect_runs/other",
+            "start": 0,
+            "stop": 2,
+        },
+        {
+            "detect_group_path": "detect_runs/clip_detect",
+            "start": 2,
+            "stop": 4,
+        },
+    ]
+    quality_parent = root.create_group("detect_quality_runs")
+    quality = quality_parent.create_group("quality_001")
+    quality.attrs["source_detection_group_path"] = (
+        "detect_collection_sources/source_001"
+    )
+    quality.create_array(
+        "instance_key", data=np.asarray([10, 11, 21, 22], dtype=np.uint64)
+    )
+    quality.create_array(
+        "detection_quality_labels", data=np.asarray([0, 3, 2, 0], dtype=np.int8)
+    )
+
+    labels, resolved_run, resolved_group = _resolve_detection_quality_labels(
+        root,
+        detect,
+        detect_run="clip_detect",
+        source_detect_path="detect_runs/clip_detect",
+        quality_run=None,
+        quality_group_path="detect_quality_runs/quality_001",
+        total_detections=2,
+        require_quality=True,
+        allow_missing_reason="test",
+        console=None,
+    )
+
+    assert labels.tolist() == [2, 0]
+    assert resolved_run == "quality_001"
+    assert resolved_group is quality
 
 
 def test_per_frame_top_k_keeps_highest_score_and_marks_duplicates() -> None:

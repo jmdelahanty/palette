@@ -406,9 +406,15 @@ def build_sparse_migration_plan(
         source_refined_run.attrs.get("source_quality_run")
     )
     quality_labels, resolved_quality_run, _quality_group = _resolve_detection_quality_labels(
+        root,
         detect_group,
         detect_run=source_detect_run,
+        source_detect_path=(
+            _normalize_text(source_refined_run.attrs.get("source_detect_path"))
+            or f"detect_runs/{source_detect_run}"
+        ),
         quality_run=requested_quality_run,
+        quality_group_path=None,
         total_detections=int(raw_bbox.shape[0]),
         require_quality=require_quality_for_run,
         allow_missing_reason="explicit opt-out (--allow-missing-quality)",

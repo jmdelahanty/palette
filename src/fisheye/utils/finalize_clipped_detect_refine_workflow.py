@@ -17,7 +17,7 @@ import zarr
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-from fisheye.shared.zarr_run_completion import require_runs_parent
+from fisheye.shared.zarr_run_completion import is_run_complete, require_runs_parent
 from fisheye.utils.plan_clipped_detect_refine_workflow import PLAN_SCHEMA
 from fisheye.shared.system_metadata import get_environment_summary, get_git_info, get_platform_info
 from fisheye.utils.validate_refined_detect_run import validate_refined_detect_run
@@ -296,6 +296,8 @@ def finalize_clipped_detect_refine_workflow(
     *,
     submission_manifest: str | Path | None = None,
     collection_id: str | None = None,
+    detect_quality_run: str | None = None,
+    detect_quality_group_path: str | None = None,
     apply: bool = False,
     overwrite: bool = False,
     require_stage_status: Optional[bool] = None,
@@ -314,6 +316,55 @@ def finalize_clipped_detect_refine_workflow(
 
     errors: list[str] = []
     warnings: list[str] = []
+    collection_quality_validation: dict[str, Any] | None = None
+    if bool(detect_quality_run) != bool(detect_quality_group_path):
+        errors.append(
+            "detect_quality_run and detect_quality_group_path must be provided together"
+        )
+    elif detect_quality_run and detect_quality_group_path:
+        try:
+            quality_group = root[str(detect_quality_group_path).strip("/")]
+            if not is_run_complete(quality_group):
+                raise ValueError("recording-level detect_quality run is incomplete")
+            if str(detect_quality_group_path).strip("/").rsplit("/", 1)[-1] != str(
+                detect_quality_run
+            ):
+                raise ValueError("detect_quality run name and group path disagree")
+            for name in ("detection_quality_labels", "instance_key"):
+                if name not in quality_group:
+                    raise ValueError(f"recording-level detect_quality is missing {name}")
+            validation = quality_group.attrs.get("collection_quality_validation")
+            if not isinstance(validation, Mapping) or str(validation.get("status")) != "complete":
+                raise ValueError("recording-level detect_quality validation is incomplete")
+            source_path = str(
+                quality_group.attrs.get("source_detection_group_path") or ""
+            ).strip("/")
+            source_group = root[source_path]
+            source_slices = source_group.attrs.get("source_slices")
+            declared_paths = {
+                str(row.get("detect_group_path") or "")
+                for row in source_slices
+                if isinstance(row, Mapping)
+            } if isinstance(source_slices, list) else set()
+            planned_paths = {
+                str(unit.get("zarr_paths", {}).get("detect_target_group_path") or "")
+                for unit in plan["work_units"]
+                if isinstance(unit, Mapping)
+            }
+            if declared_paths != planned_paths:
+                raise ValueError(
+                    "recording-level detect_quality source slices do not match planned raw runs"
+                )
+            collection_quality_validation = {
+                "status": "ok",
+                "run": str(detect_quality_run),
+                "group_path": str(detect_quality_group_path).strip("/"),
+                "source_group_path": source_path,
+                "source_slice_count": len(declared_paths),
+                "row_count": int(quality_group["instance_key"].shape[0]),
+            }
+        except Exception as exc:
+            errors.append(f"recording-level detect_quality validation failed: {exc}")
     selected_runs: list[dict[str, Any]] = []
     unit_reports: list[dict[str, Any]] = []
     frame_index_summary, frame_index_errors, frame_index_warnings = _validate_recording_frame_index(
@@ -378,7 +429,11 @@ def finalize_clipped_detect_refine_workflow(
                     "camera_serial": camera_serial,
                     "frame_count": expected_frame_count,
                     "detect_run": unit.get("run_names", {}).get("detect"),
-                    "detect_quality_run": unit.get("run_names", {}).get("detect_quality"),
+                    "detect_quality_run": (
+                        detect_quality_run
+                        or unit.get("run_names", {}).get("detect_quality")
+                    ),
+                    "detect_quality_group_path": detect_quality_group_path,
                     "refined_detect_run": unit.get("run_names", {}).get("refined_detect"),
                     "detect_group_path": unit.get("zarr_paths", {}).get("detect_target_group_path"),
                     "refined_group_path": target_group_path,
@@ -407,6 +462,9 @@ def finalize_clipped_detect_refine_workflow(
         "camera_serials": camera_serials,
         "clip_ids": clip_ids,
         "selected_runs": selected_runs,
+        "detect_quality_run": detect_quality_run,
+        "detect_quality_group_path": detect_quality_group_path,
+        "detect_quality_validation": collection_quality_validation,
         "provenance": {
             "command": " ".join(sys.argv) if sys.argv else None,
             "git": get_git_info(),
@@ -458,6 +516,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("plan_json", type=Path, help="Plan JSON from plan_clipped_detect_refine_workflow")
     parser.add_argument("--submission-manifest", type=Path, default=None, help="Optional LSF submission manifest")
     parser.add_argument("--collection-id", default=None, help="Collection id; default is plan workflow_id")
+    parser.add_argument(
+        "--detect-quality-run",
+        default=None,
+        help="Recording-level detect_quality run shared by every selected clip.",
+    )
+    parser.add_argument(
+        "--detect-quality-group-path",
+        default=None,
+        help="Exact recording-level detect_quality group path.",
+    )
     parser.add_argument("--apply", action="store_true", help="Write experiment_index/finalized_runs/<collection_id>")
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing finalized collection")
     parser.add_argument(
@@ -495,6 +563,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.plan_json,
         submission_manifest=args.submission_manifest,
         collection_id=args.collection_id,
+        detect_quality_run=args.detect_quality_run,
+        detect_quality_group_path=args.detect_quality_group_path,
         apply=args.apply,
         overwrite=args.overwrite,
         require_stage_status=require_status,

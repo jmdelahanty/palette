@@ -125,6 +125,33 @@ def validate_target(plan_path: Path, *, target_id: str, sample_rows: int = 16) -
     zarr_path = Path(str(target["analysis_zarr"])).expanduser().resolve()
     root = open_zarr_group_direct(zarr_path, mode="r")
     collection_id = str(target["collection_id"])
+    quality_source_run = str(target["detect_quality_source_run"])
+    quality_run = str(target["detect_quality_run"])
+    quality_source = _require_complete_run(
+        root, "detect_collection_sources", quality_source_run
+    )
+    quality = _require_complete_run(root, "detect_quality_runs", quality_run)
+    quality_source_identity = _instance_keys(
+        quality_source,
+        label=f"detect_collection_sources/{quality_source_run}",
+    )
+    quality_identity = _instance_keys(
+        quality,
+        label=f"detect_quality_runs/{quality_run}",
+    )
+    if quality_source_identity != quality_identity:
+        raise RuntimeError(
+            "Collection quality identity summary does not match its source: "
+            f"{quality_identity!r} != {quality_source_identity!r}."
+        )
+    expected_quality_source = str(target["detect_quality_source_group_path"])
+    if normalize_attr(quality.attrs.get("source_detection_group_path")) != expected_quality_source:
+        raise RuntimeError("Collection quality source group path does not match the plan.")
+    quality_validation = quality.attrs.get("collection_quality_validation")
+    if not isinstance(quality_validation, Mapping) or str(
+        quality_validation.get("status")
+    ) != "complete":
+        raise RuntimeError("Collection quality validation contract is incomplete.")
     collection = root["experiment_index"]["finalized_runs"][collection_id]
     selected = collection.attrs.get("selected_runs")
     if not isinstance(selected, list) or len(selected) != len(target["clips"]):
@@ -220,6 +247,10 @@ def validate_target(plan_path: Path, *, target_id: str, sample_rows: int = 16) -
         "target_id": target_id,
         "analysis_zarr": str(zarr_path),
         "collection_id": collection_id,
+        "detect_quality_source_run": quality_source_run,
+        "detect_quality_run": quality_run,
+        "detect_quality_source": quality_source_identity,
+        "detect_quality": quality_identity,
         "clip_count": len(target["clips"]),
         "row_count": expected_rows,
         "detections": detection_reports,

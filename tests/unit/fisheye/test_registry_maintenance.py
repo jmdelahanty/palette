@@ -60,6 +60,7 @@ from fisheye.registry.maintenance import (
     _delete_paths,
     _is_safe_artifact_path,
     _normalize_run_ids,
+    _resolve_detect_quality_group,
     _extract_eye_mask_profile_rows_for_maintenance,
     _resolve_existing_run_ids,
     _reconcile_stale_in_progress_runs,
@@ -1064,6 +1065,23 @@ def _create_recording_step_status_zarr(path: Path) -> _FakeGroup:
         }
     )
     return root
+
+
+def test_detect_quality_group_prefers_modern_root_family() -> None:
+    root = _FakeGroup()
+    detect = root.add_group("detect_runs").add_group("detect_001")
+    nested = detect.add_group("quality_reports", attrs={"latest": "legacy_quality"})
+    nested.add_group("legacy_quality")
+    modern = root.add_group(
+        "detect_quality_runs", attrs={"latest_complete": "modern_quality"}
+    )
+    modern_group = modern.add_group("modern_quality")
+
+    run, group, selector = _resolve_detect_quality_group(root, detect)
+
+    assert run == "modern_quality"
+    assert group is modern_group
+    assert selector.startswith("root_")
 
 
 def _create_detectless_zarr(path: Path, *, session_uuid: str = "detectless_session") -> None:

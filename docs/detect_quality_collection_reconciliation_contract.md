@@ -33,6 +33,10 @@ supply temporal order. The canonical recording frame index supplies order.
 Clipped runs must first be represented as one recording-ordered source surface.
 Clip identifiers and local row/frame indices remain lineage, but quality
 workers do not independently infer collection order from directory names.
+The clipped inference DAG materializes this surface under
+`detect_collection_sources/<run>` with indexed-sharded parent-frame, box,
+identity, and clip-lineage arrays. Its `source_slices` manifest binds every
+clip-local raw detect group to one exact half-open row interval.
 
 ## Parallel worker phase
 
@@ -140,6 +144,12 @@ Completion fails closed on:
 Failure may leave a marked failed run for audit, but it may not change the
 completed selection pointer. A successful output is immutable. Algorithm or
 parameter changes create a new quality run.
+
+Modern `refine_detect` consumers resolve either a direct single-run source or
+one declared collection slice. They read only that interval from the quality
+arrays and require exact `instance_key` equality with the raw detect run before
+filtering. A mismatched, missing, or duplicate source slice fails closed;
+positional guessing is not a compatibility fallback for modern runs.
 
 Manual detection corrections belong in sparse refined-detection deltas keyed
 by `instance_key`. They do not mutate raw quality labels. Compaction produces a

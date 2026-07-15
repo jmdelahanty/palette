@@ -29,6 +29,7 @@ from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr_run_completion import (
+    is_run_complete,
     mark_run_complete,
     mark_run_started,
     note_pending_latest,
@@ -384,11 +385,108 @@ def _quality_guardrail_error(detect_run: str, reason: str, quality_run: Optional
     )
 
 
+def _group_at(root: zarr.Group, group_path: str) -> zarr.Group:
+    group = root
+    for part in _normalize_group_path(group_path).split("/"):
+        group = group[part]
+    return group
+
+
+def _modern_quality_slice(
+    root: zarr.Group,
+    quality_group: zarr.Group,
+    *,
+    quality_group_path: str,
+    source_detect_path: str,
+    detect_group: zarr.Group,
+    total_detections: int,
+) -> np.ndarray:
+    if not is_run_complete(quality_group):
+        raise ValueError(f"modern quality run is incomplete: {quality_group_path}")
+    missing = [
+        name
+        for name in ("detection_quality_labels", "instance_key")
+        if name not in quality_group
+    ]
+    if missing:
+        raise ValueError(f"modern quality run is missing arrays: {missing}")
+    if "instance_key" not in detect_group:
+        raise ValueError("modern keyed quality requires source detect instance_key")
+    if np.dtype(detect_group["instance_key"].dtype) != np.dtype(np.uint64):
+        raise ValueError("source detect instance_key must be uint64 for modern quality")
+
+    source_group_path = normalize_attr(
+        quality_group.attrs.get("source_detection_group_path")
+    )
+    if not source_group_path:
+        raise ValueError("modern quality run has no source_detection_group_path")
+    start = 0
+    stop = int(quality_group["instance_key"].shape[0])
+    if source_group_path != source_detect_path:
+        source_group = _group_at(root, source_group_path)
+        raw_slices = source_group.attrs.get("source_slices")
+        slices = [
+            row
+            for row in raw_slices
+            if isinstance(row, Mapping)
+            and normalize_attr(row.get("detect_group_path")) == source_detect_path
+        ] if isinstance(raw_slices, list) else []
+        if len(slices) != 1:
+            raise ValueError(
+                "modern collection quality source does not declare exactly one "
+                f"slice for {source_detect_path!r}"
+            )
+        start = int(slices[0].get("start", -1))
+        stop = int(slices[0].get("stop", -1))
+    if start < 0 or stop < start or stop - start != int(total_detections):
+        raise ValueError(
+            f"modern quality slice {start}:{stop} does not match detections "
+            f"{int(total_detections)}"
+        )
+    if stop > int(quality_group["detection_quality_labels"].shape[0]):
+        raise ValueError("modern quality slice exceeds detection_quality_labels")
+    if stop > int(quality_group["instance_key"].shape[0]):
+        raise ValueError("modern quality slice exceeds instance_key")
+    quality_keys = np.asarray(
+        quality_group["instance_key"][start:stop], dtype=np.uint64
+    ).reshape(-1)
+    detect_keys = np.asarray(detect_group["instance_key"][:], dtype=np.uint64).reshape(-1)
+    if not np.array_equal(quality_keys, detect_keys):
+        raise ValueError(
+            "modern quality instance_key slice does not exactly match the source detect run"
+        )
+    return np.asarray(
+        quality_group["detection_quality_labels"][start:stop], dtype=np.int8
+    ).reshape(-1)
+
+
+def _resolve_modern_quality_group(
+    root: zarr.Group,
+    *,
+    explicit_group_path: Optional[str],
+) -> tuple[Optional[str], Optional[zarr.Group]]:
+    if explicit_group_path:
+        path = _normalize_group_path(explicit_group_path)
+        return path, _group_at(root, path)
+    parent = root.get("detect_quality_runs")
+    if parent is None:
+        return None, None
+    selected = normalize_attr(parent.attrs.get("latest_complete")) or normalize_attr(
+        parent.attrs.get("latest")
+    )
+    if not selected or selected not in parent:
+        return None, None
+    return f"detect_quality_runs/{selected}", parent[selected]
+
+
 def _resolve_detection_quality_labels(
+    root: zarr.Group,
     detect_group: zarr.Group,
     *,
     detect_run: str,
+    source_detect_path: str,
     quality_run: Optional[str],
+    quality_group_path: Optional[str],
     total_detections: int,
     require_quality: bool,
     allow_missing_reason: str,
@@ -396,6 +494,42 @@ def _resolve_detection_quality_labels(
 ) -> Tuple[np.ndarray, Optional[str], Optional[zarr.Group]]:
     """Resolve per-detection quality labels and fail closed when required."""
     total = int(total_detections)
+    modern_path: Optional[str] = None
+    modern_group: Optional[zarr.Group] = None
+    modern_error: Optional[str] = None
+    if quality_group_path or quality_run is None:
+        try:
+            modern_path, modern_group = _resolve_modern_quality_group(
+                root,
+                explicit_group_path=quality_group_path,
+            )
+            if modern_group is not None and modern_path is not None:
+                labels = _modern_quality_slice(
+                    root,
+                    modern_group,
+                    quality_group_path=modern_path,
+                    source_detect_path=source_detect_path,
+                    detect_group=detect_group,
+                    total_detections=total,
+                )
+                resolved = modern_path.rsplit("/", 1)[-1]
+                if console is not None:
+                    console.print(
+                        f"Source quality run: [cyan]{resolved}[/cyan] "
+                        f"([dim]{modern_path}[/dim])"
+                    )
+                return labels, resolved, modern_group
+        except Exception as exc:
+            modern_error = str(exc)
+            if quality_group_path:
+                if require_quality:
+                    raise _quality_guardrail_error(
+                        detect_run=detect_run,
+                        reason=modern_error,
+                        quality_run=quality_group_path,
+                    ) from exc
+                modern_group = None
+
     quality_reports = detect_group.get("quality_reports")
     requested_quality_run = normalize_attr(quality_run)
     resolved_quality_run = requested_quality_run
@@ -406,7 +540,7 @@ def _resolve_detection_quality_labels(
 
     missing_reason: Optional[str] = None
     if quality_reports is None:
-        missing_reason = "quality_reports group is missing"
+        missing_reason = modern_error or "quality_reports group is missing"
     elif not resolved_quality_run:
         missing_reason = "quality_reports/latest is missing and no --quality-run was provided"
     elif resolved_quality_run not in quality_reports:
@@ -985,6 +1119,7 @@ def create_refined_run(
     remove_blips: Optional[bool] = None,
     console: Optional[Console] = None,
     *,
+    quality_group_path: Optional[str] = None,
     command: Optional[str] = None,
     created_at_utc: Optional[str] = None,
     save_visuals: bool = False,
@@ -1003,7 +1138,9 @@ def create_refined_run(
     Args:
         zarr_path: Path to zarr file
         detect_run: Source detect run (default: latest)
-        quality_run: Source quality run (default: latest)
+        quality_run: Historical nested source quality run (default: latest)
+        quality_group_path: Modern root quality group path. Collection quality
+            slices are resolved and validated by exact ``instance_key``.
         config: Config dictionary (optional, will load if not provided)
         max_gap: Deprecated compatibility argument; ignored because interpolation is disabled
         interpolation_method: Deprecated compatibility argument; ignored because interpolation is disabled
@@ -1110,13 +1247,21 @@ def create_refined_run(
     else:
         allow_missing_reason = "guardrail disabled"
     (detection_quality_labels, resolved_quality_run, quality_group) = _resolve_detection_quality_labels(
+        root,
         detect_group,
         detect_run=detect_run,
+        source_detect_path=source_detect_path,
         quality_run=quality_run,
+        quality_group_path=quality_group_path,
         total_detections=len(bbox_coords),
         require_quality=require_quality_for_run,
         allow_missing_reason=allow_missing_reason,
         console=console,
+    )
+    resolved_quality_group_path = (
+        normalize_attr(getattr(quality_group, "path", None))
+        if quality_group is not None
+        else None
     )
     if sampled_import:
         console.print("[yellow]⚠ Sampled training import detected; disabling refine filters.[/yellow]")
@@ -1342,6 +1487,9 @@ def create_refined_run(
     refined_group.attrs['source_detect_family_path'] = detect_family_path
     refined_group.attrs['source_detect_path'] = source_detect_path
     refined_group.attrs['source_quality_run'] = resolved_quality_run or 'N/A'
+    refined_group.attrs['source_quality_group_path'] = (
+        resolved_quality_group_path or "N/A"
+    )
     refined_group.attrs['refined_family_path'] = refined_family_path
     refined_group.attrs['refinement_timestamp'] = created_timestamp
     refined_group.attrs['processing_time_seconds'] = float(duration)
@@ -1357,6 +1505,7 @@ def create_refined_run(
         'detect_family_path': detect_family_path,
         'detect_path': source_detect_path,
         'quality_run': resolved_quality_run or 'N/A',
+        'quality_group_path': resolved_quality_group_path or 'N/A',
         'refined_family_path': refined_family_path,
     }
 
@@ -1618,6 +1767,15 @@ Examples:
         ),
     )
     parser.add_argument('--quality-run', help='Source quality run (default: latest)')
+    parser.add_argument(
+        '--quality-group-path',
+        default=None,
+        help=(
+            'Modern root quality group path, for example '
+            'detect_quality_runs/<run>. Collection rows are selected through '
+            'the source manifest and verified by instance_key.'
+        ),
+    )
     parser.add_argument('--max-gap', type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument('--method', default=None, choices=['linear'], help=argparse.SUPPRESS)
     parser.add_argument('--remove-jumps', action='store_true', default=None,
@@ -1676,6 +1834,7 @@ Examples:
             zarr_path=args.zarr_path,
             detect_run=args.detect_run,
             quality_run=args.quality_run,
+            quality_group_path=args.quality_group_path,
             config=config,
             max_gap=args.max_gap,
             interpolation_method=args.method,

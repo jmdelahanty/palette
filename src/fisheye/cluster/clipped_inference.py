@@ -54,13 +54,15 @@ class CampaignTarget:
     recording_id: str
     recording_dir: Path
     analysis_zarr: Path
+    expected_subject_count: int = 1
 
-    def to_json(self) -> dict[str, str]:
+    def to_json(self) -> dict[str, object]:
         return {
             "target_id": self.target_id,
             "recording_id": self.recording_id,
             "recording_dir": str(self.recording_dir),
             "analysis_zarr": str(self.analysis_zarr),
+            "expected_subject_count": int(self.expected_subject_count),
         }
 
 
@@ -140,6 +142,14 @@ def load_target_manifest(path: Path) -> tuple[CampaignTarget, ...]:
         )
         if not recording_id:
             raise ValueError(f"Target {target_id!r} has no recording_id.")
+        raw_expected_subject_count = row.get("expected_subject_count")
+        expected_subject_count = int(
+            1 if raw_expected_subject_count is None else raw_expected_subject_count
+        )
+        if expected_subject_count <= 0:
+            raise ValueError(
+                f"Target {target_id!r} expected_subject_count must be positive."
+            )
         if not (recording_dir / "recording_clip_index.json").is_file():
             raise FileNotFoundError(
                 f"Target {target_id!r} has no recording_clip_index.json: {recording_dir}"
@@ -152,6 +162,7 @@ def load_target_manifest(path: Path) -> tuple[CampaignTarget, ...]:
                 recording_id=recording_id,
                 recording_dir=recording_dir,
                 analysis_zarr=analysis_zarr,
+                expected_subject_count=expected_subject_count,
             )
         )
     if len({target.target_id for target in targets}) != len(targets):
@@ -332,6 +343,8 @@ def _refuse_output_collisions(
     outputs.extend(
         [
             zarr / "experiment_index" / "finalized_runs" / str(target_plan["collection_id"]),
+            zarr / "detect_collection_sources" / str(target_plan["detect_quality_source_run"]),
+            zarr / "detect_quality_runs" / str(target_plan["detect_quality_run"]),
             zarr / "crop_runs" / str(target_plan["merged_proxy_crop_run"]),
             zarr / "keypoints_runs" / str(target_plan["keypoint_run"]),
             zarr / "refined_keypoints_runs" / str(target_plan["refined_keypoint_run"]),
@@ -569,6 +582,8 @@ def build_plan(
         target_safe = safe_component(target.target_id, default=f"target_{target_index}", max_length=56)
         target_label = safe_component(f"{label}_{target_safe}", default=target_safe, max_length=90)
         collection_id = f"refined_detect_collection_{target_label}"
+        detect_quality_source_run = f"detect_quality_source_{target_label}"
+        detect_quality_run = f"detect_quality_{target_label}"
         cache_dir = cache_root.expanduser().resolve() / label / target_safe
         package_dir = package_root.expanduser().resolve() / label / target_safe
         global_mask_grid_manifest = package_dir / "global_mask_chunk_grid.json"
@@ -627,6 +642,12 @@ def build_plan(
             "target_label": target_label,
             "detection_plan_path": str(detection_plan_path),
             "collection_id": collection_id,
+            "detect_quality_source_run": detect_quality_source_run,
+            "detect_quality_source_group_path": (
+                f"detect_collection_sources/{detect_quality_source_run}"
+            ),
+            "detect_quality_run": detect_quality_run,
+            "detect_quality_group_path": f"detect_quality_runs/{detect_quality_run}",
             "cache_dir": str(cache_dir),
             "package_dir": str(package_dir),
             "global_mask_grid_manifest": str(global_mask_grid_manifest),
@@ -656,10 +677,12 @@ def build_plan(
         if target_index >= max_active_targets:
             gate = (target_validation_keys[target_index - max_active_targets],)
 
+        detect_keys: list[str] = []
         refine_keys: list[str] = []
         for unit, clip in zip(work_units, clips, strict=True):
             clip_id = str(clip["clip_id"])
             detect_key = f"detect:{target_safe}:{clip_id}"
+            detect_keys.append(detect_key)
             report = run_root / "targets" / target_safe / "detection_reports" / f"{clip_id}.json"
             detect_command = [
                 "scripts/py", "-m", "fisheye.utils.run_clipped_detection_work_unit",
@@ -704,21 +727,64 @@ def build_plan(
                     ),
                 )
             )
+        quality_source_key = f"detect_quality_source:{target_safe}"
+        quality_source_command = [
+            "scripts/py", "-m", "fisheye.utils.materialize_clipped_detect_quality_source",
+            str(target.analysis_zarr), "--plan", str(detection_plan_path),
+            "--output-run", detect_quality_source_run,
+            "--recording-frame-index", str(target.recording_dir / "recording_frame_index.parquet"),
+            "--shard-rows", "131072", "--inner-rows", "16384", "--apply", "--json",
+        ]
+        jobs.append(
+            _job(
+                workflow_id=workflow_id, repo=repo, run_root=run_root,
+                job_key=quality_source_key, stage="detect_quality_source",
+                command=quality_source_command, resources=cpu,
+                upstream=tuple(detect_keys),
+                expected_outputs=(
+                    target.analysis_zarr / "detect_collection_sources" / detect_quality_source_run / "zarr.json",
+                ),
+            )
+        )
+        quality_key = f"detect_quality:{target_safe}"
+        quality_command = [
+            "scripts/py", "-m", "fisheye.refinement.detect_quality_collection",
+            str(target.analysis_zarr),
+            "--source-group", f"detect_collection_sources/{detect_quality_source_run}",
+            "--output-run", detect_quality_run,
+            "--expected-subject-count", str(target.expected_subject_count),
+            "--threshold-mode", "scaled", "--jump-threshold", "100.0",
+            "--threshold-reference-width", "640.0", "--blip-gap-threshold", "10",
+            "--shard-rows", "131072", "--row-chunk-rows", "16384",
+            "--frame-chunk-rows", "16384", "--workers", "4",
+            "--work-dir", f"/scratch/__PALETTE_LSF_USER__/{RUNTIME_JOB_ID_TOKEN}/detect_quality",
+            "--apply", "--json",
+        ]
+        jobs.append(
+            _job(
+                workflow_id=workflow_id, repo=repo, run_root=run_root,
+                job_key=quality_key, stage="detect_quality",
+                command=quality_command, resources=cpu, upstream=(quality_source_key,),
+                expected_outputs=(
+                    target.analysis_zarr / "detect_quality_runs" / detect_quality_run / "zarr.json",
+                ),
+                cleanup_paths=(
+                    f"/scratch/__PALETTE_LSF_USER__/{RUNTIME_JOB_ID_TOKEN}/detect_quality",
+                ),
+            )
+        )
+
+        for clip in clips:
+            clip_id = str(clip["clip_id"])
             refine_key = f"detect_refine:{target_safe}:{clip_id}"
             refine_keys.append(refine_key)
-            quality = [
-                "scripts/py", "-m", "fisheye.refinement.detect_quality",
-                str(target.analysis_zarr), "--run", str(clip["detect_run"]),
-                "--detect-family-path", str(Path(str(clip["detect_group_path"])).parent),
-                "--threshold", "100.0", "--threshold-mode", "scaled",
-                "--threshold-reference-width", "640.0", "--quality-run-name", str(clip["quality_run"]),
-            ]
             refine = [
                 "scripts/py", "-m", "fisheye.refinement.refine_detect",
                 str(target.analysis_zarr), "--detect-run", str(clip["detect_run"]),
                 "--detect-family-path", str(Path(str(clip["detect_group_path"])).parent),
                 "--refined-family-path", str(Path(str(clip["refined_detect_group_path"])).parent),
-                "--quality-run", str(clip["quality_run"]), "--config", str(refine_config),
+                "--quality-group-path", f"detect_quality_runs/{detect_quality_run}",
+                "--config", str(refine_config),
                 "--run-name", str(clip["refined_detect_run"]), "--per-frame-top-k", "1",
             ]
             validate = [
@@ -729,8 +795,8 @@ def build_plan(
                 _job(
                     workflow_id=workflow_id, repo=repo, run_root=run_root,
                     job_key=refine_key, stage="detect_refine",
-                    command=_chain((quality, refine, validate)), resources=cpu,
-                    upstream=(detect_key,),
+                    command=_chain((refine, validate)), resources=cpu,
+                    upstream=(quality_key,),
                     expected_outputs=(target.analysis_zarr / str(clip["refined_detect_group_path"]) / "zarr.json",),
                 )
             )
@@ -740,6 +806,8 @@ def build_plan(
         collection_command = [
             "scripts/py", "-m", "fisheye.utils.finalize_clipped_detect_refine_workflow",
             str(detection_plan_path), "--collection-id", collection_id,
+            "--detect-quality-run", detect_quality_run,
+            "--detect-quality-group-path", f"detect_quality_runs/{detect_quality_run}",
             "--no-require-stage-status", "--apply", "--output-json", str(collection_report),
         ]
         jobs.append(

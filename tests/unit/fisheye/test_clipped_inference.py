@@ -79,6 +79,8 @@ def _build_fixture_plan(
     *,
     resume_existing_detections: bool = False,
     encoded_mask_packages: bool = False,
+    target_count: int = 1,
+    max_active_targets: int = 3,
 ) -> workflow.ClippedInferencePlan:
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True)
@@ -86,7 +88,13 @@ def _build_fixture_plan(
     (repo / "configs" / "fisheye").mkdir(parents=True)
     (repo / "configs" / "fisheye" / "yolo_detect_config.yaml").write_text("{}\n", encoding="utf-8")
     (repo / "configs" / "fisheye" / "default.yaml").write_text("{}\n", encoding="utf-8")
-    target = _target(tmp_path)
+    targets = tuple(
+        _target(tmp_path, f"sleepyfish_cam{2010093 + index}")
+        for index in range(target_count)
+    )
+    targets_by_recording = {
+        target.recording_dir.resolve(): target for target in targets
+    }
     model = tmp_path / "models" / "model.pt"
     model.parent.mkdir()
     model.write_bytes(b"model")
@@ -107,7 +115,10 @@ def _build_fixture_plan(
     monkeypatch.setattr(
         workflow,
         "build_detection_plan",
-        lambda recording_dir, **kwargs: _detection_plan(target, str(kwargs["workflow_id"])),
+        lambda recording_dir, **kwargs: _detection_plan(
+            targets_by_recording[Path(recording_dir).resolve()],
+            str(kwargs["workflow_id"]),
+        ),
     )
     if resume_existing_detections:
         monkeypatch.setattr(
@@ -120,7 +131,7 @@ def _build_fixture_plan(
             },
         )
     return workflow.build_plan(
-        targets=(target,),
+        targets=targets,
         run_label="sleepyfish_full_20260714",
         repo=repo,
         registry_path=tmp_path / "registry.sqlite",
@@ -135,6 +146,7 @@ def _build_fixture_plan(
         package_root=tmp_path / "package_root",
         resume_existing_detections=resume_existing_detections,
         encoded_mask_packages=encoded_mask_packages,
+        max_active_targets=max_active_targets,
     )
 
 
@@ -145,7 +157,7 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(tmp_path: Path, m
     target_safe = workflow.safe_component(str(target["target_id"]), default="target", max_length=56)
     clip_id = "clip_000000"
 
-    assert len(plan.lsf_workflow.jobs) == 124
+    assert len(plan.lsf_workflow.jobs) == 126
     assert jobs[f"keypoints:{target_safe}:{clip_id}"].dependency.upstream_job_keys == (
         f"proxy:{target_safe}",
     )
@@ -163,6 +175,13 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(tmp_path: Path, m
     assert import_job.resources.queue == "local"
     assert import_job.resources.walltime == "3:00"
     assert all(job.command[:3] == ("scripts/py", "-m", "fisheye.cluster.lsf.runtime") for job in jobs.values())
+    quality_source = jobs[f"detect_quality_source:{target_safe}"]
+    quality = jobs[f"detect_quality:{target_safe}"]
+    refine = jobs[f"detect_refine:{target_safe}:{clip_id}"]
+    assert len(quality_source.dependency.upstream_job_keys) == 22
+    assert quality.dependency.upstream_job_keys == (quality_source.job_key,)
+    assert refine.dependency.upstream_job_keys == (quality.job_key,)
+    assert "--quality-group-path" in " ".join(refine.command)
 
 
 def test_materialized_dry_run_is_immutable_and_has_no_submission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -189,7 +208,7 @@ def test_encoded_mask_packages_add_global_grid_and_join(tmp_path: Path, monkeypa
     import_key = f"mask_import:{target_safe}"
 
     assert plan.encoded_mask_packages is True
-    assert len(plan.lsf_workflow.jobs) == 125
+    assert len(plan.lsf_workflow.jobs) == 127
     assert jobs[grid_key].dependency.upstream_job_keys == (f"keypoint_finalize:{target_safe}",)
     assert jobs[package_key].dependency.upstream_job_keys == (
         f"subject_masks:{target_safe}:clip_000000",
@@ -244,7 +263,40 @@ def test_resume_plan_revalidates_detections_on_cpu_and_preserves_dependencies(
     assert detect.resources.queue == "short"
     assert detect.resources.gpus == 0
     assert "--reuse-existing" in detect.command
-    assert refine.dependency.upstream_job_keys == (detect.job_key,)
+    assert refine.dependency.upstream_job_keys == (
+        f"detect_quality:{target_safe}",
+    )
+
+
+def test_same_dag_plans_multiple_recordings_with_bounded_target_concurrency(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _build_fixture_plan(
+        tmp_path,
+        monkeypatch,
+        target_count=2,
+        max_active_targets=1,
+    )
+    jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
+    first, second = plan.target_plans
+    first_safe = workflow.safe_component(
+        str(first["target_id"]), default="target", max_length=56
+    )
+    second_safe = workflow.safe_component(
+        str(second["target_id"]), default="target", max_length=56
+    )
+
+    assert len(plan.targets) == 2
+    assert len(plan.lsf_workflow.jobs) == 250
+    assert jobs[f"detect:{first_safe}:clip_000000"].dependency is None
+    assert jobs[f"detect:{second_safe}:clip_000000"].dependency.upstream_job_keys == (
+        f"validate:{first_safe}",
+    )
+    assert jobs["registry_finalize"].dependency.upstream_job_keys == (
+        f"validate:{first_safe}",
+        f"validate:{second_safe}",
+    )
 
 
 def test_keypoint_recovery_reuses_cache_and_raw_masks(

@@ -5539,23 +5539,35 @@ def _extract_detect_method(detect_group: object) -> Optional[str]:
 
 
 def _resolve_detect_quality_group(
+    root: object,
     detect_group: object,
 ) -> tuple[Optional[str], Optional[object], str]:
+    """Prefer the modern root run family, then historical nested reports."""
+
+    root_parent = None
+    if root is not None and hasattr(root, "get"):
+        try:
+            root_parent = root.get("detect_quality_runs")  # type: ignore[attr-defined]
+        except Exception:
+            root_parent = None
+    quality_run, quality_group, selection = _resolve_latest_group(root_parent)
+    if quality_group is not None:
+        return quality_run, quality_group, f"root_{selection}"
     if detect_group is None or not hasattr(detect_group, "get"):
         return None, None, "none"
     try:
-        quality_parent = detect_group.get("quality_reports")  # type: ignore[attr-defined]
+        nested_parent = detect_group.get("quality_reports")  # type: ignore[attr-defined]
     except Exception:
-        quality_parent = None
-    if quality_parent is None:
-        return None, None, "none"
-    return _resolve_latest_group(quality_parent)
+        nested_parent = None
+    quality_run, quality_group, selection = _resolve_latest_group(nested_parent)
+    return quality_run, quality_group, (
+        f"nested_{selection}" if selection != "none" else "none"
+    )
 
 
-def _extract_detect_quality_details(detect_group: object) -> Dict[str, object]:
-    quality_run, quality_group, _ = _resolve_detect_quality_group(detect_group)
-    if quality_run is None and quality_group is None:
-        return {}
+def _extract_detect_quality_details(
+    quality_run: Optional[str], quality_group: object
+) -> Dict[str, object]:
     if quality_group is None or not hasattr(quality_group, "attrs"):
         return {"detect_quality_run": quality_run} if quality_run else {}
 
@@ -6025,12 +6037,15 @@ def _build_recording_step_rows_from_root(
     )
     detect_method = _extract_detect_method(detect_group)
     detect_coverage = _extract_coverage_pct(detect_group)
-    detect_quality_details = _extract_detect_quality_details(detect_group)
     (
         detect_quality_run,
         detect_quality_group,
         detect_quality_selection,
-    ) = _resolve_detect_quality_group(detect_group)
+    ) = _resolve_detect_quality_group(root, detect_group)
+    detect_quality_details = _extract_detect_quality_details(
+        detect_quality_run,
+        detect_quality_group,
+    )
     detect_quality_status, detect_quality_reason = _step_status_from_presence(
         present=detect_quality_group is not None,
         is_production=False,
@@ -6773,14 +6788,37 @@ def _build_recording_step_rows_from_root(
             step_name="detect_quality",
             status=detect_quality_status,
             run_name=detect_quality_run,
-            method=None,
+            method=(
+                _decode_text(detect_quality_group.attrs.get("schema_id"))
+                if detect_quality_group is not None
+                and hasattr(detect_quality_group, "attrs")
+                else None
+            ),
             coverage_pct=None,
             review_status=None,
             details={
                 **common_details,
                 "reason": detect_quality_reason,
                 "latest_selector": detect_quality_selection,
-                "source_detect_run": detect_run,
+                "source_detect_run": (
+                    (
+                        _decode_text(
+                            detect_quality_group.attrs.get("source_detect_run")
+                        )
+                        or detect_run
+                    )
+                    if detect_quality_group is not None
+                    and hasattr(detect_quality_group, "attrs")
+                    else detect_run
+                ),
+                "source_detection_group_path": (
+                    _decode_text(
+                        detect_quality_group.attrs.get("source_detection_group_path")
+                    )
+                    if detect_quality_group is not None
+                    and hasattr(detect_quality_group, "attrs")
+                    else None
+                ),
                 "upstream": {"detect": detect_status},
                 **detect_quality_details,
             },

@@ -35,7 +35,9 @@ on the workstation or login poller.
 For each recording, the dependency structure is:
 
 ```text
-22 detect -> 22 detect refine -> finalized detection collection
+22 detect -> sharded recording-order quality source
+          -> collection quality reconcile -> 22 keyed detect refine
+                                          -> finalized detection collection
                                       |
                                6 cache bundles
                                       |
@@ -59,6 +61,24 @@ rows to the canonical Zarr; there is no redundant standalone crop-image write.
 Keypoints and masks safely read the same immutable cache concurrently. Each
 mask package waits for both its clip-local probability shard and the exact
 recording-level refined-keypoint run used for left/right eye assignment.
+
+Detection quality is a recording-level stage, not 22 independent clip-local
+state machines. The source materializer streams clip-local raw boxes, stable
+`instance_key` values, and canonical parent-frame indices into one immutable
+indexed-sharded `detect_collection_sources` run. Parallel quality workers emit
+compact traces; one reconciler carries temporal state across every shard and
+clip boundary and publishes `detect_quality_runs/<run>`. Each clip refine job
+reads only its declared source slice and requires exact key equality before
+using those labels. Historical nested `quality_reports` remain a read fallback
+for old single-run archives.
+
+The manifest always contains a nonempty `targets` list. A one-recording run is
+therefore a one-item campaign, while a multi-recording run expands this same
+subgraph for every item. `--max-active-targets` bounds recording concurrency by
+gating a later target's detection jobs on an earlier target's successful
+validation; it does not select a different workflow implementation. Each
+target may declare `expected_subject_count` (default `1`) for its quality
+policy.
 
 Every proxy crop run also carries the full-resolution source-video dimension
 contract: `source_video_width`, `source_video_height`, `width`, and `height`.
