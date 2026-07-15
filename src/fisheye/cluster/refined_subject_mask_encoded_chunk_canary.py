@@ -21,6 +21,7 @@ from fisheye.cluster.lsf import (
 
 
 CANARY_SCHEMA = "palette.refined_subject_mask_encoded_chunk_canary.v1"
+CANARY_FAMILY = "refined_subject_mask_encoded_chunk_canary"
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ def build_plan(
     jobs: list[LsfJob] = [
         _job(
             workflow_id=label,
+            family=CANARY_FAMILY,
             repo=repo,
             run_root=run_root,
             job_key="prepare",
@@ -109,6 +111,7 @@ def build_plan(
     jobs.append(
         _job(
             workflow_id=label,
+            family=CANARY_FAMILY,
             repo=repo,
             run_root=run_root,
             job_key="baseline_import",
@@ -129,6 +132,7 @@ def build_plan(
         jobs.append(
             _job(
                 workflow_id=label,
+                family=CANARY_FAMILY,
                 repo=repo,
                 run_root=run_root,
                 job_key=key,
@@ -160,6 +164,7 @@ def build_plan(
     jobs.append(
         _job(
             workflow_id=label,
+            family=CANARY_FAMILY,
             repo=repo,
             run_root=run_root,
             job_key="encoded_import",
@@ -175,6 +180,7 @@ def build_plan(
     jobs.append(
         _job(
             workflow_id=label,
+            family=CANARY_FAMILY,
             repo=repo,
             run_root=run_root,
             job_key="validate",
@@ -196,10 +202,10 @@ def build_plan(
 
     workflow = LsfWorkflow(
         workflow_id=label,
-        family="refined_subject_mask_encoded_chunk_canary",
+        family=CANARY_FAMILY,
         jobs=tuple(jobs),
         metadata={
-            "family": "refined_subject_mask_encoded_chunk_canary",
+            "family": CANARY_FAMILY,
             "schema": CANARY_SCHEMA,
         },
     )

@@ -370,6 +370,11 @@ def test_encoded_chunk_canary_serializes_prfs_ab_imports(tmp_path: Path) -> None
     assert jobs["baseline_import"].resources.queue == "local"
     assert jobs["encoded_import"].resources.queue == "local"
     assert "--encoded-copy-workers" in jobs["encoded_import"].command
+    assert plan.workflow.family == encoded_canary.CANARY_FAMILY
+    assert all(
+        job.command[job.command.index("--family") + 1] == encoded_canary.CANARY_FAMILY
+        for job in plan.workflow.jobs
+    )
 
 
 def test_resume_plan_revalidates_detections_on_cpu_and_preserves_dependencies(
