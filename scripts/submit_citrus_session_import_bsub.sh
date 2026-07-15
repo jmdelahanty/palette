@@ -51,7 +51,8 @@ Options:
   --no-register                  Do not scan imported/skipped analysis Zarrs
   --registry PATH                Registry SQLite path used with --register
                                 (default: $PALETTE_REGISTRY or /groups/.../palette_registry.sqlite)
-  --recording-only               Import camera-video-only recordings without H5
+  --recording-only               Import Orange external_ipc video-only recordings
+                                without H5; selects the no-H5 organizer mode
   --allow-preflight-failures     Do not block import on manifest preflight fail
   --run-video-diagnostics        Persist video preflight diagnostics in manifests (default)
   --no-run-video-diagnostics     Skip video preflight diagnostics
@@ -203,7 +204,7 @@ fi
 if [[ "\${RUN_VIDEO_DIAGNOSTICS}" == "1" ]]; then
   cmd+=(--run-video-diagnostics)
 fi
-if [[ "\${RUN_H5_DIAGNOSTICS}" == "1" ]]; then
+if [[ "\${RUN_H5_DIAGNOSTICS}" == "1" && "\${RECORDING_ONLY}" != "1" ]]; then
   cmd+=(--run-h5-diagnostics)
 fi
 

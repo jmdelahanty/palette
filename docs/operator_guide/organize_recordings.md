@@ -328,6 +328,27 @@ scripts/py -m fisheye.utils.organize_recordings \
   --apply
 ```
 
+For Orange `external_ipc` batches that have `recording_session.json` and
+external recorder videos but no Citrus H5 files, use the explicit no-H5 mode:
+
+```bash
+scripts/py -m fisheye.utils.organize_recordings \
+  "$PALETTE_STAGING_ROOT/2026_07_07_15_59_35" \
+  --external-ipc-recording-only \
+  --dest-root "$PALETTE_RECORDINGS_ROOT" \
+  --dry-run
+```
+
+This creates one recording folder per camera output in `recording_outputs`.
+The recording folder includes the camera ID to keep multi-camera sessions
+distinct, while camera artifacts use the normal `Cam<id>_<session>` file naming
+without repeating the camera suffix. Full-frame-only sessions are valid; when no
+crop metadata table exists, the manifest omits the compatibility
+`frame_clock_metadata` entry instead of inventing one. If crop outputs exist,
+the crop video and crop metadata are preserved under
+`derived/external_crop_recorder/` and the crop metadata is also copied into
+`cams/` for compatibility. H5 diagnostics are not supported in this mode.
+
 The organizer preserves Orange acquisition-host absolute paths by remapping
 paths below the transferred batch directory name back under the local staging
 batch root. This allows `recording_session.json` written on the rig to remain

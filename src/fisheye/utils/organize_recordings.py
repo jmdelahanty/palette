@@ -415,8 +415,13 @@ def _build_video_only_plan(
     raw_files: List[PlannedFile] = []
     derived_files: List[PlannedFile] = []
     if camera_id:
-        keyframe_sidecar = video_path.with_name(f"Cam{camera_id}_keyframe.json")
-        if keyframe_sidecar.exists():
+        keyframe_sidecar = _first_existing(
+            [
+                video_path.with_name(f"Cam{camera_id}_keyframe.json"),
+                video_path.with_name(f"{video_path.stem}_keyframe.json"),
+            ]
+        )
+        if keyframe_sidecar is not None:
             if rename_cams:
                 dest_name = f"Cam{camera_id}_{session_tag}_keyframe.json"
             else:
@@ -432,16 +437,24 @@ def _build_video_only_plan(
                     dest_name = sidecar.name
                 derived_files.append(PlannedFile(sidecar, dest_name))
 
-    for shared_name, dest_name in (
-        ("ptp_sync_summary.json", "ptp_sync_summary.json"),
-        ("recording_snapshot.json", "recording_snapshot_runtime.json"),
-        ("recording_snapshot", "recording_snapshot_runtime.json"),
+    # Video-only imports may be re-intaken from an already organized legacy
+    # recording. Search the video directory, its ancestors, and a sibling raw/
+    # directory so shared runtime context is retained without requiring a
+    # second physical copy of the camera video.
+    shared_roots = _unique_paths(
+        [video_path.parent]
+        + list(video_path.parents)
+        + [ancestor / "raw" for ancestor in video_path.parents]
+    )
+    for shared_names, dest_name in (
+        (("ptp_sync_summary.json",), "ptp_sync_summary.json"),
+        (("recording_snapshot.json", "recording_snapshot", "recording_snapshot_runtime.json"), "recording_snapshot_runtime.json"),
     ):
-        shared_path = video_path.parent / shared_name
-        if shared_path.exists():
+        shared_path = _first_existing(
+            [root / name for root in shared_roots for name in shared_names]
+        )
+        if shared_path is not None:
             raw_files.append(PlannedFile(shared_path, dest_name, action="copy"))
-            if shared_name.startswith("recording_snapshot"):
-                break
 
     meta: Dict[str, str] = {
         "session_uuid": session_uuid,
@@ -600,6 +613,33 @@ def _external_ipc_output_for_camera(
     return payload if isinstance(payload, dict) else {}
 
 
+def _iter_external_ipc_camera_outputs(
+    session: Dict[str, Any],
+) -> List[Tuple[Optional[Dict[str, Any]], str, Dict[str, Any]]]:
+    """Return clip-aware camera output payloads from an Orange session."""
+    entries: List[Tuple[Optional[Dict[str, Any]], str, Dict[str, Any]]] = []
+    clips = session.get("clips")
+    if isinstance(clips, list):
+        for clip in clips:
+            if not isinstance(clip, dict):
+                continue
+            outputs = clip.get("recording_outputs")
+            if not isinstance(outputs, dict):
+                continue
+            for camera_id, payload in sorted(outputs.items()):
+                if isinstance(payload, dict):
+                    entries.append((clip, str(camera_id), payload))
+    if entries:
+        return entries
+
+    outputs = session.get("recording_outputs")
+    if isinstance(outputs, dict):
+        for camera_id, payload in sorted(outputs.items()):
+            if isinstance(payload, dict):
+                entries.append((None, str(camera_id), payload))
+    return entries
+
+
 def _dict_or_empty(value: object) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -631,6 +671,7 @@ def _external_ipc_video_streams_payload(
     cam_base: str,
     full_output: Dict[str, Any],
     crop_output: Dict[str, Any],
+    has_frame_clock_metadata: bool = True,
 ) -> Dict[str, object]:
     full_stream = _drop_none_values(
         {
@@ -641,7 +682,9 @@ def _external_ipc_video_streams_payload(
             "stream_id": _pick_stream_value(full_output, "stream_id"),
             "orange_declared_role": _pick_stream_value(full_output, "role"),
             "video": f"cams/{cam_base}.mp4",
-            "frame_clock_metadata": f"cams/{cam_base}_meta.csv",
+            "frame_clock_metadata": (
+                f"cams/{cam_base}_meta.csv" if has_frame_clock_metadata else None
+            ),
             "keyframes": f"cams/{cam_base}_keyframe.json",
             "summary": f"cams/{cam_base}_external_summary.json",
             "frame_clock": "recording_frame_id",
@@ -731,32 +774,12 @@ def _append_planned_if_present(
         missing.append(missing_label or dest_name)
 
 
-def _build_external_ipc_plan(
-    h5_path: Path,
+def _append_external_ipc_batch_context(
     *,
     batch_root: Path,
-    session: Dict[str, Any],
-    dest_root: Path,
-    rename_cams: bool,
-) -> RecordingPlan:
-    camera_id, meta = _read_camera_context(h5_path)
-    name = h5_path.stem
-    dest_dir = dest_root / name
-    raw_files: List[PlannedFile] = [PlannedFile(h5_path, h5_path.name)]
-    cam_files: List[PlannedFile] = []
-    derived_files: List[PlannedFile] = []
-    missing: List[str] = []
-
-    rendered = h5_path.with_suffix(".mp4")
-    if rendered.exists():
-        raw_files.append(PlannedFile(rendered, rendered.name))
-    else:
-        missing.append(rendered.name)
-
-    update_timing = h5_path.with_name(f"{h5_path.stem}_update_timing.csv")
-    if update_timing.exists():
-        raw_files.append(PlannedFile(update_timing, update_timing.name))
-
+    raw_files: List[PlannedFile],
+    derived_files: List[PlannedFile],
+) -> None:
     for shared_name, dest_name in (
         ("recording_session.json", "recording_session.json"),
         ("recording_snapshot.json", "recording_snapshot_runtime.json"),
@@ -785,51 +808,23 @@ def _build_external_ipc_plan(
             )
         )
 
-    session_id = str(session.get("session_id") or batch_root.name)
-    meta.setdefault("session_uuid", _choose_session_tag(meta, h5_path))
-    meta.setdefault("recording_id", meta.get("session_uuid") or name)
-    meta.setdefault("recording_name", name)
-    meta.setdefault("recording_type", "behavior")
-    meta.setdefault("recording_subtype", "free")
-    meta.setdefault("behavior_mode", "free")
-    meta["artifact_schema_id"] = "orange_external_ipc_single_clip_v1"
-    meta["recording_backend"] = "external_ipc"
-    meta["orange_session_id"] = session_id
-    meta["orange_producer"] = str(session.get("producer") or "")
-    meta["orange_recording_mode"] = str(session.get("mode") or "")
-    _set_meta_if_present(
-        meta,
-        "software_version",
-        _runtime_snapshot_software_version(batch_root / "recording_snapshot.json"),
-    )
 
-    if not camera_id:
-        missing.append("camera_id (missing in H5 attrs)")
-        return RecordingPlan(
-            name=name,
-            source_dir=batch_root,
-            dest_dir=dest_dir,
-            raw_files=_unique_planned(raw_files),
-            cam_files=[],
-            derived_files=_unique_planned(derived_files),
-            camera_id=None,
-            meta=meta,
-            missing=missing,
-        )
-
-    outputs = _external_ipc_output_for_camera(session, camera_id)
+def _append_external_ipc_video_artifacts(
+    *,
+    batch_root: Path,
+    camera_id: str,
+    outputs: Dict[str, Any],
+    cam_base: str,
+    meta: Dict[str, Any],
+    cam_files: List[PlannedFile],
+    derived_files: List[PlannedFile],
+    missing: List[str],
+    require_compat_camera_metadata: bool,
+) -> None:
     full_output = outputs.get("full") if isinstance(outputs.get("full"), dict) else {}
     crop_output = outputs.get("crop") if isinstance(outputs.get("crop"), dict) else {}
     full_dir = batch_root / "external_recorder"
     crop_dir = batch_root / "external_crop_recorder"
-    session_tag = _sanitize_for_filename(_choose_session_tag(meta, h5_path))
-    cam_base = f"Cam{camera_id}_{session_tag}" if rename_cams else f"Cam{camera_id}"
-    meta["video_streams"] = _external_ipc_video_streams_payload(
-        camera_id=camera_id,
-        cam_base=cam_base,
-        full_output=full_output,
-        crop_output=crop_output,
-    )
 
     if not full_output:
         missing.append(f"recording_outputs/{camera_id}/full")
@@ -854,6 +849,16 @@ def _build_external_ipc_plan(
         preferred_dir=crop_dir,
     )
 
+    meta["video_streams"] = _external_ipc_video_streams_payload(
+        camera_id=camera_id,
+        cam_base=cam_base,
+        full_output=full_output,
+        crop_output=crop_output,
+        has_frame_clock_metadata=(
+            require_compat_camera_metadata or bool(crop_output) or crop_meta is not None
+        ),
+    )
+
     _append_planned_if_present(
         cam_files,
         full_video,
@@ -862,15 +867,16 @@ def _build_external_ipc_plan(
         required=True,
         missing_label=f"external_recorder/Cam{camera_id}_external.mp4",
     )
-    _append_planned_if_present(
-        cam_files,
-        crop_meta,
-        f"{cam_base}_meta.csv",
-        missing=missing,
-        required=True,
-        action="copy",
-        missing_label=f"Cam{camera_id}_crop_meta.csv (compatibility camera metadata)",
-    )
+    if require_compat_camera_metadata or crop_meta is not None or crop_output:
+        _append_planned_if_present(
+            cam_files,
+            crop_meta,
+            f"{cam_base}_meta.csv",
+            missing=missing,
+            required=require_compat_camera_metadata or bool(crop_output),
+            action="copy",
+            missing_label=f"Cam{camera_id}_crop_meta.csv (compatibility camera metadata)",
+        )
     _append_planned_if_present(
         cam_files,
         full_keyframes,
@@ -1037,6 +1043,86 @@ def _build_external_ipc_plan(
             required=False,
         )
 
+
+def _build_external_ipc_plan(
+    h5_path: Path,
+    *,
+    batch_root: Path,
+    session: Dict[str, Any],
+    dest_root: Path,
+    rename_cams: bool,
+) -> RecordingPlan:
+    camera_id, meta = _read_camera_context(h5_path)
+    name = h5_path.stem
+    dest_dir = dest_root / name
+    raw_files: List[PlannedFile] = [PlannedFile(h5_path, h5_path.name)]
+    cam_files: List[PlannedFile] = []
+    derived_files: List[PlannedFile] = []
+    missing: List[str] = []
+
+    rendered = h5_path.with_suffix(".mp4")
+    if rendered.exists():
+        raw_files.append(PlannedFile(rendered, rendered.name))
+    else:
+        missing.append(rendered.name)
+
+    update_timing = h5_path.with_name(f"{h5_path.stem}_update_timing.csv")
+    if update_timing.exists():
+        raw_files.append(PlannedFile(update_timing, update_timing.name))
+
+    _append_external_ipc_batch_context(
+        batch_root=batch_root,
+        raw_files=raw_files,
+        derived_files=derived_files,
+    )
+
+    session_id = str(session.get("session_id") or batch_root.name)
+    meta.setdefault("session_uuid", _choose_session_tag(meta, h5_path))
+    meta.setdefault("recording_id", meta.get("session_uuid") or name)
+    meta.setdefault("recording_name", name)
+    meta.setdefault("recording_type", "behavior")
+    meta.setdefault("recording_subtype", "free")
+    meta.setdefault("behavior_mode", "free")
+    meta["artifact_schema_id"] = "orange_external_ipc_single_clip_v1"
+    meta["recording_backend"] = "external_ipc"
+    meta["orange_session_id"] = session_id
+    meta["orange_producer"] = str(session.get("producer") or "")
+    meta["orange_recording_mode"] = str(session.get("mode") or "")
+    _set_meta_if_present(
+        meta,
+        "software_version",
+        _runtime_snapshot_software_version(batch_root / "recording_snapshot.json"),
+    )
+
+    if not camera_id:
+        missing.append("camera_id (missing in H5 attrs)")
+        return RecordingPlan(
+            name=name,
+            source_dir=batch_root,
+            dest_dir=dest_dir,
+            raw_files=_unique_planned(raw_files),
+            cam_files=[],
+            derived_files=_unique_planned(derived_files),
+            camera_id=None,
+            meta=meta,
+            missing=missing,
+        )
+
+    outputs = _external_ipc_output_for_camera(session, camera_id)
+    session_tag = _sanitize_for_filename(_choose_session_tag(meta, h5_path))
+    cam_base = f"Cam{camera_id}_{session_tag}" if rename_cams else f"Cam{camera_id}"
+    _append_external_ipc_video_artifacts(
+        batch_root=batch_root,
+        camera_id=camera_id,
+        outputs=outputs,
+        cam_base=cam_base,
+        meta=meta,
+        cam_files=cam_files,
+        derived_files=derived_files,
+        missing=missing,
+        require_compat_camera_metadata=True,
+    )
+
     return RecordingPlan(
         name=name,
         source_dir=batch_root,
@@ -1048,6 +1134,152 @@ def _build_external_ipc_plan(
         meta=meta,
         missing=missing,
     )
+
+
+def _external_ipc_clip_start_utc(
+    session: Dict[str, Any],
+    clip: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    candidates: List[object] = []
+    if isinstance(clip, dict):
+        candidates.extend(
+            [
+                clip.get("started_at_utc"),
+                clip.get("finalized_at_utc"),
+            ]
+        )
+    stream = session.get("stream")
+    if isinstance(stream, dict):
+        candidates.extend([stream.get("started_at_utc"), stream.get("finished_at_utc")])
+    candidates.extend([session.get("created_at_utc"), session.get("updated_at_utc")])
+    for candidate in candidates:
+        value = _normalize_attr(candidate)
+        if value:
+            return value
+    return None
+
+
+def _build_external_ipc_recording_only_plan(
+    *,
+    batch_root: Path,
+    session: Dict[str, Any],
+    clip: Optional[Dict[str, Any]],
+    camera_id: str,
+    outputs: Dict[str, Any],
+    recording_name: str,
+    dest_root: Path,
+    rename_cams: bool,
+) -> RecordingPlan:
+    raw_files: List[PlannedFile] = []
+    cam_files: List[PlannedFile] = []
+    derived_files: List[PlannedFile] = []
+    missing: List[str] = []
+    _append_external_ipc_batch_context(
+        batch_root=batch_root,
+        raw_files=raw_files,
+        derived_files=derived_files,
+    )
+
+    meta: Dict[str, Any] = {
+        "session_uuid": recording_name,
+        "recording_id": recording_name,
+        "recording_name": recording_name,
+        "recording_type": "behavior",
+        "recording_subtype": "free",
+        "behavior_mode": "free",
+        "artifact_schema_id": "orange_external_ipc_video_only_v1",
+        "camera_id": str(camera_id),
+        "recording_backend": "external_ipc",
+        "orange_session_id": str(session.get("session_id") or batch_root.name),
+        "orange_producer": str(session.get("producer") or ""),
+        "orange_recording_mode": str(session.get("mode") or ""),
+    }
+    session_start = _external_ipc_clip_start_utc(session, clip)
+    if session_start:
+        meta["session_start_iso8601_utc"] = session_start
+    if isinstance(clip, dict):
+        clip_id = _normalize_attr(clip.get("clip_id"))
+        if clip_id:
+            meta["orange_clip_id"] = clip_id
+        clip_index = clip.get("clip_index")
+        if clip_index is not None:
+            meta["orange_clip_index"] = clip_index
+        stop_reason = _normalize_attr(clip.get("stop_reason"))
+        if stop_reason:
+            meta["orange_stop_reason"] = stop_reason
+    _set_meta_if_present(
+        meta,
+        "software_version",
+        _runtime_snapshot_software_version(batch_root / "recording_snapshot.json"),
+    )
+
+    session_tag = _sanitize_for_filename(recording_name)
+    camera_suffix = f"_Cam{camera_id}"
+    if session_tag.endswith(camera_suffix):
+        session_tag = session_tag[: -len(camera_suffix)]
+    cam_base = f"Cam{camera_id}_{session_tag}" if rename_cams else f"Cam{camera_id}"
+    _append_external_ipc_video_artifacts(
+        batch_root=batch_root,
+        camera_id=str(camera_id),
+        outputs=outputs,
+        cam_base=cam_base,
+        meta=meta,
+        cam_files=cam_files,
+        derived_files=derived_files,
+        missing=missing,
+        require_compat_camera_metadata=False,
+    )
+
+    return RecordingPlan(
+        name=recording_name,
+        source_dir=batch_root,
+        dest_dir=dest_root / recording_name,
+        raw_files=_unique_planned(raw_files),
+        cam_files=_unique_planned(cam_files),
+        derived_files=_unique_planned(derived_files),
+        camera_id=str(camera_id),
+        meta=meta,
+        missing=missing,
+    )
+
+
+def _build_external_ipc_recording_only_plans(
+    source_root: Path,
+    *,
+    dest_root: Path,
+    rename_cams: bool,
+) -> List[RecordingPlan]:
+    session_path = source_root / "recording_session.json"
+    session = _load_json_object(session_path)
+    entries = _iter_external_ipc_camera_outputs(session)
+    clip_ids = {
+        str(clip.get("clip_id"))
+        for clip, _camera_id, _outputs in entries
+        if isinstance(clip, dict) and clip.get("clip_id")
+    }
+    include_clip_id = len(clip_ids) > 1
+    session_id = _sanitize_for_filename(str(session.get("session_id") or source_root.name))
+    plans: List[RecordingPlan] = []
+    for clip, camera_id, outputs in entries:
+        name_parts = [session_id]
+        clip_id = _normalize_attr(clip.get("clip_id")) if isinstance(clip, dict) else None
+        if include_clip_id and clip_id:
+            name_parts.append(_sanitize_for_filename(clip_id))
+        name_parts.append(f"Cam{camera_id}")
+        recording_name = "_".join(name_parts)
+        plans.append(
+            _build_external_ipc_recording_only_plan(
+                batch_root=source_root,
+                session=session,
+                clip=clip,
+                camera_id=str(camera_id),
+                outputs=outputs,
+                recording_name=recording_name,
+                dest_root=dest_root,
+                rename_cams=rename_cams,
+            )
+        )
+    return plans
 
 
 def _build_external_ipc_plans(
@@ -1099,28 +1331,35 @@ def _build_plan(
     if update_timing.exists():
         raw_files.append(PlannedFile(update_timing, update_timing.name))
 
-    # Move the full recording_snapshot.json into raw/ as
-    # recording_snapshot_runtime.json — the unfiltered original from Citrus,
-    # preserved alongside the H5 as a recovery backup. The per-camera
-    # filtered version is written separately by --snapshot / _write_snapshot
-    # into derived/recording_snapshot.json.
-    for snapshot_name in ("recording_snapshot.json", "recording_snapshot"):
-        snapshot_candidate = h5_path.parent / snapshot_name
-        if snapshot_candidate.exists():
-            raw_files.append(PlannedFile(snapshot_candidate, "recording_snapshot_runtime.json"))
-            break
+    search_roots = [h5_path.parent]
+    if cam_root is not None:
+        search_roots.append(cam_root)
+    if camera_id:
+        search_roots = _extend_cam_roots(search_roots, h5_path, str(camera_id))
+
+    # Older Citrus transfers place shared runtime context at the batch root
+    # while H5 files live below ``citrus/``. Copy shared context into every
+    # recording because one batch can contain several arena/H5 recordings.
+    for source_names, dest_name in (
+        (("recording_snapshot.json", "recording_snapshot"), "recording_snapshot_runtime.json"),
+        (("ptp_sync_summary.json",), "ptp_sync_summary.json"),
+    ):
+        source = _first_existing(
+            [root / source_name for root in search_roots for source_name in source_names]
+        )
+        if source is not None:
+            raw_files.append(PlannedFile(source, dest_name, action="copy"))
 
     if camera_id:
-        search_roots = [h5_path.parent]
-        if cam_root is not None:
-            search_roots.append(cam_root)
-        search_roots = _extend_cam_roots(search_roots, h5_path, str(camera_id))
 
         cam_mp4 = _first_existing(
             [root / f"Cam{camera_id}.mp4" for root in search_roots]
         )
         cam_meta = _first_existing(
             [root / f"Cam{camera_id}_meta.csv" for root in search_roots]
+        )
+        cam_keyframes = _first_existing(
+            [root / f"Cam{camera_id}_keyframe.json" for root in search_roots]
         )
         session_tag = _sanitize_for_filename(_choose_session_tag(meta, h5_path))
         cam_base = f"Cam{camera_id}_{session_tag}" if rename_cams else f"Cam{camera_id}"
@@ -1135,6 +1374,9 @@ def _build_plan(
             cam_files.append(PlannedFile(cam_meta, dest_name))
         else:
             missing.append(f"Cam{camera_id}_meta.csv")
+        if cam_keyframes:
+            dest_name = f"{cam_base}_keyframe.json"
+            cam_files.append(PlannedFile(cam_keyframes, dest_name))
 
         derived_patterns = [
             h5_path.parent / f"extracted_{camera_id}_*_image.png",
@@ -1182,6 +1424,20 @@ def _format_recording_summary(plan: RecordingPlan) -> List[str]:
     if "error" in plan.meta:
         lines.append(f"  error: {plan.meta['error']}")
     return lines
+
+
+def _apply_plan_metadata_overrides(
+    plans: List[RecordingPlan],
+    *,
+    num_dishes: Optional[int],
+    fish_per_dish: Optional[int],
+) -> None:
+    """Apply explicit operator-known setup metadata to every planned recording."""
+    for plan in plans:
+        if num_dishes is not None:
+            plan.meta["num_dishes"] = int(num_dishes)
+        if fish_per_dish is not None:
+            plan.meta["fish_per_dish"] = int(fish_per_dish)
 
 
 def _append_folder(lines: List[str], prefix: str, name: str, is_last: bool) -> str:
@@ -2010,10 +2266,30 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--external-ipc-recording-only",
+        action="store_true",
+        help=(
+            "Organize an Orange external_ipc recording_session.json batch that "
+            "has full/crop video outputs but no Citrus H5 source."
+        ),
+    )
+    parser.add_argument(
         "--metadata-csv",
         type=Path,
         default=None,
         help="CSV describing video-only recordings. Required with --video-only.",
+    )
+    parser.add_argument(
+        "--num-dishes",
+        type=int,
+        default=None,
+        help="Operator-known number of dishes to store in every planned recording manifest.",
+    )
+    parser.add_argument(
+        "--fish-per-dish",
+        type=int,
+        default=None,
+        help="Operator-known fish count per dish to store in every planned recording manifest.",
     )
     parser.add_argument(
         "--run-video-diagnostics",
@@ -2052,6 +2328,22 @@ def main() -> int:
         if args.external_ipc:
             print("--external-ipc is not supported with --video-only.", file=sys.stderr)
             return 1
+        if args.external_ipc_recording_only:
+            print("--external-ipc-recording-only is not supported with --video-only.", file=sys.stderr)
+            return 1
+
+    if args.external_ipc_recording_only and args.run_h5_diagnostics:
+        print("--run-h5-diagnostics is not supported with --external-ipc-recording-only.", file=sys.stderr)
+        return 1
+    if args.external_ipc_recording_only and args.external_ipc:
+        print("--external-ipc and --external-ipc-recording-only are mutually exclusive.", file=sys.stderr)
+        return 1
+    if args.num_dishes is not None and args.num_dishes < 1:
+        print("--num-dishes must be at least 1.", file=sys.stderr)
+        return 1
+    if args.fish_per_dish is not None and args.fish_per_dish < 1:
+        print("--fish-per-dish must be at least 1.", file=sys.stderr)
+        return 1
 
     if (args.run_video_diagnostics or args.run_h5_diagnostics) and not args.apply:
         print("--run-video-diagnostics and --run-h5-diagnostics require --apply.", file=sys.stderr)
@@ -2099,6 +2391,7 @@ def main() -> int:
             snapshot_mode=args.snapshot_mode,
             video_only=args.video_only,
             external_ipc=args.external_ipc,
+            external_ipc_recording_only=args.external_ipc_recording_only,
             metadata_csv=str(args.metadata_csv) if args.metadata_csv else None,
             run_video_diagnostics=args.run_video_diagnostics,
             run_h5_diagnostics=args.run_h5_diagnostics,
@@ -2139,6 +2432,17 @@ def main() -> int:
                 for row in rows
             ]
             print(f"Found {len(plans)} video-only recording(s) from metadata CSV.")
+        elif args.external_ipc_recording_only:
+            try:
+                plans = _build_external_ipc_recording_only_plans(
+                    source_path,
+                    dest_root=args.dest_root,
+                    rename_cams=args.rename_cams,
+                )
+            except Exception as exc:
+                print(f"Failed to build external_ipc recording-only plan: {exc}", file=sys.stderr)
+                return 1
+            print(f"Found {len(plans)} external_ipc recording-only video recording(s).")
         elif args.external_ipc or _looks_like_external_ipc_batch(source_path):
             try:
                 plans = _build_external_ipc_plans(
@@ -2214,6 +2518,11 @@ def main() -> int:
             ]
 
             print(f"Found {len(plans)} H5 recording(s).")
+        _apply_plan_metadata_overrides(
+            plans,
+            num_dishes=args.num_dishes,
+            fish_per_dish=args.fish_per_dish,
+        )
         for plan in plans:
             for line in _format_recording_summary(plan):
                 print(line)

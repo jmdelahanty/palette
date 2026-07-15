@@ -47,6 +47,7 @@ def build_organize_command(
     log_dir: Path,
     apply: bool,
     rename_cams: bool,
+    recording_only: bool,
     run_video_diagnostics: bool,
     run_h5_diagnostics: bool,
 ) -> list[str]:
@@ -64,9 +65,11 @@ def build_organize_command(
         "--apply" if apply else "--dry-run",
     ]
     command.append("--rename-cams" if rename_cams else "--no-rename-cams")
-    if run_video_diagnostics:
+    if recording_only:
+        command.append("--external-ipc-recording-only")
+    if apply and run_video_diagnostics:
         command.append("--run-video-diagnostics")
-    if run_h5_diagnostics:
+    if apply and run_h5_diagnostics and not recording_only:
         command.append("--run-h5-diagnostics")
     return command
 
@@ -266,6 +269,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         log_dir=organize_log_dir,
         apply=bool(args.apply),
         rename_cams=not bool(args.no_rename_cams),
+        recording_only=bool(args.recording_only),
         run_video_diagnostics=bool(args.run_video_diagnostics),
         run_h5_diagnostics=bool(args.run_h5_diagnostics),
     )

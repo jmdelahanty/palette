@@ -19,6 +19,7 @@ def test_build_organize_command_is_single_session_import_only(tmp_path: Path) ->
         log_dir=tmp_path / "logs",
         apply=True,
         rename_cams=True,
+        recording_only=False,
         run_video_diagnostics=False,
         run_h5_diagnostics=False,
     )
@@ -31,6 +32,41 @@ def test_build_organize_command_is_single_session_import_only(tmp_path: Path) ->
     assert "--apply" in command
     assert "--write-manifest" in command
     assert "--rename-cams" in command
+    assert "--external-ipc-recording-only" not in command
+
+
+def test_build_organize_command_recording_only_uses_external_ipc_no_h5_mode(tmp_path: Path) -> None:
+    command = build_organize_command(
+        session_dir=tmp_path / "session",
+        dest_root=tmp_path / "recordings",
+        log_dir=tmp_path / "logs",
+        apply=True,
+        rename_cams=True,
+        recording_only=True,
+        run_video_diagnostics=True,
+        run_h5_diagnostics=True,
+    )
+
+    assert "--external-ipc-recording-only" in command
+    assert "--run-video-diagnostics" in command
+    assert "--run-h5-diagnostics" not in command
+
+
+def test_build_organize_command_dry_run_suppresses_apply_only_diagnostics(tmp_path: Path) -> None:
+    command = build_organize_command(
+        session_dir=tmp_path / "session",
+        dest_root=tmp_path / "recordings",
+        log_dir=tmp_path / "logs",
+        apply=False,
+        rename_cams=True,
+        recording_only=False,
+        run_video_diagnostics=True,
+        run_h5_diagnostics=True,
+    )
+
+    assert "--dry-run" in command
+    assert "--run-video-diagnostics" not in command
+    assert "--run-h5-diagnostics" not in command
 
 
 def test_build_import_command_uses_organize_log_without_detect_or_refine(tmp_path: Path) -> None:

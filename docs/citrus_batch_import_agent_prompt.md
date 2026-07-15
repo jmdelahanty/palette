@@ -51,6 +51,19 @@ dest_dir = <absolute session directory path>
 The poller normalizes `dest_dir` and requires it to match the marker parent
 directory exactly.
 
+The marker may also declare the transferred payload kind:
+
+```text
+recording_payload_kind = citrus_h5 | external_ipc_video_only
+```
+
+If `recording_payload_kind` is absent, the poller treats the marker as the
+legacy default, `citrus_h5`. `external_ipc_video_only` means the transfer has
+Orange external-recorder video artifacts and `recording_session.json`, but no
+Citrus H5 source; the poller should submit the import wrapper with
+`--recording-only`. Unknown payload-kind values must fail closed: do not claim
+or submit the marker until the poller/importer explicitly supports that value.
+
 State/log directories:
 
 ```text
@@ -145,6 +158,18 @@ submitted with `--no-run-video-diagnostics` and/or `--no-run-h5-diagnostics`.
 The automatic video preflight uses OpenCV decode smoke by default; Decord is an
 explicit manual compatibility backend, not the current import gate.
 The downstream import gate only blocks stored `preflight.status="fail"`.
+
+For Orange `external_ipc` sessions with recorder videos but no Citrus H5 files,
+submit with `--recording-only`. The wrapper then passes
+`--external-ipc-recording-only` to `organize_recordings`, suppresses H5
+diagnostics, and passes `--recording-only` to the analysis import step. The
+organizer still preserves `recording_session.json`, full-frame recorder video,
+optional crop recorder video/metadata, keyframes, summaries, and recorder
+diagnostics in the canonical recording folder.
+
+When dispatching from the workstation poller, this should be selected from the
+completion marker field `recording_payload_kind="external_ipc_video_only"`,
+rather than by probing for missing H5 files after submission.
 
 then:
 

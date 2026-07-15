@@ -160,6 +160,74 @@ def test_external_ipc_plan_maps_full_and_crop_outputs_without_shards(tmp_path: P
     )
 
 
+def test_external_ipc_recording_only_plan_maps_full_and_crop_outputs(tmp_path: Path) -> None:
+    batch = _make_external_ipc_batch(tmp_path)
+    for h5_path in batch.rglob("*.h5"):
+        h5_path.unlink()
+
+    plans = organize_recordings._build_external_ipc_recording_only_plans(
+        batch,
+        dest_root=tmp_path / "recordings",
+        rename_cams=True,
+    )
+
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.name == "2026_05_29_14_11_07_Cam2010093"
+    assert plan.missing == []
+    assert plan.camera_id == "2010093"
+    assert plan.meta["artifact_schema_id"] == "orange_external_ipc_video_only_v1"
+    assert plan.meta["recording_backend"] == "external_ipc"
+
+    raw_names = [item.dest_name for item in plan.raw_files]
+    assert "recording_session.json" in raw_names
+    assert "transfer_complete.json" in raw_names
+    assert not any(name.endswith(".h5") for name in raw_names)
+
+    cam_names = [item.dest_name for item in plan.cam_files]
+    assert cam_names == [
+        "Cam2010093_2026_05_29_14_11_07.mp4",
+        "Cam2010093_2026_05_29_14_11_07_meta.csv",
+        "Cam2010093_2026_05_29_14_11_07_keyframe.json",
+        "Cam2010093_2026_05_29_14_11_07_external_summary.json",
+    ]
+
+    derived_names = [item.dest_name for item in plan.derived_files]
+    assert "external_crop_recorder/Cam2010093_2026_05_29_14_11_07_crop_external.mp4" in derived_names
+    assert "external_crop_recorder/Cam2010093_2026_05_29_14_11_07_crop_meta.csv" in derived_names
+
+    video_streams = plan.meta["video_streams"]
+    assert video_streams["streams"]["full"]["frame_clock_metadata"] == (
+        "cams/Cam2010093_2026_05_29_14_11_07_meta.csv"
+    )
+    assert video_streams["streams"]["crop"]["video_pixel_coordinate_space"] == "crop_frame_pixels"
+
+
+def test_external_ipc_recording_only_full_video_without_crop_meta_is_valid(tmp_path: Path) -> None:
+    batch = _make_external_ipc_batch(tmp_path)
+    session_path = batch / "recording_session.json"
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+    del session["recording_outputs"]["2010093"]["crop"]
+    session_path.write_text(json.dumps(session), encoding="utf-8")
+
+    plans = organize_recordings._build_external_ipc_recording_only_plans(
+        batch,
+        dest_root=tmp_path / "recordings",
+        rename_cams=True,
+    )
+
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.missing == []
+    assert [item.dest_name for item in plan.cam_files] == [
+        "Cam2010093_2026_05_29_14_11_07.mp4",
+        "Cam2010093_2026_05_29_14_11_07_keyframe.json",
+        "Cam2010093_2026_05_29_14_11_07_external_summary.json",
+    ]
+    assert "frame_clock_metadata" not in plan.meta["video_streams"]["streams"]["full"]
+    assert "crop" not in plan.meta["video_streams"]["streams"]
+
+
 def test_external_ipc_apply_writes_nested_sidecars_and_manifest(tmp_path: Path, monkeypatch) -> None:
     batch = _make_external_ipc_batch(tmp_path)
     plans = organize_recordings._build_external_ipc_plans(
