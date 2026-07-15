@@ -204,6 +204,7 @@ esac
 scratch_root="\${scratch_base}/tail_sharding_\${RUN_ID}"
 staged_source="\${scratch_root}/source_tail_run.zarr"
 variant_root="\${scratch_root}/variants"
+transfer_root="\${RUN_DIR}/.prfs_transfer_scratch"
 
 cleanup() {
   local status=\$?
@@ -237,6 +238,7 @@ cmd=(
   --window-count "\${WINDOW_COUNT}"
   --scan-rows "\${SCAN_ROWS}"
   --report "\${REPORT_PATH}"
+  --transfer-root "\${transfer_root}"
   --apply
 )
 read -r -a shard_rows_values <<<"\${SHARD_ROWS_TEXT}"

@@ -35,6 +35,7 @@ Recorded outcomes include:
 
 - build wall time and decoded write throughput with eight workers;
 - physical file count, apparent/allocated bytes, and shard-size distribution;
+- timed node-local-to-PRFS `rsync` publication followed by checksum validation;
 - repeated random one-row reads;
 - repeated 1,024-row contiguous windows;
 - bounded full scans of representative scalar, angle, and XY arrays.
@@ -50,4 +51,6 @@ Implementation:
 
 The LSF wrapper refuses execution outside an allocation, pins a clean shared
 Palette commit, refuses `/groups` as scratch, stages all source shards in one
-`rsync`, and retains only JSON/timing/status files on shared storage.
+`rsync`, and retains only JSON/timing/status files on shared storage. Each
+publication candidate is copied into a job-specific hidden shared directory,
+checked with a checksum-mode `rsync` dry run, and removed before the job exits.

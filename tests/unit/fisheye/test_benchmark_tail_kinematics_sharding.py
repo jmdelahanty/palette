@@ -88,6 +88,7 @@ def test_benchmark_clones_variants_exactly_with_parallel_shard_ownership(tmp_pat
     source = tmp_path / "tail_run"
     output = tmp_path / "variants"
     report_path = tmp_path / "benchmark.json"
+    transfer_root = tmp_path / "transfer"
     _write_source(source)
     source_metadata_before = (source / "zarr.json").read_bytes()
 
@@ -103,6 +104,7 @@ def test_benchmark_clones_variants_exactly_with_parallel_shard_ownership(tmp_pat
         scan_rows=8,
         digest_rows=8,
         report_path=report_path,
+        transfer_root=transfer_root,
         apply=True,
     )
 
@@ -114,6 +116,16 @@ def test_benchmark_clones_variants_exactly_with_parallel_shard_ownership(tmp_pat
     assert all(variant["worker_count"] == 2 for variant in report["variants"])
     assert all(variant["worker_task_count"] > 0 for variant in report["variants"])
     assert all(variant["all_arrays_exact"] for variant in report["variants"])
+    assert report["transfer_benchmark_status"] == "complete"
+    assert not transfer_root.exists()
+    assert all(
+        variant["transfer_benchmark"]["physical_files_exact"]
+        for variant in report["variants"]
+    )
+    assert all(
+        variant["transfer_benchmark"]["removed_after_validation"]
+        for variant in report["variants"]
+    )
 
     source_root = zarr.open_group(str(source), mode="r", use_consolidated=False)
     wider = zarr.open_group(

@@ -21,6 +21,7 @@ import math
 import os
 import shutil
 import statistics
+import subprocess
 import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
@@ -483,6 +484,79 @@ def _write_report(report: dict[str, Any], report_path: Path) -> None:
     temporary.replace(report_path)
 
 
+def _transfer_candidate(
+    source_path: Path,
+    destination_path: Path,
+    *,
+    remove_after_validation: bool,
+) -> dict[str, Any]:
+    if destination_path.exists():
+        raise FileExistsError(f"Transfer benchmark destination already exists: {destination_path}")
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    source_storage = _storage_stats(source_path)
+    started = time.perf_counter()
+    subprocess.run(
+        ["rsync", "-a", "--", f"{source_path}/", f"{destination_path}/"],
+        check=True,
+    )
+    transfer_seconds = float(time.perf_counter() - started)
+    destination_storage = _storage_stats(destination_path)
+
+    verification_started = time.perf_counter()
+    verification = subprocess.run(
+        [
+            "rsync",
+            "-a",
+            "-n",
+            "-c",
+            "--delete",
+            "--itemize-changes",
+            "--",
+            f"{source_path}/",
+            f"{destination_path}/",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    verification_seconds = float(time.perf_counter() - verification_started)
+    physical_changes = [line for line in verification.stdout.splitlines() if line.strip()]
+    storage_matches = all(
+        int(source_storage[name]) == int(destination_storage[name])
+        for name in ("file_count", "payload_file_count", "apparent_bytes")
+    )
+    if physical_changes or not storage_matches:
+        raise RuntimeError(
+            "Transfer benchmark checksum verification failed: "
+            f"changes={physical_changes[:5]!r}, storage_matches={storage_matches}."
+        )
+
+    result = {
+        "source": str(source_path),
+        "destination": str(destination_path),
+        "method": "rsync_archive_then_checksum_dry_run",
+        "transfer_seconds": transfer_seconds,
+        "verification_seconds": verification_seconds,
+        "physical_files_exact": True,
+        "source_storage": source_storage,
+        "destination_storage": destination_storage,
+        "apparent_mib_per_second": (
+            float(destination_storage["apparent_bytes"] / (1024.0**2) / transfer_seconds)
+            if transfer_seconds > 0
+            else None
+        ),
+        "files_per_second": (
+            float(destination_storage["file_count"] / transfer_seconds)
+            if transfer_seconds > 0
+            else None
+        ),
+        "removed_after_validation": bool(remove_after_validation),
+    }
+    if remove_after_validation:
+        shutil.rmtree(destination_path)
+    return result
+
+
 def run_benchmark(
     source_group: Path | str,
     *,
@@ -497,6 +571,8 @@ def run_benchmark(
     scan_rows: int = 16_384,
     digest_rows: int = 16_384,
     report_path: Path | str | None = None,
+    transfer_root: Path | str | None = None,
+    remove_transfer_copies: bool = True,
     apply: bool = False,
     overwrite: bool = False,
 ) -> dict[str, Any]:
@@ -515,6 +591,9 @@ def run_benchmark(
         if report_path is not None
         else output_path.with_name(f"{output_path.name}.benchmark.json")
     )
+    chosen_transfer_root = (
+        Path(transfer_root).expanduser().resolve() if transfer_root is not None else None
+    )
     report: dict[str, Any] = {
         "schema": REPORT_SCHEMA,
         "created_at_utc": _utc_now(),
@@ -526,6 +605,16 @@ def run_benchmark(
         "worker_count_requested": int(workers),
         "source_mutation_policy": "read_only",
         "candidate_storage_policy": "disposable_node_local_only",
+        "transfer_benchmark_root": (
+            str(chosen_transfer_root) if chosen_transfer_root is not None else None
+        ),
+        "transfer_copy_retention": (
+            "remove_after_checksum_validation"
+            if chosen_transfer_root is not None and remove_transfer_copies
+            else "retain"
+            if chosen_transfer_root is not None
+            else "not_requested"
+        ),
         "array_plans": {
             str(candidate): [asdict(plan) for plan in plans]
             for candidate, plans in plans_by_candidate.items()
@@ -622,6 +711,29 @@ def run_benchmark(
                 }
             )
             _write_report(report, chosen_report_path)
+
+        if chosen_transfer_root is not None:
+            if chosen_transfer_root.exists():
+                if not overwrite:
+                    raise FileExistsError(
+                        f"Transfer benchmark root already exists: {chosen_transfer_root}"
+                    )
+                shutil.rmtree(chosen_transfer_root)
+            chosen_transfer_root.mkdir(parents=True, exist_ok=False)
+            report["transfer_benchmark_status"] = "running"
+            _write_report(report, chosen_report_path)
+            for variant in report["variants"]:
+                candidate = int(variant["requested_shard_rows"])
+                variant["transfer_benchmark"] = _transfer_candidate(
+                    Path(variant["destination"]),
+                    chosen_transfer_root / f"shard_rows_{candidate}.zarr",
+                    remove_after_validation=bool(remove_transfer_copies),
+                )
+                _write_report(report, chosen_report_path)
+            if remove_transfer_copies:
+                chosen_transfer_root.rmdir()
+            report["transfer_benchmark_status"] = "complete"
+            _write_report(report, chosen_report_path)
     except BaseException as exc:
         report["status"] = "failed"
         report["failed_at_utc"] = _utc_now()
@@ -679,6 +791,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--scan-rows", type=int, default=16_384)
     parser.add_argument("--digest-rows", type=int, default=16_384)
     parser.add_argument("--report", type=Path)
+    parser.add_argument(
+        "--transfer-root",
+        type=Path,
+        help="Optional destination root for timed, checksum-validated rsync publication trials.",
+    )
+    parser.add_argument(
+        "--keep-transfer-copies",
+        action="store_true",
+        help="Retain transfer trial copies instead of removing each after validation.",
+    )
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--json", action="store_true")
@@ -696,6 +818,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         scan_rows=int(args.scan_rows),
         digest_rows=int(args.digest_rows),
         report_path=args.report,
+        transfer_root=args.transfer_root,
+        remove_transfer_copies=not bool(args.keep_transfer_copies),
         apply=bool(args.apply),
         overwrite=bool(args.overwrite),
     )
