@@ -201,3 +201,49 @@ for example:
 Until Crimson and the review backends are routed through this layer, existing
 in-place review writers remain compatibility paths and must not be used to edit
 an `artifact_mutability=immutable_snapshot` run.
+
+## Sleepyfish Production Snapshot Canary (2026-07-15)
+
+The full Cam2010095 clipped collection was used as the first production
+identity and immutable-snapshot canary. No inference or refinement was rerun.
+
+- The historical analysis shell lacked the newer root
+  `analysis_layout=clipped_recording_shell` marker but had a valid finalized
+  refined-detection collection pointer. The identity repair now treats that
+  pointer as an unambiguous clipped-lineage contract instead of falling into
+  unrelated legacy root runs.
+- Deterministic `instance_key` lineage repair wrote 135 arrays across all 22
+  raw/refined detection lineages, crop proxies, the merged crop, raw
+  keypoints, and refined keypoints. Post-write validation checked all 135
+  arrays with zero mismatches.
+- The selected refined-keypoint rowset contains 1,169,010 unique observation
+  rows and records
+  `instance_key_policy=copied_from_merged_proxy_crop_rows`.
+- The immutable snapshot
+  `refined_keypoints_sleepyfish_kp_allclips_sharded_20260715_01` copied 46
+  canonical arrays. Every decoded source/destination SHA-256 matched. The
+  legacy `reason` mirror was omitted and `reason_bytes` remained authoritative.
+- Publication completed on one LSF compute-node slot in 49 seconds with 242 MB
+  peak RSS. The run was streamed by outer shard; the full table was not loaded
+  into memory.
+- Physical files in the selected refined-keypoint run fell from 28,277 to 365
+  (about 77x fewer). `keypoints_img` retains 1,024-row inner chunks and uses
+  131,072-row outer shards; the backfilled identity array retains 16,384-row
+  inner chunks on the same outer-shard grid.
+- Completion, exact-validation metadata, `latest`, and `latest_complete` all
+  select the new snapshot. The shared registry refresh completed from the same
+  canonical Zarr after taking a SQLite backup.
+
+The selected refined detections remain a finalized 22-clip collection rather
+than one root table. A representative 54,000-row clip run has 53 physical files
+and its coordinate columns are already one data object apiece. Republishing
+those runs as indexed shards would not materially reduce object count, so the
+canary intentionally left that collection unchanged after adding stable keys.
+
+`immutable_snapshot` is an application contract, not a filesystem write lock.
+Low-level Zarr or PRFS writes remain physically possible for an account with
+permission. Supported review writers must refuse in-place changes and route
+them to `edit_delta_runs`. No synthetic scientific correction was added to the
+production recording merely to exercise that path. A real production delta
+canary remains blocked on the Crimson overlay reader, review-writer routing,
+and parity-tested derived-metric refresh during compaction.
