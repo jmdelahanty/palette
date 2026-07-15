@@ -253,6 +253,60 @@ def test_materialize_tail_kinematics_stages_computes_and_atomically_publishes(
     assert run["frame_index"][:].tolist() == list(range(100, 109))
 
 
+def test_materialize_tail_kinematics_process_workers_own_complete_shards(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _patch_provenance(monkeypatch)
+    monkeypatch.setattr(tail_mod, "refined_subject_mask_metric_row_chunk", lambda _total_rows: 2)
+    source = tmp_path / "source.zarr"
+    scratch = tmp_path / "scratch"
+    _build_source_zarr(source)
+
+    result = mod.materialize_tail_kinematics(
+        source,
+        scratch_root=scratch,
+        shape_run="shape_001",
+        run_name="tail_process_shards",
+        block_rows=3,
+        execution_backend="process_shards",
+        num_workers=2,
+        copy_backend="python",
+        apply=True,
+        keep_scratch=True,
+        check_capacity=False,
+        stage_command="unit-test-process-shards",
+    )
+
+    summary = result["local_materialization"]
+    assert summary["execution_backend"] == "process_shards"
+    assert summary["worker_count_requested"] == 2
+    assert summary["worker_count_effective"] == 2
+    assert summary["effective_block_rows"] == 4
+    assert summary["completed_block_count"] == 3
+    root = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    run = root["analysis/tail_kinematics_runs/tail_process_shards"]
+    assert run.attrs["materialization_mode"] == "bounded_process_shards"
+    assert run.attrs["worker_chunk_alignment"] == "align_to_output_row_chunks_and_shards"
+    assert (
+        run.attrs["worker_write_ownership"]
+        == "one_complete_nonoverlapping_output_shard_per_task"
+    )
+    assert tuple(run["tail_angle_rad"].chunks) == (2, 10)
+    assert tuple(run["tail_angle_rad"].shards) == (4, 10)
+    np.testing.assert_allclose(np.asarray(run["tail_angle_deg"][:]), 0.0, atol=1e-5)
+
+
+def test_process_shard_slice_validation_rejects_partial_shared_shards() -> None:
+    with pytest.raises(ValueError, match="output shard"):
+        tail_mod._validate_process_shard_slices(
+            (slice(0, 2), slice(2, 6), slice(6, 9)),
+            row_count=9,
+            output_row_chunk=2,
+            output_shard_rows=4,
+        )
+
+
 def test_materializer_refuses_to_replace_existing_authoritative_run(monkeypatch, tmp_path: Path) -> None:
     _patch_provenance(monkeypatch)
     source = tmp_path / "source.zarr"

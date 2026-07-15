@@ -73,6 +73,8 @@ def test_submit_tail_kinematics_materialization_renders_fail_closed_job(
             "/scratch/palette-test",
             "--queue",
             "short",
+            "--ncores",
+            "3",
         ],
         check=False,
         text=True,
@@ -84,7 +86,7 @@ def test_submit_tail_kinematics_materialization_renders_fail_closed_job(
     assert "shape_run=subject_shape_001" in result.stdout
     assert "run_name=tail_kinematics_001" in result.stdout
     assert "bsub_command=" in result.stdout
-    assert " -n 1 " in result.stdout
+    assert " -n 3 " in result.stdout
     run_dirs = list(log_dir.glob("tail_kinematics_001_*"))
     assert len(run_dirs) == 1
     job_script = run_dirs[0] / "run_tail_kinematics_materialization.sh"
@@ -92,6 +94,8 @@ def test_submit_tail_kinematics_materialization_renders_fail_closed_job(
     assert "Refusing tail-kinematics execution outside an LSF allocation" in text
     assert "fisheye.analysis_workflows.materializers.tail_kinematics" in text
     assert "--copy-backend rsync" in text
+    assert "--execution-backend process_shards" in text
+    assert '--num-workers "${NCORES}"' in text
     assert "--apply" in text
     assert "/scratch/palette-test" in text
     assert "status_tmp=" in text

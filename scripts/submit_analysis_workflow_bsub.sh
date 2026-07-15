@@ -50,8 +50,9 @@ Options:
   --submit                     Render and submit; default reserves a render-only directory
   -h, --help                   Show this help
 
-Export-product targets and tail_kinematics are intentionally unsupported until
-their streaming/chunk-safe execution adapters are implemented.
+Export-product targets remain unsupported until their immutable streaming
+execution adapters are implemented. Tail kinematics uses its dedicated
+node-local staged process-shard materializer.
 USAGE
 }
 

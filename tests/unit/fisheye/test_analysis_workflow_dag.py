@@ -41,7 +41,7 @@ def test_core_behavior_profile_declares_portable_and_framewise_resolutions() -> 
     assert workflow.temporal_policy.activity_spatial_bin_size_s == 5.0
     assert workflow.temporal_policy.eye_trace_resolution == "framewise"
     assert workflow.temporal_policy.tail_trace_resolution == "framewise"
-    assert workflow.node_by_id["tail_kinematics"].runnable is False
+    assert workflow.node_by_id["tail_kinematics"].runnable is True
     assert workflow.node_by_id["tail_traces"].depends_on == (
         "subject_shape",
         "tail_kinematics",
@@ -144,7 +144,7 @@ def test_targeted_plan_reuses_authority_and_schedules_only_dependency_closure() 
     }
 
 
-def test_tail_plan_blocks_when_safe_large_recording_backend_is_unavailable() -> None:
+def test_tail_plan_uses_staged_process_shard_backend() -> None:
     workflow = load_analysis_workflow(default_core_behavior_profile_path())
     availability = {
         "refined_subject_masks": StageAvailability(
@@ -167,13 +167,13 @@ def test_tail_plan_blocks_when_safe_large_recording_backend_is_unavailable() -> 
 
     plan = plan_analysis_workflow(workflow, availability, targets=("tail_traces",))
 
-    assert plan.ready is False
+    assert plan.ready is True
     assert plan.node_by_id["subject_shape"].action == "run"
-    assert plan.node_by_id["tail_kinematics"].action == "blocked"
+    assert plan.node_by_id["tail_kinematics"].action == "run"
     assert plan.node_by_id["tail_kinematics"].execution_policy == (
-        "chunk_aligned_backend_required"
+        "node_local_staged_process_shards"
     )
-    assert plan.node_by_id["tail_traces"].action == "blocked"
+    assert plan.node_by_id["tail_traces"].action == "run"
 
 
 def test_track_kinematics_plan_blocks_without_tracking_authority() -> None:

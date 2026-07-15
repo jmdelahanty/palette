@@ -214,17 +214,18 @@ The executor preserves these large-recording constraints:
   deterministic finalize step;
 - eye-angle and subject-shape stages already have worker-chunk designs that can
   preserve non-overlapping physical Zarr chunk ownership;
-- the Palette-native tail-kinematics writer currently reads and writes the
-  whole framewise result serially. The core profile marks that node
-  non-runnable with `chunk_aligned_backend_required`, so a million-frame plan
-  blocks the tail branch instead of accidentally launching an unsafe job;
+- Palette-native tail kinematics uses its dedicated staged materializer: it
+  transfers only the required subject-shape arrays to node-local scratch,
+  assigns complete non-overlapping output shards to process workers, validates
+  locally, and publishes one completed run atomically. The core profile can
+  therefore execute the `tail_kinematics` node with `--num-workers`;
 - framewise eye and tail exports must stream row groups or array chunks. They
   must not accumulate the complete recording as one in-memory table.
 
-The 10 Hz kinematic samples, 5-second activity/spatial summaries, framewise
-trace exports, and tail kinematics remain planning-only nodes. The executor
-rejects them instead of pretending an adapter exists. They become executable
-only after their immutable streaming materializers are implemented and tested.
+The 10 Hz kinematic samples, 5-second activity/spatial summaries, and framewise
+trace exports remain planning-only nodes. The executor rejects them instead of
+pretending an adapter exists. Tail kinematics is executable after its staged,
+chunk-safe materializer and million-frame canary validation.
 Registry updates remain serialized after successful artifact publication.
 
 ## Adding another workflow

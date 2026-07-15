@@ -433,7 +433,8 @@ a read-only plan. With `--apply`, it:
 2. copies only the required physical files through one `rsync --files-from`
    operation;
 3. validates the staged file inventory and opens the staged logical run;
-4. computes the complete result against the node-local subset Zarr;
+4. computes the complete result against the node-local subset Zarr, either
+   serially or with process tasks that each own one complete output shard;
 5. validates schema, shapes, row accounting, block accounting, and the compute
    kernel;
 6. copies the completed run into a hidden authoritative sibling, validates the
@@ -461,11 +462,11 @@ the first staging implementation copies all required source chunk files. It
 will naturally copy fewer physical files when upstream subject-shape arrays are
 sharded without changing the logical staging contract.
 
-The node-local single-writer topology and atomic publication path are now
-implemented and unit tested. The million-frame workflow DAG remains blocked by
-`chunk_aligned_backend_required` until a real large-recording staged canary is
-validated and optional intra-node worker ownership is implemented. Direct use
-of the dedicated materializer does not require enabling the general DAG node.
+The node-local serial and process-shard topologies plus atomic publication are
+implemented and unit tested. The million-frame staged canary validated source
+transfer, bounded computation, local/final inventories, and completion-last
+publication, so the general workflow DAG now enables `tail_kinematics`. Direct
+use of the dedicated materializer remains available for focused operations.
 
 ## Megabouts Compatibility
 
@@ -625,7 +626,7 @@ internal schema, model versions, dependency stack, or classifier taxonomy.
   reference was exact for floating outputs, validity, and failure bytes.
 - [x] Add a manifest-driven node-local staging adapter that copies all physical
   shards of only the required subject-shape arrays for an all-frame run.
-- [ ] Add configurable intra-node workers with exclusive, complete output-chunk
+- [x] Add configurable intra-node workers with exclusive, complete output-chunk
   ownership and record requested/effective worker blocking in provenance.
 - [x] Add shared-storage copy validation and completion-last publication. The
   publisher refuses overwrite, validates a hidden sibling, atomically renames
@@ -633,9 +634,14 @@ internal schema, model versions, dependency stack, or classifier taxonomy.
 - [x] Add a fail-closed Citrus LSF wrapper that pins a clean shared checkout,
   allocates node-local scratch, and records submission, status, and report
   paths on shared storage.
-- [ ] Run the node-local materializer on the million-frame Sleepyfish source and
+- [x] Run the node-local materializer on the million-frame Sleepyfish source and
   inspect its staging, local-compute, publish, and final-validation reports
   before enabling `tail_kinematics` in the general workflow DAG.
+- [x] The staged Sleepyfish canary `tail_kinematics_sleepyfish_node_local_canary_20260715_01`
+  processed 1,169,010 rows on node-local scratch, validated 1,097,961 valid and
+  71,049 invalid rows, and atomically published a 285 MB run. Source staging,
+  local output, temporary publication, and final authoritative validation all
+  matched their inventories.
 - [x] Run the writer on the feeding canary subject-shape run:
   `tail_kinematics_k10_canary_20260430` from
   `subject_shape_v3_snout_medialjoin_canary_20260429` wrote 17,495 valid rows

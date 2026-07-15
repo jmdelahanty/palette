@@ -102,14 +102,12 @@ nodes:
     kind: analysis
     stage_id: tail_kinematics
     depends_on: [subject_shape]
-    runnable: false
-    execution_policy: chunk_aligned_backend_required
+    execution_policy: node_local_staged_process_shards
     description: >-
       Palette-native framewise tail angles, deflections, and curvature. The
-      dedicated bounded materializer now provides node-local source staging,
-      physically sharded output, and validated completion-last publication.
-      A real million-frame staged canary and optional local-worker ownership
-      remain required before general DAG execution.
+      dedicated materializer stages required source shards to node-local
+      storage, assigns workers complete non-overlapping output shards, and
+      validates completion-last atomic publication.
 
   - id: kinematics_samples
     kind: export

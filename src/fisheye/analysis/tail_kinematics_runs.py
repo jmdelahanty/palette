@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
+import multiprocessing as mp
 import sys
 import time
 from dataclasses import dataclass
@@ -35,6 +37,7 @@ TAIL_KINEMATICS_STAGE_NAME = "analysis.tail_kinematics_runs"
 SOURCE_TAIL_GEOMETRY_KIND = "subject_shape_bspline_tail_resample"
 DEFAULT_TAIL_ANGLE_SAMPLE_COUNT = 10
 DEFAULT_BLOCK_ROWS = 16_384
+TAIL_KINEMATICS_EXECUTION_BACKENDS = frozenset({"serial", "process_shards"})
 REASON_BYTES_WIDTH = 64
 ROW_LINEAGE_NAMES = (
     "frame_indices",
@@ -233,6 +236,35 @@ def _iter_row_slices(row_count: int, block_rows: int) -> Sequence[slice]:
         slice(start, min(int(row_count), start + int(block_rows)))
         for start in range(0, int(row_count), int(block_rows))
     )
+
+
+def _validate_process_shard_slices(
+    row_slices: Sequence[slice],
+    *,
+    row_count: int,
+    output_row_chunk: int,
+    output_shard_rows: int,
+) -> None:
+    """Prove that each process owns complete, non-overlapping output storage."""
+
+    previous_stop = 0
+    for row_slice in row_slices:
+        start = int(row_slice.start or 0)
+        stop = int(row_slice.stop or 0)
+        if start != previous_stop or stop <= start:
+            raise ValueError("Worker row slices must be contiguous and non-overlapping.")
+        if start % int(output_row_chunk) != 0:
+            raise ValueError("Worker row slices must start on the output chunk grid.")
+        if start % int(output_shard_rows) != 0:
+            raise ValueError("Worker row slices must start on the output shard grid.")
+        if stop != int(row_count):
+            if stop - start != int(output_shard_rows):
+                raise ValueError("Non-final workers must own one complete output shard.")
+            if stop % int(output_row_chunk) != 0:
+                raise ValueError("Non-final workers must end on the output chunk grid.")
+        previous_stop = stop
+    if previous_stop != int(row_count):
+        raise ValueError("Worker row slices do not cover the complete row axis.")
 
 
 def _copy_array_bounded(
@@ -807,6 +839,9 @@ def _prepare_tail_kinematics_run(
     source_geometry_tail_sample_count: int,
     requested_block_rows: int,
     effective_block_rows: int,
+    execution_backend: str,
+    worker_count_requested: int,
+    worker_count_effective: int,
     stage_command: str,
     overwrite: bool,
 ) -> zarr.Group:
@@ -833,6 +868,11 @@ def _prepare_tail_kinematics_run(
     )
     output_row_chunk = int(_metric_chunks(int(row_count))[0])
     block_count = len(_iter_row_slices(int(row_count), int(effective_block_rows)))
+    materialization_mode = (
+        "bounded_streaming_single_writer"
+        if execution_backend == "serial"
+        else "bounded_process_shards"
+    )
 
     run_group.attrs.update(
         {
@@ -859,8 +899,19 @@ def _prepare_tail_kinematics_run(
             "frame_index_source": frame_index_source,
             "row_lineage_copied": copied,
             "row_lineage_missing": missing,
-            "materialization_mode": "bounded_streaming_single_writer",
+            "materialization_mode": materialization_mode,
             "compute_kernel": TAIL_KINEMATICS_COMPUTE_KERNEL,
+            "execution_backend": str(execution_backend),
+            "worker_count_requested": int(worker_count_requested),
+            "worker_count_effective": int(worker_count_effective),
+            "worker_chunk_size_requested": int(requested_block_rows),
+            "worker_chunk_size_effective": int(effective_block_rows),
+            "worker_chunk_alignment": "align_to_output_row_chunks_and_shards",
+            "worker_write_ownership": (
+                "single_driver"
+                if execution_backend == "serial"
+                else "one_complete_nonoverlapping_output_shard_per_task"
+            ),
             "requested_block_rows": int(requested_block_rows),
             "effective_block_rows": int(effective_block_rows),
             "output_row_chunk": output_row_chunk,
@@ -915,8 +966,19 @@ def _prepare_tail_kinematics_run(
             "tail_angle_reference_axis": "caudal_axis=-forward_axis",
             "tail_angle_positive_direction": "anatomical_left",
             "source_tail_geometry_kind": SOURCE_TAIL_GEOMETRY_KIND,
-            "materialization_mode": "bounded_streaming_single_writer",
+            "materialization_mode": materialization_mode,
             "compute_kernel": TAIL_KINEMATICS_COMPUTE_KERNEL,
+            "execution_backend": str(execution_backend),
+            "worker_count_requested": int(worker_count_requested),
+            "worker_count_effective": int(worker_count_effective),
+            "worker_chunk_size_requested": int(requested_block_rows),
+            "worker_chunk_size_effective": int(effective_block_rows),
+            "worker_chunk_alignment": "align_to_output_row_chunks_and_shards",
+            "worker_write_ownership": (
+                "single_driver"
+                if execution_backend == "serial"
+                else "one_complete_nonoverlapping_output_shard_per_task"
+            ),
             "requested_block_rows": int(requested_block_rows),
             "effective_block_rows": int(effective_block_rows),
             "output_row_chunk": output_row_chunk,
@@ -1030,6 +1092,65 @@ def _write_tail_kinematics_batch_slice(
     run_group["integrated_abs_tail_curvature"][row_slice] = batch.integrated_abs_tail_curvature
 
 
+def _tail_kinematics_batch_counts(batch: TailKinematicsBatch) -> tuple[int, dict[str, int]]:
+    valid_count = int(np.count_nonzero(batch.valid))
+    labels, counts = np.unique(
+        np.asarray(batch.failure_reason, dtype=str),
+        return_counts=True,
+    )
+    return valid_count, {
+        str(label): int(count)
+        for label, count in zip(labels.tolist(), counts.tolist(), strict=True)
+    }
+
+
+def _process_tail_kinematics_shard(
+    zarr_path: str,
+    *,
+    shape_run: str,
+    run_name: str,
+    row_start: int,
+    row_stop: int,
+    tail_angle_sample_count: int,
+) -> dict[str, object]:
+    """Compute and write one complete worker-owned output shard."""
+
+    root = open_zarr_root(zarr_path, mode="a")
+    resolved_shape_run, _shape_group, sources = _resolve_tail_kinematics_sources(
+        root,
+        shape_run,
+    )
+    if resolved_shape_run != shape_run:
+        raise RuntimeError(
+            f"Worker resolved subject-shape run {resolved_shape_run!r}, expected {shape_run!r}."
+        )
+    run_group = root["analysis"]["tail_kinematics_runs"][run_name]
+    row_slice = slice(int(row_start), int(row_stop))
+
+    read_started = time.perf_counter()
+    block_sources = _read_tail_kinematics_source_block(sources, row_slice)
+    read_duration = float(time.perf_counter() - read_started)
+    compute_started = time.perf_counter()
+    batch = compute_tail_kinematics_from_subject_shape_arrays(
+        **block_sources,
+        tail_angle_sample_count=int(tail_angle_sample_count),
+    )
+    compute_duration = float(time.perf_counter() - compute_started)
+    write_started = time.perf_counter()
+    _write_tail_kinematics_batch_slice(run_group, row_slice, batch)
+    write_duration = float(time.perf_counter() - write_started)
+    valid_count, reason_counts = _tail_kinematics_batch_counts(batch)
+    return {
+        "row_start": int(row_start),
+        "row_stop": int(row_stop),
+        "valid_row_count": int(valid_count),
+        "failure_reason_counts": reason_counts,
+        "source_read_duration_seconds": read_duration,
+        "compute_duration_seconds": compute_duration,
+        "write_duration_seconds": write_duration,
+    }
+
+
 def _write_tail_kinematics_batch(run_group: zarr.Group, batch: TailKinematicsBatch) -> None:
     """Compatibility helper for writing an already-materialized batch."""
 
@@ -1050,6 +1171,9 @@ def write_tail_kinematics_run_group(
     run_name: Optional[str] = None,
     tail_angle_sample_count: int = DEFAULT_TAIL_ANGLE_SAMPLE_COUNT,
     block_rows: int = DEFAULT_BLOCK_ROWS,
+    execution_backend: str = "serial",
+    num_workers: int = 1,
+    worker_zarr_path: str | Path | None = None,
     overwrite: bool = False,
     dry_run: bool = False,
     stage_command: Optional[str] = None,
@@ -1060,6 +1184,16 @@ def write_tail_kinematics_run_group(
         raise ValueError("tail_angle_sample_count must be >= 2.")
     if int(block_rows) <= 0:
         raise ValueError("block_rows must be positive.")
+    backend = str(execution_backend).strip().lower()
+    if backend not in TAIL_KINEMATICS_EXECUTION_BACKENDS:
+        raise ValueError(
+            f"Unsupported execution_backend {execution_backend!r}; expected one of "
+            f"{sorted(TAIL_KINEMATICS_EXECUTION_BACKENDS)!r}."
+        )
+    if int(num_workers) <= 0:
+        raise ValueError("num_workers must be positive.")
+    if backend == "process_shards" and not dry_run and worker_zarr_path is None:
+        raise ValueError("process_shards requires worker_zarr_path for independent worker opens.")
     shape_run_name, shape_group, sources = _resolve_tail_kinematics_sources(root, shape_run)
     row_count = int(sources.row_count)
     effective_block_rows = _effective_block_rows(
@@ -1067,6 +1201,24 @@ def write_tail_kinematics_run_group(
         requested_block_rows=int(block_rows),
     )
     row_slices = _iter_row_slices(row_count, effective_block_rows)
+    worker_count_effective = (
+        1
+        if backend == "serial"
+        else min(int(num_workers), max(1, len(row_slices)))
+    )
+    output_row_chunk = int(_metric_chunks(row_count)[0])
+    if backend == "process_shards":
+        _validate_process_shard_slices(
+            row_slices,
+            row_count=row_count,
+            output_row_chunk=output_row_chunk,
+            output_shard_rows=int(effective_block_rows),
+        )
+    materialization_mode = (
+        "bounded_streaming_single_writer"
+        if backend == "serial"
+        else "bounded_process_shards"
+    )
     target_run = str(run_name or _default_run_name())
     summary: dict[str, object] = {
         "status": "planned" if dry_run else "updated",
@@ -1075,11 +1227,17 @@ def write_tail_kinematics_run_group(
         "source_refined_subject_masks_run": shape_group.attrs.get("source_refined_subject_masks_run"),
         "roi_count": int(row_count),
         "tail_angle_sample_count": int(tail_angle_sample_count),
-        "materialization_mode": "bounded_streaming_single_writer",
+        "materialization_mode": materialization_mode,
         "compute_kernel": TAIL_KINEMATICS_COMPUTE_KERNEL,
+        "execution_backend": backend,
+        "worker_count_requested": int(num_workers),
+        "worker_count_effective": int(worker_count_effective),
+        "worker_chunk_size_requested": int(block_rows),
+        "worker_chunk_size_effective": int(effective_block_rows),
+        "worker_chunk_alignment": "align_to_output_row_chunks_and_shards",
         "requested_block_rows": int(block_rows),
         "effective_block_rows": int(effective_block_rows),
-        "output_row_chunk": int(_metric_chunks(row_count)[0]),
+        "output_row_chunk": output_row_chunk,
         "output_shard_rows": int(effective_block_rows),
         "block_count": int(len(row_slices)),
         "mutates_archive": not bool(dry_run),
@@ -1093,6 +1251,27 @@ def write_tail_kinematics_run_group(
     completed_block_count = 0
     valid_count = 0
     reason_counts: dict[str, int] = {}
+    source_read_duration_seconds_sum = 0.0
+    compute_duration_seconds_sum = 0.0
+    write_duration_seconds_sum = 0.0
+
+    def record_block_result(block_result: Mapping[str, object]) -> None:
+        nonlocal completed_block_count
+        nonlocal valid_count
+        nonlocal source_read_duration_seconds_sum
+        nonlocal compute_duration_seconds_sum
+        nonlocal write_duration_seconds_sum
+        valid_count += int(block_result["valid_row_count"])
+        for reason, count in dict(block_result["failure_reason_counts"]).items():
+            key = str(reason or "")
+            reason_counts[key] = int(reason_counts.get(key, 0) + int(count))
+        source_read_duration_seconds_sum += float(
+            block_result["source_read_duration_seconds"]
+        )
+        compute_duration_seconds_sum += float(block_result["compute_duration_seconds"])
+        write_duration_seconds_sum += float(block_result["write_duration_seconds"])
+        completed_block_count += 1
+
     try:
         run_group = _prepare_tail_kinematics_run(
             root,
@@ -1104,6 +1283,9 @@ def write_tail_kinematics_run_group(
             source_geometry_tail_sample_count=int(sources.source_sample_count),
             requested_block_rows=int(block_rows),
             effective_block_rows=int(effective_block_rows),
+            execution_backend=backend,
+            worker_count_requested=int(num_workers),
+            worker_count_effective=int(worker_count_effective),
             stage_command=command,
             overwrite=overwrite,
         )
@@ -1114,18 +1296,51 @@ def write_tail_kinematics_run_group(
             tail_angle_sample_s=target_s,
             shard_rows=int(effective_block_rows),
         )
-        for row_slice in row_slices:
-            block_sources = _read_tail_kinematics_source_block(sources, row_slice)
-            batch = compute_tail_kinematics_from_subject_shape_arrays(
-                **block_sources,
-                tail_angle_sample_count=int(tail_angle_sample_count),
-            )
-            _write_tail_kinematics_batch_slice(run_group, row_slice, batch)
-            valid_count += int(np.count_nonzero(batch.valid))
-            for reason in np.asarray(batch.failure_reason, dtype=object).tolist():
-                key = str(reason or "")
-                reason_counts[key] = int(reason_counts.get(key, 0) + 1)
-            completed_block_count += 1
+        if backend == "serial":
+            for row_slice in row_slices:
+                read_started = time.perf_counter()
+                block_sources = _read_tail_kinematics_source_block(sources, row_slice)
+                read_duration = float(time.perf_counter() - read_started)
+                compute_started = time.perf_counter()
+                batch = compute_tail_kinematics_from_subject_shape_arrays(
+                    **block_sources,
+                    tail_angle_sample_count=int(tail_angle_sample_count),
+                )
+                compute_duration = float(time.perf_counter() - compute_started)
+                write_started = time.perf_counter()
+                _write_tail_kinematics_batch_slice(run_group, row_slice, batch)
+                write_duration = float(time.perf_counter() - write_started)
+                block_valid_count, block_reason_counts = _tail_kinematics_batch_counts(batch)
+                record_block_result(
+                    {
+                        "valid_row_count": block_valid_count,
+                        "failure_reason_counts": block_reason_counts,
+                        "source_read_duration_seconds": read_duration,
+                        "compute_duration_seconds": compute_duration,
+                        "write_duration_seconds": write_duration,
+                    }
+                )
+        else:
+            worker_path = str(Path(worker_zarr_path).expanduser().resolve())
+            context = mp.get_context("spawn")
+            with ProcessPoolExecutor(
+                max_workers=int(worker_count_effective),
+                mp_context=context,
+            ) as pool:
+                futures = [
+                    pool.submit(
+                        _process_tail_kinematics_shard,
+                        worker_path,
+                        shape_run=shape_run_name,
+                        run_name=target_run,
+                        row_start=int(row_slice.start or 0),
+                        row_stop=int(row_slice.stop or 0),
+                        tail_angle_sample_count=int(tail_angle_sample_count),
+                    )
+                    for row_slice in row_slices
+                ]
+                for future in as_completed(futures):
+                    record_block_result(future.result())
 
         duration_seconds = float(time.perf_counter() - started)
         invalid_count = int(row_count - valid_count)
@@ -1136,6 +1351,9 @@ def write_tail_kinematics_run_group(
         run_group.attrs["invalid_row_count"] = invalid_count
         run_group.attrs["completed_block_count"] = int(completed_block_count)
         run_group.attrs["failure_reason_counts"] = reason_counts
+        run_group.attrs["source_read_duration_seconds_sum"] = source_read_duration_seconds_sum
+        run_group.attrs["compute_duration_seconds_sum"] = compute_duration_seconds_sum
+        run_group.attrs["write_duration_seconds_sum"] = write_duration_seconds_sum
         mark_run_complete(
             run_group,
             parent_group=root["analysis"]["tail_kinematics_runs"],
@@ -1169,6 +1387,9 @@ def write_tail_kinematics_run_group(
             "duration_seconds": duration_seconds,
             "rows_per_second": rows_per_second,
             "completed_block_count": int(completed_block_count),
+            "source_read_duration_seconds_sum": source_read_duration_seconds_sum,
+            "compute_duration_seconds_sum": compute_duration_seconds_sum,
+            "write_duration_seconds_sum": write_duration_seconds_sum,
         }
     )
     return dict(_json_safe(summary))
@@ -1181,6 +1402,8 @@ def write_tail_kinematics_run(
     run_name: Optional[str] = None,
     tail_angle_sample_count: int = DEFAULT_TAIL_ANGLE_SAMPLE_COUNT,
     block_rows: int = DEFAULT_BLOCK_ROWS,
+    execution_backend: str = "serial",
+    num_workers: int = 1,
     overwrite: bool = False,
     dry_run: bool = False,
 ) -> dict[str, object]:
@@ -1191,6 +1414,9 @@ def write_tail_kinematics_run(
         run_name=run_name,
         tail_angle_sample_count=tail_angle_sample_count,
         block_rows=block_rows,
+        execution_backend=execution_backend,
+        num_workers=num_workers,
+        worker_zarr_path=zarr_path,
         overwrite=overwrite,
         dry_run=dry_run,
     )
@@ -1218,6 +1444,13 @@ def _build_parser() -> argparse.ArgumentParser:
             "to the output row-chunk grid."
         ),
     )
+    parser.add_argument(
+        "--execution-backend",
+        choices=tuple(sorted(TAIL_KINEMATICS_EXECUTION_BACKENDS)),
+        default="serial",
+        help="Serial driver writes or chunk/shard-aligned node-local process workers.",
+    )
+    parser.add_argument("--num-workers", type=int, default=1)
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing target tail-kinematics run.")
     parser.add_argument("--dry-run", action="store_true", help="Resolve inputs without mutating the archive.")
     parser.add_argument("--json", action="store_true", help="Emit compact JSON.")
@@ -1233,6 +1466,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         run_name=args.run_name,
         tail_angle_sample_count=int(args.tail_angle_sample_count),
         block_rows=int(args.block_rows),
+        execution_backend=str(args.execution_backend),
+        num_workers=int(args.num_workers),
         overwrite=bool(args.overwrite),
         dry_run=bool(args.dry_run),
     )

@@ -10,7 +10,7 @@ SUBMIT_HOST="${PALETTE_LSF_SUBMIT_HOST:-login1-citrus-poller}"
 LOG_DIR=""
 SCRATCH_BASE=""
 QUEUE=""
-NCORES=1
+NCORES=8
 MEM_GB=32
 WALLTIME="4:00"
 BLOCK_ROWS=16384
@@ -41,6 +41,7 @@ Options:
   --scratch-base PATH         Node-local base; default: /scratch/$USER/$LSB_JOBID
                               with $TMPDIR as a node-local fallback
   --queue NAME                LSF queue; default is the cluster default
+  --ncores N                  CPU slots and process-shard workers (default: 8)
   --mem-gb N                  Memory request (default: 32)
   --walltime H:MM             Walltime (default: 4:00)
   --block-rows N              Bounded compute/output shard rows (default: 16384)
@@ -49,9 +50,8 @@ Options:
   --submit                    Submit; otherwise render only
   -h, --help                  Show this help
 
-The current writer is deliberately a single process, so this wrapper requests
-one CPU slot. A future local-worker implementation can raise that allocation
-without changing the staging or atomic-publication contract.
+Each worker owns one complete, non-overlapping output shard. The driver alone
+creates/finalizes run metadata and performs atomic publication.
 USAGE
 }
 
@@ -70,6 +70,7 @@ while [[ $# -gt 0 ]]; do
     --log-dir) LOG_DIR="$2"; shift 2;;
     --scratch-base) SCRATCH_BASE="$2"; shift 2;;
     --queue) QUEUE="$2"; shift 2;;
+    --ncores) NCORES="$2"; shift 2;;
     --mem-gb) MEM_GB="$2"; shift 2;;
     --walltime) WALLTIME="$2"; shift 2;;
     --block-rows) BLOCK_ROWS="$2"; shift 2;;
@@ -89,6 +90,7 @@ done
 [[ "$RUN_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || \
   fail "unsafe --run-name: $RUN_NAME"
 [[ "$MEM_GB" =~ ^[1-9][0-9]*$ ]] || fail "--mem-gb must be a positive integer"
+[[ "$NCORES" =~ ^[1-9][0-9]*$ ]] || fail "--ncores must be a positive integer"
 [[ "$BLOCK_ROWS" =~ ^[1-9][0-9]*$ ]] || fail "--block-rows must be a positive integer"
 [[ "$TAIL_ANGLE_SAMPLE_COUNT" =~ ^[0-9]+$ ]] || \
   fail "--tail-angle-sample-count must be an integer"
@@ -143,6 +145,7 @@ STATUS_FILE=${q_status}
 CONFIGURED_SCRATCH_BASE=${q_scratch_base}
 BLOCK_ROWS=${BLOCK_ROWS}
 TAIL_ANGLE_SAMPLE_COUNT=${TAIL_ANGLE_SAMPLE_COUNT}
+NCORES=${NCORES}
 KEEP_SCRATCH=${KEEP_SCRATCH}
 
 [[ -n "\${LSB_JOBID:-}" ]] || {
@@ -188,6 +191,8 @@ cmd=(
   --scratch-root "\${scratch_root}"
   --block-rows "\${BLOCK_ROWS}"
   --tail-angle-sample-count "\${TAIL_ANGLE_SAMPLE_COUNT}"
+  --execution-backend process_shards
+  --num-workers "\${NCORES}"
   --copy-backend rsync
   --report "\${REPORT_PATH}"
   --apply

@@ -241,26 +241,36 @@ def test_execution_refuses_export_target_without_materializer(tmp_path: Path) ->
         )
 
 
-def test_execution_refuses_blocked_tail_plan(tmp_path: Path) -> None:
+def test_execution_renders_staged_tail_materializer(tmp_path: Path) -> None:
     workflow = load_analysis_workflow(default_core_behavior_profile_path())
     availability = {
         "refined_subject_masks": _status(
             "refined_subject_masks", available=True, run_name="refined_masks_a"
         ),
-        "subject_shape": _status("subject_shape", available=False),
+        "subject_shape": _status(
+            "subject_shape", available=True, run_name="subject_shape_a"
+        ),
         "tail_kinematics": _status("tail_kinematics", available=False),
     }
-    plan = plan_analysis_workflow(workflow, availability, targets=("tail_traces",))
+    plan = plan_analysis_workflow(workflow, availability, targets=("tail_kinematics",))
 
-    with pytest.raises(WorkflowExecutionError, match="workflow plan is blocked"):
-        build_workflow_execution_plan(
-            workflow,
-            plan,
-            zarr_path=tmp_path,
-            execution_id="run_a",
-            num_workers=1,
-            python_executable="python",
-        )
+    execution = build_workflow_execution_plan(
+        workflow,
+        plan,
+        zarr_path=tmp_path,
+        execution_id="run_a",
+        num_workers=6,
+        python_executable="python",
+    )
+
+    command = execution.commands[0]
+    assert command.stage_id == "tail_kinematics"
+    assert command.dependency_runs["subject_shape"] == "subject_shape_a"
+    assert "fisheye.analysis_workflows.materializers.tail_kinematics" in command.argv
+    assert "--execution-backend" in command.argv
+    assert "process_shards" in command.argv
+    assert command.argv[command.argv.index("--num-workers") + 1] == "6"
+    assert command.argv[command.argv.index("--shape-run") + 1] == "subject_shape_a"
 
 
 def test_dry_run_writes_report_without_creating_stage_outputs(tmp_path: Path) -> None:

@@ -346,10 +346,12 @@ differ from Palette's native tangent angles, the view should derive directly
 from the source ordered curve/keypoints and record that conversion. See
 [tail_kinematics_run_design.md](tail_kinematics_run_design.md).
 
-Execution note: the v1 writer is serial within a recording. A future
-Dask-backed writer is safe in principle because each ROI row is independent,
-but it must use chunk-aligned worker writes and single-driver group/attrs
-finalization. The intended design is documented in
+Execution note: the v1 writer retains a serial backend and now also supports
+node-local `process_shards` execution. Each task owns one complete,
+non-overlapping physical output shard across every row-aligned tail array. The
+driver alone creates groups, copies lineage, writes attrs, validates the run,
+and marks completion. Shared-storage publication remains serialized and
+atomic. The ownership rules are documented in
 [dask_zarr_write_safety.md](dask_zarr_write_safety.md).
 
 ### External Classification Outputs

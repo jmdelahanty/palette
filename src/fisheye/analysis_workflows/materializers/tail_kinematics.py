@@ -70,6 +70,8 @@ class TailKinematicsMaterializationPlan:
     row_count: int
     tail_angle_sample_count: int
     requested_block_rows: int
+    execution_backend: str
+    requested_num_workers: int
     selected_paths: tuple[str, ...]
     physical_files: tuple[PhysicalFile, ...]
     source_bytes: int
@@ -105,6 +107,8 @@ class TailKinematicsMaterializationPlan:
             "row_count": int(self.row_count),
             "tail_angle_sample_count": int(self.tail_angle_sample_count),
             "requested_block_rows": int(self.requested_block_rows),
+            "execution_backend": self.execution_backend,
+            "requested_num_workers": int(self.requested_num_workers),
             "selected_paths": list(self.selected_paths),
             "physical_file_count": len(self.physical_files),
             "source_bytes": int(self.source_bytes),
@@ -284,6 +288,8 @@ def build_tail_kinematics_materialization_plan(
     run_name: str,
     tail_angle_sample_count: int = DEFAULT_TAIL_ANGLE_SAMPLE_COUNT,
     block_rows: int = DEFAULT_BLOCK_ROWS,
+    execution_backend: str = "serial",
+    num_workers: int = 1,
 ) -> TailKinematicsMaterializationPlan:
     """Build a read-only physical-file staging plan for one recording."""
 
@@ -301,6 +307,11 @@ def build_tail_kinematics_materialization_plan(
         raise ValueError("tail_angle_sample_count must be >= 2.")
     if int(block_rows) <= 0:
         raise ValueError("block_rows must be positive.")
+    backend = str(execution_backend).strip().lower()
+    if backend not in {"serial", "process_shards"}:
+        raise ValueError(f"Unsupported execution backend: {execution_backend!r}.")
+    if int(num_workers) <= 0:
+        raise ValueError("num_workers must be positive.")
 
     root = open_zarr_root(source, mode="r")
     resolved_shape_run, shape_group, sources = _resolve_tail_kinematics_sources(root, shape_run)
@@ -317,6 +328,8 @@ def build_tail_kinematics_materialization_plan(
         row_count=int(sources.row_count),
         tail_angle_sample_count=int(tail_angle_sample_count),
         requested_block_rows=int(block_rows),
+        execution_backend=backend,
+        requested_num_workers=int(num_workers),
         selected_paths=selected_paths,
         physical_files=files,
         source_bytes=sum(int(item.size_bytes) for item in files),
@@ -659,6 +672,8 @@ def materialize_tail_kinematics(
     run_name: str,
     tail_angle_sample_count: int = DEFAULT_TAIL_ANGLE_SAMPLE_COUNT,
     block_rows: int = DEFAULT_BLOCK_ROWS,
+    execution_backend: str = "serial",
+    num_workers: int = 1,
     copy_backend: str = "rsync",
     apply: bool = False,
     keep_scratch: bool = False,
@@ -674,6 +689,8 @@ def materialize_tail_kinematics(
         run_name=run_name,
         tail_angle_sample_count=tail_angle_sample_count,
         block_rows=block_rows,
+        execution_backend=execution_backend,
+        num_workers=num_workers,
     )
     result: dict[str, Any] = {
         "schema_id": MATERIALIZATION_SCHEMA_ID,
@@ -698,6 +715,9 @@ def materialize_tail_kinematics(
             run_name=plan.run_name,
             tail_angle_sample_count=plan.tail_angle_sample_count,
             block_rows=plan.requested_block_rows,
+            execution_backend=plan.execution_backend,
+            num_workers=plan.requested_num_workers,
+            worker_zarr_path=plan.staged_zarr,
             overwrite=False,
             dry_run=False,
             stage_command=stage_command or (" ".join(sys.argv) if sys.argv else "unknown"),
@@ -747,6 +767,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_TAIL_ANGLE_SAMPLE_COUNT,
     )
     parser.add_argument("--block-rows", type=int, default=DEFAULT_BLOCK_ROWS)
+    parser.add_argument(
+        "--execution-backend",
+        choices=("serial", "process_shards"),
+        default="serial",
+    )
+    parser.add_argument("--num-workers", type=int, default=1)
     parser.add_argument("--copy-backend", choices=("rsync", "python"), default="rsync")
     parser.add_argument("--apply", action="store_true", help="Execute; default is a read-only plan.")
     parser.add_argument("--keep-scratch", action="store_true", help="Keep scratch after successful publication.")
@@ -767,6 +793,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         run_name=args.run_name,
         tail_angle_sample_count=int(args.tail_angle_sample_count),
         block_rows=int(args.block_rows),
+        execution_backend=str(args.execution_backend),
+        num_workers=int(args.num_workers),
         copy_backend=str(args.copy_backend),
         apply=bool(args.apply),
         keep_scratch=bool(args.keep_scratch),

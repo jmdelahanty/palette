@@ -276,6 +276,32 @@ def _subject_shape_command(context: StageCommandContext) -> tuple[str, ...]:
     return tuple(command)
 
 
+def _tail_kinematics_command(context: StageCommandContext) -> tuple[str, ...]:
+    command = _module_command(
+        context,
+        "fisheye.analysis_workflows.materializers.tail_kinematics",
+    )
+    command.extend(
+        (
+            "--shape-run",
+            context.dependency_run("subject_shape"),
+            "--run-name",
+            context.output_run,
+            "--block-rows",
+            "16384",
+            "--execution-backend",
+            "process_shards",
+            "--num-workers",
+            str(context.num_workers),
+            "--copy-backend",
+            "rsync",
+            "--apply",
+            "--json",
+        )
+    )
+    return tuple(command)
+
+
 STAGE_COMMAND_BUILDERS: Mapping[str, StageCommandBuilder] = MappingProxyType(
     {
         "track_kinematics": _track_kinematics_command,
@@ -284,6 +310,7 @@ STAGE_COMMAND_BUILDERS: Mapping[str, StageCommandBuilder] = MappingProxyType(
         "bout_kinematics": _bout_kinematics_command,
         "eye_angles": _eye_angle_command,
         "subject_shape": _subject_shape_command,
+        "tail_kinematics": _tail_kinematics_command,
     }
 )
 
