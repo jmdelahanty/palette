@@ -34,7 +34,10 @@ def test_write_manual_group_writes_reason_bytes_and_detection_source(tmp_path) -
     assert np.asarray(manual["detection_source"][:], dtype=np.int8).tolist() == [0, 0]
     assert "reason_bytes" in manual
     assert decode_reason_bytes(manual["reason_bytes"][:]).tolist() == ["clean", "clean"]
-    assert np.asarray(manual["reason"][:], dtype=object).tolist() == ["clean", "clean"]
+    assert "reason" not in manual
+    assert manual.attrs["reason_authority"] == "reason_bytes"
+    assert manual.attrs["reason_fallback_order"] == ["reason_bytes", "detection_source"]
     fields = list(manual.attrs.get("column_fields", []))
     assert "reason_bytes" in fields
+    assert "reason" not in fields
     assert "detection_source" in fields

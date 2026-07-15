@@ -73,8 +73,8 @@ def test_plan_and_apply_preserve_values_and_selectors(tmp_path: Path) -> None:
     keypoint = root["keypoints_runs/keypoint_1"]
     np.testing.assert_array_equal(detect["bbox_norm_coords"][:], expected_bbox)
     np.testing.assert_array_equal(keypoint["keypoints_roi"][:], expected_keypoints)
-    assert detect["bbox_norm_coords"].shards == (262_144, 4)
-    assert keypoint["keypoints_roi"].shards == (262_144, 2, 2)
+    assert detect["bbox_norm_coords"].shards == (131_072, 4)
+    assert keypoint["keypoints_roi"].shards == (131_072, 2, 2)
     assert detect.attrs["detect_storage_policy"] == "migrated_indexed_sharding_v1"
     assert keypoint.attrs["keypoint_storage_policy"] == "migrated_indexed_sharding_v1"
     assert detect.attrs["palette_run_completion_status"] == "complete"

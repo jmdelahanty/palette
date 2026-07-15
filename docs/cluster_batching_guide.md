@@ -779,8 +779,8 @@ scripts/py -m fisheye.utils.run_keypoints_batch /groups/johnson/johnsonlab/jerem
 | `--include-non-success` | off   | Include non-success runs in model resolution |
 | `--crop-run`          | *(auto)* | Explicit crop run name                      |
 | `--batch-size-kp`     | `256`   | Keypoint inference batch size                |
-| `--keypoint-roi-shard-rows` | `262144` | Outer rows for indexed-sharded ROI-domain arrays |
-| `--keypoint-frame-shard-rows` | `262144` | Outer rows for indexed-sharded frame-domain arrays |
+| `--keypoint-roi-shard-rows` | `131072` | Outer rows for indexed-sharded ROI-domain arrays |
+| `--keypoint-frame-shard-rows` | `131072` | Outer rows for indexed-sharded frame-domain arrays |
 | `--no-keypoint-sharding` | off | Explicitly use ordinary chunks for keypoint outputs |
 | `--device`            | *(auto)* | Torch device override                       |
 | `--roi-cache-dir`     | *(none)* | Scratch directory for temporary Zarr ROI caches |

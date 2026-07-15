@@ -36,6 +36,7 @@ from ..shared.frame_flags import (
 )
 from ..shared.keypoint_summary import build_frame_keypoint_counts
 from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
+from ..shared.detect_reason_codec import update_reason_rows
 from ..shared.subject_mask_stale import mark_downstream_subject_mask_runs_stale
 from ..tune.keypoint_review import _update_postprocess_summary
 
@@ -748,7 +749,11 @@ def _patch_refined_keypoints(
         refined["confidence_valid"][idx] = result["confidence_valid"]
         refined["geometry_valid"][idx] = result["geometry_valid"]
         refined["usable_keypoints"][idx] = result["usable"]
-        refined["reason"][idx] = result["reason"]
+        update_reason_rows(
+            refined,
+            np.arange(int(result["start"]), int(result["end"]), dtype=np.int64),
+            np.asarray(result["reason"], dtype=object),
+        )
         refined["flip_corrected"][idx] = result["flip_flags"]
 
     keypoint_group = root[f"keypoints_runs/{keypoints_run}"]

@@ -930,7 +930,6 @@ _REFINED_DETECT_ARRAYS: Tuple[ArraySpec, ...] = (
         description="0=real, 1=interpolated.",
     ),
     ArraySpec("reason_bytes", "uint8", ("n_refined", "width")),
-    ArraySpec("reason", "string", ("n_refined",)),
     ArraySpec(
         "frame_mapping",
         "int32",
@@ -948,7 +947,6 @@ _REFINED_DETECT_SOURCE_DETECTIONS_ARRAYS: Tuple[ArraySpec, ...] = (
     ArraySpec("decision_codes", "int8", ("n_source_detections",)),
     ArraySpec("resolved_refined_row_id", "int64", ("n_source_detections",)),
     ArraySpec("reason_bytes", "uint8", ("n_source_detections", "width")),
-    ArraySpec("reason", "string", ("n_source_detections",)),
     ArraySpec("confidence_scores", "float32", ("n_source_detections",), required=False),
     ArraySpec("class_ids", "int32", ("n_source_detections",), required=False),
     ArraySpec("review_notes", "string", ("n_source_detections",), required=False),
@@ -966,7 +964,6 @@ _REFINED_DETECT_INSTANCES_ARRAYS: Tuple[ArraySpec, ...] = (
     ArraySpec("instance_key", "uint64", ("n_instances",), required=False),
     ArraySpec("frame_counts", "int32", ("n_frames",)),
     ArraySpec("reason_bytes", "uint8", ("n_instances", "width")),
-    ArraySpec("reason", "string", ("n_instances",)),
     ArraySpec("confidence_scores", "float32", ("n_instances",), required=False),
     ArraySpec("class_ids", "int32", ("n_instances",), required=False),
     ArraySpec("review_notes", "string", ("n_instances",), required=False),
@@ -1203,7 +1200,13 @@ REFINED_KEYPOINTS_SPEC = StageSpec(
             required=False,
             description="TensorStore-safe reason encoding; older runs may only carry reason strings.",
         ),
-        ArraySpec("reason", "string", ("n_rois",), required=False),
+        ArraySpec(
+            "reason",
+            "string",
+            ("n_rois",),
+            required=False,
+            description="Legacy read-only compatibility column; new runs write reason_bytes only.",
+        ),
         ArraySpec(
             "failure_indices",
             "int32",
@@ -1273,7 +1276,6 @@ _REFINED_EYE_MASK_METRICS: Tuple[ArraySpec, ...] = (
     ArraySpec("probabilities_used", "bool", ("n_rois",)),
     ArraySpec("filter_flags", "bool", ("n_rois", 2)),
     ArraySpec("reason_bytes", "uint8", ("n_rois", "width")),
-    ArraySpec("reason", "string", ("n_rois",)),
 )
 
 REFINED_EYE_MASKS_SPEC = StageSpec(
@@ -1347,7 +1349,6 @@ REFINED_SUBJECT_COMPONENT_ARRAYS: Tuple[ArraySpec, ...] = (
     ArraySpec("area_px", "float32", ("n_rois",)),
     ArraySpec("edit_applied", "bool", ("n_rois",)),
     ArraySpec("reason_bytes", "uint8", ("n_rois", "width")),
-    ArraySpec("reason", "string", ("n_rois",)),
 )
 
 REFINED_SUBJECT_COMPONENT_METRICS: Tuple[ArraySpec, ...] = (
@@ -1393,7 +1394,13 @@ REFINED_SUBJECT_MASKS_SPEC = StageSpec(
         ArraySpec("available_channels", "bool", ("n_channels",)),
         ArraySpec("edit_applied", "bool", ("n_rois", "n_channels")),
         ArraySpec("reason_bytes", "uint8", ("n_rois", "width"), required=False),
-        ArraySpec("reason", "string", ("n_rois",), required=False),
+        ArraySpec(
+            "reason",
+            "string",
+            ("n_rois",),
+            required=False,
+            description="Legacy read-only compatibility column; new runs write reason_bytes only.",
+        ),
     ),
     subgroups={"metrics": _REFINED_SUBJECT_MASK_METRICS},
 )

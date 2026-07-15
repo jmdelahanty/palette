@@ -4,6 +4,7 @@ from typing import Any
 
 import numpy as np
 
+from fisheye.shared.detect_reason_codec import read_reason_labels
 from fisheye.tune import detect_review as mod
 
 
@@ -419,7 +420,8 @@ def test_write_dense_curated_edit_payload_maps_payload_rows_back_to_storage_rows
         [0.3, 0.3, 0.1, 0.1],
     ]
     assert instances["manual_edit_flags"][:].tolist() == [True, False, False]
-    assert instances["reason"][:].tolist() == ["manual_correction", "clean", "clean"]
+    assert read_reason_labels(instances).tolist() == ["manual_correction", "clean", "clean"]
+    assert "reason" not in instances
     assert "bbox_norm_coords" not in refined
 
 

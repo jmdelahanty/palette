@@ -73,7 +73,6 @@ Common optional arrays:
 - `class_ids`
 - `source_detect_row_index`
 - `reason_bytes`
-- `reason`
 
 Reader rule:
 
@@ -110,8 +109,8 @@ surfaces:
 - `interpolated`
 - `manual`
 
-`reason` is explanatory only. Crimson should display it, but should not depend
-on parsing it to determine whether a row is present.
+Reason labels are explanatory only. Crimson should display them, but should
+not depend on parsing them to determine whether a row is present.
 
 For current sparse refined runs, prefer `source_kind_codes` over any string
 label when deciding whether a row is operator-corrected or inherited from raw
@@ -129,6 +128,11 @@ For legacy sparse refined groups:
   - `0 -> clean`
   - `1 -> interpolated`
 - else default to `clean`
+
+For current groups, `reason_bytes` is the sole persisted reason authority.
+Crimson must not create or synchronize a variable-length `reason` array. If
+both arrays occur in a historical archive, `reason_bytes` wins; `reason` is a
+read-only fallback only when `reason_bytes` is absent.
 
 ## Coordinate Rules
 

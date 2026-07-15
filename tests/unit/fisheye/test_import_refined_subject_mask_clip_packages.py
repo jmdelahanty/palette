@@ -85,7 +85,6 @@ def _write_package(
             body,
             np.asarray(body_reason_labels, dtype=object),
             chunk_size=max(1, row_count),
-            include_reason_text=True,
             overwrite=True,
         )
     contours = body.require_group("contours")

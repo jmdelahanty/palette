@@ -6,7 +6,7 @@ import numpy as np
 import zarr
 
 import fisheye.shared.refined_detect_curation as refined_detect_curation_module
-from fisheye.shared.detect_reason_codec import write_reason_columns
+from fisheye.shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from fisheye.shared.refined_detect_curation import (
     REFINED_DETECT_STATUS_CODE_MAP,
     REFINED_SOURCE_DETECTION_DECISION_CODE_MAP,
@@ -265,7 +265,6 @@ def _write_sparse_group(
         group,  # type: ignore[arg-type]
         np.asarray(reason_labels, dtype=object),
         chunk_size=max(1, int(frame_indices.shape[0])),
-        include_reason_text=True,
         overwrite=True,
     )
 
@@ -394,7 +393,8 @@ def test_materialize_refined_detect_curation_writes_dense_root_from_interpolated
         REFINED_SOURCE_DETECTION_DECISION_CODE_MAP["filtered"],
     ]
     assert source_detections["resolved_refined_row_id"][:].tolist() == [-1, -1]
-    assert source_detections["reason"][:].tolist() == ["filtered", "filtered"]
+    assert read_reason_labels(source_detections).tolist() == ["filtered", "filtered"]
+    assert "reason" not in source_detections
 
 
 def test_materialize_refined_detect_curation_preserves_row_ids_by_frame_identity() -> None:
@@ -424,7 +424,7 @@ def test_materialize_refined_detect_curation_preserves_row_ids_by_frame_identity
         REFINED_SOURCE_DETECTION_DECISION_CODE_MAP["filtered"],
     ]
     assert source_detections["resolved_refined_row_id"][:].tolist() == [-1, -1]
-    assert source_detections["reason"][:].tolist() == ["filtered", "filtered"]
+    assert read_reason_labels(source_detections).tolist() == ["filtered", "filtered"]
 
 
 def test_update_curated_refined_detect_rows_rewrites_sparse_views_best_effort_for_legacy_source_free_edits() -> None:
@@ -468,14 +468,14 @@ def test_update_curated_refined_detect_rows_rewrites_sparse_views_best_effort_fo
     instances = refined["instances"]
     assert instances["frame_indices"][:].tolist() == [1, 3]
     assert instances["refined_row_ids"][:].tolist() == [1, 3]
-    assert instances["reason"][:].tolist() == ["manual_correction", "interpolated"]
+    assert read_reason_labels(instances).tolist() == ["manual_correction", "interpolated"]
     source_detections = refined["source_detections"]
     assert source_detections["decision_codes"][:].tolist() == [
         REFINED_SOURCE_DETECTION_DECISION_CODE_MAP["filtered"],
         REFINED_SOURCE_DETECTION_DECISION_CODE_MAP["filtered"],
     ]
     assert source_detections["resolved_refined_row_id"][:].tolist() == [-1, -1]
-    assert source_detections["reason"][:].tolist() == ["filtered", "filtered"]
+    assert read_reason_labels(source_detections).tolist() == ["filtered", "filtered"]
 
 
 def test_write_curated_refined_detect_root_syncs_sparse_views_from_raw_links() -> None:
@@ -517,7 +517,7 @@ def test_write_curated_refined_detect_root_syncs_sparse_views_from_raw_links() -
         REFINED_SOURCE_DETECTION_DECISION_CODE_MAP["accepted"],
     ]
     assert source_detections["resolved_refined_row_id"][:].tolist() == [1, 3]
-    assert source_detections["reason"][:].tolist() == ["clean", "clean"]
+    assert read_reason_labels(source_detections).tolist() == ["clean", "clean"]
 
 
 def test_write_curated_refined_detect_root_preserves_filtered_backlinks_in_source_detections() -> None:
@@ -557,7 +557,7 @@ def test_write_curated_refined_detect_root_preserves_filtered_backlinks_in_sourc
         REFINED_SOURCE_DETECTION_DECISION_CODE_MAP["accepted"],
     ]
     assert source_detections["resolved_refined_row_id"][:].tolist() == [-1, 3]
-    assert source_detections["reason"][:].tolist() == ["filtered_jump", "clean"]
+    assert read_reason_labels(source_detections).tolist() == ["filtered_jump", "clean"]
 
 
 def test_write_curated_refined_detect_root_does_not_infer_duplicates_from_same_frame_raw_rows() -> None:
@@ -591,7 +591,7 @@ def test_write_curated_refined_detect_root_does_not_infer_duplicates_from_same_f
         REFINED_SOURCE_DETECTION_DECISION_CODE_MAP["accepted"],
         REFINED_SOURCE_DETECTION_DECISION_CODE_MAP["filtered"],
     ]
-    assert source_detections["reason"][:].tolist() == ["clean", "filtered"]
+    assert read_reason_labels(source_detections).tolist() == ["clean", "filtered"]
 
 
 def test_write_curated_refined_detect_surfaces_preserves_multi_instance_frames() -> None:
@@ -781,8 +781,8 @@ def test_write_curated_refined_detect_surfaces_reuses_existing_sparse_groups_on_
     )
 
     refined = root["refined_detect_runs"]["refined_detect_001"]
-    assert refined["instances"]["reason"][:].tolist() == ["clean", "clean"]
-    assert refined["source_detections"]["reason"][:].tolist() == ["clean", "clean"]
+    assert read_reason_labels(refined["instances"]).tolist() == ["clean", "clean"]
+    assert read_reason_labels(refined["source_detections"]).tolist() == ["clean", "clean"]
 
     assert isinstance(refined, _OpaqueExistingGroup)
     refined._opaque_existing_groups.update({"instances", "source_detections"})
@@ -794,8 +794,8 @@ def test_write_curated_refined_detect_surfaces_reuses_existing_sparse_groups_on_
         **common_kwargs,
     )
 
-    assert refined["instances"]["reason"][:].tolist() == ["clean_rerun", "clean_rerun"]
-    assert refined["source_detections"]["reason"][:].tolist() == ["clean_rerun", "clean_rerun"]
+    assert read_reason_labels(refined["instances"]).tolist() == ["clean_rerun", "clean_rerun"]
+    assert read_reason_labels(refined["source_detections"]).tolist() == ["clean_rerun", "clean_rerun"]
 
 
 def test_get_or_create_child_group_uses_direct_store_path_open(monkeypatch) -> None:

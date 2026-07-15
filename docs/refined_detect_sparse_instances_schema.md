@@ -75,8 +75,7 @@ refined_detect_runs/
       class_ids                             (M,) int32                 # optional
       decision_codes                        (M,) int8
       resolved_refined_row_id               (M,) int64                 # -1 if no surviving refined row
-      reason_bytes                          (M, width) uint8           # recommended
-      reason                                (M,) string                # optional mirror
+      reason_bytes                          (M, width) uint8           # canonical
       review_notes                          (M,) string                # optional
 
     instances/
@@ -91,8 +90,7 @@ refined_detect_runs/
       class_ids                             (N,) int32                 # optional
       source_detect_row_index               (N,) int32                 # optional; -1 if none
       frame_counts                          (F,) int32                 # recommended compatibility summary
-      reason_bytes                          (N, width) uint8           # recommended
-      reason                                (N,) string                # optional mirror
+      reason_bytes                          (N, width) uint8           # canonical
       review_notes                          (N,) string                # optional
 
     projections/                            # optional derived outputs; not canonical authoring
@@ -321,9 +319,10 @@ Contract note:
 - dtype: `int32`
 - copied from the source raw detect rowset when available
 
-#### `reason_bytes`, `reason`, `review_notes`
+#### `reason_bytes`, `review_notes`
 
 - explanatory review payload attached to the candidate row
+- legacy archives may contain a read-only variable-length `reason` fallback
 
 ### Why this subgroup exists
 
@@ -369,12 +368,14 @@ V1 note:
 - recommended compatibility summary array
 - must equal `np.diff(frame_offsets)`
 
-### `reason_bytes` and `reason`
+### `reason_bytes`
 
 - explanatory labels only
-- same Palette convention as other refined stages
+- canonical fixed-width, null-terminated UTF-8 Palette encoding
 - consumers may display them, but should not need to parse them to know whether
   a row is canonical
+- new writers and compactors must not create or maintain a variable-length
+  `reason` mirror; readers may retain a legacy fallback for historical runs
 
 ### `review_notes`
 

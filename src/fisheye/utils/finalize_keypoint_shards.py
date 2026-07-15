@@ -40,8 +40,8 @@ from fisheye.shared.zarr_run_completion import (
 KEYPOINT_SHARD_PARENT = "keypoint_shard_runs"
 KEYPOINT_OUTPUT_PARENT = "keypoints_runs"
 FINALIZER_SCHEMA = "palette_keypoint_shard_collection_finalizer_v1"
-DEFAULT_CANONICAL_KEYPOINT_ROW_SHARD_ROWS = 262_144
-DEFAULT_CANONICAL_KEYPOINT_FRAME_SHARD_ROWS = 262_144
+DEFAULT_CANONICAL_KEYPOINT_ROW_SHARD_ROWS = 131_072
+DEFAULT_CANONICAL_KEYPOINT_FRAME_SHARD_ROWS = 131_072
 
 REQUIRED_ROW_ARRAYS: tuple[str, ...] = (
     "frame_indices",

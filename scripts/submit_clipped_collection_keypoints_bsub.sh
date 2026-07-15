@@ -26,8 +26,8 @@ Common options:
   --run-label LABEL                 Stable label used in run/job names
   --pose-schema NAME                Pose schema (default: traditional_v2)
   --batch-size-kp N                 Keypoint inference batch size (default: 256)
-  --keypoint-roi-shard-rows N       ROI outer shard rows (default: 65536)
-  --keypoint-frame-shard-rows N     Frame outer shard rows (default: 262144)
+  --keypoint-roi-shard-rows N       ROI outer shard rows (default: 131072)
+  --keypoint-frame-shard-rows N     Frame outer shard rows (default: 131072)
   --no-keypoint-sharding            Use ordinary chunks for keypoint shard outputs
   --queue NAME                      Keypoint shard LSF queue (default: gpu_l4)
   --ncores N                        Keypoint shard CPU slots (default: 4)

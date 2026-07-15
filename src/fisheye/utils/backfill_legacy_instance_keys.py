@@ -40,7 +40,7 @@ from fisheye.shared.rowset_fingerprint import (
 MIGRATION_ID = "palette.instance_key_lineage_repair.v2"
 MIGRATION_TOOL = "fisheye.utils.backfill_legacy_instance_keys"
 DEFAULT_CHUNK_ROWS = 16_384
-DEFAULT_TABULAR_SHARD_ROWS = 262_144
+DEFAULT_TABULAR_SHARD_ROWS = 131_072
 
 
 @dataclass(frozen=True)

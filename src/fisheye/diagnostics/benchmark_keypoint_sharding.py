@@ -24,8 +24,8 @@ import numpy as np
 import zarr
 
 
-DEFAULT_ROI_SHARD_ROWS = 262_144
-DEFAULT_FRAME_SHARD_ROWS = 262_144
+DEFAULT_ROI_SHARD_ROWS = 131_072
+DEFAULT_FRAME_SHARD_ROWS = 131_072
 REPORT_SCHEMA = "palette.keypoint_sharding_canary.v1"
 _METADATA_NAMES = frozenset({"zarr.json", ".zarray", ".zattrs", ".zgroup"})
 

@@ -699,8 +699,8 @@ def test_run_yolo_prefers_model_path_override(monkeypatch: pytest.MonkeyPatch) -
     assert captured["model_path"] == "/models/from_registry.pt"
     assert captured["roi_cache_policy"] == "always"
     assert captured["roi_cache_dir"] == "/tmp/roi-cache"
-    assert captured["keypoint_roi_shard_rows"] == 262_144
-    assert captured["keypoint_frame_shard_rows"] == 262_144
+    assert captured["keypoint_roi_shard_rows"] == 131_072
+    assert captured["keypoint_frame_shard_rows"] == 131_072
 
 
 def test_run_yolo_allows_regular_chunk_storage_override(
@@ -726,7 +726,7 @@ def test_run_yolo_allows_regular_chunk_storage_override(
     )
 
     assert captured["keypoint_roi_shard_rows"] is None
-    assert captured["keypoint_frame_shard_rows"] == 262_144
+    assert captured["keypoint_frame_shard_rows"] == 131_072
 
 
 def test_resolve_registry_models_for_plans_collects_resolution_errors(

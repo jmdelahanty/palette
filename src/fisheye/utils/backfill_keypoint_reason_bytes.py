@@ -62,7 +62,13 @@ def _backfill_reason_columns(
     apply: bool,
 ) -> BackfillResult:
     if "reason_bytes" in run_group and not overwrite_existing:
-        return BackfillResult(status="skipped_existing")
+        if "reason" not in run_group:
+            return BackfillResult(status="skipped_existing")
+        if apply:
+            del run_group["reason"]
+            run_group.attrs["reason_authority"] = "reason_bytes"
+            run_group.attrs["reason_fallback_order"] = ["reason_bytes", "detection_source"]
+        return BackfillResult(status="ok", reason="retired legacy reason mirror")
 
     labels = read_reason_labels(run_group)
     if labels is None:
@@ -78,7 +84,6 @@ def _backfill_reason_columns(
             run_group,
             labels,
             chunk_size,
-            include_reason_text=True,
             overwrite=True,
         )
     return BackfillResult(status="ok")
@@ -86,7 +91,10 @@ def _backfill_reason_columns(
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Backfill Crimson-compatible keypoint reason_bytes on refined keypoint runs."
+        description=(
+            "Canonicalize refined-keypoint reasons as reason_bytes and retire the legacy "
+            "variable-length reason mirror."
+        )
     )
     parser.add_argument("paths", nargs="*", type=Path, help="Recording roots or zarr paths.")
     parser.add_argument("--recursive", action="store_true", help="Search recursively for zarr archives.")

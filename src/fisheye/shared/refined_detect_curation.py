@@ -986,7 +986,6 @@ def _write_sparse_instances_projection(
         subgroup,
         reason_labels,
         max(1, int(frame_indices.shape[0])),
-        include_reason_text=True,
         overwrite=True,
     )
 
@@ -1038,7 +1037,7 @@ def _write_source_detections_projection(
             ("resolved_refined_row_id", empty_int64),
         ):
             _write_common_array(subgroup, name, data)
-        write_reason_columns(subgroup, empty_reason, 1, include_reason_text=True, overwrite=True)
+        write_reason_columns(subgroup, empty_reason, 1, overwrite=True)
         for name in ("confidence_scores", "class_ids", "review_notes"):
             _delete_if_present(subgroup, name)
         subgroup.attrs["decision_code_map"] = dict(REFINED_SOURCE_DETECTION_DECISION_CODE_MAP)
@@ -1116,7 +1115,6 @@ def _write_source_detections_projection(
         subgroup,
         np.asarray(reason_labels, dtype=object),
         max(1, row_count),
-        include_reason_text=True,
         overwrite=True,
     )
 
@@ -1563,7 +1561,6 @@ def _write_sparse_instances_arrays(
         subgroup,
         reason_labels_arr,
         max(1, row_count),
-        include_reason_text=True,
         overwrite=True,
     )
 
@@ -1692,7 +1689,6 @@ def _write_source_detections_arrays(
         subgroup,
         reason_labels_arr,
         max(1, row_count),
-        include_reason_text=True,
         overwrite=True,
     )
 
@@ -1885,7 +1881,6 @@ def _write_dense_curated_root_arrays(
         refined_run,
         reason_labels_arr,
         max(1, row_count),
-        include_reason_text=True,
         overwrite=True,
     )
     if review_notes is not None:

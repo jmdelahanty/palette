@@ -31,8 +31,8 @@ from fisheye.shared.zarr_run_completion import (
 )
 
 
-SNAPSHOT_SCHEMA = "palette.immutable_tabular_snapshot.v1"
-DEFAULT_TABULAR_SHARD_ROWS = 262_144
+SNAPSHOT_SCHEMA = "palette.immutable_tabular_snapshot.v2"
+DEFAULT_TABULAR_SHARD_ROWS = 131_072
 SUPPORTED_FAMILIES = frozenset({"keypoints_runs", "refined_keypoints_runs", "refined_detect_runs"})
 
 
@@ -82,11 +82,38 @@ def _walk_arrays(group: zarr.Group, prefix: str = "") -> list[tuple[str, zarr.Ar
     return sorted(out, key=lambda item: item[0])
 
 
+def _walk_canonical_arrays(
+    group: zarr.Group,
+    prefix: str = "",
+) -> list[tuple[str, zarr.Array]]:
+    """Return snapshot arrays while retiring the legacy ``reason`` mirror."""
+    local_arrays = {str(name): array for name, array in group.arrays()}
+    if "reason" in local_arrays and "reason_bytes" not in local_arrays:
+        group_path = prefix or "."
+        raise ValueError(
+            f"{group_path}/reason is legacy-only; canonicalize it to reason_bytes "
+            "before publishing an immutable snapshot."
+        )
+    out = [
+        (f"{prefix}/{name}" if prefix else name, array)
+        for name, array in local_arrays.items()
+        if name != "reason"
+    ]
+    for name, child in group.groups():
+        child_prefix = f"{prefix}/{name}" if prefix else str(name)
+        out.extend(_walk_canonical_arrays(child, child_prefix))
+    return sorted(out, key=lambda item: item[0])
+
+
+def _legacy_reason_paths(group: zarr.Group) -> list[str]:
+    return [path for path, _array in _walk_arrays(group) if path.split("/")[-1] == "reason"]
+
+
 def build_plan(source: zarr.Group, *, shard_rows: int) -> tuple[ArrayPlan, ...]:
     if int(shard_rows) <= 0:
         raise ValueError("shard_rows must be positive.")
     plans: list[ArrayPlan] = []
-    for path, array in _walk_arrays(source):
+    for path, array in _walk_canonical_arrays(source):
         plans.append(
             ArrayPlan(
                 path=path,
@@ -190,6 +217,14 @@ def _copy_array(
 
 def _copy_group_attrs(source: zarr.Group, target: zarr.Group) -> None:
     target.attrs.update(dict(source.attrs))
+    local_array_names = {str(name) for name, _array in source.arrays()}
+    if "reason_bytes" in local_array_names:
+        target.attrs["reason_authority"] = "reason_bytes"
+        target.attrs["reason_fallback_order"] = ["reason_bytes", "detection_source"]
+        for attr_name in ("column_fields", "field_names"):
+            values = target.attrs.get(attr_name)
+            if isinstance(values, (list, tuple)):
+                target.attrs[attr_name] = [value for value in values if str(value) != "reason"]
     for name, child in source.groups():
         target_child = target.require_group(str(name))
         target_child.attrs.update(dict(child.attrs))
@@ -219,6 +254,7 @@ def publish_tabular_snapshot(
     if not is_run_complete(source):
         raise ValueError(f"Source run {family}/{source_run} is not complete.")
     plans = build_plan(source, shard_rows=int(shard_rows))
+    omitted_legacy_array_paths = _legacy_reason_paths(source)
     result: dict[str, Any] = {
         "schema": SNAPSHOT_SCHEMA,
         "status": "planned" if not apply else "running",
@@ -231,6 +267,7 @@ def publish_tabular_snapshot(
         "shard_rows": int(shard_rows),
         "promote": bool(promote),
         "arrays": [asdict(plan) for plan in plans],
+        "omitted_legacy_array_paths": omitted_legacy_array_paths,
         "sharded_array_count": sum(plan.shards is not None for plan in plans),
     }
     if not apply:
@@ -246,7 +283,7 @@ def publish_tabular_snapshot(
     try:
         validation: list[dict[str, Any]] = []
         plans_by_path = {plan.path: plan for plan in plans}
-        for path, source_array in _walk_arrays(source):
+        for path, source_array in _walk_canonical_arrays(source):
             plan = plans_by_path[path]
             destination = _create_array_like(target, path, source_array, plan)
             source_sha256, destination_sha256 = _copy_array(source_array, destination, plan)
@@ -269,6 +306,7 @@ def publish_tabular_snapshot(
                 "snapshot_source_run_path": f"{family}/{source_run}",
                 "tabular_storage_layout": "indexed_sharding_v1",
                 "tabular_shard_rows": int(shard_rows),
+                "omitted_legacy_array_paths": omitted_legacy_array_paths,
                 "tabular_snapshot_validation": {
                     "status": "complete",
                     "array_count": len(validation),
@@ -277,6 +315,8 @@ def publish_tabular_snapshot(
                 },
             }
         )
+        if any(plan.path.split("/")[-1] == "reason_bytes" for plan in plans):
+            target.attrs["reason_authority"] = "reason_bytes"
         provenance = build_writer_run_provenance(
             command="fisheye.utils.publish_tabular_snapshot",
             params={

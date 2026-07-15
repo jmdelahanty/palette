@@ -100,7 +100,6 @@ def _make_archive(
             component,
             np.asarray(["clean", "clean"], dtype=object),
             2,
-            include_reason_text=True,
             overwrite=True,
         )
         if omit_component_arrays:

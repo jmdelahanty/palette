@@ -19,8 +19,8 @@ from fisheye.utils.model_resolution_provenance import build_model_resolution_pay
 from fisheye.registry.model_resolution import Candidate, TargetProfile, load_candidates, load_target_profile, resolve_recording_id
 
 _DETECT_STATUS_SOURCE = "runtime_detect_with_registry_model"
-DEFAULT_DETECT_ROW_SHARD_ROWS = 262_144
-DEFAULT_DETECT_FRAME_SHARD_ROWS = 262_144
+DEFAULT_DETECT_ROW_SHARD_ROWS = 131_072
+DEFAULT_DETECT_FRAME_SHARD_ROWS = 131_072
 
 DECODE_BACKEND_CHOICES = (
     "auto",

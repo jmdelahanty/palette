@@ -30,7 +30,12 @@ from ..pose.metric_schema import (
     resolve_metric_schema_for_group,
 )
 from ..pose.heading import compute_heading_from_attrs
-from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
+from ..shared.detect_reason_codec import (
+    MutableReasonColumn,
+    open_mutable_reason_column,
+    read_reason_labels,
+    write_reason_columns,
+)
 from ..shared.frame_flags import (
     append_flagged_frame as _append_shared_flagged_frame,
     load_frame_flags as _load_shared_frame_flags,
@@ -459,7 +464,7 @@ def _build_cleared_failure_reason(existing: str) -> str:
     return "|".join(unique) if unique else "manual_correction"
 
 
-def _sanitize_reason_array(reason_arr: zarr.Array) -> None:
+def _sanitize_reason_array(reason_arr: MutableReasonColumn | zarr.Array) -> None:
     try:
         raw = reason_arr[:]
     except Exception:
@@ -492,7 +497,6 @@ def _write_reason_labels(refined: zarr.Group, labels: np.ndarray) -> None:
         refined,
         np.asarray(labels, dtype=object),
         chunk_size,
-        include_reason_text=True,
         overwrite=True,
     )
 
@@ -1183,15 +1187,15 @@ def launch_review(
     geometry_valid_arr = refined.get("geometry_valid")
     usable_arr = refined.get("usable_keypoints")
     edit_applied_arr = refined.get("edit_applied")
-    reason_arr = refined.get("reason")
+    reason_chunk = (
+        int(heading_arr.chunks[0])
+        if heading_arr is not None and heading_arr.chunks
+        else max(1, min(1024, int(kp_roi_arr.shape[0]) or 1))
+    )
+    reason_arr = open_mutable_reason_column(refined, chunk_size=reason_chunk)
     heading_finite_arr = refined.get("heading_finite")
     heading_usable_arr = refined.get("heading_usable")
     detection_source_arr = refined.get("detection_source")
-    if reason_arr is None:
-        reason_labels = read_reason_labels(refined)
-        if reason_labels is not None:
-            _write_reason_labels(refined, np.asarray(reason_labels, dtype=object))
-            reason_arr = refined.get("reason")
     if reason_arr is not None:
         _sanitize_reason_array(reason_arr)
 

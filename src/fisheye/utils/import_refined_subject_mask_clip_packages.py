@@ -640,6 +640,50 @@ def _build_row_maps(packages: Sequence[ClipPackage]) -> tuple[np.ndarray, dict[P
     return sorted_ids.astype(np.int64, copy=False), row_maps
 
 
+def _merge_component_reason_columns(
+    packages: Sequence[ClipPackage],
+    dest_run: zarr.Group,
+    *,
+    row_maps: Mapping[Path, tuple[np.ndarray, np.ndarray]],
+    total_rows: int,
+) -> None:
+    """Decode package-local widths and publish one canonical collection column."""
+    component_names = [str(value) for value in list(dest_run.attrs.get("mask_labels") or [])]
+    for component_name in component_names:
+        merged = np.full(int(total_rows), "", dtype=object)
+        found_count = 0
+        for package in packages:
+            component = package.group.get(f"components/{component_name}")
+            labels = read_reason_labels(component) if isinstance(component, zarr.Group) else None
+            if labels is None:
+                continue
+            labels = np.asarray(labels, dtype=object).reshape(-1)
+            if int(labels.shape[0]) != package.row_count:
+                raise ValueError(
+                    f"{package.package_path}:components/{component_name} reason row count "
+                    f"{int(labels.shape[0])} != {package.row_count}."
+                )
+            local_rows, dest_rows = row_maps[package.package_path]
+            merged[dest_rows] = labels[local_rows]
+            found_count += 1
+        if found_count == 0:
+            continue
+        if found_count != len(packages):
+            raise ValueError(
+                f"Component {component_name} has reason labels in {found_count}/{len(packages)} "
+                "clip packages; refusing a partially populated canonical column."
+            )
+        component_dest = dest_run.get(f"components/{component_name}")
+        if not isinstance(component_dest, zarr.Group):
+            raise ValueError(f"Destination is missing components/{component_name}.")
+        write_reason_columns(
+            component_dest,
+            merged,
+            chunk_size=refined_subject_mask_metric_row_chunk(total_rows),
+            overwrite=True,
+        )
+
+
 def _validate_package_schema(packages: Sequence[ClipPackage]) -> None:
     if not packages:
         raise ValueError("No clip packages supplied.")
@@ -1136,18 +1180,12 @@ def import_refined_subject_mask_clip_packages(
             "rows_total": total_rows,
             "imported_clip_package_count": int(len(packages)),
         }
-        for component_name in list(dest_run.attrs.get("mask_labels") or []):
-            component_group = dest_run.get(f"components/{component_name}")
-            if isinstance(component_group, zarr.Group):
-                labels = read_reason_labels(component_group)
-                if labels is not None and int(labels.shape[0]) == total_rows:
-                    write_reason_columns(
-                        component_group,
-                        labels,
-                        chunk_size=refined_subject_mask_metric_row_chunk(total_rows),
-                        include_reason_text=True,
-                        overwrite=True,
-                    )
+        _merge_component_reason_columns(
+            packages,
+            dest_run,
+            row_maps=row_maps,
+            total_rows=total_rows,
+        )
 
         package_artifacts = [
             {

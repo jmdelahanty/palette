@@ -4,7 +4,9 @@ from pathlib import Path
 
 import numpy as np
 import zarr
+from zarr.core.dtype import VariableLengthUTF8
 
+from fisheye.shared.detect_reason_codec import decode_reason_bytes, write_reason_columns
 from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
     mark_run_started,
@@ -26,6 +28,22 @@ def _complete_source(path: Path) -> tuple[Path, np.ndarray]:
         chunks=(2, 3, 2),
         overwrite=True,
     )
+    write_reason_columns(
+        source,
+        np.asarray(["clean"] * 20, dtype=object),
+        chunk_size=2,
+        overwrite=True,
+    )
+    legacy_reason = source.create_array(
+        "reason",
+        shape=(20,),
+        chunks=(2,),
+        dtype=VariableLengthUTF8(),
+        fill_value="",
+        overwrite=True,
+    )
+    legacy_reason[:] = np.asarray(["stale"] * 20, dtype=object)
+    source.attrs["reason_fallback_order"] = ["reason_bytes", "reason", "detection_source"]
     source.create_array(
         "usable_keypoints",
         data=np.ones(20, dtype=bool),
@@ -62,6 +80,12 @@ def test_publish_tabular_snapshot_is_exact_sharded_and_promoted(tmp_path: Path) 
     assert target.attrs["snapshot_source_run"] == "refined_source"
     assert target["instance_key"].shards == (8,)
     assert target["keypoints_roi"].shards == (8, 3, 2)
+    assert target["reason_bytes"].shards == (8, 64)
+    assert "reason" not in target
+    assert target.attrs["reason_authority"] == "reason_bytes"
+    assert target.attrs["reason_fallback_order"] == ["reason_bytes", "detection_source"]
+    assert result["omitted_legacy_array_paths"] == ["reason"]
+    assert decode_reason_bytes(target["reason_bytes"][:]).tolist() == ["clean"] * 20
     np.testing.assert_array_equal(target["instance_key"][:], keys)
     np.testing.assert_array_equal(
         target["keypoints_roi"][:],
@@ -83,3 +107,23 @@ def test_publish_tabular_snapshot_defaults_to_dry_run(tmp_path: Path) -> None:
     assert result["status"] == "planned"
     root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
     assert "refined_snapshot" not in root["refined_keypoints_runs"]
+
+
+def test_publish_tabular_snapshot_rejects_legacy_reason_without_reason_bytes(tmp_path: Path) -> None:
+    zarr_path, _keys = _complete_source(tmp_path)
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    source = root["refined_keypoints_runs/refined_source"]
+    del source["reason_bytes"]
+
+    try:
+        publish_tabular_snapshot(
+            zarr_path=zarr_path,
+            family="refined_keypoints_runs",
+            source_run="refined_source",
+            output_run="refined_snapshot",
+            shard_rows=8,
+        )
+    except ValueError as exc:
+        assert "canonicalize it to reason_bytes" in str(exc)
+    else:
+        raise AssertionError("Expected legacy-only reason publication to fail closed.")

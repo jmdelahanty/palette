@@ -14,6 +14,7 @@ import zarr
 from fisheye.refinement.keypoint_quality import compute_geometry_metrics, select_head_triangle_points
 from fisheye.pose.metric_schema import DerivedMetricStorage, metric_schema_from_package
 from fisheye.registry.db import Registry
+from fisheye.shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from fisheye.shared.zarr_run_completion import AUTHORITATIVE_RUN_ATTR, mark_run_complete
 from fisheye.tune import keypoint_review_backend as mod
 from fisheye.tune import keypoint_review_web as web
@@ -44,6 +45,21 @@ class _FakeGroup(dict[str, object]):
 
     def get(self, key: str, default: object = None) -> object:  # type: ignore[override]
         return super().get(key, default)
+
+    def create_array(
+        self,
+        name: str,
+        *,
+        data: object | None = None,
+        shape: tuple[int, ...] | None = None,
+        chunks: tuple[int, ...] | None = None,
+        dtype: object | None = None,
+        **_kwargs: object,
+    ) -> _FakeArray:
+        values = np.asarray(data) if data is not None else np.zeros(shape or (), dtype=dtype)
+        array = _FakeArray(values, chunks=chunks)
+        self[name] = array
+        return array
 
 
 def _labels_for_count(keypoint_count: int) -> list[str]:
@@ -128,6 +144,29 @@ def _build_fake_review_root(keypoint_count: int, *, include_derived: bool = Fals
     )
 
     return root, refined_parent, crop_parent
+
+
+def test_build_reason_array_edits_canonical_reason_bytes(tmp_path: Path) -> None:
+    root = zarr.open_group(store=tmp_path / "review_reason.zarr", mode="w")
+    refined = root.create_group("refined")
+    refined.create_array(
+        "keypoints_roi",
+        data=np.zeros((3, 3, 2), dtype=np.float64),
+        chunks=(1, 3, 2),
+    )
+    write_reason_columns(
+        refined,
+        np.asarray(["clean", "clean", "clean"], dtype=object),
+        chunk_size=1,
+        overwrite=True,
+    )
+
+    reason_column = mod._build_reason_array(refined)
+
+    assert reason_column is not None
+    reason_column[1:2] = np.asarray(["manual_correction"], dtype=object)
+    assert read_reason_labels(refined).tolist() == ["clean", "manual_correction", "clean"]
+    assert "reason" not in refined
 
 
 def _build_session(*, keypoint_count: int = 5, include_derived: bool = False) -> mod.ReviewSession:

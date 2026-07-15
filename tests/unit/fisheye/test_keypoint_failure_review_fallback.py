@@ -255,7 +255,6 @@ def test_empty_review_auto_state_allows_fish_present_no_keypoints_only(tmp_path:
         refined,
         np.array(["fish_present_no_keypoints", "fish_present_no_keypoints"], dtype=object),
         chunk_size=2,
-        include_reason_text=True,
         overwrite=True,
     )
     raw_failures = _load_raw_failure_indices(refined)
@@ -272,7 +271,6 @@ def test_empty_review_auto_state_blocks_detection_issue(tmp_path: Path) -> None:
         refined,
         np.array(["detection_issue"], dtype=object),
         chunk_size=1,
-        include_reason_text=True,
         overwrite=True,
     )
     raw_failures = _load_raw_failure_indices(refined)
@@ -308,7 +306,6 @@ def test_build_no_reviewable_failures_auto_review_contains_policy_metadata(tmp_p
         refined,
         np.array(["fish_present_no_keypoints", "fish_present_no_keypoints"], dtype=object),
         chunk_size=2,
-        include_reason_text=True,
         overwrite=True,
     )
     raw_failures = _load_raw_failure_indices(refined)
@@ -341,7 +338,6 @@ def test_launch_review_auto_applies_algorithmic_status_for_no_reviewable_failure
         refined,
         np.array(["fish_present_no_keypoints"], dtype=object),
         chunk_size=1,
-        include_reason_text=True,
         overwrite=True,
     )
     refined.attrs["source_crop_run"] = "crop_1"

@@ -16,7 +16,7 @@ from ..refinement.keypoint_quality import (
     resolve_head_triangle_for_labels,
     select_head_triangle_points,
 )
-from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
+from ..shared.detect_reason_codec import MutableReasonColumn, open_mutable_reason_column
 from ..shared.frame_flags import append_flagged_frame, load_row_identity_arrays, row_identity_payload
 from ..shared.subject_mask_stale import mark_downstream_subject_mask_runs_stale
 from ..shared.zarr_run_completion import resolve_latest_complete_run_name, set_authoritative_run
@@ -128,7 +128,7 @@ class ReviewSession:
     geometry_valid_arr: Optional[zarr.Array]
     usable_arr: Optional[zarr.Array]
     edit_applied_arr: Optional[zarr.Array]
-    reason_arr: Optional[zarr.Array]
+    reason_arr: Optional[MutableReasonColumn | zarr.Array]
     heading_finite_arr: Optional[zarr.Array]
     heading_usable_arr: Optional[zarr.Array]
     detection_source_arr: Optional[zarr.Array]
@@ -153,26 +153,14 @@ def _coerce_ints(values: Optional[Sequence[object]]) -> list[int]:
     return sorted(set(out))
 
 
-def _build_reason_array(refined: zarr.Group) -> Optional[zarr.Array]:
-    existing = refined.get("reason")
-    if existing is not None:
-        return existing
-
-    reason_values = read_reason_labels(refined)
-    if reason_values is None:
-        return None
-
+def _build_reason_array(refined: zarr.Group) -> Optional[MutableReasonColumn]:
     chunk_size = 1
     if "keypoints_roi" in refined and np.asarray(refined["keypoints_roi"].shape)[0] > 0:
         chunk_size = int(np.asarray(refined["keypoints_roi"].shape)[0])
-    write_reason_columns(
+    return open_mutable_reason_column(
         refined,
-        np.asarray(reason_values, dtype=object),
-        max(1, chunk_size),
-        include_reason_text=True,
-        overwrite=True,
+        chunk_size=max(1, chunk_size),
     )
-    return refined.get("reason")
 
 
 def _resolve_session_geometry(

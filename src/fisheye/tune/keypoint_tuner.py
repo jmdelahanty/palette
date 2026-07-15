@@ -56,6 +56,7 @@ try:
         resolve_flagged_roi_indices,
         row_identity_payload,
     )
+    from ..shared.detect_reason_codec import read_reason_labels, update_reason_rows, write_reason_columns
     from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 except ImportError:  # pragma: no cover - fallback for script execution
     from fisheye.detection.detect_keypoints_traditional import detect_keypoints_traditional
@@ -76,6 +77,7 @@ except ImportError:  # pragma: no cover - fallback for script execution
         resolve_flagged_roi_indices,
         row_identity_payload,
     )
+    from fisheye.shared.detect_reason_codec import read_reason_labels, update_reason_rows, write_reason_columns
     from fisheye.shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 
 MIN_AREA_SLIDER_MAX = 1000
@@ -443,13 +445,10 @@ def _load_failure_indices(refined: zarr.Group) -> np.ndarray:
     else:
         return np.zeros(0, dtype="i4")
 
-    reason_arr = refined.get("reason")
-    if reason_arr is None or failures.size == 0:
+    reason_vals = read_reason_labels(refined)
+    if reason_vals is None or failures.size == 0:
         return failures
-    try:
-        reason_vals = np.asarray(reason_arr[:], dtype=object)
-    except Exception:
-        return failures
+    reason_vals = np.asarray(reason_vals, dtype=object)
     if reason_vals.size == 0:
         return failures
     keep_mask = []
@@ -541,13 +540,10 @@ def _extract_background_roi(
     return roi
 
 
-def _sanitize_reason_array(reason_arr: zarr.Array) -> None:
-    try:
-        raw = reason_arr[:]
-    except Exception:
-        return
+def _sanitize_reason_values(raw: np.ndarray) -> np.ndarray:
+    raw = np.asarray(raw, dtype=object).reshape(-1)
     if raw.size == 0:
-        return
+        return raw
 
     def coerce(val: Any) -> str:
         if val is None:
@@ -560,8 +556,7 @@ def _sanitize_reason_array(reason_arr: zarr.Array) -> None:
             return "|".join(str(item) for item in val.tolist())
         return str(val)
 
-    cleaned = np.array([coerce(v) for v in raw], dtype=object)
-    reason_arr[:] = cleaned
+    return np.array([coerce(v) for v in raw], dtype=object)
 
 
 def _load_frame_flags(path: Path) -> dict[str, list[Dict[str, Optional[int]]]]:
@@ -1035,7 +1030,7 @@ def run_failure_tuner(
     confidence_valid_arr = refined.get("confidence_valid")
     geometry_valid_arr = refined.get("geometry_valid")
     usable_arr = refined.get("usable_keypoints")
-    reason_arr = refined.get("reason")
+    reason_values = read_reason_labels(refined)
     heading_finite_arr = refined.get("heading_finite")
     heading_usable_arr = refined.get("heading_usable")
     detection_source_arr = refined.get("detection_source")
@@ -1043,8 +1038,20 @@ def run_failure_tuner(
     retune_id_arr = _ensure_retune_id_array(
         refined, heading_arr.chunks or (min(1024, kp_roi_arr.shape[0]),)
     )
-    if reason_arr is not None:
-        _sanitize_reason_array(reason_arr)
+    if reason_values is not None:
+        reason_values = _sanitize_reason_values(reason_values)
+        if "reason_bytes" not in refined or "reason" in refined:
+            reason_chunk = (
+                int(refined["reason_bytes"].chunks[0])
+                if "reason_bytes" in refined and refined["reason_bytes"].chunks
+                else max(1, min(1024, int(reason_values.shape[0]) or 1))
+            )
+            write_reason_columns(
+                refined,
+                reason_values,
+                chunk_size=reason_chunk,
+                overwrite=True,
+            )
 
     summary_raw = refined.attrs.get("summary_statistics", {})
     summary = summary_raw.get("refine", summary_raw) if isinstance(summary_raw, dict) else {}
@@ -1296,7 +1303,7 @@ def run_failure_tuner(
                     if heading_usable_arr is not None:
                         det_src = int(detection_source_arr[roi_idx]) if detection_source_arr is not None else 0
                         heading_usable_arr[roi_idx] = det_src == 0 and heading_is_finite
-                    if reason_arr is not None:
+                    if reason_values is not None:
                         tags = []
                         if flip_detected:
                             tags.append("flip_corrected")
@@ -1306,10 +1313,15 @@ def run_failure_tuner(
                             tags.append("low_confidence")
                         if not geom_ok:
                             tags.append("geometry_issue")
-                        existing_val = reason_arr[roi_idx]
+                        existing_val = reason_values[roi_idx]
                         existing = "" if existing_val is None else str(existing_val)
                         reason_value = str(_merge_reason(existing, tags))
-                        reason_arr[roi_idx:roi_idx + 1] = np.array([reason_value], dtype=object)
+                        reason_values[roi_idx] = reason_value
+                        update_reason_rows(
+                            refined,
+                            np.asarray([roi_idx], dtype=np.int64),
+                            np.asarray([reason_value], dtype=object),
+                        )
 
                     updated += 1
 
@@ -1410,11 +1422,16 @@ def run_failure_tuner(
                         _append_detection_frame(detect_frame_flag_path, zarr_path, frame_idx)
                     if detect_flag_path is not None:
                         _append_flagged_path(detect_flag_path, zarr_path)
-                    if reason_arr is not None:
-                        existing_val = reason_arr[roi_idx]
+                    if reason_values is not None:
+                        existing_val = reason_values[roi_idx]
                         existing = "" if existing_val is None else str(existing_val)
                         reason_value = str(_merge_reason(existing, ["detection_issue"]))
-                        reason_arr[roi_idx:roi_idx + 1] = np.array([reason_value], dtype=object)
+                        reason_values[roi_idx] = reason_value
+                        update_reason_rows(
+                            refined,
+                            np.asarray([roi_idx], dtype=np.int64),
+                            np.asarray([reason_value], dtype=object),
+                        )
                     if refined_success_arr is not None:
                         refined_success_arr[roi_idx] = False
                     if confidence_valid_arr is not None:

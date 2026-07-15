@@ -632,8 +632,7 @@ refined_subject_masks_runs/
     components/
       <component_name>/
         provenance/                        # attrs-only subgroup for component lineage/update provenance
-        reason_bytes                        (N, width) uint8     # recommended
-        reason                              (N,) string          # optional mirror
+        reason_bytes                        (N, width) uint8     # canonical
         mask_present                        (N,) bool            # recommended
         area_px                             (N,) float32         # recommended
         geometry_valid                      (N,) bool            # optional
@@ -1298,12 +1297,17 @@ Current implementation note:
 
 ## Reason Encoding Policy
 
-If `reason_bytes` is present for a component subgroup, writers should also set:
+If `reason_bytes` is present for a component subgroup, writers must also set:
 
 - `reason_encoding = "utf8-null-terminated"`
+- `reason_authority = "reason_bytes"`
 - `reason_bytes_width = <int>`
 - `reason_bytes_null_terminated = true`
-- `reason_fallback_order = ["reason_bytes", "reason", "detection_source"]`
+- `reason_fallback_order = ["reason_bytes", "detection_source"]`
+
+Current writers must not create or synchronize a variable-length `reason`
+mirror. Readers may fall back to it only for historical archives that lack
+`reason_bytes`.
 
 Recommended reason tags may include:
 

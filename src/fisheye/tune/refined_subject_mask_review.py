@@ -26,7 +26,7 @@ import numpy as np
 import zarr
 from scipy.ndimage import gaussian_filter1d
 
-from ..shared.detect_reason_codec import encode_reason_bytes, read_reason_labels, write_reason_columns
+from ..shared.detect_reason_codec import read_reason_labels, update_reason_rows, write_reason_columns
 from ..shared.mask_store import (
     MaskStore,
     MaskStoreError,
@@ -1133,7 +1133,6 @@ def _load_or_init_reason_labels(component_group: zarr.Group, total_rois: int) ->
             component_group,
             labels,
             chunk_size=max(1, min(256, int(total_rois))),
-            include_reason_text=True,
             overwrite=True,
         )
         return labels
@@ -1146,25 +1145,11 @@ def _write_reason_label_row(
     row_idx: int,
 ) -> None:
     label = str(reason_labels[int(row_idx)])
-    reason_arr = component_group.get("reason")
-    if reason_arr is not None:
-        reason_arr[int(row_idx):int(row_idx) + 1] = np.asarray([label], dtype=object)
-
-    reason_bytes_arr = component_group.get("reason_bytes")
-    existing_width = 0
-    if reason_bytes_arr is not None and hasattr(reason_bytes_arr, "shape"):
-        existing_width = int(reason_bytes_arr.shape[1])
-    encoded = encode_reason_bytes(np.asarray([label], dtype=object), min_width=max(64, existing_width))
-    if reason_bytes_arr is None or int(encoded.shape[1]) > existing_width:
-        write_reason_columns(
-            component_group,
-            reason_labels,
-            chunk_size=max(1, min(256, int(reason_labels.shape[0]))),
-            include_reason_text=True,
-            overwrite=True,
-        )
-        return
-    reason_bytes_arr[int(row_idx):int(row_idx) + 1] = encoded
+    update_reason_rows(
+        component_group,
+        np.asarray([int(row_idx)], dtype=np.int64),
+        np.asarray([label], dtype=object),
+    )
 
 
 def _ensure_component_group(
@@ -1850,7 +1835,6 @@ def _create_refined_subject_run_from_component_seeds(
             component_group,
             reason_labels,
             chunk_size=max(1, min(256, total_rois)),
-            include_reason_text=True,
             overwrite=True,
         )
         _ensure_refined_component_provenance_payload(

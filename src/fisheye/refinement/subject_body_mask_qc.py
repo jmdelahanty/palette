@@ -453,7 +453,6 @@ def write_subject_body_mask_qc_group(
         qc_group,
         reason_labels,
         chunk_size=refined_subject_mask_metric_row_chunk(row_count),
-        include_reason_text=True,
         overwrite=True,
     )
     updated_at = _utc_now()

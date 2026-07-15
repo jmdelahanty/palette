@@ -17,8 +17,7 @@ def test_count_reason_tags_uses_reason_bytes_fallback(tmp_path) -> None:
         ],
         dtype=object,
     )
-    write_reason_columns(refined, labels, chunk_size=2, include_reason_text=True, overwrite=True)
-    del refined["reason"]
+    write_reason_columns(refined, labels, chunk_size=2, overwrite=True)
 
     counts = _count_reason_tags(refined)
 

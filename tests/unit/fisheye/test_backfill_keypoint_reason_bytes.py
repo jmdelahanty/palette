@@ -25,6 +25,7 @@ def test_backfill_reason_columns_writes_reason_bytes(tmp_path) -> None:
     assert "reason_bytes" in refined
     decoded = decode_reason_bytes(np.asarray(refined["reason_bytes"][:], dtype=np.uint8)).tolist()
     assert decoded == ["clean", "manual_correction", "geometry_issue"]
+    assert "reason" not in refined
 
 
 def test_backfill_reason_columns_skips_when_present_without_overwrite(tmp_path) -> None:
@@ -34,7 +35,6 @@ def test_backfill_reason_columns_skips_when_present_without_overwrite(tmp_path) 
         refined,
         np.array(["clean", "manual_correction"], dtype=object),
         chunk_size=2,
-        include_reason_text=True,
         overwrite=True,
     )
 

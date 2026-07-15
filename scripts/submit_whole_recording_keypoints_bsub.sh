@@ -30,8 +30,8 @@ flat-cache staging to job-local scratch, a minimum zebrafish ROI size of
 348x348, and CPU refinement on short.
 
 Keypoint storage:
-  --keypoint-roi-shard-rows N       ROI outer shard rows (default: 65536)
-  --keypoint-frame-shard-rows N     Frame outer shard rows (default: 262144)
+  --keypoint-roi-shard-rows N       ROI outer shard rows (default: 131072)
+  --keypoint-frame-shard-rows N     Frame outer shard rows (default: 131072)
   --no-keypoint-sharding            Use ordinary chunks for keypoint outputs
 
 All additional options are forwarded to

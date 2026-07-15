@@ -755,7 +755,6 @@ def _write_empty_source_detections(refined_run: zarr.Group) -> None:
         source,
         np.empty((0,), dtype=object),
         1,
-        include_reason_text=True,
         overwrite=True,
     )
     source.attrs["decision_code_map"] = dict(REFINED_SOURCE_DETECTION_DECISION_CODE_MAP)
@@ -948,7 +947,6 @@ def _sync_training_refined_instances_from_crop(
         instances,
         reason_labels,
         max(1, row_count),
-        include_reason_text=True,
         overwrite=True,
     )
     _replace_string_array(instances, "review_notes", review_notes)

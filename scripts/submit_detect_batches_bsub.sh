@@ -344,8 +344,8 @@ fi
 if [[ "$NO_DETECT_SHARDING" == "1" ]]; then
   echo "Detect storage: regular chunks (explicit override)"
 else
-  echo "Detect row shard rows: ${DETECT_ROW_SHARD_ROWS:-<runner default: 262144>}"
-  echo "Detect frame shard rows: ${DETECT_FRAME_SHARD_ROWS:-<runner default: 262144>}"
+  echo "Detect row shard rows: ${DETECT_ROW_SHARD_ROWS:-<runner default: 131072>}"
+  echo "Detect frame shard rows: ${DETECT_FRAME_SHARD_ROWS:-<runner default: 131072>}"
 fi
 echo "Analysis zarrs: $analysis_count"
 echo "Batch size: $BATCH_SIZE"

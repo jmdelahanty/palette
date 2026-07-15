@@ -571,7 +571,6 @@ def _backfill_component_arrays(
                 component,
                 np.asarray(component["reason"][:], dtype=str),
                 refined_subject_mask_metric_row_chunk(total_rows),
-                include_reason_text=True,
                 overwrite=True,
             )
             summary.setdefault("backfilled", []).append(f"components/{label}/reason_bytes")

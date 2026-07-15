@@ -37,7 +37,6 @@ def _add_refined_run(
             run,
             np.asarray(reason_labels, dtype=object),
             chunk_size=16,
-            include_reason_text=False,
             overwrite=True,
         )
     return run

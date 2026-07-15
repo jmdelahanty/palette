@@ -1,13 +1,20 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import zarr
-from zarr.core.dtype import VariableLengthUTF8
 
 REASON_BYTES_ENCODING = "utf8-null-terminated"
 REASON_BYTES_MIN_WIDTH = 64
+
+
+def _stamp_reason_contract(group: zarr.Group, width: int) -> None:
+    group.attrs["reason_encoding"] = REASON_BYTES_ENCODING
+    group.attrs["reason_authority"] = "reason_bytes"
+    group.attrs["reason_bytes_width"] = int(width)
+    group.attrs["reason_bytes_null_terminated"] = True
+    group.attrs["reason_fallback_order"] = ["reason_bytes", "detection_source"]
 
 
 def _labels_from_detection_source(detection_source: np.ndarray) -> np.ndarray:
@@ -46,12 +53,16 @@ def write_reason_columns(
     reason: np.ndarray,
     chunk_size: int,
     *,
-    include_reason_text: bool = True,
     overwrite: bool = False,
 ) -> list[str]:
+    """Write the canonical fixed-width reason column.
+
+    ``reason`` remains a supported read-only compatibility surface for old
+    archives.  New writes intentionally remove that variable-length mirror so
+    callers cannot leave two independently mutable reason authorities behind.
+    """
     labels = np.asarray(reason, dtype=str).reshape(-1)
     det_chunk = max(1, int(chunk_size))
-    written_fields = ["reason_bytes"]
 
     reason_bytes = encode_reason_bytes(labels)
     group.create_array(
@@ -61,23 +72,13 @@ def write_reason_columns(
         overwrite=overwrite,
     )
 
-    if include_reason_text:
-        reason_arr = group.create_array(
-            "reason",
-            shape=(int(labels.shape[0]),),
-            chunks=(det_chunk,),
-            dtype=VariableLengthUTF8(),
-            fill_value="",
-            overwrite=overwrite,
-        )
-        reason_arr[:] = labels
-        written_fields.append("reason")
+    # Publish the new authority before retiring the legacy mirror.  A failed
+    # reason_bytes write therefore leaves the historical column untouched.
+    if "reason" in group:
+        del group["reason"]
 
-    group.attrs["reason_encoding"] = REASON_BYTES_ENCODING
-    group.attrs["reason_bytes_width"] = int(reason_bytes.shape[1])
-    group.attrs["reason_bytes_null_terminated"] = True
-    group.attrs["reason_fallback_order"] = ["reason_bytes", "reason", "detection_source"]
-    return written_fields
+    _stamp_reason_contract(group, int(reason_bytes.shape[1]))
+    return ["reason_bytes"]
 
 
 def update_reason_rows(
@@ -92,19 +93,24 @@ def update_reason_rows(
     if row_indices_arr.size == 0:
         return
 
-    row_count = int(group["frame_indices"].shape[0]) if "frame_indices" in group else int(np.max(row_indices_arr)) + 1
+    reason_arr = group.get("reason")
+    reason_bytes_arr = group.get("reason_bytes")
+    if "frame_indices" in group:
+        row_count = int(group["frame_indices"].shape[0])
+    elif reason_bytes_arr is not None:
+        row_count = int(reason_bytes_arr.shape[0])
+    elif reason_arr is not None:
+        row_count = int(reason_arr.shape[0])
+    else:
+        row_count = int(np.max(row_indices_arr)) + 1
     if np.any(row_indices_arr < 0) or np.any(row_indices_arr >= row_count):
         raise ValueError("row_indices contain out-of-range values.")
 
-    reason_arr = group.get("reason")
-    if reason_arr is not None:
-        reason_arr[row_indices_arr] = np.asarray(labels, dtype=object)
-
-    reason_bytes_arr = group.get("reason_bytes")
     if reason_bytes_arr is None:
+        existing_labels = read_reason_labels(group)
         full_labels = (
-            np.asarray(reason_arr[:], dtype=object).reshape(-1)
-            if reason_arr is not None
+            np.asarray(existing_labels, dtype=object).reshape(-1)
+            if existing_labels is not None and int(np.asarray(existing_labels).size) == row_count
             else np.full(row_count, "", dtype=object)
         )
         full_labels[row_indices_arr] = np.asarray(labels, dtype=object)
@@ -112,7 +118,6 @@ def update_reason_rows(
             group,
             full_labels,
             max(1, row_count),
-            include_reason_text=reason_arr is not None,
             overwrite=True,
         )
         return
@@ -120,22 +125,20 @@ def update_reason_rows(
     width = int(reason_bytes_arr.shape[1]) if len(reason_bytes_arr.shape) > 1 else REASON_BYTES_MIN_WIDTH
     encoded = encode_reason_bytes(labels, min_width=width)
     if encoded.shape[1] > width:
-        full_labels = (
-            np.asarray(reason_arr[:], dtype=object).reshape(-1)
-            if reason_arr is not None
-            else decode_reason_bytes(reason_bytes_arr[:]).reshape(-1)
-        )
+        full_labels = decode_reason_bytes(reason_bytes_arr[:]).reshape(-1)
         full_labels[row_indices_arr] = np.asarray(labels, dtype=object)
         write_reason_columns(
             group,
             full_labels,
             max(1, row_count),
-            include_reason_text=reason_arr is not None,
             overwrite=True,
         )
         return
 
     reason_bytes_arr[row_indices_arr, :] = encoded[:, :width]
+    if "reason" in group:
+        del group["reason"]
+    _stamp_reason_contract(group, width)
 
 
 def read_reason_labels(group: zarr.Group) -> Optional[np.ndarray]:
@@ -152,3 +155,59 @@ def read_reason_labels(group: zarr.Group) -> Optional[np.ndarray]:
         return _labels_from_detection_source(detection_source[:])
 
     return None
+
+
+class MutableReasonColumn:
+    """A small 1-D edit adapter backed exclusively by ``reason_bytes``."""
+
+    def __init__(self, group: zarr.Group, values: np.ndarray) -> None:
+        self._group = group
+        self._values = np.asarray(values, dtype=object).reshape(-1)
+        self.shape = self._values.shape
+        self.dtype = self._values.dtype
+
+    @property
+    def chunks(self) -> tuple[int, ...] | None:
+        reason_bytes = self._group.get("reason_bytes")
+        if reason_bytes is None or not reason_bytes.chunks:
+            return None
+        return (int(reason_bytes.chunks[0]),)
+
+    def __len__(self) -> int:
+        return int(self._values.shape[0])
+
+    def __getitem__(self, item: Any) -> Any:
+        return self._values[item]
+
+    def __setitem__(self, item: Any, value: Any) -> None:
+        self._values[item] = value
+        selected = np.asarray(np.arange(len(self), dtype=np.int64)[item], dtype=np.int64).reshape(-1)
+        if selected.size == 0:
+            return
+        update_reason_rows(
+            self._group,
+            selected,
+            np.asarray(self._values[selected], dtype=object),
+        )
+
+
+def open_mutable_reason_column(
+    group: zarr.Group,
+    *,
+    chunk_size: int,
+) -> Optional[MutableReasonColumn]:
+    """Open a mutable logical reason vector while canonicalizing legacy storage."""
+    labels = read_reason_labels(group)
+    if labels is None:
+        return None
+    labels = np.asarray(labels, dtype=object).reshape(-1)
+    if "reason_bytes" not in group or "reason" in group:
+        write_reason_columns(
+            group,
+            labels,
+            chunk_size=max(1, int(chunk_size)),
+            overwrite=True,
+        )
+    else:
+        _stamp_reason_contract(group, int(group["reason_bytes"].shape[1]))
+    return MutableReasonColumn(group, labels)

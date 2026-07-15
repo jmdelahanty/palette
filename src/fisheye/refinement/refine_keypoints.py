@@ -433,7 +433,6 @@ def _write_reason_arrays(group: zarr.Group, reason: np.ndarray, chunk_size: int)
         group,
         np.asarray(reason, dtype=object),
         chunk_size,
-        include_reason_text=True,
         overwrite=True,
     )
 

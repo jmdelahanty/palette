@@ -1234,7 +1234,6 @@ def _write_manual_group(
         group,
         reason_arr,
         det_chunk,
-        include_reason_text=True,
         overwrite=True,
     )
     column_fields.extend(written_reason_fields)

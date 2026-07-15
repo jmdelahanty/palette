@@ -59,26 +59,25 @@ Given `run_name = refined_detect_runs.attrs["latest"]` and `manual_group` (defau
 3. Optional arrays (recommended when available):
 - `detection_source` (`int8`, shape `(n_detections,)`)
 - `retune_id` (`int32`, shape `(n_detections,)`, `-1` for non-retuned)
-- `reason_bytes` (`uint8`, shape `(n_detections, width)`, null-terminated UTF-8; preferred cross-tool encoding)
-- `reason` (UTF-8 variable-length string, shape `(n_detections,)`)
+- `reason_bytes` (`uint8`, shape `(n_detections, width)`, null-terminated UTF-8; canonical cross-tool encoding)
 
-`reason` write guidance:
-- If `detection_source` is written, write `reason` as well.
+`reason_bytes` write guidance:
+- If `detection_source` is written, write `reason_bytes` as well.
 - Recommended mapping:
-  - `detection_source == 0` -> `reason = "clean"` (or `"manual"` for explicit manual rows)
-  - `detection_source == 1` -> `reason = "interpolated"`
+  - `detection_source == 0` -> label `"clean"` (or `"manual"` for explicit manual rows)
+  - `detection_source == 1` -> label `"interpolated"`
 - Custom labels are allowed (for example `retune`), but lengths must still match
-  `n_detections` and labels must be UTF-8 strings.
-
-`reason_bytes` guidance:
-- Write `reason_bytes` for Crimson/TensorStore compatibility, even if `reason` is also written.
+  `n_detections` and labels must be UTF-8 strings before encoding.
+- Do not create or update a variable-length `reason` mirror. It is a historical
+  read-only compatibility surface.
 - Keep row alignment identical to `frame_indices`.
 - Encode each row as UTF-8 bytes with `0x00` terminator and `0x00` padding.
 - Keep fallback metadata aligned with Palette readers:
   - `reason_encoding="utf8-null-terminated"`
+  - `reason_authority="reason_bytes"`
   - `reason_bytes_width=<int>`
   - `reason_bytes_null_terminated=true`
-  - `reason_fallback_order=["reason_bytes","reason","detection_source"]`
+  - `reason_fallback_order=["reason_bytes","detection_source"]`
 
 4. Manual subgroup attrs:
 - `storage_layout = "columnar"`

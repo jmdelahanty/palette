@@ -180,13 +180,15 @@ frame-index semantics and Crimson impact.
 String-like data should follow these conventions across runtime writers:
 
 1. Reason/status labels that must be TensorStore/C++ compatible:
-- Primary encoding: `reason_bytes` as `uint8[N,width]`, null-terminated UTF-8.
-- Optional mirror: `reason` as variable-length UTF-8 text for Python ergonomics.
+- Canonical encoding: `reason_bytes` as `uint8[N,width]`, null-terminated UTF-8.
+- New writers, review updates, republishers, and compactors must not create or
+  maintain a variable-length `reason` mirror.
 - Required attrs when reason bytes are present:
   - `reason_encoding="utf8-null-terminated"`
+  - `reason_authority="reason_bytes"`
   - `reason_bytes_width=<int>`
   - `reason_bytes_null_terminated=true`
-  - `reason_fallback_order=["reason_bytes","reason","detection_source"]`
+  - `reason_fallback_order=["reason_bytes","detection_source"]`
 
 2. General text columns/arrays:
 - Canonical runtime encoding is variable-length UTF-8.
@@ -194,8 +196,9 @@ String-like data should follow these conventions across runtime writers:
 
 3. Read compatibility:
 - Readers should tolerate legacy fixed-width string arrays where they exist.
-- Preferred read order for reason labels remains:
-  `reason_bytes` -> `reason` -> labels derived from `detection_source`.
+- Historical read compatibility remains `reason_bytes` -> `reason` -> labels
+  derived from `detection_source`. The legacy `reason` step is a reader
+  fallback, not a current write contract.
 
 See also: `docs/zarr_string_encoding_todo.md`.
 
@@ -304,7 +307,7 @@ YOLO detection storage note:
 
 - the serial YOLO detector defaults to indexed Zarr v3 shards while retaining
   its existing inner chunk grid; the default detection- and frame-domain outer
-  row targets are both `262144`
+  row targets are both `131072`
 - detection inference already materializes the complete result table before
   saving, so the sharded path writes complete outer shards directly and does
   not allocate a second streaming buffer
@@ -481,8 +484,8 @@ Keypoint storage note:
 - fixed-width triangle diagnostic arrays are compatibility/QC outputs for the
   traditional triangle and are not the general skeleton geometry contract
 - the serial YOLO writer defaults to indexed Zarr v3 shards while retaining its
-  existing inner chunk grid: ROI outer rows default to `262144` and frame-domain
-  outer rows default to `262144`; use `--no-keypoint-sharding` for an explicit
+  existing inner chunk grid: ROI outer rows default to `131072` and frame-domain
+  outer rows default to `131072`; use `--no-keypoint-sharding` for an explicit
   ordinary-chunk compatibility or benchmark run
 - sharded YOLO writes use exactly two buffers and write complete outer shards;
   the inference-produced ROI arrays share one aligned outer grid, copied ROI
@@ -495,8 +498,11 @@ Keypoint storage note:
 - `keypoint_storage_policy` distinguishes `default_indexed_sharding_v1` from
   `explicit_regular_chunks_override`
 - completed refined keypoint outputs may be published as immutable
-  `262144`-row indexed-sharded snapshots; sparse review changes belong in
+  `131072`-row indexed-sharded snapshots; sparse review changes belong in
   `edit_delta_runs` partitions and are compacted into a new snapshot
+- strictly immutable publication jobs may explicitly choose `262144` rows per
+  shard when minimizing object count is more important than smaller maintenance
+  rewrite units
 - both ordinary working runs and sharded snapshot runs use the same Zarr array API
 - traditional/Dask writers must not concurrently write disjoint logical slices
   inside the same physical shard
@@ -719,8 +725,10 @@ Common optional arrays:
 - `class_ids`
 - `source_detect_row_index`
 - `reason_bytes`
-- `reason`
 - `review_notes`
+
+Historical runs may additionally contain a variable-length `reason` mirror;
+readers may consume it only when `reason_bytes` is absent.
 
 Reader rule:
 
@@ -754,8 +762,10 @@ Common optional arrays:
 - `confidence_scores`
 - `class_ids`
 - `reason_bytes`
-- `reason`
 - `review_notes`
+
+Historical runs may additionally contain a variable-length `reason` mirror;
+readers may consume it only when `reason_bytes` is absent.
 
 Reader rule:
 
@@ -904,12 +914,14 @@ Optional overlap-analysis attrs (when overlap analysis is enabled):
 Reason-label attrs on refined keypoint runs:
 
 - `reason_encoding="utf8-null-terminated"`
+- `reason_authority="reason_bytes"`
 - `reason_bytes_width=<int>`
 - `reason_bytes_null_terminated=true`
-- `reason_fallback_order=["reason_bytes","reason","detection_source"]`
+- `reason_fallback_order=["reason_bytes","detection_source"]`
 
-Consumers should read reason labels in this order:
-`reason_bytes` -> `reason` -> labels derived from `detection_source`
+Current consumers should read `reason_bytes`, then derive labels from
+`detection_source` when it is absent. Historical readers may insert legacy
+`reason` between those steps for old archives only
 (`0=clean`, `1=interpolated`).
 
 `summary_statistics` is a dict with a refine-time snapshot plus optional
@@ -972,8 +984,9 @@ Row lineage (`frame_indices`, `detection_indices`, `frame_counts`,
   `filter_flags`, `pixels_reassigned`.
 - Probability arrays: `probabilities_used`, `probability_mean`,
   `probability_max`, `probability_var`, `probability_high_fraction`.
-- Reason arrays: `reason_bytes` and `reason` (tags include `refined`,
+- Reason array: canonical `reason_bytes` (tags include `refined`,
   `copied_original`, `filtered_*`, `retuned`, `manual_correction`).
+  Historical runs may retain a read-only `reason` mirror.
 
 Attributes expose `metrics_summary`, configuration snapshots, per-eye filter
 thresholds, `summary_statistics`, `retune_params`, and links to source runs
@@ -1126,7 +1139,9 @@ temporal context, or cross-component relationship belongs in
 | `available_channels` | `(C,)` | `bool` | Declares which refined components are intentionally present |
 | `edit_applied` | `(n_rois, C)` | `bool` | True when the refined channel differs from the source subject-mask run |
 | `reason_bytes` *(optional)* | `(n_rois, width)` | `uint8` | Null-terminated UTF-8 reason labels |
-| `reason` *(optional)* | `(n_rois,)` | `string` | Human-readable reason tags |
+
+Historical refined subject-mask runs may contain a variable-length `reason`
+array. It is read-only compatibility data and is not emitted by current writers.
 
 Modern editable refined subject-mask runs use dense `masks_roi` as the storage
 authority. New provenance should record the explicit dense encoding name
@@ -2592,8 +2607,8 @@ Examples:
 - `fisheye.shared.zarr.schema.get_run_group(root, stage)` resolves the run
   path respecting `attrs["latest"]`.
 - QA-sensitive tooling should filter using stage-specific reason/metrics arrays.
-  For refined detect/keypoint groups, prefer `reason_bytes`, then `reason`,
-  then `detection_source` as fallback.
+  For current refined detect/keypoint groups, use `reason_bytes`, then
+  `detection_source`. Historical readers may fall back through legacy `reason`.
 - **For distance calculations**: Always verify you're using the correct
   `pixels_per_mm` value for your coordinate space.
 

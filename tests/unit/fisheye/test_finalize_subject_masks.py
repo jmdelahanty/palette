@@ -1539,7 +1539,6 @@ def test_refresh_refined_subject_mask_metrics_updates_metric_qc_reasons(monkeypa
         run["components/subject_body"],
         np.asarray(["clean", "manual_correction|needs_review_metric_holes"], dtype=object),
         chunk_size=2,
-        include_reason_text=True,
         overwrite=True,
     )
 

@@ -36,10 +36,10 @@ from fisheye.shared.zarr_helpers import reconsolidate_zarr_metadata
 MIGRATION_ID = "palette.immutable_yolo_indexed_sharding.v1"
 MIGRATION_TOOL = "fisheye.utils.migrate_immutable_yolo_sharding"
 REPORT_SCHEMA = "palette.immutable_yolo_sharding_migration_report.v1"
-DEFAULT_DETECT_ROW_SHARD_ROWS = 262_144
-DEFAULT_DETECT_FRAME_SHARD_ROWS = 262_144
-DEFAULT_KEYPOINT_ROI_SHARD_ROWS = 262_144
-DEFAULT_KEYPOINT_FRAME_SHARD_ROWS = 262_144
+DEFAULT_DETECT_ROW_SHARD_ROWS = 131_072
+DEFAULT_DETECT_FRAME_SHARD_ROWS = 131_072
+DEFAULT_KEYPOINT_ROI_SHARD_ROWS = 131_072
+DEFAULT_KEYPOINT_FRAME_SHARD_ROWS = 131_072
 FRAME_ARRAY_NAMES = {
     "detect": frozenset({"frame_counts", "n_detections"}),
     "keypoints": frozenset({"frame_counts", "n_keypoints", "n_rois"}),

@@ -7,7 +7,7 @@ follow-up integration work.
 ## Decision
 
 Raw and canonical refined keypoint/detection runs are immutable snapshots.
-They use Zarr v3 indexed sharding with `262144` requested outer rows while
+They use Zarr v3 indexed sharding with `131072` requested outer rows while
 retaining bounded inner chunks. Manual and other genuinely sparse corrections
 are written to partition-owned delta generations instead of modifying those
 shards in place.
@@ -17,7 +17,10 @@ This separates three concerns:
 1. inference and refinement produce complete evidence or canonical snapshots;
 2. interactive review writes small sparse deltas;
 3. a maintenance compactor periodically publishes another complete immutable
-   snapshot.
+snapshot.
+
+`262144` remains an explicit option for strictly immutable publication where
+the additional object-count reduction is worth doubling a shard rewrite unit.
 
 Automated refinement that changes a substantial fraction of rows should write
 a complete snapshot directly. It should not encode a dense rewrite as millions
@@ -112,6 +115,13 @@ Operation codes are versioned by
 `fisheye.shared.tabular_deltas` and are copied into partition attributes.
 Free-form reason text should remain exceptional; ordinary reasons use a
 versioned numeric map to keep partitions compact.
+
+Complete base and compacted runs persist explanatory row labels only as
+fixed-width `reason_bytes`. The variable-length `reason` array is a historical
+read fallback: delta writers must not target it, and snapshot publishers and
+compactors omit it. A legacy base containing only `reason` must first be
+deterministically canonicalized to `reason_bytes`; publication fails closed
+rather than silently dropping the labels.
 
 Each partition is immutable and owned by one writer. Writers must never append
 concurrently to a shared Zarr array. A partition uses one ordinary chunk per

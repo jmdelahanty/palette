@@ -809,8 +809,8 @@ def build_plan(
                 "--run-name", str(clip["keypoint_shard_run"]), "--output-parent", "keypoint_shard_runs",
                 "--crop-run", str(clip["proxy_crop_run"]), "--pose-schema", "traditional_v2",
                 "--batch-size", "256", "--device", "0", "--roi-cache-manifest", str(clip["alias_manifest"]),
-                "--stage-roi-cache-to-scratch", "--keypoint-roi-shard-rows", "262144",
-                "--keypoint-frame-shard-rows", "262144",
+                "--stage-roi-cache-to-scratch", "--keypoint-roi-shard-rows", "131072",
+                "--keypoint-frame-shard-rows", "131072",
                 "--progress-jsonl", str(run_root / "progress" / f"keypoints_{target_safe}_{clip_id}.jsonl"),
             ]
             jobs.append(

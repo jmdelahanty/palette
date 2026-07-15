@@ -34,7 +34,6 @@ def _write_sparse_detection_group(
         group,
         np.asarray(reasons, dtype=object),
         chunk_size=max(1, int(frames.shape[0])),
-        include_reason_text=True,
         overwrite=True,
     )
 
@@ -85,7 +84,6 @@ def _make_legacy_zarr(path: Path) -> Path:
         instances,
         np.asarray(["kept", "kept"], dtype=object),
         chunk_size=2,
-        include_reason_text=True,
         overwrite=True,
     )
 

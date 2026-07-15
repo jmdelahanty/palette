@@ -210,7 +210,7 @@ def test_finalize_keypoint_shards_writes_canonical_keypoint_run(tmp_path: Path) 
     assert run.attrs["source_crop_run"] == "crop_proxy"
     assert run.attrs["stage_selector_eligible"] is True
     assert run.attrs["keypoint_storage_layout"] == "indexed_sharding_v1"
-    assert run.attrs["keypoint_roi_shard_rows"] == 262_144
+    assert run.attrs["keypoint_roi_shard_rows"] == 131_072
     assert run["keypoints_roi"].shards == (3, 3, 2)
     assert run["instance_key"].shards == (3,)
     np.testing.assert_array_equal(run["source_crop_row_ids"][:], np.array([0, 1, 2], dtype=np.int64))

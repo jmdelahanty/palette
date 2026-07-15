@@ -24,7 +24,7 @@ DETECT_ARRAYS = (
 )
 
 
-def _digest_array(array: zarr.Array, *, row_step: int = 262_144) -> str:
+def _digest_array(array: zarr.Array, *, row_step: int = 131_072) -> str:
     digest = hashlib.sha256()
     step = max(1, int(row_step))
     for start in range(0, int(array.shape[0]), step):
@@ -61,8 +61,8 @@ def replay_detection_run_as_sharded(
     *,
     source_run: str,
     destination_run: str,
-    detect_row_shard_rows: int = 262_144,
-    detect_frame_shard_rows: int = 262_144,
+    detect_row_shard_rows: int = 131_072,
+    detect_frame_shard_rows: int = 131_072,
 ) -> dict[str, Any]:
     """Replay one materialized detect table through the production shard writer."""
 

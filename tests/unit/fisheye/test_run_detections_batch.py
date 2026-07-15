@@ -188,8 +188,8 @@ def test_main_apply_uses_pre_resolved_model_and_returns_failure(monkeypatch, tmp
     assert calls[0]["plan"].zarr_path == zarr_path.resolve()
     assert calls[0]["registry_path"] == registry_path.resolve()
     assert calls[0]["resolved_model"].model_path == "/tmp/model.pt"
-    assert calls[0]["detect_row_shard_rows"] == 262_144
-    assert calls[0]["detect_frame_shard_rows"] == 262_144
+    assert calls[0]["detect_row_shard_rows"] == 131_072
+    assert calls[0]["detect_frame_shard_rows"] == 131_072
 
 
 def test_build_plan_for_zarr_uses_source_video_path_from_copied_archive(tmp_path: Path) -> None:

@@ -159,7 +159,6 @@ def _write_sparse_group(
         group,  # type: ignore[arg-type]
         np.asarray(reason_labels, dtype=object),
         chunk_size=max(1, int(frame_indices.shape[0])),
-        include_reason_text=True,
         overwrite=True,
     )
 

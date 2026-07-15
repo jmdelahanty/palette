@@ -31,8 +31,8 @@ from fisheye.shared.zarr_run_completion import is_run_complete_in_parent
 
 
 DEFAULT_ZEBRAFISH_MIN_ROI_SIZE = 348
-DEFAULT_KEYPOINT_ROI_SHARD_ROWS = 262_144
-DEFAULT_KEYPOINT_FRAME_SHARD_ROWS = 262_144
+DEFAULT_KEYPOINT_ROI_SHARD_ROWS = 131_072
+DEFAULT_KEYPOINT_FRAME_SHARD_ROWS = 131_072
 
 
 def resolve_keypoint_storage(

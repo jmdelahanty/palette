@@ -6,7 +6,7 @@ This note records recent changes around keypoint retuning so future agents can f
 - Added a failure-retune mode to the existing keypoint tuner to re-run keypoint detection on failed ROIs only.
 - Retuning never touches detections or raw keypoint runs; it only edits the refined run.
 - Retunes write a per-ROI `retune_id` plus a `retune_params` mapping on the refined run for auditability.
-- Reason labels are written using the shared reason codec (`reason_bytes` primary, `reason` secondary).
+- Reason labels are written using the shared reason codec (`reason_bytes` only).
 
 ## Files touched
 - `src/fisheye/tune/keypoint_tuner.py`
@@ -52,13 +52,15 @@ Legacy entrypoints for retune/manual review have been removed. Use
 
 ## Reason Column Compatibility
 - Refined keypoint runs write reason labels as:
-  - `reason_bytes` (`uint8[N,width]`, null-terminated UTF-8, preferred).
-  - `reason` (string array, secondary fallback).
+  - `reason_bytes` (`uint8[N,width]`, null-terminated UTF-8, canonical).
 - Run attrs include:
   - `reason_encoding="utf8-null-terminated"`
-  - `reason_fallback_order=["reason_bytes","reason","detection_source"]`
-- Readers should follow that fallback order for robust cross-tool behavior.
+  - `reason_authority="reason_bytes"`
+  - `reason_fallback_order=["reason_bytes","detection_source"]`
+- Historical readers may fall back to a legacy `reason` array only when
+  `reason_bytes` is absent; current writers never maintain that mirror.
 
 ## Known follow-ups
-- If legacy runs are missing `reason_bytes`, run `fisheye.utils.backfill_keypoint_reason_bytes`.
+- Use `fisheye.utils.backfill_keypoint_reason_bytes` to canonicalize legacy
+  runs and retire their variable-length `reason` mirror.
 - Consider a process-based compute option for faster CPU-heavy workloads (still single writer).

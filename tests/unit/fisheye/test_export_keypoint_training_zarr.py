@@ -151,7 +151,6 @@ def _write_source_pose_zarr(
             refined,
             np.asarray(refined_reasons, dtype=object),
             chunk_size=4,
-            include_reason_text=True,
             overwrite=True,
         )
 

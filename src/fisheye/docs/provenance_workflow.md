@@ -35,7 +35,7 @@ Relevant provenance attributes:
 | `refined_detect_runs/<run>` | `instances/bbox_norm_coords`, `source_detections/bbox_norm_coords` | `source_detect_run`, `detect_review_status`, `refined_storage_semantics`, `source_detection_decision_code_map` |
 | `crop_runs/<run>` | `roi_images`, `source_refined_row_ids` *(when sourced from canonical refined detect)* | `detection_source_path`, `detect_review_status_ref`, `detect_review_status` (snapshot), `detection_selection_policy`, `crop_signature`, `roi_image_representation`, `roi_pixel_contract_name`, `roi_pixel_contract`, `crop_review_status` |
 | `keypoints_runs/<run>` | `heading`, `frame_indices` | `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `source_roi_image_representation`, `source_roi_pixel_contract_name`, `source_roi_pixel_contract`, `requested_device`, `normalized_torch_device`, `resolved_model_device`, `scheduler_job_id`, `scheduler_hosts` |
-| `refined_keypoints_runs/<run>` | `heading`, `usable_keypoints`, `reason_bytes`, `reason` | `source_keypoints_run`, `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `keypoint_signature`, `keypoint_review_status`, `reason_fallback_order`, `pose_schema`, `heading_computation_override`, `derived_metrics_schema` |
+| `refined_keypoints_runs/<run>` | `heading`, `usable_keypoints`, `reason_bytes` | `source_keypoints_run`, `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `keypoint_signature`, `keypoint_review_status`, `reason_authority`, `reason_fallback_order`, `pose_schema`, `heading_computation_override`, `derived_metrics_schema` |
 | `eye_masks_runs/<run>` | `masks_roi` | `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `source_roi_image_representation`, `source_roi_pixel_contract_name`, `source_roi_pixel_contract`, `source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)* |
 | `subject_mask_runs/<run>` | `mask_probs_roi`; optional `masks_roi` convenience threshold | `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `source_roi_image_representation`, `source_roi_pixel_contract_name`, `source_roi_pixel_contract`, `source_roi_read_mode`, `roi_cache_policy`, `source_roi_cache_used`, `source_roi_cache_backend`, `source_roi_cache_canonical_path`, `label_schema_id`, `run_semantics`, `masks_roi_materialized` |
 | `refined_subject_masks_runs/<run>` | logical mask store via `MaskStore` (`masks_roi`, `mask_bitpacked`, and/or `mask_rle`), component geometry, `relations/eye_pair/metrics/separation_px` | `source_subject_mask_run`, `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `source_roi_image_representation`, `source_roi_pixel_contract_name`, `source_roi_pixel_contract`, `source_roi_read_mode`, `source_roi_cache_canonical_path`, `mask_storage_encoding`, `mask_store_encodings`, `refined_subject_mask_review_status`, `component_review_statuses`, `source_refined_eye_masks_run` *(when seeded from compatibility eye data)* |
@@ -108,8 +108,9 @@ captured at two levels:
 `bbox_norm_coords` in detect/refined-detect groups use normalized
 `[cx, cy, w, h]`.
 
-For refined detect/keypoint reason labels, use fallback order:
-`reason_bytes` -> `reason` -> labels derived from `detection_source`.
+For current refined detect/keypoint reason labels, use `reason_bytes` and then
+labels derived from `detection_source`. Historical readers may use legacy
+`reason` between those steps, but writers must not create or update it.
 
 For keypoint heading semantics, resolve metadata in this order:
 

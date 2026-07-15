@@ -3839,7 +3839,6 @@ def refresh_refined_subject_mask_metrics_run(
                 component_group,
                 reason_labels_by_component[component_name],
                 chunk_size=max(1, min(256, total_rows)),
-                include_reason_text=True,
                 overwrite=True,
             )
         _add_review_counts(review_counts, component_name, reason_labels_by_component[component_name])
@@ -5185,7 +5184,6 @@ def finalize_subject_mask_run(
                     component_group,
                     reason_labels_by_component[component_name],
                     chunk_size=max(1, min(256, total_rows)),
-                    include_reason_text=True,
                     overwrite=True,
                 )
         phase_name = f"write_component_provenance_{component_name}"

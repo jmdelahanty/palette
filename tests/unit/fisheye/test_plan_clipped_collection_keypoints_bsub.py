@@ -98,8 +98,8 @@ def test_build_plan_resolves_manifests_and_dependency_commands(tmp_path: Path) -
     assert plan.keypoint_storage["effective"] == {
         "keypoint_storage_layout": "indexed_sharding_v1",
         "keypoint_storage_policy": "default_indexed_sharding_v1",
-        "keypoint_roi_shard_rows": 262144,
-        "keypoint_frame_shard_rows": 262144,
+        "keypoint_roi_shard_rows": 131072,
+        "keypoint_frame_shard_rows": 131072,
     }
     assert "lsf_workflow" not in plan.to_json()
     assert [job.job_key for job in plan.lsf_workflow.topological_jobs()] == [
@@ -118,8 +118,8 @@ def test_build_plan_resolves_manifests_and_dependency_commands(tmp_path: Path) -
     assert "--stage-roi-cache-to-scratch" in first.keypoint_command
     assert "--run-name" in first.keypoint_command
     assert "keypoint_shard_test_run_clip_000001" in first.keypoint_command
-    assert first.keypoint_command[first.keypoint_command.index("--keypoint-roi-shard-rows") + 1] == "262144"
-    assert first.keypoint_command[first.keypoint_command.index("--keypoint-frame-shard-rows") + 1] == "262144"
+    assert first.keypoint_command[first.keypoint_command.index("--keypoint-roi-shard-rows") + 1] == "131072"
+    assert first.keypoint_command[first.keypoint_command.index("--keypoint-frame-shard-rows") + 1] == "131072"
     assert first.keypoint_bsub_command is not None
     assert first.keypoint_bsub_command[:-3] == [
         "bsub",

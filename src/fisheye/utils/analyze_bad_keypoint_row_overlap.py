@@ -184,14 +184,14 @@ def _decode_string_array(arr: np.ndarray) -> List[str]:
 
 
 def _load_reason_strings(run: Any, roi_count: int) -> Tuple[str, List[str]]:
-    if "reason" in run:
-        reason = _decode_string_array(np.asarray(run["reason"][:]))
-        if len(reason) == roi_count:
-            return "reason", reason
     if "reason_bytes" in run:
         reason = _decode_string_array(np.asarray(run["reason_bytes"][:]))
         if len(reason) == roi_count:
             return "reason_bytes", reason
+    if "reason" in run:
+        reason = _decode_string_array(np.asarray(run["reason"][:]))
+        if len(reason) == roi_count:
+            return "reason", reason
     return "none", [""] * roi_count
 
 
