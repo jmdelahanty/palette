@@ -96,3 +96,65 @@ def test_fit_subject_body_spline_batch_propagates_invalid_centerline_reason() ->
     assert batch.bspline_failure_reasons.tolist() == ["source_body_mask_qc_failed"]
     assert batch.tail_sample_failure_reasons.tolist() == ["source_body_mask_qc_failed"]
     assert np.all(np.isnan(batch.bspline_sample_xy[0]))
+
+
+def _batch(centerline, *, curvature_smoothing_px, sample_count=64, tail_count=32):
+    n = 1
+    return fit_subject_body_spline_batch(
+        centerline[None, :, :].astype(np.float32),
+        np.asarray([True] * n, dtype=bool),
+        np.asarray([True] * n, dtype=bool),
+        np.asarray([float(sample_count) * 0.5], dtype=np.float32),  # tail base at mid-body
+        centerline_failure_reasons=["ok"],
+        tail_base_failure_reasons=["ok"],
+        centerline_sample_count=sample_count,
+        tail_sample_count=tail_count,
+        degree=DEFAULT_BSPLINE_DEGREE,
+        smoothing=0.0,
+        curvature_smoothing_px=curvature_smoothing_px,
+    )
+
+
+def test_tail_curvature_uses_a_smoothing_spline_not_the_interpolating_one() -> None:
+    """The reported bug: an interpolating spline (s=0) turns pixel-quantization jitter on the
+    skeleton into meaningless sub-pixel curvature radii. Curvature must come from a separate
+    SMOOTHING spline, so a near-straight but jittery centerline reads as nearly straight."""
+
+    rng = np.random.default_rng(0)
+    n = 64
+    x = np.linspace(0.0, 75.0, n)                 # ~75 px straight body
+    y = np.zeros(n) + rng.normal(0.0, 0.6, n)     # sub-pixel skeleton jitter
+    line = np.stack([x, y], axis=1)
+
+    interp = _batch(line, curvature_smoothing_px=0.0)      # old behaviour (differentiate s=0)
+    smooth = _batch(line, curvature_smoothing_px=0.75)     # the fix
+
+    max_interp = np.nanmax(np.abs(interp.tail_curvature_px_inv[0]))
+    max_smooth = np.nanmax(np.abs(smooth.tail_curvature_px_inv[0]))
+    # the interpolating spline invents high curvature from the jitter (small radius)...
+    assert max_interp > 0.1                        # radius < 10 px, pure noise on a straight line
+    # ...the smoothing spline reports a nearly straight tail (large radius)
+    assert max_smooth < 0.02                       # radius > 50 px
+    assert max_interp > 8 * max_smooth
+    # positions and arc length are unchanged (still the interpolating spline)
+    np.testing.assert_allclose(smooth.tail_sample_xy[0], interp.tail_sample_xy[0], atol=1e-4)
+    np.testing.assert_allclose(smooth.bspline_arc_length_px, interp.bspline_arc_length_px, atol=1e-4)
+
+
+def test_smoothing_preserves_a_real_body_bend() -> None:
+    """Smoothing must remove noise, not signal: a genuine coherent arc of known radius must
+    still read back at ~1/radius, so a real C-bend would not be flattened away."""
+
+    n = 64
+    radius = 20.0                                   # a real, tight bend (20 px radius)
+    theta = np.linspace(0.0, np.pi / 2.0, n)        # quarter circle
+    arc = np.stack([radius * np.cos(theta), radius * np.sin(theta)], axis=1)
+    rng = np.random.default_rng(1)
+    arc = arc + rng.normal(0.0, 0.6, arc.shape)     # same jitter on top of the real bend
+
+    smooth = _batch(arc, curvature_smoothing_px=0.75)
+    k = np.abs(smooth.tail_curvature_px_inv[0])
+    k = k[np.isfinite(k)]
+    assert k.size
+    # the recovered curvature should sit near 1/radius, not be smoothed to zero
+    assert 0.6 / radius < np.median(k) < 1.6 / radius

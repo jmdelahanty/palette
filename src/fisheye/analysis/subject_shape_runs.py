@@ -55,7 +55,9 @@ from .subject_shape_spline import (
     DEFAULT_BSPLINE_ARCLENGTH_SAMPLE_COUNT,
     DEFAULT_BSPLINE_DEGREE,
     DEFAULT_BSPLINE_SMOOTHING,
+    DEFAULT_TAIL_CURVATURE_SMOOTHING_PX,
     DEFAULT_TAIL_SAMPLE_COUNT,
+    TAIL_CURVATURE_METHOD,
     SubjectBodySplineBatch,
     fit_subject_body_spline_batch,
     tail_sample_positions,
@@ -64,8 +66,8 @@ from .subject_shape_spline import (
 SUBJECT_SHAPE_SCHEMA_ID = "analysis.subject_shape_runs"
 SUBJECT_SHAPE_SCHEMA_VERSION = 3
 SOURCE_REFINED_SUBJECT_MASKS_SCHEMA_ID = "analysis.subject_shape.source_refined_subject_masks_v1"
-SUBJECT_SHAPE_METHOD = "subject_shape_from_refined_masks_v8"
-SUBJECT_SHAPE_METHOD_VERSION = 8
+SUBJECT_SHAPE_METHOD = "subject_shape_from_refined_masks_v9"
+SUBJECT_SHAPE_METHOD_VERSION = 9
 SUBJECT_SHAPE_STAGE_NAME = "analysis.subject_shape_runs"
 COMPONENT_ORDER = ("subject_body", "swim_bladder", "eye_left", "eye_right")
 ELLIPSE_COMPONENTS = ("swim_bladder", "eye_left", "eye_right")
@@ -365,6 +367,10 @@ def _prepare_component_group(run_group: zarr.Group, component_name: str, *, tota
         component_group.attrs["bspline_fit_mode"] = "interpolating" if DEFAULT_BSPLINE_SMOOTHING == 0.0 else "smoothing"
         component_group.attrs["bspline_smoothing"] = DEFAULT_BSPLINE_SMOOTHING
         component_group.attrs["bspline_arclength_sample_count"] = DEFAULT_BSPLINE_ARCLENGTH_SAMPLE_COUNT
+        # tail tangent/normal/CURVATURE come from a separate smoothing spline; positions and
+        # arc length stay on the interpolating spline. See subject_shape_spline for why.
+        component_group.attrs["tail_curvature_method"] = TAIL_CURVATURE_METHOD
+        component_group.attrs["tail_curvature_smoothing_px"] = DEFAULT_TAIL_CURVATURE_SMOOTHING_PX
         component_group.attrs["tail_sample_domain"] = "tail_segment_normalized_arclength"
         component_group.attrs["tail_sample_count"] = TAIL_SAMPLE_COUNT
         component_group.attrs["tail_tip_semantic_label"] = "tail_tip"
@@ -1106,6 +1112,8 @@ def _prepare_subject_shape_run(
             "bspline_fit_mode": "interpolating" if DEFAULT_BSPLINE_SMOOTHING == 0.0 else "smoothing",
             "bspline_smoothing": DEFAULT_BSPLINE_SMOOTHING,
             "bspline_arclength_sample_count": DEFAULT_BSPLINE_ARCLENGTH_SAMPLE_COUNT,
+            "tail_curvature_method": TAIL_CURVATURE_METHOD,
+            "tail_curvature_smoothing_px": DEFAULT_TAIL_CURVATURE_SMOOTHING_PX,
             "tail_sample_count": TAIL_SAMPLE_COUNT,
             "tail_sample_domain": "tail_segment_normalized_arclength",
             "chunk_size": max(1, int(requested_chunk_size)),
@@ -1158,6 +1166,8 @@ def _prepare_subject_shape_run(
             "bspline_fit_mode": "interpolating" if DEFAULT_BSPLINE_SMOOTHING == 0.0 else "smoothing",
             "bspline_smoothing": DEFAULT_BSPLINE_SMOOTHING,
             "bspline_arclength_sample_count": DEFAULT_BSPLINE_ARCLENGTH_SAMPLE_COUNT,
+            "tail_curvature_method": TAIL_CURVATURE_METHOD,
+            "tail_curvature_smoothing_px": DEFAULT_TAIL_CURVATURE_SMOOTHING_PX,
             "tail_sample_count": TAIL_SAMPLE_COUNT,
             "tail_sample_domain": "tail_segment_normalized_arclength",
             "chunk_size": max(1, int(requested_chunk_size)),
@@ -2317,6 +2327,7 @@ def _process_and_write_subject_shape_chunk_groups(
             degree=DEFAULT_BSPLINE_DEGREE,
             smoothing=DEFAULT_BSPLINE_SMOOTHING,
             arclength_sample_count=DEFAULT_BSPLINE_ARCLENGTH_SAMPLE_COUNT,
+            curvature_smoothing_px=DEFAULT_TAIL_CURVATURE_SMOOTHING_PX,
         )
         _write_subject_body_spline_batch(run_group, row_slice, spline)
         chunk_timing["write_subject_body_spline_seconds"] = float(time.perf_counter() - phase_start)

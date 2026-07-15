@@ -19,6 +19,16 @@ DEFAULT_BSPLINE_SMOOTHING = 0.0
 DEFAULT_BSPLINE_ARCLENGTH_SAMPLE_COUNT = 256
 DEFAULT_TAIL_SAMPLE_COUNT = 32
 
+# Tail curvature is the SECOND derivative of the centerline, which amplifies the pixel-quantization
+# jitter of the mask skeleton into meaningless sub-pixel radii. The interpolating spline (s=0) that
+# gives faithful positions and arc length is the wrong curve to differentiate twice. So curvature,
+# tangent, and normal are computed from a SEPARATE smoothing spline fit to the same points -- s is
+# set to remove ~this many px of per-point jitter (s = n_points * px^2), which averages out the
+# noise while leaving any real, coherent body bend intact. Positions and arc length still come from
+# the interpolating spline. See test_tail_curvature_uses_a_smoothing_spline.
+TAIL_CURVATURE_METHOD = "separate_smoothing_spline_v1"
+DEFAULT_TAIL_CURVATURE_SMOOTHING_PX = 0.75
+
 
 @dataclass(frozen=True)
 class SubjectBodySplineBatch:
@@ -102,6 +112,7 @@ def _fit_one(
     degree: int,
     smoothing: float,
     arclength_sample_count: int,
+    curvature_smoothing_px: float = DEFAULT_TAIL_CURVATURE_SMOOTHING_PX,
 ) -> dict[str, object]:
     control = np.full((int(centerline_sample_count), 2), np.nan, dtype=np.float32)
     knots = np.full((int(centerline_sample_count) + int(degree) + 1,), np.nan, dtype=np.float32)
@@ -190,10 +201,33 @@ def _fit_one(
 
     tail_s = tail_sample_positions(int(tail_sample_count)).astype(np.float64)
     tail_u = tail_base_u + tail_s * (1.0 - tail_base_u)
+
+    # Positions come from the faithful interpolating spline. The differentiated quantities
+    # (tangent, normal, curvature) come from a SEPARATE smoothing spline fit to the same points,
+    # so the second derivative is not dominated by mask-skeleton pixel jitter. s = n * px^2 removes
+    # ~curvature_smoothing_px of per-point noise; a real, coherent body bend is far larger than the
+    # residual budget and survives. Falls back to the interpolating spline if the smoothed fit fails.
     try:
         tail_points = np.stack(interpolate.splev(tail_u, tck, der=0), axis=1)
-        first_derivative = np.stack(interpolate.splev(tail_u, tck, der=1), axis=1)
-        second_derivative = np.stack(interpolate.splev(tail_u, tck, der=2), axis=1)
+    except Exception:
+        result["tail_reason"] = "spline_eval_failed"
+        return result
+
+    n_pts = int(fitted_points.shape[0])
+    curv_s = float(max(0.0, float(curvature_smoothing_px))) ** 2 * float(n_pts)
+    deriv_tck = tck
+    used_smoothing = False
+    if curv_s > 0.0:
+        try:
+            deriv_tck, _uc = interpolate.splprep(
+                [fitted_points[:, 0], fitted_points[:, 1]], u=u, k=int(degree), s=curv_s
+            )
+            used_smoothing = True
+        except Exception:
+            deriv_tck = tck  # noisy, but never worse than before
+    try:
+        first_derivative = np.stack(interpolate.splev(tail_u, deriv_tck, der=1), axis=1)
+        second_derivative = np.stack(interpolate.splev(tail_u, deriv_tck, der=2), axis=1)
     except Exception:
         result["tail_reason"] = "spline_eval_failed"
         return result
@@ -216,7 +250,7 @@ def _fit_one(
     tail_normal[:, :] = normals.astype(np.float32)
     tail_curvature[:] = curvature.astype(np.float32)
     result["tail_valid"] = True
-    result["tail_reason"] = "ok"
+    result["tail_reason"] = "ok" if used_smoothing or curv_s <= 0.0 else "tail_curvature_smoothing_failed_used_interpolating"
     return result
 
 
@@ -233,6 +267,7 @@ def fit_subject_body_spline_batch(
     degree: int = DEFAULT_BSPLINE_DEGREE,
     smoothing: float = DEFAULT_BSPLINE_SMOOTHING,
     arclength_sample_count: int = DEFAULT_BSPLINE_ARCLENGTH_SAMPLE_COUNT,
+    curvature_smoothing_px: float = DEFAULT_TAIL_CURVATURE_SMOOTHING_PX,
 ) -> SubjectBodySplineBatch:
     """Fit per-row B-splines from ordered body centerlines.
 
@@ -288,6 +323,7 @@ def fit_subject_body_spline_batch(
             degree=int(degree),
             smoothing=float(smoothing),
             arclength_sample_count=int(arclength_sample_count),
+            curvature_smoothing_px=float(curvature_smoothing_px),
         )
         control[row_idx] = fitted["control"]  # type: ignore[assignment]
         knots[row_idx] = fitted["knots"]  # type: ignore[assignment]
