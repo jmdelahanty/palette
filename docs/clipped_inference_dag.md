@@ -155,6 +155,16 @@ reads only its declared source slice and requires exact key equality before
 using those labels. Historical nested `quality_reports` remain a read fallback
 for old single-run archives.
 
+`palette.clipped_detect_quality_source.v2` requires full-frame
+`source_video_width` and `source_video_height`. The serialized source
+materializer resolves those attrs from every selected raw detection run, fails
+closed if any run omits them or clips disagree, and stamps the agreed geometry
+on the immutable source. Because this job runs after the detection array and
+before all downstream work, it is also the single writer that updates compatible
+root `width`/`height`, root `source_video_metadata`, and `raw_video` geometry
+attrs. Inference dimensions such as `640 x 640` are not full-frame geometry and
+must never satisfy this contract.
+
 The manifest always contains a nonempty `targets` list. A one-recording run is
 therefore a one-item campaign, while a multi-recording run expands this same
 subgraph for every item. `--max-active-targets` bounds recording concurrency by

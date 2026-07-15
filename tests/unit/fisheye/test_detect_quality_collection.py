@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import zarr
 
+from fisheye.shared.detect_quality_contract import CLIPPED_DETECT_QUALITY_SOURCE_SCHEMA
 from fisheye.refinement.detect_quality_collection import (
     BLIP,
     CLEAN,
@@ -157,6 +158,9 @@ def test_collection_quality_parallel_output_is_keyed_sharded_and_promoted(
     quality = parent["quality_parallel"]
     assert quality.attrs["schema_id"] == COLLECTION_QUALITY_SCHEMA
     assert quality.attrs["temporal_artifact_policy"] == TEMPORAL_POLICY_SCHEMA
+    assert quality.attrs["source_video_width"] == 100
+    assert quality.attrs["source_video_height"] == 100
+    assert quality.attrs["full_frame_geometry_source"] == "explicit_cli"
     assert quality.attrs["palette_run_completion_status"] == "complete"
     assert quality["quality_flags"].shards == (4,)
     assert quality["detection_quality_labels"].shards == (4,)
@@ -216,6 +220,59 @@ def test_collection_quality_dry_run_does_not_mutate_archive(tmp_path: Path) -> N
     assert result["worker_tasks"] == 2
     root = zarr.open_group(path, mode="r", use_consolidated=False)
     assert "detect_quality_runs" not in root
+
+
+def test_collection_quality_resolves_full_frame_geometry_from_source_group(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "analysis.zarr"
+    _write_source(path)
+    root = zarr.open_group(path, mode="a", use_consolidated=False)
+    del root.attrs["width"]
+    del root.attrs["height"]
+    source = root["detect_runs/detect_source"]
+    source.attrs.update(
+        {
+            "source_video_width": 4512,
+            "source_video_height": 4512,
+        }
+    )
+
+    result = run_collection_detect_quality(
+        zarr_path=path,
+        source_group_path="detect_runs/detect_source",
+        output_run="quality_source_geometry",
+        recording_frame_count=8,
+        workers=1,
+        apply=False,
+    )
+
+    assert result["params"]["width"] == 4512
+    assert result["params"]["height"] == 4512
+    assert result["params"]["full_frame_geometry_source"] == (
+        "source:source_video_width/source_video_height"
+    )
+
+
+def test_collection_quality_v2_source_requires_canonical_geometry_attrs(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "analysis.zarr"
+    _write_source(path)
+    root = zarr.open_group(path, mode="a", use_consolidated=False)
+    root["detect_runs/detect_source"].attrs[
+        "schema_id"
+    ] = CLIPPED_DETECT_QUALITY_SOURCE_SCHEMA
+
+    with pytest.raises(ValueError, match="requires source_video_width"):
+        run_collection_detect_quality(
+            zarr_path=path,
+            source_group_path="detect_runs/detect_source",
+            output_run="quality_missing_source_geometry",
+            recording_frame_count=8,
+            workers=1,
+            apply=False,
+        )
 
 
 def test_collection_quality_supports_empty_modern_detection_surface(

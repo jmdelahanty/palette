@@ -20,6 +20,10 @@ import numpy as np
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from fisheye.shared.detect_quality_contract import (
+    CLIPPED_DETECT_QUALITY_SOURCE_SCHEMA,
+    FULL_FRAME_GEOMETRY_SCHEMA,
+)
 from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr_run_completion import (
@@ -34,7 +38,7 @@ from fisheye.shared.zarr_run_completion import (
 from fisheye.utils.plan_clipped_detect_refine_workflow import PLAN_SCHEMA
 
 
-SOURCE_SCHEMA = "palette.clipped_detect_quality_source.v1"
+SOURCE_SCHEMA = CLIPPED_DETECT_QUALITY_SOURCE_SCHEMA
 SOURCE_FAMILY = "detect_collection_sources"
 DEFAULT_SHARD_ROWS = 131_072
 DEFAULT_INNER_ROWS = 16_384
@@ -48,6 +52,8 @@ class ClipSource:
     detect_run: str
     group_path: str
     group: Any
+    source_video_width: int
+    source_video_height: int
     parent_frames: np.ndarray
     start: int
     stop: int
@@ -76,6 +82,135 @@ def _group_at(root: Any, path: str) -> Any:
     for part in str(path).strip("/").split("/"):
         group = group[part]
     return group
+
+
+def _positive_int(value: object) -> int | None:
+    try:
+        result = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return result if result > 0 else None
+
+
+def _required_source_geometry(group: Any, group_path: str) -> tuple[int, int]:
+    width = _positive_int(group.attrs.get("source_video_width"))
+    height = _positive_int(group.attrs.get("source_video_height"))
+    if width is None or height is None:
+        raise ValueError(
+            f"Raw detection run {group_path} is missing required full-frame geometry attrs "
+            "source_video_width/source_video_height."
+        )
+    return width, height
+
+
+def _existing_geometry_pair(
+    attrs: Any,
+    width_key: str,
+    height_key: str,
+    *,
+    label: str,
+) -> tuple[int, int] | None:
+    raw_width = attrs.get(width_key)
+    raw_height = attrs.get(height_key)
+    if raw_width is None and raw_height is None:
+        return None
+    width = _positive_int(raw_width)
+    height = _positive_int(raw_height)
+    if width is None or height is None:
+        raise ValueError(
+            f"Existing {label} geometry is incomplete or non-positive: "
+            f"{width_key}={raw_width!r}, {height_key}={raw_height!r}."
+        )
+    return width, height
+
+
+def _validate_parent_geometry(
+    root: Any,
+    *,
+    width: int,
+    height: int,
+) -> None:
+    expected = (int(width), int(height))
+    candidates: list[tuple[str, tuple[int, int] | None]] = []
+    for width_key, height_key in (
+        ("width", "height"),
+        ("source_video_width", "source_video_height"),
+        ("source_full_width", "source_full_height"),
+    ):
+        candidates.append(
+            (
+                f"root attrs {width_key}/{height_key}",
+                _existing_geometry_pair(
+                    root.attrs,
+                    width_key,
+                    height_key,
+                    label="root",
+                ),
+            )
+        )
+    metadata = root.attrs.get("source_video_metadata")
+    if isinstance(metadata, Mapping):
+        candidates.append(
+            (
+                "root source_video_metadata",
+                _existing_geometry_pair(
+                    metadata,
+                    "width",
+                    "height",
+                    label="root source_video_metadata",
+                ),
+            )
+        )
+    raw = root.get("raw_video")
+    if raw is not None:
+        for width_key, height_key in (
+            ("width", "height"),
+            ("source_video_width", "source_video_height"),
+            ("video_width", "video_height"),
+        ):
+            candidates.append(
+                (
+                    f"raw_video attrs {width_key}/{height_key}",
+                    _existing_geometry_pair(
+                        raw.attrs,
+                        width_key,
+                        height_key,
+                        label="raw_video",
+                    ),
+                )
+            )
+    for label, observed in candidates:
+        if observed is not None and observed != expected:
+            raise ValueError(
+                f"Existing {label} geometry {observed[0]}x{observed[1]} disagrees "
+                f"with validated detection geometry {expected[0]}x{expected[1]}."
+            )
+
+
+def _stamp_parent_geometry(
+    root: Any,
+    *,
+    width: int,
+    height: int,
+    source_group_path: str,
+) -> None:
+    """Stamp parent compatibility metadata from one validated clip collection."""
+
+    _validate_parent_geometry(root, width=width, height=height)
+    metadata = root.attrs.get("source_video_metadata")
+    source_video_metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+    source_video_metadata.update({"width": int(width), "height": int(height)})
+    shared_attrs = {
+        "width": int(width),
+        "height": int(height),
+        "source_video_width": int(width),
+        "source_video_height": int(height),
+        "full_frame_geometry_schema": FULL_FRAME_GEOMETRY_SCHEMA,
+        "full_frame_geometry_source": source_group_path,
+    }
+    root.attrs.update({**shared_attrs, "source_video_metadata": source_video_metadata})
+    raw = root.require_group("raw_video")
+    raw.attrs.update(shared_attrs)
 
 
 def _frame_index_path(plan: Mapping[str, Any], explicit: Path | None) -> Path:
@@ -151,6 +286,7 @@ def _build_sources(
     sources: list[ClipSource] = []
     cursor = 0
     bbox_contract: tuple[np.dtype[Any], tuple[int, ...]] | None = None
+    geometry_contract: tuple[int, int] | None = None
     for unit in sorted(
         units,
         key=lambda row: (int(row.get("clip_index") or 0), str(row.get("camera_serial") or "")),
@@ -178,6 +314,19 @@ def _build_sources(
             bbox_contract = current_contract
         elif current_contract != bbox_contract:
             raise ValueError("Clip-local bbox arrays do not share one dtype/shape contract.")
+        source_video_width, source_video_height = _required_source_geometry(
+            group,
+            group_path,
+        )
+        current_geometry = (source_video_width, source_video_height)
+        if geometry_contract is None:
+            geometry_contract = current_geometry
+        elif current_geometry != geometry_contract:
+            raise ValueError(
+                "Clip-local raw detection runs disagree on full-frame geometry: "
+                f"expected {geometry_contract[0]}x{geometry_contract[1]}, observed "
+                f"{current_geometry[0]}x{current_geometry[1]} at {group_path}."
+            )
         key = (str(unit.get("camera_serial") or ""), str(unit.get("clip_id") or ""))
         parent_frames = frame_maps[key]
         sources.append(
@@ -188,6 +337,8 @@ def _build_sources(
                 detect_run=str(names.get("detect") or ""),
                 group_path=group_path,
                 group=group,
+                source_video_width=source_video_width,
+                source_video_height=source_video_height,
                 parent_frames=parent_frames,
                 start=cursor,
                 stop=cursor + rows,
@@ -279,6 +430,8 @@ def materialize_clipped_detect_quality_source(
     frame_maps, frame_count = _frame_maps(frame_index, units)
     root = open_zarr_root(archive, mode="r")
     sources = _build_sources(root, units, frame_maps)
+    source_video_width = sources[0].source_video_width
+    source_video_height = sources[0].source_video_height
     row_count = sum(source.rows for source in sources)
     outer = _effective_shard_rows(int(shard_rows), int(inner_rows))
     slices = [
@@ -288,6 +441,8 @@ def materialize_clipped_detect_quality_source(
             "camera_serial": source.camera_serial,
             "detect_run": source.detect_run,
             "detect_group_path": source.group_path,
+            "source_video_width": source.source_video_width,
+            "source_video_height": source.source_video_height,
             "start": source.start,
             "stop": source.stop,
             "row_count": source.rows,
@@ -303,6 +458,8 @@ def materialize_clipped_detect_quality_source(
         "output_run": run_name,
         "output_group_path": f"{SOURCE_FAMILY}/{run_name}",
         "recording_frame_count": frame_count,
+        "source_video_width": source_video_width,
+        "source_video_height": source_video_height,
         "row_count": row_count,
         "source_slices": slices,
         "shard_rows": outer,
@@ -331,6 +488,12 @@ def materialize_clipped_detect_quality_source(
                 "source_plan_path": str(plan_file),
                 "recording_frame_index_path": str(frame_index),
                 "recording_frame_count": frame_count,
+                "source_video_width": source_video_width,
+                "source_video_height": source_video_height,
+                "width": source_video_width,
+                "height": source_video_height,
+                "full_frame_geometry_schema": FULL_FRAME_GEOMETRY_SCHEMA,
+                "full_frame_geometry_source": "validated_source_detect_runs",
                 "source_row_count": row_count,
                 "frame_index_semantics": "recording_parent_frame_index_0_based",
                 "row_identity": "instance_key",
@@ -381,6 +544,8 @@ def materialize_clipped_detect_quality_source(
                 "output_run": run_name,
                 "shard_rows": outer,
                 "inner_rows": int(inner_rows),
+                "source_video_width": source_video_width,
+                "source_video_height": source_video_height,
                 "promote": bool(promote),
             },
             input_run_ids={"detect_runs": slices, "plan_path": str(plan_file)},
@@ -393,10 +558,19 @@ def materialize_clipped_detect_quality_source(
             "row_count": row_count,
             "recording_frame_count": frame_count,
             "source_slice_count": len(slices),
+            "source_video_width": source_video_width,
+            "source_video_height": source_video_height,
+            "full_frame_geometry_uniform": True,
             "instance_key_unique": True,
             "frames_recording_ordered": True,
             "arrays_indexed_sharded": True,
         }
+        _stamp_parent_geometry(
+            write_root,
+            width=source_video_width,
+            height=source_video_height,
+            source_group_path=f"{SOURCE_FAMILY}/{run_name}",
+        )
         mark_run_complete(
             target,
             parent_group=parent if promote else None,

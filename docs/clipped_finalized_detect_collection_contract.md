@@ -149,6 +149,22 @@ run metadata. This follows Palette's canonical full-frame-normalized
 to the source full-frame image. ROI-local or crop-video-local boxes must use a
 more specific name such as `bbox_crop_norm_coords` or `bbox_roi_xyxy`.
 
+Modern clip-local raw detection runs must store full-frame dimensions as
+`source_video_width` and `source_video_height`. Recording-ordered detection
+snapshots using `palette.clipped_detect_quality_source.v2` must carry the same
+two attrs after verifying that every selected clip agrees. Consumers should
+resolve full-frame geometry in this order:
+
+1. the explicitly selected run or recording-ordered source;
+2. root `source_video_width`/`source_video_height` or root `width`/`height` when
+   they are a validated recording invariant;
+3. `raw_video` source/full-frame attrs or stored full-frame array shape;
+4. an explicit caller override used only when canonical metadata is absent.
+
+Conflicting positive values must fail closed. `inference_width` and
+`inference_height` describe model input resizing and are never a substitute for
+source full-frame geometry.
+
 When pixel boxes are present, `bbox_img_xyxy` must be interpreted only with its
 declared coordinate metadata. For current fixed clipped detect/refine outputs,
 pixel boxes are expected to be source-image pixels for the source clip frame.

@@ -19,7 +19,7 @@ import math
 import os
 from pathlib import Path
 import tempfile
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 import zarr
@@ -30,6 +30,10 @@ from .detect_quality import (
     calculate_sampled_quality_score,
 )
 from .utils import calculate_coverage_stats, categorize_gaps, identify_gaps
+from ..shared.detect_quality_contract import (
+    CLIPPED_DETECT_QUALITY_SOURCE_SCHEMA,
+    FULL_FRAME_GEOMETRY_SCHEMA,
+)
 from ..shared.run_provenance import build_writer_run_provenance
 from ..shared.zarr_io import open_zarr_root
 from ..shared.zarr_run_completion import (
@@ -114,6 +118,62 @@ def _mapping_int(value: object, key: str) -> int | None:
     return _positive_int(value.get(key))
 
 
+def _geometry_pair(
+    attrs: Any,
+    width_key: str,
+    height_key: str,
+    *,
+    scope: str,
+) -> tuple[float, float, str] | None:
+    raw_width = attrs.get(width_key)
+    raw_height = attrs.get(height_key)
+    if raw_width is None and raw_height is None:
+        return None
+    width = _positive_int(raw_width)
+    height = _positive_int(raw_height)
+    if width is None or height is None:
+        raise ValueError(
+            f"{scope} full-frame geometry is incomplete or non-positive: "
+            f"{width_key}={raw_width!r}, {height_key}={raw_height!r}."
+        )
+    return float(width), float(height), f"{scope}:{width_key}/{height_key}"
+
+
+def _geometry_from_attrs(attrs: Any, *, scope: str) -> tuple[float, float, str] | None:
+    candidates: list[tuple[float, float, str]] = []
+    for width_key, height_key in (
+        ("source_video_width", "source_video_height"),
+        ("source_full_width", "source_full_height"),
+        ("video_width", "video_height"),
+        ("width", "height"),
+    ):
+        candidate = _geometry_pair(
+            attrs,
+            width_key,
+            height_key,
+            scope=scope,
+        )
+        if candidate is not None:
+            candidates.append(candidate)
+    metadata = attrs.get("source_video_metadata")
+    if isinstance(metadata, Mapping):
+        candidate = _geometry_pair(
+            metadata,
+            "width",
+            "height",
+            scope=f"{scope}.source_video_metadata",
+        )
+        if candidate is not None:
+            candidates.append(candidate)
+    distinct = {(width, height) for width, height, _ in candidates}
+    if len(distinct) > 1:
+        details = ", ".join(
+            f"{source}={int(width)}x{int(height)}" for width, height, source in candidates
+        )
+        raise ValueError(f"Conflicting full-frame geometry in {scope}: {details}.")
+    return candidates[0] if candidates else None
+
+
 def _ancestor_groups(root: Any, group_path: str) -> Iterable[tuple[str, Any]]:
     parts = _safe_group_path(group_path).split("/")
     for stop in range(len(parts), 0, -1):
@@ -162,32 +222,87 @@ def _resolve_frame_count(
 
 def _resolve_geometry(
     root: Any,
+    source: Any,
     *,
     explicit_width: float | None,
     explicit_height: float | None,
-) -> tuple[float, float]:
-    width = float(explicit_width) if explicit_width is not None else None
-    height = float(explicit_height) if explicit_height is not None else None
-    raw = root.get("raw_video")
-    if width is None or height is None:
-        if raw is not None:
-            for name in ("images_full", "images_ds"):
-                if name in raw:
-                    height = height or float(raw[name].shape[1])
-                    width = width or float(raw[name].shape[2])
-                    break
-    if width is None:
-        candidate = root.attrs.get("width")
-        width = float(candidate) if candidate is not None else None
-    if height is None:
-        candidate = root.attrs.get("height")
-        height = float(candidate) if candidate is not None else None
-    if width is None or height is None or width <= 0 or height <= 0:
-        raise ValueError(
-            "Full-frame width and height are required for temporal quality. "
-            "Provide --width/--height when canonical metadata is unavailable."
+) -> tuple[float, float, str]:
+    if (explicit_width is None) != (explicit_height is None):
+        raise ValueError("Explicit full-frame width and height must be provided together.")
+
+    source_geometry = _geometry_from_attrs(source.attrs, scope="source")
+    if source.attrs.get("schema_id") == CLIPPED_DETECT_QUALITY_SOURCE_SCHEMA:
+        canonical_source_geometry = _geometry_pair(
+            source.attrs,
+            "source_video_width",
+            "source_video_height",
+            scope="source",
         )
-    return width, height
+        if canonical_source_geometry is None:
+            raise ValueError(
+                f"{CLIPPED_DETECT_QUALITY_SOURCE_SCHEMA} requires source_video_width and "
+                "source_video_height attrs."
+            )
+
+    root_geometry = _geometry_from_attrs(root.attrs, scope="root")
+    raw = root.get("raw_video")
+    raw_geometry = (
+        _geometry_from_attrs(raw.attrs, scope="raw_video") if raw is not None else None
+    )
+    metadata_geometries = [
+        candidate
+        for candidate in (source_geometry, root_geometry, raw_geometry)
+        if candidate is not None
+    ]
+    distinct_metadata_geometry = {
+        (candidate[0], candidate[1]) for candidate in metadata_geometries
+    }
+    if len(distinct_metadata_geometry) > 1:
+        details = ", ".join(
+            f"{metadata_source}={int(metadata_width)}x{int(metadata_height)}"
+            for metadata_width, metadata_height, metadata_source in metadata_geometries
+        )
+        raise ValueError(f"Conflicting full-frame geometry across Zarr metadata: {details}.")
+
+    if explicit_width is not None and explicit_height is not None:
+        width = float(explicit_width)
+        height = float(explicit_height)
+        if width <= 0 or height <= 0:
+            raise ValueError("Explicit full-frame width and height must be positive.")
+        conflicts = [
+            candidate
+            for candidate in metadata_geometries
+            if (candidate[0], candidate[1]) != (width, height)
+        ]
+        if conflicts:
+            details = ", ".join(
+                f"{metadata_source}={int(metadata_width)}x{int(metadata_height)}"
+                for metadata_width, metadata_height, metadata_source in conflicts
+            )
+            raise ValueError(
+                f"Explicit full-frame geometry {int(width)}x{int(height)} conflicts with "
+                f"canonical metadata: {details}."
+            )
+        return width, height, "explicit_cli"
+
+    if source_geometry is not None:
+        return source_geometry
+    if root_geometry is not None:
+        return root_geometry
+    if raw_geometry is not None:
+        return raw_geometry
+    if raw is not None:
+        for name in ("images_full", "images_ds"):
+            if name in raw:
+                height = float(raw[name].shape[1])
+                width = float(raw[name].shape[2])
+                if width > 0 and height > 0:
+                    return width, height, f"raw_video/{name}:array_shape"
+    raise ValueError(
+        "Full-frame width and height are required for temporal quality. "
+        "Stamp source_video_width/source_video_height on the source group or provide "
+        "--width/--height when canonical metadata is unavailable."
+    )
 
 
 def _resolve_source_identity(root: Any, source_group_path: str) -> dict[str, str]:
@@ -661,8 +776,9 @@ def run_collection_detect_quality(
         source_group_path,
         recording_frame_count,
     )
-    resolved_width, resolved_height = _resolve_geometry(
+    resolved_width, resolved_height, geometry_source = _resolve_geometry(
         root,
+        source,
         explicit_width=width,
         explicit_height=height,
     )
@@ -691,6 +807,8 @@ def run_collection_detect_quality(
         "recording_frame_count": resolved_frame_count,
         "width": resolved_width,
         "height": resolved_height,
+        "full_frame_geometry_schema": FULL_FRAME_GEOMETRY_SCHEMA,
+        "full_frame_geometry_source": geometry_source,
         "expected_subject_count": expected_subject_count,
         "jump_threshold": float(jump_threshold),
         "threshold_mode": threshold_mode,
@@ -792,6 +910,12 @@ def run_collection_detect_quality(
                     "source_detection_group_path": source_group_path,
                     "source_row_count": row_count,
                     "recording_frame_count": resolved_frame_count,
+                    "source_video_width": int(resolved_width),
+                    "source_video_height": int(resolved_height),
+                    "width": int(resolved_width),
+                    "height": int(resolved_height),
+                    "full_frame_geometry_schema": FULL_FRAME_GEOMETRY_SCHEMA,
+                    "full_frame_geometry_source": geometry_source,
                     "frame_index_semantics": "recording_parent_frame_index_0_based",
                     "row_identity": "instance_key",
                     "storage_layout": "indexed_sharding_v1",
@@ -876,6 +1000,9 @@ def run_collection_detect_quality(
                 "instance_key_unique": True,
                 "row_count": row_count,
                 "recording_frame_count": resolved_frame_count,
+                "source_video_width": int(resolved_width),
+                "source_video_height": int(resolved_height),
+                "full_frame_geometry_source": geometry_source,
                 "label_counts": label_counts,
                 "arrays_indexed_sharded": True,
                 "trace_ranges_complete_nonoverlapping": True,

@@ -127,6 +127,14 @@ A short serialized finalize step may build or refresh `experiment_index`,
 `latest` pointers, consolidated metadata, and registry projections after all
 clip-local imports complete.
 
+Run-group packaging intentionally does not copy scratch-Zarr root attrs into
+the canonical archive. Metadata measured during compute that is needed by later
+recording-level stages must therefore be present on each packaged run group and
+promoted by the serialized finalize step. For clipped detections this includes
+`source_video_width` and `source_video_height`: the recording-order source
+materializer verifies one common value before stamping compatible root and
+`raw_video` geometry metadata.
+
 ### Clip Finalize Stage
 
 For clipped recordings, finalization is a separate job family from model
