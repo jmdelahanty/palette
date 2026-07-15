@@ -134,6 +134,7 @@ As of 2026-07-09:
 
 ## References
 
+- `docs/multi_subject_tracking_phase5_plan.md`
 - `docs/sleap_palette_storage_assessment.md`
 - `docs/refined_detect_sparse_instances_schema.md`
 - `docs/refined_detect_row_identity_contract.md`
