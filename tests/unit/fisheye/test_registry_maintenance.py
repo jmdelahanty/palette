@@ -8915,13 +8915,13 @@ def test_backfill_recording_step_status_dry_run_no_write(
         zarr_use_filter="all",
     )
     assert summary["datasets_scanned"] == 1
-    assert summary["rows_inserted"] == 30
+    assert summary["rows_inserted"] == 31
     assert summary["rows_updated"] == 0
     assert summary["rows_skipped"] == 0
 
     rows_by_status = summary["rows_by_status"]
     assert isinstance(rows_by_status, dict)
-    assert int(rows_by_status["ok"]) == 30
+    assert int(rows_by_status["ok"]) == 31
     assert int(rows_by_status["missing"]) == 0
     assert int(rows_by_status["absent"]) == 0
     assert int(rows_by_status["na"]) == 0
@@ -8966,10 +8966,10 @@ def test_backfill_recording_step_status_apply_and_convergent(
         recording_ids=None,
         zarr_use_filter="all",
     )
-    assert applied["rows_inserted"] == 30
+    assert applied["rows_inserted"] == 31
     assert applied["rows_updated"] == 0
     assert applied["rows_skipped"] == 0
-    assert applied["history_rows_inserted"] == 30
+    assert applied["history_rows_inserted"] == 31
 
     rows = registry.conn.execute(
         """
@@ -8980,13 +8980,14 @@ def test_backfill_recording_step_status_apply_and_convergent(
         """,
         ("dataset_step_a",),
     ).fetchall()
-    assert len(rows) == 30
+    assert len(rows) == 31
     by_step = {str(row["step_name"]): row for row in rows}
     assert set(by_step.keys()) == {
         "background",
         "calibration",
         "crop",
         "detect",
+        "detect_quality",
         "detection_tuning",
         "dish_mask",
         "eye_masks",
@@ -9018,6 +9019,8 @@ def test_backfill_recording_step_status_apply_and_convergent(
     assert str(by_step["detect"]["run_name"]) == "detect_001"
     assert str(by_step["detect"]["method"]) == "yolo"
     assert float(by_step["detect"]["coverage_pct"]) == pytest.approx(75.0)
+    assert str(by_step["detect_quality"]["status"]) == "ok"
+    assert str(by_step["detect_quality"]["run_name"]) == "detect_quality_001"
     detect_details_row = registry.conn.execute(
         """
         SELECT details_json
@@ -9033,6 +9036,19 @@ def test_backfill_recording_step_status_apply_and_convergent(
     assert float(detect_details["detect_quality_score"]) == pytest.approx(98.4)
     assert float(detect_details["detect_quality_clean_percent"]) == pytest.approx(97.0)
     assert int(detect_details["detect_quality_artifacts"]) == 3
+    detect_quality_details_row = registry.conn.execute(
+        """
+        SELECT details_json
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'detect_quality';
+        """,
+        ("dataset_step_a",),
+    ).fetchone()
+    assert detect_quality_details_row is not None
+    detect_quality_details = json.loads(str(detect_quality_details_row["details_json"]))
+    assert detect_quality_details["source_detect_run"] == "detect_001"
+    assert detect_quality_details["detect_quality_grade"] == "A"
+    assert float(detect_quality_details["detect_quality_score"]) == pytest.approx(98.4)
     tracks_details_row = registry.conn.execute(
         """
         SELECT details_json
@@ -9119,14 +9135,14 @@ def test_backfill_recording_step_status_apply_and_convergent(
     )
     assert repeat["rows_inserted"] == 0
     assert repeat["rows_updated"] == 0
-    assert repeat["rows_skipped"] == 30
+    assert repeat["rows_skipped"] == 31
     assert repeat["history_rows_inserted"] == 0
 
     history_count = registry.conn.execute(
         "SELECT COUNT(*) AS n FROM recording_step_status_history WHERE dataset_id = ?;",
         ("dataset_step_a",),
     ).fetchone()
-    assert history_count is not None and int(history_count["n"]) == 30
+    assert history_count is not None and int(history_count["n"]) == 31
     registry.close()
 
 
@@ -10177,7 +10193,7 @@ def test_backfill_recording_step_status_scoped_filters(
         recording_ids=("recording_scope_a",),
         zarr_use_filter="all",
     )
-    assert by_recording["rows_inserted"] == 30
+    assert by_recording["rows_inserted"] == 31
     assert by_recording["datasets_skipped_recording_filter"] == 1
 
     by_use = _backfill_recording_step_status(
@@ -10187,7 +10203,7 @@ def test_backfill_recording_step_status_scoped_filters(
         recording_ids=None,
         zarr_use_filter="analysis",
     )
-    assert by_use["rows_inserted"] == 30
+    assert by_use["rows_inserted"] == 31
     assert by_use["datasets_skipped_zarr_use_filter"] == 1
 
     by_scope = _backfill_recording_step_status(
@@ -10197,7 +10213,7 @@ def test_backfill_recording_step_status_scoped_filters(
         recording_ids=None,
         zarr_use_filter="all",
     )
-    assert by_scope["rows_inserted"] == 30
+    assert by_scope["rows_inserted"] == 31
     assert by_scope["datasets_skipped_path"] == 1
 
     current_count = registry.conn.execute(

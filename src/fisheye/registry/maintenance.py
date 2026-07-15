@@ -5538,17 +5538,24 @@ def _extract_detect_method(detect_group: object) -> Optional[str]:
     return _decode_text(provenance.get("method"))
 
 
-def _extract_detect_quality_details(detect_group: object) -> Dict[str, object]:
+def _resolve_detect_quality_group(
+    detect_group: object,
+) -> tuple[Optional[str], Optional[object], str]:
     if detect_group is None or not hasattr(detect_group, "get"):
-        return {}
+        return None, None, "none"
     try:
         quality_parent = detect_group.get("quality_reports")  # type: ignore[attr-defined]
     except Exception:
         quality_parent = None
     if quality_parent is None:
-        return {}
+        return None, None, "none"
+    return _resolve_latest_group(quality_parent)
 
-    quality_run, quality_group, _ = _resolve_latest_group(quality_parent)
+
+def _extract_detect_quality_details(detect_group: object) -> Dict[str, object]:
+    quality_run, quality_group, _ = _resolve_detect_quality_group(detect_group)
+    if quality_run is None and quality_group is None:
+        return {}
     if quality_group is None or not hasattr(quality_group, "attrs"):
         return {"detect_quality_run": quality_run} if quality_run else {}
 
@@ -6019,6 +6026,16 @@ def _build_recording_step_rows_from_root(
     detect_method = _extract_detect_method(detect_group)
     detect_coverage = _extract_coverage_pct(detect_group)
     detect_quality_details = _extract_detect_quality_details(detect_group)
+    (
+        detect_quality_run,
+        detect_quality_group,
+        detect_quality_selection,
+    ) = _resolve_detect_quality_group(detect_group)
+    detect_quality_status, detect_quality_reason = _step_status_from_presence(
+        present=detect_quality_group is not None,
+        is_production=False,
+        prerequisite_statuses=(detect_status,),
+    )
 
     refined_detect_parent = root.get("refined_detect_runs") or root.get("refined_runs")  # type: ignore[attr-defined]
     refined_detect_collection = _extract_source_ref(
@@ -6749,6 +6766,30 @@ def _build_recording_step_rows_from_root(
             source=source,
             zarr_mtime_ns=zarr_mtime_ns,
             updated_utc=_extract_updated_utc(detect_group, fallback=fallback_updated_utc),
+        ),
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="detect_quality",
+            status=detect_quality_status,
+            run_name=detect_quality_run,
+            method=None,
+            coverage_pct=None,
+            review_status=None,
+            details={
+                **common_details,
+                "reason": detect_quality_reason,
+                "latest_selector": detect_quality_selection,
+                "source_detect_run": detect_run,
+                "upstream": {"detect": detect_status},
+                **detect_quality_details,
+            },
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(
+                detect_quality_group,
+                fallback=fallback_updated_utc,
+            ),
         ),
         _make_recording_step_row(
             dataset_id=dataset_id,

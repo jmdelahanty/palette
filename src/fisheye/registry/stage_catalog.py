@@ -295,6 +295,7 @@ RECORDING_STATUS_STAGE_IDS: tuple[str, ...] = (
     "raw",
     "background",
     "detect",
+    "detect_quality",
     "refined_detect",
     "crop",
     "keypoints",

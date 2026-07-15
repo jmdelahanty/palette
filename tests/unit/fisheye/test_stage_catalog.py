@@ -96,6 +96,7 @@ def test_stage_catalog_ids_are_unique_and_aliases_resolve() -> None:
 def test_stage_catalog_covers_registry_recording_step_names() -> None:
     assert RECORDING_STEP_NAMES == recording_status_stage_ids()
     assert set(RECORDING_STEP_NAMES).issubset(STAGE_BY_ID)
+    assert "detect_quality" in RECORDING_STEP_NAMES
 
 
 def test_stage_catalog_tuning_stage_projection() -> None:
