@@ -36,6 +36,7 @@ import argparse
 from io import BytesIO
 import math
 from pathlib import Path
+import re
 from typing import Any, Optional, Sequence
 
 import matplotlib
@@ -114,10 +115,36 @@ def collect_ring_entries(
     meta["responsive_band_mm"] = list(RESPONSIVE_BAND_MM)
     meta["ring_edges_mm"] = list(RING_EDGES_MM)
 
+    # Tag each scene with aggressive/inert. The figures draw every object at the origin, but the
+    # aggressive and inert objects sit at DIFFERENT distances from the dish edge, so their wall
+    # arcs land in different places -- which reads as a "moving wall" if the panels are unlabelled.
+    agg = None
+    try:
+        root = _open_root(zarr_path, mode="r")
+        rg, _n, _p = _resolve_chaser_distance_run(root, chaser_distance_run)
+        agg, _src = _aggressive_chaser_index(rg)
+    except Exception:  # noqa: BLE001 -- role labelling is cosmetic; never fail the figure for it
+        agg = None
     for scene in scenes:
+        m = re.search(r"chaser(\d+)", scene.ref_label)
+        idx = int(m.group(1)) if m else None
+        scene.role = ("aggressive" if idx == agg else "inert") if (agg is not None and idx is not None) else None
         for visit in scene.visits:
             visit["bouts"] = _bouts_in_visit(visit, bs, be, peak, float(peak_speed_threshold_mm_s))
     return scenes, meta
+
+
+def _scene_object_tag(scene: VisitScene) -> str:
+    """A short 'which dot, how far from the wall' label so the geometry is never ambiguous."""
+
+    role = getattr(scene, "role", None)
+    who = role if role else scene.ref_label
+    if getattr(scene, "chaser_centric", False):
+        return str(who)
+    wall = scene.arena_radius_mm - scene.arena_center_distance_mm
+    if np.isfinite(wall):
+        return f"{who} · {wall:.1f} mm from wall"
+    return str(who)
 
 
 def _aggressive_chaser_index(run_group) -> tuple[int, str]:
@@ -270,6 +297,7 @@ def collect_chase_ring_entries(
 
     scene = VisitScene(epoch.label, ref_label, True, math.nan, math.nan)
     scene.chaser_centric = True
+    scene.role = "aggressive"
     pad = int(max(0.0, float(pad_s)) * fps)
 
     for v in range(int(vid.max()) + 1 if vid.max() >= 0 else 0):
@@ -478,8 +506,8 @@ def render_ring_entries_png(
         j = int(np.argmin(visit["distance_mm"]))
         ax.plot(xy[j, 0], xy[j, 1], marker="o", ms=7, mfc="none", mec="#b91c1c", mew=1.4, zorder=6)
         nb = len(visit.get("bouts", []))
-        ax.set_title(f"{scene.epoch_label.replace('_',' ')} · entry {visit['visit_id']}\n"
-                     f"CPA {visit['cpa_mm']:.1f} mm · {nb} bouts"
+        ax.set_title(f"{_scene_object_tag(scene)}\n"
+                     f"entry {visit['visit_id']} · CPA {visit['cpa_mm']:.1f} mm · {nb} bouts"
                      + (f" · {n_esc} escape" if n_esc else ""),
                      fontsize=7, color=ESCAPE_C if n_esc else "#334155")
     for k in range(len(shown), n_rows * n_cols):
@@ -487,6 +515,8 @@ def render_ring_entries_png(
 
     dropped = len(rows) - len(shown)
     extra = f"   (showing {len(shown)} of {len(rows)} entries)" if dropped else ""
+    epochs_shown = sorted({s.epoch_label for s in scenes if s.visits})
+    epoch_line = " / ".join(e.replace("_", " ") for e in epochs_shown)
     is_chase = meta.get("frame") == "chaser_centric"
     frame_line = (
         "MOVING chaser at origin, rotated so pursuit points up · no fixed wall · arrow = fish body "
@@ -495,9 +525,11 @@ def render_ring_entries_png(
         "static object at origin, arena centre rotated to +x · grey arc = wall · arrow = fish body heading"
     )
     fig.suptitle(
-        f"Bouts per entry through the responsive rings — {meta['recording_id']}{extra}\n"
+        f"Bouts per entry through the responsive rings — {meta['recording_id']} · {epoch_line}{extra}\n"
         f"amber shell = 8–16 mm responsive band · red dashed = {ESCAPE_TRIGGER_MM:g} mm escape trigger · "
         f"{frame_line}\n"
+        "each panel is labelled with its object and its distance to the dish edge — the wall arc differs "
+        "because aggressive and inert dots sit at different distances from it\n"
         "green square = entry · blue = ordinary bout · red ★ = escape bout · red circle = closest approach",
         fontsize=9.5,
     )
@@ -583,8 +615,8 @@ def write_ring_traversal_gif(
         in_shell = RESPONSIVE_BAND_MM[0] <= d <= RESPONSIVE_BAND_MM[1]
         esc_tag = f"  ·  {n_esc} escape" if n_esc else ""
         ax.set_title(
-            f"{meta['recording_id']}  ·  {scene.epoch_label.replace('_',' ')}  ·  entry {visit['visit_id']}\n"
-            f"d = {d:5.1f} mm {'‹ in responsive shell ›' if in_shell else ''}\n"
+            f"{meta['recording_id']}  ·  {scene.epoch_label.replace('_',' ')}  ·  {_scene_object_tag(scene)}\n"
+            f"entry {visit['visit_id']}  ·  d = {d:5.1f} mm {'‹ in responsive shell ›' if in_shell else ''}\n"
             f"bouts this entry: {n_done}/{len(bouts)}{esc_tag}",
             fontsize=9, color=ESCAPE_C if n_esc else ("#b45309" if in_shell else "#334155"),
         )
