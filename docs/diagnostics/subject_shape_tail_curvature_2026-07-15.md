@@ -45,7 +45,28 @@ old v8 run is kept for comparison.
 | median max tail-curvature radius | **1.1 px** (noise) | **60 px** (sensible) |
 | `tail_sample_valid` | 0.901 | 0.901 (unchanged — the fix changes values, not validity) |
 
-Distribution of per-frame max curvature on v9 (129,048 valid-tail frames):
+### Use the integrated angle, not the max
+
+The right per-frame summary is the **integrated tail angle** — the sum of the between-point
+tangent-angle changes along the tail (= ∫|κ|ds), a total bend in degrees. Max pointwise curvature
+is an outlier statistic that lands on the noisiest/most-artifacted point (the tip); it is fine for
+*showing the bug* (a 1 px radius is impossible) but wrong for *measuring bend*. This metric already
+exists as `tail_kinematics_runs.integrated_abs_tail_curvature`.
+
+Integrated tail bend, base→tip (deg), v8 vs v9:
+
+| | v8 (s=0) median | v9 median | v9 p90 / p99 |
+|---|---|---|---|
+| total \|bend\| | **116°** (noise) | **5.7°** (near-straight) | 10° / 16° |
+| net base→tip | 31° | 5.7° | — |
+
+The sum of between-point angles is exactly where the s=0 jitter accumulates, so it is the metric
+that most exposes the bug (116° of fake bend on a straight fish) and most benefits from the fix.
+A consistency check: in v9 total\|bend\| ≈ net turn (5.7 ≈ 5.7), i.e. the smoothed tail is a clean
+monotonic curve with no fake back-and-forth wiggle; in v8 they diverged (116 vs 31).
+
+For reference, the max-curvature distribution on v9 (129,048 valid-tail frames) — a *diagnostic*
+view, not the analysis metric:
 
 | bend radius | fraction | reading |
 |---|---|---|
@@ -85,15 +106,18 @@ so there are no C-starts to capture here regardless of tracking quality.
 
 ## To get a trustworthy body-bend / C-bend metric
 
-1. **Compute smoothed curvature over the FULL centerline** (snout→tail), not the tail-only array.
+1. **Summarize by the integrated tail angle (Σ between-point angle change), not the max.** Max is
+   an outlier that tracks the noisy tip; the integral averages over all points and is the actual
+   tail-bend in degrees (`tail_kinematics_runs.integrated_abs_tail_curvature`).
+2. **Compute smoothed curvature over the FULL centerline** (snout→tail), not the tail-only array.
    A C-start coil is whole-body; the current `tail_curvature` (posterior half, tip-dominated)
    misses the anterior bend. Apply the same separate-smoothing-spline approach to the full
    centerline, or integrate the total head→tail turning of the *smoothed* midline (the raw one is
    too noisy). This is the main gap — it is not yet done.
-2. Use the **v9** (smoothed) tail curvature if you do use the tail — the v8 array is unusable.
-3. **Exclude the terminal tail points** (the tip is where mask/spline is least reliable), or use
-   an integrated bend over the robust body region rather than pointwise tip curvature.
-4. **QC-reject physically impossible radii** (< ~5 px) — these flag the bad-mask frames.
+3. Use the **v9** (smoothed) tail curvature if you do use the tail — the v8 array is unusable.
+4. **Exclude the terminal tail points** (the tip is where mask/spline is least reliable) when using
+   pointwise curvature.
+5. **QC-reject physically impossible radii** (< ~5 px) — these flag the bad-mask frames.
 5. Materialize `subject_shape_runs` on **recordings that contain escapes** (i.e. the chaser
    cohort) — this recording has none.
 6. Even then: this resolves C-bend *shape*, not *kinematics* (angular velocity, stage-1 latency),
