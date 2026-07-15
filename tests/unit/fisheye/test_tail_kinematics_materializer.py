@@ -188,12 +188,15 @@ def test_materialization_plan_selects_only_required_subject_shape_surface(tmp_pa
         shape_run="shape_001",
         run_name="tail_001",
         block_rows=3,
+        output_shard_rows=7,
     )
 
     selected = {item.relative_path for item in plan.physical_files}
     assert any("tail_sample_xy" in path for path in selected)
     assert not any("unrelated_debug_surface" in path for path in selected)
     assert plan.row_count == 9
+    assert plan.requested_block_rows == 3
+    assert plan.requested_output_shard_rows == 7
     assert plan.source_bytes > 0
     assert plan.estimated_output_bytes > 0
     assert len(plan.source_metadata_sha256) == 64
@@ -249,7 +252,9 @@ def test_materialize_tail_kinematics_stages_computes_and_atomically_publishes(
     )
     assert (tmp_path / ".source.zarr.tail-kinematics-publish.lock").is_file()
     assert tuple(run["tail_angle_rad"].chunks) == (2, 10)
-    assert tuple(run["tail_angle_rad"].shards) == (4, 10)
+    assert run.attrs["effective_block_rows"] == 4
+    assert run.attrs["effective_output_shard_rows"] == 10
+    assert tuple(run["tail_angle_rad"].shards) == (10, 10)
     assert run["frame_index"][:].tolist() == list(range(100, 109))
 
 
@@ -269,6 +274,7 @@ def test_materialize_tail_kinematics_process_workers_own_complete_shards(
         shape_run="shape_001",
         run_name="tail_process_shards",
         block_rows=3,
+        output_shard_rows=7,
         execution_backend="process_shards",
         num_workers=2,
         copy_backend="python",
@@ -283,17 +289,25 @@ def test_materialize_tail_kinematics_process_workers_own_complete_shards(
     assert summary["worker_count_requested"] == 2
     assert summary["worker_count_effective"] == 2
     assert summary["effective_block_rows"] == 4
+    assert summary["effective_output_shard_rows"] == 8
+    assert summary["output_shard_count"] == 2
+    assert summary["worker_task_count"] == 2
     assert summary["completed_block_count"] == 3
+    assert summary["completed_worker_task_count"] == 2
     root = zarr.open_group(str(source), mode="r", use_consolidated=False)
     run = root["analysis/tail_kinematics_runs/tail_process_shards"]
     assert run.attrs["materialization_mode"] == "bounded_process_shards"
-    assert run.attrs["worker_chunk_alignment"] == "align_to_output_row_chunks_and_shards"
+    assert run.attrs["worker_chunk_alignment"] == "compute_blocks_align_to_output_row_chunks"
     assert (
         run.attrs["worker_write_ownership"]
         == "one_complete_nonoverlapping_output_shard_per_task"
     )
     assert tuple(run["tail_angle_rad"].chunks) == (2, 10)
-    assert tuple(run["tail_angle_rad"].shards) == (4, 10)
+    assert run.attrs["worker_compute_blocking"] == "bounded_subblocks_within_owned_output_shard"
+    assert run.attrs["requested_output_shard_rows"] == 7
+    assert run.attrs["effective_output_shard_rows"] == 8
+    assert tuple(run["tail_angle_rad"].shards) == (8, 10)
+    assert tuple(run["row_index"]["frame_indices"].shards) == (8,)
     np.testing.assert_allclose(np.asarray(run["tail_angle_deg"][:]), 0.0, atol=1e-5)
 
 

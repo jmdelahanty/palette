@@ -216,7 +216,8 @@ The executor preserves these large-recording constraints:
   preserve non-overlapping physical Zarr chunk ownership;
 - Palette-native tail kinematics uses its dedicated staged materializer: it
   transfers only the required subject-shape arrays to node-local scratch,
-  assigns complete non-overlapping output shards to process workers, validates
+  assigns complete non-overlapping 262,144-row output shards to process
+  workers, computes each shard in bounded 16,384-row sub-blocks, validates
   locally, and publishes one completed run atomically. The core profile can
   therefore execute the `tail_kinematics` node with `--num-workers`;
 - framewise eye and tail exports must stream row groups or array chunks. They

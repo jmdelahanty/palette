@@ -269,6 +269,8 @@ def test_execution_renders_staged_tail_materializer(tmp_path: Path) -> None:
     assert "fisheye.analysis_workflows.materializers.tail_kinematics" in command.argv
     assert "--execution-backend" in command.argv
     assert "process_shards" in command.argv
+    assert command.argv[command.argv.index("--block-rows") + 1] == "16384"
+    assert command.argv[command.argv.index("--output-shard-rows") + 1] == "262144"
     assert command.argv[command.argv.index("--num-workers") + 1] == "6"
     assert command.argv[command.argv.index("--shape-run") + 1] == "subject_shape_a"
 

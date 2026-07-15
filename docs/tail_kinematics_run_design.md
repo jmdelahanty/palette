@@ -453,13 +453,26 @@ corresponding LSF entrypoint is
 commit, refuses compute outside an LSF allocation, selects `/scratch` or a
 node-local `$TMPDIR`, and records an atomic status file on shared storage.
 
-New tail-kinematics outputs use Zarr v3 physical shards whose outer row span is
-the effective compute block size (16,384 rows by default), while preserving the
-smaller established inner chunk grid. This reduces the number of files copied
-back to shared storage and ensures future workers can own complete physical
-output shards. Current subject-shape sources are still physically chunked, so
-the first staging implementation copies all required source chunk files. It
-will naturally copy fewer physical files when upstream subject-shape arrays are
+New tail-kinematics outputs separate three storage/compute scales: 256-row
+logical chunks, 16,384-row bounded compute blocks, and 262,144-row physical
+output shards. A process task exclusively owns one complete physical shard and
+computes/writes it serially in bounded sub-blocks. The driver remains the only
+metadata/finalization writer. Requested and effective values for both compute
+blocking and output sharding, plus block/shard/task counts, are recorded in run
+attrs and stage provenance. Copied lineage arrays preserve their source logical
+chunks, so their physical shard span is the requested output span or the
+minimum larger span required to contain one source chunk.
+
+The 262,144-row default is measured rather than arbitrary. On the 1,169,010-row
+Sleepyfish tail run it reduced total files from 1,686 to 145 and reduced a
+checksum-validated node-local-to-PRFS publication from 13.70 seconds to 2.41
+seconds. Random-row and 1,024-row window reads were unchanged; the bounded full
+scan increased from 3.95 to 6.26 seconds. See
+`docs/diagnostics/tail_kinematics_sharding_benchmark.md`.
+
+Current subject-shape sources are still physically chunked, so the first
+staging implementation copies all required source chunk files. It will
+naturally copy fewer physical files when upstream subject-shape arrays are
 sharded without changing the logical staging contract.
 
 The node-local serial and process-shard topologies plus atomic publication are
@@ -626,8 +639,9 @@ internal schema, model versions, dependency stack, or classifier taxonomy.
   reference was exact for floating outputs, validity, and failure bytes.
 - [x] Add a manifest-driven node-local staging adapter that copies all physical
   shards of only the required subject-shape arrays for an all-frame run.
-- [x] Add configurable intra-node workers with exclusive, complete output-chunk
-  ownership and record requested/effective worker blocking in provenance.
+- [x] Add configurable intra-node workers with exclusive, complete output-shard
+  ownership, bounded compute sub-blocks, and independent requested/effective
+  compute and physical-shard provenance.
 - [x] Add shared-storage copy validation and completion-last publication. The
   publisher refuses overwrite, validates a hidden sibling, atomically renames
   the run group, and advances completion metadata last.

@@ -75,6 +75,8 @@ def test_submit_tail_kinematics_materialization_renders_fail_closed_job(
             "short",
             "--ncores",
             "3",
+            "--output-shard-rows",
+            "131072",
         ],
         check=False,
         text=True,
@@ -95,6 +97,8 @@ def test_submit_tail_kinematics_materialization_renders_fail_closed_job(
     assert "fisheye.analysis_workflows.materializers.tail_kinematics" in text
     assert "--copy-backend rsync" in text
     assert "--execution-backend process_shards" in text
+    assert '--output-shard-rows "${OUTPUT_SHARD_ROWS}"' in text
+    assert "OUTPUT_SHARD_ROWS=131072" in text
     assert '--num-workers "${NCORES}"' in text
     assert "--apply" in text
     assert "/scratch/palette-test" in text

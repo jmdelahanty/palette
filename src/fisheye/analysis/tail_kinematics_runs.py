@@ -37,6 +37,7 @@ TAIL_KINEMATICS_STAGE_NAME = "analysis.tail_kinematics_runs"
 SOURCE_TAIL_GEOMETRY_KIND = "subject_shape_bspline_tail_resample"
 DEFAULT_TAIL_ANGLE_SAMPLE_COUNT = 10
 DEFAULT_BLOCK_ROWS = 16_384
+DEFAULT_OUTPUT_SHARD_ROWS = 262_144
 TAIL_KINEMATICS_EXECUTION_BACKENDS = frozenset({"serial", "process_shards"})
 REASON_BYTES_WIDTH = 64
 ROW_LINEAGE_NAMES = (
@@ -207,6 +208,27 @@ def _effective_block_rows(*, row_count: int, requested_block_rows: int) -> int:
     return min(aligned, int(row_count)) if int(row_count) > 0 else aligned
 
 
+def _effective_output_shard_rows(
+    *,
+    row_count: int,
+    requested_output_shard_rows: int,
+) -> int:
+    requested = int(requested_output_shard_rows)
+    if requested <= 0:
+        raise ValueError("output_shard_rows must be positive.")
+    output_row_chunk = int(_metric_chunks(int(row_count))[0])
+    aligned_requested = max(
+        output_row_chunk,
+        ((requested + output_row_chunk - 1) // output_row_chunk) * output_row_chunk,
+    )
+    if int(row_count) <= 0:
+        return aligned_requested
+    aligned_extent = (
+        (int(row_count) + output_row_chunk - 1) // output_row_chunk
+    ) * output_row_chunk
+    return min(aligned_requested, aligned_extent)
+
+
 def _output_shards(
     chunks: Sequence[int],
     *,
@@ -308,6 +330,7 @@ def _copy_optional_source_revision_snapshot(
     shape_run_name: str,
     row_count: int,
     block_rows: int,
+    output_shard_rows: int,
 ) -> bool:
     source = shape_group.get("source_refined_subject_masks")
     if not isinstance(source, zarr.Group):
@@ -332,7 +355,7 @@ def _copy_optional_source_revision_snapshot(
             arr,
             block_rows=int(block_rows),
             row_aligned_count=int(row_count) if name == "row_revision" else None,
-            shard_rows=int(block_rows) if name == "row_revision" else None,
+            shard_rows=int(output_shard_rows) if name == "row_revision" else None,
         )
         copied.append(name)
     target.attrs["copied_arrays"] = copied
@@ -781,6 +804,7 @@ def _copy_row_lineage_bounded(
     *,
     row_count: int,
     block_rows: int,
+    output_shard_rows: int,
 ) -> tuple[list[str], list[str], str]:
     target = run_group.require_group("row_index")
     source = shape_group.get("row_index")
@@ -799,7 +823,7 @@ def _copy_row_lineage_bounded(
                 source_array,
                 block_rows=int(block_rows),
                 row_aligned_count=int(row_count),
-                shard_rows=int(block_rows),
+                shard_rows=int(output_shard_rows),
             )
             copied.append(name)
             if name == "frame_indices":
@@ -815,7 +839,11 @@ def _copy_row_lineage_bounded(
         shape=(int(row_count),),
         dtype=frame_dtype,
         chunks=frame_chunks,
-        shards=_output_shards(frame_chunks, shard_rows=int(block_rows), dtype=frame_dtype),
+        shards=_output_shards(
+            frame_chunks,
+            shard_rows=int(output_shard_rows),
+            dtype=frame_dtype,
+        ),
     )
     for row_slice in _iter_row_slices(int(row_count), int(block_rows)):
         if frame_source is not None:
@@ -839,6 +867,8 @@ def _prepare_tail_kinematics_run(
     source_geometry_tail_sample_count: int,
     requested_block_rows: int,
     effective_block_rows: int,
+    requested_output_shard_rows: int,
+    effective_output_shard_rows: int,
     execution_backend: str,
     worker_count_requested: int,
     worker_count_effective: int,
@@ -865,9 +895,13 @@ def _prepare_tail_kinematics_run(
         shape_group,
         row_count=int(row_count),
         block_rows=int(effective_block_rows),
+        output_shard_rows=int(effective_output_shard_rows),
     )
     output_row_chunk = int(_metric_chunks(int(row_count))[0])
     block_count = len(_iter_row_slices(int(row_count), int(effective_block_rows)))
+    output_shard_count = len(
+        _iter_row_slices(int(row_count), int(effective_output_shard_rows))
+    )
     materialization_mode = (
         "bounded_streaming_single_writer"
         if execution_backend == "serial"
@@ -906,16 +940,33 @@ def _prepare_tail_kinematics_run(
             "worker_count_effective": int(worker_count_effective),
             "worker_chunk_size_requested": int(requested_block_rows),
             "worker_chunk_size_effective": int(effective_block_rows),
-            "worker_chunk_alignment": "align_to_output_row_chunks_and_shards",
+            "worker_chunk_alignment": "compute_blocks_align_to_output_row_chunks",
             "worker_write_ownership": (
                 "single_driver"
                 if execution_backend == "serial"
                 else "one_complete_nonoverlapping_output_shard_per_task"
             ),
+            "worker_compute_blocking": (
+                "single_driver_bounded_blocks"
+                if execution_backend == "serial"
+                else "bounded_subblocks_within_owned_output_shard"
+            ),
             "requested_block_rows": int(requested_block_rows),
             "effective_block_rows": int(effective_block_rows),
+            "compute_block_rows_requested": int(requested_block_rows),
+            "compute_block_rows_effective": int(effective_block_rows),
             "output_row_chunk": output_row_chunk,
-            "output_shard_rows": int(effective_block_rows),
+            "requested_output_shard_rows": int(requested_output_shard_rows),
+            "effective_output_shard_rows": int(effective_output_shard_rows),
+            "output_shard_rows": int(effective_output_shard_rows),
+            "output_shard_count": int(output_shard_count),
+            "output_shard_scope": (
+                "canonical_tail_arrays_and_frame_index; copied_lineage_preserves_"
+                "source_chunks_with_output_shard_as_floor"
+            ),
+            "worker_task_count": (
+                0 if execution_backend == "serial" else int(output_shard_count)
+            ),
             "block_count": int(block_count),
             "source_refs": {
                 "subject_shape_run": f"analysis/subject_shape_runs/{shape_run_name}",
@@ -930,6 +981,7 @@ def _prepare_tail_kinematics_run(
         shape_run_name=shape_run_name,
         row_count=int(row_count),
         block_rows=int(effective_block_rows),
+        output_shard_rows=int(effective_output_shard_rows),
     )
 
     git_info = get_git_info(repo_path=Path(__file__).resolve().parents[3])
@@ -973,16 +1025,33 @@ def _prepare_tail_kinematics_run(
             "worker_count_effective": int(worker_count_effective),
             "worker_chunk_size_requested": int(requested_block_rows),
             "worker_chunk_size_effective": int(effective_block_rows),
-            "worker_chunk_alignment": "align_to_output_row_chunks_and_shards",
+            "worker_chunk_alignment": "compute_blocks_align_to_output_row_chunks",
             "worker_write_ownership": (
                 "single_driver"
                 if execution_backend == "serial"
                 else "one_complete_nonoverlapping_output_shard_per_task"
             ),
+            "worker_compute_blocking": (
+                "single_driver_bounded_blocks"
+                if execution_backend == "serial"
+                else "bounded_subblocks_within_owned_output_shard"
+            ),
             "requested_block_rows": int(requested_block_rows),
             "effective_block_rows": int(effective_block_rows),
+            "compute_block_rows_requested": int(requested_block_rows),
+            "compute_block_rows_effective": int(effective_block_rows),
             "output_row_chunk": output_row_chunk,
-            "output_shard_rows": int(effective_block_rows),
+            "requested_output_shard_rows": int(requested_output_shard_rows),
+            "effective_output_shard_rows": int(effective_output_shard_rows),
+            "output_shard_rows": int(effective_output_shard_rows),
+            "output_shard_count": int(output_shard_count),
+            "output_shard_scope": (
+                "canonical_tail_arrays_and_frame_index; copied_lineage_preserves_"
+                "source_chunks_with_output_shard_as_floor"
+            ),
+            "worker_task_count": (
+                0 if execution_backend == "serial" else int(output_shard_count)
+            ),
             "block_count": int(block_count),
         },
         inputs={
@@ -1112,8 +1181,9 @@ def _process_tail_kinematics_shard(
     row_start: int,
     row_stop: int,
     tail_angle_sample_count: int,
+    block_rows: int,
 ) -> dict[str, object]:
-    """Compute and write one complete worker-owned output shard."""
+    """Compute one worker-owned output shard in bounded row sub-blocks."""
 
     root = open_zarr_root(zarr_path, mode="a")
     resolved_shape_run, _shape_group, sources = _resolve_tail_kinematics_sources(
@@ -1123,23 +1193,33 @@ def _process_tail_kinematics_shard(
     if resolved_shape_run != shape_run:
         raise RuntimeError(
             f"Worker resolved subject-shape run {resolved_shape_run!r}, expected {shape_run!r}."
-        )
-    run_group = root["analysis"]["tail_kinematics_runs"][run_name]
-    row_slice = slice(int(row_start), int(row_stop))
-
-    read_started = time.perf_counter()
-    block_sources = _read_tail_kinematics_source_block(sources, row_slice)
-    read_duration = float(time.perf_counter() - read_started)
-    compute_started = time.perf_counter()
-    batch = compute_tail_kinematics_from_subject_shape_arrays(
-        **block_sources,
-        tail_angle_sample_count=int(tail_angle_sample_count),
     )
-    compute_duration = float(time.perf_counter() - compute_started)
-    write_started = time.perf_counter()
-    _write_tail_kinematics_batch_slice(run_group, row_slice, batch)
-    write_duration = float(time.perf_counter() - write_started)
-    valid_count, reason_counts = _tail_kinematics_batch_counts(batch)
+    run_group = root["analysis"]["tail_kinematics_runs"][run_name]
+    valid_count = 0
+    reason_counts: dict[str, int] = {}
+    read_duration = 0.0
+    compute_duration = 0.0
+    write_duration = 0.0
+    completed_block_count = 0
+    for start in range(int(row_start), int(row_stop), int(block_rows)):
+        row_slice = slice(start, min(start + int(block_rows), int(row_stop)))
+        read_started = time.perf_counter()
+        block_sources = _read_tail_kinematics_source_block(sources, row_slice)
+        read_duration += float(time.perf_counter() - read_started)
+        compute_started = time.perf_counter()
+        batch = compute_tail_kinematics_from_subject_shape_arrays(
+            **block_sources,
+            tail_angle_sample_count=int(tail_angle_sample_count),
+        )
+        compute_duration += float(time.perf_counter() - compute_started)
+        write_started = time.perf_counter()
+        _write_tail_kinematics_batch_slice(run_group, row_slice, batch)
+        write_duration += float(time.perf_counter() - write_started)
+        block_valid_count, block_reason_counts = _tail_kinematics_batch_counts(batch)
+        valid_count += int(block_valid_count)
+        for reason, count in block_reason_counts.items():
+            reason_counts[str(reason)] = int(reason_counts.get(str(reason), 0) + int(count))
+        completed_block_count += 1
     return {
         "row_start": int(row_start),
         "row_stop": int(row_stop),
@@ -1148,6 +1228,8 @@ def _process_tail_kinematics_shard(
         "source_read_duration_seconds": read_duration,
         "compute_duration_seconds": compute_duration,
         "write_duration_seconds": write_duration,
+        "completed_block_count": int(completed_block_count),
+        "completed_worker_task_count": 1,
     }
 
 
@@ -1171,6 +1253,7 @@ def write_tail_kinematics_run_group(
     run_name: Optional[str] = None,
     tail_angle_sample_count: int = DEFAULT_TAIL_ANGLE_SAMPLE_COUNT,
     block_rows: int = DEFAULT_BLOCK_ROWS,
+    output_shard_rows: int = DEFAULT_OUTPUT_SHARD_ROWS,
     execution_backend: str = "serial",
     num_workers: int = 1,
     worker_zarr_path: str | Path | None = None,
@@ -1184,6 +1267,8 @@ def write_tail_kinematics_run_group(
         raise ValueError("tail_angle_sample_count must be >= 2.")
     if int(block_rows) <= 0:
         raise ValueError("block_rows must be positive.")
+    if int(output_shard_rows) <= 0:
+        raise ValueError("output_shard_rows must be positive.")
     backend = str(execution_backend).strip().lower()
     if backend not in TAIL_KINEMATICS_EXECUTION_BACKENDS:
         raise ValueError(
@@ -1200,19 +1285,34 @@ def write_tail_kinematics_run_group(
         row_count=row_count,
         requested_block_rows=int(block_rows),
     )
-    row_slices = _iter_row_slices(row_count, effective_block_rows)
+    effective_output_shard_rows = _effective_output_shard_rows(
+        row_count=row_count,
+        requested_output_shard_rows=int(output_shard_rows),
+    )
+    compute_block_slices = _iter_row_slices(row_count, effective_block_rows)
+    worker_shard_slices = _iter_row_slices(row_count, effective_output_shard_rows)
     worker_count_effective = (
         1
         if backend == "serial"
-        else min(int(num_workers), max(1, len(row_slices)))
+        else min(int(num_workers), max(1, len(worker_shard_slices)))
     )
     output_row_chunk = int(_metric_chunks(row_count)[0])
     if backend == "process_shards":
+        if len(worker_shard_slices) > 1 and (
+            int(effective_output_shard_rows) < int(effective_block_rows)
+            or int(effective_output_shard_rows) % int(effective_block_rows) != 0
+        ):
+            raise ValueError(
+                "For process_shards, non-final output shards must contain a whole "
+                "number of effective compute blocks. "
+                f"effective_output_shard_rows={effective_output_shard_rows}, "
+                f"effective_block_rows={effective_block_rows}."
+            )
         _validate_process_shard_slices(
-            row_slices,
+            worker_shard_slices,
             row_count=row_count,
             output_row_chunk=output_row_chunk,
-            output_shard_rows=int(effective_block_rows),
+            output_shard_rows=int(effective_output_shard_rows),
         )
     materialization_mode = (
         "bounded_streaming_single_writer"
@@ -1234,12 +1334,36 @@ def write_tail_kinematics_run_group(
         "worker_count_effective": int(worker_count_effective),
         "worker_chunk_size_requested": int(block_rows),
         "worker_chunk_size_effective": int(effective_block_rows),
-        "worker_chunk_alignment": "align_to_output_row_chunks_and_shards",
+        "worker_chunk_alignment": "compute_blocks_align_to_output_row_chunks",
+        "worker_shard_rows_requested": int(output_shard_rows),
+        "worker_shard_rows_effective": int(effective_output_shard_rows),
+        "worker_write_ownership": (
+            "single_driver"
+            if backend == "serial"
+            else "one_complete_nonoverlapping_output_shard_per_task"
+        ),
+        "worker_compute_blocking": (
+            "single_driver_bounded_blocks"
+            if backend == "serial"
+            else "bounded_subblocks_within_owned_output_shard"
+        ),
         "requested_block_rows": int(block_rows),
         "effective_block_rows": int(effective_block_rows),
+        "compute_block_rows_requested": int(block_rows),
+        "compute_block_rows_effective": int(effective_block_rows),
         "output_row_chunk": output_row_chunk,
-        "output_shard_rows": int(effective_block_rows),
-        "block_count": int(len(row_slices)),
+        "requested_output_shard_rows": int(output_shard_rows),
+        "effective_output_shard_rows": int(effective_output_shard_rows),
+        "output_shard_rows": int(effective_output_shard_rows),
+        "output_shard_count": int(len(worker_shard_slices)),
+        "output_shard_scope": (
+            "canonical_tail_arrays_and_frame_index; copied_lineage_preserves_"
+            "source_chunks_with_output_shard_as_floor"
+        ),
+        "worker_task_count": (
+            0 if backend == "serial" else int(len(worker_shard_slices))
+        ),
+        "block_count": int(len(compute_block_slices)),
         "mutates_archive": not bool(dry_run),
     }
     if dry_run:
@@ -1249,6 +1373,7 @@ def write_tail_kinematics_run_group(
     command = stage_command or (" ".join(sys.argv) if sys.argv else "unknown")
     run_group: zarr.Group | None = None
     completed_block_count = 0
+    completed_worker_task_count = 0
     valid_count = 0
     reason_counts: dict[str, int] = {}
     source_read_duration_seconds_sum = 0.0
@@ -1257,6 +1382,7 @@ def write_tail_kinematics_run_group(
 
     def record_block_result(block_result: Mapping[str, object]) -> None:
         nonlocal completed_block_count
+        nonlocal completed_worker_task_count
         nonlocal valid_count
         nonlocal source_read_duration_seconds_sum
         nonlocal compute_duration_seconds_sum
@@ -1270,7 +1396,10 @@ def write_tail_kinematics_run_group(
         )
         compute_duration_seconds_sum += float(block_result["compute_duration_seconds"])
         write_duration_seconds_sum += float(block_result["write_duration_seconds"])
-        completed_block_count += 1
+        completed_block_count += int(block_result.get("completed_block_count", 1))
+        completed_worker_task_count += int(
+            block_result.get("completed_worker_task_count", 0)
+        )
 
     try:
         run_group = _prepare_tail_kinematics_run(
@@ -1283,6 +1412,8 @@ def write_tail_kinematics_run_group(
             source_geometry_tail_sample_count=int(sources.source_sample_count),
             requested_block_rows=int(block_rows),
             effective_block_rows=int(effective_block_rows),
+            requested_output_shard_rows=int(output_shard_rows),
+            effective_output_shard_rows=int(effective_output_shard_rows),
             execution_backend=backend,
             worker_count_requested=int(num_workers),
             worker_count_effective=int(worker_count_effective),
@@ -1294,10 +1425,10 @@ def write_tail_kinematics_run_group(
             run_group,
             row_count=row_count,
             tail_angle_sample_s=target_s,
-            shard_rows=int(effective_block_rows),
+            shard_rows=int(effective_output_shard_rows),
         )
         if backend == "serial":
-            for row_slice in row_slices:
+            for row_slice in compute_block_slices:
                 read_started = time.perf_counter()
                 block_sources = _read_tail_kinematics_source_block(sources, row_slice)
                 read_duration = float(time.perf_counter() - read_started)
@@ -1318,6 +1449,8 @@ def write_tail_kinematics_run_group(
                         "source_read_duration_seconds": read_duration,
                         "compute_duration_seconds": compute_duration,
                         "write_duration_seconds": write_duration,
+                        "completed_block_count": 1,
+                        "completed_worker_task_count": 0,
                     }
                 )
         else:
@@ -1336,12 +1469,24 @@ def write_tail_kinematics_run_group(
                         row_start=int(row_slice.start or 0),
                         row_stop=int(row_slice.stop or 0),
                         tail_angle_sample_count=int(tail_angle_sample_count),
+                        block_rows=int(effective_block_rows),
                     )
-                    for row_slice in row_slices
+                    for row_slice in worker_shard_slices
                 ]
                 for future in as_completed(futures):
                     record_block_result(future.result())
 
+        if completed_block_count != len(compute_block_slices):
+            raise RuntimeError(
+                "Tail-kinematics compute block accounting mismatch: "
+                f"completed={completed_block_count}, expected={len(compute_block_slices)}."
+            )
+        expected_worker_tasks = 0 if backend == "serial" else len(worker_shard_slices)
+        if completed_worker_task_count != expected_worker_tasks:
+            raise RuntimeError(
+                "Tail-kinematics worker task accounting mismatch: "
+                f"completed={completed_worker_task_count}, expected={expected_worker_tasks}."
+            )
         duration_seconds = float(time.perf_counter() - started)
         invalid_count = int(row_count - valid_count)
         rows_per_second = float(row_count / duration_seconds) if duration_seconds > 0.0 else float("inf")
@@ -1350,6 +1495,7 @@ def write_tail_kinematics_run_group(
         run_group.attrs["valid_row_count"] = int(valid_count)
         run_group.attrs["invalid_row_count"] = invalid_count
         run_group.attrs["completed_block_count"] = int(completed_block_count)
+        run_group.attrs["completed_worker_task_count"] = int(completed_worker_task_count)
         run_group.attrs["failure_reason_counts"] = reason_counts
         run_group.attrs["source_read_duration_seconds_sum"] = source_read_duration_seconds_sum
         run_group.attrs["compute_duration_seconds_sum"] = compute_duration_seconds_sum
@@ -1370,6 +1516,9 @@ def write_tail_kinematics_run_group(
                 run_group = candidate
         if run_group is not None:
             run_group.attrs["completed_block_count"] = int(completed_block_count)
+            run_group.attrs["completed_worker_task_count"] = int(
+                completed_worker_task_count
+            )
             mark_run_failed(
                 run_group,
                 parent_group=root.get("analysis/tail_kinematics_runs"),
@@ -1387,6 +1536,7 @@ def write_tail_kinematics_run_group(
             "duration_seconds": duration_seconds,
             "rows_per_second": rows_per_second,
             "completed_block_count": int(completed_block_count),
+            "completed_worker_task_count": int(completed_worker_task_count),
             "source_read_duration_seconds_sum": source_read_duration_seconds_sum,
             "compute_duration_seconds_sum": compute_duration_seconds_sum,
             "write_duration_seconds_sum": write_duration_seconds_sum,
@@ -1402,6 +1552,7 @@ def write_tail_kinematics_run(
     run_name: Optional[str] = None,
     tail_angle_sample_count: int = DEFAULT_TAIL_ANGLE_SAMPLE_COUNT,
     block_rows: int = DEFAULT_BLOCK_ROWS,
+    output_shard_rows: int = DEFAULT_OUTPUT_SHARD_ROWS,
     execution_backend: str = "serial",
     num_workers: int = 1,
     overwrite: bool = False,
@@ -1414,6 +1565,7 @@ def write_tail_kinematics_run(
         run_name=run_name,
         tail_angle_sample_count=tail_angle_sample_count,
         block_rows=block_rows,
+        output_shard_rows=output_shard_rows,
         execution_backend=execution_backend,
         num_workers=num_workers,
         worker_zarr_path=zarr_path,
@@ -1445,6 +1597,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--output-shard-rows",
+        type=int,
+        default=DEFAULT_OUTPUT_SHARD_ROWS,
+        help=(
+            "Requested physical outer row-shard span. This is aligned to the logical "
+            "row-chunk grid independently of bounded compute blocks."
+        ),
+    )
+    parser.add_argument(
         "--execution-backend",
         choices=tuple(sorted(TAIL_KINEMATICS_EXECUTION_BACKENDS)),
         default="serial",
@@ -1466,6 +1627,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         run_name=args.run_name,
         tail_angle_sample_count=int(args.tail_angle_sample_count),
         block_rows=int(args.block_rows),
+        output_shard_rows=int(args.output_shard_rows),
         execution_backend=str(args.execution_backend),
         num_workers=int(args.num_workers),
         overwrite=bool(args.overwrite),

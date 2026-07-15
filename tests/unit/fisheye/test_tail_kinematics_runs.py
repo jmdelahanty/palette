@@ -318,17 +318,26 @@ def test_write_tail_kinematics_run_group_streams_aligned_blocks_with_whole_batch
         run_name="tail_streamed",
         tail_angle_sample_count=10,
         block_rows=3,
+        output_shard_rows=7,
     )
 
     assert source_slices == [(0, 4), (4, 8), (8, 9)]
     assert summary["requested_block_rows"] == 3
     assert summary["effective_block_rows"] == 4
+    assert summary["requested_output_shard_rows"] == 7
+    assert summary["effective_output_shard_rows"] == 8
     assert summary["block_count"] == 3
+    assert summary["output_shard_count"] == 2
     assert summary["completed_block_count"] == 3
     run = root["analysis"]["tail_kinematics_runs"]["tail_streamed"]
     assert run.attrs["output_row_chunk"] == 2
-    assert run.attrs["output_shard_rows"] == 4
-    assert tuple(run["tail_angle_rad"].shards) == (4, 10)
+    assert run.attrs["compute_block_rows_effective"] == 4
+    assert run.attrs["output_shard_rows"] == 8
+    assert run.attrs["completed_worker_task_count"] == 0
+    assert tuple(run["tail_angle_rad"].shards) == (8, 10)
+    # Copied lineage preserves its source logical chunk (9 rows), so its outer
+    # shard cannot be smaller than that chunk even though metric arrays use 8.
+    assert tuple(run["row_index"]["frame_indices"].shards) == (9,)
     assert run.attrs["palette_run_completion_status"] == "complete"
     np.testing.assert_allclose(
         np.asarray(run["tail_angle_rad"][:], dtype=np.float32),
@@ -365,6 +374,23 @@ def test_write_tail_kinematics_run_group_dry_run_does_not_read_frame_blocks(monk
 
     assert summary["status"] == "planned"
     assert "tail_kinematics_runs" not in root["analysis"]
+
+
+def test_process_shards_reject_output_shards_that_split_compute_blocks(monkeypatch) -> None:
+    monkeypatch.setattr(mod, "refined_subject_mask_metric_row_chunk", lambda _total_rows: 2)
+    root = _build_shape_root(row_count=9)
+
+    with pytest.raises(ValueError, match="whole number of effective compute blocks"):
+        mod.write_tail_kinematics_run_group(
+            root,
+            shape_run="shape_001",
+            run_name="tail_invalid_grids",
+            block_rows=3,
+            output_shard_rows=5,
+            execution_backend="process_shards",
+            num_workers=2,
+            dry_run=True,
+        )
 
 
 def test_write_tail_kinematics_run_group_marks_partial_stream_failed(monkeypatch) -> None:

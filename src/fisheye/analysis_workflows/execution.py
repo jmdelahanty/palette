@@ -289,6 +289,8 @@ def _tail_kinematics_command(context: StageCommandContext) -> tuple[str, ...]:
             context.output_run,
             "--block-rows",
             "16384",
+            "--output-shard-rows",
+            "262144",
             "--execution-backend",
             "process_shards",
             "--num-workers",

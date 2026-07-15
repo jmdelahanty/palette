@@ -28,6 +28,7 @@ import zarr
 
 from ...analysis.tail_kinematics_runs import (
     DEFAULT_BLOCK_ROWS,
+    DEFAULT_OUTPUT_SHARD_ROWS,
     DEFAULT_TAIL_ANGLE_SAMPLE_COUNT,
     ROW_LINEAGE_NAMES,
     SOURCE_REVISION_ARRAY_NAMES,
@@ -70,6 +71,7 @@ class TailKinematicsMaterializationPlan:
     row_count: int
     tail_angle_sample_count: int
     requested_block_rows: int
+    requested_output_shard_rows: int
     execution_backend: str
     requested_num_workers: int
     selected_paths: tuple[str, ...]
@@ -107,6 +109,7 @@ class TailKinematicsMaterializationPlan:
             "row_count": int(self.row_count),
             "tail_angle_sample_count": int(self.tail_angle_sample_count),
             "requested_block_rows": int(self.requested_block_rows),
+            "requested_output_shard_rows": int(self.requested_output_shard_rows),
             "execution_backend": self.execution_backend,
             "requested_num_workers": int(self.requested_num_workers),
             "selected_paths": list(self.selected_paths),
@@ -288,6 +291,7 @@ def build_tail_kinematics_materialization_plan(
     run_name: str,
     tail_angle_sample_count: int = DEFAULT_TAIL_ANGLE_SAMPLE_COUNT,
     block_rows: int = DEFAULT_BLOCK_ROWS,
+    output_shard_rows: int = DEFAULT_OUTPUT_SHARD_ROWS,
     execution_backend: str = "serial",
     num_workers: int = 1,
 ) -> TailKinematicsMaterializationPlan:
@@ -307,6 +311,8 @@ def build_tail_kinematics_materialization_plan(
         raise ValueError("tail_angle_sample_count must be >= 2.")
     if int(block_rows) <= 0:
         raise ValueError("block_rows must be positive.")
+    if int(output_shard_rows) <= 0:
+        raise ValueError("output_shard_rows must be positive.")
     backend = str(execution_backend).strip().lower()
     if backend not in {"serial", "process_shards"}:
         raise ValueError(f"Unsupported execution backend: {execution_backend!r}.")
@@ -328,6 +334,7 @@ def build_tail_kinematics_materialization_plan(
         row_count=int(sources.row_count),
         tail_angle_sample_count=int(tail_angle_sample_count),
         requested_block_rows=int(block_rows),
+        requested_output_shard_rows=int(output_shard_rows),
         execution_backend=backend,
         requested_num_workers=int(num_workers),
         selected_paths=selected_paths,
@@ -537,6 +544,10 @@ def _validate_tail_run(path: Path, *, row_count: int, sample_count: int) -> dict
         errors.append("valid/invalid accounting mismatch")
     if int(attrs.get("completed_block_count", -1)) != int(attrs.get("block_count", -2)):
         errors.append("block completion mismatch")
+    if str(attrs.get("execution_backend")) == "process_shards" and int(
+        attrs.get("completed_worker_task_count", -1)
+    ) != int(attrs.get("worker_task_count", -2)):
+        errors.append("worker task completion mismatch")
     return {
         "valid": not errors,
         "errors": errors,
@@ -545,7 +556,11 @@ def _validate_tail_run(path: Path, *, row_count: int, sample_count: int) -> dict
         "valid_row_count": valid_count,
         "invalid_row_count": invalid_count,
         "output_row_chunk": attrs.get("output_row_chunk"),
+        "requested_output_shard_rows": attrs.get("requested_output_shard_rows"),
+        "effective_output_shard_rows": attrs.get("effective_output_shard_rows"),
         "output_shard_rows": attrs.get("output_shard_rows"),
+        "output_shard_count": attrs.get("output_shard_count"),
+        "completed_worker_task_count": attrs.get("completed_worker_task_count"),
     }
 
 
@@ -672,6 +687,7 @@ def materialize_tail_kinematics(
     run_name: str,
     tail_angle_sample_count: int = DEFAULT_TAIL_ANGLE_SAMPLE_COUNT,
     block_rows: int = DEFAULT_BLOCK_ROWS,
+    output_shard_rows: int = DEFAULT_OUTPUT_SHARD_ROWS,
     execution_backend: str = "serial",
     num_workers: int = 1,
     copy_backend: str = "rsync",
@@ -689,6 +705,7 @@ def materialize_tail_kinematics(
         run_name=run_name,
         tail_angle_sample_count=tail_angle_sample_count,
         block_rows=block_rows,
+        output_shard_rows=output_shard_rows,
         execution_backend=execution_backend,
         num_workers=num_workers,
     )
@@ -715,6 +732,7 @@ def materialize_tail_kinematics(
             run_name=plan.run_name,
             tail_angle_sample_count=plan.tail_angle_sample_count,
             block_rows=plan.requested_block_rows,
+            output_shard_rows=plan.requested_output_shard_rows,
             execution_backend=plan.execution_backend,
             num_workers=plan.requested_num_workers,
             worker_zarr_path=plan.staged_zarr,
@@ -768,6 +786,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--block-rows", type=int, default=DEFAULT_BLOCK_ROWS)
     parser.add_argument(
+        "--output-shard-rows",
+        type=int,
+        default=DEFAULT_OUTPUT_SHARD_ROWS,
+    )
+    parser.add_argument(
         "--execution-backend",
         choices=("serial", "process_shards"),
         default="serial",
@@ -793,6 +816,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         run_name=args.run_name,
         tail_angle_sample_count=int(args.tail_angle_sample_count),
         block_rows=int(args.block_rows),
+        output_shard_rows=int(args.output_shard_rows),
         execution_backend=str(args.execution_backend),
         num_workers=int(args.num_workers),
         copy_backend=str(args.copy_backend),

@@ -14,6 +14,7 @@ NCORES=8
 MEM_GB=32
 WALLTIME="4:00"
 BLOCK_ROWS=16384
+OUTPUT_SHARD_ROWS=262144
 TAIL_ANGLE_SAMPLE_COUNT=10
 KEEP_SCRATCH=0
 SUBMIT=0
@@ -44,14 +45,16 @@ Options:
   --ncores N                  CPU slots and process-shard workers (default: 8)
   --mem-gb N                  Memory request (default: 32)
   --walltime H:MM             Walltime (default: 4:00)
-  --block-rows N              Bounded compute/output shard rows (default: 16384)
+  --block-rows N              Bounded compute rows (default: 16384)
+  --output-shard-rows N       Physical output shard rows (default: 262144)
   --tail-angle-sample-count N Resampled tail points (default: 10)
   --keep-scratch              Retain node-local files after successful publish
   --submit                    Submit; otherwise render only
   -h, --help                  Show this help
 
-Each worker owns one complete, non-overlapping output shard. The driver alone
-creates/finalizes run metadata and performs atomic publication.
+Each worker owns one complete, non-overlapping output shard and computes it in
+bounded sub-blocks. The driver alone creates/finalizes run metadata and performs
+atomic publication.
 USAGE
 }
 
@@ -74,6 +77,7 @@ while [[ $# -gt 0 ]]; do
     --mem-gb) MEM_GB="$2"; shift 2;;
     --walltime) WALLTIME="$2"; shift 2;;
     --block-rows) BLOCK_ROWS="$2"; shift 2;;
+    --output-shard-rows) OUTPUT_SHARD_ROWS="$2"; shift 2;;
     --tail-angle-sample-count) TAIL_ANGLE_SAMPLE_COUNT="$2"; shift 2;;
     --keep-scratch) KEEP_SCRATCH=1; shift;;
     --submit) SUBMIT=1; shift;;
@@ -92,6 +96,8 @@ done
 [[ "$MEM_GB" =~ ^[1-9][0-9]*$ ]] || fail "--mem-gb must be a positive integer"
 [[ "$NCORES" =~ ^[1-9][0-9]*$ ]] || fail "--ncores must be a positive integer"
 [[ "$BLOCK_ROWS" =~ ^[1-9][0-9]*$ ]] || fail "--block-rows must be a positive integer"
+[[ "$OUTPUT_SHARD_ROWS" =~ ^[1-9][0-9]*$ ]] || \
+  fail "--output-shard-rows must be a positive integer"
 [[ "$TAIL_ANGLE_SAMPLE_COUNT" =~ ^[0-9]+$ ]] || \
   fail "--tail-angle-sample-count must be an integer"
 (( TAIL_ANGLE_SAMPLE_COUNT >= 2 )) || \
@@ -144,6 +150,7 @@ REPORT_PATH=${q_report}
 STATUS_FILE=${q_status}
 CONFIGURED_SCRATCH_BASE=${q_scratch_base}
 BLOCK_ROWS=${BLOCK_ROWS}
+OUTPUT_SHARD_ROWS=${OUTPUT_SHARD_ROWS}
 TAIL_ANGLE_SAMPLE_COUNT=${TAIL_ANGLE_SAMPLE_COUNT}
 NCORES=${NCORES}
 KEEP_SCRATCH=${KEEP_SCRATCH}
@@ -190,6 +197,7 @@ cmd=(
   --run-name "\${RUN_NAME}"
   --scratch-root "\${scratch_root}"
   --block-rows "\${BLOCK_ROWS}"
+  --output-shard-rows "\${OUTPUT_SHARD_ROWS}"
   --tail-angle-sample-count "\${TAIL_ANGLE_SAMPLE_COUNT}"
   --execution-backend process_shards
   --num-workers "\${NCORES}"

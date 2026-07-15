@@ -15,7 +15,7 @@ The benchmark preserves each array's dtype, shape, logical chunk grid, codec,
 fill value, and decoded bytes. Only row-aligned arrays change physical outer
 shard span:
 
-- 16,384 rows (current baseline)
+- 16,384 rows (materialized-canary baseline)
 - 65,536 rows
 - 131,072 rows
 - 262,144 rows
@@ -54,3 +54,23 @@ Palette commit, refuses `/groups` as scratch, stages all source shards in one
 `rsync`, and retains only JSON/timing/status files on shared storage. Each
 publication candidate is copied into a job-specific hidden shared directory,
 checked with a checksum-mode `rsync` dry run, and removed before the job exits.
+
+## Sleepyfish result
+
+The direct publication benchmark ran as Citrus job `153100876` against
+`tail_kinematics_sleepyfish_node_local_canary_20260715_01`. All decoded-array
+digests and post-transfer physical-file checksums matched.
+
+| Outer shard rows | Total files | Publication seconds | MiB/s | Full scan seconds |
+| ---: | ---: | ---: | ---: | ---: |
+| 16,384 | 1,686 | 13.70 | 19.9 | 3.95 |
+| 65,536 | 444 | 5.01 | 54.4 | 5.98 |
+| 131,072 | 237 | 3.20 | 85.0 | 6.37 |
+| 262,144 | 145 | 2.41 | 113.2 | 6.26 |
+
+Random-row and 1,024-row window timings were effectively unchanged at 262,144
+rows. The selected production contract is therefore 262,144-row physical
+shards with 16,384-row compute sub-blocks and the existing 256-row logical
+chunks. This prioritizes publication and object-count performance while keeping
+interactive bounded reads stable; consumers doing full scans retain a measured
+roughly 58% local-read penalty.
