@@ -225,6 +225,8 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(tmp_path: Path, m
     assert len(cache_tasks) == 6
     assert refine_bundle.resources.ncores == 16
     assert refine_bundle.resources.mem_gb == 32
+    assert refine_bundle.resources.queue == "short"
+    assert refine_bundle.resources.walltime == "1:00"
     assert refine_bundle.resources.span_hosts == 1
     assert "OMP_NUM_THREADS=4" in refine_bundle.command
 

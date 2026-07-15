@@ -160,7 +160,7 @@ def build_detection_fragment(inputs: DetectionFragmentInputs) -> DetectionWorkfl
         queue="short",
         ncores=4 * int(inputs.refine_bundle_concurrency),
         mem_gb=32,
-        walltime="2:00",
+        walltime="1:00",
         span_hosts=1,
     )
     jobs = []
