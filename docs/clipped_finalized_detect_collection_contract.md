@@ -165,6 +165,14 @@ Conflicting positive values must fail closed. `inference_width` and
 `inference_height` describe model input resizing and are never a substitute for
 source full-frame geometry.
 
+Completed historical v1 recording-order sources may receive a metadata-only
+geometry repair only after revalidating their exact raw-run lineage, canonical
+frame coverage, source slices, array contracts, and stored decoded digests.
+Such a repair must retain the v1 `schema_id`, record
+`full_frame_geometry_repair`, explicitly state that array payloads were not
+rewritten, and stamp only compatible root/`raw_video` geometry. It must not
+promote an incompletely validated artifact to v2 by attribute substitution.
+
 When pixel boxes are present, `bbox_img_xyxy` must be interpreted only with its
 declared coordinate metadata. For current fixed clipped detect/refine outputs,
 pixel boxes are expected to be source-image pixels for the source clip frame.

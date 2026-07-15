@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from fisheye.cluster import clipped_inference as workflow
+from fisheye.cluster import clipped_inference_detect_quality_recovery as quality_recovery
 from fisheye.cluster import clipped_inference_import_recovery as import_recovery
 from fisheye.cluster import clipped_inference_keypoint_recovery as recovery
 from fisheye.cluster import refined_subject_mask_encoded_chunk_canary as encoded_canary
@@ -492,6 +493,69 @@ def test_keypoint_recovery_reuses_cache_and_raw_masks(
     assert any(str(recovery_root) in value for value in keypoint_task.command)
     assert all(str(source.run_root) not in value for value in keypoint_task.command)
     assert plan.payload["targets"] == source.to_json()["targets"]
+
+
+def test_detect_quality_recovery_reuses_source_and_clones_complete_dag_tail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _build_fixture_plan(tmp_path, monkeypatch)
+    workflow.materialize_plan_bundle(source)
+    source_plan = source.run_root / "plan.json"
+    target = source.target_plans[0]
+    source_metadata = (
+        Path(str(target["analysis_zarr"]))
+        / "detect_collection_sources"
+        / str(target["detect_quality_source_run"])
+        / "zarr.json"
+    )
+    _write_json(
+        source_metadata,
+        {
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "schema_id": "palette.clipped_detect_quality_source.v1",
+                "palette_run_completion_status": "complete",
+            },
+        },
+    )
+
+    recovery_root = tmp_path / "quality_recovery"
+    plan = quality_recovery.build_plan(
+        source_plan_path=source_plan,
+        run_root=recovery_root,
+        recovery_label="sleepyfish_quality_recovery",
+        repo=source.repo,
+    )
+    jobs = {job.job_key: job for job in plan.workflow.jobs}
+    target_safe = workflow.safe_component(
+        str(target["target_id"]), default="target", max_length=56
+    )
+    repair_key = f"detect_quality_source_geometry_repair:{target_safe}"
+    quality_key = f"detect_quality:{target_safe}"
+
+    assert len(plan.workflow.jobs) == len(source.lsf_workflow.jobs) - 1
+    assert f"detect_array:{target_safe}" not in jobs
+    assert f"detect_quality_source:{target_safe}" not in jobs
+    assert jobs[quality_key].dependency.upstream_job_keys == (repair_key,)
+    assert jobs[f"detect_refine_bundle:{target_safe}"].dependency.upstream_job_keys == (
+        quality_key,
+    )
+    assert jobs["nrs_cleanup"].dependency.upstream_job_keys == ("registry_finalize",)
+    assert plan.payload["detect_quality_recovery"]["source_array_payload_rewritten"] is False
+    assert plan.payload["targets"][0]["detect_quality_source_run"] == target[
+        "detect_quality_source_run"
+    ]
+    quality_inner = quality_recovery._inner_command(jobs[quality_key].to_json())
+    assert all(str(source.run_root) not in value for value in quality_inner)
+    assert all(str(source.repo) not in value or str(plan.repo) in value for value in quality_inner)
+
+    quality_recovery.materialize_plan(plan)
+    assert plan.recovery_detection_plan.is_file()
+    assert json.loads(plan.recovery_detection_plan.read_text(encoding="utf-8")) == json.loads(
+        plan.source_detection_plan.read_text(encoding="utf-8")
+    )
 
 
 def test_import_recovery_reuses_packages_on_long_queue(

@@ -200,6 +200,39 @@ keypoint assignment lineage. A single registry writer reconciles all targets
 only after every validation succeeds. NRS cache and package directories are
 removed only after that registry report passes its integrity check.
 
+## Detection-quality geometry recovery
+
+Historical `palette.clipped_detect_quality_source.v1` snapshots may be complete
+and content-validated while lacking the full-frame geometry introduced by the
+v2 contract. Do not rebuild their indexed-sharded arrays or silently relabel
+them as v2. `fisheye.utils.repair_clipped_detect_quality_source_geometry`
+validates the canonical frame manifest, every raw detection run, complete
+source slices, array shapes/dtypes, stored decoded SHA-256 records, and uniform
+raw-run geometry before changing metadata. It preserves the v1 `schema_id`,
+adds a deterministic `full_frame_geometry_repair` audit record, stamps the
+compatible root and `raw_video` geometry, and records that no array payload was
+rewritten.
+
+`fisheye.cluster.clipped_inference_detect_quality_recovery` is the one-target
+campaign recovery for a geometry failure at this boundary. It fails closed if
+the quality source is incomplete or any planned downstream artifact already
+exists. The recovery then submits, through the Citrus poller, a short CPU
+metadata-repair job followed by a cloned copy of the original DAG from
+recording-level detection quality onward:
+
+```text
+validate/repair v1 source metadata -> detect quality -> detect refine bundle
+  -> finalized detection collection -> ROI cache array -> proxy
+  -> keypoint and subject-mask arrays -> finalizers/import
+  -> validation -> registry reconciliation -> NRS cleanup
+```
+
+The original raw detections, source array objects, artifact run names, model
+bindings, and collection lineage remain unchanged. The recovery has its own
+immutable plan, logs, statuses, and submission receipt, and runs against an
+explicit deployed repository checkout rather than the obsolete source-run
+repository snapshot.
+
 ## Keypoint-stage recovery
 
 `fisheye.cluster.clipped_inference_keypoint_recovery` resumes a failed campaign

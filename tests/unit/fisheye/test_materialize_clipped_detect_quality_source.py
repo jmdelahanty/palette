@@ -14,6 +14,10 @@ from fisheye.utils.materialize_clipped_detect_quality_source import (
     materialize_clipped_detect_quality_source,
 )
 from fisheye.utils.plan_clipped_detect_refine_workflow import PLAN_SCHEMA
+from fisheye.utils.repair_clipped_detect_quality_source_geometry import (
+    REPAIR_SCHEMA,
+    repair_clipped_detect_quality_source_geometry,
+)
 
 
 def _raw_group(
@@ -189,3 +193,110 @@ def test_materializer_rejects_conflicting_parent_geometry(tmp_path: Path) -> Non
     assert root.attrs["height"] == 640
     failed = root["detect_collection_sources/source_parent_geometry_conflict"]
     assert failed.attrs["palette_run_completion_status"] == "failed"
+
+
+def test_repairs_historical_source_geometry_without_rewriting_arrays(tmp_path: Path) -> None:
+    zarr_path, frame_index, plan_path = _fixture(tmp_path)
+    materialize_clipped_detect_quality_source(
+        zarr_path,
+        plan_path=plan_path,
+        output_run="source_historical",
+        recording_frame_index=frame_index,
+        shard_rows=4,
+        inner_rows=2,
+        apply=True,
+    )
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    source = root["detect_collection_sources/source_historical"]
+    before_arrays = {
+        name: np.asarray(source[name][:]).copy()
+        for name in (
+            "frame_indices",
+            "bbox_norm_coords",
+            "instance_key",
+            "source_clip_indices",
+            "source_clip_local_frame_indices",
+            "source_clip_detect_row_index",
+        )
+    }
+    before_digests = dict(source.attrs["decoded_array_sha256"])
+    source.attrs["schema_id"] = "palette.clipped_detect_quality_source.v1"
+    for key in (
+        "source_video_width",
+        "source_video_height",
+        "width",
+        "height",
+        "full_frame_geometry_schema",
+        "full_frame_geometry_source",
+    ):
+        del source.attrs[key]
+    source.attrs["source_slices"] = [
+        {
+            key: value
+            for key, value in row.items()
+            if key not in {"source_video_width", "source_video_height"}
+        }
+        for row in source.attrs["source_slices"]
+    ]
+    source_validation = dict(source.attrs["source_validation"])
+    for key in (
+        "source_video_width",
+        "source_video_height",
+        "full_frame_geometry_uniform",
+    ):
+        source_validation.pop(key, None)
+    source.attrs["source_validation"] = source_validation
+    for key in (
+        "width",
+        "height",
+        "source_video_width",
+        "source_video_height",
+        "full_frame_geometry_schema",
+        "full_frame_geometry_source",
+        "source_video_metadata",
+    ):
+        if key in root.attrs:
+            del root.attrs[key]
+    raw = root["raw_video"]
+    for key in tuple(raw.attrs):
+        del raw.attrs[key]
+
+    dry_run = repair_clipped_detect_quality_source_geometry(
+        zarr_path,
+        plan_path=plan_path,
+        source_run="source_historical",
+        recording_frame_index=frame_index,
+        apply=False,
+    )
+    assert dry_run["status"] == "planned"
+
+    report = repair_clipped_detect_quality_source_geometry(
+        zarr_path,
+        plan_path=plan_path,
+        source_run="source_historical",
+        recording_frame_index=frame_index,
+        apply=True,
+    )
+    assert report["status"] == "complete"
+    assert report["repair"]["schema"] == REPAIR_SCHEMA
+    assert report["repair"]["array_payload_rewritten"] is False
+    repaired = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    repaired_source = repaired["detect_collection_sources/source_historical"]
+    assert repaired_source.attrs["schema_id"] == "palette.clipped_detect_quality_source.v1"
+    assert repaired_source.attrs["source_video_width"] == 4512
+    assert repaired_source.attrs["source_video_height"] == 4512
+    assert repaired_source.attrs["decoded_array_sha256"] == before_digests
+    assert repaired_source.attrs["full_frame_geometry_repair"]["schema"] == REPAIR_SCHEMA
+    assert repaired.attrs["width"] == 4512
+    assert repaired["raw_video"].attrs["height"] == 4512
+    for name, expected in before_arrays.items():
+        np.testing.assert_array_equal(repaired_source[name][:], expected)
+
+    repeated = repair_clipped_detect_quality_source_geometry(
+        zarr_path,
+        plan_path=plan_path,
+        source_run="source_historical",
+        recording_frame_index=frame_index,
+        apply=True,
+    )
+    assert repeated == report
