@@ -245,10 +245,10 @@ analysis/subject_shape_runs/
         tail_segment_arclength_px  (N,) optional
         body_arclength_px          (N,) optional
         tail_sample_s              (K,) optional normalized tail arclength samples
-        tail_sample_xy             (N, K, 2) optional
-        tail_tangent_xy            (N, K, 2) optional
-        tail_normal_xy             (N, K, 2) optional
-        tail_curvature_px_inv      (N, K) optional
+        tail_sample_xy             (N, K, 2) optional   [interpolating spline: faithful positions]
+        tail_tangent_xy            (N, K, 2) optional   [smoothing spline, see below]
+        tail_normal_xy             (N, K, 2) optional   [smoothing spline]
+        tail_curvature_px_inv      (N, K) optional      [smoothing spline]
         tail_sample_valid          (N,) optional
         tail_sample_failure_reason_bytes (N, width) optional
         tail_width_px              (N, K) optional
@@ -304,6 +304,30 @@ Current schema v3 tail samples are subject-shape geometry samples. They are
 used to support geometry review, width/curvature profiles, and downstream
 resampling. They should not be assumed to be the final low-dimensional
 behavioral tail-angle vector.
+
+### Two-spline tail geometry (method v9+, 2026-07-15)
+
+Positions (`tail_sample_xy`) and arc length come from the **interpolating** spline
+(`bspline_smoothing = 0`), which faithfully follows the mask skeleton. The **differentiated**
+quantities — `tail_tangent_xy`, `tail_normal_xy`, and `tail_curvature_px_inv` — come from a
+**separate smoothing spline** (`tail_curvature_method = separate_smoothing_spline_v1`,
+`s = n_points * tail_curvature_smoothing_px^2`, default 0.75 px). Recorded in the component/run
+attrs `tail_curvature_method` and `tail_curvature_smoothing_px`.
+
+**Why:** curvature is the second derivative of the centerline, and an interpolating spline
+through the ±0.5–1 px pixel-quantization jitter of the mask skeleton produces meaningless
+sub-pixel bend radii (v8 median max curvature ≈ 1 px radius on a 75 px tail — pure noise). The
+smoothing spline removes the jitter while preserving real, coherent bends (a synthetic 20 px-radius
+arc reads back at ≈1/20). On the one re-materialized recording this moved the median max-curvature
+radius from **1.1 px → 60 px**. Pinned by `test_tail_curvature_uses_a_smoothing_spline...` and
+`test_smoothing_preserves_a_real_body_bend`.
+
+**Residual caveats (the fit is fixed; the masks are not):** after the fix, the highest-curvature
+frames are dominated by (a) the **tail tip**, where curvature is both genuinely highest during a
+tail beat *and* least reliable (thin mask, spline endpoint curl), and (b) **truncated/jagged tail
+masks** (`tail_sample_valid` fails ~10% of frames). For a trustworthy body-bend / C-bend metric,
+exclude the terminal tail points and QC-reject physically impossible radii (< ~5 px). See
+`docs/diagnostics/subject_shape_tail_curvature_2026-07-15.md`.
 
 The low-dimensional behavior-facing representation should be written by
 `analysis/tail_kinematics_runs`, defaulting to approximately `K=10` normalized
