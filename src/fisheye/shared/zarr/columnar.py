@@ -16,12 +16,22 @@ from zarr import Array as ZarrArray, Group as ZarrGroup
 from fisheye.shared.json_safety import decode_null_terminated_text
 
 __all__ = [
+    "COLUMNAR_SHARD_ALIGNMENT_POLICY",
+    "COLUMNAR_STORAGE_SCHEMA_ID",
+    "DEFAULT_COLUMNAR_SHARD_ROWS",
     "load_structured_dataset",
     "pick_chunks",
+    "pick_shards",
     "read_columnar_dataset",
     "store_array",
     "write_columnar_dataset",
 ]
+
+COLUMNAR_STORAGE_SCHEMA_ID = "palette.columnar_zarr_storage.v1"
+DEFAULT_COLUMNAR_SHARD_ROWS = 262_144
+COLUMNAR_SHARD_ALIGNMENT_POLICY = (
+    "ceil_requested_rows_to_logical_chunk_grid_capped_to_array"
+)
 
 
 def pick_chunks(shape: Tuple[int, ...]) -> Optional[Tuple[int, ...]]:
@@ -37,6 +47,49 @@ def pick_chunks(shape: Tuple[int, ...]) -> Optional[Tuple[int, ...]]:
     if first_dim <= 0:
         return None
     return (first_dim,) + shape[1:]
+
+
+def pick_shards(
+    shape: Tuple[int, ...],
+    chunks: Optional[Tuple[int, ...]],
+    *,
+    shard_rows: Optional[int] = DEFAULT_COLUMNAR_SHARD_ROWS,
+) -> Optional[Tuple[int, ...]]:
+    """Choose a row-aligned outer shard without changing logical chunks.
+
+    Sharding is omitted for scalars, empty arrays, and arrays containing only
+    one logical row chunk. Capping the shard to the array's chunk-grid extent
+    prevents short two-dimensional arrays from acquiring enormous empty shard
+    indexes when their first-axis logical chunk is small.
+    """
+
+    if shard_rows is None:
+        return None
+    requested = int(shard_rows)
+    if requested <= 0:
+        raise ValueError("shard_rows must be positive when provided.")
+    if not shape or not chunks:
+        return None
+    if len(shape) != len(chunks):
+        raise ValueError(
+            f"shape and chunks must have the same rank; got shape={shape!r}, chunks={chunks!r}."
+        )
+    row_count = int(shape[0])
+    inner_rows = int(chunks[0])
+    if row_count <= 0:
+        return None
+    if inner_rows <= 0:
+        raise ValueError("Logical row chunks must be positive.")
+
+    logical_row_chunks = (row_count + inner_rows - 1) // inner_rows
+    if logical_row_chunks <= 1:
+        return None
+    aligned_requested = ((requested + inner_rows - 1) // inner_rows) * inner_rows
+    maximum_useful_rows = logical_row_chunks * inner_rows
+    effective_rows = min(aligned_requested, maximum_useful_rows)
+    if effective_rows <= inner_rows:
+        return None
+    return (int(effective_rows), *tuple(int(value) for value in chunks[1:]))
 
 
 def _to_string_list(data: np.ndarray) -> List[str]:
@@ -58,23 +111,13 @@ def store_array(
     name: str,
     data: np.ndarray,
     attrs: Optional[Dict[str, object]] = None,
+    *,
+    shard_rows: Optional[int] = DEFAULT_COLUMNAR_SHARD_ROWS,
 ) -> zarr.Array:
-    """Store a NumPy array in Zarr, replacing any existing node."""
+    """Store a complete NumPy array with aligned, single-writer sharding."""
 
     if name in parent:
         del parent[name]
-
-    if data.dtype.names:
-        arr = parent.create_array(
-            name,
-            data=data,
-            chunks=pick_chunks(data.shape),
-            overwrite=True,
-        )
-        if attrs:
-            for attr_name, attr_value in attrs.items():
-                arr.attrs[attr_name] = attr_value
-        return arr
 
     if data.dtype.kind in ("S", "O", "U"):
         values = _to_string_list(data)
@@ -89,23 +132,61 @@ def store_array(
             byte_data = str(value).encode("utf-8")[:max_len]
             encoded[index, : len(byte_data)] = np.frombuffer(byte_data, dtype=np.uint8)
 
-        arr = parent.create_array(
-            name,
-            data=encoded,
-            chunks=pick_chunks(encoded.shape),
-            overwrite=True,
-        )
+        stored_data = encoded
     else:
-        arr = parent.create_array(
-            name,
-            data=data,
-            chunks=pick_chunks(data.shape),
-            overwrite=True,
-        )
+        stored_data = data
+
+    chunks = pick_chunks(tuple(int(value) for value in stored_data.shape))
+    shards = pick_shards(
+        tuple(int(value) for value in stored_data.shape),
+        chunks,
+        shard_rows=shard_rows,
+    )
+    create_kwargs: Dict[str, object] = {
+        "data": stored_data,
+        "overwrite": True,
+    }
+    if chunks is not None:
+        create_kwargs["chunks"] = chunks
+    if shards is not None:
+        create_kwargs["shards"] = shards
+    arr = parent.create_array(name, **create_kwargs)
 
     if attrs:
         for attr_name, attr_value in attrs.items():
             arr.attrs[attr_name] = attr_value
+
+    if shard_rows is None:
+        skip_reason = "disabled"
+    elif not stored_data.shape:
+        skip_reason = "scalar"
+    elif int(stored_data.shape[0]) <= 0:
+        skip_reason = "empty_array"
+    elif shards is None:
+        skip_reason = "single_logical_row_chunk"
+    else:
+        skip_reason = None
+    arr.attrs.update(
+        {
+            "palette_storage_schema_id": COLUMNAR_STORAGE_SCHEMA_ID,
+            "palette_storage_writer": "fisheye.shared.zarr.columnar.store_array",
+            "palette_physical_layout": (
+                "indexed_sharding_v1" if shards is not None else "regular_chunks_v1"
+            ),
+            "palette_logical_chunk_shape": (
+                list(chunks) if chunks is not None else None
+            ),
+            "palette_shard_rows_requested": (
+                int(shard_rows) if shard_rows is not None else None
+            ),
+            "palette_shard_rows_effective": (
+                int(shards[0]) if shards is not None else None
+            ),
+            "palette_shard_shape": list(shards) if shards is not None else None,
+            "palette_shard_alignment_policy": COLUMNAR_SHARD_ALIGNMENT_POLICY,
+            "palette_sharding_skip_reason": skip_reason,
+        }
+    )
 
     return arr
 
@@ -115,6 +196,8 @@ def write_columnar_dataset(
     name: str,
     data: np.ndarray,
     attrs: Optional[Dict[str, object]] = None,
+    *,
+    shard_rows: Optional[int] = DEFAULT_COLUMNAR_SHARD_ROWS,
 ) -> zarr.Group:
     """Store a structured array as a group of field-aligned Zarr arrays."""
 
@@ -136,8 +219,29 @@ def write_columnar_dataset(
         for attr_name, attr_value in attrs.items():
             group.attrs[attr_name] = attr_value
 
+    sharded_field_count = 0
     for field in field_names:
-        store_array(group, field, np.asarray(data[field]))
+        array = store_array(
+            group,
+            field,
+            np.asarray(data[field]),
+            shard_rows=shard_rows,
+        )
+        if array.attrs["palette_physical_layout"] == "indexed_sharding_v1":
+            sharded_field_count += 1
+
+    group.attrs.update(
+        {
+            "columnar_storage_schema_id": COLUMNAR_STORAGE_SCHEMA_ID,
+            "columnar_shard_rows_requested": (
+                int(shard_rows) if shard_rows is not None else None
+            ),
+            "columnar_shard_alignment_policy": COLUMNAR_SHARD_ALIGNMENT_POLICY,
+            "columnar_sharding_policy": "shard_fields_with_multiple_logical_row_chunks",
+            "columnar_sharded_field_count": int(sharded_field_count),
+            "columnar_regular_field_count": int(len(field_names) - sharded_field_count),
+        }
+    )
 
     return group
 

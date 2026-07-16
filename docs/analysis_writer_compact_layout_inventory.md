@@ -87,6 +87,16 @@ performance problem. Sparse analytic outputs such as swim bouts,
 bout-kinematics metrics, classifications, and stimulus-response summaries
 should stay table-first.
 
+## Shared Columnar Physical Storage
+
+As of 2026-07-16, the shared serialized columnar writer uses 262,144 requested
+row shards for fields that span multiple logical chunks. Logical chunk shapes
+and reader contracts are unchanged; short and one-chunk fields remain regular
+arrays. The default and its measured Sleepyfish tradeoffs are recorded in
+`docs/diagnostics/sleepyfish_columnar_zarr_sharding_benchmark_2026-07-16.md`.
+Future parallel writers must assign complete, non-overlapping physical shards
+rather than treating disjoint logical rows as sufficient ownership.
+
 ## Writer Inventory
 
 | Writer family | Current layout | Compact status | Migration priority | Recommendation |

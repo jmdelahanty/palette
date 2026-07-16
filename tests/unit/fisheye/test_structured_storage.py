@@ -1,10 +1,16 @@
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.analysis.chaser_state_interpolator import analyze_frame_gaps, interpolate_metadata
 from fisheye.shared.zarr.columnar import (
+    COLUMNAR_SHARD_ALIGNMENT_POLICY,
+    COLUMNAR_STORAGE_SCHEMA_ID,
+    DEFAULT_COLUMNAR_SHARD_ROWS,
     load_structured_dataset,
     pick_chunks,
+    pick_shards,
+    store_array,
     write_columnar_dataset,
 )
 
@@ -55,6 +61,64 @@ def test_pick_chunks_returns_positive_chunks_for_empty_arrays():
     assert pick_chunks(()) is None
     assert pick_chunks((0,)) == (1,)
     assert pick_chunks((0, 2)) == (1, 2)
+
+
+def test_pick_shards_aligns_and_caps_requested_rows():
+    assert DEFAULT_COLUMNAR_SHARD_ROWS == 262_144
+    assert pick_shards((10_000,), (4_096,), shard_rows=7_000) == (8_192,)
+    assert pick_shards((5_000,), (4_096,), shard_rows=262_144) == (8_192,)
+    assert pick_shards((1, 10_000), (1, 10_000), shard_rows=262_144) is None
+    assert pick_shards((0,), (1,), shard_rows=262_144) is None
+    assert pick_shards((10_000,), (4_096,), shard_rows=None) is None
+    with pytest.raises(ValueError, match="shard_rows must be positive"):
+        pick_shards((10_000,), (4_096,), shard_rows=0)
+
+
+def test_columnar_writer_records_aligned_sharding_contract(tmp_path):
+    root = zarr.open_group(str(tmp_path / "sharded.zarr"), mode="w", zarr_format=3)
+    data = np.zeros(10_000, dtype=[("value", "i8"), ("label", "S8")])
+    data["value"] = np.arange(data.shape[0], dtype=np.int64)
+    data["label"] = b"bout"
+
+    table = write_columnar_dataset(root, "events", data, shard_rows=7_000)
+
+    assert table["value"].chunks == (4_096,)
+    assert table["value"].shards == (8_192,)
+    assert table["label"].chunks == (1_024, 4)
+    assert table["label"].shards == (7_168, 4)
+    assert table.attrs["columnar_storage_schema_id"] == COLUMNAR_STORAGE_SCHEMA_ID
+    assert table.attrs["columnar_shard_rows_requested"] == 7_000
+    assert table.attrs["columnar_shard_alignment_policy"] == COLUMNAR_SHARD_ALIGNMENT_POLICY
+    assert table.attrs["columnar_sharded_field_count"] == 2
+    assert table.attrs["columnar_regular_field_count"] == 0
+    assert table["value"].attrs["palette_shard_rows_requested"] == 7_000
+    assert table["value"].attrs["palette_shard_rows_effective"] == 8_192
+    assert table["value"].attrs["palette_sharding_skip_reason"] is None
+
+    loaded, _attrs = load_structured_dataset(root, "events")
+    np.testing.assert_array_equal(loaded, data)
+
+
+def test_store_array_can_disable_sharding_and_skips_single_chunk_arrays(tmp_path):
+    root = zarr.open_group(str(tmp_path / "regular.zarr"), mode="w", zarr_format=3)
+    regular = store_array(
+        root,
+        "regular",
+        np.arange(10_000, dtype=np.int64),
+        shard_rows=None,
+    )
+    short = store_array(
+        root,
+        "short",
+        np.zeros((1, 10_000), dtype=np.float32),
+    )
+
+    assert regular.shards is None
+    assert regular.attrs["palette_physical_layout"] == "regular_chunks_v1"
+    assert regular.attrs["palette_sharding_skip_reason"] == "disabled"
+    assert short.shards is None
+    assert short.attrs["palette_shard_rows_requested"] == DEFAULT_COLUMNAR_SHARD_ROWS
+    assert short.attrs["palette_sharding_skip_reason"] == "single_logical_row_chunk"
 
 
 def test_write_columnar_dataset_empty_roundtrip(tmp_path):
