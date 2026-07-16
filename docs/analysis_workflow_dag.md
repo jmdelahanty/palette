@@ -209,9 +209,13 @@ timestamps, return codes, and completion verification.
 
 The executor preserves these large-recording constraints:
 
-- track smoothing, derivatives, and bout segmentation have temporal boundary
-  state and must not be split into independent clips without overlap and a
-  deterministic finalize step;
+- track smoothing and derivatives have temporal boundary state and are still
+  computed as complete ordered tracks. The track materializer opens the
+  authoritative recording read-only, writes the regular completed run to
+  node-local scratch, then assigns complete non-overlapping 262,144-row outer
+  shards to copy workers. It validates the sharded run before copying it to a
+  hidden shared-filesystem sibling, atomically renaming it, and updating the
+  nested offline pointers under a per-recording lock;
 - eye angles preserve non-overlapping physical Zarr chunk ownership;
 - subject shape reads refined masks from the authoritative Zarr without
   mutation, computes into node-local 1,024-row logical blocks, assembles

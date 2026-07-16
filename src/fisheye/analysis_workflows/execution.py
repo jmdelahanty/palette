@@ -96,12 +96,22 @@ def _module_command(context: StageCommandContext, module: str) -> list[str]:
 
 
 def _track_kinematics_command(context: StageCommandContext) -> tuple[str, ...]:
-    command = _module_command(context, "fisheye.analysis.track_kinematics")
+    command = _module_command(
+        context,
+        "fisheye.analysis_workflows.materializers.track_kinematics",
+    )
     command.extend(
         (
-            "--offline-only",
             "--keypoint-run",
             f"refined/{context.dependency_run('refined_keypoints')}",
+            "--run-name",
+            context.output_run,
+            "--output-shard-rows",
+            "262144",
+            "--shard-workers",
+            str(max(1, context.num_workers)),
+            "--apply",
+            "--",
             "--hysteresis-high-px",
             "4.0",
             "--hysteresis-low-px",
@@ -114,8 +124,6 @@ def _track_kinematics_command(context: StageCommandContext) -> tuple[str, ...]:
             "0.05",
             "--smoothing-alignment",
             "causal",
-            "--offline-run-name",
-            context.output_run,
         )
     )
     return tuple(command)

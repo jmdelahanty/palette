@@ -252,7 +252,12 @@ Recommended order for downstream movement analysis:
   is independent. Use a single setup/finalize writer and worker chunks aligned
   exactly to output row chunks.
 - `track_kinematics`: only parallelize internally after defining boundary state
-  for hysteresis, smoothing, speed derivatives, and heading derivatives.
+  for hysteresis, smoothing, speed derivatives, and heading derivatives. Its
+  production materializer therefore keeps computation ordered, writes a
+  completed regular run on node-local scratch, and parallelizes only the
+  subsequent copy into whole non-overlapping indexed outer shards. Different
+  track lengths are allowed; shard ownership is defined independently for each
+  array rather than by one global logical row count.
 - `detect_bouts_multi_level`: only parallelize internally after defining how
   peak events, threshold components, and gap merges are reconciled across chunk
   boundaries.

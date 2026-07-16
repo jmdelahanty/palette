@@ -79,23 +79,27 @@ def _effective_shard_rows(requested: int, inner_rows: int) -> int:
 def build_sharded_copy_plan(
     source_run: str | Path,
     *,
-    row_count_array: str,
+    row_count_array: str | None,
     shard_rows: int,
 ) -> tuple[ShardedArrayPlan, ...]:
     source = zarr.open_group(str(Path(source_run).expanduser()), mode="r", use_consolidated=False)
     if str(source.attrs.get("palette_run_completion_status", "")) != "complete":
         raise ValueError("Sharded copy requires a completed immutable source run.")
-    row_node = source.get(str(row_count_array))
-    if not isinstance(row_node, zarr.Array) or int(row_node.ndim) < 1:
-        raise ValueError(f"Row-count array {row_count_array!r} is missing or invalid.")
-    row_count = int(row_node.shape[0])
+    row_count: int | None = None
+    if row_count_array is not None:
+        row_node = source.get(str(row_count_array))
+        if not isinstance(row_node, zarr.Array) or int(row_node.ndim) < 1:
+            raise ValueError(f"Row-count array {row_count_array!r} is missing or invalid.")
+        row_count = int(row_node.shape[0])
     plans: list[ShardedArrayPlan] = []
     for path, array in _iter_arrays(source):
         chunks = getattr(array, "chunks", None)
         if not chunks:
             raise ValueError(f"Array {path!r} has no logical chunk contract.")
         inner = tuple(int(value) for value in chunks)
-        row_aligned = int(array.ndim) >= 1 and int(array.shape[0]) == row_count
+        row_aligned = int(array.ndim) >= 1 and (
+            row_count is None or int(array.shape[0]) == row_count
+        )
         effective = _effective_shard_rows(int(shard_rows), inner[0]) if row_aligned else None
         plans.append(
             ShardedArrayPlan(
@@ -185,7 +189,7 @@ def copy_completed_run_to_sharded(
     source_run: str | Path,
     destination_run: str | Path,
     *,
-    row_count_array: str,
+    row_count_array: str | None,
     shard_rows: int,
     workers: int = 1,
     overwrite: bool = False,
@@ -261,7 +265,7 @@ def copy_completed_run_to_sharded(
         "status": "complete",
         "source_run": str(source_path),
         "destination_run": str(destination_path),
-        "row_count_array": str(row_count_array),
+        "row_count_array": None if row_count_array is None else str(row_count_array),
         "requested_shard_rows": int(shard_rows),
         "effective_shard_rows": effective_values,
         "worker_count": worker_count,
@@ -288,6 +292,11 @@ def copy_completed_run_to_sharded(
         "layout": "zarr_v3_indexed_sharding",
         "requested_outer_shard_rows": int(shard_rows),
         "effective_outer_shard_rows": effective_values,
+        "eligibility": (
+            "all_arrays_with_a_first_axis"
+            if row_count_array is None
+            else f"first_axis_matches:{row_count_array}"
+        ),
         "worker_ownership": report["worker_ownership"],
         "exact_decoded_validation": True,
     }

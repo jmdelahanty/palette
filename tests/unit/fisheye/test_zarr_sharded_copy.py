@@ -55,3 +55,38 @@ def test_copy_completed_run_to_sharded_preserves_values_and_owns_outer_shards(
     assert tuple(destination["values"].shards) == (6, 3)
     assert destination.attrs["custom"] == {"preserved": True}
     assert destination.attrs["physical_storage_layout"]["requested_outer_shard_rows"] == 5
+
+
+def test_copy_completed_run_to_sharded_supports_different_track_lengths(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "multi-track-source"
+    destination_path = tmp_path / "multi-track-destination"
+    source = zarr.open_group(str(source_path), mode="w", zarr_format=3)
+    source.attrs["palette_run_completion_status"] = "complete"
+    tracks = source.create_group("tracks")
+    first = tracks.create_group("id_0")
+    second = tracks.create_group("id_1")
+    first_values = np.arange(20, dtype=np.float32)
+    second_values = np.arange(14, dtype=np.float32)
+    first.create_array("speed", data=first_values, chunks=(4,))
+    second.create_array("speed", data=second_values, chunks=(2,))
+
+    report = copy_completed_run_to_sharded(
+        source_path,
+        destination_path,
+        row_count_array=None,
+        shard_rows=9,
+        workers=2,
+    )
+
+    destination = zarr.open_group(str(destination_path), mode="r", use_consolidated=False)
+    np.testing.assert_array_equal(destination["tracks/id_0/speed"][:], first_values)
+    np.testing.assert_array_equal(destination["tracks/id_1/speed"][:], second_values)
+    assert tuple(destination["tracks/id_0/speed"].shards) == (12,)
+    assert tuple(destination["tracks/id_1/speed"].shards) == (10,)
+    assert report["row_count_array"] is None
+    assert report["row_aligned_array_count"] == 2
+    assert destination.attrs["physical_storage_layout"]["eligibility"] == (
+        "all_arrays_with_a_first_axis"
+    )

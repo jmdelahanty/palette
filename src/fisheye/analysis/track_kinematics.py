@@ -16,6 +16,7 @@ import math
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import numpy as np
@@ -2236,6 +2237,14 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     )
     parser.add_argument("zarr_path", help="Path to the Palette Zarr archive.")
     parser.add_argument(
+        "--output-zarr-path",
+        help=(
+            "Optional separate output Zarr. When provided, the source archive is "
+            "opened read-only and all track-kinematics writes and run pointers are "
+            "created in this output archive. Intended for node-local materialization."
+        ),
+    )
+    parser.add_argument(
         "--keypoint-run",
         help="Keypoint run to use. Prefix with 'refined/' to target a refined run. Default: latest refined if available.",
     )
@@ -2372,8 +2381,22 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     args = parser.parse_args(argv)
 
     console = Console()
-    mode = "r" if args.no_write else "a"
-    root = open_zarr_root(args.zarr_path, mode=mode)
+    source_path = Path(args.zarr_path).expanduser().resolve()
+    output_path = (
+        Path(args.output_zarr_path).expanduser().resolve()
+        if args.output_zarr_path
+        else source_path
+    )
+    separate_output = output_path != source_path
+    if args.no_write and separate_output:
+        raise ValueError("--no-write cannot be combined with --output-zarr-path.")
+    root = open_zarr_root(
+        source_path,
+        mode="r" if args.no_write or separate_output else "a",
+    )
+    output_root = (
+        open_zarr_root(output_path, mode="a") if separate_output else root
+    )
 
     render_online = not args.offline_only
     render_offline = not args.online_only
@@ -2567,7 +2590,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 if args.no_write:
                     console.print("[green]Skipping online write (--no-write).[/green]")
                 else:
-                    run_name, run_group = ensure_track_kinematics_run_group(root, args.run_name, run_type="online")
+                    run_name, run_group = ensure_track_kinematics_run_group(
+                        output_root, args.run_name, run_type="online"
+                    )
                     ordered_track_ids = save_track_kinematics_tracks(run_group, tracks_online, summaries_online)
 
                     created_at = datetime.now(timezone.utc).isoformat()
@@ -2637,6 +2662,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             "num_tracks": len(ordered_track_ids),
                             "total_distance_px": total_px_online,
                             "total_distance_mm": total_mm_online if pixel_to_mm_online is not None else float("nan"),
+                            "source_zarr": str(source_path),
+                            "output_zarr": str(output_path),
                         }
                     )
                     write_best_effort_run_lineage_attrs(
@@ -2644,7 +2671,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         run_family="track_kinematics_run",
                     )
                     mark_track_kinematics_run_complete(
-                        root,
+                        output_root,
                         run_group,
                         run_name=run_name,
                         run_type="online",
@@ -2835,7 +2862,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             )
 
                         offline_run_name, offline_group = ensure_track_kinematics_run_group(
-                            root,
+                            output_root,
                             offline_run_name,
                             run_type="offline",
                             overwrite=True,
@@ -2996,6 +3023,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                                 "num_tracks": len(ordered_ids_offline),
                                 "total_distance_px": total_px_offline,
                                 "total_distance_mm": total_mm_offline if pixel_to_mm is not None else float("nan"),
+                                "source_zarr": str(source_path),
+                                "output_zarr": str(output_path),
                             }
                         )
                         write_best_effort_run_lineage_attrs(
@@ -3003,7 +3032,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             run_family="track_kinematics_run",
                         )
                         mark_track_kinematics_run_complete(
-                            root,
+                            output_root,
                             offline_group,
                             run_name=offline_run_name,
                             run_type="offline",
