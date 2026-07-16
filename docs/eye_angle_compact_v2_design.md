@@ -32,7 +32,8 @@ analysis/eye_angle_runs/<run>/
     layout = "compact_dense_v2"
     schema_id = "analysis.eye_angle_runs"
     schema_version = 5
-    eye_angle_output_schema.schema_version = 7
+    eye_angle_output_schema.schema_version = 8
+    eye_angle_algorithm_contract.schema_version = 1
 
   angle_channel_index/
     name                         # string channel names

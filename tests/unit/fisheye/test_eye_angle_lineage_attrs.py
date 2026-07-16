@@ -88,7 +88,13 @@ def test_eye_angle_output_schema_describes_run_layout_and_conventions() -> None:
     schema = eye_angle_analysis._eye_angle_output_schema()
 
     assert schema["schema_id"] == "analysis.eye_angle_output_schema"
-    assert schema["schema_version"] == 7
+    assert schema["schema_version"] == 8
+    assert schema["algorithm_contract"] == {
+        "schema_id": "analysis.eye_angle_algorithm_contract",
+        "schema_version": 1,
+        "run_attr": "eye_angle_algorithm_contract",
+    }
+    assert schema["temporal_operators"]["delta"] == "absolute_adjacent_finite_difference"
     assert schema["variant_schema"]["schema_id"] == "analysis.eye_angle_variant_schema"
     assert schema["variant_schema"]["schema_version"] == 1
     assert schema["variant_schema"]["default_representation"] == "eye_frame"
@@ -275,6 +281,21 @@ def test_eye_angle_frame_projection_flags_missing_and_multi_detection_frames() -
     assert int(frame_reason[4]) & int(eye_angle_analysis.REASON_HEADING_INVALID)
 
 
+def test_eye_angle_channel_formulas_describe_actual_temporal_operators() -> None:
+    assert eye_angle_analysis._formula_for_angle_channel("left_deg_smoothed") == (
+        "nan_aware_centered_boxcar(source_channel)"
+    )
+    assert eye_angle_analysis._formula_for_angle_channel("left_delta_deg") == (
+        "abs(source_channel[row] - source_channel[row - 1])"
+    )
+    assert eye_angle_analysis._formula_for_angle_channel("left_delta_deg_smoothed") == (
+        "abs(smoothed_source_channel[row] - smoothed_source_channel[row - 1])"
+    )
+    assert eye_angle_analysis._formula_for_angle_channel("left_speed_deg_s") == (
+        "backward_difference_to_previous_valid(source_channel, time_seconds)"
+    )
+
+
 def _add_refined_subject_eye_geometry(root):
     parent = root.create_group("refined_subject_masks_runs")
     parent.attrs["latest"] = "refined_001"
@@ -313,6 +334,150 @@ def _add_subject_shape_eye_geometry(root):
     pair = run.create_group("relations/eye_pair")
     pair.create_array("separation_px", data=np.asarray([5.0, 5.5], dtype=np.float32), overwrite=True)
     return run
+
+
+def test_eye_angle_algorithm_contract_records_resolved_sources_and_exact_methods(
+    tmp_path,
+) -> None:
+    import zarr
+
+    zarr_path = tmp_path / "eye-contract.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w", zarr_format=3)
+    shape = _add_subject_shape_eye_geometry(root)
+    shape.attrs.update(
+        {
+            "schema_id": "analysis.subject_shape_runs",
+            "schema_version": 3,
+            "method": "subject_shape",
+            "method_version": "subject_shape.v3",
+            "source_fingerprint": "shape-fingerprint",
+        }
+    )
+    for component in ("eye_left", "eye_right"):
+        shape[f"components/{component}"].attrs["ellipse_method"] = (
+            "cv2.fitEllipse_component_contour_v1"
+        )
+
+    refined_parent = root.create_group("refined_keypoints_runs")
+    refined_parent.attrs["latest"] = "kp_from_shape"
+    refined = refined_parent.create_group("kp_from_shape")
+    refined.attrs.update(
+        {
+            "schema_id": "refined_keypoints",
+            "schema_version": 4,
+            "method": "manual_plus_model_refinement",
+            "method_version": "refined_keypoints.v4",
+            "source_keypoints_run": "raw_001",
+            "source_lineage_hash": "refined-lineage",
+            "keypoint_labels": ["swim_bladder", "eye_left", "eye_right"],
+        }
+    )
+    refined.create_array(
+        "keypoints_roi",
+        data=np.zeros((2, 3, 2), dtype=np.float32),
+        overwrite=True,
+    )
+    refined.create_array("heading", data=np.zeros(2, dtype=np.float32), overwrite=True)
+    refined.create_array("refined_success", data=np.ones(2, dtype=bool), overwrite=True)
+
+    raw_parent = root.create_group("keypoints_runs")
+    raw = raw_parent.create_group("raw_001")
+    raw.attrs.update(
+        {
+            "schema_id": "keypoints",
+            "schema_version": 2,
+            "method": "yolo_pose",
+            "method_version": "detector.v2",
+            "lineage_hash": "raw-lineage",
+        }
+    )
+    raw.create_array("detection_success", data=np.ones(2, dtype=bool), overwrite=True)
+    raw.create_array("frame_indices", data=np.asarray([4, 5], dtype=np.int64), overwrite=True)
+
+    context = eye_angle_analysis._resolve_eye_angle_inputs(
+        root,
+        subject_shape_run="shape_001",
+        refined_subject_run=None,
+        keypoint_run="kp_from_shape",
+    )
+    sources = eye_angle_analysis._eye_angle_source_contracts(context)
+    contract = eye_angle_analysis._eye_angle_algorithm_contract(
+        context,
+        fps=200.0,
+        fps_source="recording_metadata",
+        smoothing_window_requested=7,
+        smoothing_window_source="module_default",
+        detection_smoothing_window=7,
+        frame_smoothing_window=5,
+    )
+
+    assert sources["eye_geometry"]["path"] == "analysis/subject_shape_runs/shape_001"
+    assert sources["eye_geometry"]["source_fingerprint"] == "shape-fingerprint"
+    assert sources["eye_geometry"]["components"][0]["ellipse_source_contract"] == {
+        "ellipse_method": "cv2.fitEllipse_component_contour_v1"
+    }
+    assert sources["refined_keypoints"]["source_lineage_hash"] == "refined-lineage"
+    assert sources["source_keypoints"]["lineage_hash"] == "raw-lineage"
+    assert sources["resolved_arrays"] == {
+        "keypoints_roi": "refined_keypoints_runs/kp_from_shape/keypoints_roi",
+        "heading": "refined_keypoints_runs/kp_from_shape/heading",
+        "detection_success": "refined_keypoints_runs/kp_from_shape/refined_success",
+        "frame_indices": "keypoints_runs/raw_001/frame_indices",
+    }
+    assert contract["schema_id"] == "analysis.eye_angle_algorithm_contract"
+    assert contract["ellipse_input"]["parameter_order"][-1] == "major_axis_angle_deg"
+    assert contract["ellipse_input"]["circularity_reject_condition"] == (
+        "ellipse_ratio > 0.95"
+    )
+    assert contract["body_frame"]["resolved_keypoint_indices"] == {
+        "swim_bladder": 0,
+        "eye_left": 1,
+        "eye_right": 2,
+    }
+    assert contract["smoothing"]["method"] == (
+        "nan_aware_centered_boxcar_finite_count_normalized"
+    )
+    assert contract["delta"]["method"] == "absolute_adjacent_finite_difference"
+    assert contract["derivative"]["maximum_dt_seconds"] == 0.25
+    assert contract["frame_projection"]["multiple_detection_rule"].startswith(
+        "leave values NaN"
+    )
+
+    args = eye_angle_analysis.build_parser().parse_args(
+        [
+            str(zarr_path),
+            "--subject-shape-run",
+            "shape_001",
+            "--keypoint-run",
+            "kp_from_shape",
+            "--run-name",
+            "eye_contract_001",
+            "--fps",
+            "200",
+            "--chunk-size",
+            "2",
+            "--smoothing-window",
+            "3",
+            "--quiet",
+        ]
+    )
+    eye_angle_analysis.run(args)
+
+    persisted_root = zarr.open_group(
+        str(zarr_path),
+        mode="r",
+        use_consolidated=False,
+    )
+    persisted = persisted_root["analysis/eye_angle_runs/eye_contract_001"]
+    assert persisted.attrs["eye_angle_output_schema"]["schema_version"] == 8
+    assert persisted.attrs["eye_angle_algorithm_contract"]["schema_version"] == 1
+    assert persisted.attrs["eye_angle_source_contracts"]["resolved_arrays"] == (
+        sources["resolved_arrays"]
+    )
+    assert persisted.attrs["angle_derivative_max_dt_seconds"] == 0.25
+    assert persisted.attrs["provenance"]["algorithm_contract"]["delta"]["method"] == (
+        "absolute_adjacent_finite_difference"
+    )
 
 
 def test_eye_geometry_resolution_prefers_latest_subject_shape_when_enabled() -> None:

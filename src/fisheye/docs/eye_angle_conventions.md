@@ -1,6 +1,6 @@
 # Eye-Angle Metrics: Data Layout and Computation
 
-This note summarizes where the eye-angle products are written inside a Palette archive and how each quantity is derived from the upstream detections, keypoints, and subject-mask eye geometry. It reflects the v5 eye-angle run schema and v7 output schema: the ellipse major axis is the canonical stored eye-orientation axis, gaze/minor direction is derived from that resolved major axis, BEAST/Johnson-style and Bianco/Engert-style vergence surfaces are available without changing the existing total-vergence surface, and a machine-readable variant schema classifies those surfaces for UI selection. For a field-by-field user guide to every angle variant, see `docs/eye_angle_variants.md`.
+This note summarizes where the eye-angle products are written inside a Palette archive and how each quantity is derived from the upstream detections, keypoints, and subject-mask eye geometry. It reflects the v5 eye-angle run schema and v8 output schema: the ellipse major axis is the canonical stored eye-orientation axis, gaze/minor direction is derived from that resolved major axis, BEAST/Johnson-style and Bianco/Engert-style vergence surfaces are available without changing the existing total-vergence surface, a machine-readable variant schema classifies those surfaces for UI selection, and versioned algorithm/source contracts make the exact computation reproducible. For a field-by-field user guide to every angle variant, see `docs/eye_angle_variants.md`.
 
 ## Where the data lives
 
@@ -54,11 +54,28 @@ The referenced sources are captured in run attributes:
   row axes, units, suffix conventions, derivative outputs, QA reason-code
   linkage, and `variant_schema`. Output schema v6 adds Bianco/Engert-style
   eye-frame fields, and output schema v7 adds the UI-facing representation
-  registry while leaving the run schema and v5 method semantics intact.
+  registry while leaving the run schema and v5 method semantics intact. Output
+  schema v8 adds the versioned algorithm-contract link and exact temporal
+  operator identities.
 - `eye_angle_variant_schema`: mirror of
   `eye_angle_output_schema.variant_schema`. Consumers can use it to present
   selectable `eye_frame`, `gaze`, `nasal_gaze`, `major`, `centroid`, and
   `legacy` angle representations without hardcoding field-name groups.
+- `eye_angle_algorithm_contract`: versioned, machine-readable record of the
+  exact ellipse parameter order and rejection rule, resolved keypoint indices,
+  body-frame construction, 180-degree axis resolution, eye-frame/gaze
+  transforms, smoothing, delta and derivative operators, frame projection,
+  FPS source, and every numerical threshold. Its contract identity is
+  `analysis.eye_angle_algorithm_contract`, version 1. This is separate from
+  `method_version` because adding more precise provenance does not change the
+  v5 scientific calculation.
+- `eye_angle_source_contracts`: resolved paths and available schema, method,
+  completion, git, and lineage-fingerprint attrs for the eye-geometry,
+  refined-keypoint, and base-keypoint runs. It also records the exact
+  `ellipse_params`, `ellipse_success`, `keypoints_roi`, `heading`, detection
+  success, and frame-index paths. Source-shape component attrs preserve the
+  upstream ellipse estimator, such as
+  `cv2.fitEllipse_component_contour_v1`.
 - `source_eye_geometry_stage` and `source_eye_geometry_run`: the actual stage
   and run used for geometry.
 - `source_geometry_kind`: normalized geometry role, one of
@@ -173,7 +190,20 @@ Outputs:
 
 ### Deltas and smoothing
 
-Absolute per-step changes (`*_delta_deg`) are computed with `_compute_delta`, preserving NaNs. When smoothing windows are configured, rolling averages are applied after the base computation, and the same delta routine is run on the smoothed series.
+Absolute per-step changes (`*_delta_deg`) are
+`abs(value[row] - value[row - 1])`; the first row and any pair containing a
+non-finite value are `NaN`. These deltas are not time-normalized. Smoothing is
+a centered, NaN-aware boxcar implemented with `numpy.convolve(mode="same")`;
+edge windows are partial and normalized by their finite sample count. The
+requested window is capped to the sequence length, made odd by decrementing an
+even value, and disabled below three samples. Smoothed deltas apply the same
+absolute adjacent-difference operator to the smoothed series.
+
+Angular speeds use a backward difference to the previous valid sample. A
+sample is left `NaN` when `dt <= 0` or the valid-sample gap exceeds 0.25 s.
+Angular acceleration applies the same operator to angular speed. These
+details, including requested/effective smoothing windows and the actual FPS
+source, are persisted in `eye_angle_algorithm_contract`.
 
 ## Auxiliary products
 

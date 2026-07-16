@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import dask
 from dask import delayed
@@ -88,9 +88,11 @@ DASK_WORKER_EXECUTION_BACKEND = "dask_worker_chunks"
 EYE_ANGLE_RUN_SCHEMA_ID = "analysis.eye_angle_runs"
 EYE_ANGLE_RUN_SCHEMA_VERSION = 5
 EYE_ANGLE_OUTPUT_SCHEMA_ID = "analysis.eye_angle_output_schema"
-EYE_ANGLE_OUTPUT_SCHEMA_VERSION = 7
+EYE_ANGLE_OUTPUT_SCHEMA_VERSION = 8
 EYE_ANGLE_VARIANT_SCHEMA_ID = "analysis.eye_angle_variant_schema"
 EYE_ANGLE_VARIANT_SCHEMA_VERSION = 1
+EYE_ANGLE_ALGORITHM_CONTRACT_SCHEMA_ID = "analysis.eye_angle_algorithm_contract"
+EYE_ANGLE_ALGORITHM_CONTRACT_SCHEMA_VERSION = 1
 EYE_ANGLE_METHOD = "ellipse_and_centroid_eye_angles"
 EYE_ANGLE_METHOD_VERSION = "eye_angle_analysis.v5"
 EYE_ANGLE_ROW_AXIS = "keypoint_detection_rows"
@@ -508,6 +510,11 @@ def _eye_angle_output_schema() -> Dict[str, object]:
     return {
         "schema_id": EYE_ANGLE_OUTPUT_SCHEMA_ID,
         "schema_version": EYE_ANGLE_OUTPUT_SCHEMA_VERSION,
+        "algorithm_contract": {
+            "schema_id": EYE_ANGLE_ALGORITHM_CONTRACT_SCHEMA_ID,
+            "schema_version": EYE_ANGLE_ALGORITHM_CONTRACT_SCHEMA_VERSION,
+            "run_attr": "eye_angle_algorithm_contract",
+        },
         "variant_schema": _eye_angle_variant_schema(),
         "row_axes": {
             "roi": EYE_ANGLE_ROW_AXIS,
@@ -550,6 +557,11 @@ def _eye_angle_output_schema() -> Dict[str, object]:
         },
         "angle_units": "degrees",
         "time_units": "seconds",
+        "temporal_operators": {
+            "smoothing": "nan_aware_centered_boxcar_finite_count_normalized",
+            "delta": "absolute_adjacent_finite_difference",
+            "derivative": "backward_difference_to_previous_valid_sample",
+        },
         "signed_angle_convention": "per-eye signed angles are body-frame anatomical-left-positive",
         "canonical_eye_orientation_axis": "ellipse_major",
         "canonical_eye_orientation_arrays": ["left_major_signed_deg", "right_major_signed_deg"],
@@ -665,11 +677,295 @@ class EyeAngleInputContext:
 
     eye_geometry: Any
     kp_group: zarr.Group
+    kp_group_path: str
+    source_kp_group: Optional[zarr.Group]
+    source_kp_run_name: Optional[str]
+    source_kp_group_path: Optional[str]
     detection_success_source: zarr.Group
     detection_success_key: str
+    detection_success_path: str
     frame_indices_source: zarr.Group
+    frame_indices_path: str
     keypoint_run_name: str
     keypoint_indices: Dict[str, int]
+
+
+_SOURCE_CONTRACT_ATTRS = (
+    "schema_id",
+    "schema_version",
+    "method",
+    "method_version",
+    "palette_run_completion_status",
+    "source_fingerprint",
+    "source_lineage_hash",
+    "lineage_hash",
+    "fingerprint_status",
+    "git_commit",
+    "git_dirty",
+    "created_at_utc",
+    "completed_at_utc",
+)
+
+
+def _source_group_contract(group: Optional[zarr.Group], *, path: Optional[str]) -> Dict[str, object]:
+    """Capture stable identity, implementation, and lineage fields for one input run."""
+
+    if group is None or not path:
+        return {"path": path, "available": False}
+    attrs = group.attrs
+    contract: Dict[str, object] = {
+        "path": str(path),
+        "available": True,
+    }
+    for name in _SOURCE_CONTRACT_ATTRS:
+        if name in attrs:
+            contract[name] = attrs[name]
+    provenance = attrs.get("provenance")
+    if isinstance(provenance, str):
+        try:
+            provenance = json.loads(provenance)
+        except json.JSONDecodeError:
+            provenance = None
+    if isinstance(provenance, Mapping):
+        git = provenance.get("git")
+        if isinstance(git, Mapping):
+            contract["provenance_git"] = dict(git)
+        for name in ("script", "stage", "command"):
+            if name in provenance:
+                contract[f"provenance_{name}"] = provenance[name]
+    return contract
+
+
+def _eye_geometry_component_contracts(context: EyeAngleInputContext) -> list[Dict[str, object]]:
+    """Describe the exact arrays and upstream ellipse estimator for each eye."""
+
+    geometry = context.eye_geometry
+    components: list[Dict[str, object]] = []
+    for component in ("eye_left", "eye_right"):
+        if geometry.stage_group == EYE_GEOMETRY_STAGE_SUBJECT_SHAPE:
+            relative_group = f"components/{component}"
+        else:
+            relative_group = f"components/{component}/geometry"
+        component_group = geometry.group.get(relative_group)
+        attrs = dict(component_group.attrs) if isinstance(component_group, zarr.Group) else {}
+        components.append(
+            {
+                "component": component,
+                "group_path": f"{geometry.group_path}/{relative_group}",
+                "ellipse_params_path": (
+                    f"{geometry.group_path}/{relative_group}/ellipse_params"
+                ),
+                "ellipse_success_path": (
+                    f"{geometry.group_path}/{relative_group}/ellipse_success"
+                ),
+                "ellipse_source_contract": {
+                    key: attrs[key]
+                    for key in (
+                        "ellipse_method",
+                        "geometry_schema_id",
+                        "geometry_method",
+                        "source_mask_component",
+                    )
+                    if key in attrs
+                },
+            }
+        )
+    return components
+
+
+def _eye_angle_source_contracts(context: EyeAngleInputContext) -> Dict[str, object]:
+    """Return the complete resolved source identity used by one eye-angle run."""
+
+    geometry = context.eye_geometry
+    return {
+        "eye_geometry": {
+            **_source_group_contract(geometry.group, path=geometry.group_path),
+            "stage_group": geometry.stage_group,
+            "run_name": geometry.run_name,
+            "geometry_kind": _source_geometry_kind(geometry.stage_group),
+            "source_subject_shape_run": geometry.source_subject_shape_run,
+            "source_refined_subject_masks_run": geometry.source_refined_subject_run,
+            "source_refined_eye_run": geometry.source_refined_eye_run,
+            "components": _eye_geometry_component_contracts(context),
+        },
+        "refined_keypoints": {
+            **_source_group_contract(
+                context.kp_group,
+                path=context.kp_group_path,
+            ),
+            "run_name": context.keypoint_run_name,
+        },
+        "source_keypoints": {
+            **_source_group_contract(
+                context.source_kp_group,
+                path=context.source_kp_group_path,
+            ),
+            "run_name": context.source_kp_run_name,
+        },
+        "resolved_arrays": {
+            "keypoints_roi": f"{context.kp_group_path}/keypoints_roi",
+            "heading": f"{context.kp_group_path}/heading",
+            "detection_success": context.detection_success_path,
+            "frame_indices": context.frame_indices_path,
+        },
+    }
+
+
+def _eye_angle_algorithm_contract(
+    context: EyeAngleInputContext,
+    *,
+    fps: Optional[float],
+    fps_source: str,
+    smoothing_window_requested: int,
+    smoothing_window_source: str,
+    detection_smoothing_window: int,
+    frame_smoothing_window: int,
+) -> Dict[str, object]:
+    """Describe the exact scientific transformations used for eye-angle outputs."""
+
+    return {
+        "schema_id": EYE_ANGLE_ALGORITHM_CONTRACT_SCHEMA_ID,
+        "schema_version": EYE_ANGLE_ALGORITHM_CONTRACT_SCHEMA_VERSION,
+        "method": EYE_ANGLE_METHOD,
+        "method_version": EYE_ANGLE_METHOD_VERSION,
+        "source_contracts_attr": "eye_angle_source_contracts",
+        "ellipse_input": {
+            "parameter_order": [
+                "center_x_px",
+                "center_y_px",
+                "major_axis_length_px",
+                "minor_axis_length_px",
+                "major_axis_angle_deg",
+            ],
+            "parameter_normalization": (
+                "cv2.fitEllipse axes reordered so major >= minor and major-axis angle "
+                "normalized to [0, 180) degrees"
+            ),
+            "validity_array": "ellipse_success",
+            "finite_positive_axis_requirement": True,
+            "circularity_ratio_formula": "minor_axis_length_px / major_axis_length_px",
+            "circularity_reject_condition": (
+                f"ellipse_ratio > {ELLIPSE_CIRCULARITY_THRESHOLD}"
+            ),
+            "circularity_threshold": float(ELLIPSE_CIRCULARITY_THRESHOLD),
+            "component_sources": _eye_geometry_component_contracts(context),
+        },
+        "body_frame": {
+            "schema_id": BODY_FRAME_SCHEMA_ID,
+            "schema_version": BODY_FRAME_SCHEMA_VERSION,
+            "estimator": "keypoint_head_axis",
+            "coordinate_space": BODY_FRAME_COORDINATE_SPACE_ROI,
+            "required_keypoint_labels": list(_HEAD_KEYPOINT_LABELS),
+            "resolved_keypoint_indices": {
+                key: int(value) for key, value in context.keypoint_indices.items()
+            },
+            "origin_formula": "0.5 * (eye_left_xy + eye_right_xy)",
+            "forward_axis_formula": (
+                "unit(origin_xy - swim_bladder_xy)"
+            ),
+            "left_axis_resolution": (
+                "choose the forward-axis perpendicular whose dot product with "
+                "unit(eye_left_xy - eye_right_xy) is nonnegative"
+            ),
+            "signed_angle_formula": (
+                "degrees(atan2(dot(vector_xy, left_axis_xy), "
+                "dot(vector_xy, forward_axis_xy)))"
+            ),
+            "signed_angle_convention": "positive_anatomical_left",
+        },
+        "major_axis_resolution": {
+            "input_axis_is_directionless": True,
+            "half_turn_normalization": "major_axis_angle_rad modulo pi",
+            "forward_half_plane_rule": (
+                "multiply ellipse major unit vector by -1 when its dot product "
+                "with body forward_axis_xy is negative"
+            ),
+            "marginal_condition": (
+                f"abs(dot(resolved_major_axis_xy, forward_axis_xy)) < "
+                f"{MAJOR_AXIS_MARGINAL_DOT_THRESHOLD}"
+            ),
+            "marginal_dot_threshold": float(MAJOR_AXIS_MARGINAL_DOT_THRESHOLD),
+        },
+        "angle_families": {
+            "canonical_major": (
+                "left/right_major_signed_deg = body-frame signed angle of the "
+                "forward-half-plane resolved ellipse major axis"
+            ),
+            "eye_frame": {
+                "left_eye_angle_deg": "wrap_signed(-left_major_signed_deg)",
+                "right_eye_angle_deg": "wrap_signed(right_major_signed_deg)",
+                "vergence_eye_angle_deg": (
+                    "left_eye_angle_deg + right_eye_angle_deg"
+                ),
+                "convention": "per-eye nasal-positive Bianco/Engert",
+            },
+            "gaze": {
+                "left_gaze_axis": "resolved_left_major_axis rotated +90 deg in body frame",
+                "right_gaze_axis": "resolved_right_major_axis rotated -90 deg in body frame",
+                "signed_angle_wrap_range_deg": "[-180, 180)",
+                "directional_assumption": (
+                    "gaze direction inherits the forward-half-plane major-axis "
+                    "resolution and eye-specific 90-degree rotation"
+                ),
+            },
+            "undirected_vergence": (
+                "minimum separation of the two directionless axes after wrapping "
+                "the absolute signed-angle difference through 360 and 180 degrees"
+            ),
+            "nasal_gaze": "90 - abs(gaze_signed_deg) per eye",
+            "mean_eye_vergence_gaze_deg": (
+                "0.5 * (left_nasal_gaze_deg + right_nasal_gaze_deg)"
+            ),
+            "version": "0.5 * (left_signed_deg + right_signed_deg)",
+        },
+        "temporal_sampling": {
+            "fps": float(fps) if fps else None,
+            "fps_source": fps_source,
+            "time_seconds_formula": "frame_indices / fps when fps is available",
+        },
+        "smoothing": {
+            "method": "nan_aware_centered_boxcar_finite_count_normalized",
+            "implementation": "numpy.convolve(mode='same')",
+            "edge_policy": "partial centered window normalized by finite sample count",
+            "missing_value_policy": "ignore NaN; output NaN only when finite count is zero",
+            "requested_window": int(smoothing_window_requested),
+            "requested_window_source": smoothing_window_source,
+            "window_resolution": (
+                "cap at axis length, decrement even windows to odd, disable below 3"
+            ),
+            "effective_detection_row_window": (
+                int(detection_smoothing_window) if detection_smoothing_window else None
+            ),
+            "effective_frame_window": (
+                int(frame_smoothing_window) if frame_smoothing_window else None
+            ),
+        },
+        "delta": {
+            "method": "absolute_adjacent_finite_difference",
+            "formula": "abs(value[row] - value[row - 1])",
+            "first_row": "NaN",
+            "missing_value_policy": "NaN unless both adjacent values are finite",
+            "time_normalized": False,
+        },
+        "derivative": {
+            "method": "backward_difference_to_previous_valid_sample",
+            "formula": "(value[current] - value[previous_valid]) / dt",
+            "maximum_dt_seconds": float(DERIVATIVE_MAX_DT),
+            "gap_policy": "NaN when dt <= 0 or dt exceeds maximum_dt_seconds",
+            "acceleration": "apply the same derivative operator to angular speed",
+        },
+        "frame_projection": {
+            "source_axis": EYE_ANGLE_ROW_AXIS,
+            "target_axis": "video_frame_rows",
+            "unique_detection_rule": (
+                "copy a detection row only when exactly one row maps to the frame"
+            ),
+            "zero_detection_rule": "leave values NaN and set no_detection QA bit",
+            "multiple_detection_rule": (
+                "leave values NaN and set multiple_detections QA bit"
+            ),
+        },
+    }
 
 
 def _normalize_scheduler(value: str) -> str:
@@ -1405,16 +1701,16 @@ def _source_channel_for_angle_channel(name: str) -> str:
 
 
 def _formula_for_angle_channel(name: str) -> str:
-    if name.endswith("_smoothed"):
-        return "moving_average(source_channel)"
-    if name.endswith("_delta_deg"):
-        return "framewise_delta(source_channel)"
     if name.endswith("_delta_deg_smoothed"):
-        return "framewise_delta(smoothed_source_channel)"
+        return "abs(smoothed_source_channel[row] - smoothed_source_channel[row - 1])"
+    if name.endswith("_delta_deg"):
+        return "abs(source_channel[row] - source_channel[row - 1])"
+    if name.endswith("_smoothed"):
+        return "nan_aware_centered_boxcar(source_channel)"
     if name.endswith("_speed_deg_s"):
-        return "time_derivative(source_channel)"
+        return "backward_difference_to_previous_valid(source_channel, time_seconds)"
     if name.endswith("_accel_deg_s2"):
-        return "time_derivative(speed_channel)"
+        return "backward_difference_to_previous_valid(speed_channel, time_seconds)"
     formulas = {
         "left_eye_angle_deg": "-left_major_signed_deg",
         "right_eye_angle_deg": "right_major_signed_deg",
@@ -1799,13 +2095,16 @@ def _resolve_eye_angle_inputs(
     if not keypoint_run_name or keypoint_run_name not in kp_parent:
         raise ValueError("Refined keypoint run not found; specify --keypoint-run.")
     kp_group = kp_parent[keypoint_run_name]
+    kp_group_path = f"refined_keypoints_runs/{keypoint_run_name}"
 
     source_kp_run_name = resolve_source_keypoints_run(kp_group.attrs)
     source_kp_group = None
+    source_kp_group_path = None
     if source_kp_run_name:
         source_kp_parent = root.get("keypoints_runs")
         if source_kp_parent and source_kp_run_name in source_kp_parent:
             source_kp_group = source_kp_parent[source_kp_run_name]
+            source_kp_group_path = f"keypoints_runs/{source_kp_run_name}"
 
     required_kp = ["keypoints_roi", "heading"]
     for dataset in required_kp:
@@ -1815,12 +2114,15 @@ def _resolve_eye_angle_inputs(
     if "refined_success" in kp_group:
         detection_success_key = "refined_success"
         detection_success_source = kp_group
+        detection_success_path = f"{kp_group_path}/{detection_success_key}"
     elif "detection_success" in kp_group:
         detection_success_key = "detection_success"
         detection_success_source = kp_group
+        detection_success_path = f"{kp_group_path}/{detection_success_key}"
     elif source_kp_group is not None and "detection_success" in source_kp_group:
         detection_success_key = "detection_success"
         detection_success_source = source_kp_group
+        detection_success_path = f"{source_kp_group_path}/{detection_success_key}"
     else:
         raise ValueError(
             f"Keypoint run '{keypoint_run_name}' missing detection success data "
@@ -1833,6 +2135,11 @@ def _resolve_eye_angle_inputs(
             f"Keypoint run '{keypoint_run_name}' missing 'frame_indices' "
             "(not in refined or source keypoints run)."
         )
+    frame_indices_path = (
+        f"{kp_group_path}/frame_indices"
+        if frame_indices_source is kp_group
+        else f"{source_kp_group_path}/frame_indices"
+    )
 
     total_detections = eye_geometry.ellipse_params.shape[0]
     if kp_group["keypoints_roi"].shape[0] != total_detections:
@@ -1841,9 +2148,15 @@ def _resolve_eye_angle_inputs(
     return EyeAngleInputContext(
         eye_geometry=eye_geometry,
         kp_group=kp_group,
+        kp_group_path=kp_group_path,
+        source_kp_group=source_kp_group,
+        source_kp_run_name=source_kp_run_name,
+        source_kp_group_path=source_kp_group_path,
         detection_success_source=detection_success_source,
         detection_success_key=detection_success_key,
+        detection_success_path=detection_success_path,
         frame_indices_source=frame_indices_source,
+        frame_indices_path=frame_indices_path,
         keypoint_run_name=keypoint_run_name,
         keypoint_indices=_resolve_head_keypoint_indices(kp_group),
     )
@@ -2187,6 +2500,15 @@ def run(args: argparse.Namespace) -> None:
             source_refined_keypoints_run=keypoint_run_name,
             coordinate_space=BODY_FRAME_COORDINATE_SPACE_ROI,
         )
+    )
+    run_group["support"]["body_frame"].attrs.update(
+        {
+            "resolved_keypoint_indices": {
+                key: int(value) for key, value in context.keypoint_indices.items()
+            },
+            "source_keypoints_roi_path": f"{context.kp_group_path}/keypoints_roi",
+            "source_detection_success_path": context.detection_success_path,
+        }
     )
     chunks = _row_chunks(total_detections, chunk_size)
     chunk_timings: list[dict[str, object]] = []
@@ -3214,6 +3536,33 @@ def run(args: argparse.Namespace) -> None:
         "chunk_count": len(chunks),
         "chunk_timing_count": len(chunk_timings),
     }
+    fps_source = (
+        "cli_override"
+        if args.fps is not None and float(args.fps) > 0.0
+        else "recording_metadata"
+        if fps
+        else "unavailable"
+    )
+    smoothing_window_source = (
+        "cli_override" if smoothing_window_param is not None else "module_default"
+    )
+    source_contracts = json.loads(
+        json.dumps(_eye_angle_source_contracts(context), default=_to_serializable)
+    )
+    algorithm_contract = json.loads(
+        json.dumps(
+            _eye_angle_algorithm_contract(
+                context,
+                fps=fps,
+                fps_source=fps_source,
+                smoothing_window_requested=int(window_setting),
+                smoothing_window_source=smoothing_window_source,
+                detection_smoothing_window=int(detection_smooth_window),
+                frame_smoothing_window=int(frame_smooth_window),
+            ),
+            default=_to_serializable,
+        )
+    )
     run_group.attrs.update(
         {
             "status": "complete",
@@ -3231,6 +3580,14 @@ def run(args: argparse.Namespace) -> None:
             "source_subject_shape_run": eye_geometry.source_subject_shape_run,
             "source_refined_eye_run": eye_geometry.source_refined_eye_run,
             "source_refined_subject_masks_run": eye_geometry.source_refined_subject_run,
+            "source_base_keypoints_run": context.source_kp_run_name,
+            "source_detection_success_path": context.detection_success_path,
+            "source_frame_indices_path": context.frame_indices_path,
+            "resolved_head_keypoint_indices": {
+                key: int(value) for key, value in context.keypoint_indices.items()
+            },
+            "eye_angle_source_contracts": source_contracts,
+            "eye_angle_algorithm_contract": algorithm_contract,
             "eye_angle_output_schema": _eye_angle_output_schema(),
             "eye_angle_variant_schema": _eye_angle_variant_schema(),
             **build_source_keypoints_attrs(keypoint_run_name, include_legacy_alias=True),
@@ -3259,9 +3616,16 @@ def run(args: argparse.Namespace) -> None:
                 "representation and derives gaze/minor direction from that major axis without clipping."
             ),
             "angle_smoothing_method": "moving_average",
+            "angle_smoothing_algorithm": (
+                "nan_aware_centered_boxcar_finite_count_normalized"
+            ),
             "angle_smoothing_window_detections": int(detection_smooth_window) if detection_smooth_window else None,
             "angle_smoothing_window_frames": int(frame_smooth_window) if frame_smooth_window else None,
-            "angle_smoothing_window_requested": int(smoothing_window_param) if smoothing_window_param else None,
+            "angle_smoothing_window_requested": int(window_setting),
+            "angle_smoothing_window_source": smoothing_window_source,
+            "angle_delta_method": "absolute_adjacent_finite_difference",
+            "angle_derivative_method": "backward_difference_to_previous_valid_sample",
+            "angle_derivative_max_dt_seconds": float(DERIVATIVE_MAX_DT),
             # Centroid-based eye-position angles are auxiliary pose context.
             "centroid_angles": True,
             "centroid_angle_definition": "atan2(rotated_eye_vector_y, rotated_eye_vector_x) in fish frame",
@@ -3274,6 +3638,8 @@ def run(args: argparse.Namespace) -> None:
         "script": "fisheye.analysis.eye_angle_analysis",
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "git": get_git_info(),
+        "algorithm_contract": algorithm_contract,
+        "source_contracts": source_contracts,
         "arguments": {
             "zarr_path": str(args.zarr_path),
             "eye_geometry_stage": eye_geometry.stage_group,
@@ -3282,6 +3648,13 @@ def run(args: argparse.Namespace) -> None:
             "refined_eye_run": eye_geometry.source_refined_eye_run,
             "refined_subject_run": eye_geometry.source_refined_subject_run,
             "keypoint_run": keypoint_run_name,
+            "base_keypoint_run": context.source_kp_run_name,
+            "keypoints_roi_path": f"{context.kp_group_path}/keypoints_roi",
+            "detection_success_path": context.detection_success_path,
+            "frame_indices_path": context.frame_indices_path,
+            "resolved_head_keypoint_indices": {
+                key: int(value) for key, value in context.keypoint_indices.items()
+            },
             "run_name": args.run_name,
             "chunk_size": chunk_size,
             "execution_backend": backend,
@@ -3546,6 +3919,11 @@ def run(args: argparse.Namespace) -> None:
                 "refined_eye_run": eye_geometry.source_refined_eye_run,
                 "refined_subject_run": eye_geometry.source_refined_subject_run,
                 "keypoint_run": keypoint_run_name,
+                "base_keypoint_run": context.source_kp_run_name,
+                "eye_geometry_path": eye_geometry.group_path,
+                "refined_keypoints_path": context.kp_group_path,
+                "detection_success_path": context.detection_success_path,
+                "frame_indices_path": context.frame_indices_path,
             },
         ),
     )

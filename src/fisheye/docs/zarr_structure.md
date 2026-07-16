@@ -1996,9 +1996,19 @@ Eye angle analysis results:
   `method_version = "eye_angle_analysis.v5"`,
   `row_axis = "keypoint_detection_rows"`, and `eye_angle_output_schema` for
   machine-readable output groups, units, suffixes, derivative arrays, and QA
-  reason-code linkage. Output schema v7 also includes
+  reason-code linkage. Output schema v8 includes
   `variant_schema`, mirrored as `eye_angle_variant_schema` in run attrs, for
-  UI-selectable angle representations.
+  UI-selectable angle representations, and links the versioned algorithm
+  contract.
+- `eye_angle_algorithm_contract`: versioned computation metadata covering the
+  ellipse source/parameter convention, body-frame formulas and resolved
+  keypoint indices, axis-ambiguity rule, angle transforms, QA thresholds,
+  temporal operators, effective smoothing windows, derivative gap limit, FPS
+  source, and unique-detection frame projection.
+- `eye_angle_source_contracts`: exact source paths plus available schema,
+  method, completion, git, and lineage identities for the eye geometry,
+  refined keypoints, and base keypoints. The resolved detection-success and
+  frame-index fallback paths are explicit rather than inferred from run age.
 - Schema v5 exposes canonical major-axis arrays:
   `left_major_signed_deg`, `right_major_signed_deg`,
   `vergence_major_signed_deg`, and `version_major_deg`. The major axis is
@@ -2017,6 +2027,9 @@ Eye angle analysis results:
   UI-facing representations: `eye_frame`, `gaze`, `nasal_gaze`, `major`,
   `centroid`, and `legacy`. UIs should prefer this registry over hardcoded
   angle-field lists when offering representation selectors.
+- Output schema v8 adds the `eye_angle_algorithm_contract` link and exact
+  smoothing, delta, and derivative operator identities without changing the
+  v5 scientific method.
 - Schema v5 exposes explicit gaze arrays derived from the resolved major axis:
   `left_gaze_deg`, `right_gaze_deg`, `left_gaze_signed_deg`,
   `right_gaze_signed_deg`, `vergence_gaze_deg`,

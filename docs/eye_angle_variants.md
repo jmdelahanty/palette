@@ -350,7 +350,9 @@ Common suffixes:
 Some older/gaze families also expose speed and acceleration derivatives such as
 `left_gaze_speed_deg_s` and `left_gaze_accel_deg_s2`. The eye-frame fields added
 in output schema v6 currently expose base, smoothed, delta, and frame variants;
-output schema v7 adds representation metadata but no additional angle arrays.
+output schema v7 adds representation metadata but no additional angle arrays,
+and output schema v8 adds versioned algorithm/source metadata without changing
+those arrays.
 
 ## QA Fields
 
