@@ -200,16 +200,19 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
     ),
     StageSpec(
         id="eye_angles",
-        depends_on=("refined_keypoints", "refined_subject_masks"),
+        depends_on=("refined_keypoints", "subject_shape"),
         invalidates=("bout_kinematics", "stimulus_response"),
         artifact_families=("analysis/eye_angle_runs",),
         category=DERIVED_ANALYSIS,
-        description="Per-eye angle and vergence measurements.",
+        description=(
+            "Per-eye angle and vergence measurements from subject-shape eye "
+            "geometry and refined keypoints."
+        ),
     ),
     StageSpec(
         id="subject_shape",
         depends_on=("refined_subject_masks",),
-        invalidates=("tail_kinematics", "tail_posture_view"),
+        invalidates=("eye_angles", "tail_kinematics", "tail_posture_view"),
         artifact_families=("analysis/subject_shape_runs",),
         category=DERIVED_ANALYSIS,
         description="Mask-derived body frame, centerline, and shape geometry.",

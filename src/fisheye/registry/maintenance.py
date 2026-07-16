@@ -6459,36 +6459,6 @@ def _build_recording_step_rows_from_root(
         ),
     )
     (
-        eye_angles_run,
-        eye_angles_group,
-        _eye_angles_selection,
-        eye_angles_status,
-        _eye_angles_reason,
-        eye_angles_method,
-        _eye_angles_state,
-        eye_angles_details,
-    ) = _analysis_status(
-        "eye_angle_runs",
-        prerequisites={
-            "keypoints": keypoints_status,
-            "refined_keypoints": refined_keypoints_status,
-            "refined_subject_masks": refined_subject_masks_status,
-        },
-        source_ref_expectations=(
-            _SourceRefExpectation(
-                "source_keypoints_run",
-                refined_keypoints_run,
-                "refined_keypoints",
-                aliases=("source_keypoint_run",),
-            ),
-            _SourceRefExpectation(
-                "source_refined_subject_masks_run",
-                refined_subject_masks_run,
-                "refined_subject_masks",
-            ),
-        ),
-    )
-    (
         subject_shape_run,
         subject_shape_group,
         _subject_shape_selection,
@@ -6505,6 +6475,43 @@ def _build_recording_step_rows_from_root(
                 "source_refined_subject_masks_run",
                 refined_subject_masks_run,
                 "refined_subject_masks",
+            ),
+        ),
+    )
+    (
+        eye_angles_run,
+        eye_angles_group,
+        _eye_angles_selection,
+        eye_angles_status,
+        _eye_angles_reason,
+        eye_angles_method,
+        _eye_angles_state,
+        eye_angles_details,
+    ) = _analysis_status(
+        "eye_angle_runs",
+        prerequisites={
+            "keypoints": keypoints_status,
+            "refined_keypoints": refined_keypoints_status,
+            "subject_shape": subject_shape_status,
+        },
+        source_ref_expectations=(
+            _SourceRefExpectation(
+                "source_keypoints_run",
+                refined_keypoints_run,
+                "refined_keypoints",
+                aliases=("source_keypoint_run",),
+            ),
+            _SourceRefExpectation(
+                "source_subject_shape_run",
+                subject_shape_run,
+                "subject_shape",
+                required=False,
+            ),
+            _SourceRefExpectation(
+                "source_refined_subject_masks_run",
+                refined_subject_masks_run,
+                "refined_subject_masks",
+                required=False,
             ),
         ),
     )

@@ -96,8 +96,8 @@ def test_execution_plan_renders_exact_dependency_runs_and_parallel_backends(
         "swim_bouts",
         "track_kinematics_visualization",
         "bout_kinematics",
-        "eye_angles",
         "subject_shape",
+        "eye_angles",
     ]
     commands = {command.node_id: command for command in execution.commands}
     swim = commands["swim_bouts"].argv
@@ -135,10 +135,22 @@ def test_execution_plan_renders_exact_dependency_runs_and_parallel_backends(
     assert bout[bout.index("--track-kinematics-run") + 1] == "track_a"
 
     eyes = commands["eye_angles"].argv
-    assert eyes[eyes.index("--refined-subject-run") + 1] == "refined_masks_a"
+    assert eyes[:4] == (
+        "/palette/python",
+        "-m",
+        "fisheye.analysis_workflows.materializers.eye_angles",
+        str(tmp_path / "recording_analysis.zarr"),
+    )
+    assert eyes[eyes.index("--subject-shape-run") + 1] == (
+        "subject_shape_canary_20260713_01"
+    )
     assert eyes[eyes.index("--keypoint-run") + 1] == "refined_kp_a"
     assert eyes[eyes.index("--execution-backend") + 1] == "dask_worker_chunks"
     assert eyes[eyes.index("--num-workers") + 1] == "8"
+    assert eyes[eyes.index("--output-shard-rows") + 1] == "262144"
+    assert eyes[eyes.index("--shard-workers") + 1] == "8"
+    assert eyes[eyes.index("--native-threads") + 1] == "1"
+    assert "--apply" in eyes
 
     shape = commands["subject_shape"].argv
     assert shape[:4] == (

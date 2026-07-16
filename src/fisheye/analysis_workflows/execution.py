@@ -237,11 +237,14 @@ def _bout_kinematics_command(context: StageCommandContext) -> tuple[str, ...]:
 
 
 def _eye_angle_command(context: StageCommandContext) -> tuple[str, ...]:
-    command = _module_command(context, "fisheye.analysis.eye_angle_analysis")
+    command = _module_command(
+        context,
+        "fisheye.analysis_workflows.materializers.eye_angles",
+    )
     command.extend(
         (
-            "--refined-subject-run",
-            context.dependency_run("refined_subject_masks"),
+            "--subject-shape-run",
+            context.dependency_run("subject_shape"),
             "--keypoint-run",
             context.dependency_run("refined_keypoints"),
             "--run-name",
@@ -254,9 +257,16 @@ def _eye_angle_command(context: StageCommandContext) -> tuple[str, ...]:
             "processes",
             "--num-workers",
             str(context.num_workers),
-            "--layout",
-            "compact_dense_v2",
-            "--quiet",
+            "--output-shard-rows",
+            "262144",
+            "--shard-workers",
+            str(min(context.num_workers, 16)),
+            "--native-threads",
+            "1",
+            "--copy-backend",
+            "rsync",
+            "--apply",
+            "--json",
         )
     )
     return tuple(command)

@@ -216,7 +216,12 @@ The executor preserves these large-recording constraints:
   shards to copy workers. It validates the sharded run before copying it to a
   hidden shared-filesystem sibling, atomically renaming it, and updating the
   nested offline pointers under a per-recording lock;
-- eye angles preserve non-overlapping physical Zarr chunk ownership;
+- eye angles use their dedicated production materializer. It resolves completed
+  subject-shape eye ellipses and refined keypoints, transfers only those exact
+  arrays to node-local scratch, records the authoritative and staged locations
+  separately, and runs framewise computation against the staged archive.
+  Completed regular output is converted to 262,144-row indexed shards with
+  exact decoded validation before checksum-verified atomic publication;
 - subject shape reads refined masks from the authoritative Zarr without
   mutation, computes into node-local 1,024-row logical blocks, assembles
   131,072-row indexed outer shards while preserving 256-row inner chunks,
@@ -231,7 +236,7 @@ The executor preserves these large-recording constraints:
 - framewise eye and tail exports must stream row groups or array chunks. They
   must not accumulate the complete recording as one in-memory table.
 
-Subject-shape, tail-kinematics, and track-kinematics publication share
+Subject-shape, tail-kinematics, track-kinematics, and eye-angle publication share
 `analysis_workflows.materializers.atomic_run_publisher`. Scientific validation,
 completion, and pointer rules remain family-specific callbacks, while the
 publisher owns the transaction: advisory locking, hidden same-parent copy,
@@ -240,8 +245,21 @@ rename, pre-pointer and final validation, snapshots of every affected parent,
 and rollback of both the new run and parent attrs after any post-rename error.
 The per-family lock filenames and publish schema IDs remain stable. Published
 runs record the shared publisher schema/version and the parent snapshots in
-`cluster_output_staging`, so a future materializer does not need to create a
-fourth transaction implementation.
+`cluster_output_staging`, so each new materializer can reuse the same
+transaction implementation.
+
+Eye-angle provenance is intentionally layered. `eye_angle_source_contracts`
+names the exact subject-shape, refined-keypoint, base-keypoint, and physical
+array paths; `eye_angle_algorithm_contract` records ellipse normalization,
+body-frame construction, major-axis ambiguity resolution, angle definitions,
+smoothing, frame projection, and derivatives; and
+`node_local_materialization` records the physical input inventory, metadata and
+logical-contract hashes, staged and authoritative paths, compute arguments,
+thread/worker settings, sharding report, and validations. Publication adds a
+second source-revision audit and the transaction record in
+`cluster_output_staging`. Full source-array content is not re-hashed: the
+record states that assurance relies on completed immutable input runs plus
+path/size/mtime inventory and selected-metadata SHA-256.
 
 For a subject-shape-only cluster run, render and then submit the DAG target. A
 32-core node matches the measured canary configuration; request enough memory

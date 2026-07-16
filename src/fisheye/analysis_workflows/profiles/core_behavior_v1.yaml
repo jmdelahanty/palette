@@ -87,9 +87,12 @@ nodes:
   - id: eye_angles
     kind: analysis
     stage_id: eye_angles
-    depends_on: [refined_keypoints, refined_subject_masks]
-    execution_policy: chunk_aligned_workers_global_temporal_finalize
-    description: Compute framewise eye angles and convergence without downsampling.
+    depends_on: [refined_keypoints, subject_shape]
+    execution_policy: exact_source_subset_node_local_compute_shard_publish
+    description: >-
+      Stage completed subject-shape eye geometry and refined keypoints locally,
+      compute framewise eye angles without downsampling, shard the completed
+      output, and publish it atomically with source and algorithm provenance.
 
   - id: subject_shape
     kind: analysis

@@ -9954,6 +9954,73 @@ def test_backfill_recording_step_status_marks_tail_behavior_stale_when_subject_s
     registry.close()
 
 
+def test_backfill_recording_step_status_marks_modern_eye_angles_stale_when_subject_shape_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = (
+        tmp_path
+        / "recordings"
+        / "rec_step_eye_shape_stale"
+        / "zarr"
+        / "rec_step_eye_shape_stale_analysis.zarr"
+    )
+    fake_root = _create_recording_step_status_zarr(zarr_path)
+    eye_run = fake_root["analysis"]["eye_angle_runs"]["eye_angle_001"]
+    eye_run.attrs["source_subject_shape_run"] = "shape_001"
+    subject_shape_parent = fake_root["analysis"]["subject_shape_runs"]
+    subject_shape_parent.add_group(
+        "shape_002",
+        attrs={
+            "created_utc": "2026-02-15T06:00:00+00:00",
+            "method": "subject_shape_v3",
+            "source_refined_subject_masks_run": "refined_subject_masks_001",
+        },
+    )
+    subject_shape_parent.attrs["latest"] = "shape_002"
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
+    )
+
+    registry.upsert_dataset(
+        dataset_id="dataset_eye_shape_stale",
+        session_uuid="session_eye_shape_stale",
+        zarr_path=zarr_path,
+        recording_id="recording_eye_shape_stale",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+
+    _backfill_recording_step_status(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        recording_ids=None,
+        zarr_use_filter="all",
+    )
+
+    eye_row = registry.conn.execute(
+        """
+        SELECT status, run_name, details_json
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'eye_angles';
+        """,
+        ("dataset_eye_shape_stale",),
+    ).fetchone()
+    assert eye_row is not None
+    assert str(eye_row["status"]) == "missing"
+    assert eye_row["run_name"] is None
+    details = json.loads(str(eye_row["details_json"]))
+    assert details["reason"] == "stale_vs_latest_subject_shape"
+    assert details["source_freshness_state"] == "stale"
+    assert details["expected_source_subject_shape_run"] == "shape_002"
+    assert details["actual_source_refs"]["source_subject_shape_run"] == "shape_001"
+    assert details["latest_run"] == "eye_angle_001"
+    registry.close()
+
+
 def test_backfill_recording_step_status_marks_bout_kinematics_stale_when_swim_bouts_change(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

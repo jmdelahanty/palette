@@ -50,6 +50,13 @@ def test_core_behavior_profile_declares_portable_and_framewise_resolutions() -> 
         "refined_keypoints",
         "tracks",
     )
+    assert workflow.node_by_id["eye_angles"].depends_on == (
+        "refined_keypoints",
+        "subject_shape",
+    )
+    assert workflow.node_by_id["eye_angles"].execution_policy == (
+        "exact_source_subset_node_local_compute_shard_publish"
+    )
     visualization = workflow.node_by_id["track_kinematics_visualization"]
     assert visualization.kind == "visualization"
     assert visualization.depends_on == ("track_kinematics", "swim_bouts")
