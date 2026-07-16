@@ -231,6 +231,18 @@ The executor preserves these large-recording constraints:
 - framewise eye and tail exports must stream row groups or array chunks. They
   must not accumulate the complete recording as one in-memory table.
 
+Subject-shape, tail-kinematics, and track-kinematics publication share
+`analysis_workflows.materializers.atomic_run_publisher`. Scientific validation,
+completion, and pointer rules remain family-specific callbacks, while the
+publisher owns the transaction: advisory locking, hidden same-parent copy,
+physical inventory verification (with optional full content checksums), atomic
+rename, pre-pointer and final validation, snapshots of every affected parent,
+and rollback of both the new run and parent attrs after any post-rename error.
+The per-family lock filenames and publish schema IDs remain stable. Published
+runs record the shared publisher schema/version and the parent snapshots in
+`cluster_output_staging`, so a future materializer does not need to create a
+fourth transaction implementation.
+
 For a subject-shape-only cluster run, render and then submit the DAG target. A
 32-core node matches the measured canary configuration; request enough memory
 for the observed 36.7 GB peak:

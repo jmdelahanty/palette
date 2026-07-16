@@ -9,18 +9,12 @@ shared filesystem and atomically renamed into the canonical run family.
 from __future__ import annotations
 
 import argparse
-import fcntl
-import functools
-import hashlib
 import json
 import os
 import shutil
-import socket
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
@@ -31,6 +25,7 @@ from ...shared.json_safety import json_attr_safe
 from ...shared.zarr_io import open_zarr_root
 from ...shared.zarr_run_completion import require_runs_parent
 from ...shared.zarr_sharded_copy import copy_completed_run_to_sharded
+from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
 
 
 MATERIALIZATION_SCHEMA_ID = "palette.track_kinematics_materialization.v1"
@@ -93,10 +88,6 @@ class TrackKinematicsMaterializationPlan:
             "shard_workers": int(self.shard_workers),
             "writer_arguments": list(self.writer_arguments),
         }
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _validate_run_name(run_name: str) -> str:
@@ -237,53 +228,6 @@ def _validate_track_run(path: Path, *, require_sharded: bool) -> dict[str, Any]:
     }
 
 
-def _inventory(path: Path) -> tuple[tuple[tuple[str, int], ...], str]:
-    files = tuple(
-        (item.relative_to(path).as_posix(), int(item.stat().st_size))
-        for item in sorted(path.rglob("*"))
-        if item.is_file()
-    )
-    digest = hashlib.sha256()
-    for name, size in files:
-        digest.update(name.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(str(size).encode("ascii"))
-        digest.update(b"\n")
-    return files, digest.hexdigest()
-
-
-def _copy_tree(source: Path, target: Path, *, backend: str) -> None:
-    if backend == "python":
-        shutil.copytree(source, target)
-    elif backend == "rsync":
-        target.mkdir(parents=True)
-        subprocess.run(["rsync", "--archive", f"{source}/", f"{target}/"], check=True)
-    else:
-        raise ValueError(f"Unsupported copy backend: {backend!r}.")
-
-
-def _restore_attrs(group: zarr.Group, attrs: dict[str, Any]) -> None:
-    group.attrs.clear()
-    group.attrs.update(attrs)
-
-
-def _serialized_publish(function):
-    @functools.wraps(function)
-    def wrapped(plan: TrackKinematicsMaterializationPlan, *args, **kwargs):
-        lock_path = plan.source_zarr.parent / (
-            f".{plan.source_zarr.name}.track-kinematics-publish.lock"
-        )
-        with lock_path.open("a+b") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                return function(plan, *args, **kwargs)
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-    return wrapped
-
-
-@_serialized_publish
 def publish_track_kinematics_run(
     plan: TrackKinematicsMaterializationPlan,
     *,
@@ -292,81 +236,30 @@ def publish_track_kinematics_run(
 ) -> dict[str, Any]:
     """Copy to a hidden sibling, validate, rename, then update pointers."""
 
-    local_validation = _validate_track_run(plan.sharded_run, require_sharded=True)
-    if not local_validation["valid"]:
-        raise RuntimeError(f"Local sharded track run is invalid: {local_validation}")
-    root = open_zarr_root(plan.source_zarr, mode="a")
-    track_parent = require_runs_parent(root.require_group("analysis"), "track_kinematics_runs")
-    offline_parent = track_parent.require_group("offline")
-    if plan.run_name in offline_parent or plan.target_run_path.exists():
-        raise FileExistsError(
-            f"Refusing to replace existing authoritative run: {plan.target_run_path}"
-        )
-    track_attrs_before = dict(track_parent.attrs)
-    offline_attrs_before = dict(offline_parent.attrs)
-    target_parent = plan.target_run_path.parent
-    target_parent.mkdir(parents=True, exist_ok=True)
-    temporary = target_parent / f".{plan.run_name}.publish_tmp.{os.getpid()}"
-    if temporary.exists():
-        raise FileExistsError(f"Refusing existing publish temporary path: {temporary}")
-    source_files, source_digest = _inventory(plan.sharded_run)
-    published = False
-    try:
-        started = time.perf_counter()
-        _copy_tree(plan.sharded_run, temporary, backend=copy_backend)
-        temporary_files, temporary_digest = _inventory(temporary)
-        temporary_validation = _validate_track_run(temporary, require_sharded=True)
-        if temporary_files != source_files or temporary_digest != source_digest:
-            raise RuntimeError("Temporary publish physical inventory differs from local run.")
-        if not temporary_validation["valid"]:
-            raise RuntimeError(
-                f"Temporary publish logical validation failed: {temporary_validation}"
-            )
-        os.replace(temporary, plan.target_run_path)
-        published = True
+    def validate(path: Path) -> dict[str, Any]:
+        return _validate_track_run(path, require_sharded=True)
 
-        root = open_zarr_root(plan.source_zarr, mode="a")
-        track_parent = root["analysis"]["track_kinematics_runs"]
-        offline_parent = track_parent["offline"]
-        run = offline_parent[plan.run_name]
-        payload = {
-            "schema_id": PUBLISH_SCHEMA_ID,
-            "policy": "node_local_output_sharded_atomic_run_group_publish",
-            "serialization_policy": "per_recording_advisory_file_lock",
-            "rollback_policy": "remove_new_target_and_restore_both_parent_attr_sets",
-            "published_at_utc": _utc_now(),
-            "host": socket.gethostname(),
-            "lsb_jobid": os.environ.get("LSB_JOBID"),
-            "source_zarr": str(plan.source_zarr),
-            "local_run_path": str(plan.local_run_path),
-            "sharded_run_path": str(plan.sharded_run),
-            "target_run_path": str(plan.target_run_path),
-            "copy_backend": copy_backend,
-            "copy_duration_seconds": float(time.perf_counter() - started),
-            "physical_file_count": len(source_files),
-            "physical_bytes": sum(size for _name, size in source_files),
-            "inventory_sha256": source_digest,
-            "materialization": json_attr_safe(materialization_payload),
-            "local_validation": local_validation,
-            "temporary_validation": temporary_validation,
-        }
-        run.attrs["cluster_output_staging"] = payload
-        pre_pointer = _validate_track_run(plan.target_run_path, require_sharded=True)
-        if not pre_pointer["valid"]:
-            raise RuntimeError(f"Pre-pointer validation failed: {pre_pointer}")
-        payload["pre_pointer_validation"] = pre_pointer
-        run.attrs["cluster_output_staging"] = payload
+    def prepare(root: zarr.Group) -> tuple[zarr.Group, zarr.Group]:
+        track_parent = require_runs_parent(
+            root.require_group("analysis"),
+            "track_kinematics_runs",
+        )
+        return track_parent, track_parent.require_group("offline")
+
+    def complete(
+        root: zarr.Group,
+        _parent: zarr.Group,
+        run: zarr.Group,
+    ) -> None:
         track_writer.mark_track_kinematics_run_complete(
             root,
             run,
             run_name=plan.run_name,
             run_type="offline",
         )
-        final = _validate_track_run(plan.target_run_path, require_sharded=True)
-        if not final["valid"]:
-            raise RuntimeError(f"Final published validation failed: {final}")
-        pointer_root = open_zarr_root(plan.source_zarr, mode="r")
-        pointer_parent = pointer_root["analysis"]["track_kinematics_runs"]
+
+    def verify(root: zarr.Group) -> None:
+        pointer_parent = root["analysis/track_kinematics_runs"]
         pointer_offline = pointer_parent["offline"]
         if (
             str(pointer_parent.attrs.get("latest")) != f"offline/{plan.run_name}"
@@ -375,21 +268,30 @@ def publish_track_kinematics_run(
             or str(pointer_offline.attrs.get("latest")) != plan.run_name
         ):
             raise RuntimeError("Track-kinematics parent pointers were not updated consistently.")
-        payload["final_validation"] = final
-        run.attrs["cluster_output_staging"] = payload
-        return payload
-    except BaseException:
-        if published and plan.target_run_path.exists():
-            shutil.rmtree(plan.target_run_path)
-        root = open_zarr_root(plan.source_zarr, mode="a")
-        track_parent = require_runs_parent(root.require_group("analysis"), "track_kinematics_runs")
-        offline_parent = track_parent.require_group("offline")
-        _restore_attrs(track_parent, track_attrs_before)
-        _restore_attrs(offline_parent, offline_attrs_before)
-        raise
-    finally:
-        if temporary.exists():
-            shutil.rmtree(temporary)
+
+    return atomic_publish_run_group(
+        AtomicRunPublishSpec(
+            source_zarr=plan.source_zarr,
+            local_run_path=plan.sharded_run,
+            target_run_path=plan.target_run_path,
+            run_name=plan.run_name,
+            lock_suffix="track-kinematics-publish",
+            publish_schema_id=PUBLISH_SCHEMA_ID,
+            policy="node_local_output_sharded_atomic_run_group_publish",
+            rollback_policy="remove_new_target_and_restore_both_parent_attr_sets",
+        ),
+        copy_backend=copy_backend,
+        validate_run=validate,
+        prepare_parents=prepare,
+        complete_run=complete,
+        verify_pointers=verify,
+        payload_metadata={
+            "local_run_path": str(plan.local_run_path),
+            "sharded_run_path": str(plan.sharded_run),
+            "copy_backend": copy_backend,
+            "materialization": json_attr_safe(materialization_payload),
+        },
+    )
 
 
 def materialize_track_kinematics(

@@ -114,9 +114,25 @@ def test_materializer_computes_locally_shards_and_atomically_publishes(
     assert offline.attrs["latest"] == "track_1"
     assert tuple(run["tracks/id_0/speed_raw_px"].shards) == (6,)
     assert tuple(run["tracks/id_1/speed_raw_px"].shards) == (6,)
-    assert run.attrs["cluster_output_staging"]["serialization_policy"] == (
+    staging = run.attrs["cluster_output_staging"]
+    assert staging["serialization_policy"] == (
         "per_recording_advisory_file_lock"
     )
+    assert staging["publisher_contract"] == {
+        "schema_id": "palette.atomic_run_group_publisher",
+        "schema_version": 1,
+    }
+    assert set(staging["parent_attrs_before"]) == {
+        "analysis/track_kinematics_runs",
+        "analysis/track_kinematics_runs/offline",
+    }
+    final_track_attrs = staging["parent_attrs_after"]["analysis/track_kinematics_runs"]
+    assert final_track_attrs["latest"] == "offline/track_1"
+    assert final_track_attrs["latest_complete"] == "offline/track_1"
+    assert final_track_attrs["latest_offline"] == "track_1"
+    assert staging["parent_attrs_after"]["analysis/track_kinematics_runs/offline"][
+        "latest"
+    ] == "track_1"
     assert (tmp_path / ".source.zarr.track-kinematics-publish.lock").is_file()
 
 

@@ -9,16 +9,10 @@ the completed sharded run is copied back to shared storage.
 from __future__ import annotations
 
 import argparse
-import fcntl
-import functools
-import hashlib
 import json
 import os
 import shutil
-import socket
-import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +39,7 @@ from ...shared.run_provenance import build_run_provenance_from_stage_record
 from ...shared.zarr_io import open_zarr_root
 from ...shared.zarr_run_completion import mark_run_complete, require_runs_parent
 from ...shared.zarr_sharded_copy import copy_completed_run_to_sharded
+from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
 
 
 MATERIALIZATION_SCHEMA_ID = "palette.subject_shape_materialization.v1"
@@ -302,133 +297,31 @@ def _validate_subject_shape_run(
     }
 
 
-def _file_content_digest(root: Path) -> tuple[int, int, str]:
-    digest = hashlib.sha256()
-    count = 0
-    total = 0
-    for path in sorted(item for item in root.rglob("*") if item.is_file()):
-        relative = path.relative_to(root).as_posix()
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
-        with path.open("rb") as stream:
-            for block in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(block)
-                total += len(block)
-        digest.update(b"\n")
-        count += 1
-    return count, total, digest.hexdigest()
-
-
-def _copy_and_checksum(source: Path, target: Path, *, copy_backend: str) -> dict[str, Any]:
-    if copy_backend == "rsync":
-        target.mkdir(parents=True)
-        subprocess.run(["rsync", "--archive", f"{source}/", f"{target}/"], check=True)
-        check = subprocess.run(
-            [
-                "rsync",
-                "--archive",
-                "--dry-run",
-                "--checksum",
-                "--delete",
-                "--itemize-changes",
-                f"{source}/",
-                f"{target}/",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        if check.stdout.strip():
-            raise RuntimeError(f"Rsync checksum validation found differences: {check.stdout}")
-        count, total, digest = _file_content_digest(source)
-        return {
-            "backend": "rsync",
-            "verification": "rsync_checksum_dry_run",
-            "file_count": count,
-            "physical_bytes": total,
-            "source_tree_sha256": digest,
-        }
-    if copy_backend == "python":
-        shutil.copytree(source, target)
-        source_count, source_total, source_digest = _file_content_digest(source)
-        target_count, target_total, target_digest = _file_content_digest(target)
-        if (source_count, source_total, source_digest) != (
-            target_count,
-            target_total,
-            target_digest,
-        ):
-            raise RuntimeError("Python publish copy failed exact physical checksum validation.")
-        return {
-            "backend": "python",
-            "verification": "sha256_all_physical_files",
-            "file_count": source_count,
-            "physical_bytes": source_total,
-            "source_tree_sha256": source_digest,
-        }
-    raise ValueError(f"Unsupported copy backend: {copy_backend!r}.")
-
-
-def _restore_attrs(group: zarr.Group, attrs: dict[str, Any]) -> None:
-    group.attrs.clear()
-    group.attrs.update(attrs)
-
-
-def _serialized_publish(function):
-    @functools.wraps(function)
-    def wrapped(plan: SubjectShapeMaterializationPlan, *args, **kwargs):
-        lock_path = plan.source_zarr.parent / f".{plan.source_zarr.name}.subject-shape-publish.lock"
-        with lock_path.open("a+b") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                return function(plan, *args, **kwargs)
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-    return wrapped
-
-
-@_serialized_publish
 def publish_subject_shape_run(
     plan: SubjectShapeMaterializationPlan,
     *,
     materialization_payload: dict[str, Any],
     copy_backend: str,
 ) -> dict[str, Any]:
-    local_validation = _validate_subject_shape_run(
-        plan.sharded_run,
-        row_count=plan.row_count,
-        require_sharded=True,
-    )
-    if not local_validation["valid"]:
-        raise RuntimeError(f"Local sharded run validation failed: {local_validation}")
-
-    root = open_zarr_root(plan.source_zarr, mode="a")
-    parent = require_runs_parent(root.require_group("analysis"), "subject_shape_runs")
-    if plan.run_name in parent or plan.target_run_path.exists():
-        raise FileExistsError(f"Refusing to replace existing authoritative run: {plan.target_run_path}")
-    parent_attrs_before = dict(parent.attrs)
-    plan.target_run_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = plan.target_run_path.parent / f".{plan.run_name}.publish_tmp.{os.getpid()}"
-    if temporary.exists():
-        raise FileExistsError(f"Refusing existing publish temporary: {temporary}")
-
-    published = False
-    started = time.perf_counter()
-    try:
-        physical = _copy_and_checksum(plan.sharded_run, temporary, copy_backend=copy_backend)
-        temporary_validation = _validate_subject_shape_run(
-            temporary,
+    def validate(path: Path) -> dict[str, Any]:
+        return _validate_subject_shape_run(
+            path,
             row_count=plan.row_count,
             require_sharded=True,
         )
-        if not temporary_validation["valid"]:
-            raise RuntimeError(f"Temporary publish logical validation failed: {temporary_validation}")
-        os.replace(temporary, plan.target_run_path)
-        published = True
 
-        root = open_zarr_root(plan.source_zarr, mode="a")
-        parent = require_runs_parent(root.require_group("analysis"), "subject_shape_runs")
-        run_group = parent[plan.run_name]
+    def prepare(root: zarr.Group) -> tuple[zarr.Group]:
+        return (
+            require_runs_parent(
+                root.require_group("analysis"),
+                "subject_shape_runs",
+            ),
+        )
+
+    def after_rename(
+        root: zarr.Group,
+        run_group: zarr.Group,
+    ) -> dict[str, Any]:
         source_revision_audit = audit_subject_shape_source_revisions_group(
             root,
             shape_run=plan.run_name,
@@ -439,35 +332,14 @@ def publish_subject_shape_run(
                 "Refined subject-mask revisions changed during materialization: "
                 f"{source_revision_audit}"
             )
-        payload = {
-            "schema_id": PUBLISH_SCHEMA_ID,
-            "policy": "node_local_compute_then_shard_then_atomic_run_group_publish",
-            "serialization_policy": "per_recording_advisory_file_lock",
-            "published_at_utc": _utc_now(),
-            "host": socket.gethostname(),
-            "lsb_jobid": os.environ.get("LSB_JOBID"),
-            "source_zarr": str(plan.source_zarr),
-            "local_sharded_run": str(plan.sharded_run),
-            "target_run_path": str(plan.target_run_path),
-            "copy_duration_seconds": float(time.perf_counter() - started),
-            "physical_copy": physical,
-            "local_validation": local_validation,
-            "source_revision_audit": source_revision_audit,
-            "materialization": materialization_payload,
-        }
-        run_group.attrs["cluster_output_staging"] = json_attr_safe(payload)
         write_best_effort_run_lineage_attrs(run_group, run_family="subject_shape_run")
-        pre_pointer_validation = _validate_subject_shape_run(
-            plan.target_run_path,
-            row_count=plan.row_count,
-            require_sharded=True,
-        )
-        if not pre_pointer_validation["valid"]:
-            raise RuntimeError(
-                f"Published run failed pre-pointer validation: {pre_pointer_validation}"
-            )
-        payload["pre_pointer_validation"] = pre_pointer_validation
-        run_group.attrs["cluster_output_staging"] = json_attr_safe(payload)
+        return {"source_revision_audit": source_revision_audit}
+
+    def complete(
+        _root: zarr.Group,
+        parent: zarr.Group,
+        run_group: zarr.Group,
+    ) -> None:
         mark_run_complete(
             run_group,
             parent_group=parent,
@@ -477,30 +349,41 @@ def publish_subject_shape_run(
                 fallback_command="subject_shape_materializer",
             ),
         )
-        final_validation = _validate_subject_shape_run(
-            plan.target_run_path,
-            row_count=plan.row_count,
-            require_sharded=True,
-        )
-        if not final_validation["valid"]:
-            raise RuntimeError(f"Published run validation failed: {final_validation}")
+
+    def verify(root: zarr.Group) -> None:
+        parent = root["analysis/subject_shape_runs"]
         if str(parent.attrs.get("latest")) != plan.run_name or str(
             parent.attrs.get("latest_complete")
         ) != plan.run_name:
-            raise RuntimeError("Subject-shape parent pointers were not updated to the published run.")
-        payload["final_validation"] = final_validation
-        run_group.attrs["cluster_output_staging"] = json_attr_safe(payload)
-        return payload
-    except BaseException:
-        if published and plan.target_run_path.exists():
-            shutil.rmtree(plan.target_run_path)
-        root = open_zarr_root(plan.source_zarr, mode="a")
-        parent = require_runs_parent(root.require_group("analysis"), "subject_shape_runs")
-        _restore_attrs(parent, parent_attrs_before)
-        raise
-    finally:
-        if temporary.exists():
-            shutil.rmtree(temporary)
+            raise RuntimeError(
+                "Subject-shape parent pointers were not updated to the published run."
+            )
+
+    return atomic_publish_run_group(
+        AtomicRunPublishSpec(
+            source_zarr=plan.source_zarr,
+            local_run_path=plan.sharded_run,
+            target_run_path=plan.target_run_path,
+            run_name=plan.run_name,
+            lock_suffix="subject-shape-publish",
+            publish_schema_id=PUBLISH_SCHEMA_ID,
+            policy="node_local_compute_then_shard_then_atomic_run_group_publish",
+            rollback_policy=(
+                "remove_new_target_and_restore_parent_attrs_on_post_rename_failure"
+            ),
+            content_checksum=True,
+        ),
+        copy_backend=copy_backend,
+        validate_run=validate,
+        prepare_parents=prepare,
+        complete_run=complete,
+        verify_pointers=verify,
+        after_rename=after_rename,
+        payload_metadata={
+            "local_sharded_run": str(plan.sharded_run),
+            "materialization": json_attr_safe(materialization_payload),
+        },
+    )
 
 
 def materialize_subject_shape(
