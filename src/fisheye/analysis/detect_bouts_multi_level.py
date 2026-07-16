@@ -61,6 +61,7 @@ import math
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
@@ -133,10 +134,57 @@ PEAK_EVENT_SCHEMA_ID = "palette.swim_bout_peak_events.v1"
 PEAK_EVENT_SCHEMA_VERSION = 1
 METHOD_VERSION = "detect_bouts_multi_level.v7"
 THRESHOLD_CROSSING_INTERPOLATION = "linear_between_samples"
+PHASE_TIMING_SCHEMA_ID = "palette.swim_bout_phase_timing"
+PHASE_TIMING_SCHEMA_VERSION = 1
 
 
 _json_safe_attr_value = json_attr_safe
 _json_safe_attrs = json_attr_safe_mapping
+
+
+def _finish_timed_phase(
+    phase_durations_s: Dict[str, float],
+    phase_name: str,
+    started_at: float,
+) -> float:
+    """Record and immediately report a monotonic-clock phase duration."""
+
+    elapsed_s = max(0.0, float(perf_counter() - started_at))
+    phase_durations_s[phase_name] = elapsed_s
+    print(
+        f"phase_timing phase={phase_name} elapsed_s={elapsed_s:.6f}",
+        flush=True,
+    )
+    return elapsed_s
+
+
+def _build_phase_timing_payload(
+    *,
+    phase_durations_s: Mapping[str, float],
+    detection_levels: Mapping[str, Mapping[str, Any]],
+    timed_pipeline_elapsed_s: float,
+) -> Dict[str, Any]:
+    """Build the additive, non-scientific performance telemetry contract."""
+
+    normalized_phases = {
+        str(name): max(0.0, float(elapsed_s))
+        for name, elapsed_s in phase_durations_s.items()
+    }
+    phase_sum_s = float(sum(normalized_phases.values()))
+    total_s = max(0.0, float(timed_pipeline_elapsed_s))
+    return {
+        "schema_id": PHASE_TIMING_SCHEMA_ID,
+        "schema_version": PHASE_TIMING_SCHEMA_VERSION,
+        "clock": "time.perf_counter",
+        "scope": "load_track_kinematics_through_payload_write",
+        "phase_durations_s": normalized_phases,
+        "detection_levels": {
+            str(level): dict(values) for level, values in detection_levels.items()
+        },
+        "timed_pipeline_elapsed_s": total_s,
+        "phase_sum_s": phase_sum_s,
+        "unattributed_elapsed_s": max(0.0, total_s - phase_sum_s),
+    }
 
 
 def _strict_json_dumps(value: Any) -> str:
@@ -2263,10 +2311,20 @@ def detect_and_save_bouts(
     print(f"Default level: {default_level_key}")
     print()
 
+    timed_pipeline_started_at = perf_counter()
+    phase_durations_s: Dict[str, float] = {}
+    detection_level_timings: Dict[str, Dict[str, Any]] = {}
+
     # Load speed data
     print("Loading track kinematics track data...")
+    phase_started_at = perf_counter()
     speeds, metadata = _load_track_kinematics_track_speeds(
         zarr_path, track_kinematics_run, track_id
+    )
+    _finish_timed_phase(
+        phase_durations_s,
+        "load_track_kinematics",
+        phase_started_at,
     )
 
     fps = metadata['fps']
@@ -2283,12 +2341,18 @@ def detect_and_save_bouts(
         min_gap_frames=min_gap_frames,
     )
     resolved_boundary_window_frames = max(0, int(round(boundary_window_s * fps)))
+    phase_started_at = perf_counter()
     speeds["speed_exponential_mm"] = _causal_exponential_speed_response(
         speeds[f"{exponential_source_key}_mm"],
         frames,
         fps,
         tau_s=float(exponential_tau_s),
         transition_valid=speeds.get("transition_valid"),
+    )
+    _finish_timed_phase(
+        phase_durations_s,
+        "build_exponential_response",
+        phase_started_at,
     )
     path_distance_level_source = {
         **PATH_DISTANCE_LEVEL_SOURCE,
@@ -2317,7 +2381,9 @@ def detect_and_save_bouts(
     peak_event_results = {}
 
     print("Detecting bouts for each speed level:")
+    detection_started_at = perf_counter()
     for level in speed_levels:
+        level_started_at = perf_counter()
         speed_key = f"{level}_mm"
         speed = speeds[speed_key]
         metric_inputs = _metric_inputs_for_level(
@@ -2332,6 +2398,18 @@ def detect_and_save_bouts(
             print(f"  {level}: SKIPPED (all NaN)")
             bout_results[level] = _empty_bouts()
             peak_event_results[level] = _empty_peak_events()
+            level_elapsed_s = max(0.0, float(perf_counter() - level_started_at))
+            detection_level_timings[level] = {
+                "elapsed_s": level_elapsed_s,
+                "status": "skipped_all_nan",
+                "n_bouts": 0,
+                "n_peak_events": 0,
+            }
+            print(
+                f"phase_timing phase=detect_level level={level} "
+                f"elapsed_s={level_elapsed_s:.6f} status=skipped_all_nan",
+                flush=True,
+            )
             continue
 
         if method == "threshold":
@@ -2389,11 +2467,31 @@ def detect_and_save_bouts(
             peak_events = _empty_peak_events()
         peak_event_results[level] = peak_events
         print(f"  {level}: {len(bouts)} bouts detected")
+        level_elapsed_s = max(0.0, float(perf_counter() - level_started_at))
+        detection_level_timings[level] = {
+            "elapsed_s": level_elapsed_s,
+            "status": "complete",
+            "n_bouts": int(len(bouts)),
+            "n_peak_events": int(len(peak_events)),
+        }
+        print(
+            f"phase_timing phase=detect_level level={level} "
+            f"elapsed_s={level_elapsed_s:.6f} status=complete "
+            f"n_bouts={len(bouts)} n_peak_events={len(peak_events)}",
+            flush=True,
+        )
+
+    _finish_timed_phase(
+        phase_durations_s,
+        "detect_levels",
+        detection_started_at,
+    )
 
     print()
 
     # Save to zarr
     print("Saving to zarr...")
+    phase_started_at = perf_counter()
     root = open_zarr_root(zarr_path, mode='r+')
 
     # Create analysis/swim_bout_runs if needed
@@ -2584,7 +2682,11 @@ def detect_and_save_bouts(
         },
     ))
     write_stage_provenance(run_group, provenance)
-    write_best_effort_run_lineage_attrs(run_group, run_family="swim_bout_run")
+    _finish_timed_phase(
+        phase_durations_s,
+        "initialize_output_and_metadata",
+        phase_started_at,
+    )
 
     signal_id_by_level = {level: idx for idx, level in enumerate(speed_levels)}
     estimator_signal_id_by_level = {
@@ -2592,6 +2694,7 @@ def detect_and_save_bouts(
         for level in speed_levels
     }
     level_payloads: dict[str, dict[str, Any]] = {}
+    phase_started_at = perf_counter()
     for level in speed_levels:
         bouts = bout_results[level]
         peak_events = peak_event_results[level]
@@ -2684,6 +2787,13 @@ def detect_and_save_bouts(
             "attrs": level_specific_attrs,
         }
 
+    _finish_timed_phase(
+        phase_durations_s,
+        "prepare_level_payloads",
+        phase_started_at,
+    )
+
+    phase_started_at = perf_counter()
     if layout == SWIM_BOUT_LAYOUT_COMPACT_V2:
         _write_compact_v2_swim_bout_payloads(
             run_group,
@@ -2744,6 +2854,31 @@ def detect_and_save_bouts(
             write_columnar_dataset(level_group, 'global_metrics', payload["global_metrics"], attrs=None)
             write_columnar_dataset(level_group, 'bout_points', payload["bout_points"], attrs=None)
             print(f"  Saved {level}: {len(payload['bouts'])} bouts, {len(payload['intervals'])} intervals")
+
+    _finish_timed_phase(
+        phase_durations_s,
+        "write_payloads",
+        phase_started_at,
+    )
+    phase_timing = _json_safe_attr_value(
+        _build_phase_timing_payload(
+            phase_durations_s=phase_durations_s,
+            detection_levels=detection_level_timings,
+            timed_pipeline_elapsed_s=perf_counter() - timed_pipeline_started_at,
+        )
+    )
+    run_group.attrs["phase_timing"] = phase_timing
+    provenance = dict(provenance)
+    provenance["performance"] = phase_timing
+    write_stage_provenance(run_group, provenance)
+    write_best_effort_run_lineage_attrs(run_group, run_family="swim_bout_run")
+    print(
+        "phase_timing "
+        f"scope={phase_timing['scope']} "
+        f"elapsed_s={phase_timing['timed_pipeline_elapsed_s']:.6f} "
+        f"unattributed_s={phase_timing['unattributed_elapsed_s']:.6f}",
+        flush=True,
+    )
 
     mark_run_complete(
         run_group,

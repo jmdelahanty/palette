@@ -189,3 +189,35 @@ def test_detect_and_save_bouts_defaults_to_compact_v2_layout(tmp_path, monkeypat
     assert "speed_exponential" not in run
     assert payload.signal.speed_level == "speed_exponential"
     assert payload.bouts.size > 0
+
+    phase_timing = run.attrs["phase_timing"]
+    assert phase_timing["schema_id"] == "palette.swim_bout_phase_timing"
+    assert phase_timing["schema_version"] == 1
+    assert phase_timing["clock"] == "time.perf_counter"
+    assert phase_timing["scope"] == "load_track_kinematics_through_payload_write"
+    assert set(phase_timing["phase_durations_s"]) == {
+        "load_track_kinematics",
+        "build_exponential_response",
+        "detect_levels",
+        "initialize_output_and_metadata",
+        "prepare_level_payloads",
+        "write_payloads",
+    }
+    assert set(phase_timing["detection_levels"]) == {
+        "speed_raw",
+        "speed_filtered",
+        "speed_smoothed",
+        "speed_averaged",
+        "speed_exponential",
+    }
+    assert all(
+        elapsed_s >= 0.0
+        for elapsed_s in phase_timing["phase_durations_s"].values()
+    )
+    assert all(
+        level_timing["elapsed_s"] >= 0.0
+        for level_timing in phase_timing["detection_levels"].values()
+    )
+    assert phase_timing["timed_pipeline_elapsed_s"] >= phase_timing["phase_sum_s"]
+    assert phase_timing["unattributed_elapsed_s"] >= 0.0
+    assert run.attrs["provenance"]["performance"] == phase_timing
