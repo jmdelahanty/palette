@@ -742,6 +742,15 @@ analysis shell records `dish_mask_scope="recording_camera"` and
 should derive or copy one dish mask per `(recording_id, camera_serial)` and
 reuse it across all clips for that camera.
 
+For single-camera shells, `fisheye.utils.create_clipped_analysis_zarr`
+automatically discovers an unambiguous sibling training Zarr and copies
+`analysis_metadata.attrs["dish_mask"]` plus root
+`attrs["experiment_setup"]`, recording the source Zarr and copy timestamp.
+Production creation should pass `--require-dish-mask` so a missing or
+conflicting geometry fails before the shell is written. Use
+`--copy-analysis-metadata-from` when discovery is ambiguous; multi-camera
+shells require that explicit choice until a camera-keyed mask contract exists.
+
 Smoke result from 2026-05-16:
 
 ```text
