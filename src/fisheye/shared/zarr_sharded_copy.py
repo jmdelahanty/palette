@@ -14,7 +14,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 import zarr
@@ -26,15 +26,33 @@ _DESTINATION_ROOT: zarr.Group | None = None
 
 
 @dataclass(frozen=True)
+class ShardedArrayLayout:
+    """Optional target chunk/shard grid for one copied array.
+
+    The logical values are unchanged.  ``inner_chunks`` and ``outer_shards``
+    describe only the physical Zarr-v3 layout, and every requested outer shard
+    dimension is rounded up to the target inner-chunk grid.
+    """
+
+    inner_chunks: tuple[int, ...] | None = None
+    outer_shards: tuple[int, ...] | None = None
+    layout_profile: str | None = None
+
+
+@dataclass(frozen=True)
 class ShardedArrayPlan:
     path: str
     shape: tuple[int, ...]
     dtype: str
+    source_chunks: tuple[int, ...]
+    requested_inner_chunks: tuple[int, ...]
     inner_chunks: tuple[int, ...]
     row_aligned: bool
     requested_shard_rows: int | None
     effective_shard_rows: int | None
+    requested_outer_shards: tuple[int, ...] | None
     outer_shards: tuple[int, ...] | None
+    layout_profile: str | None
 
 
 def _iter_arrays(group: zarr.Group, prefix: str = "") -> Iterable[tuple[str, zarr.Array]]:
@@ -70,10 +88,45 @@ def _data_type(array: zarr.Array) -> Any:
     return getattr(metadata, "data_type", None) or array.dtype
 
 
-def _effective_shard_rows(requested: int, inner_rows: int) -> int:
-    if int(requested) <= 0 or int(inner_rows) <= 0:
-        raise ValueError("Shard and inner-chunk row counts must be positive.")
-    return int(math.ceil(int(requested) / int(inner_rows)) * int(inner_rows))
+def _normalize_grid(
+    requested: Sequence[int],
+    *,
+    shape: Sequence[int],
+    label: str,
+) -> tuple[int, ...]:
+    values = tuple(int(value) for value in requested)
+    dimensions = tuple(int(value) for value in shape)
+    if len(values) != len(dimensions):
+        raise ValueError(
+            f"{label} has {len(values)} dimensions for an array with "
+            f"{len(dimensions)} dimensions."
+        )
+    if any(value <= 0 for value in values):
+        raise ValueError(f"{label} dimensions must all be positive.")
+    return tuple(
+        min(value, max(1, dimension))
+        for value, dimension in zip(values, dimensions)
+    )
+
+
+def _aligned_outer_grid(
+    requested: Sequence[int],
+    *,
+    inner_chunks: Sequence[int],
+    shape: Sequence[int],
+) -> tuple[int, ...]:
+    requested_grid = tuple(int(value) for value in requested)
+    if len(requested_grid) != len(tuple(shape)):
+        raise ValueError(
+            "Requested outer-shard grid has "
+            f"{len(requested_grid)} dimensions for an array with {len(tuple(shape))} dimensions."
+        )
+    if any(value <= 0 for value in requested_grid):
+        raise ValueError("Requested outer-shard dimensions must all be positive.")
+    return tuple(
+        int(math.ceil(requested_value / inner_value) * inner_value)
+        for requested_value, inner_value in zip(requested_grid, inner_chunks)
+    )
 
 
 def build_sharded_copy_plan(
@@ -81,6 +134,7 @@ def build_sharded_copy_plan(
     *,
     row_count_array: str | None,
     shard_rows: int,
+    array_layouts: Mapping[str, ShardedArrayLayout] | None = None,
 ) -> tuple[ShardedArrayPlan, ...]:
     source = zarr.open_group(str(Path(source_run).expanduser()), mode="r", use_consolidated=False)
     if str(source.attrs.get("palette_run_completion_status", "")) != "complete":
@@ -92,29 +146,70 @@ def build_sharded_copy_plan(
             raise ValueError(f"Row-count array {row_count_array!r} is missing or invalid.")
         row_count = int(row_node.shape[0])
     plans: list[ShardedArrayPlan] = []
+    layouts = dict(array_layouts or {})
+    observed_paths: set[str] = set()
     for path, array in _iter_arrays(source):
+        observed_paths.add(path)
         chunks = getattr(array, "chunks", None)
         if not chunks:
             raise ValueError(f"Array {path!r} has no logical chunk contract.")
-        inner = tuple(int(value) for value in chunks)
+        source_chunks = tuple(int(value) for value in chunks)
+        layout = layouts.get(path)
+        requested_inner = (
+            source_chunks
+            if layout is None or layout.inner_chunks is None
+            else tuple(int(value) for value in layout.inner_chunks)
+        )
+        inner = _normalize_grid(
+            requested_inner,
+            shape=array.shape,
+            label=f"Requested inner-chunk grid for {path!r}",
+        )
         row_aligned = int(array.ndim) >= 1 and (
             row_count is None or int(array.shape[0]) == row_count
         )
-        effective = _effective_shard_rows(int(shard_rows), inner[0]) if row_aligned else None
+        if layout is not None and layout.outer_shards is not None and not row_aligned:
+            raise ValueError(
+                f"Array {path!r} has an outer-shard override but is not row aligned."
+            )
+        requested_outer: tuple[int, ...] | None = None
+        outer: tuple[int, ...] | None = None
+        if row_aligned:
+            requested_outer = (
+                (int(shard_rows), *inner[1:])
+                if layout is None or layout.outer_shards is None
+                else tuple(int(value) for value in layout.outer_shards)
+            )
+            outer = _aligned_outer_grid(
+                requested_outer,
+                inner_chunks=inner,
+                shape=array.shape,
+            )
+        effective = outer[0] if outer is not None else None
         plans.append(
             ShardedArrayPlan(
                 path=path,
                 shape=tuple(int(value) for value in array.shape),
                 dtype=str(array.dtype),
+                source_chunks=source_chunks,
+                requested_inner_chunks=requested_inner,
                 inner_chunks=inner,
                 row_aligned=row_aligned,
-                requested_shard_rows=int(shard_rows) if row_aligned else None,
+                requested_shard_rows=(requested_outer[0] if requested_outer else None),
                 effective_shard_rows=effective,
-                outer_shards=(effective, *inner[1:]) if row_aligned else None,
+                requested_outer_shards=requested_outer,
+                outer_shards=outer,
+                layout_profile=None if layout is None else layout.layout_profile,
             )
         )
     if not plans:
         raise ValueError("Completed source run contains no arrays.")
+    unknown_layout_paths = sorted(set(layouts) - observed_paths)
+    if unknown_layout_paths:
+        raise ValueError(
+            "Array-layout overrides reference missing source arrays: "
+            f"{unknown_layout_paths}."
+        )
     return tuple(plans)
 
 
@@ -191,6 +286,7 @@ def copy_completed_run_to_sharded(
     *,
     row_count_array: str | None,
     shard_rows: int,
+    array_layouts: Mapping[str, ShardedArrayLayout] | None = None,
     workers: int = 1,
     overwrite: bool = False,
 ) -> dict[str, Any]:
@@ -211,6 +307,7 @@ def copy_completed_run_to_sharded(
         source_path,
         row_count_array=row_count_array,
         shard_rows=int(shard_rows),
+        array_layouts=array_layouts,
     )
     source = zarr.open_group(str(source_path), mode="r", use_consolidated=False)
     destination = zarr.open_group(str(destination_path), mode="w", zarr_format=3)
@@ -282,6 +379,7 @@ def copy_completed_run_to_sharded(
             else None
         ),
         "exact_decoded_validation": True,
+        "array_layout_override_count": len(array_layouts or {}),
         "arrays": [asdict(plan) for plan in plans],
         "shards": sorted(shard_results, key=lambda item: (item["path"], item["start_row"])),
         "static_arrays": sorted(static_results, key=lambda item: item["path"]),
@@ -299,5 +397,35 @@ def copy_completed_run_to_sharded(
         ),
         "worker_ownership": report["worker_ownership"],
         "exact_decoded_validation": True,
+        "array_layout_overrides": {
+            str(path): {
+                "inner_chunks": (
+                    None if layout.inner_chunks is None else list(layout.inner_chunks)
+                ),
+                "outer_shards": (
+                    None if layout.outer_shards is None else list(layout.outer_shards)
+                ),
+                "layout_profile": layout.layout_profile,
+            }
+            for path, layout in sorted((array_layouts or {}).items())
+        },
+        "effective_overridden_array_layouts": {
+            plan.path: {
+                "source_chunks": list(plan.source_chunks),
+                "requested_inner_chunks": list(plan.requested_inner_chunks),
+                "effective_inner_chunks": list(plan.inner_chunks),
+                "requested_outer_shards": (
+                    None
+                    if plan.requested_outer_shards is None
+                    else list(plan.requested_outer_shards)
+                ),
+                "effective_outer_shards": (
+                    None if plan.outer_shards is None else list(plan.outer_shards)
+                ),
+                "layout_profile": plan.layout_profile,
+            }
+            for plan in plans
+            if plan.layout_profile is not None
+        },
     }
     return report

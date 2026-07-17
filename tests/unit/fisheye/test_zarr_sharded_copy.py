@@ -6,7 +6,10 @@ import numpy as np
 import pytest
 import zarr
 
-from fisheye.shared.zarr_sharded_copy import copy_completed_run_to_sharded
+from fisheye.shared.zarr_sharded_copy import (
+    ShardedArrayLayout,
+    copy_completed_run_to_sharded,
+)
 
 
 @pytest.mark.parametrize("workers", [1, 2])
@@ -90,3 +93,45 @@ def test_copy_completed_run_to_sharded_supports_different_track_lengths(
     assert destination.attrs["physical_storage_layout"]["eligibility"] == (
         "all_arrays_with_a_first_axis"
     )
+
+
+def test_copy_completed_run_to_sharded_applies_two_dimensional_layout_override(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "column-source"
+    destination_path = tmp_path / "column-destination"
+    source = zarr.open_group(str(source_path), mode="w", zarr_format=3)
+    source.attrs["palette_run_completion_status"] = "complete"
+    values = np.arange(70, dtype=np.float32).reshape(10, 7)
+    source.create_array("frame_angles", data=values, chunks=(5, 7))
+
+    report = copy_completed_run_to_sharded(
+        source_path,
+        destination_path,
+        row_count_array=None,
+        shard_rows=9,
+        array_layouts={
+            "frame_angles": ShardedArrayLayout(
+                inner_chunks=(3, 2),
+                outer_shards=(7, 5),
+                layout_profile="fixture.semantic_columns.v1",
+            )
+        },
+        workers=1,
+    )
+
+    destination = zarr.open_group(str(destination_path), mode="r", use_consolidated=False)
+    np.testing.assert_array_equal(destination["frame_angles"][:], values)
+    assert tuple(destination["frame_angles"].chunks) == (3, 2)
+    assert tuple(destination["frame_angles"].shards) == (9, 6)
+    plan = next(item for item in report["arrays"] if item["path"] == "frame_angles")
+    assert tuple(plan["source_chunks"]) == (5, 7)
+    assert tuple(plan["requested_inner_chunks"]) == (3, 2)
+    assert tuple(plan["requested_outer_shards"]) == (7, 5)
+    assert plan["layout_profile"] == "fixture.semantic_columns.v1"
+    persisted = destination.attrs["physical_storage_layout"]
+    assert persisted["array_layout_overrides"]["frame_angles"] == {
+        "inner_chunks": [3, 2],
+        "outer_shards": [7, 5],
+        "layout_profile": "fixture.semantic_columns.v1",
+    }
