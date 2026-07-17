@@ -185,6 +185,7 @@ def _measure_workload(
         values = _read_columns(array, rows=rows, indexes=indexes)
         durations.append(float(time.perf_counter() - started))
         decoded_return_bytes = int(values.nbytes)
+        del values
     shape = tuple(int(value) for value in array.shape)
     chunks = tuple(int(value) for value in array.chunks)
     return {
@@ -320,6 +321,7 @@ def run_benchmark(
             indexes=[names.index(name) for name in source_names],
         )
         exact = bool(np.array_equal(restored, source_values, equal_nan=True))
+        del restored
         if not exact:
             raise RuntimeError(f"Decoded-value validation failed for {candidate.name}.")
         workloads = {
@@ -335,6 +337,13 @@ def run_benchmark(
                 names=names,
                 selected_names=six_channel,
                 rows=min(rows, max(1, int(narrow_rows))),
+                repeats=repeats,
+            ),
+            "full_duration_common_three": _measure_workload(
+                array,
+                names=names,
+                selected_names=preferred,
+                rows=rows,
                 repeats=repeats,
             ),
             "bounded_full_table": _measure_workload(

@@ -61,4 +61,5 @@ def test_eye_angle_column_layout_benchmark_validates_values_by_name(
     )
     assert recommended["layout"]["chunks"] == [10, 8]
     assert recommended["workloads"]["narrow_common_three"]["channel_count"] == 3
+    assert recommended["workloads"]["full_duration_common_three"]["rows"] == 10
     assert (output_path / "report.json").is_file()

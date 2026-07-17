@@ -60,6 +60,7 @@ scripts/py -m fisheye.diagnostics.benchmark_eye_angle_column_layout \
 
 It reports physical file/byte counts, warm local read medians, estimated inner
 chunk bytes decoded for three-channel, six-channel, and bounded full-table
-workloads, and exact decoded-value equality after resolving every column by
-name. The source Zarr is always opened read-only.
-
+workloads. It also compares three named channels across the complete bounded
+duration against the complete table and checks exact decoded-value equality
+after resolving every column by name. The source Zarr is always opened
+read-only.
