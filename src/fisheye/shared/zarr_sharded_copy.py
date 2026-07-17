@@ -21,6 +21,12 @@ import zarr
 
 
 SHARDED_COPY_SCHEMA_ID = "palette.zarr_sharded_run_copy.v1"
+SHARD_POLICY_ALL_ROW_ALIGNED = "all_row_aligned"
+SHARD_POLICY_MULTI_CHUNK_CAPPED = "multi_chunk_capped"
+SHARD_POLICIES = (
+    SHARD_POLICY_ALL_ROW_ALIGNED,
+    SHARD_POLICY_MULTI_CHUNK_CAPPED,
+)
 _SOURCE_ROOT: zarr.Group | None = None
 _DESTINATION_ROOT: zarr.Group | None = None
 
@@ -53,6 +59,7 @@ class ShardedArrayPlan:
     requested_outer_shards: tuple[int, ...] | None
     outer_shards: tuple[int, ...] | None
     layout_profile: str | None
+    shard_policy: str
 
 
 def _iter_arrays(group: zarr.Group, prefix: str = "") -> Iterable[tuple[str, zarr.Array]]:
@@ -135,10 +142,16 @@ def build_sharded_copy_plan(
     row_count_array: str | None,
     shard_rows: int,
     array_layouts: Mapping[str, ShardedArrayLayout] | None = None,
+    shard_policy: str = SHARD_POLICY_ALL_ROW_ALIGNED,
 ) -> tuple[ShardedArrayPlan, ...]:
     source = zarr.open_group(str(Path(source_run).expanduser()), mode="r", use_consolidated=False)
     if str(source.attrs.get("palette_run_completion_status", "")) != "complete":
         raise ValueError("Sharded copy requires a completed immutable source run.")
+    policy = str(shard_policy)
+    if policy not in SHARD_POLICIES:
+        raise ValueError(
+            f"Unsupported shard_policy={policy!r}; expected one of {SHARD_POLICIES!r}."
+        )
     row_count: int | None = None
     if row_count_array is not None:
         row_node = source.get(str(row_count_array))
@@ -175,16 +188,38 @@ def build_sharded_copy_plan(
         requested_outer: tuple[int, ...] | None = None
         outer: tuple[int, ...] | None = None
         if row_aligned:
-            requested_outer = (
-                (int(shard_rows), *inner[1:])
-                if layout is None or layout.outer_shards is None
-                else tuple(int(value) for value in layout.outer_shards)
-            )
-            outer = _aligned_outer_grid(
-                requested_outer,
-                inner_chunks=inner,
-                shape=array.shape,
-            )
+            if layout is not None and layout.outer_shards is not None:
+                requested_outer = tuple(int(value) for value in layout.outer_shards)
+                outer = _aligned_outer_grid(
+                    requested_outer,
+                    inner_chunks=inner,
+                    shape=array.shape,
+                )
+            elif policy == SHARD_POLICY_ALL_ROW_ALIGNED:
+                requested_outer = (int(shard_rows), *inner[1:])
+                outer = _aligned_outer_grid(
+                    requested_outer,
+                    inner_chunks=inner,
+                    shape=array.shape,
+                )
+            else:
+                logical_row_chunks = (
+                    int(math.ceil(int(array.shape[0]) / int(inner[0])))
+                    if int(array.shape[0]) > 0
+                    else 0
+                )
+                if logical_row_chunks > 1:
+                    requested_outer = (int(shard_rows), *inner[1:])
+                    aligned = _aligned_outer_grid(
+                        requested_outer,
+                        inner_chunks=inner,
+                        shape=array.shape,
+                    )
+                    maximum_useful_rows = logical_row_chunks * int(inner[0])
+                    outer = (
+                        min(int(aligned[0]), int(maximum_useful_rows)),
+                        *aligned[1:],
+                    )
         effective = outer[0] if outer is not None else None
         plans.append(
             ShardedArrayPlan(
@@ -200,6 +235,7 @@ def build_sharded_copy_plan(
                 requested_outer_shards=requested_outer,
                 outer_shards=outer,
                 layout_profile=None if layout is None else layout.layout_profile,
+                shard_policy=policy,
             )
         )
     if not plans:
@@ -287,6 +323,7 @@ def copy_completed_run_to_sharded(
     row_count_array: str | None,
     shard_rows: int,
     array_layouts: Mapping[str, ShardedArrayLayout] | None = None,
+    shard_policy: str = SHARD_POLICY_ALL_ROW_ALIGNED,
     workers: int = 1,
     overwrite: bool = False,
 ) -> dict[str, Any]:
@@ -308,6 +345,7 @@ def copy_completed_run_to_sharded(
         row_count_array=row_count_array,
         shard_rows=int(shard_rows),
         array_layouts=array_layouts,
+        shard_policy=shard_policy,
     )
     source = zarr.open_group(str(source_path), mode="r", use_consolidated=False)
     destination = zarr.open_group(str(destination_path), mode="w", zarr_format=3)
@@ -319,7 +357,7 @@ def copy_completed_run_to_sharded(
     for plan in plans:
         source_array = source[plan.path]
         destination_array = _create_destination_array(source_array, destination, plan)
-        if plan.row_aligned:
+        if plan.outer_shards is not None:
             step = int(plan.effective_shard_rows or 0)
             for start in range(0, int(plan.shape[0]), step):
                 tasks.append((plan.path, start, min(start + step, int(plan.shape[0]))))
@@ -364,12 +402,19 @@ def copy_completed_run_to_sharded(
         "destination_run": str(destination_path),
         "row_count_array": None if row_count_array is None else str(row_count_array),
         "requested_shard_rows": int(shard_rows),
+        "shard_policy": str(shard_policy),
         "effective_shard_rows": effective_values,
         "worker_count": worker_count,
         "worker_task_count": len(tasks),
         "worker_ownership": "one_complete_nonoverlapping_outer_row_shard_per_array_task",
         "array_count": len(plans),
         "row_aligned_array_count": sum(1 for plan in plans if plan.row_aligned),
+        "sharded_array_count": sum(
+            1 for plan in plans if plan.outer_shards is not None
+        ),
+        "regular_array_count": sum(
+            1 for plan in plans if plan.outer_shards is None
+        ),
         "static_array_count": sum(1 for plan in plans if not plan.row_aligned),
         "decoded_bytes_copied": decoded_bytes_copied,
         "duration_seconds": duration_seconds,
@@ -389,11 +434,20 @@ def copy_completed_run_to_sharded(
         "schema_id": SHARDED_COPY_SCHEMA_ID,
         "layout": "zarr_v3_indexed_sharding",
         "requested_outer_shard_rows": int(shard_rows),
+        "shard_policy": str(shard_policy),
         "effective_outer_shard_rows": effective_values,
         "eligibility": (
-            "all_arrays_with_a_first_axis"
-            if row_count_array is None
-            else f"first_axis_matches:{row_count_array}"
+            (
+                "all_arrays_with_multiple_logical_row_chunks"
+                if row_count_array is None
+                else f"multiple_logical_row_chunks_and_first_axis_matches:{row_count_array}"
+            )
+            if str(shard_policy) == SHARD_POLICY_MULTI_CHUNK_CAPPED
+            else (
+                "all_arrays_with_a_first_axis"
+                if row_count_array is None
+                else f"first_axis_matches:{row_count_array}"
+            )
         ),
         "worker_ownership": report["worker_ownership"],
         "exact_decoded_validation": True,

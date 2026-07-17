@@ -7,6 +7,7 @@ import pytest
 import zarr
 
 from fisheye.shared.zarr_sharded_copy import (
+    SHARD_POLICY_MULTI_CHUNK_CAPPED,
     ShardedArrayLayout,
     copy_completed_run_to_sharded,
 )
@@ -135,3 +136,38 @@ def test_copy_completed_run_to_sharded_applies_two_dimensional_layout_override(
         "outer_shards": [7, 5],
         "layout_profile": "fixture.semantic_columns.v1",
     }
+
+
+def test_copy_completed_run_to_sharded_supports_small_run_columnar_policy(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "columnar-source"
+    destination_path = tmp_path / "columnar-destination"
+    source = zarr.open_group(str(source_path), mode="w", zarr_format=3)
+    source.attrs["palette_run_completion_status"] = "complete"
+    long_values = np.arange(10, dtype=np.float32)
+    short_values = np.arange(2, dtype=np.int16)
+    source.create_array("long_values", data=long_values, chunks=(2,))
+    source.create_array("short_values", data=short_values, chunks=(2,))
+
+    report = copy_completed_run_to_sharded(
+        source_path,
+        destination_path,
+        row_count_array=None,
+        shard_rows=100,
+        shard_policy=SHARD_POLICY_MULTI_CHUNK_CAPPED,
+        workers=1,
+    )
+
+    destination = zarr.open_group(
+        str(destination_path), mode="r", use_consolidated=False
+    )
+    assert tuple(destination["long_values"].chunks) == (2,)
+    assert tuple(destination["long_values"].shards) == (10,)
+    assert destination["short_values"].shards is None
+    assert report["sharded_array_count"] == 1
+    assert report["regular_array_count"] == 1
+    assert report["shard_policy"] == SHARD_POLICY_MULTI_CHUNK_CAPPED
+    assert destination.attrs["physical_storage_layout"]["eligibility"] == (
+        "all_arrays_with_multiple_logical_row_chunks"
+    )

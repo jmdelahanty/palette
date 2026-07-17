@@ -63,3 +63,42 @@ keypoint, and refined-mask surfaces contain enough objects that statting every
 payload takes minutes on PRFS; that should be a scheduled infrastructure audit,
 while a metadata-only expected-object mode would be more appropriate for quick
 interactive triage.
+
+## Bout small-run benchmark and retained Zarr authority
+
+The follow-up decision is to keep the per-recording bout product authoritative
+inside the analysis Zarr. Although Parquet would be efficient for this small
+table, the run-local completion state, source lineage, parameters, validation,
+and FileGlancer discovery are valuable enough to retain one coherent Zarr run.
+Parquet remains the regenerated cross-recording/query representation.
+
+A read-only storage-only benchmark compared the completed source with the
+production 262,144-row capped-shard profile. Both candidates preserved logical
+chunks and passed path, shape, dtype, and representative decoded-value parity;
+the source metadata digest was unchanged.
+
+| Measure | Regular source layout | Capped small-run shards |
+| --- | ---: | ---: |
+| Payload files | 1,359 | 110 |
+| Total apparent bytes | 12.52 MiB | 12.59 MiB |
+| Write time | 4.15 s | 3.17 s |
+| Full-table scan | 0.68 s | 0.55 s |
+| Three 1,024-row windows per eligible array | 0.39 s | 0.60 s |
+
+The object-count improvement is decisive, but the bounded-window result is a
+real tradeoff rather than a universal read-speed win. The small-run profile
+therefore shards only arrays spanning multiple logical row chunks, caps the
+outer shard to the complete useful row grid, and leaves single-chunk metadata
+and visualization arrays regular.
+
+The production materializer publishes a new named candidate through the shared
+atomic publisher and deliberately leaves `latest` and `latest_complete`
+unchanged. Promotion is a separate decision after inspecting the persisted
+report. Reproduce the disposable benchmark with:
+
+```bash
+scripts/py -m fisheye.diagnostics.benchmark_columnar_zarr_sharding \
+  /path/to/analysis.zarr/analysis/bout_kinematics_runs/SOURCE_RUN \
+  --output-root /tmp/bout-small-run-benchmark \
+  --shard-rows 262144
+```
