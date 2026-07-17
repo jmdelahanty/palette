@@ -102,8 +102,8 @@ EYE_ANGLE_LAYOUT_CHOICES = (EYE_ANGLE_LAYOUT_HIERARCHICAL_V1, EYE_ANGLE_LAYOUT_C
 EYE_ANGLE_LAYOUT_DEFAULT = EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2
 EYE_ANGLE_COLUMN_ORDER_SCHEMA_ID = "palette.eye_angle_semantic_column_order.v1"
 EYE_ANGLE_COLUMN_ORDER_PROFILE = "semantic_bundles_v1"
-EYE_ANGLE_DENSE_CHUNK_ROWS = 2_048
-EYE_ANGLE_DENSE_CHUNK_COLUMNS = 8
+EYE_ANGLE_DENSE_CHUNK_ROWS = 4_096
+EYE_ANGLE_DENSE_CHUNK_COLUMNS = 16
 MAJOR_AXIS_MARGINAL_DOT_THRESHOLD = 0.1
 
 _BASE_ROI_RESULT_FIELDS: tuple[tuple[str, str], ...] = (
@@ -1588,6 +1588,25 @@ _SEMANTIC_ANGLE_BASE_BUNDLES: tuple[tuple[str, ...], ...] = (
     ("left_gaze_deg", "right_gaze_deg", "vergence_gaze_signed_deg"),
 )
 
+EYE_ANGLE_PRIMARY_INTERACTIVE_CHANNELS: tuple[str, ...] = (
+    "left_eye_angle_deg",
+    "right_eye_angle_deg",
+    "vergence_eye_angle_deg",
+    "left_eye_angle_deg_smoothed",
+    "right_eye_angle_deg_smoothed",
+    "vergence_eye_angle_deg_smoothed",
+    "left_gaze_signed_deg",
+    "right_gaze_signed_deg",
+    "vergence_gaze_deg",
+    "left_gaze_signed_deg_smoothed",
+    "right_gaze_signed_deg_smoothed",
+    "vergence_gaze_deg_smoothed",
+    "left_nasal_gaze_deg",
+    "right_nasal_gaze_deg",
+    "mean_eye_vergence_gaze_deg",
+    "mean_eye_vergence_gaze_deg_smoothed",
+)
+
 _SEMANTIC_ANGLE_KINEMATIC_BUNDLES: tuple[tuple[str, ...], ...] = (
     ("left_speed_deg_s", "right_speed_deg_s", "vergence_speed_deg_s"),
     (
@@ -1633,7 +1652,12 @@ def semantic_angle_channel_order(
     if width <= 0:
         raise ValueError("Eye-angle semantic block width must be positive.")
     available = set(str(name) for name in channel_names)
-    bundles: list[tuple[str, ...]] = []
+    primary = tuple(
+        name for name in EYE_ANGLE_PRIMARY_INTERACTIVE_CHANNELS if name in available
+    )
+    bundles: list[tuple[str, ...]] = (
+        [primary] if 2 <= len(primary) <= width else []
+    )
     for base_bundle in _SEMANTIC_ANGLE_BASE_BUNDLES:
         for variant in ("raw", "smoothed", "delta", "delta_smoothed"):
             bundle = tuple(
@@ -2089,6 +2113,9 @@ def _write_compact_dense_layout(
                 ],
                 "effective_frame_chunks": [
                     int(value) for value in run_group["frame_angles"].chunks
+                ],
+                "first_angle_chunk_channels": angle_names[
+                    : int(dense_chunk_columns)
                 ],
             },
             "compact_dense_v2_note": (

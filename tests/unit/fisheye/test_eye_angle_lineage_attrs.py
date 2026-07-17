@@ -974,10 +974,15 @@ def test_eye_angle_compact_dense_writer_packs_logical_tables(tmp_path) -> None:
         "profile": eye_angle_analysis.EYE_ANGLE_COLUMN_ORDER_PROFILE,
         "logical_lookup": "angle_channel_index/name",
         "physical_index_semantics": False,
-        "semantic_bundle_width": 8,
-        "requested_dense_inner_chunks": [2048, 8],
+        "semantic_bundle_width": 16,
+        "requested_dense_inner_chunks": [4096, 16],
         "effective_roi_chunks": [2, 3],
         "effective_frame_chunks": [3, 3],
+        "first_angle_chunk_channels": [
+            "heading_deg",
+            "left_eye_angle_deg",
+            "left_gaze_deg",
+        ],
     }
 
     tables = load_eye_angle_run_tables(root, run_name="latest")
@@ -1015,3 +1020,21 @@ def test_semantic_angle_order_keeps_common_triplets_inside_column_blocks() -> No
     for triplet in triplets:
         indexes = [ordered.index(name) for name in triplet]
         assert len({index // 8 for index in indexes}) == 1
+
+
+def test_semantic_angle_order_starts_with_primary_interactive_chunk() -> None:
+    names = list(eye_angle_analysis.EYE_ANGLE_PRIMARY_INTERACTIVE_CHANNELS)
+    names.extend(
+        (
+            "heading_deg",
+            "left_eye_angle_delta_deg",
+            "right_eye_angle_delta_deg",
+            "vergence_eye_angle_delta_deg",
+        )
+    )
+
+    ordered = eye_angle_analysis.semantic_angle_channel_order(names)
+
+    assert ordered[:16] == list(
+        eye_angle_analysis.EYE_ANGLE_PRIMARY_INTERACTIVE_CHANNELS
+    )

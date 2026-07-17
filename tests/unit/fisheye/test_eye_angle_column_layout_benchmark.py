@@ -54,12 +54,18 @@ def test_eye_angle_column_layout_benchmark_validates_values_by_name(
     assert report["benchmarked_rows"] == 10
     assert len(report["candidates"]) == 3
     assert all(item["exact_values_by_name"] for item in report["candidates"])
+    narrow = next(
+        item
+        for item in report["candidates"]
+        if item["candidate"]["name"] == "narrow_semantic_8"
+    )
     recommended = next(
         item
         for item in report["candidates"]
-        if item["candidate"]["name"] == "recommended_semantic_8"
+        if item["candidate"]["name"] == "recommended_semantic_16"
     )
-    assert recommended["layout"]["chunks"] == [10, 8]
-    assert recommended["workloads"]["narrow_common_three"]["channel_count"] == 3
+    assert narrow["layout"]["chunks"] == [10, 8]
+    assert narrow["workloads"]["narrow_common_three"]["channel_count"] == 3
+    assert recommended["candidate"]["chunks"] == (4096, 16)
     assert recommended["workloads"]["full_duration_common_three"]["rows"] == 10
     assert (output_path / "report.json").is_file()

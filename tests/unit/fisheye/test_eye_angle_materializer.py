@@ -133,8 +133,8 @@ def test_plan_is_read_only_and_selects_only_resolved_geometry_and_keypoints(
     plan = result["plan"]
     assert plan["row_count"] == 4
     assert plan["frame_count"] == 4
-    assert plan["angle_chunk_rows"] == 2048
-    assert plan["angle_chunk_columns"] == 8
+    assert plan["angle_chunk_rows"] == 4096
+    assert plan["angle_chunk_columns"] == 16
     assert plan["output_shard_rows"] == 131072
     assert plan["angle_shard_columns"] == 32
     assert plan["fps_source"] == "cli_override"

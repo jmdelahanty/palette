@@ -48,13 +48,13 @@ CANDIDATES = (
         shards=(262_144, -1),
     ),
     LayoutCandidate(
-        name="recommended_semantic_8",
+        name="narrow_semantic_8",
         semantic_order=True,
         chunks=(2_048, 8),
         shards=(131_072, 32),
     ),
     LayoutCandidate(
-        name="balanced_semantic_16",
+        name="recommended_semantic_16",
         semantic_order=True,
         chunks=(4_096, 16),
         shards=(131_072, 32),

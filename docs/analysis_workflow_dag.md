@@ -223,7 +223,7 @@ The executor preserves these large-recording constraints:
   Completed regular output is converted to indexed shards with exact decoded
   validation before checksum-verified atomic publication. Compact
   `roi_angles` and `frame_angles` use semantic name-local column order,
-  approximately `(2048, 8)` inner chunks, and `(131072, 32)` outer shards;
+  approximately `(4096, 16)` inner chunks, and `(131072, 32)` outer shards;
   their requested and effective grids are persisted in materialization
   provenance;
 - subject shape reads refined masks from the authoritative Zarr without

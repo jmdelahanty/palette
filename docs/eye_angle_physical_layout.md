@@ -24,7 +24,7 @@ New compact eye-angle runs use
 - remaining support, compatibility, version, and derivative channels fill the
   unused positions deterministically;
 - `roi_angles` and `frame_angles` use inner chunks of approximately
-  `(2048 rows, 8 columns)`;
+  `(4096 rows, 16 columns)`;
 - materialized production runs use outer shards of approximately
   `(131072 rows, 32 columns)`.
 
@@ -34,10 +34,18 @@ are recorded in `physical_storage_layout`, `node_local_materialization`, and
 the materializer report. Other arrays in an eye-angle run retain their normal
 layout.
 
-This layout means a three-series plot typically touches one 8-column chunk per
+This layout means a three-series plot typically touches one 16-column chunk per
 row block instead of decompressing all 141 columns. It does not make the
 canonical matrix a user-facing table: the name index and the guided
 eye-angle catalog remain the interface.
+
+The first 16-column angle chunk is reserved for the frame-available interactive
+core: raw and smoothed left/right/vergence eye-frame angles; raw and smoothed
+left/right/vergence body-relative gaze; raw left/right/mean nasal gaze; and
+smoothed mean nasal-gaze convergence. Heading remains in the body-frame support
+contract because `heading_deg` is not populated on the dense `frame_angles`
+axis. Subsequent chunks contain deltas, derivatives, alternative
+representations, and compatibility channels.
 
 ## Safe writing
 
