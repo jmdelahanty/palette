@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-17: benchmark plan superseded by measured diagnostics and the storage lifecycle policy. -->
+
 # Zarr Transfer Benchmark Plan
 
 ## Purpose

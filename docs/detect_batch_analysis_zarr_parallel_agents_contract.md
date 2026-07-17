@@ -26,7 +26,7 @@ Out of scope:
 
 - Batch runner: `src/fisheye/utils/run_detections_batch.py`
 - Registry-backed detect runner: `src/fisheye/utils/run_detect_with_registry_model.py`
-- Analysis archive contract: `docs/analysis_zarr_creation_contract.md`
+- Analysis archive contract: `docs/recording_analysis_pipeline_contract.md`
 - Recording pipeline contract: `docs/recording_analysis_pipeline_contract.md`
 - Cluster submission wrapper: `scripts/submit_detect_batches_bsub.sh`
 - Operator guide baseline: `docs/cluster_batching_guide.md`

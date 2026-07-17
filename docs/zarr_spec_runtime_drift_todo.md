@@ -85,7 +85,7 @@ Cross-cutting string/text encoding policy and migration is tracked separately in
 ## Phase 5: Doc alignment and downstream handoff
 
 - [ ] Update all docs that imply a single canonical root shape:
-  - `docs/analysis_zarr_creation_contract.md`
+  - `docs/recording_analysis_pipeline_contract.md`
   - `docs/zarr_split_policy.md`
   - any operator runbooks referencing required groups
 - [ ] Publish a short migration note for external consumers (`crimson`, etc.) describing profile-aware expectations.

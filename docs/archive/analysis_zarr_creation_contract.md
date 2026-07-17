@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-17: superseded by recording_analysis_pipeline_contract.md. -->
+
 # Analysis Zarr Creation Contract (Proposed)
 <!-- contract-meta
 version: 1
@@ -153,7 +155,7 @@ Omit `--apply` for the default dry-run plan.
 Registry scans extract this surface into `acquisition_video_streams` and expose
 `recording_crop_video_available_current` for filesystem-free discovery of
 recordings with acquisition crop video. See
-[`docs/diagnostics/acquisition_crop_video_integration_2026-06-17.md`](diagnostics/acquisition_crop_video_integration_2026-06-17.md)
+[`docs/diagnostics/acquisition_crop_video_integration_2026-06-17.md`](../diagnostics/acquisition_crop_video_integration_2026-06-17.md)
 for the current integration state and next-step recommendations.
 
 ### Failure semantics

@@ -383,7 +383,7 @@ demonstrates repeated need for denormalized parameter columns.
   reference for all stimulus types
 - `src/fisheye/docs/zarr_structure.md` -- where protocol_json lives in zarr
 - `docs/registry_query_todo.md` -- existing query CLI status
-- `docs/provenance_todo.md` -- provenance extraction pipeline
+- `docs/zarr_run_completion_contract.md` -- active provenance/completion contract
 - `src/fisheye/registry/db.py` -- registry schema and `_extract_protocol`
 - `src/fisheye/registry/query.py` -- query CLI
 - `src/fisheye/analysis/import_stimulus_to_zarr.py` -- h5 -> zarr import

@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-17: implemented decisions moved to the schema matrix, layout inventory, and lifecycle policy. -->
+
 # Analysis Zarr Object-Count Schema Direction
 
 ## Purpose
@@ -12,7 +14,7 @@ new schemas and v2 rewrites.
 
 For the current writer-by-writer compact-layout status and migration priority
 list, see
-[analysis_writer_compact_layout_inventory.md](analysis_writer_compact_layout_inventory.md).
+[analysis_writer_compact_layout_inventory.md](../analysis_writer_compact_layout_inventory.md).
 
 ## Current Audit Snapshot
 
@@ -86,7 +88,7 @@ about `109,632` regular probability chunk objects, even though internal Zstd
 compression reduces a representative `39.55 GiB` logical clip tensor to
 `168.60 MiB` of chunk payloads. The proposed indexed-sharding benchmark and
 parallel-write constraints are recorded in
-[`diagnostics/sleepyfish_subject_mask_storage_sharding_strategy_2026-07-10.md`](diagnostics/sleepyfish_subject_mask_storage_sharding_strategy_2026-07-10.md).
+[`diagnostics/sleepyfish_subject_mask_storage_sharding_strategy_2026-07-10.md`](../diagnostics/sleepyfish_subject_mask_storage_sharding_strategy_2026-07-10.md).
 
 ## Main Anti-Patterns
 

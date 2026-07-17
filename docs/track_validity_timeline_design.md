@@ -430,8 +430,8 @@ multiple simultaneous reasons become common, add bitmask fields later.
 
 ## Related Docs
 
-- [`coverage_unification_todo.md`](./coverage_unification_todo.md)
+- [`coverage_unification_todo.md`](archive/coverage_unification_todo.md)
 - [`single_subject_per_arena_tracking_contract.md`](./single_subject_per_arena_tracking_contract.md)
-- [`track_kinematics_bout_status.md`](./track_kinematics_bout_status.md)
+- [`kinematics_zarr_access_guide.md`](./kinematics_zarr_access_guide.md)
 - [`plot_visualization_artifact_contract.md`](./plot_visualization_artifact_contract.md)
 - [`tracking_unassigned_row_policy.md`](./tracking_unassigned_row_policy.md)

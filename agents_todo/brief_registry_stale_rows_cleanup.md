@@ -8,7 +8,7 @@ dry-run-default tool and runs ONLY the dry run against the real registry; the
 maintainer runs `--execute` from their own session.
 Co-author trailer: `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
 
-**Read first:** `HANDOFF_2026-07-05.md` operating notes;
+**Read first:** `docs/archive/HANDOFF_2026-07-05.md` operating notes;
 `docs/diagnostics/detect_review_pointer_census_2026-07-06.md` (the row inventory
 this cleans); `docs/registry_data_governance_policy.md` (authority model — registry
 rows "may be repaired, rebuilt, normalized, or refreshed as indexes", and the

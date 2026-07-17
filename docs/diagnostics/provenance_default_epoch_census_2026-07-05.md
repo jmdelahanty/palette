@@ -4,8 +4,8 @@
 status: implemented
 created: 2026-07-05
 owner: jeremy
-related: docs/provenance_finalization_enforcement_design.md,
-         docs/provenance_enforcement_roadmap.md,
+related: docs/archive/provenance_finalization_enforcement_design.md,
+         docs/archive/provenance_enforcement_roadmap.md,
          agents_todo/brief_review_remediation_wave_2026-07-05.md
 -->
 

@@ -109,9 +109,16 @@ Useful outputs:
   incomplete opted-in runs. This is acceptable while a job is running, but
   should be investigated if the job is finished.
 
-## Current Limitation
+## Physical Publication
 
-This contract is attr-based and protects default resolution, registry
-completion, and diagnostics. It does not yet implement physical atomic
-`<run>.partial` to `<run>` renames. That future hardening would reduce the
-chance of consumers seeing a partially-populated group by explicit path.
+The completion attributes remain the generic compatibility contract for every
+run family. Hardened analysis materializers additionally use
+`palette.atomic_run_group_publisher` version 1: compute in node-local storage,
+copy to a hidden same-parent sibling, verify the physical inventory, atomically
+rename the sibling to the final run name, mark completion, update pointers, and
+roll back the target and parent attributes after any failure.
+
+Readers must still enforce completion because historical and non-materialized
+writers may use only the attr contract. Atomic installation prevents a new
+production analysis run from becoming visible under its final path while it is
+being populated; completion controls whether default resolution may select it.

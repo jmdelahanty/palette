@@ -5,7 +5,7 @@
 **Do NOT push or merge — the commander verifies and merges.**
 Co-author trailer: `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
 
-**Read first:** `HANDOFF_2026-07-05.md` operating notes;
+**Read first:** `docs/archive/HANDOFF_2026-07-05.md` operating notes;
 `docs/diagnostics/detect_review_pointer_recensus_2026-07-07.md` (the gate
 evidence). Ground rules: local `sun` is ground truth; fresh worktree on
 `agent/detect-review-reader-retirement` from CURRENT `sun`; env

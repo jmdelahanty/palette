@@ -14,6 +14,10 @@ This document is the short current-state contract. Deeper design notes and TODOs
 remain useful, but operator/query behavior should be judged against this file
 first.
 
+The canonical family-by-family analytics schema, resolver, axis, layout, and
+publication index is
+[analytics_storage_schema_matrix.md](analytics_storage_schema_matrix.md).
+
 For a beginner-facing explanation of the coordinate systems, formulas, and
 behavioral analytics used by these stages, start with
 [`analytics_math_primer.md`](analytics_math_primer.md).
@@ -274,7 +278,7 @@ When reviewing new pipeline work, ask:
 - [derived_analysis_run_contract.md](derived_analysis_run_contract.md)
 - [segmentation_pipeline_step_todo.md](segmentation_pipeline_step_todo.md)
 - [subject_mask_refinement_todo.md](subject_mask_refinement_todo.md)
-- [subject_mask_stage_unification_todo.md](subject_mask_stage_unification_todo.md)
+- [subject_mask_stage_unification_todo.md](archive/subject_mask_stage_unification_todo.md)
 - [subject_shape_runs_contract.md](subject_shape_runs_contract.md)
 - [body_frame_contract.md](body_frame_contract.md)
 - [body_spline_tail_anchor_design.md](body_spline_tail_anchor_design.md)

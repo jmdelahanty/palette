@@ -1160,8 +1160,8 @@ use `[128, 1, 348, 348]`. The default modern bitpacked cache policy is
 `(min(512, n_rois), min(4, C), H, ceil(W/8))`, so a 512x512 four-component cache
 uses chunks `[512, 4, 512, 64]`.
 Use `scripts/py -m fisheye.utils.materialize_refined_subject_mask_store` to
-dry-run, recreate, refresh, or delete the dense `masks_roi` compatibility cache
-for compact refined-subject runs. The same utility refreshes compact mirrors
+dry-run, create, or repair the dense authoritative `masks_roi` surface for
+historical compact-only refined-subject runs. The same utility refreshes compact mirrors
 from edited dense masks: `--refresh-bitpacked --components <name> --rows <idx>`
 updates fixed-size bitpacked row/channel cells, while `--refresh-rle
 --components <name>` rebuilds selected component RLE groups after the edit path
@@ -1641,6 +1641,11 @@ historical flat acceleration arrays only for older archives.
 
 Track-level arrays remain unchanged between online and offline runs; only the root-level chaser metrics are added for offline runs.
 
+Current run attrs include `schema_id = "analysis.track_kinematics_runs"`,
+`schema_version = 1`, `method = "track_kinematics"`,
+`method_version = "track_kinematics.v1"`, `row_axis = "track_samples"`, and
+exact `source_refs` for tracking, keypoint, and refined-keypoint inputs.
+
 ### `analysis/swim_bout_runs/`
 
 Bout segmentation candidates derived from track-kinematics speed traces.
@@ -1857,6 +1862,11 @@ the measurement logic used.
 
 **Structure**: `analysis/bout_kinematics_runs/<run_name>/`
 
+The default physical layout is `compact_tabular_v2`. Logical movement,
+heading, and eye-gaze tables are resolved through
+`fisheye.analysis.bout_kinematics_io`; the hierarchical paths below describe
+the compatibility layout and logical table names, not a required on-disk tree.
+
 **Run Attributes**:
 - `schema_id`: `"analysis.bout_kinematics_runs"`
 - `schema_version`: Current schema is `7`
@@ -2029,6 +2039,12 @@ Eye angle analysis results:
 - Per-ROI and per-frame eye-angle metrics
 - QA masks and quality indicators
 - `reason_codes` for data quality classification
+- The default physical layout is `compact_dense_v2`: comprehensive
+  `roi_angles` and `frame_angles` matrices plus a name index. Current
+  production storage uses semantic channel order, approximately `(4096, 16)`
+  inner chunks and `(131072, 32)` outer shards; consumers resolve named
+  channels through `fisheye.analysis.eye_angle_io` rather than persisting
+  numeric column positions.
 - Run attrs: `schema_id = "analysis.eye_angle_runs"`, `schema_version = 5`,
   `method = "ellipse_and_centroid_eye_angles"`,
   `method_version = "eye_angle_analysis.v5"`,
@@ -2106,7 +2122,7 @@ Eye angle analysis results:
 
 ### `analysis/subject_shape_runs/`
 
-Draft deterministic derived analysis stage for biological shape outputs
+Active deterministic derived analysis stage for biological shape outputs
 computed from canonical refined subject masks.
 
 **Structure**: `analysis/subject_shape_runs/<run_name>/`
@@ -2117,12 +2133,12 @@ Expected source:
 - optional refined-subject mask-local geometry primitives
 - optional keypoint, heading, tracking, or temporal context inputs
 
-Expected run attrs:
+Current run attrs:
 
 - `schema_id`: `"analysis.subject_shape_runs"`
-- `schema_version`
-- `method`
-- `method_version`
+- `schema_version`: `3`
+- `method`: the declared subject-shape method
+- `method_version`: current implementation version `10`
 - `created_at_utc`
 - `row_axis`: initially `"refined_subject_mask_rows"`
 - `source_refs`: exact input runs and paths
@@ -2401,6 +2417,13 @@ definitions and `docs/stimulus_response_implementation_plan.md` for design
 decisions.
 
 **Structure**: `analysis/stimulus_response_runs/<run_name>/`
+
+Schema `palette.stimulus_response` version 2 defaults to
+`compact_tabular_v2`, with summary, bout, window, and trial tables resolved by
+`fisheye.analysis.stimulus_response_io`. The hierarchical groups below are the
+explicit compatibility/debug layout; compact runs intentionally omit dense
+per-frame/time-series copies that can be reconstructed from exact upstream
+sources.
 
 **Run Attributes**:
 - `provenance`: Stage provenance contract (`palette_stage_provenance`)

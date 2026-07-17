@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-17: durable guidance merged into cross_recording_analytics_export_design.md. -->
+
 # Analytics Query Layer Design
 <!-- design-meta
 status: draft
@@ -9,7 +11,7 @@ without weakening the Zarr-based archive and real-time visualization model.
 
 This note is intentionally architectural. The more detailed export schema draft
 lives in
-[cross_recording_analytics_export_design.md](cross_recording_analytics_export_design.md).
+[cross_recording_analytics_export_design.md](../cross_recording_analytics_export_design.md).
 
 ## Problem
 

@@ -9,7 +9,7 @@ scope: cross-recording swim-bout collections containing contours, trajectories,
 depends_on: docs/behavior_event_analysis_design_decision.md,
   docs/stable_identity_incremental_materialization_decision.md,
   docs/dataset_reporting_contract.md,
-  docs/zarr_parquet_sidecar_exports_design.md
+  docs/cross_recording_analytics_export_design.md
 -->
 
 ## Decision Summary

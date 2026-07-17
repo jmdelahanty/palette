@@ -959,7 +959,7 @@ Importer failures should be recoverable:
 - `docs/cluster_batching_guide.md` defines current cluster batching guidance.
 - `docs/zarr_storage_lifecycle_policy.md` defines storage-tier and archival
   policy.
-- `docs/analytics_query_layer_design.md` defines how exported analytics should
+- `docs/cross_recording_analytics_export_design.md` defines how exported analytics should
   query registry-selected Zarr archives and Parquet products.
 
 This document fills the gap between cluster compute and canonical Zarr mutation.

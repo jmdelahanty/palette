@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-17: completed/superseded implementation checklist. -->
+
 # Analysis Zarr Creation Split TODO
 
 Purpose: track the implementation steps to split analysis archive creation/provenance from `detect_yolo`, while keeping migration-safe, operator-first behavior.

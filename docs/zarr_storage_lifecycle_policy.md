@@ -273,7 +273,8 @@ Implications:
 - small scalar metrics should eventually be audited for packing/aggregation
 
 For analysis-run schema direction specifically, see
-`docs/analysis_zarr_object_count_schema_direction.md`. That note covers the
+`docs/analytics_storage_schema_matrix.md`. The dated measurements in
+`docs/archive/analysis_zarr_object_count_schema_direction.md` cover the
 schema-level object-count issue: parameter-sweep fanout, representation/alias
 materialization, and component-per-group metric mirrors. Those patterns can
 create many `zarr.json` metadata objects even when chunking/sharding choices are
@@ -301,9 +302,10 @@ revisited after a transfer-artifact benchmark exists.
 ## Cluster / Network Storage Workflow
 
 For cluster jobs, avoid streaming many small Zarr chunk writes directly over
-network storage. The preferred pattern is to write complete derived run groups
-on node-local scratch, pack them, transfer the packed artifact, and promote the
-complete run group near the destination archive.
+network storage. The production same-filesystem pattern is to write complete
+derived run groups on node-local scratch, copy them to a hidden sibling near the
+destination, validate that copy, and atomically rename it. Packed artifacts are
+reserved for cross-filesystem transfer or archive movement.
 
 Recommended flow:
 
@@ -311,13 +313,12 @@ Recommended flow:
    practical.
 2. Compute outputs into a local scratch Zarr run group.
 3. Validate the local run group before transfer.
-4. Pack the run group as a transfer artifact, preferably `tar.zst`, with a
-   manifest and checksums.
-5. Transfer the packed artifact over the network.
-6. Unpack into a staging path on the destination side, near the canonical Zarr.
-7. Validate the unpacked staging run group.
-8. Promote the complete run group into the destination hierarchy with an atomic
-   rename when the filesystem supports it.
+4. Copy the run group to a hidden same-parent sibling while holding the
+   per-recording publication lock.
+5. Validate the hidden copy by physical inventory and the family validator.
+6. Atomically rename it into the final destination path.
+7. Mark the installed run complete and update reader-visible pointers.
+8. Roll back the installed run and parent attrs if any post-rename step fails.
 9. Update small metadata surfaces last, such as `latest` attrs and consolidated
    metadata.
 
@@ -331,11 +332,16 @@ other shared storage. It also keeps mutable Dask writes on local scratch, where
 they can follow the chunk-ownership safety rules in
 `docs/dask_zarr_write_safety.md`.
 
-Prefer this:
+Prefer this for same-filesystem publication:
 
 ```text
-local scratch Zarr run -> validate -> tar.zst -> transfer -> stage -> validate -> atomic promote
+local scratch Zarr run -> validate -> hidden sibling -> verify -> atomic rename -> complete/pointers
 ```
+
+For cross-filesystem transfer or offline archive movement, package the
+validated run as `tar.zst` with a manifest and checksums, transfer it, unpack to
+a destination-side staging path, validate again, and then use the same atomic
+promotion rule.
 
 Avoid this for bulk outputs:
 
@@ -439,7 +445,7 @@ Guardrails:
   stores if canonical unified subject-mask data is the future
 - keep transfer-only optimizations separate from the mutable working-store path
 5. Use the transfer benchmark runbook in
-   `docs/zarr_transfer_benchmark_plan.md` to compare raw vs packed vs sharded
+   the historical `docs/archive/zarr_transfer_benchmark_plan.md` to compare raw vs packed vs sharded
    export layouts.
    - Prototype utility:
      `scripts/py -m fisheye.utils.export_sharded_zarr_clone <source>.zarr --dest <dest>.zarr --policy <policy> --apply`

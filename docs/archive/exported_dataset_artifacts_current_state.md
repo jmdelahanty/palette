@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-17: dated /nvme1 inventory superseded by the shared /groups export contract. -->
+
 # Exported Dataset Artifacts Current State
 <!-- doc-meta
 status: current_state
@@ -9,9 +11,9 @@ Purpose: give collaborators a practical map of what exists under
 current cross-recording exported analytics artifacts.
 
 This is a README-style current-state document. It does not replace the stage
-contracts in [`src/fisheye/docs/zarr_structure.md`](../src/fisheye/docs/zarr_structure.md)
+contracts in [`src/fisheye/docs/zarr_structure.md`](../../src/fisheye/docs/zarr_structure.md)
 or the export design in
-[`cross_recording_analytics_export_design.md`](cross_recording_analytics_export_design.md).
+[`cross_recording_analytics_export_design.md`](../cross_recording_analytics_export_design.md).
 
 ## Authority Model
 
@@ -122,7 +124,7 @@ This file is the first thing to inspect for a recording. It usually contains:
 - optional `preflight` status;
 - optional repair/migration notes, especially for video-only recordings.
 
-See [`recording_manifest_contract.md`](recording_manifest_contract.md) for the
+See [`recording_manifest_contract.md`](../recording_manifest_contract.md) for the
 contracted fields and schema-specific expectations.
 
 ## Zarr Archives Inside A Recording
@@ -132,7 +134,7 @@ inline in root `zarr.json`, so consumers should not assume every array has a
 separate `zarr.json` file.
 
 Common top-level run families are documented in
-[`src/fisheye/docs/zarr_structure.md`](../src/fisheye/docs/zarr_structure.md).
+[`src/fisheye/docs/zarr_structure.md`](../../src/fisheye/docs/zarr_structure.md).
 The main ones collaborators will encounter are:
 
 | Group | Typical content |
@@ -410,12 +412,12 @@ run-specific quality indicators, not a universal guarantee.
 
 Related contracts and implementation notes:
 
-- [`subject_mask_runs_contract.md`](subject_mask_runs_contract.md)
-- [`refined_subject_masks_runs_contract.md`](refined_subject_masks_runs_contract.md)
-- [`subject_shape_runs_contract.md`](subject_shape_runs_contract.md)
-- [`subject_shape_snout_centerline_workflow.md`](subject_shape_snout_centerline_workflow.md)
-- [`subject_shape_landmark_conventions.md`](subject_shape_landmark_conventions.md)
-- [`body_frame_contract.md`](body_frame_contract.md)
+- [`subject_mask_runs_contract.md`](../subject_mask_runs_contract.md)
+- [`refined_subject_masks_runs_contract.md`](../refined_subject_masks_runs_contract.md)
+- [`subject_shape_runs_contract.md`](../subject_shape_runs_contract.md)
+- [`subject_shape_snout_centerline_workflow.md`](../subject_shape_snout_centerline_workflow.md)
+- [`subject_shape_landmark_conventions.md`](../subject_shape_landmark_conventions.md)
+- [`body_frame_contract.md`](../body_frame_contract.md)
 
 Minimal reader example for the transferred example recording:
 
@@ -827,7 +829,7 @@ when a storage migration needs a strong audit trail.
 - Absolute paths currently point at `/nvme1`. If recordings are moved, use the
   registry and relocation policy rather than editing historical manifests in
   place. See
-  [`recording_store_relocation_components.md`](recording_store_relocation_components.md).
+  [`recording_store_relocation_components.md`](../recording_store_relocation_components.md).
 - Some older analysis Zarrs use root `zarr_purpose="production"` while the
   registry and current terminology call them analysis datasets.
 - Video-only and GoodCopBadCop manifests may have null biological metadata such

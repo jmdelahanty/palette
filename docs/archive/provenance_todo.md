@@ -1,4 +1,4 @@
-<!-- NOTE 2026-07-04: superseded as the forward plan by docs/provenance_enforcement_roadmap.md; retained live because other docs still reference it. -->
+<!-- ARCHIVED 2026-07-17: superseded provenance TODO retained for history. -->
 
 # Provenance TODO
 

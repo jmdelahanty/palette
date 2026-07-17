@@ -205,7 +205,7 @@ Why `source_index/`:
 
 ## Related Docs
 
-- [provenance_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/provenance_todo.md)
+- [archived provenance TODO](archive/provenance_todo.md)
 - [training_label_origin_phase1_audit.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/training_label_origin_phase1_audit.md)
 - [training_quality_gate_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/training_quality_gate_contract.md)
 - [detection_merged_export_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/detection_merged_export_contract.md)

@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-17: measured conclusions moved to zarr_storage_lifecycle_policy.md and diagnostics. -->
+
 # Zarr on NFS: Audit + Design TODO
 
 ## Context (current assumptions)

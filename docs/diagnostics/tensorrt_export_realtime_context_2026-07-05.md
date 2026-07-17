@@ -75,5 +75,5 @@ These inherit the repo's silent-wrong-data and provenance discipline; none are d
 ## Pointers
 
 - Realtime/offline comparison design: `docs/diagnostics/realtime_offline_detection_comparison_design_2026-06-17.md`
-- Provenance enforcement (epoch gate, artifact-hash follow-up): `docs/provenance_finalization_enforcement_design.md`, `docs/provenance_enforcement_roadmap.md`
+- Provenance enforcement (epoch gate, artifact-hash follow-up): `docs/archive/provenance_finalization_enforcement_design.md`, `docs/archive/provenance_enforcement_roadmap.md`
 - Regex fix + hygiene assignment: `agents_todo/brief_review_remediation_wave_2026-07-05.md` (Slice D)

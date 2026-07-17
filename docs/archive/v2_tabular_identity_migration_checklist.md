@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-17: accepted identity decisions now live in active identity and compaction contracts. -->
+
 # V2 Tabular Identity Migration Checklist
 
 <!-- design-meta
@@ -22,7 +24,7 @@ This is not a migration script. It is the implementation order and contract
 checklist for future code changes.
 
 For a writer-by-writer status inventory and migration priority list, see
-[analysis_writer_compact_layout_inventory.md](analysis_writer_compact_layout_inventory.md).
+[analysis_writer_compact_layout_inventory.md](../analysis_writer_compact_layout_inventory.md).
 
 ## Archive, Collection, And Project Model
 
@@ -283,7 +285,7 @@ Family-specific changes:
 
 - [ ] Define a manifest/collection schema that acts as the virtual project
       boundary for cross-recording work. See
-      [virtual_collection_manifest_schema.md](virtual_collection_manifest_schema.md).
+      [virtual_collection_manifest_schema.md](../virtual_collection_manifest_schema.md).
 - [ ] Export builders should resolve `latest` selections to concrete source
       run IDs before writing rows.
 - [ ] Export tables should include source run IDs, source lineage hash,
@@ -338,16 +340,16 @@ Family-specific changes:
 
 ## References
 
-- [current_pipeline_contract.md](current_pipeline_contract.md)
+- [current_pipeline_contract.md](../current_pipeline_contract.md)
 - [analysis_zarr_object_count_schema_direction.md](analysis_zarr_object_count_schema_direction.md)
-- [analysis_writer_compact_layout_inventory.md](analysis_writer_compact_layout_inventory.md)
-- [refined_detect_sparse_instances_schema.md](refined_detect_sparse_instances_schema.md)
-- [refined_detect_row_identity_contract.md](refined_detect_row_identity_contract.md)
-- [realtime_sparse_row_index_contract.md](realtime_sparse_row_index_contract.md)
-- [track_identity_target_architecture.md](track_identity_target_architecture.md)
-- [single_subject_per_arena_tracking_contract.md](single_subject_per_arena_tracking_contract.md)
-- [repo_wide_staleness_policy.md](repo_wide_staleness_policy.md)
-- [repo_wide_staleness_gap_matrix.md](repo_wide_staleness_gap_matrix.md)
-- [derived_analysis_run_contract.md](derived_analysis_run_contract.md)
+- [analysis_writer_compact_layout_inventory.md](../analysis_writer_compact_layout_inventory.md)
+- [refined_detect_sparse_instances_schema.md](../refined_detect_sparse_instances_schema.md)
+- [refined_detect_row_identity_contract.md](../refined_detect_row_identity_contract.md)
+- [realtime_sparse_row_index_contract.md](../realtime_sparse_row_index_contract.md)
+- [track_identity_target_architecture.md](../track_identity_target_architecture.md)
+- [single_subject_per_arena_tracking_contract.md](../single_subject_per_arena_tracking_contract.md)
+- [repo_wide_staleness_policy.md](../repo_wide_staleness_policy.md)
+- [repo_wide_staleness_gap_matrix.md](../repo_wide_staleness_gap_matrix.md)
+- [derived_analysis_run_contract.md](../derived_analysis_run_contract.md)
 - [zarr_parquet_sidecar_exports_design.md](zarr_parquet_sidecar_exports_design.md)
-- [virtual_collection_manifest_schema.md](virtual_collection_manifest_schema.md)
+- [virtual_collection_manifest_schema.md](../virtual_collection_manifest_schema.md)

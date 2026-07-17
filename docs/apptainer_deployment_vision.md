@@ -6,7 +6,7 @@ created: 2026-07-04
 owner: jeremy
 picks-up-after: provenance enforcement (Slice 2) landed; repo structural cleanup further along
 related: docs/interface_and_execution_strategy.md,
-         docs/provenance_finalization_enforcement_design.md,
+         docs/archive/provenance_finalization_enforcement_design.md,
          docs/palette_cli_narrow_waist_design.md
 -->
 
@@ -39,7 +39,7 @@ non-starter on shared clusters (needs root/daemon).
 ## The three convergences (why this isn't a side-quest)
 
 1. **It solves the provenance cluster git-state problem at the root.** The provenance work
-   (`provenance_finalization_enforcement_design.md`) flags that the rsync'd `/groups`
+   (`archive/provenance_finalization_enforcement_design.md`) flags that the rsync'd `/groups`
    checkout can be dirty/ambiguous, so the captured `git_sha` on the production path may be
    a lie. A container makes the code *immutable at a known build-time SHA* — no checkout to
    drift, no dirty tree. Provenance *records* which code ran; the container *guarantees* it.

@@ -1,10 +1,11 @@
 # Cross-Recording Analytics Export Design
-<!-- design-meta
-status: draft
-last_updated: 2026-05-05
+<!-- contract-meta
+version: 2
+status: active
+last_verified: 2026-07-17
 -->
 
-Purpose: define a future export strategy for querying Palette metrics across
+Purpose: define the current export strategy for querying Palette metrics across
 many recordings with columnar tools such as Polars, DuckDB, Arrow, and Parquet.
 
 This is not a replacement for Palette Zarr archives. It is a design for
@@ -15,9 +16,9 @@ regenerable analytics views built from those archives.
 - Zarr remains the authoritative per-recording archive format.
 - Parquet/Arrow exports should be derived, disposable, and reproducible from
   Zarr plus registry metadata.
-- Parquet should be organized as an incremental analytics lake: stable table
-  directories with many append-only part files, not one monolithic file and not
-  one file per question.
+- Parquet is organized as immutable manifest-selected export runs with
+  partitioned table directories. A published export run ID is never
+  overwritten; a new export receives a new run ID and manifest.
 - DuckDB should be treated as the query layer over those Parquet datasets, not
   as the primary durable storage format.
 - Cross-recording exports should prioritize scalar and tabular metrics first.
@@ -28,6 +29,12 @@ regenerable analytics views built from those archives.
   analytics export target.
 - Every exported row must carry enough source identity to map back to the exact
   Zarr archive, run, row, component, track, bout, or frame.
+
+The authoritative publication root is
+`/groups/johnson/johnsonlab/palette_analytics`. `/nvme1` is optional operator
+scratch and is not part of the publication contract. See
+`shared_analytics_exports_and_cluster_jobs.md` for job submission, completion,
+and validation mechanics.
 - Every exported row should carry dependency lineage so stale exports can be
   detected when masks, keypoints, or downstream analysis runs are regenerated.
 

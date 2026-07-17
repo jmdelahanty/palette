@@ -1,8 +1,8 @@
 # Derived Analysis Run Contract
 <!-- contract-meta
 version: 1
-status: draft
-last_verified: 2026-05-01
+status: active
+last_verified: 2026-07-17
 -->
 
 Purpose: define the shared storage and provenance contract for deterministic
@@ -37,9 +37,11 @@ Use `analysis/<analysis_type>_runs/<run>` for:
 Derived analysis runs must not edit source authority arrays. If their source
 changes, the derived run should be marked stale, superseded, or regenerated.
 
-For future cross-recording Parquet/Arrow exports built from derived analysis
+For current cross-recording Parquet/Arrow exports built from derived analysis
 runs, see
 [cross_recording_analytics_export_design.md](cross_recording_analytics_export_design.md).
+The canonical family-by-family schema and publication index is
+[analytics_storage_schema_matrix.md](analytics_storage_schema_matrix.md).
 
 ## Required Run Attributes
 
@@ -78,6 +80,20 @@ Recommended `row_axis` values:
 
 Writers may add narrower values, but they must be stable strings and documented
 by the run family.
+
+## Publication Contract
+
+Production analysis workflows must not compute directly into a visible final
+run path. They compute into node-local Zarr storage, validate the completed
+logical and physical product, and publish it with
+`palette.atomic_run_group_publisher` version 1. The publisher serializes per
+recording, copies to a hidden same-parent sibling, verifies the copy, atomically
+renames it, marks completion, updates pointers, and restores both the target and
+parent attributes after any post-rename failure.
+
+Lower-level writer functions may write directly to explicitly supplied
+in-memory or disposable Zarr groups for tests. Operator CLIs and DAG execution
+must use the atomic materializer for authoritative recording archives.
 
 ## Row-Aligned Analysis Runs
 
@@ -171,11 +187,13 @@ Existing analysis outputs already follow this direction:
   each owning independent window semantics. See
   [`stimulus_epoch_run_contract.md`](stimulus_epoch_run_contract.md).
 - `analysis/track_kinematics_runs/<online|offline>/<run>` stores
-  identity-resolved movement outputs.
+  identity-resolved movement outputs under run schema
+  `analysis.track_kinematics_runs` version 1 and row axis `track_samples`.
 - `analysis/bout_kinematics_runs/<run>` stores per-bout heading and movement
   metrics derived from an exact swim-bout segmentation candidate without
-  mutating that segmentation artifact. Schema v7 includes
-  `movement/per_bout_metrics` for physical-active movement summaries measured
+  mutating that segmentation artifact. Schema v7 defaults to compact table
+  paths resolved by `fisheye.analysis.bout_kinematics_io`; its logical
+  movement table contains physical-active movement summaries measured
   from a declared physical speed source, while preserving source
   detector-window durations. It may also include an optional
   `eye_gaze/per_bout_metrics` subgroup with pre/post/within-bout eye-gaze and
@@ -199,10 +217,12 @@ Existing analysis outputs already follow this direction:
   `left_eye_angle_deg`, `right_eye_angle_deg`, and
   `vergence_eye_angle_deg`, with per-eye nasal-positive signs and signed
   vergence where positive means convergence and negative means divergence.
-  Output schema v7 adds `eye_angle_variant_schema`, mirrored in run attrs, so
+  Output schema v7 added `eye_angle_variant_schema`, mirrored in run attrs, so
   marimo, Crimson, and other consumers can present selectable angle
   representations (`eye_frame`, `gaze`, `nasal_gaze`, `major`, `centroid`,
-  `legacy`) from metadata rather than hardcoded field lists.
+  `legacy`) from metadata rather than hardcoded field lists. Output schema v8
+  adds the versioned algorithm-contract link and exact temporal-operator
+  identities without changing the run schema or v5 scientific method.
   Eye-angle writers should prefer `analysis/subject_shape_runs/<run>` eye
   geometry when a coherent body/eyes/swim shape run exists, and preserve
   refined-subject/refined-eye fallbacks as explicit lineage. Current v5 runs
@@ -211,7 +231,8 @@ Existing analysis outputs already follow this direction:
   available.
 - `analysis/stimulus_response_runs/<run>` is the implemented stimulus-aware
   downstream consumer for protocol-step summaries and stimulus-specific
-  adapters.
+  adapters. Schema 2 defaults to compact-tabular-v2 and is read through
+  `fisheye.analysis.stimulus_response_io`.
 - `analysis/chaser_distance_runs/<run>` stores framewise offline fish-to-chaser
   distances and epoch summaries derived from exact refined detections,
   `analysis/stimulus_runs`, and `analysis/stimulus_epoch_runs` sources. It is a

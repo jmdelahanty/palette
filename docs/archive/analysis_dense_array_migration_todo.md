@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-17: superseded by sparse logical readers and authoritative frame-axis references. -->
+
 # Analysis Dense Array Migration TODO
 
 Last reviewed: 2026-04-26

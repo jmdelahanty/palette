@@ -97,7 +97,7 @@ Useful starting points:
 - `docs/operator_guide/pipeline_workflow.md` - current processing workflow.
 - `docs/palette_cli_narrow_waist_design.md` - CLI/API contract.
 - `docs/run_resolution_semantics.md` - run-selection semantics.
-- `docs/provenance_finalization_enforcement_design.md` - completion and provenance gate.
+- `docs/zarr_run_completion_contract.md` - completion, provenance, and atomic publication gate.
 - `docs/marimo_explorer_architecture.md` - interactive viewer structure.
 - `docs/palette_analytics_app_deployment.md` - Pixi and FileGlancer deployment.
 - `docs/marimo_pair_recording_workspace.md` - editable, read-only-mounted recording workspace.

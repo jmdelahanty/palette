@@ -4,13 +4,13 @@
 status: active
 created: 2026-07-02
 owner: jeremy
-related: docs/provenance_enforcement_roadmap.md,
+related: docs/archive/provenance_enforcement_roadmap.md,
          docs/diagnostics/codebase_review_2026-07-01.md
 -->
 
 ## Purpose
 
-This census supports Slice 1 of `docs/provenance_enforcement_roadmap.md`: promote
+This census supports Slice 1 of `docs/archive/provenance_enforcement_roadmap.md`: promote
 stage-array validation from shadow telemetry to hard completion-time enforcement only
 for stages whose current writers already satisfy their declared `StageSpec`.
 

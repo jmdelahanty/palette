@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-17: implementation roadmap superseded by active completion and provenance contracts. -->
+
 # Provenance enforcement roadmap
 
 <!-- contract-meta

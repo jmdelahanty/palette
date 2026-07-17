@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-17: the proposed online/offline movement split is implemented. -->
+
 # Movement Analysis: Split Online / Offline Runs
 
 ## Overview

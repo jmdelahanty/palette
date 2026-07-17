@@ -6,7 +6,7 @@
 `docs/diagnostics/registry_reconcile_collapse_audit_2026-06-18.md` (the collapse map,
 boundaries, and "smallest first step" you are executing),
 `docs/diagnostics/subject_mask_profile_design_2026-06-18.md` (the profile-path design),
-`docs/provenance_enforcement_roadmap.md` Slice 4, `docs/registry_schema_reference.md`
+`docs/archive/provenance_enforcement_roadmap.md` Slice 4, `docs/registry_schema_reference.md`
 (schema conventions). Where a design doc and this brief disagree, the design doc wins —
 report the disagreement.
 

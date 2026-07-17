@@ -10,7 +10,7 @@ read-only against `/nvme1/recordings` and the registry; Phase 3 (if cleared)
 ships a dry-run-default tool that only the maintainer executes.
 Co-author trailer: `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
 
-**Read first:** `HANDOFF_2026-07-05.md` operating-notes section. Ground rules:
+**Read first:** `docs/archive/HANDOFF_2026-07-05.md` operating-notes section. Ground rules:
 local `sun` is ground truth; fresh worktree on `agent/detect-review-pointer-census`
 from CURRENT `sun`; env `~/miniconda3/envs/palette-py311/bin/python` (conda; never
 uv, never a `.venv`); sync code only; re-locate cited line numbers by content.
