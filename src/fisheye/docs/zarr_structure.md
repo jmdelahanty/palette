@@ -1716,7 +1716,12 @@ Compact v2 replaces physical `<speed_level>` subgroups with `candidate_id` and
 `source_level`, and `path_distance_source_level` come from
 `indexes/signal_variants`. A detector response such as `speed_exponential`
 therefore remains selectable, but its dense trace is stored as one row in
-`signals/detector_signal_mm_s` keyed by `detector_signal_signal_ids`.
+`signals/detector_signal_mm_s` keyed by `detector_signal_signal_ids`. The
+logical array remains signal-major with shape `(detector_signal_id, frame)` for
+reader compatibility. New runs use logical chunks and indexed outer shards
+along the frame axis, so a single detector row does not become one
+recording-length physical chunk. Readers should resolve the signal row first
+and then request only that row's frame slice.
 
 Do not add v1-style compatibility mirrors under compact runs unless a concrete
 external reader requires them. New Palette Python readers, Marimo notebooks,

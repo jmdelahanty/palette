@@ -67,7 +67,11 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 import numpy as np
 from scipy import signal
 
-from fisheye.shared.zarr.columnar import store_array, write_columnar_dataset
+from fisheye.shared.zarr.columnar import (
+    DEFAULT_COLUMNAR_SHARD_ROWS,
+    store_array,
+    write_columnar_dataset,
+)
 from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
 from fisheye.shared.json_safety import json_attr_safe, json_attr_safe_mapping, strict_json_dumps
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
@@ -130,6 +134,12 @@ SWIM_BOUT_LAYOUT_DEFAULT = SWIM_BOUT_LAYOUT_COMPACT_V2
 BOUT_METRIC_SCHEMA_ID = "palette.swim_bout_metrics.v3"
 DETECTION_SIGNAL_SCHEMA_ID = "palette.swim_bout_detection_signal.v1"
 DETECTION_SIGNAL_SCHEMA_VERSION = 1
+DETECTOR_SIGNAL_STORAGE_SCHEMA_ID = "palette.swim_bout_detector_signal_storage.v1"
+DETECTOR_SIGNAL_FRAME_CHUNK_LENGTH = 4_096
+DETECTOR_SIGNAL_FRAME_SHARD_LENGTH = DEFAULT_COLUMNAR_SHARD_ROWS
+DETECTOR_SIGNAL_SHARD_ALIGNMENT_POLICY = (
+    "ceil_requested_length_to_logical_chunk_grid_capped_to_frame_axis"
+)
 PEAK_EVENT_SCHEMA_ID = "palette.swim_bout_peak_events.v1"
 PEAK_EVENT_SCHEMA_VERSION = 1
 METHOD_VERSION = "detect_bouts_multi_level.v7"
@@ -140,6 +150,115 @@ PHASE_TIMING_SCHEMA_VERSION = 1
 
 _json_safe_attr_value = json_attr_safe
 _json_safe_attrs = json_attr_safe_mapping
+
+
+def _detector_signal_frame_shard_length(
+    *,
+    frame_count: int,
+    frame_chunk_length: int,
+    requested_frame_shard_length: int,
+) -> Optional[int]:
+    """Return an aligned, useful outer-shard length for a dense trace."""
+
+    frames = int(frame_count)
+    chunk = int(frame_chunk_length)
+    requested = int(requested_frame_shard_length)
+    if frames < 0:
+        raise ValueError("frame_count must be non-negative.")
+    if chunk <= 0 or requested <= 0:
+        raise ValueError(
+            "frame_chunk_length and requested_frame_shard_length must be positive."
+        )
+    logical_frame_chunks = (frames + chunk - 1) // chunk
+    if logical_frame_chunks <= 1:
+        return None
+    aligned_requested = ((requested + chunk - 1) // chunk) * chunk
+    maximum_useful_length = logical_frame_chunks * chunk
+    effective = min(aligned_requested, maximum_useful_length)
+    return int(effective) if effective > chunk else None
+
+
+def _store_detector_signal_matrix(
+    group: Any,
+    name: str,
+    data: np.ndarray,
+    *,
+    attrs: Optional[Mapping[str, Any]] = None,
+) -> Any:
+    """Store ``(detector_signal_id, frame)`` traces sharded over time.
+
+    The signal-major logical contract is retained for existing Palette and
+    Crimson readers. Physical chunks and outer shards instead divide axis 1,
+    so a recording with one detector signal does not collapse into one large
+    unsharded row chunk.
+    """
+
+    values = np.asarray(data)
+    if values.ndim != 2:
+        raise ValueError(
+            "Detector signal matrices must have shape "
+            f"(detector_signal_id, frame); got {values.shape!r}."
+        )
+    signal_count, frame_count = (int(value) for value in values.shape)
+    if signal_count <= 0:
+        raise ValueError("Detector signal matrices must contain at least one signal.")
+
+    frame_chunk_length = max(
+        1,
+        min(int(DETECTOR_SIGNAL_FRAME_CHUNK_LENGTH), max(1, frame_count)),
+    )
+    frame_shard_length = _detector_signal_frame_shard_length(
+        frame_count=frame_count,
+        frame_chunk_length=frame_chunk_length,
+        requested_frame_shard_length=DETECTOR_SIGNAL_FRAME_SHARD_LENGTH,
+    )
+    chunks = (1, int(frame_chunk_length))
+    shards = (
+        (1, int(frame_shard_length))
+        if frame_shard_length is not None
+        else None
+    )
+
+    if name in group:
+        del group[name]
+    create_kwargs: Dict[str, Any] = {
+        "data": values,
+        "chunks": chunks,
+        "overwrite": True,
+    }
+    if shards is not None:
+        create_kwargs["shards"] = shards
+    array = group.create_array(name, **create_kwargs)
+    if attrs:
+        array.attrs.update(_json_safe_attrs(attrs))
+    array.attrs.update(
+        {
+            "palette_storage_schema_id": DETECTOR_SIGNAL_STORAGE_SCHEMA_ID,
+            "palette_storage_writer": (
+                "fisheye.analysis.detect_bouts_multi_level."
+                "_store_detector_signal_matrix"
+            ),
+            "palette_physical_layout": (
+                "indexed_sharding_v1" if shards is not None else "regular_chunks_v1"
+            ),
+            "palette_logical_chunk_shape": list(chunks),
+            "palette_shard_axis": 1,
+            "palette_shard_axis_name": "frame",
+            "palette_shard_length_requested": int(
+                DETECTOR_SIGNAL_FRAME_SHARD_LENGTH
+            ),
+            "palette_shard_length_effective": (
+                int(frame_shard_length) if frame_shard_length is not None else None
+            ),
+            "palette_shard_shape": list(shards) if shards is not None else None,
+            "palette_shard_alignment_policy": DETECTOR_SIGNAL_SHARD_ALIGNMENT_POLICY,
+            "palette_sharding_skip_reason": (
+                None if shards is not None else "single_logical_frame_chunk"
+            ),
+            "logical_axis_order": ["detector_signal_id", "frame"],
+        }
+    )
+    return array
 
 
 def _finish_timed_phase(
@@ -1551,7 +1670,7 @@ def _write_compact_v2_swim_bout_payloads(
         detector_rows.append(np.asarray(arr, dtype=np.float32))
         detector_signal_ids.append(int(signal_id_by_level[level]))
     if detector_rows:
-        store_array(
+        _store_detector_signal_matrix(
             signals_group,
             "detector_signal_mm_s",
             np.stack(detector_rows, axis=0),

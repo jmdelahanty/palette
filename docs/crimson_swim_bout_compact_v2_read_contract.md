@@ -212,7 +212,9 @@ Detector trace:
   `signals/detector_signal_signal_ids`.
 - Find the row whose value equals the selected `signal_id`.
 - Use that row as the detector trace and read `signals/frame_indices` as the
-  frame axis.
+  frame axis. New Palette runs retain the logical `(signal_id, frame)` shape
+  but chunk and shard the second axis; select the row before reading values so
+  the store only fetches that signal's time shards.
 - This replaces the v1 path
   `<run>/<speed_level>/detection_signal_mm_s`.
 

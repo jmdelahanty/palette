@@ -13,6 +13,7 @@ from fisheye.analysis.detect_bouts_multi_level import (
     _compute_inter_bout_intervals,
     _create_bout_points,
     _empty_peak_events,
+    _store_detector_signal_matrix,
     _write_compact_v2_swim_bout_payloads,
     _bout_dtype,
 )
@@ -41,6 +42,33 @@ def _one_bout(bout_id: int, start_frame: int, end_frame: int) -> np.ndarray:
     records["core_start_time_s"] = start_frame / 60.0
     records["core_end_time_s"] = end_frame / 60.0
     return records
+
+
+def test_detector_signal_matrix_shards_the_frame_axis_without_transposing() -> None:
+    root = zarr.group()
+    signals = root.create_group("signals")
+    frame_count = 8_193
+    values = np.arange(frame_count, dtype=np.float32)[None, :]
+
+    stored = _store_detector_signal_matrix(
+        signals,
+        "detector_signal_mm_s",
+        values,
+        attrs={
+            "units": "mm/s",
+            "axis_0": "detector_signal_id",
+            "axis_1": "frame",
+        },
+    )
+
+    assert stored.shape == (1, frame_count)
+    assert stored.chunks == (1, 4_096)
+    assert stored.shards == (1, 12_288)
+    assert stored.attrs["palette_physical_layout"] == "indexed_sharding_v1"
+    assert stored.attrs["palette_shard_axis"] == 1
+    assert stored.attrs["palette_shard_axis_name"] == "frame"
+    assert stored.attrs["logical_axis_order"] == ["detector_signal_id", "frame"]
+    np.testing.assert_array_equal(stored[0, :], values[0])
 
 
 def test_compact_v2_writer_helper_outputs_resolver_readable_tables() -> None:
@@ -118,6 +146,14 @@ def test_compact_v2_writer_helper_outputs_resolver_readable_tables() -> None:
     assert "speed_exponential" not in run
     assert "indexes" in run
     assert "tables" in run
+    detector_signal = run["signals/detector_signal_mm_s"]
+    assert detector_signal.shape == (1, frames.size)
+    assert detector_signal.attrs["axis_0"] == "detector_signal_id"
+    assert detector_signal.attrs["axis_1"] == "frame"
+    assert detector_signal.attrs["palette_shard_axis"] == 1
+    assert detector_signal.attrs["palette_sharding_skip_reason"] == (
+        "single_logical_frame_chunk"
+    )
     assert payload.signal.speed_level == "speed_exponential"
     assert payload.signal.role == "detector_response"
     assert payload.bouts["signal_id"].tolist() == [signal_id_by_level["speed_exponential"]]

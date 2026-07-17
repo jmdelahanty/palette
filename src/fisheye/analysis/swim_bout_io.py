@@ -737,10 +737,6 @@ def _load_compact_signal_series(
         return series
     detector_signal = _get_child(signals_group, "detector_signal_mm_s")
     if detector_signal is not None:
-        try:
-            detector_values = np.asarray(detector_signal[:])
-        except Exception:
-            detector_values = np.zeros(0, dtype=np.float32)
         signal_ids_node = _get_child(signals_group, "detector_signal_signal_ids")
         if signal_ids_node is not None:
             try:
@@ -750,11 +746,21 @@ def _load_compact_signal_series(
         else:
             signal_ids = np.asarray([signal.signal_id], dtype=np.int64)
         matches = np.flatnonzero(signal_ids == int(signal.signal_id))
-        if matches.size and detector_values.ndim >= 2:
-            values = np.asarray(detector_values[int(matches[0])])
-            series["detection_signal_mm_s"] = values
-            if signal.speed_level == "speed_exponential":
-                series["speed_exponential_mm"] = values
+        if matches.size:
+            try:
+                if int(detector_signal.ndim) >= 2:
+                    # Compact v2 is signal-major. Select the logical row before
+                    # reading so time-axis-sharded arrays only fetch the chosen
+                    # detector signal.
+                    values = np.asarray(detector_signal[int(matches[0]), :])
+                else:
+                    values = np.asarray(detector_signal[:])
+            except Exception:
+                values = np.zeros(0, dtype=np.float32)
+            if values.size:
+                series["detection_signal_mm_s"] = values
+                if signal.speed_level == "speed_exponential":
+                    series["speed_exponential_mm"] = values
     frame_indices = _get_child(signals_group, "frame_indices")
     if frame_indices is not None:
         try:

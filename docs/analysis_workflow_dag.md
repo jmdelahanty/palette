@@ -233,6 +233,11 @@ The executor preserves these large-recording constraints:
   shards to copy workers. It validates the sharded run before copying it to a
   hidden shared-filesystem sibling, atomically renaming it, and updating the
   nested offline pointers under a per-recording lock;
+- swim-bout detection preserves its signal-major compact-v2 logical contract,
+  but dense detector traces use 4,096-frame logical chunks within aligned
+  262,144-frame indexed outer shards along the frame axis. Readers resolve the
+  detector signal ID before requesting its time slice, while sparse event and
+  bout tables continue to use the shared row-sharded columnar writer;
 - eye angles use their dedicated production materializer. It resolves completed
   subject-shape eye ellipses and refined keypoints, transfers only those exact
   arrays to node-local scratch, records the authoritative and staged locations
