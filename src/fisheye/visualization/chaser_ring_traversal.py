@@ -508,11 +508,13 @@ def _ordered_entries(scenes: Sequence[VisitScene], object_only: bool) -> list[tu
 
 def render_ring_entries_png(
     scenes: Sequence[VisitScene], meta: dict[str, Any], *, object_only: bool = True,
-    limit: float = 24.0, max_panels: int = 24,
+    limit: float = 24.0, max_panels: int = 24, object_role: Optional[str] = None,
 ) -> bytes:
+    if object_role is not None:
+        scenes = [s for s in scenes if getattr(s, "role", None) == object_role]
     rows = _ordered_entries(scenes, object_only)
     if not rows:
-        raise ValueError("No entries to render.")
+        raise ValueError(f"No entries to render (object_role={object_role!r}).")
     shown = rows[:max_panels]
     n_cols = 6
     n_rows = int(math.ceil(len(shown) / n_cols))
@@ -578,7 +580,7 @@ def write_ring_traversal_gif(
     scenes: Sequence[VisitScene], meta: dict[str, Any], out_path: Path, *,
     object_only: bool = True, limit: float = 24.0, fps: int = 25,
     max_entries: int = 12, frames_per_entry: int = 90, trail_frac: float = 0.25,
-    hold_s: float = 0.7,
+    hold_s: float = 0.7, object_role: Optional[str] = None,
 ) -> Path:
     """Replay each entry: the fish moves through the rings and each bout, once executed, stays
     lit for the rest of that entry -- so the *set* of bouts builds up as you watch.
@@ -587,11 +589,16 @@ def write_ring_traversal_gif(
     actually lingered, so a 4 s approach and a 130 s wall-dwell take the same wall-clock. Long
     entries are subsampled (real xy indices are kept, so bout onsets still register); short
     ones play at full detail. Entries are ordered by _entry_sort_key and capped at
-    ``max_entries`` -- the legible, escape-containing passes lead."""
+    ``max_entries`` -- the legible, escape-containing passes lead.
 
+    ``object_role`` restricts the animation to a single object ('aggressive' or 'inert'), so the
+    two chasers get their own videos instead of one interleaved clip."""
+
+    if object_role is not None:
+        scenes = [s for s in scenes if getattr(s, "role", None) == object_role]
     rows = _ordered_entries(scenes, object_only)[:max_entries]
     if not rows:
-        raise ValueError("No entries to animate.")
+        raise ValueError(f"No entries to animate (object_role={object_role!r}).")
 
     hold_frames = max(1, int(hold_s * fps))
     timeline: list[tuple[int, int, bool]] = []       # (row, xy-index, is_hold)
@@ -686,6 +693,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--gif-max-entries", type=int, default=12)
     p.add_argument("--gif-frames-per-entry", type=int, default=90,
                    help="Display frames per entry; long lingering entries are subsampled to fit.")
+    p.add_argument("--combined", "--gif-combined", dest="combined", action="store_true",
+                   help="Write one interleaved figure/video with all objects instead of a "
+                        "separate PNG and video per chaser (aggressive / inert). Default is per-object.")
     return p
 
 
@@ -732,17 +742,45 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     epoch_tag = (chase_wanted[0] if chase_wanted else "_".join(static_wanted)) or "epochs"
     out_dir = args.out_dir or Path.cwd()
     out_dir.mkdir(parents=True, exist_ok=True)
-    png = out_dir / f"{meta['recording_id']}_ring_entries_{epoch_tag}.png"
-    png.write_bytes(render_ring_entries_png(scenes, meta, limit=float(args.limit_mm)))
-    print(f"wrote {png}")
+    roles_present = [
+        r for r in ("aggressive", "inert")
+        if any(getattr(s, "role", None) == r and s.is_object for s in scenes)
+    ]
+    per_object = bool(roles_present) and not args.combined
+
+    png_stem = f"{meta['recording_id']}_ring_entries_{epoch_tag}"
+    if per_object:
+        for role in roles_present:
+            png = out_dir / f"{png_stem}_{role}.png"
+            try:
+                png.write_bytes(render_ring_entries_png(scenes, meta, limit=float(args.limit_mm), object_role=role))
+                print(f"wrote {png}")
+            except ValueError as exc:
+                print(f"skip {role} png: {exc}")
+    else:
+        png = out_dir / f"{png_stem}.png"
+        png.write_bytes(render_ring_entries_png(scenes, meta, limit=float(args.limit_mm)))
+        print(f"wrote {png}")
 
     if args.gif:
-        path = write_ring_traversal_gif(
-            scenes, meta, Path(args.gif), object_only=not bool(args.gif_include_virtual),
-            limit=float(args.limit_mm), fps=int(args.gif_fps),
-            max_entries=int(args.gif_max_entries), frames_per_entry=int(args.gif_frames_per_entry),
+        gif_path = Path(args.gif)
+        common = dict(
+            object_only=not bool(args.gif_include_virtual), limit=float(args.limit_mm),
+            fps=int(args.gif_fps), max_entries=int(args.gif_max_entries),
+            frames_per_entry=int(args.gif_frames_per_entry),
         )
-        print(f"wrote {path}")
+        if per_object:
+            # One video per chaser: ring_traversal_<epoch>_aggressive.mp4 / _inert.mp4
+            for role in roles_present:
+                role_path = gif_path.with_name(f"{gif_path.stem}_{role}{gif_path.suffix}")
+                try:
+                    path = write_ring_traversal_gif(scenes, meta, role_path, object_role=role, **common)
+                    print(f"wrote {path}")
+                except ValueError as exc:
+                    print(f"skip {role}: {exc}")
+        else:
+            path = write_ring_traversal_gif(scenes, meta, gif_path, **common)
+            print(f"wrote {path}")
     return 0
 
 

@@ -69,6 +69,14 @@ for ep in pre_event training_event post_event; do
 done
 ```
 
+**One video per chaser (default).** When both objects are present (the static pre/post
+epochs), `--gif <name>.mp4` writes a **separate animation per object**, tagged by role —
+`<name>_aggressive.mp4` and `<name>_inert.mp4` — so the two chasers can be compared side by
+side rather than interleaved in one clip. Pass `--gif-combined` to fall back to the single
+interleaved video. The training epoch has only the aggressive (chasing) object, so it yields
+one `_aggressive` file. The static PNG reference sheet still shows every object's entries in
+one panel grid.
+
 ## Three things that are not cosmetic
 
 1. **Bout segments come from the `chaser_bout_response` bout table** — the same table the escape
