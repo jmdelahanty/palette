@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import zarr
@@ -44,7 +46,7 @@ def _one_bout(bout_id: int, start_frame: int, end_frame: int) -> np.ndarray:
     return records
 
 
-def test_detector_signal_matrix_shards_the_frame_axis_without_transposing() -> None:
+def test_detector_signal_matrix_uses_one_regular_chunk_without_transposing() -> None:
     root = zarr.group()
     signals = root.create_group("signals")
     frame_count = 8_193
@@ -62,13 +64,134 @@ def test_detector_signal_matrix_shards_the_frame_axis_without_transposing() -> N
     )
 
     assert stored.shape == (1, frame_count)
-    assert stored.chunks == (1, 4_096)
-    assert stored.shards == (1, 12_288)
-    assert stored.attrs["palette_physical_layout"] == "indexed_sharding_v1"
-    assert stored.attrs["palette_shard_axis"] == 1
-    assert stored.attrs["palette_shard_axis_name"] == "frame"
+    assert stored.chunks == (1, frame_count)
+    assert stored.shards is None
+    assert stored.attrs["palette_physical_layout"] == "regular_chunks_v1"
+    assert stored.attrs["palette_storage_schema_id"] == (
+        "palette.swim_bout_detector_signal_storage.v2"
+    )
+    assert stored.attrs["palette_storage_policy"] == "single_regular_chunk_v1"
+    assert stored.attrs["palette_shard_shape"] is None
+    assert stored.attrs["palette_sharding_skip_reason"] == (
+        "product_policy_single_regular_chunk"
+    )
     assert stored.attrs["logical_axis_order"] == ["detector_signal_id", "frame"]
     np.testing.assert_array_equal(stored[0, :], values[0])
+
+
+def test_peak_event_algorithm_contract_is_machine_interpretable() -> None:
+    contract = detect_bouts_multi_level._swim_bout_algorithm_contract(
+        method="peak_event",
+        parameters={
+            "min_bout_duration_s": 0.05,
+            "resolved_min_bout_frames": 3,
+            "boundary_mode": "threshold",
+            "boundary_window_s": 0.25,
+            "resolved_boundary_window_frames": 15,
+            "min_peak_height_mm_s": None,
+            "min_peak_prominence_mm_s": 4.0,
+            "min_peak_distance_s": 0.1,
+            "peak_width_rel_height": 0.98,
+            "peak_event_boundary_mode": "relative_prominence_width",
+            "shape_split_policy": "none",
+        },
+        source_track_path=(
+            "analysis/track_kinematics_runs/offline/tk_run/tracks/id_0"
+        ),
+        track_id=0,
+        fps=60.0,
+        n_frames=120,
+        speed_levels=list(SPEED_LEVELS),
+        default_level="speed_exponential",
+        path_distance_level_source={
+            **PATH_DISTANCE_LEVEL_SOURCE,
+            "speed_exponential": "filtered",
+        },
+        exponential_source_level="speed_filtered",
+        exponential_tau_s=0.025,
+        source_array_paths={
+            "frame_indices": "resolved/track/frame_indices",
+            "speed_mm": {
+                "speed_filtered": "resolved/track/movement/speed/filtered/mm",
+            },
+            "frame_path_distance_mm": {
+                "filtered": (
+                    "resolved/track/movement/speed/filtered/frame_path_distance_mm"
+                ),
+            },
+        },
+    )
+
+    assert contract["schema_id"] == "analysis.swim_bout_algorithm_contract"
+    assert contract["schema_version"] == 1
+    assert contract["active_detection"]["candidate_primitive"] == (
+        "scipy.signal.find_peaks"
+    )
+    assert contract["active_detection"]["candidate_input_policy"] == (
+        "replace every nonfinite value with 0.0 for peak operations"
+    )
+    assert contract["active_detection"]["gap_merge"] == "not_applied"
+    assert "split at the finite minimum" in contract["active_detection"][
+        "overlap_resolution"
+    ]
+    assert contract["signal_contracts"]["speed_exponential"]["transform"] == (
+        "causal_exponential"
+    )
+    assert contract["causal_exponential_transform"]["source_path"] == (
+        "resolved/track/movement/speed/filtered/mm"
+    )
+    assert contract["signal_contracts"]["speed_exponential"][
+        "path_distance_source"
+    ] == "resolved/track/movement/speed/filtered/frame_path_distance_mm"
+    assert contract["persisted_metrics"]["mean_speed_mm_s"] == (
+        "path_length_mm / observed_duration_s when defined"
+    )
+
+
+def test_source_path_contract_prefers_grouped_track_arrays() -> None:
+    root = zarr.group()
+    track = (
+        root.create_group("analysis")
+        .create_group("track_kinematics_runs")
+        .create_group("offline")
+        .create_group("tk_run")
+        .create_group("tracks")
+        .create_group("id_0")
+    )
+    track.create_array("frame_indices", data=np.arange(4, dtype=np.int64))
+    track.create_array("speed_averaged_mm", data=np.arange(4, dtype=np.float32))
+    filtered = (
+        track.create_group("movement")
+        .create_group("speed")
+        .create_group("filtered")
+    )
+    filtered.create_array("mm", data=np.arange(4, dtype=np.float32))
+    filtered.create_array(
+        "frame_path_distance_mm",
+        data=np.arange(4, dtype=np.float32),
+    )
+
+    paths = detect_bouts_multi_level._resolved_track_source_array_paths(
+        root,
+        SimpleNamespace(
+            scope="offline",
+            run_name="tk_run",
+            track_id=0,
+            track_path=(
+                "analysis/track_kinematics_runs/offline/tk_run/tracks/id_0"
+            ),
+        ),
+    )
+
+    assert paths["speed_mm"]["speed_filtered"].endswith(
+        "/movement/speed/filtered/mm"
+    )
+    assert paths["frame_path_distance_mm"]["filtered"].endswith(
+        "/movement/speed/filtered/frame_path_distance_mm"
+    )
+    assert paths["speed_mm"]["speed_averaged"].endswith(
+        "/speed_averaged_mm"
+    )
 
 
 def test_compact_v2_writer_helper_outputs_resolver_readable_tables() -> None:
@@ -148,11 +271,15 @@ def test_compact_v2_writer_helper_outputs_resolver_readable_tables() -> None:
     assert "tables" in run
     detector_signal = run["signals/detector_signal_mm_s"]
     assert detector_signal.shape == (1, frames.size)
+    assert detector_signal.chunks == (1, frames.size)
+    assert detector_signal.shards is None
     assert detector_signal.attrs["axis_0"] == "detector_signal_id"
     assert detector_signal.attrs["axis_1"] == "frame"
-    assert detector_signal.attrs["palette_shard_axis"] == 1
+    assert detector_signal.attrs["palette_storage_policy"] == (
+        "single_regular_chunk_v1"
+    )
     assert detector_signal.attrs["palette_sharding_skip_reason"] == (
-        "single_logical_frame_chunk"
+        "product_policy_single_regular_chunk"
     )
     assert payload.signal.speed_level == "speed_exponential"
     assert payload.signal.role == "detector_response"
@@ -225,6 +352,28 @@ def test_detect_and_save_bouts_defaults_to_compact_v2_layout(tmp_path, monkeypat
     assert "speed_exponential" not in run
     assert payload.signal.speed_level == "speed_exponential"
     assert payload.bouts.size > 0
+
+    algorithm_contract = run.attrs["swim_bout_algorithm_contract"]
+    assert algorithm_contract["schema_id"] == "analysis.swim_bout_algorithm_contract"
+    assert algorithm_contract["schema_version"] == 1
+    assert algorithm_contract["method_version"] == "detect_bouts_multi_level.v7"
+    assert algorithm_contract["active_detection_method"] == "threshold"
+    assert algorithm_contract["active_detection"]["candidate_rule"] == (
+        "detection_signal_mm_s > threshold_mm"
+    )
+    assert algorithm_contract["causal_exponential_transform"]["source_level"] == (
+        "speed_filtered"
+    )
+    assert algorithm_contract["causal_exponential_transform"]["recurrence"] == (
+        "y[i] = alpha[i]*x[i] + (1-alpha[i])*y[i-1]"
+    )
+    assert algorithm_contract["boundaries"]["internal_interval_convention"] == (
+        "half_open_sample_indices_[start,end_exclusive)"
+    )
+    assert run.attrs["provenance"]["algorithm_contract"] == algorithm_contract
+    assert run.attrs["provenance"]["algorithm_contract_sha256"] == (
+        run.attrs["swim_bout_algorithm_contract_sha256"]
+    )
 
     phase_timing = run.attrs["phase_timing"]
     assert phase_timing["schema_id"] == "palette.swim_bout_phase_timing"

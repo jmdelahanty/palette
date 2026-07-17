@@ -233,11 +233,14 @@ The executor preserves these large-recording constraints:
   shards to copy workers. It validates the sharded run before copying it to a
   hidden shared-filesystem sibling, atomically renaming it, and updating the
   nested offline pointers under a per-recording lock;
-- swim-bout detection preserves its signal-major compact-v2 logical contract,
-  but dense detector traces use 4,096-frame logical chunks within aligned
-  262,144-frame indexed outer shards along the frame axis. Readers resolve the
-  detector signal ID before requesting its time slice, while sparse event and
-  bout tables continue to use the shared row-sharded columnar writer;
+- swim-bout detection preserves its signal-major compact-v2 logical contract.
+  Its small dense detector payload uses one regular recording-length chunk
+  because the trace is normally consumed whole and the Sleepyfish benchmark
+  found indexed inner-chunk overhead dominated both full and bounded reads.
+  This is a detector-product policy, not a general framewise-array policy.
+  Sparse event and bout tables continue to use the adaptive shared columnar
+  writer: one-chunk tables remain regular and larger multi-chunk tables acquire
+  aligned row shards;
 - eye angles use their dedicated production materializer. It resolves completed
   subject-shape eye ellipses and refined keypoints, transfers only those exact
   arrays to node-local scratch, records the authoritative and staged locations
@@ -286,6 +289,14 @@ second source-revision audit and the transaction record in
 `cluster_output_staging`. Full source-array content is not re-hashed: the
 record states that assurance relies on completed immutable input runs plus
 path/size/mtime inventory and selected-metadata SHA-256.
+
+Swim-bout provenance follows the same scientific-contract principle. The
+run-level `swim_bout_algorithm_contract` and identical provenance member use
+schema `analysis.swim_bout_algorithm_contract` version 1. They name the source
+speed and frame axes, causal exponential recurrence and reset behavior, active
+detection primitive and parameters, gap/overlap and boundary rules, interval
+semantics, validity handling, and physical metric sources. A persisted SHA-256
+binds the two copies.
 
 For a subject-shape-only cluster run, render and then submit the DAG target. A
 32-core node matches the measured canary configuration; request enough memory

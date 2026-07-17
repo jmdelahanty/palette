@@ -1718,10 +1718,19 @@ Compact v2 replaces physical `<speed_level>` subgroups with `candidate_id` and
 therefore remains selectable, but its dense trace is stored as one row in
 `signals/detector_signal_mm_s` keyed by `detector_signal_signal_ids`. The
 logical array remains signal-major with shape `(detector_signal_id, frame)` for
-reader compatibility. New runs use logical chunks and indexed outer shards
-along the frame axis, so a single detector row does not become one
-recording-length physical chunk. Readers should resolve the signal row first
-and then request only that row's frame slice.
+reader compatibility. New runs store this small dense payload as one regular
+chunk (`palette_storage_policy="single_regular_chunk_v1"`). This measured
+exception favors the common complete-trace read; it does not apply to large
+framewise eye, tail, or track arrays. Readers should still resolve the signal
+row before requesting values so the logical lookup remains future-compatible.
+
+Run attrs also include `swim_bout_algorithm_contract`, a versioned,
+self-contained scientific contract (`analysis.swim_bout_algorithm_contract`,
+schema version 1). It records source paths and axes, the exact causal
+exponential recurrence and reset rules, the active threshold/peak algorithm,
+duration and boundary rounding, overlap/gap handling, interval conventions,
+validity rules, and the physical sources used for bout metrics. The identical
+contract and its SHA-256 are nested in stage provenance.
 
 Do not add v1-style compatibility mirrors under compact runs unless a concrete
 external reader requires them. New Palette Python readers, Marimo notebooks,

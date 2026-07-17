@@ -68,7 +68,6 @@ import numpy as np
 from scipy import signal
 
 from fisheye.shared.zarr.columnar import (
-    DEFAULT_COLUMNAR_SHARD_ROWS,
     store_array,
     write_columnar_dataset,
 )
@@ -134,12 +133,10 @@ SWIM_BOUT_LAYOUT_DEFAULT = SWIM_BOUT_LAYOUT_COMPACT_V2
 BOUT_METRIC_SCHEMA_ID = "palette.swim_bout_metrics.v3"
 DETECTION_SIGNAL_SCHEMA_ID = "palette.swim_bout_detection_signal.v1"
 DETECTION_SIGNAL_SCHEMA_VERSION = 1
-DETECTOR_SIGNAL_STORAGE_SCHEMA_ID = "palette.swim_bout_detector_signal_storage.v1"
-DETECTOR_SIGNAL_FRAME_CHUNK_LENGTH = 4_096
-DETECTOR_SIGNAL_FRAME_SHARD_LENGTH = DEFAULT_COLUMNAR_SHARD_ROWS
-DETECTOR_SIGNAL_SHARD_ALIGNMENT_POLICY = (
-    "ceil_requested_length_to_logical_chunk_grid_capped_to_frame_axis"
-)
+DETECTOR_SIGNAL_STORAGE_SCHEMA_ID = "palette.swim_bout_detector_signal_storage.v2"
+DETECTOR_SIGNAL_STORAGE_POLICY = "single_regular_chunk_v1"
+SWIM_BOUT_ALGORITHM_CONTRACT_SCHEMA_ID = "analysis.swim_bout_algorithm_contract"
+SWIM_BOUT_ALGORITHM_CONTRACT_SCHEMA_VERSION = 1
 PEAK_EVENT_SCHEMA_ID = "palette.swim_bout_peak_events.v1"
 PEAK_EVENT_SCHEMA_VERSION = 1
 METHOD_VERSION = "detect_bouts_multi_level.v7"
@@ -152,30 +149,69 @@ _json_safe_attr_value = json_attr_safe
 _json_safe_attrs = json_attr_safe_mapping
 
 
-def _detector_signal_frame_shard_length(
+def _store_detector_signal_array(
+    group: Any,
+    name: str,
+    data: np.ndarray,
     *,
-    frame_count: int,
-    frame_chunk_length: int,
-    requested_frame_shard_length: int,
-) -> Optional[int]:
-    """Return an aligned, useful outer-shard length for a dense trace."""
+    logical_axis_order: List[str],
+    attrs: Optional[Mapping[str, Any]] = None,
+) -> Any:
+    """Store a small dense detector payload as one regular Zarr chunk.
 
-    frames = int(frame_count)
-    chunk = int(frame_chunk_length)
-    requested = int(requested_frame_shard_length)
-    if frames < 0:
-        raise ValueError("frame_count must be non-negative.")
-    if chunk <= 0 or requested <= 0:
+    Detector traces are normally consumed whole.  The Sleepyfish benchmark
+    showed that splitting the current single-signal, approximately 4.7 MB
+    payload into hundreds of inner chunks made both complete and bounded reads
+    slower.  This is a product-specific policy, not a general recommendation
+    for framewise Palette arrays.
+    """
+
+    values = np.asarray(data)
+    if values.ndim not in (1, 2):
         raise ValueError(
-            "frame_chunk_length and requested_frame_shard_length must be positive."
+            "Detector signal arrays must be one- or two-dimensional; "
+            f"got {values.shape!r}."
         )
-    logical_frame_chunks = (frames + chunk - 1) // chunk
-    if logical_frame_chunks <= 1:
-        return None
-    aligned_requested = ((requested + chunk - 1) // chunk) * chunk
-    maximum_useful_length = logical_frame_chunks * chunk
-    effective = min(aligned_requested, maximum_useful_length)
-    return int(effective) if effective > chunk else None
+    if len(logical_axis_order) != values.ndim:
+        raise ValueError(
+            "logical_axis_order must name every detector signal axis; "
+            f"got {logical_axis_order!r} for shape {values.shape!r}."
+        )
+    if values.ndim == 2 and int(values.shape[0]) <= 0:
+        raise ValueError("Detector signal matrices must contain at least one signal.")
+    chunks = tuple(max(1, int(length)) for length in values.shape)
+
+    if name in group:
+        del group[name]
+    array = group.create_array(
+        name,
+        data=values,
+        chunks=chunks,
+        overwrite=True,
+    )
+    if attrs:
+        array.attrs.update(_json_safe_attrs(attrs))
+    array.attrs.update(
+        {
+            "palette_storage_schema_id": DETECTOR_SIGNAL_STORAGE_SCHEMA_ID,
+            "palette_storage_writer": (
+                "fisheye.analysis.detect_bouts_multi_level."
+                "_store_detector_signal_array"
+            ),
+            "palette_physical_layout": "regular_chunks_v1",
+            "palette_storage_policy": DETECTOR_SIGNAL_STORAGE_POLICY,
+            "palette_logical_chunk_shape": list(chunks),
+            "palette_shard_shape": None,
+            "palette_sharding_skip_reason": "product_policy_single_regular_chunk",
+            "palette_layout_rationale": (
+                "detector traces are small dense payloads normally consumed whole; "
+                "indexed inner chunks added decode and lookup overhead in the "
+                "Sleepyfish access benchmark"
+            ),
+            "logical_axis_order": list(logical_axis_order),
+        }
+    )
+    return array
 
 
 def _store_detector_signal_matrix(
@@ -185,13 +221,7 @@ def _store_detector_signal_matrix(
     *,
     attrs: Optional[Mapping[str, Any]] = None,
 ) -> Any:
-    """Store ``(detector_signal_id, frame)`` traces sharded over time.
-
-    The signal-major logical contract is retained for existing Palette and
-    Crimson readers. Physical chunks and outer shards instead divide axis 1,
-    so a recording with one detector signal does not collapse into one large
-    unsharded row chunk.
-    """
+    """Store ``(detector_signal_id, frame)`` traces as one regular chunk."""
 
     values = np.asarray(data)
     if values.ndim != 2:
@@ -199,66 +229,36 @@ def _store_detector_signal_matrix(
             "Detector signal matrices must have shape "
             f"(detector_signal_id, frame); got {values.shape!r}."
         )
-    signal_count, frame_count = (int(value) for value in values.shape)
-    if signal_count <= 0:
-        raise ValueError("Detector signal matrices must contain at least one signal.")
-
-    frame_chunk_length = max(
-        1,
-        min(int(DETECTOR_SIGNAL_FRAME_CHUNK_LENGTH), max(1, frame_count)),
-    )
-    frame_shard_length = _detector_signal_frame_shard_length(
-        frame_count=frame_count,
-        frame_chunk_length=frame_chunk_length,
-        requested_frame_shard_length=DETECTOR_SIGNAL_FRAME_SHARD_LENGTH,
-    )
-    chunks = (1, int(frame_chunk_length))
-    shards = (
-        (1, int(frame_shard_length))
-        if frame_shard_length is not None
-        else None
+    return _store_detector_signal_array(
+        group,
+        name,
+        values,
+        logical_axis_order=["detector_signal_id", "frame"],
+        attrs=attrs,
     )
 
-    if name in group:
-        del group[name]
-    create_kwargs: Dict[str, Any] = {
-        "data": values,
-        "chunks": chunks,
-        "overwrite": True,
-    }
-    if shards is not None:
-        create_kwargs["shards"] = shards
-    array = group.create_array(name, **create_kwargs)
-    if attrs:
-        array.attrs.update(_json_safe_attrs(attrs))
-    array.attrs.update(
-        {
-            "palette_storage_schema_id": DETECTOR_SIGNAL_STORAGE_SCHEMA_ID,
-            "palette_storage_writer": (
-                "fisheye.analysis.detect_bouts_multi_level."
-                "_store_detector_signal_matrix"
-            ),
-            "palette_physical_layout": (
-                "indexed_sharding_v1" if shards is not None else "regular_chunks_v1"
-            ),
-            "palette_logical_chunk_shape": list(chunks),
-            "palette_shard_axis": 1,
-            "palette_shard_axis_name": "frame",
-            "palette_shard_length_requested": int(
-                DETECTOR_SIGNAL_FRAME_SHARD_LENGTH
-            ),
-            "palette_shard_length_effective": (
-                int(frame_shard_length) if frame_shard_length is not None else None
-            ),
-            "palette_shard_shape": list(shards) if shards is not None else None,
-            "palette_shard_alignment_policy": DETECTOR_SIGNAL_SHARD_ALIGNMENT_POLICY,
-            "palette_sharding_skip_reason": (
-                None if shards is not None else "single_logical_frame_chunk"
-            ),
-            "logical_axis_order": ["detector_signal_id", "frame"],
-        }
+
+def _store_detector_signal_vector(
+    group: Any,
+    name: str,
+    data: np.ndarray,
+    *,
+    attrs: Optional[Mapping[str, Any]] = None,
+) -> Any:
+    """Store a compatibility-layout ``(frame,)`` trace as one regular chunk."""
+
+    values = np.asarray(data)
+    if values.ndim != 1:
+        raise ValueError(
+            f"Detector signal vectors must have shape (frame,); got {values.shape!r}."
+        )
+    return _store_detector_signal_array(
+        group,
+        name,
+        values,
+        logical_axis_order=["frame"],
+        attrs=attrs,
     )
-    return array
 
 
 def _finish_timed_phase(
@@ -550,12 +550,29 @@ def _detection_signal_attrs(
     path_distance_source_level: str,
     exponential_source_key: str,
     exponential_tau_s: float,
+    source_array_paths: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Describe the signal used to define bout boundaries for one subgroup."""
 
     is_exponential = level == "speed_exponential"
     source_level = exponential_source_key if is_exponential else level
     source_array = f"{source_level}_mm"
+    resolved_source_paths = dict(source_array_paths or {})
+    speed_source_paths = dict(resolved_source_paths.get("speed_mm", {}))
+    path_distance_source_paths = dict(
+        resolved_source_paths.get("frame_path_distance_mm", {})
+    )
+    source_path = speed_source_paths.get(source_level)
+    if source_path is None and source_array_paths is None:
+        source_path = f"{source_track_path}/{source_array}"
+    movement_speed_level = f"speed_{path_distance_source_level}"
+    path_distance_path = path_distance_source_paths.get(path_distance_source_level)
+    movement_speed_path = speed_source_paths.get(movement_speed_level)
+    if source_array_paths is None:
+        path_distance_path = (
+            f"{source_track_path}/frame_path_distance_{path_distance_source_level}_mm"
+        )
+        movement_speed_path = f"{source_track_path}/{movement_speed_level}_mm"
     attrs: Dict[str, Any] = {
         "signal_level": level,
         "detection_signal_schema_id": DETECTION_SIGNAL_SCHEMA_ID,
@@ -564,13 +581,15 @@ def _detection_signal_attrs(
         "detection_signal_units": "mm/s",
         "detection_signal_source_level": source_level,
         "detection_signal_source_array": source_array,
-        "detection_signal_source_path": f"{source_track_path}/{source_array}",
+        "detection_signal_source_path": source_path,
         "detection_signal_array": "detection_signal_mm_s" if is_exponential else source_array,
         "detection_signal_transform_type": "convolution" if is_exponential else "identity",
         "detection_signal_transform_family": "causal_exponential" if is_exponential else "identity",
         "detection_signal_is_primary_physical_speed": not is_exponential,
         "movement_metric_source_level": path_distance_source_level,
         "movement_metric_path_distance_array": f"frame_path_distance_{path_distance_source_level}_mm",
+        "movement_metric_path_distance_path": path_distance_path,
+        "movement_metric_speed_path": movement_speed_path,
         "peak_detection_signal_field": "peak_detection_signal_mm_s",
         "peak_physical_speed_field": "peak_physical_speed_mm_s",
     }
@@ -591,6 +610,292 @@ def _detection_signal_attrs(
             }
         )
     return attrs
+
+
+def _swim_bout_algorithm_contract(
+    *,
+    method: str,
+    parameters: Mapping[str, Any],
+    source_track_path: str,
+    track_id: int,
+    fps: float,
+    n_frames: int,
+    speed_levels: List[str],
+    default_level: str,
+    path_distance_level_source: Mapping[str, str],
+    exponential_source_level: str,
+    exponential_tau_s: float,
+    source_array_paths: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Describe the exact scientific transformations used for swim bouts."""
+
+    resolved_source_paths = dict(source_array_paths or {})
+    speed_source_paths = dict(resolved_source_paths.get("speed_mm", {}))
+    path_distance_source_paths = dict(
+        resolved_source_paths.get("frame_path_distance_mm", {})
+    )
+
+    common_boundary_contract: Dict[str, Any] = {
+        "internal_interval_convention": "half_open_sample_indices_[start,end_exclusive)",
+        "persisted_frame_convention": (
+            "start_frame=frame_indices[start]; "
+            "end_frame=frame_indices[end_exclusive-1] (inclusive endpoint)"
+        ),
+        "duration_frames_formula": "end_exclusive - start",
+        "duration_seconds_formula": "duration_frames / fps",
+        "minimum_duration_resolution": (
+            "0 when seconds=0 else ceil(seconds*fps - 1e-9)"
+        ),
+        "minimum_duration_rounding_policy": DURATION_FRAME_ROUNDING_POLICY,
+        "minimum_bout_duration_s": parameters.get("min_bout_duration_s"),
+        "resolved_min_bout_frames": parameters.get("resolved_min_bout_frames"),
+        "boundary_mode": (
+            parameters.get("peak_event_boundary_mode")
+            if method == "peak_event"
+            else parameters.get("boundary_mode")
+        ),
+        "local_minimum_expansion": {
+            "active": (
+                method in {"threshold", "peak"}
+                and parameters.get("boundary_mode") == "local_minimum"
+            ),
+            "window_seconds": parameters.get("boundary_window_s"),
+            "window_frames": parameters.get("resolved_boundary_window_frames"),
+            "window_frame_resolution": "round(boundary_window_s * fps)",
+            "rule": (
+                "expand each core toward finite global minima inside bounded left/right "
+                "windows; ties choose the minimum nearest the core; constrain boundaries "
+                "by the previous expanded end and next core so bouts cannot overlap"
+            ),
+        },
+    }
+
+    if method == "threshold":
+        active_detection: Dict[str, Any] = {
+            "method": "threshold",
+            "candidate_rule": "detection_signal_mm_s > threshold_mm",
+            "threshold_mm_s": parameters.get("threshold_mm"),
+            "missing_value_policy": (
+                "NaN is forced below threshold; other values follow NumPy greater-than comparison"
+            ),
+            "core_rule": "contiguous true samples after optional gap merging",
+            "gap_merge": {
+                "policy": parameters.get("gap_merge_policy"),
+                "resolved_min_gap_frames": parameters.get("resolved_min_gap_frames"),
+                "effective_min_gap_duration_s": parameters.get(
+                    "gap_merge_min_gap_duration_s"
+                ),
+                "comparison": "merge when observed gap is strictly less than the minimum",
+                "sampled_frame_gap": "next_start_index - previous_end_exclusive",
+                "interpolated_core_gap": (
+                    "linearly interpolate threshold crossings on adjacent finite samples; "
+                    "fall back to sampled_frame_gap when either crossing is invalid"
+                ),
+            },
+            "threshold_crossing_interpolation": {
+                "method": THRESHOLD_CROSSING_INTERPOLATION,
+                "formula": (
+                    "fraction=(threshold-below_speed)/(above_speed-below_speed); "
+                    "crossing_frame=below_frame+fraction*(above_frame-below_frame)"
+                ),
+                "validity": (
+                    "adjacent indices, finite unequal endpoint speeds, and threshold "
+                    "inside the closed endpoint range"
+                ),
+                "scope": "interpolated core timing fields only; stored frame endpoints remain sampled",
+            },
+        }
+    elif method == "peak":
+        active_detection = {
+            "method": "peak",
+            "candidate_primitive": "scipy.signal.find_peaks",
+            "peak_parameters": {
+                "prominence_mm_s": parameters.get("prominence"),
+                "minimum_height_mm_s": parameters.get("min_peak_height"),
+            },
+            "candidate_input_policy": "replace NaN with 0.0 before peak detection",
+            "boundary_primitive": "scipy.signal.peak_widths",
+            "relative_height": parameters.get("rel_height"),
+            "integer_boundary_rule": (
+                "start=floor(left_ips); end_exclusive=ceil(right_ips)+1; clip to signal bounds"
+            ),
+            "gap_merge": {
+                "policy": "sampled_frame_gap",
+                "resolved_min_gap_frames": parameters.get("resolved_min_gap_frames"),
+                "comparison": "merge adjacent width envelopes when gap is strictly less than minimum",
+            },
+        }
+    elif method == "peak_event":
+        active_detection = {
+            "method": "peak_event",
+            "event_identity": "one accepted event per scipy peak after duration filtering",
+            "candidate_primitive": "scipy.signal.find_peaks",
+            "candidate_input_policy": "replace every nonfinite value with 0.0 for peak operations",
+            "peak_parameters": {
+                "minimum_height_mm_s": parameters.get("min_peak_height_mm_s"),
+                "minimum_prominence_mm_s": parameters.get(
+                    "min_peak_prominence_mm_s"
+                ),
+                "none_prominence_resolution": 0.0,
+                "minimum_distance_s": parameters.get("min_peak_distance_s"),
+                "minimum_distance_frames": (
+                    "0 when seconds=0 else ceil(seconds*fps - 1e-9)"
+                ),
+            },
+            "boundary_primitive": "scipy.signal.peak_widths",
+            "relative_height": parameters.get("peak_width_rel_height"),
+            "boundary_mode": parameters.get("peak_event_boundary_mode"),
+            "shape_split_policy": parameters.get("shape_split_policy"),
+            "integer_boundary_rule": (
+                "start=floor(left_ips); end_exclusive=ceil(right_ips)+1; clip to signal bounds"
+            ),
+            "overlap_resolution": (
+                "preserve one event per peak; when adjacent width envelopes overlap, split "
+                "at the finite minimum between peak centers (first minimum wins), then clamp "
+                "the split after the left peak and no later than the right peak"
+            ),
+            "acceptance_rule": (
+                "duration_frames >= resolved_min_bout_frames and "
+                "start <= peak_index < end_exclusive"
+            ),
+            "gap_merge": "not_applied",
+        }
+    else:
+        raise ValueError(f"Unsupported swim-bout detection method: {method!r}.")
+
+    signal_contracts: Dict[str, Dict[str, Any]] = {}
+    for level in speed_levels:
+        is_exponential = level == "speed_exponential"
+        source_level = exponential_source_level if is_exponential else level
+        movement_source = str(path_distance_level_source[level])
+        detection_source_path = speed_source_paths.get(source_level)
+        movement_speed_level = f"speed_{movement_source}"
+        path_distance_path = path_distance_source_paths.get(movement_source)
+        movement_speed_path = speed_source_paths.get(movement_speed_level)
+        if source_array_paths is None:
+            detection_source_path = f"{source_track_path}/{source_level}_mm"
+            path_distance_path = (
+                f"{source_track_path}/frame_path_distance_{movement_source}_mm"
+            )
+            movement_speed_path = f"{source_track_path}/{movement_speed_level}_mm"
+        signal_contracts[level] = {
+            "detection_signal_source": detection_source_path,
+            "detection_signal_units": "mm/s",
+            "transform": "causal_exponential" if is_exponential else "identity",
+            "movement_metric_source_level": movement_source,
+            "path_distance_source": path_distance_path,
+            "physical_peak_speed_source": movement_speed_path,
+        }
+
+    return {
+        "schema_id": SWIM_BOUT_ALGORITHM_CONTRACT_SCHEMA_ID,
+        "schema_version": SWIM_BOUT_ALGORITHM_CONTRACT_SCHEMA_VERSION,
+        "method": "multi_level_speed_bout_detection",
+        "method_version": METHOD_VERSION,
+        "active_detection_method": method,
+        "detection_scope": "apply the active method independently to every signal_contracts entry",
+        "default_signal_level": default_level,
+        "source_contract": {
+            "track_id": int(track_id),
+            "track_path": source_track_path,
+            "frame_indices_path": resolved_source_paths.get(
+                "frame_indices",
+                f"{source_track_path}/frame_indices",
+            ),
+            "frame_axis": "track_kinematics_samples",
+            "frame_count": int(n_frames),
+            "fps": float(fps),
+            "time_seconds_formula": "frame_indices / fps",
+            "delta_seconds_path": resolved_source_paths.get("delta_seconds"),
+            "transition_valid_path": resolved_source_paths.get("transition_valid"),
+            "sample_valid_path": resolved_source_paths.get("sample_valid"),
+            "positions_mm_path": resolved_source_paths.get("positions_mm"),
+            "positions_px_path": resolved_source_paths.get("positions_px"),
+        },
+        "signal_contracts": signal_contracts,
+        "causal_exponential_transform": {
+            "output_level": "speed_exponential",
+            "source_level": exponential_source_level,
+            "source_path": (
+                speed_source_paths.get(exponential_source_level)
+                if source_array_paths is not None
+                else f"{source_track_path}/{exponential_source_level}_mm"
+            ),
+            "tau_s": float(exponential_tau_s),
+            "causal": True,
+            "normalized": True,
+            "input_clamp": "finite negative speeds are clamped to 0.0",
+            "recurrence": "y[i] = alpha[i]*x[i] + (1-alpha[i])*y[i-1]",
+            "alpha_formula": "1 - exp(-dt_s / tau_s)",
+            "dt_formula": "max((frame_indices[i]-frame_indices[i-1])/fps, 0.0)",
+            "initialization": "first finite sample initializes y to clamped x",
+            "missing_sample_policy": "nonfinite x produces NaN and clears recurrent state",
+            "invalid_transition_policy": (
+                "when transition_valid[i] is false, restart state at the current clamped sample"
+            ),
+            "transition_valid_fallback": (
+                "frame delta equals 1 and current speed is finite when source validity is absent"
+            ),
+        },
+        "active_detection": active_detection,
+        "boundaries": common_boundary_contract,
+        "persisted_metrics": {
+            "detection_signal_peak": (
+                "maximum finite detection signal inside the persisted half-open bout interval"
+            ),
+            "physical_speed_peak": (
+                "maximum finite speed from the movement metric source level inside the interval"
+            ),
+            "path_length": (
+                "sum finite frame_path_distance values only where effective transition validity is true"
+            ),
+            "observed_duration_s": (
+                "sum delta_seconds only where effective transition validity is true"
+            ),
+            "mean_speed_mm_s": "path_length_mm / observed_duration_s when defined",
+            "net_displacement": (
+                "Euclidean distance between finite first and inclusive-last sampled positions"
+            ),
+            "effective_transition_validity": (
+                "source transition_valid (or adjacent-frame fallback), AND validity of both "
+                "sample endpoints when sample_valid is available"
+            ),
+            "gap_censored": "true when any transition in the persisted interval is invalid",
+            "inter_bout_interval": (
+                "sort bouts by start_time_s; interval_frames=max(0,next_start_frame-"
+                "previous_end_frame); interval_s uses the corresponding sampled times, "
+                "falling back to interval_frames/fps when needed"
+            ),
+            "global_activity": (
+                "recording_duration_s=frame_count/fps; percent_active=100*sum(duration_s)/"
+                "recording_duration_s; bout_rate_per_min=60*bout_count/recording_duration_s"
+            ),
+        },
+        "implementation_symbols": {
+            "exponential_transform": (
+                "fisheye.analysis.detect_bouts_multi_level."
+                "_causal_exponential_speed_response"
+            ),
+            "threshold_detection": (
+                "fisheye.analysis.detect_bouts_multi_level._detect_bouts_from_speed"
+            ),
+            "peak_detection": (
+                "fisheye.analysis.detect_bouts_multi_level._detect_bouts_from_peaks"
+            ),
+            "peak_event_detection": (
+                "fisheye.analysis.detect_bouts_multi_level."
+                "_detect_bouts_from_peak_events"
+            ),
+            "metric_materialization": (
+                "fisheye.analysis.detect_bouts_multi_level._build_bout_array"
+            ),
+        },
+        "dependency_primitives": {
+            "peak_detection": "scipy.signal.find_peaks",
+            "peak_widths": "scipy.signal.peak_widths",
+            "dependency_versions": "recorded by stage provenance environment metadata",
+        },
+    }
 
 
 def _sum_valid_path_distance(
@@ -1511,6 +1816,7 @@ def _write_compact_v2_swim_bout_payloads(
     exponential_tau_s: float,
     frames: np.ndarray,
     speeds: Mapping[str, Optional[np.ndarray]],
+    source_array_paths: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """Write the compact tabular v2 swim-bout representation."""
 
@@ -1566,6 +1872,7 @@ def _write_compact_v2_swim_bout_payloads(
             path_distance_source_level=path_distance_level_source[level],
             exponential_source_key=exponential_source_key,
             exponential_tau_s=float(exponential_tau_s),
+            source_array_paths=source_array_paths,
         )
         signal_params = {
             "speed_level": level,
@@ -2214,6 +2521,57 @@ def _detect_bouts_from_peak_events(
     return bouts, peak_events
 
 
+def _resolved_track_source_array_paths(root: Any, track: Any) -> Dict[str, Any]:
+    """Return the physical track arrays selected by the logical resolver."""
+
+    track_group = root["analysis"]["track_kinematics_runs"][track.scope][
+        track.run_name
+    ]["tracks"][f"id_{int(track.track_id)}"]
+    track_path = str(track.track_path)
+    speed_mm: Dict[str, str] = {}
+    frame_path_distance_mm: Dict[str, str] = {}
+    grouped_speed = None
+    if "movement" in track_group and "speed" in track_group["movement"]:
+        grouped_speed = track_group["movement"]["speed"]
+
+    for level in BASE_SPEED_LEVELS:
+        short_level = level.replace("speed_", "", 1)
+        grouped_level = (
+            grouped_speed[short_level]
+            if grouped_speed is not None and short_level in grouped_speed
+            else None
+        )
+        if grouped_level is not None and "mm" in grouped_level:
+            speed_mm[level] = f"{track_path}/movement/speed/{short_level}/mm"
+        else:
+            speed_mm[level] = f"{track_path}/{level}_mm"
+
+        if grouped_level is not None and "frame_path_distance_mm" in grouped_level:
+            frame_path_distance_mm[short_level] = (
+                f"{track_path}/movement/speed/{short_level}/frame_path_distance_mm"
+            )
+        elif f"frame_path_distance_{short_level}_mm" in track_group:
+            frame_path_distance_mm[short_level] = (
+                f"{track_path}/frame_path_distance_{short_level}_mm"
+            )
+
+    resolved: Dict[str, Any] = {
+        "frame_indices": f"{track_path}/frame_indices",
+        "speed_mm": speed_mm,
+        "frame_path_distance_mm": frame_path_distance_mm,
+    }
+    for name in (
+        "delta_seconds",
+        "transition_valid",
+        "sample_valid",
+        "positions_mm",
+        "positions_px",
+    ):
+        if name in track_group:
+            resolved[name] = f"{track_path}/{name}"
+    return resolved
+
+
 def _load_track_kinematics_track_speeds(
     zarr_path: Path,
     track_kinematics_run: str,
@@ -2241,6 +2599,7 @@ def _load_track_kinematics_track_speeds(
         track_id=track_id,
     )
     speeds = track.speed_level_dict()
+    source_array_paths = _resolved_track_source_array_paths(root, track)
 
     source_provenance = track.run_attrs.get('provenance')
     if not isinstance(source_provenance, dict):
@@ -2262,6 +2621,7 @@ def _load_track_kinematics_track_speeds(
         'track_kinematics_git_commit': track.run_attrs.get('git_commit') or source_git.get('commit'),
         'track_kinematics_git_dirty': track.run_attrs.get('git_dirty', source_git.get('is_dirty')),
         'track_id': track_id,
+        'source_array_paths': source_array_paths,
         'positions_mm': track.positions_mm,
         'positions_px': track.positions_px,
     }
@@ -2768,6 +3128,33 @@ def detect_and_save_bouts(
         'distance_policy': 'path_length_from_track_frame_path_distance_only',
         'overwrite': bool(overwrite),
     })
+    algorithm_contract = _json_safe_attr_value(
+        _swim_bout_algorithm_contract(
+            method=method,
+            parameters=parameters,
+            source_track_path=source_track_path,
+            track_id=int(track_id),
+            fps=float(fps),
+            n_frames=int(metadata['n_frames']),
+            speed_levels=list(speed_levels),
+            default_level=default_level_key,
+            path_distance_level_source=path_distance_level_source,
+            exponential_source_level=exponential_source_key,
+            exponential_tau_s=float(exponential_tau_s),
+            source_array_paths=metadata.get('source_array_paths'),
+        )
+    )
+    algorithm_contract_sha256 = _sha256_json(algorithm_contract)
+    run_group.attrs['swim_bout_algorithm_contract'] = algorithm_contract
+    run_group.attrs['swim_bout_algorithm_contract_schema_id'] = (
+        SWIM_BOUT_ALGORITHM_CONTRACT_SCHEMA_ID
+    )
+    run_group.attrs['swim_bout_algorithm_contract_schema_version'] = (
+        SWIM_BOUT_ALGORITHM_CONTRACT_SCHEMA_VERSION
+    )
+    run_group.attrs['swim_bout_algorithm_contract_sha256'] = (
+        algorithm_contract_sha256
+    )
     inputs = _json_safe_attr_value({
         'zarr_path': str(zarr_path),
         'source_track_kinematics_run': metadata['track_kinematics_run'],
@@ -2783,8 +3170,9 @@ def detect_and_save_bouts(
         'fps': float(fps),
         'pixel_to_mm': metadata.get('pixel_to_mm'),
         'n_frames': int(metadata['n_frames']),
+        'resolved_source_array_paths': metadata.get('source_array_paths'),
     })
-    provenance = _json_safe_attr_value(build_stage_provenance(
+    provenance = build_stage_provenance(
         stage="detect_bouts_multi_level",
         created_at_utc=created_at_utc,
         parameters=parameters,
@@ -2798,8 +3186,18 @@ def detect_and_save_bouts(
             'run_path': f"analysis/swim_bout_runs/{run_name}",
             'default_level': default_level_key,
             'layout': layout,
+            'algorithm_contract_schema_id': (
+                SWIM_BOUT_ALGORITHM_CONTRACT_SCHEMA_ID
+            ),
+            'algorithm_contract_schema_version': (
+                SWIM_BOUT_ALGORITHM_CONTRACT_SCHEMA_VERSION
+            ),
+            'algorithm_contract_sha256': algorithm_contract_sha256,
         },
-    ))
+    )
+    provenance['algorithm_contract'] = algorithm_contract
+    provenance['algorithm_contract_sha256'] = algorithm_contract_sha256
+    provenance = _json_safe_attr_value(provenance)
     write_stage_provenance(run_group, provenance)
     _finish_timed_phase(
         phase_durations_s,
@@ -2874,6 +3272,7 @@ def detect_and_save_bouts(
                 path_distance_source_level=path_distance_level_source[level],
                 exponential_source_key=exponential_source_key,
                 exponential_tau_s=float(exponential_tau_s),
+                source_array_paths=metadata.get('source_array_paths'),
             )
         )
         if len(bouts) > 0:
@@ -2933,6 +3332,7 @@ def detect_and_save_bouts(
             exponential_tau_s=float(exponential_tau_s),
             frames=frames,
             speeds=speeds,
+            source_array_paths=metadata.get('source_array_paths'),
         )
         for level in speed_levels:
             payload = level_payloads[level]
@@ -2945,7 +3345,7 @@ def detect_and_save_bouts(
             level_specific_attrs = payload["attrs"]
             level_group.attrs.update(level_specific_attrs)
             if level == "speed_exponential":
-                store_array(
+                _store_detector_signal_vector(
                     level_group,
                     "detection_signal_mm_s",
                     np.asarray(speeds["speed_exponential_mm"], dtype=np.float32),
@@ -2957,6 +3357,7 @@ def detect_and_save_bouts(
                             path_distance_source_level=path_distance_level_source[level],
                             exponential_source_key=exponential_source_key,
                             exponential_tau_s=float(exponential_tau_s),
+                            source_array_paths=metadata.get('source_array_paths'),
                         ),
                     },
                 )

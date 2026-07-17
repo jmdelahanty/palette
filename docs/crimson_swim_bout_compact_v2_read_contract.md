@@ -213,10 +213,18 @@ Detector trace:
 - Find the row whose value equals the selected `signal_id`.
 - Use that row as the detector trace and read `signals/frame_indices` as the
   frame axis. New Palette runs retain the logical `(signal_id, frame)` shape
-  but chunk and shard the second axis; select the row before reading values so
-  the store only fetches that signal's time shards.
+  and store the small detector payload as one regular recording-length chunk.
+  Select the row before reading values to retain compatibility if more detector
+  signals or another physical layout are introduced later.
 - This replaces the v1 path
   `<run>/<speed_level>/detection_signal_mm_s`.
+
+Scientific interpretation should prefer the run-level
+`swim_bout_algorithm_contract` attribute. Schema version 1 names the exact
+source signal, causal exponential recurrence and gap-reset behavior, active
+detection primitive and parameters, boundary/overlap rules, inclusive stored
+frame endpoints, and metric-source validity rules. The same payload and its
+SHA-256 are present in run provenance.
 
 ## Compatibility Rules
 
