@@ -543,6 +543,47 @@ def _resolve_review_geometry(root: zarr.Group, run_attrs: Mapping[str, Any]):
     raise ValueError("Eye-angle run does not identify a modern subject eye-geometry source.")
 
 
+def _resolve_review_masks(root: zarr.Group, geometry: Any) -> tuple[Any, str]:
+    """Resolve exact left/right masks aligned to the selected eye geometry."""
+
+    masks = geometry.masks_roi
+    mask_source_path = str(geometry.group_path)
+    if masks is None:
+        refined_subject_run = str(geometry.source_refined_subject_run or "").strip()
+        if not refined_subject_run:
+            raise ValueError(
+                "Subject-shape eye geometry does not identify its source "
+                "refined-subject-mask run for review."
+            )
+        mask_geometry = resolve_eye_geometry_source(
+            root,
+            refined_subject_run=refined_subject_run,
+        )
+        masks = mask_geometry.masks_roi
+        mask_source_path = str(mask_geometry.group_path)
+
+    if masks is None:
+        raise ValueError("Resolved eye geometry has no dense/decodable eye masks for review.")
+    mask_shape = tuple(int(value) for value in getattr(masks, "shape", ()))
+    ellipse_shape = tuple(int(value) for value in getattr(geometry.ellipse_params, "shape", ()))
+    if len(mask_shape) != 4 or mask_shape[1] != 2:
+        raise ValueError(
+            f"Review eye masks must have shape (row, 2, y, x); got {mask_shape}."
+        )
+    if len(ellipse_shape) < 3 or ellipse_shape[1] != 2:
+        raise ValueError(
+            "Review eye ellipses must have shape (row, 2, parameter); "
+            f"got {ellipse_shape}."
+        )
+    if mask_shape[0] != ellipse_shape[0]:
+        raise ValueError(
+            "Review masks and eye ellipses are not row-aligned: "
+            f"{mask_source_path} has {mask_shape[0]} rows but "
+            f"{geometry.group_path} has {ellipse_shape[0]}."
+        )
+    return masks, mask_source_path
+
+
 def _normalize_image(image: np.ndarray) -> np.ndarray:
     values = np.asarray(image, dtype=np.float32)
     finite = values[np.isfinite(values)]
@@ -578,16 +619,14 @@ def write_bounded_review_png(
     sample: Mapping[str, np.ndarray],
     output_path: Path,
     panel_count: int = 12,
-) -> list[int]:
+) -> tuple[list[int], str]:
     """Write a bounded eye-identity/gaze-vector overlay review grid."""
 
     attrs = _group_attrs(run_group)
     _keypoint_name, keypoint_group = _resolve_keypoint_group(root, attrs)
     roi_images = _resolve_roi_images(root, keypoint_group)
     geometry = _resolve_review_geometry(root, attrs)
-    if geometry.masks_roi is None:
-        raise ValueError("Resolved eye geometry has no dense/decodable eye masks for review.")
-    masks = geometry.masks_roi
+    masks, mask_source_path = _resolve_review_masks(root, geometry)
     ellipse_params = geometry.ellipse_params
     selected = _review_selection(sample, panel_count)
     if selected.size == 0:
@@ -667,7 +706,7 @@ def write_bounded_review_png(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    return review_rows
+    return review_rows, mask_source_path
 
 
 def validate_eye_angle_run(
@@ -721,8 +760,9 @@ def validate_eye_angle_run(
         "stored_gaze_angle_source": attrs.get("gaze_angle_source"),
     }
     review_rows: list[int] = []
+    review_mask_source_path: Optional[str] = None
     if review_png is not None:
-        review_rows = write_bounded_review_png(
+        review_rows, review_mask_source_path = write_bounded_review_png(
             root=root,
             run_group=run_group,
             sample=sample,
@@ -760,6 +800,7 @@ def validate_eye_angle_run(
         "checks": [check.to_dict() for check in checks],
         "direction_assumption": assumption,
         "review_png": str(review_png) if review_png is not None else None,
+        "review_mask_source_path": review_mask_source_path,
         "review_row_indices": review_rows,
     }
 

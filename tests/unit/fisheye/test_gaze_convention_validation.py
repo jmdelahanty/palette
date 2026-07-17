@@ -1,8 +1,13 @@
 from __future__ import annotations
 
-import numpy as np
+from types import SimpleNamespace
 
+import numpy as np
+import pytest
+
+import fisheye.analysis.gaze_convention_validation as validation_module
 from fisheye.analysis.gaze_convention_validation import (
+    _resolve_review_masks,
     body_frame_angles_from_vectors,
     validate_gaze_geometry_arrays,
     wrap_degrees_signed,
@@ -73,3 +78,48 @@ def test_body_frame_vector_angles_use_anatomical_left_positive() -> None:
         body_frame_angles_from_vectors(vectors, forward, left),
         np.asarray([0.0, 90.0, -90.0]),
     )
+
+
+def test_review_masks_follow_subject_shape_refined_subject_lineage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    masks = np.zeros((5, 2, 8, 8), dtype=np.uint8)
+    subject_shape = SimpleNamespace(
+        masks_roi=None,
+        ellipse_params=np.zeros((5, 2, 5), dtype=np.float32),
+        group_path="analysis/subject_shape_runs/shape_a",
+        source_refined_subject_run="refined_subject_a",
+    )
+    refined_subject = SimpleNamespace(
+        masks_roi=masks,
+        group_path="refined_subject_masks_runs/refined_subject_a",
+    )
+    calls: list[str] = []
+
+    def _fake_resolve(_root: object, *, refined_subject_run: str):
+        calls.append(refined_subject_run)
+        return refined_subject
+
+    monkeypatch.setattr(
+        validation_module,
+        "resolve_eye_geometry_source",
+        _fake_resolve,
+    )
+
+    resolved, source_path = _resolve_review_masks(object(), subject_shape)
+
+    assert resolved is masks
+    assert source_path == "refined_subject_masks_runs/refined_subject_a"
+    assert calls == ["refined_subject_a"]
+
+
+def test_review_masks_reject_row_mismatch() -> None:
+    geometry = SimpleNamespace(
+        masks_roi=np.zeros((4, 2, 8, 8), dtype=np.uint8),
+        ellipse_params=np.zeros((5, 2, 5), dtype=np.float32),
+        group_path="analysis/subject_shape_runs/shape_a",
+        source_refined_subject_run="refined_subject_a",
+    )
+
+    with pytest.raises(ValueError, match="not row-aligned"):
+        _resolve_review_masks(object(), geometry)
