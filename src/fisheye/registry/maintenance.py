@@ -12,7 +12,7 @@ from pathlib import PurePosixPath
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, NoReturn, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, NoReturn, Optional, Sequence, Set, Tuple
 
 from .db import (
     Registry,
@@ -34,6 +34,7 @@ from .extractors.masks import (
 from .extractors.quality import _extract_detect_quality_rows, _extract_keypoint_quality_rows
 from fisheye.shared.experiment_setup import subdish_required
 from fisheye.shared.zarr_run_completion import (
+    is_run_complete,
     is_run_complete_in_parent,
     resolve_latest_complete_run_name,
 )
@@ -58,6 +59,8 @@ EYE_MASK_REGISTRY_WRITES_RETIRED_MESSAGE = (
     "Standalone eye-mask registry write/backfill paths are retired. Historical "
     "eye_mask_* rows remain readable through registry query/status surfaces."
 )
+
+CLIPPED_DETECT_COLLECTION_SCHEMA = "palette.refined_detect_clip_collection.v1"
 
 
 def _raise_eye_mask_registry_writes_retired() -> NoReturn:
@@ -5660,6 +5663,300 @@ def _extract_detect_method(detect_group: object) -> Optional[str]:
     return _decode_text(provenance.get("method"))
 
 
+@dataclass(frozen=True)
+class _ClippedDetectCollectionResolution:
+    collection_id: str
+    collection_path: str
+    collection_group: Optional[object]
+    valid: bool
+    validation_errors: Tuple[str, ...]
+    selected_run_count: int
+    clip_count: int
+    work_unit_count: int
+    quality_valid: bool
+    quality_errors: Tuple[str, ...]
+    quality_mode: Optional[str]
+    quality_run: Optional[str]
+    quality_group: Optional[object]
+    quality_selection: str
+    quality_member_run_count: int
+
+    def details(self) -> Dict[str, object]:
+        details: Dict[str, object] = {
+            "detect_collection_id": self.collection_id,
+            "detect_collection_path": self.collection_path,
+            "detect_collection_schema": CLIPPED_DETECT_COLLECTION_SCHEMA,
+            "detect_collection_validation_status": "ok" if self.valid else "error",
+            "detect_collection_selected_run_count": self.selected_run_count,
+            "detect_collection_clip_count": self.clip_count,
+            "detect_collection_work_unit_count": self.work_unit_count,
+        }
+        if self.validation_errors:
+            details["detect_collection_validation_errors"] = list(self.validation_errors)
+        if self.quality_mode:
+            details["detect_quality_collection_mode"] = self.quality_mode
+        if self.quality_member_run_count:
+            details["detect_quality_member_run_count"] = self.quality_member_run_count
+        if self.quality_errors:
+            details["detect_quality_collection_errors"] = list(self.quality_errors)
+        return details
+
+
+def _group_has_strict_completion(group: object) -> bool:
+    if group is None or not hasattr(group, "attrs"):
+        return False
+    try:
+        return bool(is_run_complete(group, legacy_default=False))
+    except Exception:
+        return False
+
+
+def _resolve_latest_clipped_detect_collection(
+    root: object,
+    refined_detect_parent: object,
+    *,
+    recording_id: str,
+) -> Optional[_ClippedDetectCollectionResolution]:
+    """Resolve and validate the manifest selected by ``latest_collection``.
+
+    A clipped collection is a recording-level detection/refinement authority,
+    even though its physical runs remain under per-clip groups.  Registry
+    projection must therefore validate the manifest and its selected member
+    paths instead of treating empty top-level run parents as evidence that the
+    stages did not run.
+    """
+
+    collection_id = _extract_source_ref(refined_detect_parent, "latest_collection")
+    if not collection_id:
+        return None
+
+    declared_path = _extract_source_ref(refined_detect_parent, "latest_collection_path")
+    collection_path = declared_path or f"experiment_index/finalized_runs/{collection_id}"
+    validation_errors: List[str] = []
+    quality_errors: List[str] = []
+    collection_group = _get_group_path(root, collection_path)
+    if collection_group is None:
+        validation_errors.append(f"collection path does not exist: {collection_path}")
+        return _ClippedDetectCollectionResolution(
+            collection_id=collection_id,
+            collection_path=collection_path,
+            collection_group=None,
+            valid=False,
+            validation_errors=tuple(validation_errors),
+            selected_run_count=0,
+            clip_count=0,
+            work_unit_count=0,
+            quality_valid=False,
+            quality_errors=(),
+            quality_mode=None,
+            quality_run=None,
+            quality_group=None,
+            quality_selection="collection_missing",
+            quality_member_run_count=0,
+        )
+
+    attrs = collection_group.attrs if hasattr(collection_group, "attrs") else {}  # type: ignore[attr-defined]
+    if _decode_text(attrs.get("schema_version")) != CLIPPED_DETECT_COLLECTION_SCHEMA:
+        validation_errors.append(
+            f"schema_version must be {CLIPPED_DETECT_COLLECTION_SCHEMA}"
+        )
+    if _decode_text(attrs.get("collection_kind")) != "refined_detect_clip_collection":
+        validation_errors.append("collection_kind must be refined_detect_clip_collection")
+    if _decode_text(attrs.get("collection_id")) != collection_id:
+        validation_errors.append("collection_id does not match latest_collection")
+    if PurePosixPath(collection_path).name != collection_id:
+        validation_errors.append("latest_collection_path basename does not match collection_id")
+    if _decode_text(attrs.get("recording_id")) != recording_id:
+        validation_errors.append("collection recording_id does not match registry recording_id")
+
+    selected_value = attrs.get("selected_runs")
+    selected_runs: List[Mapping[str, object]] = []
+    if isinstance(selected_value, Sequence) and not isinstance(
+        selected_value, (str, bytes, bytearray)
+    ):
+        for index, value in enumerate(selected_value):
+            if isinstance(value, Mapping):
+                selected_runs.append(value)
+            else:
+                validation_errors.append(f"selected_runs[{index}] is not an object")
+    else:
+        validation_errors.append("selected_runs must be a non-empty array")
+    if not selected_runs:
+        validation_errors.append("selected_runs is empty")
+
+    selected_run_count = _coerce_int_value(attrs.get("selected_run_count"))
+    work_unit_count = _coerce_int_value(attrs.get("work_unit_count"))
+    clip_count = _coerce_int_value(attrs.get("clip_count"))
+    if selected_run_count != len(selected_runs):
+        validation_errors.append("selected_run_count does not match selected_runs")
+    if work_unit_count != len(selected_runs):
+        validation_errors.append("work_unit_count does not match selected_runs")
+
+    clip_ids: Set[str] = set()
+    work_unit_ids: Set[str] = set()
+    clip_camera_pairs: Set[Tuple[str, str]] = set()
+    for index, selected in enumerate(selected_runs):
+        prefix = f"selected_runs[{index}]"
+        clip_id = _decode_text(selected.get("clip_id"))
+        work_unit_id = _decode_text(selected.get("work_unit_id"))
+        camera_serial = _decode_text(selected.get("camera_serial"))
+        if not clip_id:
+            validation_errors.append(f"{prefix}.clip_id is missing")
+        else:
+            clip_ids.add(clip_id)
+        if not work_unit_id:
+            validation_errors.append(f"{prefix}.work_unit_id is missing")
+        elif work_unit_id in work_unit_ids:
+            validation_errors.append(f"{prefix}.work_unit_id is duplicated")
+        else:
+            work_unit_ids.add(work_unit_id)
+        if not camera_serial:
+            validation_errors.append(f"{prefix}.camera_serial is missing")
+        if clip_id and camera_serial:
+            pair = (clip_id, camera_serial)
+            if pair in clip_camera_pairs:
+                validation_errors.append(f"{prefix} duplicates a clip-camera pair")
+            clip_camera_pairs.add(pair)
+
+        for run_key, path_key in (
+            ("detect_run", "detect_group_path"),
+            ("refined_detect_run", "refined_group_path"),
+        ):
+            run_name = _decode_text(selected.get(run_key))
+            group_path = _decode_text(selected.get(path_key))
+            if not run_name or not group_path:
+                validation_errors.append(f"{prefix} is missing {run_key} or {path_key}")
+                continue
+            if PurePosixPath(group_path).name != run_name:
+                validation_errors.append(f"{prefix}.{path_key} does not identify {run_key}")
+                continue
+            member_group = _get_group_path(root, group_path)
+            if member_group is None:
+                validation_errors.append(f"{prefix}.{path_key} does not exist: {group_path}")
+            elif not _group_has_strict_completion(member_group):
+                validation_errors.append(f"{prefix}.{path_key} is not complete")
+
+    if clip_count != len(clip_ids):
+        validation_errors.append("clip_count does not match selected clip IDs")
+    declared_clip_ids = attrs.get("clip_ids")
+    if isinstance(declared_clip_ids, Sequence) and not isinstance(
+        declared_clip_ids, (str, bytes, bytearray)
+    ):
+        if {str(value) for value in declared_clip_ids} != clip_ids:
+            validation_errors.append("clip_ids does not match selected_runs")
+
+    quality_run: Optional[str] = None
+    quality_group: Optional[object] = None
+    quality_mode: Optional[str] = None
+    quality_selection = "collection_none"
+    quality_member_run_count = 0
+    collection_quality_run = _decode_text(attrs.get("detect_quality_run"))
+    collection_quality_path = _decode_text(attrs.get("detect_quality_group_path"))
+    if bool(collection_quality_run) != bool(collection_quality_path):
+        quality_errors.append(
+            "collection detect_quality_run and detect_quality_group_path must appear together"
+        )
+    elif collection_quality_run and collection_quality_path:
+        quality_mode = "recording_wide"
+        quality_run = collection_quality_run
+        quality_selection = "collection_recording_wide"
+        if PurePosixPath(collection_quality_path).name != collection_quality_run:
+            quality_errors.append("recording-wide detect-quality path does not match its run")
+        quality_group = _get_group_path(root, collection_quality_path)
+        if quality_group is None:
+            quality_errors.append(
+                f"recording-wide detect-quality path does not exist: {collection_quality_path}"
+            )
+        else:
+            if not _group_has_strict_completion(quality_group):
+                quality_errors.append("recording-wide detect-quality run is not complete")
+            for array_name in ("detection_quality_labels", "instance_key"):
+                try:
+                    present = array_name in quality_group  # type: ignore[operator]
+                except Exception:
+                    present = False
+                if not present:
+                    quality_errors.append(
+                        f"recording-wide detect-quality run is missing {array_name}"
+                    )
+            group_validation = _coerce_mapping_value(
+                quality_group.attrs.get("collection_quality_validation")  # type: ignore[attr-defined]
+            )
+            if not group_validation or _decode_text(group_validation.get("status")) != "complete":
+                quality_errors.append("recording-wide detect-quality validation is incomplete")
+        manifest_validation = _coerce_mapping_value(attrs.get("detect_quality_validation"))
+        if not manifest_validation or _decode_text(manifest_validation.get("status")) != "ok":
+            quality_errors.append("collection detect-quality validation is not ok")
+        elif (
+            _decode_text(manifest_validation.get("run")) != collection_quality_run
+            or _decode_text(manifest_validation.get("group_path"))
+            != collection_quality_path.strip("/")
+        ):
+            quality_errors.append("collection detect-quality validation binds a different run")
+        quality_member_run_count = 1
+    elif selected_runs:
+        quality_mode = "per_clip"
+        quality_run = collection_id
+        quality_selection = "collection_per_clip"
+        first_quality_group: Optional[object] = None
+        for index, selected in enumerate(selected_runs):
+            detect_run = _decode_text(selected.get("detect_run"))
+            detect_path = _decode_text(selected.get("detect_group_path"))
+            member_quality_run = _decode_text(selected.get("detect_quality_run"))
+            member_quality_path = _decode_text(selected.get("detect_quality_group_path"))
+            if not member_quality_path and detect_path and member_quality_run:
+                member_quality_path = f"{detect_path}/quality_reports/{member_quality_run}"
+            if not member_quality_run or not member_quality_path:
+                quality_errors.append(
+                    f"selected_runs[{index}] has no per-clip detect-quality binding"
+                )
+                continue
+            if PurePosixPath(member_quality_path).name != member_quality_run:
+                quality_errors.append(
+                    f"selected_runs[{index}] detect-quality path does not match its run"
+                )
+                continue
+            member_quality_group = _get_group_path(root, member_quality_path)
+            if member_quality_group is None:
+                quality_errors.append(
+                    f"selected_runs[{index}] detect-quality path does not exist: {member_quality_path}"
+                )
+                continue
+            if not _group_has_strict_completion(member_quality_group):
+                quality_errors.append(
+                    f"selected_runs[{index}] detect-quality run is not complete"
+                )
+                continue
+            source_detect_run = _extract_source_ref(member_quality_group, "source_detect_run")
+            if source_detect_run and detect_run and source_detect_run != detect_run:
+                quality_errors.append(
+                    f"selected_runs[{index}] detect-quality source run does not match detection"
+                )
+                continue
+            if first_quality_group is None:
+                first_quality_group = member_quality_group
+            quality_member_run_count += 1
+        quality_group = first_quality_group
+
+    return _ClippedDetectCollectionResolution(
+        collection_id=collection_id,
+        collection_path=collection_path,
+        collection_group=collection_group,
+        valid=not validation_errors,
+        validation_errors=tuple(validation_errors),
+        selected_run_count=len(selected_runs),
+        clip_count=len(clip_ids),
+        work_unit_count=len(work_unit_ids),
+        quality_valid=bool(quality_group is not None and not quality_errors),
+        quality_errors=tuple(quality_errors),
+        quality_mode=quality_mode,
+        quality_run=quality_run,
+        quality_group=quality_group,
+        quality_selection=quality_selection,
+        quality_member_run_count=quality_member_run_count,
+    )
+
+
 def _resolve_detect_quality_group(
     root: object,
     detect_group: object,
@@ -6152,33 +6449,101 @@ def _build_recording_step_rows_from_root(
 
     detect_parent = root.get("detect_runs")  # type: ignore[attr-defined]
     detect_run, detect_group, detect_selection = _resolve_latest_group(detect_parent)
+    refined_detect_parent = root.get("refined_detect_runs")  # type: ignore[attr-defined]
+    if refined_detect_parent is None:
+        refined_detect_parent = root.get("refined_runs")  # type: ignore[attr-defined]
+    refined_detect_collection = _extract_source_ref(
+        refined_detect_parent,
+        "latest_collection",
+    )
+    detect_collection = _resolve_latest_clipped_detect_collection(
+        root,
+        refined_detect_parent,
+        recording_id=recording_id,
+    )
+    detect_collection_details = detect_collection.details() if detect_collection else {}
+    detect_uses_collection = bool(
+        detect_group is None and detect_collection is not None and detect_collection.valid
+    )
+    if detect_uses_collection and detect_collection is not None:
+        detect_run = detect_collection.collection_id
+        detect_group = detect_collection.collection_group
+        detect_selection = "latest_collection_manifest"
     detect_status, detect_reason = _step_status_from_presence(
         present=detect_group is not None,
         is_production=is_production,
         prerequisite_statuses=(),
     )
-    detect_method = _extract_detect_method(detect_group)
-    detect_coverage = _extract_coverage_pct(detect_group)
-    (
-        detect_quality_run,
-        detect_quality_group,
-        detect_quality_selection,
-    ) = _resolve_detect_quality_group(root, detect_group)
-    detect_quality_details = _extract_detect_quality_details(
-        detect_quality_run,
-        detect_quality_group,
+    if detect_uses_collection:
+        detect_reason = "present_collection_manifest"
+    elif detect_group is None and detect_collection is not None and not detect_collection.valid:
+        detect_reason = "invalid_latest_collection"
+    detect_method = (
+        "clipped_detect_collection"
+        if detect_uses_collection
+        else _extract_detect_method(detect_group)
     )
+    detect_coverage = None if detect_uses_collection else _extract_coverage_pct(detect_group)
+
+    detect_quality_method: Optional[str] = None
+    if detect_uses_collection and detect_collection is not None:
+        if detect_collection.quality_valid:
+            detect_quality_run = detect_collection.quality_run
+            detect_quality_group = detect_collection.quality_group
+            detect_quality_selection = detect_collection.quality_selection
+            detect_quality_method = (
+                "palette.detect_quality_collection.v1"
+                if detect_collection.quality_mode == "per_clip"
+                else (
+                    _decode_text(detect_quality_group.attrs.get("schema_id"))
+                    if detect_quality_group is not None
+                    and hasattr(detect_quality_group, "attrs")
+                    else None
+                )
+            )
+            detect_quality_details = {
+                "detect_quality_run": detect_quality_run,
+                "detect_quality_collection_mode": detect_collection.quality_mode,
+                "detect_quality_member_run_count": (
+                    detect_collection.quality_member_run_count
+                ),
+            }
+        else:
+            detect_quality_run = None
+            detect_quality_group = None
+            detect_quality_selection = "collection_quality_invalid"
+            detect_quality_details = {
+                "detect_quality_collection_mode": detect_collection.quality_mode,
+                "detect_quality_collection_errors": list(detect_collection.quality_errors),
+            }
+    else:
+        (
+            detect_quality_run,
+            detect_quality_group,
+            detect_quality_selection,
+        ) = _resolve_detect_quality_group(root, detect_group)
+        detect_quality_details = _extract_detect_quality_details(
+            detect_quality_run,
+            detect_quality_group,
+        )
+        detect_quality_method = (
+            _decode_text(detect_quality_group.attrs.get("schema_id"))
+            if detect_quality_group is not None
+            and hasattr(detect_quality_group, "attrs")
+            else None
+        )
     detect_quality_status, detect_quality_reason = _step_status_from_presence(
         present=detect_quality_group is not None,
         is_production=False,
         prerequisite_statuses=(detect_status,),
     )
+    if detect_uses_collection and detect_collection is not None:
+        detect_quality_reason = (
+            "present_collection_quality"
+            if detect_collection.quality_valid
+            else "invalid_collection_quality"
+        )
 
-    refined_detect_parent = root.get("refined_detect_runs") or root.get("refined_runs")  # type: ignore[attr-defined]
-    refined_detect_collection = _extract_source_ref(
-        refined_detect_parent,
-        "latest_collection",
-    )
     refined_detect_expected_source = refined_detect_collection or detect_run
     (
         refined_detect_run,
@@ -6191,11 +6556,24 @@ def _build_recording_step_rows_from_root(
         source_run=refined_detect_expected_source,
         source_run_extractor=_extract_source_detect_run,
     )
+    refined_detect_uses_collection = bool(
+        refined_detect_group is None
+        and detect_collection is not None
+        and detect_collection.valid
+    )
+    if refined_detect_uses_collection and detect_collection is not None:
+        refined_detect_run = detect_collection.collection_id
+        refined_detect_group = detect_collection.collection_group
+        refined_detect_selection = "latest_collection_manifest"
+        refined_detect_latest_run = None
+        refined_detect_latest_source_run = None
     refined_detect_status, refined_detect_reason = _step_status_from_presence(
         present=refined_detect_group is not None,
         is_production=is_production,
         prerequisite_statuses=(detect_status,),
     )
+    if refined_detect_uses_collection:
+        refined_detect_reason = "present_collection_manifest"
     if (
         refined_detect_group is None
         and refined_detect_expected_source
@@ -6209,9 +6587,17 @@ def _build_recording_step_rows_from_root(
             )
         elif refined_detect_selection == "source_mismatch_missing_attr":
             refined_detect_reason = "missing_source_detect_run"
+    if (
+        refined_detect_group is None
+        and detect_collection is not None
+        and not detect_collection.valid
+    ):
+        refined_detect_reason = "invalid_latest_collection"
     refined_detect_method = _decode_text(
         refined_detect_group.attrs.get("method")  # type: ignore[union-attr]
     ) if refined_detect_group is not None else None
+    if refined_detect_uses_collection:
+        refined_detect_method = "refined_detect_clip_collection"
     if not refined_detect_method and refined_detect_group is not None:
         parameters = _coerce_mapping_value(refined_detect_group.attrs.get("parameters"))  # type: ignore[attr-defined]
         if parameters is not None:
@@ -6220,7 +6606,11 @@ def _build_recording_step_rows_from_root(
         refined_detect_method = _decode_text(
             refined_detect_group.attrs.get("palette_run_stage")  # type: ignore[attr-defined]
         )
-    refined_detect_coverage = _extract_refined_detect_coverage_pct(refined_detect_group)
+    refined_detect_coverage = (
+        None
+        if refined_detect_uses_collection
+        else _extract_refined_detect_coverage_pct(refined_detect_group)
+    )
     detect_review_status = (
         _coerce_mapping_value(refined_detect_group.attrs.get("detect_review_status"))  # type: ignore[attr-defined]
         if refined_detect_group is not None
@@ -6754,8 +7144,21 @@ def _build_recording_step_rows_from_root(
         "zarr_purpose": zarr_purpose,
         "pipeline_type": pipeline_type,
     }
+    detect_identity_kind: Optional[str] = None
+    if detect_uses_collection or (detect_run is None and detect_collection is not None):
+        detect_identity_kind = "collection"
+    elif detect_run:
+        detect_identity_kind = "run"
+    detect_quality_identity_kind = detect_identity_kind
+    if (
+        detect_collection is not None
+        and detect_quality_method is not None
+        and "collection" in detect_quality_method
+    ):
+        detect_quality_identity_kind = "collection"
     refined_detect_details: Dict[str, object] = {
         **common_details,
+        **detect_collection_details,
         "reason": refined_detect_reason,
         "latest_selector": refined_detect_selection,
         "upstream": {"detect": detect_status},
@@ -6905,6 +7308,8 @@ def _build_recording_step_rows_from_root(
             review_status=None,
             details={
                 **common_details,
+                **detect_collection_details,
+                "source_detect_identity_kind": detect_identity_kind,
                 "reason": detect_reason,
                 "latest_selector": detect_selection,
                 **detect_quality_details,
@@ -6919,20 +7324,19 @@ def _build_recording_step_rows_from_root(
             step_name="detect_quality",
             status=detect_quality_status,
             run_name=detect_quality_run,
-            method=(
-                _decode_text(detect_quality_group.attrs.get("schema_id"))
-                if detect_quality_group is not None
-                and hasattr(detect_quality_group, "attrs")
-                else None
-            ),
+            method=detect_quality_method,
             coverage_pct=None,
             review_status=None,
             details={
                 **common_details,
+                **detect_collection_details,
+                "source_detect_identity_kind": detect_quality_identity_kind,
                 "reason": detect_quality_reason,
                 "latest_selector": detect_quality_selection,
                 "source_detect_run": (
-                    (
+                    detect_run
+                    if detect_uses_collection
+                    else (
                         _decode_text(
                             detect_quality_group.attrs.get("source_detect_run")
                         )

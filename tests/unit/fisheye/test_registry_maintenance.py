@@ -705,6 +705,13 @@ class _GetMissFakeGroup(_FakeGroup):
         return None
 
 
+class _FalseyFakeGroup(_FakeGroup):
+    """Emulate an empty Zarr group, whose truth value is false."""
+
+    def __bool__(self) -> bool:
+        return False
+
+
 class _FakeZarrModule:
     def __init__(self, roots_by_path: Dict[str, _FakeGroup]) -> None:
         self._roots_by_path = roots_by_path
@@ -712,6 +719,159 @@ class _FakeZarrModule:
     def open_group(self, path: str, mode: str = "r", consolidated: Optional[bool] = None) -> _FakeGroup:
         _ = mode, consolidated
         return self._roots_by_path[str(path)]
+
+
+def _add_fake_group_path(
+    root: _FakeGroup,
+    path: str,
+    *,
+    attrs: Optional[Dict[str, object]] = None,
+) -> _FakeGroup:
+    current = root
+    parts = [part for part in path.split("/") if part]
+    for index, part in enumerate(parts):
+        child = current.get(part)
+        if child is None:
+            child = current.add_group(part, attrs=attrs if index == len(parts) - 1 else None)
+        assert isinstance(child, _FakeGroup)
+        current = child
+    if attrs:
+        current.attrs.update(attrs)
+    return current
+
+
+def _configure_manifest_only_clipped_detect_collection(
+    root: _FakeGroup,
+    *,
+    recording_id: str,
+    collection_id: str,
+    quality_mode: str,
+    omit_refined_member: bool = False,
+) -> None:
+    root.attrs.update(
+        {
+            "recording_id": recording_id,
+            "has_raw_video": False,
+            "zarr_purpose": "analysis",
+        }
+    )
+    raw = root["raw_video"]
+    assert isinstance(raw, _FakeGroup)
+    raw._children.clear()
+
+    detect_parent = root["detect_runs"]
+    assert isinstance(detect_parent, _FakeGroup)
+    detect_parent._children.clear()
+    detect_parent.attrs.clear()
+    refined_parent = root["refined_detect_runs"]
+    assert isinstance(refined_parent, _FakeGroup)
+    refined_parent._children.clear()
+    refined_parent.attrs.clear()
+
+    complete_attrs = {
+        "palette_run_completion_contract": "palette.zarr_run_completion.v1",
+        "palette_run_completion_status": "complete",
+    }
+    selected_runs = []
+    for index in range(2):
+        clip_id = f"clip_{index:06d}"
+        work_unit_id = f"{recording_id}_{clip_id}_cam2010093"
+        detect_run = f"detect_{clip_id}"
+        refined_run = f"refined_detect_{clip_id}"
+        quality_run = f"detect_quality_{clip_id}"
+        detect_path = (
+            f"clips/{clip_id}/cameras/2010093/detect_runs/{detect_run}"
+        )
+        refined_path = (
+            f"clips/{clip_id}/cameras/2010093/refined_detect_runs/{refined_run}"
+        )
+        detect_group = _add_fake_group_path(
+            root,
+            detect_path,
+            attrs={**complete_attrs, "detection_method": "yolo"},
+        )
+        if not (omit_refined_member and index == 1):
+            _add_fake_group_path(
+                root,
+                refined_path,
+                attrs={**complete_attrs, "source_detect_run": detect_run},
+            )
+        if quality_mode == "per_clip":
+            quality_parent = detect_group.add_group("quality_reports")
+            quality_parent.add_group(quality_run, attrs=complete_attrs)
+        selected_runs.append(
+            {
+                "work_unit_id": work_unit_id,
+                "clip_id": clip_id,
+                "clip_index": index,
+                "camera_serial": "2010093",
+                "frame_count": 4,
+                "detect_run": detect_run,
+                "detect_quality_run": quality_run,
+                "detect_quality_group_path": None,
+                "refined_detect_run": refined_run,
+                "detect_group_path": detect_path,
+                "refined_group_path": refined_path,
+            }
+        )
+
+    collection_attrs: Dict[str, object] = {
+        "schema_version": "palette.refined_detect_clip_collection.v1",
+        "collection_kind": "refined_detect_clip_collection",
+        "collection_id": collection_id,
+        "recording_id": recording_id,
+        "created_at_utc": "2026-07-17T12:00:00+00:00",
+        "selected_runs": selected_runs,
+        "selected_run_count": 2,
+        "work_unit_count": 2,
+        "clip_count": 2,
+        "clip_ids": ["clip_000000", "clip_000001"],
+        "camera_serials": ["2010093"],
+        "detect_quality_run": None,
+        "detect_quality_group_path": None,
+        "detect_quality_validation": None,
+    }
+    if quality_mode == "recording_wide":
+        quality_run = f"detect_quality_{collection_id}"
+        quality_path = f"detect_quality_runs/{quality_run}"
+        quality_group = _add_fake_group_path(
+            root,
+            quality_path,
+            attrs={
+                **complete_attrs,
+                "schema_id": "palette.detect_quality.v2",
+                "collection_quality_validation": {"status": "complete"},
+            },
+        )
+        quality_group.add_array(
+            "detection_quality_labels",
+            np.zeros(4, dtype=np.uint8),
+        )
+        quality_group.add_array("instance_key", np.arange(4, dtype=np.uint64))
+        collection_attrs.update(
+            {
+                "detect_quality_run": quality_run,
+                "detect_quality_group_path": quality_path,
+                "detect_quality_validation": {
+                    "status": "ok",
+                    "run": quality_run,
+                    "group_path": quality_path,
+                    "row_count": 4,
+                },
+            }
+        )
+        for selected in selected_runs:
+            selected["detect_quality_run"] = quality_run
+            selected["detect_quality_group_path"] = quality_path
+
+    collection_path = f"experiment_index/finalized_runs/{collection_id}"
+    _add_fake_group_path(root, collection_path, attrs=collection_attrs)
+    refined_parent.attrs.update(
+        {
+            "latest_collection": collection_id,
+            "latest_collection_path": collection_path,
+        }
+    )
 
 
 def _create_fake_zarr_store(path: Path) -> None:
@@ -9457,6 +9617,237 @@ def test_backfill_recording_step_status_accepts_current_refined_detect_collectio
     assert details["expected_source_detect_collection"] == "detect_collection_001"
     assert details["source_detect_run"] == "detect_collection_001"
     assert details["source_detect_identity_kind"] == "collection"
+    registry.close()
+
+
+def test_backfill_recording_step_status_projects_manifest_only_clipped_collection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    recording_id = "recording_manifest_collection"
+    collection_id = "refined_detect_collection_001"
+    zarr_path = (
+        tmp_path
+        / "recordings"
+        / recording_id
+        / "zarr"
+        / f"{recording_id}_analysis.zarr"
+    )
+    fake_root = _create_recording_step_status_zarr(zarr_path)
+    refined_parent = fake_root["refined_detect_runs"]
+    assert isinstance(refined_parent, _FakeGroup)
+    fake_root._children["refined_detect_runs"] = _FalseyFakeGroup(
+        attrs=refined_parent.attrs
+    )
+    _configure_manifest_only_clipped_detect_collection(
+        fake_root,
+        recording_id=recording_id,
+        collection_id=collection_id,
+        quality_mode="recording_wide",
+    )
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
+    )
+    registry.upsert_dataset(
+        dataset_id="dataset_manifest_collection",
+        session_uuid="session_manifest_collection",
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+
+    _backfill_recording_step_status(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        recording_ids=None,
+        zarr_use_filter="all",
+    )
+
+    rows = registry.conn.execute(
+        """
+        SELECT step_name, status, run_name, method, details_json
+        FROM recording_step_status
+        WHERE dataset_id = ?
+          AND step_name IN ('detect', 'detect_quality', 'refined_detect')
+        ORDER BY step_name;
+        """,
+        ("dataset_manifest_collection",),
+    ).fetchall()
+    by_step = {str(row["step_name"]): row for row in rows}
+    assert str(by_step["detect"]["status"]) == "ok"
+    assert str(by_step["detect"]["run_name"]) == collection_id
+    assert str(by_step["detect"]["method"]) == "clipped_detect_collection"
+    assert str(by_step["refined_detect"]["status"]) == "ok"
+    assert str(by_step["refined_detect"]["run_name"]) == collection_id
+    assert str(by_step["refined_detect"]["method"]) == "refined_detect_clip_collection"
+    assert str(by_step["detect_quality"]["status"]) == "ok"
+    assert str(by_step["detect_quality"]["run_name"]) == (
+        f"detect_quality_{collection_id}"
+    )
+    assert str(by_step["detect_quality"]["method"]) == "palette.detect_quality.v2"
+    for step_name in ("detect", "detect_quality", "refined_detect"):
+        details = json.loads(str(by_step[step_name]["details_json"]))
+        assert details["source_detect_identity_kind"] == "collection"
+        assert details["detect_collection_id"] == collection_id
+        assert details["detect_collection_validation_status"] == "ok"
+        assert details["detect_collection_selected_run_count"] == 2
+    registry.close()
+
+
+def test_backfill_recording_step_status_preserves_ok_quality_for_per_clip_collection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    recording_id = "recording_per_clip_collection"
+    collection_id = "refined_detect_collection_legacy_quality"
+    dataset_id = "dataset_per_clip_collection"
+    zarr_path = (
+        tmp_path
+        / "recordings"
+        / recording_id
+        / "zarr"
+        / f"{recording_id}_analysis.zarr"
+    )
+    fake_root = _create_recording_step_status_zarr(zarr_path)
+    _configure_manifest_only_clipped_detect_collection(
+        fake_root,
+        recording_id=recording_id,
+        collection_id=collection_id,
+        quality_mode="per_clip",
+    )
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
+    )
+    registry.upsert_dataset(
+        dataset_id=dataset_id,
+        session_uuid="session_per_clip_collection",
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    upsert_recording_step_status(
+        registry,
+        dataset_id=dataset_id,
+        recording_id=recording_id,
+        step_name="detect_quality",
+        status="ok",
+        run_name="runtime_detect_quality",
+        source="runtime_detect_quality",
+    )
+
+    _backfill_recording_step_status(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        recording_ids=None,
+        zarr_use_filter="all",
+    )
+
+    row = registry.conn.execute(
+        """
+        SELECT status, run_name, method, details_json
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'detect_quality';
+        """,
+        (dataset_id,),
+    ).fetchone()
+    assert row is not None
+    assert str(row["status"]) == "ok"
+    assert str(row["run_name"]) == collection_id
+    assert str(row["method"]) == "palette.detect_quality_collection.v1"
+    details = json.loads(str(row["details_json"]))
+    assert details["reason"] == "present_collection_quality"
+    assert details["detect_quality_collection_mode"] == "per_clip"
+    assert details["detect_quality_member_run_count"] == 2
+    assert details["source_detect_identity_kind"] == "collection"
+    history_statuses = [
+        str(item["status"])
+        for item in registry.conn.execute(
+            """
+            SELECT status
+            FROM recording_step_status_history
+            WHERE dataset_id = ? AND step_name = 'detect_quality'
+            ORDER BY event_id;
+            """,
+            (dataset_id,),
+        ).fetchall()
+    ]
+    assert history_statuses
+    assert set(history_statuses) == {"ok"}
+    registry.close()
+
+
+def test_backfill_recording_step_status_fails_closed_for_invalid_clipped_collection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    recording_id = "recording_invalid_collection"
+    collection_id = "refined_detect_collection_invalid"
+    dataset_id = "dataset_invalid_collection"
+    zarr_path = (
+        tmp_path
+        / "recordings"
+        / recording_id
+        / "zarr"
+        / f"{recording_id}_analysis.zarr"
+    )
+    fake_root = _create_recording_step_status_zarr(zarr_path)
+    _configure_manifest_only_clipped_detect_collection(
+        fake_root,
+        recording_id=recording_id,
+        collection_id=collection_id,
+        quality_mode="recording_wide",
+        omit_refined_member=True,
+    )
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
+    )
+    registry.upsert_dataset(
+        dataset_id=dataset_id,
+        session_uuid="session_invalid_collection",
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+
+    _backfill_recording_step_status(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        recording_ids=None,
+        zarr_use_filter="all",
+    )
+
+    rows = registry.conn.execute(
+        """
+        SELECT step_name, status, run_name, details_json
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name IN ('detect', 'refined_detect')
+        ORDER BY step_name;
+        """,
+        (dataset_id,),
+    ).fetchall()
+    assert len(rows) == 2
+    for row in rows:
+        assert str(row["status"]) == "na"
+        assert row["run_name"] is None
+        details = json.loads(str(row["details_json"]))
+        assert details["reason"] == "invalid_latest_collection"
+        assert details["detect_collection_validation_status"] == "error"
+        assert any(
+            "refined_group_path does not exist" in error
+            for error in details["detect_collection_validation_errors"]
+        )
     registry.close()
 
 
