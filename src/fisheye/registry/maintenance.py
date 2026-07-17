@@ -4896,6 +4896,128 @@ def _coerce_mapping_value(value: object) -> Optional[Dict[str, object]]:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _positive_float_value(value: object) -> Optional[float]:
+    parsed = _coerce_float_value(value)
+    if parsed is None or parsed <= 0.0:
+        return None
+    return float(parsed)
+
+
+def _recording_calibration_status(
+    *,
+    root: object,
+    analysis_group: Optional[object],
+) -> tuple[Optional[object], str, str, Dict[str, object]]:
+    """Summarize canonical camera-scale calibration for the status ledger.
+
+    ``analysis/calibration`` is preferred over the legacy root ``calibration``
+    group when it has a usable scale. An empty group remains a present legacy
+    surface for compatibility, but is explicitly distinguished from a usable
+    camera calibration in ``details_json``.
+    """
+
+    candidates: List[tuple[str, object]] = []
+    if analysis_group is not None and hasattr(analysis_group, "get"):
+        try:
+            analysis_calibration = analysis_group.get("calibration")  # type: ignore[attr-defined]
+        except Exception:
+            analysis_calibration = None
+        if analysis_calibration is not None:
+            candidates.append(("analysis/calibration", analysis_calibration))
+    try:
+        legacy_calibration = root.get("calibration")  # type: ignore[attr-defined]
+    except Exception:
+        legacy_calibration = None
+    if legacy_calibration is not None and all(
+        legacy_calibration is not group for _, group in candidates
+    ):
+        candidates.append(("calibration", legacy_calibration))
+
+    summaries: List[tuple[object, Dict[str, object]]] = []
+    for group_path, group in candidates:
+        attrs = getattr(group, "attrs", {})
+        ppm = _positive_float_value(attrs.get("pixels_per_mm_camera"))
+        ppm_source = "pixels_per_mm_camera" if ppm is not None else None
+        if ppm is None:
+            ppm = _positive_float_value(attrs.get("pixels_per_mm"))
+            ppm_source = "pixels_per_mm" if ppm is not None else None
+        pixel_to_mm = _positive_float_value(attrs.get("pixel_to_mm"))
+        if ppm is None and pixel_to_mm is not None:
+            ppm = 1.0 / pixel_to_mm
+            ppm_source = "inverse_pixel_to_mm"
+
+        details: Dict[str, object] = {
+            "calibration_group_path": group_path,
+            "usable_camera_scale": ppm is not None,
+        }
+        if ppm is not None:
+            details["pixels_per_mm_camera"] = float(ppm)
+            details["camera_scale_source_attr"] = str(ppm_source)
+        if pixel_to_mm is not None:
+            details["pixel_to_mm"] = float(pixel_to_mm)
+        for attr_name in (
+            "source_h5",
+            "source_h5_path",
+            "source_stimulus_run",
+            "calibration_authority",
+            "calibration_source",
+            "authority",
+        ):
+            value = _decode_text(attrs.get(attr_name))
+            if value is not None:
+                details[attr_name] = value
+        summaries.append((group, details))
+
+    if not summaries:
+        return None, "missing", "missing", {"usable_camera_scale": False}
+
+    selected_group, selected_details = next(
+        (
+            (group, details)
+            for group, details in summaries
+            if details.get("usable_camera_scale") is True
+        ),
+        summaries[0],
+    )
+    if selected_details.get("usable_camera_scale") is True:
+        return selected_group, "ok", "present_usable_camera_scale", selected_details
+    return selected_group, "ok", "present_without_usable_camera_scale", selected_details
+
+
+def _preserve_operator_inferred_calibration(
+    *,
+    existing: Optional[Dict[str, object]],
+    extracted: Dict[str, object],
+) -> Dict[str, object]:
+    """Keep an approved registry inference until Zarr has a usable scale.
+
+    The exemption is intentionally narrow: only the versioned, operator-
+    approved inference contract is protected. As soon as reconciliation sees a
+    positive camera scale in a canonical Zarr calibration group, normal Zarr-
+    derived status replaces the registry-only inference.
+    """
+
+    if existing is None or str(extracted.get("step_name")) != "calibration":
+        return extracted
+    extracted_details = _coerce_mapping_value(extracted.get("details_json")) or {}
+    if extracted_details.get("usable_camera_scale") is True:
+        return extracted
+
+    existing_details = _coerce_mapping_value(existing.get("details_json")) or {}
+    method = _decode_text(existing.get("method")) or ""
+    source = _decode_text(existing.get("source")) or ""
+    is_protected_inference = (
+        _decode_text(existing.get("status")) == "ok"
+        and method.startswith("inferred_")
+        and source.startswith("operator_approved_")
+        and existing_details.get("schema_id") == "palette.inferred_camera_calibration.v1"
+        and existing_details.get("authority") == "provisional_inference"
+        and existing_details.get("authoritative_h5_for_target") is False
+        and _positive_float_value(existing_details.get("pixels_per_mm_camera")) is not None
+    )
+    return existing if is_protected_inference else extracted
+
+
 def _canonical_json_text(value: object) -> Optional[str]:
     if value is None:
         return None
@@ -6354,10 +6476,12 @@ def _build_recording_step_rows_from_root(
     stimulus_status = "ok" if stimulus_runs > 0 else "missing"
     stimulus_reason = "present" if stimulus_runs > 0 else "run_missing"
 
-    calibration_group = root.get("calibration")  # type: ignore[attr-defined]
-    calibration_present = calibration_group is not None
-    calibration_status = "ok" if calibration_present else "missing"
-    calibration_reason = "present" if calibration_present else "missing"
+    (
+        calibration_group,
+        calibration_status,
+        calibration_reason,
+        calibration_details,
+    ) = _recording_calibration_status(root=root, analysis_group=analysis_group)
 
     def _analysis_status(
         family: str,
@@ -7167,7 +7291,7 @@ def _build_recording_step_rows_from_root(
             method=None,
             coverage_pct=None,
             review_status=None,
-            details={**common_details, "reason": calibration_reason},
+            details={**common_details, "reason": calibration_reason, **calibration_details},
             source=source,
             zarr_mtime_ns=zarr_mtime_ns,
             updated_utc=_extract_updated_utc(calibration_group, fallback=fallback_updated_utc),
@@ -7394,6 +7518,10 @@ def reconcile_recording_step_status_for_dataset(
     for extracted in extracted_rows:
         summary["rows_evaluated"] += 1
         existing = existing_by_step.get(str(extracted["step_name"]))
+        extracted = _preserve_operator_inferred_calibration(
+            existing=existing,
+            extracted=extracted,
+        )
         if existing is None:
             summary["rows_inserted"] += 1
             current_upserts.append(extracted)
@@ -7537,6 +7665,11 @@ def _backfill_recording_step_status(
 
         for extracted in extracted_rows:
             step_name = str(extracted["step_name"])
+            existing = existing_by_step.get(step_name)
+            extracted = _preserve_operator_inferred_calibration(
+                existing=existing,
+                extracted=extracted,
+            )
             status = str(extracted["status"])
             summary["rows_evaluated"] = int(summary["rows_evaluated"]) + 1
             rows_by_status = summary["rows_by_status"]
@@ -7546,7 +7679,6 @@ def _backfill_recording_step_status(
             if isinstance(rows_by_step, dict) and step_name in rows_by_step:
                 rows_by_step[step_name] = int(rows_by_step[step_name]) + 1
 
-            existing = existing_by_step.get(step_name)
             if existing is None:
                 summary["rows_inserted"] = int(summary["rows_inserted"]) + 1
                 if not dry_run:

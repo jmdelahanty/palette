@@ -1,8 +1,8 @@
 # Recording Analysis Pipeline Contract
 <!-- contract-meta
-version: 2
+version: 3
 status: active
-last_verified: 2026-05-09
+last_verified: 2026-07-16
 -->
 
 Purpose: define the canonical, operator-first contract for analysis processing per recording.
@@ -39,7 +39,10 @@ Related detect batch contract:
     - raw detect can run without a dish mask, but `refine_detect` applies the
       dish-mask bbox-center gate only when this metadata exists.
     - adding/changing the dish mask after refinement means detect-quality and
-      refined-detect outputs for that run should be regenerated.
+      refined-detect outputs for that run should normally be regenerated. A
+      finalized clipped collection may instead retain its selected rowset only
+      after the read-only post-hoc equivalence audit described below proves
+      that the gate would remove zero selected instances.
 - Stage 3 detect tool:
   - Modules:
     - `fisheye.detection.detect_yolo` (explicit model path/config)
@@ -65,6 +68,51 @@ Related detect batch contract:
 - Stage 6 registry tool:
   - Module: `fisheye.registry.db.Registry.scan_zarr`
   - Responsibility: rescan/update registry metadata for the resulting analysis Zarr.
+
+### Post-hoc dish-mask equivalence audit
+
+`fisheye.utils.audit_clipped_dish_mask_equivalence` is the narrow recovery path
+for a finalized clipped refined-detection collection whose dish mask was added
+after refinement. It follows `refined_detect_runs.latest_collection_path`,
+requires an explicitly complete modern refined run for every selected member,
+and streams `instances/bbox_norm_coords`, `instances/frame_indices`, and
+`instances/instance_key` without materializing the full collection in RAM. The
+geometry test is the same normalized bbox-center gate used by `refine_detect`.
+Both use the versioned `palette.dish_mask_boundary_tolerance.v1` contract. The
+default boundary expansion is 0.5 mm, converted using camera-space
+`pixels_per_mm_camera` and the full source-frame dimensions; it is not baked
+into or allowed to mutate the fitted dish geometry. A positive physical
+tolerance fails closed when calibration or full-frame geometry is absent.
+Explicit calibration overrides are allowed for recovery audits but must be
+recorded as such in the receipt/run provenance.
+
+For a video-only recording whose camera scale is recoverable only from
+cross-session evidence, the registry may carry a provisional calibration in
+the `calibration` row of `recording_step_status`. The protected inference
+contract is `palette.inferred_camera_calibration.v1`, with method beginning
+`inferred_`, source beginning `operator_approved_`,
+`authority = provisional_inference`, and
+`authoritative_h5_for_target = false`. Registry reconciliation preserves that
+row while neither `analysis/calibration` nor legacy `calibration` contains a
+positive camera scale. A subsequently stored Zarr camera scale supersedes the
+registry-only inference automatically and appends the transition to status
+history. This does not change `experiment_context_status`: a video-only
+recording without an H5 remains `absent`.
+
+An audit with zero outside-mask selected rows establishes equivalence only for
+the selected refined instance rowset. It permits retaining downstream artifacts
+that are exactly keyed to that rowset. It does not change the original run's
+provenance, claim that the gate originally ran, or attest the full
+`source_detections` decision/reason surface. A nonzero result requires a new
+mask-aware refinement followed by `instance_key`-based downstream
+reconciliation.
+
+The JSON receipt and optional outside-row Parquet are evidence outside the
+analysis Zarr. The Parquet is a sparse exception list, not a lineage authority:
+canonical `instance_key` arrays remain in Zarr beside the detection, keypoint,
+and mask data. The auditor also fails closed on missing or duplicate modern
+keys, incomplete selected runs, an unresolved dish mask, and an inconsistent
+collection manifest.
 
 ## Canonical Orchestrators
 

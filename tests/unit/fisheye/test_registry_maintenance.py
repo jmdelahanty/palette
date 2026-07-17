@@ -67,6 +67,7 @@ from fisheye.registry.maintenance import (
     _normalize_status_values,
     main as maintenance_main,
 )
+from fisheye.registry.status_ledger import upsert_recording_step_status
 from fisheye.shared.stage_provenance import build_stage_provenance
 from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from tests.unit.fisheye._eye_mask_registry_seed import insert_eye_mask_performance
@@ -9161,6 +9162,98 @@ def test_backfill_recording_step_status_apply_and_convergent(
         ("dataset_step_a",),
     ).fetchone()
     assert history_count is not None and int(history_count["n"]) == 31
+    registry.close()
+
+
+def test_backfill_preserves_operator_inferred_calibration_until_zarr_has_scale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_step_a" / "zarr" / "rec_step_a_analysis.zarr"
+    fake_root = _create_recording_step_status_zarr(zarr_path)
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
+    )
+    registry.upsert_dataset(
+        dataset_id="dataset_step_a",
+        session_uuid="session_step_a",
+        zarr_path=zarr_path,
+        recording_id="recording_step_a",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    _backfill_recording_step_status(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        recording_ids=None,
+        zarr_use_filter="all",
+    )
+    upsert_recording_step_status(
+        registry,
+        dataset_id="dataset_step_a",
+        recording_id="recording_step_a",
+        step_name="calibration",
+        status="ok",
+        method="inferred_cross_session_same_camera",
+        source="operator_approved_registry_inference",
+        details_json={
+            "schema_id": "palette.inferred_camera_calibration.v1",
+            "authority": "provisional_inference",
+            "authoritative_h5_for_target": False,
+            "pixels_per_mm_camera": 52.885459899902344,
+        },
+    )
+
+    preserved = _backfill_recording_step_status(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        recording_ids=None,
+        zarr_use_filter="all",
+    )
+    assert preserved["rows_updated"] == 0
+    assert preserved["rows_skipped"] == 31
+    assert preserved["history_rows_inserted"] == 0
+    row = registry.conn.execute(
+        """
+        SELECT method, source, details_json
+        FROM recording_step_status
+        WHERE dataset_id = 'dataset_step_a' AND step_name = 'calibration';
+        """
+    ).fetchone()
+    assert row is not None
+    assert row["method"] == "inferred_cross_session_same_camera"
+    assert row["source"] == "operator_approved_registry_inference"
+
+    calibration = fake_root.get("calibration")
+    assert isinstance(calibration, _FakeGroup)
+    calibration.attrs["pixels_per_mm_camera"] = 53.05908203125
+    replaced = _backfill_recording_step_status(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        recording_ids=None,
+        zarr_use_filter="all",
+    )
+    assert replaced["rows_updated"] == 1
+    assert replaced["rows_skipped"] == 30
+    assert replaced["history_rows_inserted"] == 1
+    row = registry.conn.execute(
+        """
+        SELECT method, source, details_json
+        FROM recording_step_status
+        WHERE dataset_id = 'dataset_step_a' AND step_name = 'calibration';
+        """
+    ).fetchone()
+    assert row is not None
+    assert row["method"] is None
+    assert row["source"] == "maintenance_backfill_recording_step_status"
+    details = json.loads(str(row["details_json"]))
+    assert details["usable_camera_scale"] is True
+    assert details["pixels_per_mm_camera"] == pytest.approx(53.05908203125)
     registry.close()
 
 

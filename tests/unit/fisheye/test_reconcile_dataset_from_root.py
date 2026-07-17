@@ -10,15 +10,18 @@ Covers the checkpoint-1 validation bar:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 
+import pytest
 import zarr
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry
 from fisheye.registry import maintenance as maintenance_cli
+from fisheye.registry.status_ledger import upsert_recording_step_status
 
 _VOLATILE_SUFFIXES = ("updated_utc", "seen_utc")
 _VOLATILE_COLUMNS = {"recorded_utc"}
@@ -220,5 +223,96 @@ def test_reconcile_include_step_status_is_idempotent(tmp_path: Path) -> None:
         second = registry.reconcile_dataset_from_root(root, zarr_path, include_step_status=True)
         # Converged dataset: no new history rows appended on the second pass.
         assert second["recording_step_status"]["history_rows_inserted"] == 0
+    finally:
+        registry.close()
+
+
+def test_reconcile_preserves_operator_inferred_calibration_until_zarr_has_scale(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "dataset_training.zarr"
+    _build_zarr(zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    calibration = root.require_group("calibration")
+
+    registry = Registry(tmp_path / "registry.sqlite")
+    try:
+        dataset_id = registry.register_from_root(root, zarr_path)
+        registry.reconcile_dataset_from_root(root, zarr_path, include_step_status=True)
+        upsert_recording_step_status(
+            registry,
+            dataset_id=dataset_id,
+            recording_id="rec_a",
+            step_name="calibration",
+            status="ok",
+            method="inferred_cross_session_same_camera",
+            source="operator_approved_registry_inference",
+            details_json={
+                "schema_id": "palette.inferred_camera_calibration.v1",
+                "authority": "provisional_inference",
+                "authoritative_h5_for_target": False,
+                "pixels_per_mm_camera": 52.885459899902344,
+            },
+        )
+        history_before = registry.conn.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM recording_step_status_history
+            WHERE dataset_id = ? AND step_name = 'calibration';
+            """,
+            (dataset_id,),
+        ).fetchone()["n"]
+
+        preserved = registry.reconcile_dataset_from_root(
+            root,
+            zarr_path,
+            include_step_status=True,
+        )
+        row = registry.conn.execute(
+            """
+            SELECT method, source, details_json
+            FROM recording_step_status
+            WHERE dataset_id = ? AND step_name = 'calibration';
+            """,
+            (dataset_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["method"] == "inferred_cross_session_same_camera"
+        assert row["source"] == "operator_approved_registry_inference"
+        details = json.loads(str(row["details_json"]))
+        assert details["pixels_per_mm_camera"] == pytest.approx(52.885459899902344)
+        assert preserved["recording_step_status"]["history_rows_inserted"] == 0
+        history_after_preserve = registry.conn.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM recording_step_status_history
+            WHERE dataset_id = ? AND step_name = 'calibration';
+            """,
+            (dataset_id,),
+        ).fetchone()["n"]
+        assert history_after_preserve == history_before
+
+        calibration.attrs["pixels_per_mm_camera"] = 53.05908203125
+        replaced = registry.reconcile_dataset_from_root(
+            root,
+            zarr_path,
+            include_step_status=True,
+        )
+        row = registry.conn.execute(
+            """
+            SELECT method, source, details_json
+            FROM recording_step_status
+            WHERE dataset_id = ? AND step_name = 'calibration';
+            """,
+            (dataset_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["method"] is None
+        assert row["source"] == "reconcile_recording_step_status"
+        details = json.loads(str(row["details_json"]))
+        assert details["usable_camera_scale"] is True
+        assert details["calibration_group_path"] == "calibration"
+        assert details["pixels_per_mm_camera"] == pytest.approx(53.05908203125)
+        assert replaced["recording_step_status"]["history_rows_inserted"] == 1
     finally:
         registry.close()

@@ -21,6 +21,11 @@ from typing import Dict, List, Mapping, Optional, Tuple, Any
 from rich.console import Console
 
 from ..shared.frame_domains import FrameDomain, FrameDomainError, FrameDomains
+from ..shared.dish_mask_boundary import (
+    DEFAULT_DISH_MASK_BOUNDARY_TOLERANCE_MM,
+    apply_dish_mask_boundary_tolerance,
+    resolve_dish_mask_boundary_tolerance,
+)
 from ..shared.metadata import get_total_frames, get_detection_method
 from ..shared.system_metadata import get_environment_info, get_git_info
 from ..shared.refined_detect_curation import write_curated_refined_detect_surfaces
@@ -264,6 +269,7 @@ def _read_dish_mask_spec(root: zarr.Group, detect_group: zarr.Group) -> Optional
                         "center_norm": [cx_px / mask_w, cy_px / mask_h],
                         "radius_norm_x": r_px / mask_w,
                         "radius_norm_y": r_px / mask_h,
+                        "mask_image_shape_hw": [mask_h, mask_w],
                         "source": "analysis_metadata.dish_mask",
                     }
 
@@ -281,6 +287,7 @@ def _read_dish_mask_spec(root: zarr.Group, detect_group: zarr.Group) -> Optional
                         "center_norm": [cx, cy],
                         "radius_norm_x": r,
                         "radius_norm_y": r,
+                        "mask_image_shape_hw": [mask_h, mask_w],
                         "source": "analysis_metadata.dish_mask",
                     }
             except Exception:
@@ -306,6 +313,7 @@ def _read_dish_mask_spec(root: zarr.Group, detect_group: zarr.Group) -> Optional
         "y_min_norm": y / mask_h,
         "x_max_norm": (x + w) / mask_w,
         "y_max_norm": (y + h) / mask_h,
+        "mask_image_shape_hw": [mask_h, mask_w],
         "source": "analysis_metadata.dish_mask",
     }
 
@@ -363,11 +371,45 @@ def _apply_dish_mask_quality_gate(
     outside = ~inside
     clean_outside = outside & (labels == 0)
     labels[clean_outside] = np.int8(_DISH_MASK_QUALITY_LABEL)
+    shape = str(mask_spec.get("shape") or "")
+    if shape == "circle":
+        base_geometry: Dict[str, object] = {
+            "center_norm": mask_spec.get("center_norm"),
+            "radius_norm_x": mask_spec.get(
+                "base_radius_norm_x",
+                mask_spec.get("radius_norm_x"),
+            ),
+            "radius_norm_y": mask_spec.get(
+                "base_radius_norm_y",
+                mask_spec.get("radius_norm_y"),
+            ),
+        }
+        effective_geometry: Dict[str, object] = {
+            "center_norm": mask_spec.get("center_norm"),
+            "radius_norm_x": mask_spec.get("radius_norm_x"),
+            "radius_norm_y": mask_spec.get("radius_norm_y"),
+        }
+    else:
+        base_geometry = dict(
+            mask_spec.get("base_rectangle_norm")
+            if isinstance(mask_spec.get("base_rectangle_norm"), Mapping)
+            else {
+                name: mask_spec.get(name)
+                for name in ("x_min_norm", "y_min_norm", "x_max_norm", "y_max_norm")
+            }
+        )
+        effective_geometry = {
+            name: mask_spec.get(name)
+            for name in ("x_min_norm", "y_min_norm", "x_max_norm", "y_max_norm")
+        }
     stats.update(
         {
             "enabled": True,
             "source": mask_spec.get("source"),
-            "shape": mask_spec.get("shape"),
+            "shape": shape,
+            "boundary_tolerance": mask_spec.get("boundary_tolerance"),
+            "base_geometry": base_geometry,
+            "effective_geometry": effective_geometry,
             "candidate_rows": int(labels.shape[0]),
             "outside_rows": int(np.sum(outside)),
             "outside_clean_rows": int(np.sum(clean_outside)),
@@ -1131,6 +1173,8 @@ def create_refined_run(
     detect_family_path: str = DEFAULT_DETECT_FAMILY_PATH,
     refined_family_path: str = REFINED_DETECT_GROUP,
     refined_run_name: Optional[str] = None,
+    dish_mask_boundary_tolerance_mm: Optional[float] = None,
+    pixels_per_mm_camera: Optional[float] = None,
 ) -> str:
     """
     Create a refined detection run with sparse-first curated detect surfaces.
@@ -1154,6 +1198,10 @@ def create_refined_run(
         refined_family_path: Group path where refined detect runs are written
         refined_run_name: Optional explicit refined run name. Used by cluster
             planners when downstream jobs need deterministic paths.
+        dish_mask_boundary_tolerance_mm: Physical expansion around the fitted
+            dish boundary. Defaults to 0.5 mm when a dish mask is present.
+        pixels_per_mm_camera: Explicit camera-space calibration override. The
+            override is recorded in provenance and does not mutate Zarr calibration.
         
     Returns:
         Name of created refined run
@@ -1182,6 +1230,19 @@ def create_refined_run(
     )
 
     refine_config = config.get("refine_detect", {}) if isinstance(config, dict) else {}
+    resolved_dish_tolerance_mm = (
+        dish_mask_boundary_tolerance_mm
+        if dish_mask_boundary_tolerance_mm is not None
+        else refine_config.get(
+            "dish_mask_boundary_tolerance_mm",
+            DEFAULT_DISH_MASK_BOUNDARY_TOLERANCE_MM,
+        )
+    )
+    resolved_pixels_per_mm_camera = (
+        pixels_per_mm_camera
+        if pixels_per_mm_camera is not None
+        else refine_config.get("pixels_per_mm_camera")
+    )
     configured_max_gap = refine_config.get("max_gap")
     configured_method = refine_config.get("interpolation_method")
     if configured_max_gap not in (None, 0):
@@ -1197,6 +1258,8 @@ def create_refined_run(
     
     # Get parameters
     params, param_source = get_refinement_parameters(config, None)
+    if dish_mask_boundary_tolerance_mm is not None or pixels_per_mm_camera is not None:
+        param_source = "cli_override"
     
     # Handle filter overrides
     filters_config = params.get('filters', {'remove_jumps': True, 'remove_blips': False})
@@ -1271,6 +1334,17 @@ def create_refined_run(
         param_source = "sampled_import_guard"
 
     dish_mask_spec = _read_dish_mask_spec(root, detect_group)
+    if dish_mask_spec is not None:
+        dish_mask_tolerance = resolve_dish_mask_boundary_tolerance(
+            root,
+            source_group=detect_group,
+            tolerance_mm=resolved_dish_tolerance_mm,
+            pixels_per_mm_camera=resolved_pixels_per_mm_camera,
+        )
+        dish_mask_spec = apply_dish_mask_boundary_tolerance(
+            dish_mask_spec,
+            dish_mask_tolerance,
+        )
     detection_quality_labels, dish_mask_gate = _apply_dish_mask_quality_gate(
         bbox_coords=bbox_coords,
         detection_quality_labels=detection_quality_labels,
@@ -1816,6 +1890,24 @@ Examples:
         default=None,
         help='Optional explicit refined run name (default: timestamped refined_detect_<local_time>).',
     )
+    parser.add_argument(
+        '--dish-mask-boundary-tolerance-mm',
+        type=float,
+        default=None,
+        help=(
+            'Physical tolerance outside the fitted dish boundary. Default: 0.5 mm '
+            '(or refine_detect.dish_mask_boundary_tolerance_mm from config).'
+        ),
+    )
+    parser.add_argument(
+        '--pixels-per-mm-camera',
+        type=float,
+        default=None,
+        help=(
+            'Explicit raw camera pixels/mm calibration override for the dish tolerance. '
+            'Used only when supplied and recorded in provenance.'
+        ),
+    )
     
     args = parser.parse_args()
     
@@ -1851,6 +1943,8 @@ Examples:
             detect_family_path=args.detect_family_path,
             refined_family_path=args.refined_family_path,
             refined_run_name=args.run_name,
+            dish_mask_boundary_tolerance_mm=args.dish_mask_boundary_tolerance_mm,
+            pixels_per_mm_camera=args.pixels_per_mm_camera,
         )
         
         print(f"\n✓ Created refined run: {run_name}")

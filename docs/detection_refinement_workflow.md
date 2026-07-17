@@ -76,7 +76,12 @@ This is the current detect workflow as of 2026-04-07.
    applies it as a spatial gate for any source detect run: raw detect candidates
    remain in `source_detections`, but clean candidates whose bbox center falls
    outside the dish are marked `filtered` with reason `outside_dish_mask` and
-   cannot enter `instances` or win per-frame top-k selection. In sampled-import
+   cannot enter `instances` or win per-frame top-k selection. Before this test,
+   the fitted boundary is expanded by the versioned 0.5 mm physical tolerance.
+   The expansion is resolved from camera-space
+   `pixels_per_mm_camera` plus full-frame dimensions and is recorded separately
+   from the immutable fitted dish geometry.
+   In sampled-import
    passthrough mode, jump/blip filters are disabled before this spatial gate and
    the remaining raw detections are materialized into the curated sparse
    `instances/` surface for manual review.

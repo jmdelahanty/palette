@@ -348,6 +348,12 @@ def test_dish_mask_gate_marks_clean_outside_candidates_before_top_k() -> None:
     )
 
     assert gate_stats["outside_clean_rows"] == 1
+    assert gate_stats["base_geometry"] == {
+        "center_norm": [0.5, 0.5],
+        "radius_norm_x": 0.3,
+        "radius_norm_y": 0.3,
+    }
+    assert gate_stats["effective_geometry"] == gate_stats["base_geometry"]
     assert gated_labels.tolist() == [5, 0, 0]
     assert _filtered_reason_from_quality_label(5) == "outside_dish_mask"
 
