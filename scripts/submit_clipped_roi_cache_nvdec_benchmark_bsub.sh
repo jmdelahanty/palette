@@ -11,7 +11,7 @@ SUBMIT_HOST="${PALETTE_LSF_SUBMIT_HOST:-login1-citrus-poller}"
 LOG_DIR=""
 PUBLIC_ROOT=""
 QUEUE="gpu_l4"
-NCORES=16
+NCORES=8
 MEM_GB=64
 WALLTIME="2:00"
 LIMIT_ROWS=8192
@@ -50,7 +50,7 @@ Options:
                                  (default: 4,1,8,2,6 then 6,2,8,1,4)
   --limit-rows N                 Cache rows per clip per trial (default: 8192)
   --gpu-chunk-frames N           Production decoder batch size (default: 32)
-  --ncores N                     Allocated CPU slots (default: 16)
+  --ncores N                     Allocated CPU slots (default: 8; gpu_l4 queue ratio)
   --mem-gb N                     Approximate total memory (default: 64)
   --walltime H:MM                LSF walltime (default: 2:00)
   --queue NAME                   LSF queue (default: gpu_l4)

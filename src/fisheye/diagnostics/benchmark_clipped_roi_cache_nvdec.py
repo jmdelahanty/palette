@@ -377,7 +377,7 @@ def _render_reports(report: Mapping[str, Any], report_path: Path) -> None:
         f"- Clips per trial: `{len(report.get('clip_ids', []))}`",
         "- NVDEC telemetry is the aggregate decoder-utilization value reported by nvidia-smi.",
         "",
-        "| Workers | Trials | Median wall (s) | Median rows/s | Median decoded frames/s | Median NVDEC util. (%) | Max RSS (GiB) |",
+        "| Workers | Trials | Median wall (s) | Median rows/s | Median decoded frames/s | Median trial-mean NVDEC util. (%) | GNU-time max RSS (GiB) |",
         "|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for item in aggregates:
@@ -397,6 +397,8 @@ def _render_reports(report: Mapping[str, Any], report_path: Path) -> None:
     recommendation = report.get("recommendation", {})
     lines.extend(
         [
+            "",
+            "GNU time reports the maximum RSS attributed to the timed command/process tree, not simultaneous aggregate job memory. Use final LSF accounting for allocation-level peak memory.",
             "",
             "## Recommendation",
             "",
