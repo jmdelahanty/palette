@@ -26,12 +26,15 @@ from fisheye.analysis.swim_bout_io import (
 from fisheye.analytics_exports.baseline import is_baseline_label
 from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.utils.view_zarr_visualization import load_png_artifact_bytes
 from fisheye.visualization.eye_angle_timeseries import (
+    catalog_eye_angle_timeseries_data,
     discover_eye_angle_run_options,
-    load_eye_angle_timeseries_data,
+    load_eye_angle_timeseries_window,
 )
 
 from .registry import InteractiveSpecOption
+from .common import png_bytes_to_markdown_image
 
 
 TRACK_KINEMATICS_RENDERER = "palette-track-kinematics-summary-v1"
@@ -60,6 +63,21 @@ class CoreBehaviorProjection:
     load_duration_ms: float
     note: str
     related_frames: Mapping[str, pl.LazyFrame] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class CoreBehaviorOption:
+    """Selectable core source independent of optional visualization artifacts."""
+
+    zarr_path: Path
+    run_path: str
+    run_name: str
+    label: str
+    track_id: int
+    source_paths: Mapping[str, str]
+    attrs: Mapping[str, Any]
+    interactive_option: InteractiveSpecOption | None = None
 
 
 def scan_export_parquet(
@@ -77,19 +95,191 @@ def scan_export_parquet(
     return lazy.select(list(columns)) if columns is not None else lazy
 
 
-def is_core_behavior_option(option: InteractiveSpecOption) -> bool:
-    return option.renderer == TRACK_KINEMATICS_RENDERER
+def is_core_behavior_option(option: InteractiveSpecOption | CoreBehaviorOption) -> bool:
+    return isinstance(option, CoreBehaviorOption) or option.renderer == TRACK_KINEMATICS_RENDERER
 
 
 def _normal_path(value: object) -> str:
     return "/".join(part for part in str(value or "").strip("/").split("/") if part)
 
 
-def _source_paths(option: InteractiveSpecOption) -> dict[str, str]:
+def _source_paths(option: InteractiveSpecOption | CoreBehaviorOption) -> dict[str, str]:
+    if isinstance(option, CoreBehaviorOption):
+        return dict(option.source_paths)
     raw = option.spec.get("source_paths")
     if not isinstance(raw, Mapping):
         return {}
     return {str(key): _normal_path(value) for key, value in raw.items() if _normal_path(value)}
+
+
+def _core_option_from_spec(option: InteractiveSpecOption) -> CoreBehaviorOption:
+    return CoreBehaviorOption(
+        zarr_path=option.zarr_path,
+        run_path=_normal_path(option.run_path),
+        run_name=option.run_name or _normal_path(option.run_path).split("/")[-1],
+        label=option.label,
+        track_id=int(option.spec.get("track_id") or 0),
+        source_paths=_source_paths(option),
+        attrs=option.attrs,
+        interactive_option=option,
+    )
+
+
+def _track_source_paths_from_group(
+    run_path: str,
+    run_group: Any,
+    track_id: int,
+) -> dict[str, str]:
+    track_path = f"{run_path}/tracks/id_{int(track_id)}"
+    track_group = run_group[f"tracks/id_{int(track_id)}"]
+    paths: dict[str, str] = {"run": run_path, "track": track_path}
+    flat_names = (
+        "time_seconds",
+        "frame_indices",
+        "positions_px",
+        "positions_mm",
+        "speed_raw_px",
+        "speed_raw_mm",
+        "speed_filtered_px",
+        "speed_filtered_mm",
+        "speed_smoothed_px",
+        "speed_smoothed_mm",
+        "speed_averaged_px",
+        "speed_averaged_mm",
+        "acceleration_px",
+        "acceleration_mm",
+        "smoothed_heading_degrees",
+        "smoothed_acceleration_px",
+        "smoothed_acceleration_mm",
+        "delta_heading_degrees",
+        "angular_velocity_deg_s",
+        "angular_velocity_raw_deg_s",
+        "angular_speed_raw_deg_s",
+        "delta_heading_smoothed_degrees",
+        "angular_velocity_smoothed_deg_s",
+        "angular_speed_smoothed_deg_s",
+        "cumulative_path_distance_px",
+        "cumulative_path_distance_mm",
+        "sample_valid",
+        "sample_reason_code",
+        "transition_valid",
+        "transition_reason_code",
+    )
+    for name in flat_names:
+        if name in track_group:
+            paths[name] = f"{track_path}/{name}"
+    movement = track_group.get("movement")
+    speed_parent = movement.get("speed") if movement is not None else None
+    if speed_parent is not None:
+        for level in ("raw", "filtered", "smoothed", "averaged"):
+            if level not in speed_parent:
+                continue
+            level_group = speed_parent[level]
+            for unit in ("px", "mm"):
+                if unit in level_group:
+                    paths.setdefault(
+                        f"speed_{level}_{unit}",
+                        f"{track_path}/movement/speed/{level}/{unit}",
+                    )
+    return paths
+
+
+def _track_run_groups(parent: Any, parent_path: str, *, depth: int = 0) -> list[tuple[str, Any]]:
+    if parent is None or depth > 2:
+        return []
+    if "tracks" in parent:
+        return [(parent_path, parent)]
+    rows: list[tuple[str, Any]] = []
+    group_keys = getattr(parent, "group_keys", None)
+    if not callable(group_keys):
+        return rows
+    for name in group_keys():
+        child = parent[name]
+        rows.extend(_track_run_groups(child, f"{parent_path}/{name}", depth=depth + 1))
+    return rows
+
+
+def discover_core_behavior_options(
+    zarr_path: Path | str,
+    interactive_options: Sequence[InteractiveSpecOption] = (),
+) -> list[CoreBehaviorOption]:
+    """Discover canonical core runs even when no visualization spec was persisted."""
+
+    archive = Path(zarr_path)
+    options = [
+        _core_option_from_spec(option)
+        for option in interactive_options
+        if is_core_behavior_option(option)
+    ]
+    seen = {(option.run_path, option.track_id) for option in options}
+    root = open_zarr_root(archive, mode="r")
+    parent_path = "analysis/track_kinematics_runs"
+    parent = root.get(parent_path)
+    latest_paths: set[str] = set()
+    if parent is not None:
+        for key in ("latest_complete", "latest"):
+            value = str(parent.attrs.get(key) or "").strip("/")
+            if value:
+                latest_paths.add(f"{parent_path}/{value}")
+        for run_path, run_group in _track_run_groups(parent, parent_path):
+            status = str(run_group.attrs.get("palette_run_completion_status") or "").lower()
+            if status and status != "complete":
+                continue
+            tracks = run_group.get("tracks")
+            if tracks is None:
+                continue
+            for track_name in sorted(tracks.group_keys()):
+                if not str(track_name).startswith("id_"):
+                    continue
+                try:
+                    track_id = int(str(track_name).split("_", 1)[1])
+                except ValueError:
+                    continue
+                if (run_path, track_id) in seen:
+                    continue
+                run_name = run_path.split("/")[-1]
+                is_latest = run_path in latest_paths
+                options.append(
+                    CoreBehaviorOption(
+                        zarr_path=archive,
+                        run_path=run_path,
+                        run_name=run_name,
+                        label=(
+                            f"{run_name} | track {track_id}"
+                            f"{' | latest' if is_latest else ''} | canonical arrays"
+                        ),
+                        track_id=track_id,
+                        source_paths=_track_source_paths_from_group(
+                            run_path, run_group, track_id
+                        ),
+                        attrs=dict(run_group.attrs),
+                    )
+                )
+                seen.add((run_path, track_id))
+    if not options:
+        eye_options = discover_eye_angle_run_options(archive)
+        if eye_options:
+            eye = eye_options[0]
+            options.append(
+                CoreBehaviorOption(
+                    zarr_path=archive,
+                    run_path=eye.run_path,
+                    run_name=eye.run_name,
+                    label=f"{eye.label} | eye-angle capability",
+                    track_id=0,
+                    source_paths={},
+                    attrs=eye.attrs,
+                )
+            )
+    return sorted(
+        options,
+        key=lambda item: (
+            0 if "latest" in item.label else 1,
+            0 if item.interactive_option is not None else 1,
+            item.run_path,
+            item.track_id,
+        ),
+    )
 
 
 def _finite_bounds(values: np.ndarray) -> tuple[float, float]:
@@ -198,20 +388,102 @@ def _swim_bout_distribution_specs(
     return tuple(specs)
 
 
-class CoreBehaviorSource:
-    """Metadata-first, read-only source for one track-kinematics spec."""
+def _eye_provenance_summary(attrs: Mapping[str, Any]) -> dict[str, Any]:
+    scalar_keys = (
+        "schema_id",
+        "schema_version",
+        "layout",
+        "method",
+        "method_version",
+        "row_axis",
+        "fps",
+        "preferred_angle_family",
+        "preferred_eye_axis",
+        "body_frame_estimator",
+        "body_frame_angle_convention",
+        "body_frame_coordinate_space",
+        "angle_sign_convention",
+        "angle_zero",
+        "axis_ambiguity_resolution",
+        "gaze_angle_source",
+        "angle_smoothing_algorithm",
+        "angle_smoothing_window_frames",
+        "source_subject_shape_run",
+        "source_refined_subject_masks_run",
+        "source_keypoint_run",
+        "source_detection_success_path",
+        "valid_detection_fraction",
+        "valid_frame_fraction",
+        "lineage_hash",
+        "palette_run_completion_status",
+        "palette_run_completed_at_utc",
+    )
+    summary = {key: attrs.get(key) for key in scalar_keys if key in attrs}
+    for key in (
+        "eye_angle_algorithm_contract",
+        "eye_angle_source_contracts",
+        "eye_angle_timing_summary",
+        "physical_storage_layout",
+    ):
+        value = attrs.get(key)
+        if isinstance(value, Mapping):
+            summary[key] = dict(value)
+    return summary
 
-    def __init__(self, zarr_path: Path | str, option: InteractiveSpecOption):
+
+def _eye_png_artifacts(root: Any, run_path: str) -> tuple[dict[str, Any], ...]:
+    try:
+        visualizations = root[f"{run_path}/visualizations"]
+    except Exception:
+        return ()
+    rows: list[dict[str, Any]] = []
+    child_names = sorted(
+        set(visualizations.group_keys()) | set(visualizations.array_keys())
+    )
+    for name in child_names:
+        artifact_path = f"{run_path}/visualizations/{name}"
+        node = visualizations[name]
+        attrs = getattr(node, "attrs", {})
+        media_type = str(attrs.get("media_type") or attrs.get("mime") or "")
+        if media_type != "image/png" and not str(name).lower().endswith("png"):
+            continue
+        try:
+            resolved_path, payload = load_png_artifact_bytes(root, artifact_path)
+        except Exception as exc:
+            rows.append({"path": artifact_path, "error": str(exc)})
+            continue
+        rows.append(
+            {
+                "path": resolved_path,
+                "media_type": "image/png",
+                "bytes": payload,
+                "description": attrs.get("description"),
+            }
+        )
+    return tuple(rows)
+
+
+class CoreBehaviorSource:
+    """Metadata-first, read-only source for canonical core analysis runs."""
+
+    def __init__(
+        self,
+        zarr_path: Path | str,
+        option: InteractiveSpecOption | CoreBehaviorOption,
+    ):
         if not is_core_behavior_option(option):
-            raise ValueError(f"Not a core-behavior renderer: {option.renderer!r}")
+            raise ValueError("Not a core-behavior source")
         self.zarr_path = Path(zarr_path)
-        self.option = option
-        self.source_paths = _source_paths(option)
-        self.track_id = int(option.spec.get("track_id") or 0)
+        self.option = (
+            option if isinstance(option, CoreBehaviorOption) else _core_option_from_spec(option)
+        )
+        self.source_paths = dict(self.option.source_paths)
+        self.track_id = int(self.option.track_id)
         self._time_seconds_cache: np.ndarray | None = None
         self._swim_bout_selection_cache: tuple[Any, Any] | None = None
         self._swim_bout_events_cache: Any = None
         self._available_analysis_ids_cache: tuple[str, ...] | None = None
+        self._eye_catalog_cache: dict[str, Any] = {}
 
     @property
     def available_series(self) -> tuple[str, ...]:
@@ -299,9 +571,105 @@ class CoreBehaviorSource:
         self._available_analysis_ids_cache = tuple(available)
         return self._available_analysis_ids_cache
 
+    def eye_angle_options(self) -> tuple[Any, ...]:
+        return tuple(discover_eye_angle_run_options(self.zarr_path))
+
+    def eye_angle_catalog(self, run_name: str | None = None) -> Any:
+        key = str(run_name or "latest")
+        if key not in self._eye_catalog_cache:
+            self._eye_catalog_cache[key] = catalog_eye_angle_timeseries_data(
+                self.zarr_path,
+                run_name=run_name,
+                prefer_frame=True,
+            )
+        return self._eye_catalog_cache[key]
+
+    def eye_representations_for(self, run_name: str | None = None) -> tuple[str, ...]:
+        catalog = self.eye_angle_catalog(run_name)
+        preferred_order = (
+            "eye_frame",
+            "gaze",
+            "nasal_gaze",
+            "major",
+            "centroid",
+            "legacy",
+            "legacy_minor",
+            "other",
+        )
+        present = set(catalog.channel_representations.values())
+        return tuple(name for name in preferred_order if name in present) + tuple(
+            sorted(present.difference(preferred_order))
+        )
+
+    def eye_series_for(
+        self,
+        run_name: str | None = None,
+        representation: str | None = None,
+    ) -> tuple[str, ...]:
+        catalog = self.eye_angle_catalog(run_name)
+        return tuple(
+            name
+            for name in catalog.angle_channels
+            if representation is None
+            or catalog.channel_representations.get(name) == str(representation)
+        )
+
+    def default_eye_series_for(
+        self,
+        run_name: str | None = None,
+        representation: str | None = None,
+    ) -> tuple[str, ...]:
+        available = set(self.eye_series_for(run_name, representation))
+        preferences = {
+            "eye_frame": (
+                "left_eye_angle_deg_smoothed",
+                "right_eye_angle_deg_smoothed",
+                "vergence_eye_angle_deg_smoothed",
+                "left_eye_angle_deg",
+                "right_eye_angle_deg",
+                "vergence_eye_angle_deg",
+            ),
+            "gaze": (
+                "left_gaze_signed_deg_smoothed",
+                "right_gaze_signed_deg_smoothed",
+                "vergence_gaze_signed_deg_smoothed",
+                "left_gaze_signed_deg",
+                "right_gaze_signed_deg",
+                "vergence_gaze_signed_deg",
+            ),
+            "nasal_gaze": (
+                "left_nasal_gaze_deg_smoothed",
+                "right_nasal_gaze_deg_smoothed",
+                "mean_eye_vergence_gaze_deg_smoothed",
+                "left_nasal_gaze_deg",
+                "right_nasal_gaze_deg",
+                "mean_eye_vergence_gaze_deg",
+            ),
+            "major": (
+                "left_major_signed_deg_smoothed",
+                "right_major_signed_deg_smoothed",
+                "vergence_major_signed_deg_smoothed",
+            ),
+            "centroid": (
+                "left_centroid_deg_smoothed",
+                "right_centroid_deg_smoothed",
+                "vergence_centroid_deg_smoothed",
+            ),
+        }
+        selected = [name for name in preferences.get(str(representation), ()) if name in available]
+        if len(selected) < 3:
+            selected.extend(name for name in sorted(available) if name not in selected)
+        return tuple(selected[:3])
+
+    def eye_time_bounds(self, run_name: str | None = None) -> tuple[float, float]:
+        catalog = self.eye_angle_catalog(run_name)
+        return float(catalog.time_start_s), float(catalog.time_stop_s)
+
     def _swim_bout_selection(self) -> tuple[Any, Any] | None:
         if self._swim_bout_selection_cache is not None:
             return self._swim_bout_selection_cache
+        if "track" not in self.source_paths:
+            return None
         root = self._root()
         track_run_name = _normal_path(self.option.run_path).split("/")[-1]
         candidates = discover_swim_bout_candidates(
@@ -558,38 +926,63 @@ class CoreBehaviorSource:
     def project_eye_angles(
         self,
         *,
+        run_name: str | None = None,
+        representation: str | None = None,
         start_s: float | None = None,
         stop_s: float | None = None,
+        series_keys: Sequence[str] | None = None,
     ) -> CoreBehaviorProjection:
         started = time.perf_counter()
-        options = discover_eye_angle_run_options(self.zarr_path)
-        if not options:
-            raise ValueError("No eye-angle run is available")
-        selected = options[0]
-        payload = load_eye_angle_timeseries_data(
+        catalog = self.eye_angle_catalog(run_name)
+        selected_series = tuple(series_keys) if series_keys is not None else self.default_eye_series_for(
+            catalog.run_name,
+            representation,
+        )
+        if not selected_series:
+            raise ValueError(
+                f"No selectable eye-angle series are available for representation {representation!r}"
+            )
+        payload = load_eye_angle_timeseries_window(
             self.zarr_path,
-            run_name=selected.run_name,
+            run_name=catalog.run_name,
             prefer_frame=True,
+            start_s=start_s,
+            stop_s=stop_s,
+            series_names=selected_series,
         )
         frame = payload.dataframe
-        if "time_s" in frame.columns:
-            if start_s is not None:
-                frame = frame.filter(pl.col("time_s") >= float(start_s))
-            if stop_s is not None:
-                frame = frame.filter(pl.col("time_s") <= float(stop_s))
-            bounds = _finite_bounds(frame["time_s"].to_numpy())
-        else:
-            bounds = (0.0, 0.0)
+        bounds = _finite_bounds(frame["time_s"].to_numpy()) if "time_s" in frame.columns else (0.0, 0.0)
+        qa_summary: dict[str, Any] = {}
+        for qa_name in ("valid_frame", "valid_left", "valid_right", "major_axis_marginal"):
+            if qa_name not in frame.columns:
+                continue
+            values = frame.get_column(qa_name).cast(pl.Boolean, strict=False)
+            qa_summary[f"{qa_name}_fraction"] = float(values.mean() or 0.0)
+        root = self._root()
+        pngs = _eye_png_artifacts(root, payload.run_path)
         return CoreBehaviorProjection(
             analysis_id="eye_angles",
             frame=frame.lazy(),
             columns=tuple(frame.columns),
-            source_paths=(payload.run_path,),
+            source_paths=tuple(dict.fromkeys(payload.source_paths.values())),
             start_s=bounds[0],
             stop_s=bounds[1],
             row_count=frame.height,
             load_duration_ms=(time.perf_counter() - started) * 1000.0,
-            note="Eye arrays loaded only after selection; downstream Polars transformations are lazy.",
+            note=(
+                "Bounded, column-selective eye-angle projection from persisted arrays; "
+                "downstream Polars transformations are lazy."
+            ),
+            metadata={
+                "eye_run_name": payload.run_name,
+                "eye_run_path": payload.run_path,
+                "row_axis": payload.row_axis,
+                "representation": representation,
+                "selected_series": selected_series,
+                "qa_summary": qa_summary,
+                "provenance": _eye_provenance_summary(payload.attrs),
+                "persisted_pngs": pngs,
+            },
         )
 
     def baseline_interval(self) -> BaselineInterval | None:
@@ -650,6 +1043,8 @@ def load_core_behavior_projection(
     start_s: float | None = None,
     stop_s: float | None = None,
     series_keys: Sequence[str] | None = None,
+    eye_run_name: str | None = None,
+    eye_representation: str | None = None,
 ) -> CoreBehaviorProjection:
     if analysis_id in {"speed", "heading"}:
         return source.project_timeseries(
@@ -663,7 +1058,13 @@ def load_core_behavior_projection(
     if analysis_id == "swim_bouts":
         return source.project_swim_bouts(start_s=start_s, stop_s=stop_s)
     if analysis_id == "eye_angles":
-        return source.project_eye_angles(start_s=start_s, stop_s=stop_s)
+        return source.project_eye_angles(
+            run_name=eye_run_name,
+            representation=eye_representation,
+            start_s=start_s,
+            stop_s=stop_s,
+            series_keys=series_keys,
+        )
     if analysis_id == "baseline":
         interval = source.baseline_interval()
         if interval is None:
@@ -818,7 +1219,60 @@ def build_core_behavior_output(
             height=500,
             margin=dict(l=55, r=25, t=60, b=50),
         )
-        body = figure if value_columns else mo.md("No compatible series are present in this run.")
+        if not value_columns:
+            body = mo.md("No compatible series are present in this run.")
+        elif projection.analysis_id != "eye_angles":
+            body = figure
+        else:
+            eye_pieces: list[Any] = [figure]
+            qa_summary = projection.metadata.get("qa_summary", {})
+            if isinstance(qa_summary, Mapping) and qa_summary:
+                qa_stats = [
+                    mo.stat(
+                        label=str(name).removesuffix("_fraction").replace("_", " ").title(),
+                        value=f"{100.0 * float(value):.1f}%",
+                    )
+                    for name, value in qa_summary.items()
+                ]
+                eye_pieces.extend([mo.md("### Eye-angle QA in selected window"), mo.hstack(qa_stats)])
+            provenance = projection.metadata.get("provenance", {})
+            if isinstance(provenance, Mapping) and provenance:
+                provenance_view = (
+                    mo.tree(dict(provenance), label="Computation and source provenance")
+                    if hasattr(mo, "tree")
+                    else mo.md(f"Provenance: `{dict(provenance)}`")
+                )
+                eye_pieces.extend([mo.md("### Persisted computation contract"), provenance_view])
+            pngs = projection.metadata.get("persisted_pngs", ())
+            eye_pieces.append(mo.md("### Persisted snapshots"))
+            if pngs:
+                for index, artifact in enumerate(pngs):
+                    if artifact.get("bytes"):
+                        eye_pieces.extend(
+                            [
+                                mo.md(f"`{artifact.get('path')}`"),
+                                png_bytes_to_markdown_image(
+                                    mo,
+                                    artifact["bytes"],
+                                    alt_text=f"eye-angle persisted snapshot {index + 1}",
+                                ),
+                            ]
+                        )
+                    else:
+                        eye_pieces.append(
+                            mo.md(
+                                f"Persisted snapshot could not be loaded: "
+                                f"`{artifact.get('path')}` — `{artifact.get('error')}`"
+                            )
+                        )
+            else:
+                eye_pieces.append(
+                    mo.md(
+                        "No analysis-owned eye-angle PNG is persisted for this run. "
+                        "The interactive traces above are rendered from the canonical arrays."
+                    )
+                )
+            body = mo.vstack(eye_pieces)
     elif projection.analysis_id in {"position", "baseline"}:
         if frame.height:
             display_frame = _decimate_for_display(

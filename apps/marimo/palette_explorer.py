@@ -26,8 +26,10 @@ def _():
         group_specs_by_provider,
     )
     from apps.marimo.components.core_behavior import (
+        TRACK_KINEMATICS_RENDERER,
         CoreBehaviorSource,
         build_core_behavior_output,
+        discover_core_behavior_options,
         load_core_behavior_projection,
     )
     from apps.marimo.components.goodcopbadcop_chaser import (
@@ -65,6 +67,7 @@ def _():
 
     return (
         PROVIDERS,
+        TRACK_KINEMATICS_RENDERER,
         CoreBehaviorSource,
         Path,
         RecordingExplorationWorkspace,
@@ -89,6 +92,7 @@ def _():
         build_spec_provenance_panel,
         build_static_artifacts_panel,
         discover_recording_explorer_spec_options,
+        discover_core_behavior_options,
         discover_protocol_recording_options,
         discover_chaser_gaze_tracking_components,
         go,
@@ -195,6 +199,8 @@ def _(mo, recording_options, recording_scope_label, seed_zarr_path):
 
 @app.cell(hide_code=True)
 def _(
+    TRACK_KINEMATICS_RENDERER,
+    discover_core_behavior_options,
     discover_recording_explorer_spec_options,
     initial_artifact,
     initial_renderer,
@@ -210,12 +216,19 @@ def _(
         run_path_filter=str(initial_run_path) if initial_run_path else None,
         artifact_filter=str(initial_artifact) if initial_artifact else None,
     )
-    return selected_recording, spec_options, zarr_path
+    core_options = (
+        discover_core_behavior_options(zarr_path, spec_options)
+        if not initial_renderer or str(initial_renderer) == TRACK_KINEMATICS_RENDERER
+        else []
+    )
+    return core_options, selected_recording, spec_options, zarr_path
 
 
 @app.cell(hide_code=True)
-def _(PROVIDERS, group_specs_by_provider, mo, spec_options, zarr_path):
+def _(PROVIDERS, core_options, group_specs_by_provider, mo, spec_options, zarr_path):
     specs_by_provider = group_specs_by_provider(spec_options)
+    if core_options:
+        specs_by_provider["core_behavior"] = list(core_options)
     provider_by_label = {
         PROVIDERS[provider_id].label: PROVIDERS[provider_id]
         for provider_id in PROVIDERS
@@ -242,8 +255,8 @@ def _(PROVIDERS, group_specs_by_provider, mo, spec_options, zarr_path):
     else:
         provider_picker = None
         provider_output = mo.md(
-            "No supported interactive analysis specs are present in this recording. "
-            "Run or backfill a track-kinematics or chaser visualization contract first."
+            "No supported canonical analysis runs or interactive visualization specs "
+            "are present in this recording."
         )
     provider_output
     return provider_by_label, provider_picker, specs_by_provider
@@ -268,7 +281,7 @@ def _(mo, provider_specs, selected_provider):
         source_output = mo.md("")
     else:
         source_by_label = {
-            f"{index + 1}. {option.run_name or option.run_path}": option
+            f"{index + 1}. {getattr(option, 'label', None) or option.run_name or option.run_path}": option
             for index, option in enumerate(provider_specs)
         }
         source_picker = mo.ui.dropdown(
@@ -339,12 +352,88 @@ def _(analysis_by_label, analysis_picker):
 
 @app.cell(hide_code=True)
 def _(core_source, mo, selected_analysis_id):
+    if core_source is not None and selected_analysis_id == "eye_angles":
+        eye_run_by_label = {
+            option.label: option for option in core_source.eye_angle_options()
+        }
+        eye_run_picker = mo.ui.dropdown(
+            options=list(eye_run_by_label),
+            value=next(iter(eye_run_by_label)),
+            label="Eye-angle run",
+        )
+        eye_run_output = eye_run_picker
+    else:
+        eye_run_by_label = {}
+        eye_run_picker = None
+        eye_run_output = mo.md("")
+    eye_run_output
+    return eye_run_by_label, eye_run_picker
+
+
+@app.cell(hide_code=True)
+def _(core_source, eye_run_by_label, eye_run_picker, mo, selected_analysis_id):
+    if (
+        core_source is not None
+        and selected_analysis_id == "eye_angles"
+        and eye_run_picker is not None
+    ):
+        selected_eye_run = eye_run_by_label[eye_run_picker.value]
+        eye_representations = list(
+            core_source.eye_representations_for(selected_eye_run.run_name)
+        )
+        preferred = str(selected_eye_run.preferred_angle_family or "")
+        default_representation = (
+            preferred if preferred in eye_representations else eye_representations[0]
+        )
+        eye_representation_picker = mo.ui.dropdown(
+            options=eye_representations,
+            value=default_representation,
+            label="Angle representation",
+        )
+        eye_representation_output = eye_representation_picker
+    else:
+        selected_eye_run = None
+        eye_representation_picker = None
+        eye_representation_output = mo.md("")
+    eye_representation_output
+    return eye_representation_picker, selected_eye_run
+
+
+@app.cell(hide_code=True)
+def _(
+    core_source,
+    eye_representation_picker,
+    mo,
+    selected_analysis_id,
+    selected_eye_run,
+):
     if core_source is not None and selected_analysis_id in {"speed", "heading"}:
         core_series_options = list(core_source.series_for(selected_analysis_id))
         core_series_picker = mo.ui.multiselect(
             options=core_series_options,
             value=list(core_source.default_series_for(selected_analysis_id)),
             label="Series",
+        )
+        core_series_output = core_series_picker
+    elif (
+        core_source is not None
+        and selected_analysis_id == "eye_angles"
+        and selected_eye_run is not None
+        and eye_representation_picker is not None
+    ):
+        representation = str(eye_representation_picker.value)
+        core_series_options = list(
+            core_source.eye_series_for(selected_eye_run.run_name, representation)
+        )
+        core_series_picker = mo.ui.multiselect(
+            options=core_series_options,
+            value=list(
+                core_source.default_eye_series_for(
+                    selected_eye_run.run_name,
+                    representation,
+                )
+            ),
+            label="Eye-angle series",
         )
         core_series_output = core_series_picker
     else:
@@ -355,19 +444,31 @@ def _(core_source, mo, selected_analysis_id):
 
 
 @app.cell(hide_code=True)
-def _(core_source, mo, selected_analysis_id, selected_provider):
+def _(core_source, mo, selected_analysis_id, selected_eye_run, selected_provider):
     if (
         selected_provider is not None
         and selected_provider.provider_id == "core_behavior"
         and core_source is not None
         and selected_analysis_id in {"speed", "heading", "position", "eye_angles", "swim_bouts"}
     ):
-        core_start_s, core_stop_s = core_source.time_bounds()
+        if selected_analysis_id == "eye_angles" and selected_eye_run is not None:
+            core_start_s, core_stop_s = core_source.eye_time_bounds(
+                selected_eye_run.run_name
+            )
+            core_default_stop_s = min(core_stop_s, core_start_s + 60.0)
+            core_time_step = max(
+                min((core_stop_s - core_start_s) / 10000.0, 1.0),
+                0.01,
+            )
+        else:
+            core_start_s, core_stop_s = core_source.time_bounds()
+            core_default_stop_s = core_stop_s
+            core_time_step = max((core_stop_s - core_start_s) / 1000.0, 0.001)
         core_time_window = mo.ui.range_slider(
             start=core_start_s,
             stop=max(core_stop_s, core_start_s + 1e-9),
-            value=(core_start_s, core_stop_s),
-            step=max((core_stop_s - core_start_s) / 1000.0, 0.001),
+            value=(core_start_s, core_default_stop_s),
+            step=core_time_step,
             label="Time window (s)",
             full_width=True,
         )
@@ -384,8 +485,10 @@ def _(
     core_source,
     core_series_picker,
     core_time_window,
+    eye_representation_picker,
     load_core_behavior_projection,
     selected_analysis_id,
+    selected_eye_run,
     selected_provider,
 ):
     if (
@@ -407,6 +510,16 @@ def _(
                 series_keys=(
                     tuple(core_series_picker.value)
                     if core_series_picker is not None
+                    else None
+                ),
+                eye_run_name=(
+                    selected_eye_run.run_name
+                    if selected_eye_run is not None
+                    else None
+                ),
+                eye_representation=(
+                    str(eye_representation_picker.value)
+                    if eye_representation_picker is not None
                     else None
                 ),
             )

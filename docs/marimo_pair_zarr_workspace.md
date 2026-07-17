@@ -324,8 +324,8 @@ logs. Pair installation and version caveats are shared with
 
 ## Choosing among recording apps
 
-- **Palette Recording Explorer**: locked, rendered views backed by persisted
-  visualization contracts.
+- **Palette Recording Explorer**: locked, rendered views backed by canonical
+  core-analysis runs and protocol-specific visualization contracts.
 - **Palette Recording Exploration Workspace**: those rendered views plus an
   editable cell over the currently selected analysis.
 - **Palette Zarr Exploration Workspace**: generic editable inspection of any

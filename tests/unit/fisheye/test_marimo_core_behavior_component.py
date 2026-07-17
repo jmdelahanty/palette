@@ -12,6 +12,7 @@ from apps.marimo.components.core_behavior import (
     CoreBehaviorProjection,
     build_core_behavior_output,
     collect_projection,
+    discover_core_behavior_options,
     scan_export_parquet,
 )
 from apps.marimo.components.registry import (
@@ -23,6 +24,9 @@ from tests.unit.fisheye.test_interactive_track_kinematics import (
     _add_eye_angle_run,
     _add_hierarchical_swim_bouts,
     _make_archive_with_interactive_artifact,
+)
+from tests.unit.fisheye.test_plot_track_kinematics_artifacts import (
+    _make_track_kinematics_archive,
 )
 
 
@@ -44,6 +48,20 @@ def test_track_renderer_is_registered_and_routes_to_core_provider(tmp_path) -> N
 
     targeted = discover_recording_explorer_spec_options(zarr_path)
     assert [item.artifact_path for item in targeted] == [option.artifact_path]
+
+
+def test_canonical_track_run_is_discovered_without_visualization_spec(tmp_path) -> None:
+    zarr_path = _make_track_kinematics_archive(tmp_path)
+
+    assert discover_recording_explorer_spec_options(zarr_path) == []
+    options = discover_core_behavior_options(zarr_path)
+
+    assert len(options) == 1
+    assert options[0].run_path == "analysis/track_kinematics_runs/offline/track_kinematics_1"
+    assert options[0].track_id == 0
+    assert options[0].interactive_option is None
+    source = CoreBehaviorSource(zarr_path, options[0])
+    assert {"speed", "heading", "position"}.issubset(source.available_analysis_ids())
 
 
 def test_core_source_defers_zarr_open_until_projection(tmp_path, monkeypatch) -> None:
@@ -161,12 +179,21 @@ def test_core_source_exposes_eye_angles_only_when_persisted(
         raise AssertionError("eye projection must not require Polars.from_pandas")
 
     monkeypatch.setattr(pl, "from_pandas", _forbid_from_pandas)
-    projection = source.project_eye_angles(start_s=0.0, stop_s=0.01)
+    projection = source.project_eye_angles(
+        run_name="latest",
+        representation="nasal_gaze",
+        start_s=0.0,
+        stop_s=0.01,
+        series_keys=("mean_eye_vergence_gaze_deg_smoothed",),
+    )
 
     assert "eye_angles" in source.available_analysis_ids()
     assert isinstance(projection.frame, pl.LazyFrame)
     assert projection.row_count == 3
     assert "mean_eye_vergence_gaze_deg_smoothed" in projection.columns
+    assert projection.metadata["eye_run_name"] == "eye_angle_1"
+    assert projection.metadata["representation"] == "nasal_gaze"
+    assert projection.metadata["persisted_pngs"] == ()
 
 
 def test_position_plot_avoids_arrow_backed_pandas_bridge(monkeypatch) -> None:

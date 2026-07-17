@@ -86,13 +86,25 @@ class RecordingExplorationWorkspace:
     def persisted_pngs(self) -> Mapping[str, Mapping[str, Any]]:
         """Already-loaded persisted PNGs for the selected analysis."""
 
+        core_metadata = getattr(self.core_projection, "metadata", {})
+        core_pngs = core_metadata.get("persisted_pngs", ()) if isinstance(core_metadata, Mapping) else ()
+        core_rows = {
+            f"core_snapshot_{index + 1}": {
+                "path": str(artifact.get("path")),
+                "media_type": str(artifact.get("media_type") or "image/png"),
+                "bytes": artifact.get("bytes", b""),
+            }
+            for index, artifact in enumerate(core_pngs)
+            if artifact.get("path") and artifact.get("bytes")
+        }
         if self.chaser_view is None:
-            return {}
+            return core_rows
         payload = getattr(self.chaser_view, "summary_png_bytes", b"")
         path = getattr(self.chaser_view, "summary_png_path", None)
         if not payload or not path:
-            return {}
+            return core_rows
         return {
+            **core_rows,
             "chaser_gaze_tracking_summary_png": {
                 "path": str(path),
                 "media_type": "image/png",

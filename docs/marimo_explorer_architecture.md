@@ -22,12 +22,12 @@ loading contracts are different.
 
 ## Direction
 
-`apps/marimo/palette_explorer.py` is the general entrypoint for interactive
-visualization specs stored in analysis Zarr archives. It discovers persisted
-interactive spec artifacts, groups them into capability providers, and offers
-only the analyses supported within the selected provider. Selecting an
-analysis is the data-loading boundary; sibling panels are not evaluated merely
-because their provider is present.
+`apps/marimo/palette_explorer.py` is the general entrypoint for persisted
+analysis capabilities stored in recording Zarr archives. It discovers canonical
+core-analysis runs directly and protocol-specific interactive specs, groups
+them into capability providers, and offers only the analyses supported within
+the selected provider. Selecting an analysis is the data-loading boundary;
+sibling panels are not evaluated merely because their provider is present.
 
 Existing focused notebooks remain available while this pattern settles:
 
@@ -43,8 +43,14 @@ general explorer.
 
 ## Boundaries
 
-Zarr artifact specs are the routing contract. A persisted interactive artifact
-stores:
+Canonical analysis contracts are sufficient for general Core Behavior views.
+The explorer currently resolves `analysis/track_kinematics_runs` directly and
+adds compatible eye-angle and swim-bout capabilities from their canonical run
+families. A plot manifest is therefore not required merely to expose those
+persisted arrays.
+
+Protocol-specific dashboards continue to use Zarr artifact specs as their
+routing contract. A persisted interactive artifact stores:
 
 ```text
 <run>/visualizations/<artifact_name>/spec_json
@@ -72,9 +78,9 @@ apps/marimo/components/core_behavior.py
 apps/marimo/components/analysis_catalog.py
 ```
 
-The top-level notebook should only discover specs, choose a renderer, and route
-to the registered component. It should not hard-code protocol-specific Zarr
-paths except through the selected component.
+The top-level notebook should discover capabilities, choose a provider, and
+route to the registered component. It should not hard-code protocol-specific
+Zarr paths except through the selected component.
 
 ## Current Renderer Registry and Providers
 
@@ -105,7 +111,9 @@ uses a precise two-stage contract:
 
 1. Zarr access is deferred until an analysis is selected. The component reads
    the time coordinate plus only that analysis' source arrays and selected
-   contiguous row interval.
+   contiguous row interval. Compact eye-angle runs additionally project only
+   the selected channel columns; the UI defaults to a 60-second window and
+   refuses windows above the configured viewer row limit.
 2. The resulting projection is represented as a `polars.LazyFrame`; filtering,
    column projection, grouping, and descriptive display queries remain lazy
    until collection.
