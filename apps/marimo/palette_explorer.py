@@ -64,6 +64,7 @@ def _():
         discover_protocol_recording_options,
     )
     from apps.marimo.components.static_artifacts import build_static_artifacts_panel
+    from apps.marimo.components.tail_kinematics import build_tail_kinematics_output
 
     return (
         PROVIDERS,
@@ -91,6 +92,7 @@ def _():
         build_spatial_occupancy_output,
         build_spec_provenance_panel,
         build_static_artifacts_panel,
+        build_tail_kinematics_output,
         discover_recording_explorer_spec_options,
         discover_core_behavior_options,
         discover_protocol_recording_options,
@@ -400,12 +402,34 @@ def _(core_source, eye_run_by_label, eye_run_picker, mo, selected_analysis_id):
 
 
 @app.cell(hide_code=True)
+def _(core_source, mo, selected_analysis_id):
+    if core_source is not None and selected_analysis_id == "tail_kinematics":
+        tail_run_by_label = {
+            option.label: option for option in core_source.tail_kinematics_options()
+        }
+        tail_run_picker = mo.ui.dropdown(
+            options=list(tail_run_by_label),
+            value=next(iter(tail_run_by_label)),
+            label="Tail-kinematics run",
+        )
+        selected_tail_run = tail_run_by_label[tail_run_picker.value]
+        tail_run_output = tail_run_picker
+    else:
+        tail_run_picker = None
+        selected_tail_run = None
+        tail_run_output = mo.md("")
+    tail_run_output
+    return selected_tail_run, tail_run_picker
+
+
+@app.cell(hide_code=True)
 def _(
     core_source,
     eye_representation_picker,
     mo,
     selected_analysis_id,
     selected_eye_run,
+    selected_tail_run,
 ):
     if core_source is not None and selected_analysis_id in {"speed", "heading"}:
         core_series_options = list(core_source.series_for(selected_analysis_id))
@@ -436,6 +460,24 @@ def _(
             label="Eye-angle series",
         )
         core_series_output = core_series_picker
+    elif (
+        core_source is not None
+        and selected_analysis_id == "tail_kinematics"
+        and selected_tail_run is not None
+    ):
+        core_series_options = list(
+            core_source.tail_scalar_series_for(selected_tail_run.run_name)
+        )
+        core_series_picker = mo.ui.multiselect(
+            options=core_series_options,
+            value=list(
+                core_source.default_tail_scalar_series_for(
+                    selected_tail_run.run_name
+                )
+            ),
+            label="Tail scalar traces",
+        )
+        core_series_output = core_series_picker
     else:
         core_series_picker = None
         core_series_output = mo.md("")
@@ -444,12 +486,27 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(core_source, mo, selected_analysis_id, selected_eye_run, selected_provider):
+def _(
+    core_source,
+    mo,
+    selected_analysis_id,
+    selected_eye_run,
+    selected_provider,
+    selected_tail_run,
+):
     if (
         selected_provider is not None
         and selected_provider.provider_id == "core_behavior"
         and core_source is not None
-        and selected_analysis_id in {"speed", "heading", "position", "eye_angles", "swim_bouts"}
+        and selected_analysis_id
+        in {
+            "speed",
+            "heading",
+            "position",
+            "eye_angles",
+            "tail_kinematics",
+            "swim_bouts",
+        }
     ):
         if selected_analysis_id == "eye_angles" and selected_eye_run is not None:
             core_start_s, core_stop_s = core_source.eye_time_bounds(
@@ -459,6 +516,15 @@ def _(core_source, mo, selected_analysis_id, selected_eye_run, selected_provider
             core_time_step = max(
                 min((core_stop_s - core_start_s) / 10000.0, 1.0),
                 0.01,
+            )
+        elif selected_analysis_id == "tail_kinematics" and selected_tail_run is not None:
+            core_start_s, core_stop_s = core_source.tail_time_bounds(
+                selected_tail_run.run_name
+            )
+            core_default_stop_s = min(core_stop_s, core_start_s + 10.0)
+            core_time_step = max(
+                min((core_stop_s - core_start_s) / 100000.0, 0.1),
+                0.001,
             )
         else:
             core_start_s, core_stop_s = core_source.time_bounds()
@@ -490,6 +556,7 @@ def _(
     selected_analysis_id,
     selected_eye_run,
     selected_provider,
+    selected_tail_run,
 ):
     if (
         selected_provider is not None
@@ -522,6 +589,17 @@ def _(
                     if eye_representation_picker is not None
                     else None
                 ),
+                tail_run_name=(
+                    selected_tail_run.run_name
+                    if selected_tail_run is not None
+                    else None
+                ),
+                tail_scalar_series=(
+                    tuple(core_series_picker.value)
+                    if selected_analysis_id == "tail_kinematics"
+                    and core_series_picker is not None
+                    else None
+                ),
             )
             core_error = None
         except Exception as exc:
@@ -534,13 +612,26 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(build_core_behavior_output, core_error, core_projection, go, mo, px):
+def _(
+    build_core_behavior_output,
+    build_tail_kinematics_output,
+    core_error,
+    core_projection,
+    go,
+    mo,
+    px,
+):
     if core_error:
         core_output = mo.md(f"Core behavior analysis failed: `{core_error}`")
     elif core_projection is not None:
-        core_output = build_core_behavior_output(
-            mo, go, px, projection=core_projection
-        )
+        if core_projection.analysis_id == "tail_kinematics":
+            core_output = build_tail_kinematics_output(
+                mo, go, projection=core_projection
+            )
+        else:
+            core_output = build_core_behavior_output(
+                mo, go, px, projection=core_projection
+            )
     else:
         core_output = mo.md("")
     core_output

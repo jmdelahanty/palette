@@ -45,9 +45,10 @@ general explorer.
 
 Canonical analysis contracts are sufficient for general Core Behavior views.
 The explorer currently resolves `analysis/track_kinematics_runs` directly and
-adds compatible eye-angle and swim-bout capabilities from their canonical run
-families. A plot manifest is therefore not required merely to expose those
-persisted arrays.
+adds compatible eye-angle, tail-kinematics, and swim-bout capabilities from
+their canonical run families. A plot manifest is therefore not required merely
+to expose those persisted arrays. Tail discovery also admits a capability-only
+source when no track run is present.
 
 Protocol-specific dashboards continue to use Zarr artifact specs as their
 routing contract. A persisted interactive artifact stores:
@@ -75,6 +76,7 @@ apps/marimo/components/static_artifacts.py
 apps/marimo/components/provenance.py
 apps/marimo/components/goodcopbadcop_chaser.py
 apps/marimo/components/core_behavior.py
+apps/marimo/components/tail_kinematics.py
 apps/marimo/components/analysis_catalog.py
 ```
 
@@ -99,8 +101,8 @@ selected provider, preventing a control from another visualization family from
 remaining selectable while doing nothing.
 
 Core behavior currently provides projected speed, heading/turning, position,
-eye-angle/convergence, lineage-compatible swim-bout segmentation overlays,
-and canonical pre-period views. Chaser stimulus
+eye-angle/convergence, tail posture/curvature, lineage-compatible swim-bout
+segmentation overlays, and canonical pre-period views. Chaser stimulus
 provides distance, epoch, egocentric, polar, spatial, CRA, near-field, escape,
 artifact, and provenance views when their persisted inputs are present.
 
@@ -113,7 +115,9 @@ uses a precise two-stage contract:
    the time coordinate plus only that analysis' source arrays and selected
    contiguous row interval. Compact eye-angle runs additionally project only
    the selected channel columns; the UI defaults to a 60-second window and
-   refuses windows above the configured viewer row limit.
+   refuses windows above the configured viewer row limit. Tail projections use
+   binary search over the persisted sparse frame coordinate, default to ten
+   seconds, and refuse more than 10,000 framewise rows.
 2. The resulting projection is represented as a `polars.LazyFrame`; filtering,
    column projection, grouping, and descriptive display queries remain lazy
    until collection.
@@ -151,6 +155,21 @@ the default, and Plotly traces are deterministically decimated to at most
 60,000 total displayed points. Raising Marimo's output-size limit is not part
 of the design; the source data remain unchanged and exact event boundaries are
 retained.
+
+Tail posture is deliberately represented by two complementary persisted
+surfaces: the canonical 10-position body-frame local-tangent angles and the
+exact 32-position subject-shape spline curvature named in the tail run's source
+lineage. The viewer validates bounded source-frame alignment before exposing
+the dense curvature. It overlays selected tail scalar traces, bounded x/y
+position traces, and lineage-compatible persisted bout intervals. Missing rows
+remain gaps; the viewer does not interpolate or recompute tail geometry.
+
+Sampling metadata is part of the interpretation contract. The panel reports
+FPS and Nyquist frequency and warns when the acquisition cannot resolve the
+typical 20–40 Hz larval tail-beat band. It does not calculate oscillation
+frequency, phase, or wave speed from under-sampled recordings. For example, a
+30 Hz recording has a 15 Hz Nyquist frequency: its acquired posture samples are
+still displayable, but tail-beat spectral claims would be aliased.
 
 Chaser-distance lines use a separate 24,000-point budget shared across visible
 traces. The display projection selects real source samples and retains each

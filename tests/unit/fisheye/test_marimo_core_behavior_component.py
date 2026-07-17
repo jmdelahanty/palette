@@ -4,6 +4,7 @@ import numpy as np
 import polars as pl
 import plotly.express as px
 import plotly.graph_objects as go
+import zarr
 
 import apps.marimo.components.core_behavior as core_component
 from apps.marimo.components.analysis_catalog import group_specs_by_provider
@@ -20,6 +21,7 @@ from apps.marimo.components.registry import (
     discover_recording_explorer_spec_options,
     supported_renderer_ids,
 )
+from apps.marimo.components.tail_kinematics import build_tail_kinematics_figures
 from tests.unit.fisheye.test_interactive_track_kinematics import (
     _add_eye_angle_run,
     _add_hierarchical_swim_bouts,
@@ -35,6 +37,66 @@ def _core_option(zarr_path):
         option
         for option in discover_interactive_spec_options(zarr_path)
         if option.renderer == core_component.TRACK_KINEMATICS_RENDERER
+    )
+
+
+def _add_tail_kinematics_run(zarr_path) -> None:
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    root.attrs["fps"] = 200.0
+    frames = np.arange(6, dtype=np.int64)
+
+    parent = root["analysis"].require_group("tail_kinematics_runs")
+    parent.attrs["latest_complete"] = "tail_1"
+    tail = parent.create_group("tail_1")
+    tail.attrs.update(
+        {
+            "palette_run_completion_status": "complete",
+            "schema_id": "palette.tail_kinematics",
+            "schema_version": 2,
+            "method": "body_frame_spline_tangent",
+            "source_subject_shape_run": "shape_1",
+            "tail_angle_reference_axis": "caudal_axis=-forward_axis",
+            "tail_angle_positive_direction": "anatomical_left",
+        }
+    )
+    tail.create_array("frame_index", data=frames, chunks=(6,))
+    tail.create_array("valid", data=np.ones(6, dtype=bool), chunks=(6,))
+    tail.create_array(
+        "tail_angle_deg",
+        data=np.arange(60, dtype=np.float32).reshape(6, 10),
+        chunks=(6, 10),
+    )
+    tail.create_array(
+        "tail_angle_sample_s",
+        data=np.linspace(0.05, 0.95, 10, dtype=np.float32),
+        chunks=(10,),
+    )
+    for name, values in {
+        "tail_tip_angle_deg": np.linspace(-4, 4, 6, dtype=np.float32),
+        "tail_tip_lateral_deflection_px": np.linspace(-2, 2, 6, dtype=np.float32),
+        "tail_angle_rms_deg": np.linspace(0, 3, 6, dtype=np.float32),
+    }.items():
+        tail.create_array(name, data=values, chunks=(6,))
+
+    shape = root["analysis"].require_group("subject_shape_runs").create_group("shape_1")
+    shape.attrs["palette_run_completion_status"] = "complete"
+    row_index = shape.create_group("row_index")
+    row_index.create_array("frame_indices", data=frames, chunks=(6,))
+    body = shape.create_group("components").create_group("subject_body")
+    body.create_array(
+        "tail_curvature_px_inv",
+        data=np.arange(192, dtype=np.float32).reshape(6, 32) / 100.0,
+        chunks=(6, 32),
+    )
+    body.create_array(
+        "tail_sample_s",
+        data=np.linspace(0, 1, 32, dtype=np.float32),
+        chunks=(32,),
+    )
+    body.create_array(
+        "tail_sample_valid",
+        data=np.ones(6, dtype=bool),
+        chunks=(6,),
     )
 
 
@@ -62,6 +124,20 @@ def test_canonical_track_run_is_discovered_without_visualization_spec(tmp_path) 
     assert options[0].interactive_option is None
     source = CoreBehaviorSource(zarr_path, options[0])
     assert {"speed", "heading", "position"}.issubset(source.available_analysis_ids())
+
+
+def test_tail_capability_is_discovered_without_track_run(tmp_path) -> None:
+    zarr_path = tmp_path / "tail_only.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.create_group("analysis")
+    _add_tail_kinematics_run(zarr_path)
+
+    options = discover_core_behavior_options(zarr_path)
+
+    assert len(options) == 1
+    assert options[0].run_path == "analysis/tail_kinematics_runs/tail_1"
+    source = CoreBehaviorSource(zarr_path, options[0])
+    assert source.available_analysis_ids() == ("tail_kinematics",)
 
 
 def test_core_source_defers_zarr_open_until_projection(tmp_path, monkeypatch) -> None:
@@ -194,6 +270,45 @@ def test_core_source_exposes_eye_angles_only_when_persisted(
     assert projection.metadata["eye_run_name"] == "eye_angle_1"
     assert projection.metadata["representation"] == "nasal_gaze"
     assert projection.metadata["persisted_pngs"] == ()
+
+
+def test_core_source_projects_tail_surfaces_bouts_and_positions(tmp_path) -> None:
+    zarr_path = _make_archive_with_interactive_artifact(tmp_path)
+    _add_tail_kinematics_run(zarr_path)
+    _add_hierarchical_swim_bouts(zarr_path)
+    source = CoreBehaviorSource(zarr_path, _core_option(zarr_path))
+
+    assert "tail_kinematics" in source.available_analysis_ids()
+    assert source.tail_time_bounds("tail_1") == (0.0, 0.025)
+    projection = source.project_tail_kinematics(
+        run_name="tail_1",
+        start_s=0.0,
+        stop_s=0.025,
+        scalar_series=("tail_tip_angle_deg", "tail_tip_lateral_deflection_px"),
+    )
+
+    assert isinstance(projection.frame, pl.LazyFrame)
+    assert projection.row_count == 6
+    assert len(projection.metadata["angle_columns"]) == 10
+    assert len(projection.metadata["curvature_columns"]) == 32
+    assert projection.metadata["fps"] == 200.0
+    assert {"bout_intervals", "position_trace"}.issubset(projection.related_frames)
+    assert projection.related_frames["bout_intervals"].collect().height == 1
+    assert projection.related_frames["position_trace"].collect().height == 6
+
+    figures = build_tail_kinematics_figures(go, projection=projection)
+    assert set(figures) == {
+        "angle_kymograph",
+        "curvature_kymograph",
+        "synchronized_traces",
+    }
+    assert np.asarray(figures["angle_kymograph"].data[0].z).shape == (10, 6)
+    assert np.asarray(figures["curvature_kymograph"].data[0].z).shape == (32, 6)
+    synchronized = figures["synchronized_traces"]
+    assert any(trace.name == "Persisted swim bouts" for trace in synchronized.data)
+    assert {"position_x", "position_y"}.issubset(
+        {trace.name for trace in synchronized.data}
+    )
 
 
 def test_position_plot_avoids_arrow_backed_pandas_bridge(monkeypatch) -> None:

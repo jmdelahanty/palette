@@ -23,6 +23,12 @@ from fisheye.analysis.swim_bout_io import (
     load_swim_bout_events,
     structured_records_to_dicts,
 )
+from fisheye.analysis.tail_kinematics_io import (
+    TAIL_SCALAR_SERIES,
+    catalog_tail_kinematics_run,
+    discover_tail_kinematics_run_options,
+    load_tail_kinematics_window,
+)
 from fisheye.analytics_exports.baseline import is_baseline_label
 from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.shared.zarr_io import open_zarr_root
@@ -271,6 +277,21 @@ def discover_core_behavior_options(
                     attrs=eye.attrs,
                 )
             )
+        else:
+            tail_options = discover_tail_kinematics_run_options(root)
+            if tail_options:
+                tail = tail_options[0]
+                options.append(
+                    CoreBehaviorOption(
+                        zarr_path=archive,
+                        run_path=tail.run_path,
+                        run_name=tail.run_name,
+                        label=f"{tail.label} | tail-kinematics capability",
+                        track_id=0,
+                        source_paths={},
+                        attrs=tail.attrs,
+                    )
+                )
     return sorted(
         options,
         key=lambda item: (
@@ -431,7 +452,69 @@ def _eye_provenance_summary(attrs: Mapping[str, Any]) -> dict[str, Any]:
     return summary
 
 
-def _eye_png_artifacts(root: Any, run_path: str) -> tuple[dict[str, Any], ...]:
+def _tail_provenance_summary(
+    attrs: Mapping[str, Any],
+    source_shape_attrs: Mapping[str, Any],
+) -> dict[str, Any]:
+    scalar_keys = (
+        "schema_id",
+        "schema_version",
+        "method",
+        "method_version",
+        "row_axis",
+        "source_subject_shape_run",
+        "source_subject_shape_path",
+        "source_refined_subject_masks_run",
+        "source_tail_geometry_kind",
+        "body_frame_convention",
+        "body_frame_source",
+        "tail_angle_reference_axis",
+        "tail_angle_positive_direction",
+        "tail_angle_units_primary",
+        "tail_sample_domain",
+        "tail_angle_sample_count",
+        "source_geometry_tail_sample_count",
+        "curvature_source",
+        "frame_index_source",
+        "materialization_mode",
+        "compute_kernel",
+        "execution_backend",
+        "worker_count_effective",
+        "effective_block_rows",
+        "effective_output_shard_rows",
+        "palette_run_completion_status",
+        "palette_run_completed_at_utc",
+    )
+    summary = {key: attrs.get(key) for key in scalar_keys if key in attrs}
+    for key in ("source_refs", "provenance", "physical_storage_layout"):
+        value = attrs.get(key)
+        if isinstance(value, Mapping):
+            summary[key] = dict(value)
+    source_summary_keys = (
+        "schema_id",
+        "schema_version",
+        "method",
+        "method_version",
+        "tail_sample_count",
+        "spline_method",
+        "spline_smoothing",
+        "spline_degree",
+        "body_frame_schema_id",
+        "source_refined_subject_masks_run",
+        "source_refined_keypoints_run",
+        "palette_run_completion_status",
+    )
+    source_summary = {
+        key: source_shape_attrs.get(key)
+        for key in source_summary_keys
+        if key in source_shape_attrs
+    }
+    if source_summary:
+        summary["source_subject_shape_contract"] = source_summary
+    return summary
+
+
+def _run_png_artifacts(root: Any, run_path: str) -> tuple[dict[str, Any], ...]:
     try:
         visualizations = root[f"{run_path}/visualizations"]
     except Exception:
@@ -484,6 +567,7 @@ class CoreBehaviorSource:
         self._swim_bout_events_cache: Any = None
         self._available_analysis_ids_cache: tuple[str, ...] | None = None
         self._eye_catalog_cache: dict[str, Any] = {}
+        self._tail_catalog_cache: dict[str, Any] = {}
 
     @property
     def available_series(self) -> tuple[str, ...]:
@@ -559,6 +643,11 @@ class CoreBehaviorSource:
         try:
             if discover_eye_angle_run_options(self.zarr_path):
                 available.append("eye_angles")
+        except Exception:
+            pass
+        try:
+            if discover_tail_kinematics_run_options(self._root()):
+                available.append("tail_kinematics")
         except Exception:
             pass
         try:
@@ -663,6 +752,38 @@ class CoreBehaviorSource:
 
     def eye_time_bounds(self, run_name: str | None = None) -> tuple[float, float]:
         catalog = self.eye_angle_catalog(run_name)
+        return float(catalog.time_start_s), float(catalog.time_stop_s)
+
+    def tail_kinematics_options(self) -> tuple[Any, ...]:
+        return tuple(discover_tail_kinematics_run_options(self._root()))
+
+    def tail_kinematics_catalog(self, run_name: str | None = None) -> Any:
+        key = str(run_name or "latest")
+        if key not in self._tail_catalog_cache:
+            self._tail_catalog_cache[key] = catalog_tail_kinematics_run(
+                self._root(),
+                run_name=run_name,
+            )
+        return self._tail_catalog_cache[key]
+
+    def tail_scalar_series_for(self, run_name: str | None = None) -> tuple[str, ...]:
+        available = set(self.tail_kinematics_catalog(run_name).scalar_series)
+        return tuple(name for name in TAIL_SCALAR_SERIES if name in available)
+
+    def default_tail_scalar_series_for(
+        self,
+        run_name: str | None = None,
+    ) -> tuple[str, ...]:
+        available = set(self.tail_scalar_series_for(run_name))
+        preferred = (
+            "tail_tip_angle_deg",
+            "tail_tip_lateral_deflection_px",
+            "tail_angle_rms_deg",
+        )
+        return tuple(name for name in preferred if name in available)
+
+    def tail_time_bounds(self, run_name: str | None = None) -> tuple[float, float]:
+        catalog = self.tail_kinematics_catalog(run_name)
         return float(catalog.time_start_s), float(catalog.time_stop_s)
 
     def _swim_bout_selection(self) -> tuple[Any, Any] | None:
@@ -959,7 +1080,7 @@ class CoreBehaviorSource:
             values = frame.get_column(qa_name).cast(pl.Boolean, strict=False)
             qa_summary[f"{qa_name}_fraction"] = float(values.mean() or 0.0)
         root = self._root()
-        pngs = _eye_png_artifacts(root, payload.run_path)
+        pngs = _run_png_artifacts(root, payload.run_path)
         return CoreBehaviorProjection(
             analysis_id="eye_angles",
             frame=frame.lazy(),
@@ -981,6 +1102,179 @@ class CoreBehaviorSource:
                 "selected_series": selected_series,
                 "qa_summary": qa_summary,
                 "provenance": _eye_provenance_summary(payload.attrs),
+                "persisted_pngs": pngs,
+            },
+        )
+
+    def project_tail_kinematics(
+        self,
+        *,
+        run_name: str | None = None,
+        start_s: float | None = None,
+        stop_s: float | None = None,
+        scalar_series: Sequence[str] | None = None,
+    ) -> CoreBehaviorProjection:
+        started = time.perf_counter()
+        catalog = self.tail_kinematics_catalog(run_name)
+        selected_scalars = (
+            tuple(scalar_series)
+            if scalar_series is not None
+            else self.default_tail_scalar_series_for(catalog.run_name)
+        )
+        root = self._root()
+        payload = load_tail_kinematics_window(
+            root,
+            run_name=catalog.run_name,
+            start_s=start_s,
+            stop_s=stop_s,
+            scalar_series=selected_scalars,
+            include_native_angles=True,
+            include_dense_curvature=True,
+            max_rows=10_000,
+        )
+        columns: dict[str, Any] = {
+            "time_s": payload.time_seconds,
+            "frame_index": payload.frame_indices,
+            "valid": payload.valid,
+        }
+        angle_columns = tuple(
+            f"tail_angle_{index:02d}_deg"
+            for index in range(payload.angle_deg.shape[1])
+        )
+        for index, name in enumerate(angle_columns):
+            columns[name] = payload.angle_deg[:, index]
+        curvature_columns = tuple(
+            f"tail_curvature_{index:02d}_px_inv"
+            for index in range(payload.dense_curvature_px_inv.shape[1])
+        )
+        for index, name in enumerate(curvature_columns):
+            columns[name] = payload.dense_curvature_px_inv[:, index]
+        for name, values in payload.scalar_series.items():
+            columns[name] = values
+        frame = pl.DataFrame(columns)
+
+        related_frames: dict[str, pl.LazyFrame] = {}
+        companion_notes: list[str] = []
+        if payload.catalog.source_shape_run_path is None:
+            companion_notes.append(
+                "The exact source subject-shape curvature surface is unavailable or does not "
+                "satisfy the canonical row-alignment contract."
+            )
+        try:
+            bouts = _structured_lazy(self._swim_bout_events().bouts)
+            schema = bouts.collect_schema()
+            aliases: list[pl.Expr] = []
+            if "start_time_s" in schema and "start_s" not in schema:
+                aliases.append(pl.col("start_time_s").alias("start_s"))
+            if "end_time_s" in schema and "end_s" not in schema:
+                aliases.append(pl.col("end_time_s").alias("end_s"))
+            if aliases:
+                bouts = bouts.with_columns(aliases)
+            schema = bouts.collect_schema()
+            if {"start_s", "end_s"}.issubset(schema):
+                if frame.height:
+                    bouts = bouts.filter(
+                        (pl.col("end_s") >= float(frame["time_s"][0]))
+                        & (pl.col("start_s") <= float(frame["time_s"][-1]))
+                    )
+                related_frames["bout_intervals"] = bouts
+            else:
+                companion_notes.append("Persisted bouts lack start/end time columns.")
+        except Exception as exc:
+            companion_notes.append(f"No lineage-compatible bout overlay: {exc}")
+
+        try:
+            frame_path = self.source_paths.get("frame_indices")
+            position_key = (
+                "positions_mm"
+                if "positions_mm" in self.source_paths
+                else "positions_px"
+            )
+            position_path = self.source_paths.get(position_key)
+            if frame.height and frame_path and position_path:
+                track_frames = root[frame_path]
+
+                def _search(value: int, *, right: bool) -> int:
+                    lo = 0
+                    hi = int(track_frames.shape[0])
+                    while lo < hi:
+                        middle = (lo + hi) // 2
+                        current = int(np.asarray(track_frames[middle]).reshape(-1)[0])
+                        if current < value or (right and current == value):
+                            lo = middle + 1
+                        else:
+                            hi = middle
+                    return lo
+
+                first_frame = int(frame["frame_index"][0])
+                last_frame = int(frame["frame_index"][-1])
+                row_slice = slice(
+                    _search(first_frame, right=False),
+                    _search(last_frame, right=True),
+                )
+                projected_frames = np.asarray(track_frames[row_slice], dtype=np.int64).reshape(-1)
+                projected_positions = np.asarray(root[position_path][row_slice], dtype=np.float64)
+                if (
+                    projected_positions.ndim == 2
+                    and projected_positions.shape[0] == projected_frames.shape[0]
+                    and projected_positions.shape[1] >= 2
+                ):
+                    unit = "mm" if position_key.endswith("_mm") else "px"
+                    related_frames["position_trace"] = pl.DataFrame(
+                        {
+                            "time_s": projected_frames.astype(np.float64)
+                            / float(payload.catalog.fps),
+                            "frame_index": projected_frames,
+                            "x": projected_positions[:, 0],
+                            "y": projected_positions[:, 1],
+                            "unit": np.full(projected_frames.shape[0], unit, dtype=object),
+                        }
+                    ).lazy()
+            elif frame.height:
+                companion_notes.append("No track-position coordinate is available for this source.")
+        except Exception as exc:
+            companion_notes.append(f"Position companion could not be loaded: {exc}")
+
+        bounds = _finite_bounds(payload.time_seconds)
+        pngs = _run_png_artifacts(root, payload.catalog.run_path)
+        return CoreBehaviorProjection(
+            analysis_id="tail_kinematics",
+            frame=frame.lazy(),
+            columns=tuple(frame.columns),
+            source_paths=tuple(dict.fromkeys(payload.source_paths.values())),
+            start_s=bounds[0],
+            stop_s=bounds[1],
+            row_count=frame.height,
+            load_duration_ms=(time.perf_counter() - started) * 1000.0,
+            note=(
+                "Bounded framewise tail projection from the canonical tail run and its exact "
+                "subject-shape source; no viewer-side interpolation or writeback is performed."
+            ),
+            related_frames=related_frames,
+            metadata={
+                "tail_run_name": payload.catalog.run_name,
+                "tail_run_path": payload.catalog.run_path,
+                "source_shape_run_name": payload.catalog.source_shape_run_name,
+                "source_shape_run_path": payload.catalog.source_shape_run_path,
+                "fps": payload.catalog.fps,
+                "fps_source": payload.catalog.fps_source,
+                "nyquist_hz": (
+                    float(payload.catalog.fps) / 2.0
+                    if payload.catalog.fps is not None
+                    else None
+                ),
+                "angle_columns": angle_columns,
+                "angle_sample_s": payload.catalog.angle_sample_s.tolist(),
+                "curvature_columns": curvature_columns,
+                "curvature_sample_s": (
+                    payload.catalog.source_curvature_sample_s.tolist()
+                ),
+                "scalar_columns": selected_scalars,
+                "companion_notes": tuple(companion_notes),
+                "provenance": _tail_provenance_summary(
+                    payload.catalog.attrs,
+                    payload.catalog.source_shape_attrs,
+                ),
                 "persisted_pngs": pngs,
             },
         )
@@ -1045,6 +1339,8 @@ def load_core_behavior_projection(
     series_keys: Sequence[str] | None = None,
     eye_run_name: str | None = None,
     eye_representation: str | None = None,
+    tail_run_name: str | None = None,
+    tail_scalar_series: Sequence[str] | None = None,
 ) -> CoreBehaviorProjection:
     if analysis_id in {"speed", "heading"}:
         return source.project_timeseries(
@@ -1064,6 +1360,13 @@ def load_core_behavior_projection(
             start_s=start_s,
             stop_s=stop_s,
             series_keys=series_keys,
+        )
+    if analysis_id == "tail_kinematics":
+        return source.project_tail_kinematics(
+            run_name=tail_run_name,
+            start_s=start_s,
+            stop_s=stop_s,
+            scalar_series=tail_scalar_series,
         )
     if analysis_id == "baseline":
         interval = source.baseline_interval()

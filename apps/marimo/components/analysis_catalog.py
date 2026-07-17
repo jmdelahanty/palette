@@ -38,6 +38,11 @@ CORE_BEHAVIOR_PROVIDER = ProviderDefinition(
             "Eye angles and convergence",
             "Framewise eye-angle, gaze, and convergence traces when persisted.",
         ),
+        AnalysisDefinition(
+            "tail_kinematics",
+            "Tail posture and curvature",
+            "Framewise body-frame tail angles, spline curvature, and synchronized bouts.",
+        ),
         AnalysisDefinition("swim_bouts", "Swim bouts", "Persisted bout events and distributions."),
         AnalysisDefinition(
             "baseline",
