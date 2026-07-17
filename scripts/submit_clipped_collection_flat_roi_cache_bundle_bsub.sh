@@ -16,12 +16,12 @@ QUEUE="gpu_l4"
 NCORES=8
 MEM_GB=64
 GPUS=1
-GPU_RESOURCE=""
+GPU_RESOURCE="num=1:mode=shared:j_exclusive=no"
 WALLTIME="4:00"
 ROI_SIZE=()
 LIMIT_ROWS=""
 GPU_CHUNK_FRAMES=32
-MAX_WORKERS=4
+MAX_WORKERS=8
 PROGRESS_INTERVAL_S=30
 PROGRESS_EVERY_BATCHES=0
 SHA256=0
@@ -62,16 +62,17 @@ Cache options:
   --overwrite                       Overwrite existing published child cache files
 
 Bundle options:
-  --max-workers N                   Concurrent child builders inside this job (default: 4)
+  --max-workers N                   Concurrent child builders inside this job (default: 8)
 
 LSF options:
   --queue NAME                      LSF queue (default: gpu_l4)
   --ncores N                        CPU slots (default: 8)
   --mem-gb N                        Memory request in GB (default: 64)
   --gpus N                          GPU count; 0 omits -gpu (default: 1)
-  --gpu-resource STRING             Raw LSF -gpu resource string; overrides --gpus.
-                                    Needed for multi-process children if the
-                                    cluster default is exclusive_process.
+  --gpu-resource STRING             Raw LSF -gpu resource string; overrides --gpus
+                                    (default: num=1:mode=shared:j_exclusive=no).
+                                    Shared mode is required by the independent
+                                    decoder child processes.
   --walltime H:MM                   Wall time (default: 4:00)
 
 Logging:

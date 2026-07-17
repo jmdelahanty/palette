@@ -830,12 +830,34 @@ scripts/submit_whole_recording_analysis_bsub.sh \
 ```
 
 With `--roi-cache-policy build`, each target must name an explicit `crop_run`
-and the intended, not-yet-existing `roi_cache_manifest` path. The planner adds
-one cache build/publish job per target. Both inference jobs depend on that exact
-producer, so a cache is never consumed before its payload-first,
-manifest-last publication succeeds. With the default `existing` policy, cache
-metadata and payload size are validated during planning and the inference jobs
-remain independent roots.
+and the intended, not-yet-existing `roi_cache_manifest` path. Planning reads
+only crop shapes and attributes to compute the exact expected flat payload as
+`rows * height * width` bytes. Geometry-only crop runs backed by external
+full-frame video are packed best-fit-decreasing into one-L4 bundles with at
+most eight independent decoder sessions and 128 GiB expected payload by
+default. The LSF request uses shared GPU process mode, each child owns private
+scratch and output artifacts, and downstream jobs depend on the bundle that
+owns their exact cache. Publication remains payload-first and manifest-last.
+
+The defaults come from the 2026-07-17 eight-clip L4 canary, not from a generic
+assumption that every cache source benefits from NVDEC concurrency. The planner
+classifies materialized `roi_images`, Zarr `raw_video/images_full`, acquisition
+crop videos, missing external-video dimensions, and unknown sources as
+non-eligible; each remains a singleton job. An individual cache larger than
+the payload ceiling is retained as an explicitly marked oversized singleton.
+The immutable `plan.json` records each source classification, exact byte count,
+bundle membership, total bundle payload, and whether the bundle is eligible for
+the measured NVDEC path. Override with `--cache-bundle-size` and
+`--cache-bundle-max-payload-gib` only after reviewing scratch capacity or new
+benchmark evidence.
+
+For a day's transferred experiments, put the independent recordings in one
+reviewed target manifest. This lets the planner fill an L4 with up to eight
+separate videos; it does not pretend that eight workers can independently seek
+and accelerate one sequential video. A pre-existing complete flat cache uses
+the default `existing` policy and skips construction entirely. Persisted crop
+pixels can also avoid full-frame decode, so they are intentionally outside the
+current full-frame-video bundling default.
 
 Keypoint refinement depends only on keypoint inference. Refined subject-mask
 finalization depends on both subject-mask inference and the target's exact
@@ -857,7 +879,12 @@ reviewed recovery workflow.
 cannot begin its cache build (or its two inference roots when using existing
 caches) until target 1 finishes refined-mask finalization. This bounds live
 recording pipelines without forcing every target in a cohort to wait for the
-slowest target before another slot opens.
+slowest target before another slot opens. When several recordings share one
+NVDEC cache bundle, that shared cache job may run ahead; gating it from one
+member could form a dependency cycle for another member. In that case the
+rolling gate is applied to each recording's keypoint and mask inference roots
+after the shared cache completes. Singleton cache producers retain the original
+cache-level gate.
 
 The implementation composes reusable `roi_cache`, `keypoints`,
 `subject_masks`, `analysis_validation`, `registry`, and optional

@@ -91,6 +91,7 @@ def _build_plan(
     keypoint_roi_shard_rows: int | None = common_mod.DEFAULT_KEYPOINT_ROI_SHARD_ROWS,
     keypoint_frame_shard_rows: int = common_mod.DEFAULT_KEYPOINT_FRAME_SHARD_ROWS,
     planned_caches: bool = False,
+    shared_cache_bundle: bool = False,
 ):
     manifest, repo, registry, model_path = _make_inputs(
         tmp_path,
@@ -145,7 +146,11 @@ def _build_plan(
             )["array"]["bin_path"]
             (target.roi_cache_manifest.parent / existing_payload_name).unlink()
             target.roi_cache_manifest.unlink()
-            producer_job_key = f"cache:{target.target_id}"
+            producer_job_key = (
+                "cache_bundle:000"
+                if shared_cache_bundle
+                else f"cache:{target.target_id}"
+            )
             cache_bindings[target.target_id] = common_mod.FlatRoiCacheBinding(
                 manifest_path=target.roi_cache_manifest,
                 manifest_sha256=None,
@@ -160,18 +165,19 @@ def _build_plan(
                 availability="planned",
                 producer_job_key=producer_job_key,
             )
-            cache_jobs.append(
-                LsfJob(
-                    job_key=producer_job_key,
-                    job_name=f"cache_{target.target_id}",
-                    command=("true",),
-                    resources=LsfResources(
-                        queue="gpu_l4", ncores=4, mem_gb=64, gpus=1
-                    ),
-                    stdout_path=tmp_path / f"{target.target_id}.cache.out",
-                    stderr_path=tmp_path / f"{target.target_id}.cache.err",
+            if not any(job.job_key == producer_job_key for job in cache_jobs):
+                cache_jobs.append(
+                    LsfJob(
+                        job_key=producer_job_key,
+                        job_name=f"cache_{target.target_id}",
+                        command=("true",),
+                        resources=LsfResources(
+                            queue="gpu_l4", ncores=4, mem_gb=64, gpus=1
+                        ),
+                        stdout_path=tmp_path / f"{target.target_id}.cache.out",
+                        stderr_path=tmp_path / f"{target.target_id}.cache.err",
+                    )
                 )
-            )
         upstream_jobs = tuple(cache_jobs)
     plan = planner.build_plan(
         manifest_path=manifest,
@@ -524,6 +530,47 @@ def test_whole_recording_analysis_limits_active_targets_with_rolling_gate(
     )
     assert plan.lsf_workflow.metadata["target_concurrency_contract"] == (
         "rolling_finalization_gate_v1"
+    )
+
+
+def test_rolling_gate_applies_after_shared_cache_bundle_without_cycle(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    keypoint_plan = _build_plan(
+        tmp_path,
+        monkeypatch,
+        target_count=2,
+        planned_caches=True,
+        shared_cache_bundle=True,
+    )
+    plan = analysis_planner.build_plan(
+        keypoint_plan=keypoint_plan,
+        run_root=tmp_path / "combined",
+        mask_run_label="masks_shared_cache_bundle",
+        mask_inference_resources=LsfResources(
+            queue="gpu_l4", ncores=8, mem_gb=48, gpus=1
+        ),
+        mask_finalization_resources=LsfResources(
+            queue="short", ncores=16, mem_gb=32
+        ),
+        max_active_targets=1,
+    )
+
+    jobs = {job.job_key: job for job in plan.lsf_workflow.jobs}
+    assert jobs["cache_bundle:000"].dependency is None
+    assert jobs["predict:target_1"].dependency.upstream_job_keys == (
+        "cache_bundle:000",
+        "mask_finalize:target_0",
+    )
+    assert jobs["mask_infer:target_1"].dependency.upstream_job_keys == (
+        "cache_bundle:000",
+        "mask_finalize:target_0",
+    )
+    assert [job.job_key for job in plan.lsf_workflow.topological_jobs()].index(
+        "cache_bundle:000"
+    ) < [job.job_key for job in plan.lsf_workflow.topological_jobs()].index(
+        "mask_finalize:target_0"
     )
 
 

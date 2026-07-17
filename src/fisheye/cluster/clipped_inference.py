@@ -482,7 +482,7 @@ def build_plan(
     subject_mask_label_schema_id: str = "subject_v1_union",
     cache_root: Path = DEFAULT_CACHE_ROOT,
     package_root: Path = DEFAULT_PACKAGE_ROOT,
-    cache_bundle_size: int = 4,
+    cache_bundle_size: int = 8,
     max_active_targets: int = 3,
     cleanup_nrs_after_success: bool = True,
     resume_existing_detections: bool = False,
@@ -1270,7 +1270,15 @@ def _parser() -> argparse.ArgumentParser:
         default=os.environ.get("PALETTE_LSF_SUBMIT_HOST", "login1-citrus-poller"),
         help="SSH poller used only for individual bsub commands in --apply mode.",
     )
-    parser.add_argument("--cache-bundle-size", type=int, default=4)
+    parser.add_argument(
+        "--cache-bundle-size",
+        type=int,
+        default=8,
+        help=(
+            "Clip caches per one-L4 decode bundle (default: 8, selected from the "
+            "2026-07-17 L4 concurrency canary)."
+        ),
+    )
     parser.add_argument("--max-active-targets", type=int, default=3)
     parser.add_argument("--detect-array-concurrency", type=int, default=8)
     parser.add_argument(

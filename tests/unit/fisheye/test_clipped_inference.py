@@ -277,7 +277,10 @@ def test_build_plan_has_parallel_keypoint_mask_branch_and_join(tmp_path: Path, m
     assert subject_mask_array.metadata["max_concurrent"] == 4
     assert len(_execution_tasks(jobs[f"detect_array:{target_safe}"])) == 22
     assert len(_execution_tasks(refine_bundle)) == 22
-    assert len(cache_tasks) == 6
+    assert len(cache_tasks) == 3
+    first_cache_task = cache_tasks[f"cache:{target_safe}:00"]
+    max_workers_index = first_cache_task.command.index("--max-workers")
+    assert first_cache_task.command[max_workers_index + 1] == "8"
     assert refine_bundle.resources.ncores == 16
     assert refine_bundle.resources.mem_gb == 32
     assert refine_bundle.resources.queue == "short"

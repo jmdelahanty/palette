@@ -112,6 +112,9 @@ class FlatRoiCacheBinding:
     payload_sha256: str | None
     availability: str = "existing"
     producer_job_key: str | None = None
+    source_kind: str | None = None
+    nvdec_bundle_eligible: bool = False
+    nvdec_bundle_reason: str | None = None
 
     def __post_init__(self) -> None:
         if self.availability not in {"existing", "planned"}:
@@ -405,6 +408,13 @@ def validate_flat_roi_cache_binding(
         payload_sha256=(str(array.get("sha256")) if array.get("sha256") else None),
         availability="existing",
         producer_job_key=None,
+        source_kind=(
+            str(source.get("frame_source_kind"))
+            if source.get("frame_source_kind")
+            else None
+        ),
+        nvdec_bundle_eligible=False,
+        nvdec_bundle_reason="cache_already_exists",
     )
 
 

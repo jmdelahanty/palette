@@ -896,7 +896,7 @@ sequential PyNvVideoCodec reader. The safe way to expose decoder parallelism is
 not to write a shared flat cache from multiple processes. Instead:
 
 - Request one GPU allocation.
-- Launch up to `--max-workers 4` child builders inside that job.
+- Launch up to `--max-workers 8` child builders inside that job.
 - Give each child exactly one `--clip-id` selection.
 - Publish one manifest/bin/rows triplet per child clip.
 - Treat the bundle status JSON as an orchestration artifact, not as a merged
@@ -920,7 +920,7 @@ scripts/submit_clipped_collection_flat_roi_cache_bundle_bsub.sh \
   --ncores 8 \
   --mem-gb 64 \
   --gpus 1 \
-  --max-workers 4 \
+  --max-workers 8 \
   --walltime 4:00 \
   --progress-interval-s 30 \
   --overwrite
@@ -935,7 +935,8 @@ On Janelia LSF, the default `-gpu num=1` request has been observed to resolve to
 `mode=exclusive_process:mps=no:j_exclusive=yes`. That mode allows only one child
 process to create a CUDA decoder/context; additional PyNvVideoCodec children can
 fail with `CUDA_ERROR_DEVICE_UNAVAILABLE`. The bundle submitter therefore
-exposes `--gpu-resource` as a raw LSF override for experiments such as:
+exposes `--gpu-resource` as a raw LSF override. Production now defaults that
+resource to the validated shared mode:
 
 ```bash
 --gpu-resource 'num=1:mode=shared:j_exclusive=no'
@@ -961,6 +962,17 @@ Measured validation on 2026-07-07:
   NRS, for roughly `468 ROI/s` overall.
 - Per-child payload publish took `~17-18 s` at roughly `746-779 MiB/s`.
 
+The production default was raised to eight sessions after the bounded
+2026-07-17 cam2010096 L4 benchmark. Across two reversed-order repetitions, the
+eight-session condition was the fastest tested layout: `462.8` median ROI
+rows/s for the bounded benchmark, with median active-period decoder utilization
+of `95-96%`. A subsequent full eight-clip canary produced `429,077` ROI rows
+and `112,479,961,088` payload bytes in `817.9 s`, reached `92%` median NVDEC
+utilization, used at most `9,418 MiB` GPU memory and `14.1 GB` aggregate host
+memory, published all eight caches, validated every child, and removed its
+temporary NRS payloads. This is the evidence behind the current default, not a
+claim that more sessions will always be faster on another GPU or source path.
+
 ### Whole Collection Scheduling
 
 Use `submit_clipped_collection_flat_roi_cache_bundles_bsub.sh` when the goal is
@@ -984,8 +996,8 @@ scripts/submit_clipped_collection_flat_roi_cache_bundles_bsub.sh \
   --mem-gb 64 \
   --gpus 1 \
   --gpu-resource 'num=1:mode=shared:j_exclusive=no' \
-  --clips-per-job 4 \
-  --max-workers 4 \
+  --clips-per-job 8 \
+  --max-workers 8 \
   --walltime 1:00 \
   --progress-interval-s 60
 ```
@@ -996,7 +1008,8 @@ Operational notes:
 - `--max-workers` controls how many child builders run concurrently inside one
   bundle job.
 - For L4 shared-mode decode, keep `--clips-per-job` and `--max-workers` aligned
-  at `4` unless benchmarking suggests otherwise.
+  at the measured default of `8`. Override both together for a different GPU,
+  unusually large cache payloads, or a new benchmark result.
 - Use `--start-bundle-index` and `--limit-bundles` for retries, canaries, or
   partial scheduling.
 - Use `--dry-run` first; it prints every child bundle submission and output

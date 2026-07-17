@@ -12,9 +12,14 @@ from typing import Any, Mapping, Sequence
 from fisheye.cluster.keypoints import whole_recording as keypoints
 from fisheye.cluster.keypoints.common import safe_component
 from fisheye.cluster.flat_roi_cache import (
-    build_flat_roi_cache_job,
+    DEFAULT_NVDEC_BUNDLE_MAX_PAYLOAD_BYTES,
+    DEFAULT_NVDEC_BUNDLE_SIZE,
+    FlatRoiCacheBundlePlan,
+    PlannedFlatRoiCacheTarget,
+    build_flat_roi_cache_bundle_job,
     cache_contract_snapshot_path,
     plan_flat_roi_cache_binding,
+    plan_flat_roi_cache_bundles,
 )
 from fisheye.cluster.lsf import (
     CommandRunner,
@@ -110,6 +115,7 @@ class WholeRecordingAnalysisPlan:
     max_active_targets: int | None
     analysis_validation_job_key: str | None
     roi_cache_cleanup_job_key: str | None
+    roi_cache_bundles: tuple[Mapping[str, Any], ...]
     lsf_workflow: LsfWorkflow
 
     def to_json(self) -> dict[str, Any]:
@@ -126,6 +132,7 @@ class WholeRecordingAnalysisPlan:
             "max_active_targets": self.max_active_targets,
             "analysis_validation_job_key": self.analysis_validation_job_key,
             "roi_cache_cleanup_job_key": self.roi_cache_cleanup_job_key,
+            "roi_cache_bundles": [dict(bundle) for bundle in self.roi_cache_bundles],
             "lsf_workflow": self.lsf_workflow.to_json(),
         }
 
@@ -367,12 +374,14 @@ def _gate_target_entry_jobs(
     target: keypoints.PlannedWholeRecordingTarget,
     mask_inference_job_key: str,
     upstream_finalization_job_key: str,
+    cache_producer_is_shared: bool = False,
 ) -> None:
     """Gate the jobs that make a recording occupy one campaign slot."""
 
     entry_keys = (
         (target.cache.producer_job_key,)
         if target.cache.producer_job_key is not None
+        and not cache_producer_is_shared
         else (target.prediction_job_key, mask_inference_job_key)
     )
     entry_key_set = set(entry_keys)
@@ -411,6 +420,7 @@ def build_plan(
     cleanup_roi_caches: bool = False,
     roi_cache_cleanup_allowed_root: Path = DEFAULT_ROI_CACHE_CLEANUP_ROOT,
     roi_cache_cleanup_resources: LsfResources | None = None,
+    roi_cache_bundles: Sequence[Mapping[str, Any]] = (),
 ) -> WholeRecordingAnalysisPlan:
     run_root = run_root.expanduser().resolve()
     if max_active_targets is not None and int(max_active_targets) <= 0:
@@ -434,6 +444,14 @@ def build_plan(
         if job.job_key != keypoint_plan.registry_finalizer_job_key
     ]
     jobs_by_key = {job.job_key: job for job in jobs}
+    cache_producer_target_counts: dict[str, int] = {}
+    for target in keypoint_plan.targets:
+        producer_job_key = target.cache.producer_job_key
+        if producer_job_key is None:
+            continue
+        cache_producer_target_counts[producer_job_key] = (
+            cache_producer_target_counts.get(producer_job_key, 0) + 1
+        )
     planned_targets: list[PlannedAnalysisTarget] = []
     mask_finalizer_keys: list[str] = []
 
@@ -482,6 +500,13 @@ def build_plan(
                 target=target,
                 mask_inference_job_key=inference_job.job_key,
                 upstream_finalization_job_key=concurrency_gate_job_key,
+                cache_producer_is_shared=(
+                    target.cache.producer_job_key is not None
+                    and cache_producer_target_counts.get(
+                        target.cache.producer_job_key, 0
+                    )
+                    > 1
+                ),
             )
         planned_targets.append(
             PlannedAnalysisTarget(
@@ -672,7 +697,11 @@ def build_plan(
                 },
             )
         )
-    cache_jobs = tuple(job for job in jobs if job.job_key.startswith("cache:"))
+    cache_jobs = tuple(
+        job
+        for job in jobs
+        if job.job_key.startswith(("cache:", "cache_bundle:"))
+    )
     keypoint_jobs = tuple(
         job
         for job in jobs
@@ -771,6 +800,7 @@ def build_plan(
         max_active_targets=resolved_max_active_targets,
         analysis_validation_job_key=analysis_validation_job_key,
         roi_cache_cleanup_job_key=cleanup_job_key,
+        roi_cache_bundles=tuple(dict(bundle) for bundle in roi_cache_bundles),
         lsf_workflow=workflow,
     )
 
@@ -879,14 +909,48 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--cache-batch-size", type=int, default=1024)
-    parser.add_argument("--cache-decode-backend", default="pynvvc_luma")
+    parser.add_argument(
+        "--cache-decode-backend",
+        default="auto",
+        help=(
+            "Flat-cache pixel reader (default: auto). External full-frame videos "
+            "still fail closed unless the production PyNv decoder is available."
+        ),
+    )
     parser.add_argument("--cache-roi-live-acceleration", default="cpu")
     parser.add_argument("--cache-roi-live-gpu-chunk-frames", type=int, default=32)
     parser.add_argument("--cache-queue", default="gpu_l4")
-    parser.add_argument("--cache-ncores", type=int, default=4)
+    parser.add_argument("--cache-ncores", type=int, default=8)
     parser.add_argument("--cache-mem-gb", type=int, default=64)
     parser.add_argument("--cache-gpus", type=int, default=1)
     parser.add_argument("--cache-walltime", default="2:00")
+    parser.add_argument(
+        "--cache-bundle-size",
+        type=int,
+        default=DEFAULT_NVDEC_BUNDLE_SIZE,
+        help=(
+            "Maximum independent external-video decoders sharing one L4 "
+            f"(default: {DEFAULT_NVDEC_BUNDLE_SIZE})."
+        ),
+    )
+    parser.add_argument(
+        "--cache-bundle-max-payload-gib",
+        type=float,
+        default=DEFAULT_NVDEC_BUNDLE_MAX_PAYLOAD_BYTES / 1024**3,
+        help=(
+            "Maximum expected flat-cache payload packed into one multi-recording "
+            "bundle; an individually larger recording remains a marked singleton "
+            "(default: 128 GiB)."
+        ),
+    )
+    parser.add_argument(
+        "--cache-gpu-resource",
+        default="num=1:mode=shared:j_exclusive=no",
+        help=(
+            "Raw LSF GPU resource used by multi-decoder bundles. The default permits "
+            "the independent CUDA decoder processes validated on L4."
+        ),
+    )
     parser.add_argument(
         "--cleanup-roi-caches-after-success",
         action="store_true",
@@ -912,16 +976,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_root = args.run_root.expanduser().resolve()
     cache_bindings = None
     cache_jobs: tuple[LsfJob, ...] = ()
+    cache_bundle_plans: tuple[FlatRoiCacheBundlePlan, ...] = ()
     if args.roi_cache_policy == "build":
-        cache_bindings = {}
-        planned_cache_jobs: list[LsfJob] = []
-        cache_resources = LsfResources(
-            queue=args.cache_queue,
-            ncores=int(args.cache_ncores),
-            mem_gb=int(args.cache_mem_gb),
-            gpus=int(args.cache_gpus),
-            walltime=args.cache_walltime,
-        )
+        provisional_targets: list[PlannedFlatRoiCacheTarget] = []
         for target in keypoints.load_target_manifest(args.manifest):
             if target.crop_run is None:
                 raise ValueError(
@@ -936,13 +993,52 @@ def main(argv: Sequence[str] | None = None) -> int:
                 producer_job_key=producer_job_key,
                 min_roi_size=348,
             )
-            cache_bindings[target.target_id] = cache
-            planned_cache_jobs.append(
-                build_flat_roi_cache_job(
-                    workflow_id=safe_component(args.run_label, default="analysis"),
+            provisional_targets.append(
+                PlannedFlatRoiCacheTarget(
                     target_id=target.target_id,
                     analysis_zarr=target.analysis_zarr,
                     cache=cache,
+                )
+            )
+        max_payload_bytes = int(float(args.cache_bundle_max_payload_gib) * 1024**3)
+        cache_bundle_plans = plan_flat_roi_cache_bundles(
+            provisional_targets,
+            max_workers=int(args.cache_bundle_size),
+            max_payload_bytes=max_payload_bytes,
+        )
+        cache_bindings = {
+            target.target_id: target.cache
+            for bundle in cache_bundle_plans
+            for target in bundle.targets
+        }
+        planned_cache_jobs: list[LsfJob] = []
+        for bundle in cache_bundle_plans:
+            if bundle.nvdec_bundle_eligible:
+                if int(args.cache_gpus) != 1:
+                    raise ValueError(
+                        "Source-video NVDEC cache bundles require --cache-gpus 1; "
+                        f"received {args.cache_gpus}."
+                    )
+                cache_resources = LsfResources(
+                    queue=args.cache_queue,
+                    ncores=int(args.cache_ncores),
+                    mem_gb=int(args.cache_mem_gb),
+                    gpus=0,
+                    walltime=args.cache_walltime,
+                    extra_lsf_args=("-gpu", str(args.cache_gpu_resource)),
+                )
+            else:
+                cache_resources = LsfResources(
+                    queue=args.cache_queue,
+                    ncores=int(args.cache_ncores),
+                    mem_gb=int(args.cache_mem_gb),
+                    gpus=int(args.cache_gpus),
+                    walltime=args.cache_walltime,
+                )
+            planned_cache_jobs.append(
+                build_flat_roi_cache_bundle_job(
+                    workflow_id=safe_component(args.run_label, default="analysis"),
+                    bundle=bundle,
                     repo=args.repo.expanduser().resolve(),
                     run_root=run_root,
                     resources=cache_resources,
@@ -1003,6 +1099,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         roi_cache_cleanup_resources=LsfResources(
             queue="short", ncores=1, mem_gb=4, walltime="1:00"
         ),
+        roi_cache_bundles=tuple(bundle.to_json() for bundle in cache_bundle_plans),
     )
     if args.apply:
         result = apply_plan(plan)

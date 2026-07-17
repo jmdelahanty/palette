@@ -445,3 +445,18 @@ submission evidence was created. These diagnostic snapshots are retained at:
 
 - `/tmp/sleepyfish_composable_dag_single_dryrun_20260715_v001`;
 - `/tmp/sleepyfish_composable_dag_multi_dryrun_20260715_v001`.
+
+## L4 cache-bundle production default, 2026-07-17
+
+Clipped production now defaults to eight clips and eight independent cache
+builders per one-L4 bundle. For a 22-clip recording this changes the cache array
+from six four-clip elements to three elements (`8 + 8 + 6`) while preserving
+one cache artifact and one independently auditable task contract per clip. The
+parent cache array concurrency is unchanged; the increased concurrency is
+inside each single-GPU allocation.
+
+The default follows a two-order concurrency benchmark and a full eight-clip
+cam2010096 canary. The full canary produced 112.5 GB across 429,077 rows in
+13.6 minutes, with 92% median NVDEC utilization, no swap, and successful
+validation and cleanup of all child caches. Shared LSF GPU process mode remains
+required; exclusive-process mode cannot host the independent decoder children.

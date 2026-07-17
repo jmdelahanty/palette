@@ -16,13 +16,13 @@ QUEUE="gpu_l4"
 NCORES=8
 MEM_GB=64
 GPUS=1
-GPU_RESOURCE=""
+GPU_RESOURCE="num=1:mode=shared:j_exclusive=no"
 WALLTIME="4:00"
 ROI_SIZE=()
 LIMIT_ROWS=""
 GPU_CHUNK_FRAMES=32
-CLIPS_PER_JOB=4
-MAX_WORKERS=4
+CLIPS_PER_JOB=8
+MAX_WORKERS=8
 START_BUNDLE_INDEX=0
 LIMIT_BUNDLES=""
 PROGRESS_INTERVAL_S=30
@@ -51,8 +51,8 @@ Selection:
   --work-unit-id ID                 Restrict selection to matching work_unit_id; repeatable
 
 Bundle layout:
-  --clips-per-job N                 Clip IDs per submitted bundle job (default: 4)
-  --max-workers N                   Concurrent child builders per bundle job (default: 4)
+  --clips-per-job N                 Clip IDs per submitted bundle job (default: 8)
+  --max-workers N                   Concurrent child builders per bundle job (default: 8)
   --start-bundle-index N            Skip bundles before this index (default: 0)
   --limit-bundles N                 Submit at most N bundles after start index
 
@@ -72,6 +72,7 @@ LSF options:
   --mem-gb N                        Memory request in GB per bundle job (default: 64)
   --gpus N                          GPU count; 0 omits -gpu (default: 1)
   --gpu-resource STRING             Raw LSF -gpu resource string; overrides --gpus
+                                    (default: num=1:mode=shared:j_exclusive=no)
   --walltime H:MM                   Wall time per bundle job (default: 4:00)
 
 Logging:
