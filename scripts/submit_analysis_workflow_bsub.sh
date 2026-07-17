@@ -118,6 +118,7 @@ JOB_SCRIPT="${RUN_DIR}/run_analysis_workflow.sh"
 REPORT_PATH="${RUN_DIR}/execution_report.json"
 STATUS_FILE="${RUN_DIR}/status.txt"
 SUBMISSION_FILE="${RUN_DIR}/submission.txt"
+RUNTIME_ENVIRONMENT_FILE="${RUN_DIR}/runtime_environment.txt"
 
 q_repo="$(printf '%q' "$PALETTE_REPO")"
 q_zarr="$(printf '%q' "$ZARR_PATH")"
@@ -125,6 +126,8 @@ q_execution_id="$(printf '%q' "$EXECUTION_ID")"
 q_expected_commit="$(printf '%q' "$EXPECTED_COMMIT")"
 q_report="$(printf '%q' "$REPORT_PATH")"
 q_status="$(printf '%q' "$STATUS_FILE")"
+q_runtime_environment="$(printf '%q' "$RUNTIME_ENVIRONMENT_FILE")"
+q_requested_queue="$(printf '%q' "${QUEUE:-<cluster-default>}")"
 quote_array() {
   local rendered="" value quoted
   for value in "$@"; do
@@ -149,7 +152,11 @@ EXECUTION_ID=${q_execution_id}
 EXPECTED_COMMIT=${q_expected_commit}
 REPORT_PATH=${q_report}
 STATUS_FILE=${q_status}
+RUNTIME_ENVIRONMENT_FILE=${q_runtime_environment}
+REQUESTED_QUEUE=${q_requested_queue}
 NCORES=${NCORES}
+REQUESTED_MEM_GB_PER_SLOT=${MEM_GB}
+REQUESTED_WALLTIME=${WALLTIME}
 TARGETS=(${q_targets})
 STAGE_RUNS=(${q_stage_runs})
 OUTPUT_RUNS=(${q_output_runs})
@@ -170,6 +177,57 @@ fi
   printf 'Refusing analysis execution outside an LSF allocation.\n' >&2
   exit 2
 }
+
+EXECUTION_HOST="\$(hostname)"
+EXECUTION_HOST_FQDN="\$(hostname -f 2>/dev/null || hostname)"
+EFFECTIVE_QUEUE="\${LSB_QUEUE:-unknown}"
+LSF_EXECUTION_HOSTS="\${LSB_HOSTS:-\${EXECUTION_HOST}}"
+ALLOCATED_SLOTS="\${LSB_DJOB_NUMPROC:-\${NCORES}}"
+CPU_MODEL=""
+if command -v lscpu >/dev/null 2>&1; then
+  CPU_MODEL="\$(LC_ALL=C lscpu 2>/dev/null | awk -F: '
+    /^Model name:/ {
+      value=\$2
+      sub(/^[[:space:]]+/, "", value)
+      print value
+      exit
+    }
+  ')"
+fi
+if [[ -z "\${CPU_MODEL}" && -r /proc/cpuinfo ]]; then
+  CPU_MODEL="\$(awk -F: '
+    /^(model name|Hardware)[[:space:]]*:/ {
+      value=\$2
+      sub(/^[[:space:]]+/, "", value)
+      print value
+      exit
+    }
+  ' /proc/cpuinfo)"
+fi
+CPU_MODEL="\${CPU_MODEL:-unknown}"
+CPU_LOGICAL_COUNT="\$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+CPU_LOGICAL_COUNT="\${CPU_LOGICAL_COUNT:-unknown}"
+
+runtime_environment_tmp="\${RUNTIME_ENVIRONMENT_FILE}.tmp.\$\$"
+{
+  printf 'schema_id=palette.analysis_workflow_runtime_environment.v1\n'
+  printf 'captured_at_utc=%s\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf 'job_id=%s\n' "\${LSB_JOBID}"
+  printf 'requested_queue=%s\n' "\${REQUESTED_QUEUE}"
+  printf 'effective_queue=%s\n' "\${EFFECTIVE_QUEUE}"
+  printf 'execution_host=%s\n' "\${EXECUTION_HOST}"
+  printf 'execution_host_fqdn=%s\n' "\${EXECUTION_HOST_FQDN}"
+  printf 'lsf_execution_hosts=%s\n' "\${LSF_EXECUTION_HOSTS}"
+  printf 'requested_ncores=%s\n' "\${NCORES}"
+  printf 'allocated_slots=%s\n' "\${ALLOCATED_SLOTS}"
+  printf 'requested_mem_gb_per_slot=%s\n' "\${REQUESTED_MEM_GB_PER_SLOT}"
+  printf 'requested_walltime=%s\n' "\${REQUESTED_WALLTIME}"
+  printf 'cpu_model=%s\n' "\${CPU_MODEL}"
+  printf 'cpu_architecture=%s\n' "\$(uname -m)"
+  printf 'cpu_logical_count=%s\n' "\${CPU_LOGICAL_COUNT}"
+  printf 'kernel_release=%s\n' "\$(uname -r)"
+} >"\${runtime_environment_tmp}"
+mv "\${runtime_environment_tmp}" "\${RUNTIME_ENVIRONMENT_FILE}"
 
 # Multi-process analysis stages own CPU parallelism at the process level.
 # Keep BLAS/OpenMP/OpenCV-adjacent native pools from multiplying that count.
@@ -216,13 +274,19 @@ status_tmp="${STATUS_FILE}.tmp.$$"
 {
   printf 'status=%s\n' "$([[ "$payload_rc" == "0" ]] && printf complete || printf failed)"
   printf 'completed_at_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  printf 'host=%s\n' "$(hostname)"
+  printf 'host=%s\n' "${EXECUTION_HOST}"
+  printf 'host_fqdn=%s\n' "${EXECUTION_HOST_FQDN}"
+  printf 'requested_queue=%s\n' "${REQUESTED_QUEUE}"
+  printf 'effective_queue=%s\n' "${EFFECTIVE_QUEUE}"
+  printf 'cpu_model=%s\n' "${CPU_MODEL}"
+  printf 'allocated_slots=%s\n' "${ALLOCATED_SLOTS}"
   printf 'job_id=%s\n' "${LSB_JOBID}"
   printf 'palette_commit=%s\n' "${ACTUAL_COMMIT}"
   printf 'zarr_path=%s\n' "${ZARR_PATH}"
   printf 'execution_id=%s\n' "${EXECUTION_ID}"
   printf 'payload_returncode=%s\n' "${payload_rc}"
   printf 'execution_report=%s\n' "${REPORT_PATH}"
+  printf 'runtime_environment=%s\n' "${RUNTIME_ENVIRONMENT_FILE}"
 } >"${status_tmp}"
 mv "${status_tmp}" "${STATUS_FILE}"
 exit "${payload_rc}"
@@ -248,6 +312,10 @@ printf 'execution_id=%s\n' "$EXECUTION_ID"
 printf 'run_dir=%s\n' "$RUN_DIR"
 printf 'job_script=%s\n' "$JOB_SCRIPT"
 printf 'execution_report=%s\n' "$REPORT_PATH"
+printf 'runtime_environment=%s\n' "$RUNTIME_ENVIRONMENT_FILE"
+printf 'requested_queue=%s\n' "${QUEUE:-<cluster-default>}"
+printf 'requested_resources=ncores:%s mem_gb_per_slot:%s walltime:%s\n' \
+  "$NCORES" "$MEM_GB" "$WALLTIME"
 printf 'bsub_command='; printf '%q ' "${BSUB_COMMAND[@]}"; printf '\n'
 
 if [[ "$SUBMIT" == "1" ]]; then
@@ -268,12 +336,17 @@ if [[ "$SUBMIT" == "1" ]]; then
     printf 'submitted_at_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'submit_mode=%s\n' "$submit_mode"
     printf 'submit_host=%s\n' "$SUBMIT_HOST"
+    printf 'requested_queue=%s\n' "${QUEUE:-<cluster-default>}"
+    printf 'requested_ncores=%s\n' "$NCORES"
+    printf 'requested_mem_gb_per_slot=%s\n' "$MEM_GB"
+    printf 'requested_walltime=%s\n' "$WALLTIME"
     printf 'job_id=%s\n' "$job_id"
     printf 'job_script=%s\n' "$JOB_SCRIPT"
     printf 'lsf_stdout=%s\n' "${RUN_DIR}/${job_id}.out"
     printf 'lsf_stderr=%s\n' "${RUN_DIR}/${job_id}.err"
     printf 'status_file=%s\n' "$STATUS_FILE"
     printf 'execution_report=%s\n' "$REPORT_PATH"
+    printf 'runtime_environment=%s\n' "$RUNTIME_ENVIRONMENT_FILE"
     printf 'palette_commit=%s\n' "$EXPECTED_COMMIT"
   } >"$submission_tmp"
   mv "$submission_tmp" "$SUBMISSION_FILE"

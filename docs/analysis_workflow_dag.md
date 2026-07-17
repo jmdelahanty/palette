@@ -205,6 +205,19 @@ metadata after each command, and never starts a dependent node after an error.
 Its atomic JSON report records commands, reused runs, generated outputs,
 timestamps, return codes, and completion verification.
 
+The submission directory also separates requested resources from the allocation
+that actually ran. `submission.txt` records the requested queue, core count,
+memory per slot, and walltime. At job start, `runtime_environment.txt` records
+the effective LSF queue, execution host and host list, allocated slots, CPU
+model and architecture, logical CPU count, and kernel release. `status.txt`
+repeats the requested/effective queue, host, CPU model, and allocation size so
+benchmark comparisons can reject runs made on incompatible worker classes.
+Successful finalized analysis runs also persist the effective scheduler
+allocation under `run_provenance.scheduler` and lightweight host, CPU, and
+kernel identity under `run_provenance.runtime`. The sidecars remain necessary
+for requested-resource provenance and for jobs that fail before publishing an
+immutable run.
+
 ## Million-frame execution boundary
 
 The executor preserves these large-recording constraints:

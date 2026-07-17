@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import fisheye.shared.run_provenance as run_provenance_module
 from fisheye.shared.run_provenance import append_input_artifacts
 from fisheye.shared.run_provenance import build_run_provenance
 from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
@@ -97,6 +98,8 @@ def test_build_writer_run_provenance_defaults_to_minimal_valid_payload() -> None
     assert payload["input_run_ids"] == {"detect": "detect_001"}
     assert payload["input_artifacts"] == []
     assert "system" not in payload
+    assert payload["runtime"]["host"]["hostname"]
+    assert payload["runtime"]["cpu"]["model"]
     assert validate_run_provenance(payload).valid is True
 
 
@@ -242,7 +245,41 @@ def test_provenance_resolves_source_checkout_outside_git_working_directory(
 def test_scheduler_context_captures_lsf_job_identity(monkeypatch) -> None:
     monkeypatch.setenv("LSB_JOBID", "12345")
     monkeypatch.setenv("LSB_JOBINDEX", "7")
+    monkeypatch.setenv("LSB_QUEUE", "short")
+    monkeypatch.setenv("LSB_HOSTS", "node-a node-a node-a")
+    monkeypatch.setenv("LSB_DJOB_NUMPROC", "3")
+    monkeypatch.setenv("LSB_MCPU_HOSTS", "node-a 3")
 
     lsf = scheduler_context()["lsf"]
     assert lsf["lsb_jobid"] == "12345"
     assert lsf["lsb_jobindex"] == "7"
+    assert lsf["lsb_queue"] == "short"
+    assert lsf["lsb_hosts"] == "node-a node-a node-a"
+    assert lsf["lsb_djob_numproc"] == "3"
+    assert lsf["lsb_mcpu_hosts"] == "node-a 3"
+
+
+def test_runtime_context_captures_lightweight_host_and_cpu_identity(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(run_provenance_module.socket, "gethostname", lambda: "node-a")
+    monkeypatch.setattr(run_provenance_module, "_runtime_cpu_model", lambda: "Test CPU")
+    monkeypatch.setattr(run_provenance_module.platform, "machine", lambda: "test-arch")
+    monkeypatch.setattr(run_provenance_module.platform, "system", lambda: "TestOS")
+    monkeypatch.setattr(run_provenance_module.platform, "release", lambda: "1.2.3")
+    monkeypatch.setattr(run_provenance_module.os, "cpu_count", lambda: 64)
+
+    runtime = run_provenance_module.runtime_context()
+
+    assert runtime == {
+        "host": {"hostname": "node-a"},
+        "cpu": {
+            "model": "Test CPU",
+            "architecture": "test-arch",
+            "logical_count": 64,
+        },
+        "platform": {
+            "system": "TestOS",
+            "kernel_release": "1.2.3",
+        },
+    }

@@ -7,7 +7,9 @@ import hashlib
 import json
 from importlib import metadata
 import os
+import platform
 from pathlib import Path
+import socket
 import subprocess
 from typing import Any, Mapping, Sequence
 
@@ -143,16 +145,82 @@ def fisheye_version() -> str | None:
 def scheduler_context() -> dict[str, Any]:
     """Return scheduler metadata when running under a batch system."""
 
-    lsf_keys = ("LSB_JOBID", "LSB_JOBINDEX", "LSB_JOBNAME", "LSB_QUEUE", "LSB_HOSTS")
-    lsf = {key.lower(): os.environ.get(key) for key in lsf_keys if os.environ.get(key) is not None}
-    slurm_keys = ("SLURM_JOB_ID", "SLURM_JOB_NAME", "SLURM_NODELIST", "SLURM_PROCID")
-    slurm = {key.lower(): os.environ.get(key) for key in slurm_keys if os.environ.get(key) is not None}
+    lsf_keys = (
+        "LSB_JOBID",
+        "LSB_JOBINDEX",
+        "LSB_JOBNAME",
+        "LSB_QUEUE",
+        "LSB_HOSTS",
+        "LSB_DJOB_NUMPROC",
+        "LSB_MCPU_HOSTS",
+    )
+    lsf = {
+        key.lower(): os.environ.get(key)
+        for key in lsf_keys
+        if os.environ.get(key) is not None
+    }
+    slurm_keys = (
+        "SLURM_JOB_ID",
+        "SLURM_JOB_NAME",
+        "SLURM_NODELIST",
+        "SLURM_PROCID",
+        "SLURM_CPUS_PER_TASK",
+        "SLURM_NTASKS",
+        "SLURM_JOB_CPUS_PER_NODE",
+    )
+    slurm = {
+        key.lower(): os.environ.get(key)
+        for key in slurm_keys
+        if os.environ.get(key) is not None
+    }
     out: dict[str, Any] = {}
     if lsf:
         out["lsf"] = lsf
     if slurm:
         out["slurm"] = slurm
     return out
+
+
+def _runtime_cpu_model() -> str:
+    """Return a best-effort CPU model without launching another process."""
+
+    cpuinfo_path = Path("/proc/cpuinfo")
+    if cpuinfo_path.is_file():
+        try:
+            fields: dict[str, str] = {}
+            cpuinfo = cpuinfo_path.read_text(encoding="utf-8", errors="replace")
+            for line in cpuinfo.splitlines():
+                key, separator, raw_value = line.partition(":")
+                if not separator:
+                    continue
+                value = raw_value.strip()
+                if value:
+                    fields.setdefault(key.strip().lower(), value)
+            for key in ("model name", "hardware", "processor"):
+                if fields.get(key):
+                    return fields[key]
+        except OSError:
+            pass
+    return platform.processor().strip() or "unknown"
+
+
+def runtime_context() -> dict[str, Any]:
+    """Return lightweight host and CPU identity for every finalized run."""
+
+    return {
+        "host": {
+            "hostname": socket.gethostname(),
+        },
+        "cpu": {
+            "model": _runtime_cpu_model(),
+            "architecture": platform.machine() or "unknown",
+            "logical_count": os.cpu_count(),
+        },
+        "platform": {
+            "system": platform.system() or "unknown",
+            "kernel_release": platform.release() or "unknown",
+        },
+    }
 
 
 def system_context() -> dict[str, Any]:
@@ -195,6 +263,7 @@ def build_run_provenance(
     scheduler = scheduler_context()
     if scheduler:
         provenance["scheduler"] = scheduler
+    provenance["runtime"] = runtime_context()
     if include_system_context:
         provenance["system"] = system_context()
     return provenance
