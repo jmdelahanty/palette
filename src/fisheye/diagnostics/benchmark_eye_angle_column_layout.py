@@ -182,7 +182,10 @@ def _measure_workload(
     decoded_return_bytes = 0
     for _repeat in range(max(1, int(repeats))):
         started = time.perf_counter()
-        values = _read_columns(array, rows=rows, indexes=indexes)
+        if indexes == list(range(int(array.shape[1]))):
+            values = np.asarray(array[: int(rows), :])
+        else:
+            values = _read_columns(array, rows=rows, indexes=indexes)
         durations.append(float(time.perf_counter() - started))
         decoded_return_bytes = int(values.nbytes)
         del values
