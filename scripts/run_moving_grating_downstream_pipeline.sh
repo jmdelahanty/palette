@@ -272,38 +272,38 @@ run_cmd scripts/py -m fisheye.analysis.track_kinematics "$ZARR_PATH" \
 if [[ "$WITH_BOUTS" -eq 1 ]]; then
   section "Swim-Bout Candidates"
   BOUT_ARGS=(
-    scripts/py -m fisheye.analysis.detect_bouts_multi_level "$ZARR_PATH"
+    scripts/py -m fisheye.analysis_workflows.materializers.swim_bouts "$ZARR_PATH"
+    --run-name "$BOUT_RUN"
+    --apply
+    --json
+    --
     --track-kinematics-run "$TRACK_RUN"
     --track-id "$TRACK_ID"
-    --run-name "$BOUT_RUN"
     --threshold-mm "$BOUT_THRESHOLD_MM_S"
     --default-level "$BOUT_DEFAULT_LEVEL"
     --boundary-mode threshold
   )
-  if [[ "$OVERWRITE" -eq 1 ]]; then
-    BOUT_ARGS+=(--overwrite)
-  fi
   run_cmd "${BOUT_ARGS[@]}"
 fi
 
 section "Stimulus Response"
 STIM_ARGS=(
-  scripts/py -m fisheye.analysis.stimulus_response "$ZARR_PATH"
+  scripts/py -m fisheye.analysis_workflows.materializers.stimulus_response "$ZARR_PATH"
+  --run-name "$STIMULUS_RESPONSE_RUN"
+  --apply
+  --json
+  --
   --track-kinematics-type offline
   --track-kinematics-run "$TRACK_RUN"
   --stimulus-run "$STIMULUS_RUN"
   --moving-threshold-mm-s "$MOVING_THRESHOLD_MM_S"
   --camera-to-projector-offset-deg "$CAMERA_TO_PROJECTOR_OFFSET_DEG"
   --bin-size-s "$BIN_SIZE_S"
-  --run-name "$STIMULUS_RESPONSE_RUN"
 )
 if [[ "$WITH_BOUTS" -eq 1 ]]; then
   STIM_ARGS+=(--bout-run "$BOUT_RUN")
 else
   STIM_ARGS+=(--no-bouts)
-fi
-if [[ "$OVERWRITE" -eq 1 ]]; then
-  STIM_ARGS+=(--overwrite)
 fi
 if [[ "$WRITE_VISUALIZATIONS" -eq 1 ]]; then
   STIM_ARGS+=(--write-zarr-artifacts)

@@ -1917,6 +1917,7 @@ def write_stimulus_response_run(
     run_name: Optional[str] = None,
     overwrite: bool = False,
     layout: str = STIMULUS_RESPONSE_LAYOUT_DEFAULT,
+    archive_identity_root: Optional[zarr.Group] = None,
     console: Optional[Console] = None,
 ) -> str:
     """Write stimulus response run to zarr."""
@@ -1961,14 +1962,15 @@ def write_stimulus_response_run(
 
     # Archive-level identity: which recording produced this analysis?
     archive_identity: Dict[str, Any] = {}
-    root_attrs = root.attrs if hasattr(root, "attrs") else {}
+    identity_root = archive_identity_root or root
+    root_attrs = identity_root.attrs if hasattr(identity_root, "attrs") else {}
     for key in ("source_video_path", "source_video", "session_uuid"):
         val = root_attrs.get(key)
         if val is not None:
             archive_identity[key] = str(val) if isinstance(val, bytes) else val
     # Check analysis group for session_uuid if not at root.
     if "session_uuid" not in archive_identity:
-        analysis_attrs = root.get("analysis", {})
+        analysis_attrs = identity_root.get("analysis", {})
         if hasattr(analysis_attrs, "attrs"):
             val = analysis_attrs.attrs.get("session_uuid")
             if val is not None:
@@ -1993,7 +1995,12 @@ def write_stimulus_response_run(
     run_attrs: Dict[str, Any] = {
         "schema_id": STIMULUS_RESPONSE_SCHEMA_ID,
         "schema_version": STIMULUS_RESPONSE_SCHEMA_VERSION,
+        "method": "stimulus_response",
+        "method_version": "stimulus_response.v2",
+        "row_axis": "stimulus_steps",
         "layout": layout,
+        "parameters": safe_parameters,
+        "source_refs": safe_inputs,
         "source_track_kinematics_run": source_kinematics_run,
         "source_track_kinematics_type": source_kinematics_type,
         "source_stimulus_run": source_stimulus_run,
@@ -2228,6 +2235,16 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     )
     parser.add_argument("zarr_path", help="Path to the analysis Zarr archive.")
     parser.add_argument(
+        "--output-zarr-path",
+        type=Path,
+        default=None,
+        help=(
+            "Write the completed run to a separate disposable/local Zarr while "
+            "reading all inputs from zarr_path. Production materializers use "
+            "this before atomic publication."
+        ),
+    )
+    parser.add_argument(
         "--track-kinematics-type",
         default="offline",
         choices=("online", "offline"),
@@ -2416,7 +2433,13 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     console.print(f"\n[bold]Stimulus Response Analysis[/bold]")
     console.print(f"  Archive: {args.zarr_path}")
 
-    root = open_zarr_root(args.zarr_path, mode="a")
+    root = open_zarr_root(args.zarr_path, mode="r")
+    output_path = (
+        Path(args.output_zarr_path)
+        if args.output_zarr_path is not None
+        else Path(args.zarr_path)
+    )
+    output_root = open_zarr_root(output_path, mode="a")
 
     # Load inputs.
     tracks, kin_run, n_frames, upstream_lineage = load_track_data(
@@ -2775,7 +2798,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     frame_annotations = build_frame_annotations(steps, n_frames)
 
     run_name = write_stimulus_response_run(
-        root,
+        output_root,
         global_metrics=global_metrics,
         steps=steps,
         step_metrics=step_metrics,
@@ -2794,6 +2817,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         run_name=args.run_name,
         overwrite=args.overwrite,
         layout=args.layout,
+        archive_identity_root=root,
         console=console,
     )
 
@@ -2804,9 +2828,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
         try:
             write_omr_summary_visualization(
-                root,
+                output_root,
                 run_name=run_name,
-                zarr_path=Path(args.zarr_path),
+                zarr_path=output_path,
                 artifact_dpi=args.artifact_dpi,
                 command=" ".join(sys.argv),
                 console=console,

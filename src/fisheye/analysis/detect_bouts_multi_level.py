@@ -35,12 +35,12 @@ Compatibility storage structure (`--layout hierarchical_v1`):
     ├── default_level = "speed_exponential" or another stored speed level (attr)
     └── run_metadata (attrs: threshold, source_track_kinematics_run, etc.)
 
-Usage (basic):
+Lower-level disposable/local usage (basic):
     scripts/py -m fisheye.analysis.detect_bouts_multi_level /path/to/archive.zarr
 
     Auto-generates run name like: swim_bout_detect_20250905_143022
 
-Usage (with options):
+Lower-level disposable/local usage (with options):
     scripts/py -m fisheye.analysis.detect_bouts_multi_level /path/to/archive.zarr \\
         --run-name custom_run \\
         --track-kinematics-run latest \\
@@ -51,6 +51,10 @@ Usage (with options):
         --min-peak-distance-s 0.10 \\
         --peak-width-rel-height 0.98 \\
         --overwrite
+
+Authoritative recording runs should use
+``fisheye.analysis_workflows.materializers.swim_bouts`` so publication is
+validated and atomic.
 """
 
 from __future__ import annotations
@@ -2710,6 +2714,7 @@ def detect_and_save_bouts(
     layout: str = SWIM_BOUT_LAYOUT_DEFAULT,
     frame_axis_storage: str = FRAME_AXIS_STORAGE_DEFAULT,
     command: Optional[str] = None,
+    output_zarr_path: Optional[Path] = None,
 ) -> str:
     """
     Detect bouts from source and derived speed levels and save hierarchically.
@@ -2717,6 +2722,9 @@ def detect_and_save_bouts(
     Args:
         zarr_path: Path to capture zarr
         run_name: Name for this bout detection run (auto-generated if None)
+        output_zarr_path: Optional disposable/local Zarr receiving the output
+            run. Inputs are always read from ``zarr_path``. Production callers
+            use this to compute locally before atomic publication.
         track_kinematics_run: Track kinematics run name (or "latest")
         track_id: Track ID to analyze
         method: Detection method ("threshold", "peak", or "peak_event")
@@ -3015,7 +3023,8 @@ def detect_and_save_bouts(
     # Save to zarr
     print("Saving to zarr...")
     phase_started_at = perf_counter()
-    root = open_zarr_root(zarr_path, mode='r+')
+    output_path = Path(output_zarr_path) if output_zarr_path is not None else zarr_path
+    root = open_zarr_root(output_path, mode='a')
 
     # Create analysis/swim_bout_runs if needed
     if 'analysis' not in root:
@@ -3057,6 +3066,9 @@ def detect_and_save_bouts(
     )
     run_group.attrs['schema_id'] = SWIM_BOUT_RUN_SCHEMA_ID
     run_group.attrs['schema_version'] = schema_version
+    run_group.attrs['method'] = method
+    run_group.attrs['method_version'] = METHOD_VERSION
+    run_group.attrs['row_axis'] = 'swim_bout_rows'
     run_group.attrs['layout'] = layout
     run_group.attrs['created_at_utc'] = created_at_utc
     run_group.attrs['detection_method'] = method
@@ -3203,6 +3215,17 @@ def detect_and_save_bouts(
         'peak_event_schema_version': PEAK_EVENT_SCHEMA_VERSION,
         'distance_policy': 'path_length_from_track_frame_path_distance_only',
         'overwrite': bool(overwrite),
+    })
+    run_group.attrs['parameters'] = parameters
+    run_group.attrs['source_refs'] = _json_safe_attr_value({
+        'source_track_kinematics_path': source_track_path,
+        'source_track_id': int(track_id),
+        'source_frame_axis_path': (
+            frame_axis_contract.get('authoritative_path')
+            if frame_axis_contract is not None
+            else f"{source_track_path}/frame_indices"
+        ),
+        'frame_axis_contract_sha256': frame_axis_contract_sha256,
     })
     algorithm_contract = _json_safe_attr_value(
         _swim_bout_algorithm_contract(
@@ -3537,6 +3560,17 @@ def main():
     )
 
     parser.add_argument(
+        '--output-zarr-path',
+        type=Path,
+        default=None,
+        help=(
+            'Write the completed run to a separate disposable/local Zarr while '
+            'reading all inputs from zarr_path. Production materializers use '
+            'this before atomic publication.'
+        ),
+    )
+
+    parser.add_argument(
         '--run-name',
         type=str,
         default=None,
@@ -3786,6 +3820,7 @@ def main():
     run_name = detect_and_save_bouts(
         zarr_path=zarr_path,
         run_name=args.run_name,
+        output_zarr_path=args.output_zarr_path,
         track_kinematics_run=args.track_kinematics_run,
         track_id=args.track_id,
         method=args.method,
