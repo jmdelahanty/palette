@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -12,10 +12,13 @@ import polars as pl
 from fisheye.analysis.eye_angle_io import (
     EYE_ANGLE_TIMESERIES_COLUMNS,
     EyeAngleRunOption,
+    EyeAngleSeriesCatalog,
+    catalog_eye_angle_series,
     discover_eye_angle_run_options as discover_eye_angle_run_options_from_root,
     first_array_length,
     frame_time_seconds,
     load_eye_angle_run_tables,
+    load_eye_angle_series_window,
     optional_1d_array,
     roi_frame_indices,
     roi_time_seconds,
@@ -31,6 +34,7 @@ class EyeAngleTimeseriesData:
     row_axis: str
     attrs: Mapping[str, Any]
     dataframe: pl.DataFrame
+    source_paths: Mapping[str, str] = field(default_factory=dict)
 
 
 def _safe_float(value: object) -> float | None:
@@ -46,6 +50,58 @@ def discover_eye_angle_run_options(zarr_path: Path | str) -> list[EyeAngleRunOpt
 
     root = open_zarr_root(Path(zarr_path), mode="r")
     return discover_eye_angle_run_options_from_root(root)
+
+
+def catalog_eye_angle_timeseries_data(
+    zarr_path: Path | str,
+    *,
+    run_name: str | None = None,
+    prefer_frame: bool = True,
+) -> EyeAngleSeriesCatalog:
+    """Return a metadata-only channel and time inventory for one run."""
+
+    root = open_zarr_root(Path(zarr_path), mode="r")
+    return catalog_eye_angle_series(root, run_name=run_name, prefer_frame=prefer_frame)
+
+
+def load_eye_angle_timeseries_window(
+    zarr_path: Path | str,
+    *,
+    run_name: str | None = None,
+    prefer_frame: bool = True,
+    start_s: float | None = None,
+    stop_s: float | None = None,
+    series_names: tuple[str, ...] = (),
+    max_rows: int = 300_000,
+) -> EyeAngleTimeseriesData:
+    """Load selected eye-angle columns for one bounded time interval."""
+
+    archive = Path(zarr_path)
+    root = open_zarr_root(archive, mode="r")
+    window = load_eye_angle_series_window(
+        root,
+        run_name=run_name,
+        prefer_frame=prefer_frame,
+        start_s=start_s,
+        stop_s=stop_s,
+        angle_channels=series_names,
+        max_rows=max_rows,
+    )
+    columns: dict[str, np.ndarray] = {
+        "time_s": window.time_seconds,
+        "frame_index": window.frame_indices,
+        **window.angles,
+        **window.qa,
+    }
+    return EyeAngleTimeseriesData(
+        zarr_path=archive,
+        run_name=window.catalog.run_name,
+        run_path=window.catalog.run_path,
+        row_axis=window.catalog.row_axis,
+        attrs=window.catalog.attrs,
+        dataframe=pl.DataFrame(columns),
+        source_paths=window.source_paths,
+    )
 
 
 def load_eye_angle_timeseries_data(
@@ -114,11 +170,14 @@ def load_eye_angle_timeseries_data(
         row_axis=row_axis,
         attrs=tables.attrs,
         dataframe=dataframe,
+        source_paths=tables.source_paths,
     )
 
 
 __all__ = [
     "EyeAngleTimeseriesData",
+    "catalog_eye_angle_timeseries_data",
     "discover_eye_angle_run_options",
     "load_eye_angle_timeseries_data",
+    "load_eye_angle_timeseries_window",
 ]

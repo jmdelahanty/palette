@@ -9,9 +9,11 @@ import zarr
 from fisheye.analysis.eye_angle_io import (
     EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2,
     EyeAngleIOError,
+    catalog_eye_angle_series,
     discover_eye_angle_run_options,
     first_array_length,
     load_eye_angle_run_tables,
+    load_eye_angle_series_window,
     load_eye_gaze_frame_series,
     optional_1d_array,
 )
@@ -213,6 +215,46 @@ def test_load_eye_angle_run_tables_reads_compact_dense_channels(tmp_path: Path) 
     assert tables.source_paths[
         "analysis/eye_angle_runs/eye_angle_compact/angles/frame/left_gaze_deg"
     ].endswith("frame_angles[:,1]")
+
+
+def test_compact_eye_angle_window_reads_selected_columns_and_rows(tmp_path: Path) -> None:
+    root = _make_compact_eye_angle_archive(tmp_path)
+
+    catalog = catalog_eye_angle_series(root, run_name="latest", prefer_frame=True)
+
+    assert catalog.row_axis == "frame"
+    assert catalog.row_count == 4
+    assert catalog.time_start_s == 0.0
+    assert catalog.time_stop_s == 0.03
+    assert catalog.channel_representations["left_gaze_deg"] == "gaze"
+    assert catalog.qa_channels == ("valid_frame", "major_axis_marginal")
+
+    window = load_eye_angle_series_window(
+        root,
+        run_name="latest",
+        start_s=0.01,
+        stop_s=0.02,
+        angle_channels=("left_gaze_deg", "vergence_gaze_signed_deg"),
+    )
+
+    np.testing.assert_allclose(window.time_seconds, [0.01, 0.02])
+    assert window.frame_indices.tolist() == [1, 2]
+    np.testing.assert_allclose(window.angles["left_gaze_deg"], [2.0, 3.0])
+    np.testing.assert_allclose(window.angles["vergence_gaze_signed_deg"], [-2.0, -3.0])
+    assert window.qa["valid_frame"].tolist() == [False, True]
+    assert window.qa["major_axis_marginal"].tolist() == [True, False]
+
+
+def test_eye_angle_window_refuses_unbounded_large_projection(tmp_path: Path) -> None:
+    root = _make_compact_eye_angle_archive(tmp_path)
+
+    with pytest.raises(EyeAngleIOError, match="viewer limit"):
+        load_eye_angle_series_window(
+            root,
+            run_name="latest",
+            angle_channels=("left_gaze_deg",),
+            max_rows=2,
+        )
 
 
 def test_load_eye_gaze_frame_series_aligns_frames_and_validity(tmp_path: Path) -> None:

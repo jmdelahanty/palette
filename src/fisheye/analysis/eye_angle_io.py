@@ -8,7 +8,7 @@ and support tables for hierarchical-v1 runs and compact-dense-v2 runs.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 import zarr
@@ -147,6 +147,34 @@ class EyeAngleRunTables:
         raise EyeAngleIOError(f"Unsupported eye-angle QA row axis {row_axis!r}; expected 'frame' or 'roi'.")
 
 
+@dataclass(frozen=True)
+class EyeAngleSeriesCatalog:
+    """Metadata-only inventory for a selectable row representation."""
+
+    run_name: str
+    run_path: str
+    row_axis: str
+    row_count: int
+    time_start_s: float
+    time_stop_s: float
+    angle_channels: tuple[str, ...]
+    channel_representations: Mapping[str, str]
+    qa_channels: tuple[str, ...]
+    attrs: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class EyeAngleSeriesWindow:
+    """Bounded logical angle and QA projection from one eye-angle run."""
+
+    catalog: EyeAngleSeriesCatalog
+    time_seconds: np.ndarray
+    frame_indices: np.ndarray
+    angles: Mapping[str, np.ndarray]
+    qa: Mapping[str, np.ndarray]
+    source_paths: Mapping[str, str]
+
+
 def first_array_length(arrays: Mapping[str, np.ndarray], names: tuple[str, ...] = EYE_ANGLE_ROW_COUNT_COLUMNS) -> int:
     """Return the first non-scalar array length found among candidate names."""
 
@@ -200,6 +228,30 @@ def _channel_names(index_group: Any | None, *, expected_count: int | None = None
         if names:
             return names[:expected_count] if expected_count is not None else names
     return []
+
+
+def _channel_text_values(
+    index_group: Any | None,
+    array_name: str,
+    *,
+    expected_count: int,
+) -> list[str]:
+    if index_group is None:
+        return [""] * int(expected_count)
+    try:
+        if array_name not in index_group:
+            return [""] * int(expected_count)
+        values = np.asarray(index_group[array_name][:])
+    except Exception:
+        return [""] * int(expected_count)
+    if values.ndim >= 2 and values.dtype.kind in {"u", "i"}:
+        iter_values = values.reshape(values.shape[0], -1)
+    else:
+        iter_values = values.reshape(-1)
+    decoded = [str(decode_null_terminated_text(value)) for value in iter_values]
+    if len(decoded) != int(expected_count):
+        return [""] * int(expected_count)
+    return decoded
 
 
 def _channel_availability(
@@ -585,6 +637,347 @@ def discover_eye_angle_run_options(root: zarr.Group) -> list[EyeAngleRunOption]:
         )
 
     return sorted(options, key=lambda item: (not item.is_latest, item.run_name))
+
+
+def _inferred_representation(channel_name: str) -> str:
+    name = str(channel_name)
+    if "nasal_gaze" in name or "eye_vergence_gaze" in name:
+        return "nasal_gaze"
+    if "gaze" in name or "minor_signed" in name:
+        return "gaze"
+    if "major" in name:
+        return "major_axis"
+    if "centroid" in name:
+        return "centroid"
+    if "eye_angle" in name:
+        return "eye_frame"
+    return "other"
+
+
+def _time_bounds_from_support(
+    support_group: Any | None,
+    *,
+    row_axis: str,
+    row_count: int,
+    fps: float | None,
+) -> tuple[float, float]:
+    time_name = "frame_time_seconds" if row_axis == "frame" else "time_seconds"
+    if support_group is not None:
+        try:
+            if time_name in support_group:
+                values = support_group[time_name]
+                if int(values.shape[0]) == int(row_count) and row_count > 0:
+                    first = float(np.asarray(values[0]).reshape(-1)[0])
+                    last = float(np.asarray(values[row_count - 1]).reshape(-1)[0])
+                    if np.isfinite(first) and np.isfinite(last):
+                        return min(first, last), max(first, last)
+        except Exception:
+            pass
+    if fps is not None and fps > 0 and row_count > 0:
+        return 0.0, float(row_count - 1) / float(fps)
+    return 0.0, float(max(0, row_count - 1))
+
+
+def catalog_eye_angle_series(
+    root: zarr.Group,
+    *,
+    run_name: str | None = None,
+    prefer_frame: bool = True,
+) -> EyeAngleSeriesCatalog:
+    """Inspect selectable eye-angle channels without reading dense value arrays."""
+
+    run_group, resolved_run, run_path = resolve_eye_angle_run(root, run_name)
+    attrs = _attrs_dict(run_group)
+    layout = _layout(attrs)
+    support_group = _child_group(run_group, "support")
+
+    if layout == EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2:
+        frame_array = run_group.get("frame_angles")
+        roi_array = run_group.get("roi_angles")
+        use_frame = bool(
+            prefer_frame
+            and frame_array is not None
+            and len(getattr(frame_array, "shape", ())) == 2
+            and int(frame_array.shape[0]) > 0
+        )
+        data_array = frame_array if use_frame else roi_array
+        if data_array is None or len(getattr(data_array, "shape", ())) != 2:
+            raise EyeAngleIOError(f"Eye-angle run {resolved_run!r} has no selectable dense angle array.")
+        row_axis = "frame" if use_frame else "roi"
+        row_count = int(data_array.shape[0])
+        channel_count = int(data_array.shape[1])
+        angle_index = _child_group(run_group, "angle_channel_index")
+        names = _channel_names(angle_index, expected_count=channel_count)
+        if len(names) != channel_count:
+            raise EyeAngleIOError(
+                f"{run_path} names {len(names)} angle channels for {channel_count} dense columns."
+            )
+        available = _channel_availability(
+            angle_index,
+            array_name="frame_available" if use_frame else "roi_available",
+            expected_count=channel_count,
+        )
+        representations = _channel_text_values(
+            angle_index,
+            "representation",
+            expected_count=channel_count,
+        )
+        angle_channels = tuple(name for index, name in enumerate(names) if bool(available[index]))
+        channel_representations = {
+            name: (representations[index] or _inferred_representation(name))
+            for index, name in enumerate(names)
+            if bool(available[index])
+        }
+
+        qa_name = "frame_qa" if use_frame else "roi_qa"
+        qa_array = run_group.get(qa_name)
+        qa_channels: tuple[str, ...] = ()
+        if qa_array is not None and len(getattr(qa_array, "shape", ())) == 2:
+            qa_count = int(qa_array.shape[1])
+            qa_index = _child_group(run_group, "qa_channel_index")
+            qa_names = _channel_names(qa_index, expected_count=qa_count)
+            qa_available = _channel_availability(
+                qa_index,
+                array_name="frame_available" if use_frame else "roi_available",
+                expected_count=qa_count,
+            )
+            qa_channels = tuple(
+                name for index, name in enumerate(qa_names) if bool(qa_available[index])
+            )
+    else:
+        frame_group = _child_group(run_group, "angles/frame")
+        roi_group = _child_group(run_group, "angles/roi")
+        frame_count = _first_array_length_in_group(frame_group, EYE_ANGLE_ROW_COUNT_COLUMNS)
+        use_frame = bool(prefer_frame and frame_count > 0)
+        row_axis = "frame" if use_frame else "roi"
+        angle_group = frame_group if use_frame else roi_group
+        row_count = frame_count if use_frame else _first_array_length_in_group(
+            roi_group, EYE_ANGLE_ROW_COUNT_COLUMNS
+        )
+        angle_channels = tuple(
+            name for name in _group_array_keys(angle_group) if name in EYE_ANGLE_TIMESERIES_COLUMNS
+        )
+        channel_representations = {
+            name: _inferred_representation(name) for name in angle_channels
+        }
+        qa_group = _child_group(run_group, f"qa/{row_axis}")
+        qa_channels = tuple(_group_array_keys(qa_group))
+
+    fps_raw = attrs.get("fps")
+    try:
+        fps = float(fps_raw)
+    except (TypeError, ValueError):
+        fps = None
+    if fps is not None and (not np.isfinite(fps) or fps <= 0):
+        fps = None
+    time_start_s, time_stop_s = _time_bounds_from_support(
+        support_group,
+        row_axis=row_axis,
+        row_count=row_count,
+        fps=fps,
+    )
+    return EyeAngleSeriesCatalog(
+        run_name=resolved_run,
+        run_path=run_path,
+        row_axis=row_axis,
+        row_count=row_count,
+        time_start_s=time_start_s,
+        time_stop_s=time_stop_s,
+        angle_channels=angle_channels,
+        channel_representations=channel_representations,
+        qa_channels=qa_channels,
+        attrs=attrs,
+    )
+
+
+def _group_array_keys(group: Any | None) -> list[str]:
+    if group is None:
+        return []
+    array_keys = getattr(group, "array_keys", None)
+    if not callable(array_keys):
+        return []
+    try:
+        return sorted(str(name) for name in array_keys())
+    except Exception:
+        return []
+
+
+def _bounded_row_selection(
+    run_group: zarr.Group,
+    catalog: EyeAngleSeriesCatalog,
+    *,
+    start_s: float | None,
+    stop_s: float | None,
+    max_rows: int,
+) -> tuple[slice, np.ndarray, np.ndarray]:
+    count = int(catalog.row_count)
+    lo = catalog.time_start_s if start_s is None else float(start_s)
+    hi = catalog.time_stop_s if stop_s is None else float(stop_s)
+    if hi < lo:
+        lo, hi = hi, lo
+    lo = max(catalog.time_start_s, lo)
+    hi = min(catalog.time_stop_s, hi)
+    if count <= 0 or hi < lo:
+        empty = np.asarray([], dtype=np.float64)
+        return slice(0, 0), empty, np.asarray([], dtype=bool)
+
+    support_group = _child_group(run_group, "support")
+    time_name = "frame_time_seconds" if catalog.row_axis == "frame" else "time_seconds"
+    time_array = None
+    if support_group is not None:
+        try:
+            candidate = support_group.get(time_name)
+            if candidate is not None and int(candidate.shape[0]) == count:
+                time_array = candidate
+        except Exception:
+            time_array = None
+    fps_raw = catalog.attrs.get("fps")
+    try:
+        fps = float(fps_raw)
+    except (TypeError, ValueError):
+        fps = float("nan")
+
+    if catalog.row_axis == "frame" and np.isfinite(fps) and fps > 0:
+        start_index = max(0, int(np.floor((lo - catalog.time_start_s) * fps)) - 2)
+        stop_index = min(count, int(np.ceil((hi - catalog.time_start_s) * fps)) + 3)
+    elif time_array is not None:
+        all_times = np.asarray(time_array[:], dtype=np.float64).reshape(-1)
+        start_index = int(np.searchsorted(all_times, lo, side="left"))
+        stop_index = int(np.searchsorted(all_times, hi, side="right"))
+    else:
+        start_index = max(0, int(np.floor(lo - catalog.time_start_s)))
+        stop_index = min(count, int(np.ceil(hi - catalog.time_start_s)) + 1)
+
+    selected_rows = max(0, stop_index - start_index)
+    if selected_rows > int(max_rows):
+        raise EyeAngleIOError(
+            f"Requested eye-angle window spans {selected_rows:,} rows; the read-only viewer limit "
+            f"is {int(max_rows):,}. Select a shorter time window."
+        )
+    row_slice = slice(start_index, stop_index)
+    if time_array is not None:
+        times = np.asarray(time_array[row_slice], dtype=np.float64).reshape(-1)
+    elif np.isfinite(fps) and fps > 0:
+        times = catalog.time_start_s + np.arange(start_index, stop_index, dtype=np.float64) / fps
+    else:
+        times = catalog.time_start_s + np.arange(start_index, stop_index, dtype=np.float64)
+    mask = np.isfinite(times) & (times >= lo) & (times <= hi)
+    return row_slice, times, mask
+
+
+def _dense_columns(
+    array: Any,
+    *,
+    row_slice: slice,
+    indexes: Sequence[int],
+) -> np.ndarray:
+    if not indexes:
+        return np.empty((max(0, int(row_slice.stop or 0) - int(row_slice.start or 0)), 0))
+    try:
+        values = array.get_orthogonal_selection((row_slice, list(indexes)))
+    except (AttributeError, TypeError, IndexError):
+        values = np.column_stack([np.asarray(array[row_slice, index]) for index in indexes])
+    result = np.asarray(values)
+    if result.ndim == 1:
+        result = result.reshape(-1, 1)
+    return result
+
+
+def load_eye_angle_series_window(
+    root: zarr.Group,
+    *,
+    run_name: str | None = None,
+    prefer_frame: bool = True,
+    start_s: float | None = None,
+    stop_s: float | None = None,
+    angle_channels: Sequence[str] = (),
+    qa_channels: Sequence[str] = (
+        "valid_frame",
+        "valid_left",
+        "valid_right",
+        "major_axis_marginal",
+    ),
+    max_rows: int = 300_000,
+) -> EyeAngleSeriesWindow:
+    """Read only requested columns from a bounded eye-angle time interval."""
+
+    catalog = catalog_eye_angle_series(root, run_name=run_name, prefer_frame=prefer_frame)
+    run_group, _resolved_run, run_path = resolve_eye_angle_run(root, catalog.run_name)
+    requested_angles = tuple(dict.fromkeys(str(name) for name in angle_channels))
+    missing_angles = [name for name in requested_angles if name not in catalog.angle_channels]
+    if missing_angles:
+        raise EyeAngleIOError(f"Unavailable eye-angle channels: {', '.join(missing_angles)}")
+    requested_qa = tuple(
+        name for name in dict.fromkeys(str(name) for name in qa_channels) if name in catalog.qa_channels
+    )
+    row_slice, times, time_mask = _bounded_row_selection(
+        run_group,
+        catalog,
+        start_s=start_s,
+        stop_s=stop_s,
+        max_rows=max_rows,
+    )
+    source_paths: dict[str, str] = {"run": run_path}
+    angles: dict[str, np.ndarray] = {}
+    qa: dict[str, np.ndarray] = {}
+    layout = _layout(catalog.attrs)
+    if layout == EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2:
+        use_frame = catalog.row_axis == "frame"
+        angle_array_name = "frame_angles" if use_frame else "roi_angles"
+        angle_array = run_group[angle_array_name]
+        angle_index = _child_group(run_group, "angle_channel_index")
+        all_angle_names = _channel_names(angle_index, expected_count=int(angle_array.shape[1]))
+        indexes = [all_angle_names.index(name) for name in requested_angles]
+        values = _dense_columns(angle_array, row_slice=row_slice, indexes=indexes)
+        for column_index, name in enumerate(requested_angles):
+            angles[name] = np.asarray(values[:, column_index])[time_mask]
+            source_paths[f"angles/{name}"] = f"{run_path}/{angle_array_name}[:,{indexes[column_index]}]"
+
+        qa_array_name = "frame_qa" if use_frame else "roi_qa"
+        if requested_qa and qa_array_name in run_group:
+            qa_array = run_group[qa_array_name]
+            qa_index = _child_group(run_group, "qa_channel_index")
+            all_qa_names = _channel_names(qa_index, expected_count=int(qa_array.shape[1]))
+            qa_indexes = [all_qa_names.index(name) for name in requested_qa]
+            qa_values = _dense_columns(qa_array, row_slice=row_slice, indexes=qa_indexes)
+            for column_index, name in enumerate(requested_qa):
+                qa[name] = np.asarray(qa_values[:, column_index])[time_mask]
+                source_paths[f"qa/{name}"] = f"{run_path}/{qa_array_name}[:,{qa_indexes[column_index]}]"
+    else:
+        angle_group = _child_group(run_group, f"angles/{catalog.row_axis}")
+        qa_group = _child_group(run_group, f"qa/{catalog.row_axis}")
+        for name in requested_angles:
+            angles[name] = np.asarray(angle_group[name][row_slice]).reshape(-1)[time_mask]
+            source_paths[f"angles/{name}"] = f"{run_path}/angles/{catalog.row_axis}/{name}"
+        for name in requested_qa:
+            qa[name] = np.asarray(qa_group[name][row_slice]).reshape(-1)[time_mask]
+            source_paths[f"qa/{name}"] = f"{run_path}/qa/{catalog.row_axis}/{name}"
+
+    if catalog.row_axis == "frame":
+        frame_indices = np.arange(
+            int(row_slice.start or 0), int(row_slice.stop or 0), dtype=np.int64
+        )[time_mask]
+    else:
+        support_group = _child_group(run_group, "support")
+        if support_group is not None and "frame_indices" in support_group:
+            frame_indices = np.asarray(
+                support_group["frame_indices"][row_slice], dtype=np.int64
+            ).reshape(-1)[time_mask]
+            source_paths["frame_indices"] = f"{run_path}/support/frame_indices"
+        else:
+            frame_indices = np.arange(
+                int(row_slice.start or 0), int(row_slice.stop or 0), dtype=np.int64
+            )[time_mask]
+    time_name = "frame_time_seconds" if catalog.row_axis == "frame" else "time_seconds"
+    source_paths["time_seconds"] = f"{run_path}/support/{time_name}"
+    return EyeAngleSeriesWindow(
+        catalog=catalog,
+        time_seconds=times[time_mask],
+        frame_indices=frame_indices,
+        angles=angles,
+        qa=qa,
+        source_paths=source_paths,
+    )
 
 
 def aligned_frame_values(
