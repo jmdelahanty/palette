@@ -134,3 +134,34 @@ authoritative per-recording run archive, physical-layout improvements can be
 published as complete named runs with full lineage, and cross-recording
 Parquet exports can remain derived query products rather than competing
 authorities.
+
+## Native compute and publication canary
+
+The validated storage candidate was promoted under the bout-family publication
+lock after its resolver fingerprint was recomputed. Both pointers moved from
+`bout_kinematics_sleepyfish_core_canary_20260713_01` to
+`bout_kinematics_sleepyfish_smallrun_candidate_20260717_01`.
+
+Commit `c7bbc798` then moved the workflow's native bout stage onto the same
+execution model used by the other hardened materializers: authoritative inputs
+are opened read-only, the writer creates its final sharded layout in a
+node-local Zarr, and the shared publisher copies to a hidden PRFS sibling,
+validates, atomically renames, completes, and updates the pointers under one
+lock. The native writer now records its requested row-shard size and a run-level
+physical-layout summary.
+
+LSF job `153131310` exercised that path on `h07u11` with one core. It completed
+successfully in 104 seconds with empty stderr and a maximum memory use of 1.5
+GiB. Native computation took 37.97 seconds and atomic PRFS publication took
+4.51 seconds. The published run,
+`bout_kinematics_sleepyfish_native_atomic_canary_20260717_01`, contains 115
+arrays (104 sharded and 11 regular), 110 payload files, and passed final
+resolver validation. Its 26,565-row movement, raw-heading, and smoothed-heading
+record hashes exactly match the previously validated run; the overall logical
+fingerprint differs only because provenance-bearing scientific attributes now
+include the native storage parameters and newly pinned source identities.
+
+The same workflow also persisted the bounded track-kinematics visualization
+contract that was missing before the canary. Fast Recording Explorer discovery
+now resolves `offline/tk_sleepyfish_sharded_canary_20260716_02` through the
+supported `palette-track-kinematics-summary-v1` renderer.
