@@ -158,7 +158,35 @@ def test_batch_eye_angle_defaults_are_compact_dense_v2() -> None:
     args = parser.parse_args(["/tmp/example_analysis.zarr"])
 
     assert args.eye_angle_run == "eye_angle_compact_dense_v2_batch_20260511"
+    assert args.include_eye_gaze is True
     assert mod.DEFAULT_EYE_ANGLE_LAYOUT == "compact_dense_v2"
+
+
+def test_bout_kinematics_command_makes_eye_gaze_choice_explicit() -> None:
+    args = argparse.Namespace(
+        pre_window_s=0.05,
+        post_window_s=0.05,
+        physical_active_threshold_mm_s=0.01,
+        physical_active_boundary_margin_s=0.05,
+        overwrite=False,
+    )
+    without_eye = mod._bout_kinematics_command(
+        _plan(Path("/tmp/example_analysis.zarr")),
+        args,
+    )
+    with_eye_plan = mod.ArchivePlan(
+        **{
+            **_plan(Path("/tmp/example_analysis.zarr")).__dict__,
+            "include_eye_gaze": True,
+        }
+    )
+    with_eye = mod._bout_kinematics_command(with_eye_plan, args)
+
+    assert "--no-include-eye-gaze" in without_eye
+    assert "--include-eye-gaze" not in without_eye
+    assert "--include-eye-gaze" in with_eye
+    assert "--no-include-eye-gaze" not in with_eye
+    assert with_eye[with_eye.index("--eye-angle-run") + 1] == "eye"
 
 
 def test_eye_angle_command_pins_compact_layout() -> None:

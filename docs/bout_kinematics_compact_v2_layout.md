@@ -87,8 +87,9 @@ index columns:
 `heading_level_bytes` column distinguishes `heading_smoothed`, `heading_raw`,
 or future heading variants.
 
-`eye_gaze_metrics` stores optional eye-gaze rows with the same compact index
-columns.
+`eye_gaze_metrics` stores the default eye-gaze rows with the same compact index
+columns. It is absent only when the writer was explicitly invoked with
+`--no-include-eye-gaze` for compatibility.
 
 Reader-facing metric schemas are unchanged after resolving: compact index
 columns are storage metadata and should not appear in exported analytics rows.

@@ -1809,8 +1809,10 @@ here; those belong in linked `analysis/bout_kinematics_runs` outputs.
 
 ### `analysis/bout_kinematics_runs/`
 
-Per-bout movement, heading, and optional eye-gaze metrics linked to an exact
-track-kinematics run and swim-bout segmentation candidate.
+Per-bout movement, heading, and eye-gaze metrics linked to exact
+track-kinematics, swim-bout segmentation, and eye-angle runs. Eye-gaze metrics
+are computed by default and are omitted only for an explicitly opted-out
+compatibility run.
 
 Use this surface for downstream per-bout biological measurements after a bout
 candidate has been selected. The primary table is `per_bout_metrics/`, aligned
@@ -1941,7 +1943,7 @@ When visualization artifacts are requested, `visualizations/` may contain:
   `bout_kinematics_summary_track_<id>_interactive` for heading/turning
   histograms
 - `bout_eye_gaze_summary_track_<id>_png` and
-  `bout_eye_gaze_summary_track_<id>_interactive` when `eye_gaze` is enabled
+  `bout_eye_gaze_summary_track_<id>_interactive` for default eye-gaze metrics
 
 ### `analysis/refined_online_runs/`
 

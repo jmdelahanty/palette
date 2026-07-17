@@ -16,7 +16,7 @@ Palette stores related kinematics outputs in separate run families under
 | --- | --- | --- |
 | Frame-by-frame position, speed, heading, acceleration | `analysis/track_kinematics_runs/<scope>/<run>/` | `fisheye.analysis.track_kinematics_io.load_track_kinematics_track` |
 | Swim-bout event boundaries and inter-bout intervals | `analysis/swim_bout_runs/<run>/` | `fisheye.analysis.swim_bout_io.load_swim_bout_tables` |
-| Per-bout distance, duration, heading change, optional eye-gaze metrics | `analysis/bout_kinematics_runs/<run>/` | `fisheye.analysis.bout_kinematics.resolve_bout_kinematics_tables` |
+| Per-bout distance, duration, heading change, and eye-gaze metrics | `analysis/bout_kinematics_runs/<run>/` | `fisheye.analysis.bout_kinematics.resolve_bout_kinematics_tables` |
 | Frame-by-frame tail-angle / tail-deflection traces | `analysis/tail_kinematics_runs/<run>/` | Direct zarr arrays for now |
 
 Use the reader helpers when they exist. Several run families have historical
@@ -181,7 +181,8 @@ Frame boundary fields are authoritative for slicing frame-level arrays.
 
 Bout-kinematics runs are the per-bout biological measurement layer. Use these
 when you want bout duration, active path length, heading change, heading path,
-or optional eye-gaze metrics aligned to bout rows.
+and, by default, eye-gaze metrics aligned to bout rows. Historical or explicit
+compatibility runs created with `--no-include-eye-gaze` may omit that level.
 
 ```bash
 scripts/py - <<'PY'

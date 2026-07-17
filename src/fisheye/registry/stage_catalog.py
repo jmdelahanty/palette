@@ -193,10 +193,10 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
     ),
     StageSpec(
         id="bout_kinematics",
-        depends_on=("swim_bouts",),
+        depends_on=("swim_bouts", "eye_angles"),
         artifact_families=("analysis/bout_kinematics_runs",),
         category=DERIVED_ANALYSIS,
-        description="Per-bout movement, heading, and optional eye-gaze metrics.",
+        description="Per-bout movement, heading, and eye-gaze metrics.",
     ),
     StageSpec(
         id="eye_angles",

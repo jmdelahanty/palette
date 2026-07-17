@@ -35,8 +35,8 @@ RUN_CRA_NEAR=1
 RUN_EPOCH_BEHAVIOR=1
 RUN_EGOCENTRIC=1
 RUN_ESCAPE_FREEZE=1
-RUN_EYE_ANGLES=0
-RUN_GAZE_TRACKING=0
+RUN_EYE_ANGLES=1
+RUN_GAZE_TRACKING=1
 
 OVERWRITE=0
 NO_PNG=0
@@ -45,7 +45,7 @@ NO_INTERACTIVE_SPEC=0
 TRACK_RUN="tk_hyst4_low2_latch_s005"
 SWIM_BOUT_RUN="bouts_tk_hyst4_low2_latch_s005_peak_event_exp_tau025_prom4_dist010_w098"
 BOUT_KINEMATICS_RUN="bk_tk_hyst4_low2_latch_s005_peak_event_prom4_w098_interbout"
-INCLUDE_EYE_GAZE=0
+INCLUDE_EYE_GAZE=1
 
 EPOCH_RUN="goodcopbadcop_stimulus_epochs_v1_20260617"
 OCCUPANCY_RUN="goodcopbadcop_detection_occupancy_v1_20260617"
@@ -154,8 +154,10 @@ Stage toggles:
   --skip-epoch-behavior       Skip epoch behavior/bout distribution summary.
   --skip-egocentric           Skip fish-centered egocentric chaser bearing.
   --skip-escape-freeze        Skip escape/freeze diagnostic.
-  --run-eye-angles            Run/reuse the DAG eye-angle target before gaze validation.
-  --run-gaze-tracking         Validate eye conventions, then write chaser gaze tracking.
+  --run-eye-angles            Run/reuse the DAG eye-angle target (default).
+  --skip-eye-angles           Skip the separate DAG eye-angle target.
+  --run-gaze-tracking         Validate conventions and write chaser gaze tracking (default).
+  --skip-gaze-tracking        Skip chaser-relative gaze tracking.
   --eye-and-gaze-only         Disable the legacy stage set; run eye angles then gaze tracking.
   --gaze-only                 Disable the legacy stage set; validate/use an existing eye run.
 
@@ -182,7 +184,8 @@ Parameters:
   --overwrite                 Overwrite existing runs/components where supported.
   --no-png                    Skip PNG artifacts where supported.
   --no-interactive-spec       Skip interactive specs where supported.
-  --include-eye-gaze          Include eye-gaze bout-kinematics metrics in movement stage.
+  --include-eye-gaze          Include eye-gaze bout metrics (default).
+  --no-include-eye-gaze       Explicitly omit eye-gaze bout metrics for compatibility.
   --occupancy-bin-size N
   --occupancy-smooth-sigma X
   --chaser-threshold-mm X
@@ -233,7 +236,9 @@ while [[ $# -gt 0 ]]; do
     --skip-egocentric) RUN_EGOCENTRIC=0; shift;;
     --skip-escape-freeze) RUN_ESCAPE_FREEZE=0; shift;;
     --run-eye-angles) RUN_EYE_ANGLES=1; shift;;
+    --skip-eye-angles) RUN_EYE_ANGLES=0; shift;;
     --run-gaze-tracking) RUN_GAZE_TRACKING=1; shift;;
+    --skip-gaze-tracking) RUN_GAZE_TRACKING=0; shift;;
     --eye-and-gaze-only)
       RUN_MOVEMENT=0; RUN_STIMULUS_EPOCH=0; RUN_DETECTION_OCCUPANCY=0
       RUN_CHASER_DISTANCE=0; RUN_CRA_PRIMARY=0; RUN_CRA_NEAR=0
@@ -264,6 +269,7 @@ while [[ $# -gt 0 ]]; do
     --no-png) NO_PNG=1; shift;;
     --no-interactive-spec) NO_INTERACTIVE_SPEC=1; shift;;
     --include-eye-gaze) INCLUDE_EYE_GAZE=1; shift;;
+    --no-include-eye-gaze) INCLUDE_EYE_GAZE=0; shift;;
     --occupancy-bin-size) OCCUPANCY_BIN_SIZE="$2"; shift 2;;
     --occupancy-smooth-sigma) OCCUPANCY_SMOOTH_SIGMA="$2"; shift 2;;
     --chaser-threshold-mm) CHASER_THRESHOLD_MM="$2"; shift 2;;

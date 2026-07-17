@@ -95,9 +95,9 @@ def test_execution_plan_renders_exact_dependency_runs_and_parallel_backends(
     assert [command.node_id for command in execution.commands] == [
         "swim_bouts",
         "track_kinematics_visualization",
-        "bout_kinematics",
         "subject_shape",
         "eye_angles",
+        "bout_kinematics",
     ]
     commands = {command.node_id: command for command in execution.commands}
     swim = commands["swim_bouts"].argv
@@ -143,6 +143,11 @@ def test_execution_plan_renders_exact_dependency_runs_and_parallel_backends(
         "swim_bouts_canary_20260713_01"
     )
     assert bout[bout.index("--track-kinematics-run") + 1] == "track_a"
+    assert "--include-eye-gaze" in bout
+    assert bout[bout.index("--eye-angle-run") + 1] == (
+        "eye_angles_canary_20260713_01"
+    )
+    assert bout[bout.index("--eye-angle-family") + 1] == "gaze"
 
     eyes = commands["eye_angles"].argv
     assert eyes[:4] == (
@@ -191,6 +196,9 @@ def test_output_run_override_is_used_by_downstream_commands(tmp_path: Path) -> N
             "track_kinematics", available=True, run_name="track_a"
         ),
         "swim_bouts": _status("swim_bouts", available=False),
+        "eye_angles": _status(
+            "eye_angles", available=True, run_name="eye_angles_a"
+        ),
         "bout_kinematics": _status("bout_kinematics", available=False),
     }
     plan = plan_analysis_workflow(
@@ -211,6 +219,7 @@ def test_output_run_override_is_used_by_downstream_commands(tmp_path: Path) -> N
 
     bout_command = execution.commands[-1].argv
     assert bout_command[bout_command.index("--swim-bout-run") + 1] == "custom_bouts"
+    assert bout_command[bout_command.index("--eye-angle-run") + 1] == "eye_angles_a"
 
 
 def test_visualization_refuses_independent_output_run_override(tmp_path: Path) -> None:

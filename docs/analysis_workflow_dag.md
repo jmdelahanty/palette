@@ -76,10 +76,11 @@ flowchart LR
   TK --> BK
 
   RK --> EA[eye angles]
-  RM[refined subject masks] --> EA
+  RM[refined subject masks] --> SS[subject shape]
+  SS --> EA
   EA --> ET[framewise eye traces]
+  EA --> BK
 
-  RM --> SS[subject shape]
   SS --> TKM[tail kinematics]
   SS --> TT[framewise tail traces]
   TKM --> TT
@@ -159,6 +160,9 @@ and records the exact swim-bout input. A `bout_kinematics` target includes this
 stage automatically, so a successful core workflow is immediately discoverable
 by the recording explorer. Planning reuses the artifact only when both its
 track-kinematics and swim-bout lineage match the selected dependency runs.
+Bout kinematics also depends on the exact eye-angle node: eye-gaze summaries
+are part of the default contract, and the rendered command pins that completed
+run rather than resolving a mutable `latest` pointer at execution time.
 
 Execution requires one or more explicit analysis targets. The default remains
 a read-only command render:

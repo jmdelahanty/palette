@@ -118,6 +118,11 @@ through the Citrus poller. This example selects the 32 source recordings in the
 current GoodCopBadCop analysis cohort that have the modern movement and geometry
 prerequisites:
 
+The normal chaser-protocol submission runs/reuses framewise eye angles and
+then performs convention-validated chaser gaze tracking by default. Use
+`--skip-eye-angles`, `--skip-gaze-tracking`, or `--no-include-eye-gaze` only
+when intentionally producing a reduced compatibility result.
+
 ```bash
 scripts/submit_chaser_protocol_analytics_bsub.sh \
   --source registry \

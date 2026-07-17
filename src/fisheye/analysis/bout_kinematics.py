@@ -1038,7 +1038,12 @@ def _load_eye_gaze_frame_series(
             allowed_families=EYE_ANGLE_FAMILIES,
         )
     except EyeAngleIOError as exc:
-        raise ValueError(str(exc)) from exc
+        raise ValueError(
+            "Eye-gaze bout metrics are enabled by default, but no compatible "
+            f"eye-angle source could be loaded: {exc} Run eye-angle analysis "
+            "or select a completed run with --eye-angle-run. Use "
+            "--no-include-eye-gaze only for an intentional compatibility run."
+        ) from exc
 
 
 def _eye_epoch_stats(
@@ -2838,7 +2843,7 @@ def compute_and_save_bout_kinematics(
     dominant_frequency: bool = False,
     dominant_frequency_min_samples: int = 8,
     dominant_frequency_detrend: bool = True,
-    include_eye_gaze: bool = False,
+    include_eye_gaze: bool = True,
     eye_angle_run: str = "latest",
     eye_angle_family: str = "gaze",
     eye_validity_min_fraction: float = 1.0,
@@ -3052,6 +3057,16 @@ def compute_and_save_bout_kinematics(
         if len(loaded_peak_events) == len(bouts) and _records_align_by_bout_id(bouts, loaded_peak_events):
             peak_events = loaded_peak_events
 
+    eye_series: Optional[dict[str, np.ndarray]] = None
+    eye_source_refs: dict[str, Any] = {}
+    if include_eye_gaze:
+        eye_series, eye_source_refs = _load_eye_gaze_frame_series(
+            source_root,
+            eye_angle_run=eye_angle_run,
+            eye_angle_family=eye_angle_family,
+            frames=frames,
+        )
+
     if "analysis" not in output_root:
         analysis = output_root.create_group("analysis")
     else:
@@ -3092,14 +3107,7 @@ def compute_and_save_bout_kinematics(
     }
     if peak_events is not None:
         source_refs["source_peak_events_path"] = f"{swim_level_path}/peak_events"
-    eye_series: Optional[dict[str, np.ndarray]] = None
     if include_eye_gaze:
-        eye_series, eye_source_refs = _load_eye_gaze_frame_series(
-            source_root,
-            eye_angle_run=eye_angle_run,
-            eye_angle_family=eye_angle_family,
-            frames=frames,
-        )
         source_refs.update(eye_source_refs)
     source_bout_field_names = list(bouts.dtype.names or [])
     source_interpolated_threshold_fields = [
@@ -3490,8 +3498,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument(
         "--include-eye-gaze",
-        action="store_true",
-        help="Also compute per-bout eye-gaze summaries from an eye-angle v2 run.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Compute per-bout eye-gaze summaries from a completed eye-angle "
+            "run (default). Use --no-include-eye-gaze only for intentional "
+            "compatibility runs without eye data."
+        ),
     )
     parser.add_argument("--eye-angle-run", type=str, default="latest")
     parser.add_argument("--eye-angle-family", choices=EYE_ANGLE_FAMILIES, default="gaze")

@@ -28,9 +28,11 @@ This layer should consume:
 It should produce per-bout metrics such as net heading change, within-bout
 heading excursion, within-bout heading path length, physical active-motion
 duration, physical path length, and optional within-bout dominant frequency.
-When explicitly enabled, it should also join frame-level eye-gaze outputs from
-an exact `analysis/eye_angle_runs/<run>` source and write bout-aligned eye
-summaries without mutating either source run.
+By default it also joins frame-level eye-gaze outputs from an exact
+`analysis/eye_angle_runs/<run>` source and writes bout-aligned eye summaries
+without mutating either source run. A compatibility run may explicitly disable
+that join with `include_eye_gaze=False` or `--no-include-eye-gaze`; missing eye
+inputs must otherwise fail rather than silently producing a reduced contract.
 
 ## Use-Case Boundary
 
@@ -69,8 +71,9 @@ boundaries. The source eye trace remains owned by `analysis/eye_angle_runs`; the
 bout-kinematics run stores only windowed per-bout summaries and lineage.
 
 New compact-v2 runs store the same logical levels in direct tables
-(`movement_metrics`, `heading_metrics`, and optional `eye_gaze_metrics`) rather
-than subgroup-per-level tables. Readers should use
+(`movement_metrics`, `heading_metrics`, and `eye_gaze_metrics`) rather than
+subgroup-per-level tables. `eye_gaze_metrics` is absent only for an explicitly
+opted-out compatibility run. Readers should use
 `resolve_bout_kinematics_tables(...)` instead of hard-coding physical paths.
 See `docs/bout_kinematics_compact_v2_layout.md` for the compact layout
 contract.

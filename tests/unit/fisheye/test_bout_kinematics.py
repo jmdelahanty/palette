@@ -140,6 +140,12 @@ def test_bout_kinematics_layout_default_is_compact_v2(monkeypatch: pytest.Monkey
         inspect.signature(compute_and_save_bout_kinematics).parameters["layout"].default
         == BOUT_KINEMATICS_LAYOUT_DEFAULT
     )
+    assert (
+        inspect.signature(compute_and_save_bout_kinematics)
+        .parameters["include_eye_gaze"]
+        .default
+        is True
+    )
 
     captured: dict[str, object] = {}
 
@@ -155,6 +161,34 @@ def test_bout_kinematics_layout_default_is_compact_v2(monkeypatch: pytest.Monkey
 
     assert bout_kinematics_module.main(["/tmp/example.zarr"]) == 0
     assert captured["layout"] == BOUT_KINEMATICS_LAYOUT_DEFAULT
+    assert captured["include_eye_gaze"] is True
+
+    captured.clear()
+    assert (
+        bout_kinematics_module.main(
+            ["/tmp/example.zarr", "--no-include-eye-gaze"]
+        )
+        == 0
+    )
+    assert captured["include_eye_gaze"] is False
+
+
+def test_default_eye_gaze_fails_before_creating_output_without_eye_angles(
+    tmp_path: Path,
+) -> None:
+    zarr_path = _make_archive(tmp_path)
+
+    with pytest.raises(ValueError, match="enabled by default"):
+        compute_and_save_bout_kinematics(
+            zarr_path,
+            run_name="missing_eye_angles",
+            track_kinematics_run="tk_1",
+            track_id=0,
+            swim_bout_run="bouts_1",
+        )
+
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    assert "bout_kinematics_runs" not in root["analysis"]
 
 
 def test_compute_can_write_separate_node_local_output_without_mutating_source(
@@ -171,6 +205,7 @@ def test_compute_can_write_separate_node_local_output_without_mutating_source(
         track_id=0,
         swim_bout_run="bouts_1",
         speed_level="filtered",
+        include_eye_gaze=False,
         write_visualizations=False,
         output_shard_rows=8_192,
     )
@@ -203,6 +238,7 @@ def test_compute_and_save_bout_kinematics_writes_hierarchical_heading_levels(tmp
         post_window_s=0.2,
         physical_active_threshold_mm_s=0.1,
         physical_active_boundary_margin_s=0.1,
+        include_eye_gaze=False,
         write_visualizations=True,
         visualization_bins=8,
         layout=LAYOUT_HIERARCHICAL_V1,
@@ -423,7 +459,6 @@ def test_compute_and_save_bout_kinematics_writes_default_compact_v2_layout(tmp_p
         post_window_s=0.2,
         physical_active_threshold_mm_s=0.1,
         physical_active_boundary_margin_s=0.1,
-        include_eye_gaze=True,
         eye_angle_run="eye_1",
         vergence_threshold_deg=10.0,
     )
@@ -560,6 +595,7 @@ def test_compute_and_save_bout_kinematics_rejects_exponential_physical_source(tm
             track_id=0,
             swim_bout_run="bouts_1",
             physical_active_signal_level="exponential",
+            include_eye_gaze=False,
         )
 
 
@@ -678,6 +714,7 @@ def test_compute_and_save_bout_kinematics_marks_angular_velocity_invalid_across_
         track_id=0,
         swim_bout_run="bouts_1",
         speed_level="filtered",
+        include_eye_gaze=False,
         overwrite=False,
         layout=LAYOUT_HIERARCHICAL_V1,
     )
@@ -724,6 +761,7 @@ def test_compute_and_save_bout_kinematics_copies_peak_event_boundary_context(tmp
         heading_levels=("heading_smoothed",),
         pre_window_s=0.2,
         post_window_s=0.2,
+        include_eye_gaze=False,
         layout=LAYOUT_HIERARCHICAL_V1,
     )
 
@@ -772,6 +810,7 @@ def test_compute_and_save_bout_kinematics_requires_overwrite(tmp_path: Path) -> 
         speed_level="filtered",
         pre_window_s=0.2,
         post_window_s=0.2,
+        include_eye_gaze=False,
     )
 
     compute_and_save_bout_kinematics(**kwargs)
@@ -803,6 +842,7 @@ def test_compute_and_save_bout_kinematics_does_not_publish_latest_when_visualiza
             track_id=0,
             swim_bout_run="bouts_1",
             speed_level="filtered",
+            include_eye_gaze=False,
             write_visualizations=True,
         )
 
@@ -839,6 +879,7 @@ def test_compute_and_save_bout_kinematics_interbout_epoch_mode(tmp_path: Path) -
         speed_level="filtered",
         heading_levels=("heading_smoothed",),
         pre_post_mode="interbout_epoch",
+        include_eye_gaze=False,
         layout=LAYOUT_HIERARCHICAL_V1,
         overwrite=False,
     )

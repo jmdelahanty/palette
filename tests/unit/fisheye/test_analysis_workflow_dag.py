@@ -61,9 +61,12 @@ def test_core_behavior_profile_declares_portable_and_framewise_resolutions() -> 
     assert visualization.kind == "visualization"
     assert visualization.depends_on == ("track_kinematics", "swim_bouts")
     assert visualization.output_run_from == "track_kinematics"
-    assert "track_kinematics_visualization" in workflow.node_by_id[
-        "bout_kinematics"
-    ].depends_on
+    assert workflow.node_by_id["bout_kinematics"].depends_on == (
+        "track_kinematics",
+        "swim_bouts",
+        "track_kinematics_visualization",
+        "eye_angles",
+    )
 
 
 def test_temporal_policy_allows_numeric_overrides_but_not_trace_downsampling() -> None:
