@@ -302,10 +302,21 @@ def _packed_columns(run_group: zarr.Group, data_name: str, index_name: str, requ
     missing = [name for name in requested if name not in names]
     if missing:
         raise ValueError(f"{data_name} is missing required channels: {missing}.")
-    # This is one all-channel physical chunk per row block.  A single sequential
-    # read is faster over the network than requesting each logical channel.
-    packed = np.asarray(data[:])
-    return {name: np.asarray(packed[:, names.index(name)]) for name in requested}
+    indexes = [names.index(name) for name in requested]
+    try:
+        packed = np.asarray(
+            data.get_orthogonal_selection((slice(None), indexes))
+        )
+    except (AttributeError, TypeError, IndexError):
+        packed = np.column_stack(
+            [np.asarray(data[:, index]) for index in indexes]
+        )
+    if packed.ndim == 1:
+        packed = packed.reshape(-1, 1)
+    return {
+        name: np.asarray(packed[:, output_index])
+        for output_index, name in enumerate(requested)
+    }
 
 
 def _dense_frame_row_lookup(

@@ -969,6 +969,16 @@ def test_eye_angle_compact_dense_writer_packs_logical_tables(tmp_path) -> None:
     assert run["frame_angles"].shape == (3, 3)
     assert run["roi_vectors"].shape == (2, 1, 2)
     assert run["roi_qa"].shape == (2, 3)
+    assert run.attrs["angle_column_order_contract"] == {
+        "schema_id": eye_angle_analysis.EYE_ANGLE_COLUMN_ORDER_SCHEMA_ID,
+        "profile": eye_angle_analysis.EYE_ANGLE_COLUMN_ORDER_PROFILE,
+        "logical_lookup": "angle_channel_index/name",
+        "physical_index_semantics": False,
+        "semantic_bundle_width": 8,
+        "requested_dense_inner_chunks": [2048, 8],
+        "effective_roi_chunks": [2, 3],
+        "effective_frame_chunks": [3, 3],
+    }
 
     tables = load_eye_angle_run_tables(root, run_name="latest")
     np.testing.assert_allclose(tables.roi["left_eye_angle_deg"], [10.0, 11.0])
@@ -983,3 +993,25 @@ def test_eye_angle_compact_dense_writer_packs_logical_tables(tmp_path) -> None:
     assert tables.source_paths[
         "analysis/eye_angle_runs/compact/angles/frame/left_gaze_deg"
     ].startswith("analysis/eye_angle_runs/compact/frame_angles[:,")
+
+
+def test_semantic_angle_order_keeps_common_triplets_inside_column_blocks() -> None:
+    triplets = (
+        ("left_eye_angle_deg", "right_eye_angle_deg", "vergence_eye_angle_deg"),
+        (
+            "left_eye_angle_deg_smoothed",
+            "right_eye_angle_deg_smoothed",
+            "vergence_eye_angle_deg_smoothed",
+        ),
+        ("left_gaze_signed_deg", "right_gaze_signed_deg", "vergence_gaze_deg"),
+    )
+    names = [name for triplet in triplets for name in triplet]
+    names.extend(("heading_deg", "version_deg"))
+
+    ordered = eye_angle_analysis.semantic_angle_channel_order(names, block_width=8)
+
+    assert set(ordered) == set(names)
+    assert len(ordered) == len(names)
+    for triplet in triplets:
+        indexes = [ordered.index(name) for name in triplet]
+        assert len({index // 8 for index in indexes}) == 1

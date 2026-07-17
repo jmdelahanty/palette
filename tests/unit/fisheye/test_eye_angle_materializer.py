@@ -133,6 +133,10 @@ def test_plan_is_read_only_and_selects_only_resolved_geometry_and_keypoints(
     plan = result["plan"]
     assert plan["row_count"] == 4
     assert plan["frame_count"] == 4
+    assert plan["angle_chunk_rows"] == 2048
+    assert plan["angle_chunk_columns"] == 8
+    assert plan["output_shard_rows"] == 131072
+    assert plan["angle_shard_columns"] == 32
     assert plan["fps_source"] == "cli_override"
     assert all("masks_roi" not in path for path in plan["selected_arrays"])
     assert plan["selected_arrays"] == sorted(
@@ -192,7 +196,10 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
         keypoint_run="kp_refined_1",
         run_name="eye_1",
         chunk_rows=2,
+        angle_chunk_rows=2,
+        angle_chunk_columns=4,
         output_shard_rows=3,
+        angle_shard_columns=4,
         execution_backend="serial_driver",
         scheduler="single-threaded",
         num_workers=1,
@@ -219,8 +226,10 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
     assert run.attrs["schema_version"] == 5
     assert run.attrs["eye_angle_output_schema"]["schema_version"] == 8
     assert run.attrs["eye_angle_algorithm_contract"]["schema_version"] == 1
-    assert tuple(run["frame_angles"].shards) == (4, run["frame_angles"].shape[1])
-    assert tuple(run["roi_angles"].shards) == (4, run["roi_angles"].shape[1])
+    assert tuple(run["frame_angles"].chunks) == (2, 4)
+    assert tuple(run["roi_angles"].chunks) == (2, 4)
+    assert tuple(run["frame_angles"].shards) == (4, 4)
+    assert tuple(run["roi_angles"].shards) == (4, 4)
 
     local = run.attrs["node_local_materialization"]
     assert local["authoritative_source_zarr"] == str(source.resolve())
@@ -229,10 +238,20 @@ def test_materializer_stages_computes_shards_and_publishes_with_provenance(
     )
     assert local["source_staging"]["source_revision_audit"]["status"] == "current"
     assert local["compute"]["writer"] == "fisheye.analysis.eye_angle_analysis"
+    assert local["compute"]["angle_chunk_rows"] == 2
+    assert local["compute"]["angle_chunk_columns"] == 4
+    assert local["compute"]["angle_column_order_profile"] == (
+        "semantic_bundles_v1"
+    )
     assert local["compute"]["stage_command"] == "unit-test-eye-materializer"
     assert local["algorithm_contract"]["sha256"]
     assert local["output_contract"]["sha256"]
     assert local["sharding"]["exact_decoded_validation"] is True
+    layouts = {
+        item["path"]: item for item in local["sharding"]["angle_array_layouts"]
+    }
+    assert tuple(layouts["frame_angles"]["inner_chunks"]) == (2, 4)
+    assert tuple(layouts["frame_angles"]["outer_shards"]) == (4, 4)
 
     provenance = run.attrs["provenance"]
     assert provenance["materialization"]["authoritative_source_zarr"] == str(

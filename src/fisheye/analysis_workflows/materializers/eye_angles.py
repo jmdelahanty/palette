@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
 import socket
@@ -35,7 +36,7 @@ from ...shared.run_lineage_fingerprint import write_best_effort_run_lineage_attr
 from ...shared.run_provenance import build_run_provenance_from_stage_record
 from ...shared.zarr_io import open_zarr_root
 from ...shared.zarr_run_completion import mark_run_complete, require_runs_parent
-from ...shared.zarr_sharded_copy import copy_completed_run_to_sharded
+from ...shared.zarr_sharded_copy import ShardedArrayLayout, copy_completed_run_to_sharded
 from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
 
 
@@ -45,7 +46,10 @@ PUBLISH_SCHEMA_ID = "palette.eye_angle_run_publish.v1"
 SOURCE_REVISION_AUDIT_SCHEMA_ID = "palette.eye_angle_source_revision_audit.v1"
 GROUP_METADATA_NAMES = ("zarr.json", ".zgroup", ".zattrs")
 DEFAULT_CHUNK_ROWS = 8_192
-DEFAULT_OUTPUT_SHARD_ROWS = 262_144
+DEFAULT_ANGLE_CHUNK_ROWS = eye_writer.EYE_ANGLE_DENSE_CHUNK_ROWS
+DEFAULT_ANGLE_CHUNK_COLUMNS = eye_writer.EYE_ANGLE_DENSE_CHUNK_COLUMNS
+DEFAULT_OUTPUT_SHARD_ROWS = 131_072
+DEFAULT_ANGLE_SHARD_COLUMNS = 32
 DEFAULT_NUM_WORKERS = 8
 DEFAULT_SHARD_WORKERS = 8
 DEFAULT_NATIVE_THREADS = 1
@@ -83,7 +87,10 @@ class EyeAngleMaterializationPlan:
     row_count: int
     frame_count: int
     chunk_rows: int
+    angle_chunk_rows: int
+    angle_chunk_columns: int
     output_shard_rows: int
+    angle_shard_columns: int
     execution_backend: str
     scheduler: str
     num_workers: int
@@ -136,7 +143,10 @@ class EyeAngleMaterializationPlan:
                 "row_count": self.row_count,
                 "frame_count": self.frame_count,
                 "chunk_rows": self.chunk_rows,
+                "angle_chunk_rows": self.angle_chunk_rows,
+                "angle_chunk_columns": self.angle_chunk_columns,
                 "output_shard_rows": self.output_shard_rows,
+                "angle_shard_columns": self.angle_shard_columns,
                 "execution_backend": self.execution_backend,
                 "scheduler": self.scheduler,
                 "num_workers": self.num_workers,
@@ -374,7 +384,10 @@ def build_eye_angle_materialization_plan(
     keypoint_run: str | None,
     run_name: str,
     chunk_rows: int = DEFAULT_CHUNK_ROWS,
+    angle_chunk_rows: int = DEFAULT_ANGLE_CHUNK_ROWS,
+    angle_chunk_columns: int = DEFAULT_ANGLE_CHUNK_COLUMNS,
     output_shard_rows: int = DEFAULT_OUTPUT_SHARD_ROWS,
+    angle_shard_columns: int = DEFAULT_ANGLE_SHARD_COLUMNS,
     execution_backend: str = eye_writer.DASK_WORKER_EXECUTION_BACKEND,
     scheduler: str = "processes",
     num_workers: int = DEFAULT_NUM_WORKERS,
@@ -397,13 +410,20 @@ def build_eye_angle_materialization_plan(
         raise ValueError("Scratch root must not be inside the authoritative source Zarr.")
     positive_values = (
         chunk_rows,
+        angle_chunk_rows,
+        angle_chunk_columns,
         output_shard_rows,
+        angle_shard_columns,
         num_workers,
         shard_workers,
         native_threads,
     )
     if min(int(value) for value in positive_values) <= 0:
         raise ValueError("Chunk, shard, worker, and native-thread values must be positive.")
+    if int(angle_chunk_columns) < 3:
+        raise ValueError(
+            "angle_chunk_columns must be at least 3 to preserve left/right/binocular bundles."
+        )
     backend = eye_writer._normalize_execution_backend(execution_backend)
     scheduler_key = eye_writer._normalize_scheduler(scheduler)
     if fps is not None and float(fps) <= 0:
@@ -446,7 +466,10 @@ def build_eye_angle_materialization_plan(
         row_count=row_count,
         frame_count=frame_count,
         chunk_rows=int(chunk_rows),
+        angle_chunk_rows=int(angle_chunk_rows),
+        angle_chunk_columns=int(angle_chunk_columns),
         output_shard_rows=int(output_shard_rows),
+        angle_shard_columns=int(angle_shard_columns),
         execution_backend=backend,
         scheduler=scheduler_key,
         num_workers=int(num_workers),
@@ -733,6 +756,10 @@ def _validate_eye_angle_run(
     frame_count: int,
     expected_source_contract_sha256: str,
     require_sharded: bool,
+    expected_angle_chunk_rows: int,
+    expected_angle_chunk_columns: int,
+    expected_angle_shard_rows: int,
+    expected_angle_shard_columns: int,
 ) -> dict[str, Any]:
     group = open_zarr_root(path, mode="r")
     attrs = group.attrs
@@ -745,6 +772,15 @@ def _validate_eye_angle_run(
         errors.append("run is not complete")
     if str(attrs.get("layout")) != eye_writer.EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2:
         errors.append("layout is not compact_dense_v2")
+    column_order = attrs.get("angle_column_order_contract")
+    if not isinstance(column_order, dict) or (
+        str(column_order.get("schema_id"))
+        != eye_writer.EYE_ANGLE_COLUMN_ORDER_SCHEMA_ID
+        or str(column_order.get("profile"))
+        != eye_writer.EYE_ANGLE_COLUMN_ORDER_PROFILE
+        or bool(column_order.get("physical_index_semantics", True))
+    ):
+        errors.append("angle column-order contract mismatch")
     if int(attrs.get("num_detections", -1)) != int(row_count):
         errors.append("num_detections mismatch")
     observed_frame_count = int(attrs.get("num_frames", -1))
@@ -800,6 +836,12 @@ def _validate_eye_angle_run(
         channel_names[index_path] = names
         if int(index_group.attrs.get("channel_count", -1)) != len(names):
             errors.append(f"channel_count mismatch for {index_path}")
+        if index_path == "angle_channel_index" and (
+            str(index_group.attrs.get("logical_lookup")) != "name"
+            or str(index_group.attrs.get("physical_order_profile"))
+            != eye_writer.EYE_ANGLE_COLUMN_ORDER_PROFILE
+        ):
+            errors.append("angle_channel_index does not declare name-based lookup")
         for array_path in array_paths:
             array = group.get(array_path)
             if not isinstance(array, zarr.Array):
@@ -810,6 +852,33 @@ def _validate_eye_angle_run(
             )
             if tuple(int(value) for value in array.shape) != (expected_rows, len(names)):
                 errors.append(f"shape mismatch for {array_path}")
+                continue
+            if index_path == "angle_channel_index":
+                expected_chunks = (
+                    min(max(1, int(expected_angle_chunk_rows)), max(1, expected_rows)),
+                    min(max(1, int(expected_angle_chunk_columns)), max(1, len(names))),
+                )
+                observed_chunks = tuple(int(value) for value in array.chunks)
+                if observed_chunks != expected_chunks:
+                    errors.append(
+                        f"{array_path}: expected angle chunks {expected_chunks}, "
+                        f"observed {observed_chunks}"
+                    )
+                if require_sharded:
+                    requested_outer = (
+                        max(1, int(expected_angle_shard_rows)),
+                        max(1, int(expected_angle_shard_columns)),
+                    )
+                    expected_outer = tuple(
+                        int(math.ceil(requested / chunk) * chunk)
+                        for requested, chunk in zip(requested_outer, expected_chunks)
+                    )
+                    observed_outer = tuple(int(value) for value in array.shards)
+                    if observed_outer != expected_outer:
+                        errors.append(
+                            f"{array_path}: expected angle shards {expected_outer}, "
+                            f"observed {observed_outer}"
+                        )
 
     required_angles = {
         "left_eye_angle_deg",
@@ -923,6 +992,10 @@ def publish_eye_angle_run(
             frame_count=plan.frame_count,
             expected_source_contract_sha256=plan.source_contract_sha256,
             require_sharded=True,
+            expected_angle_chunk_rows=plan.angle_chunk_rows,
+            expected_angle_chunk_columns=plan.angle_chunk_columns,
+            expected_angle_shard_rows=plan.output_shard_rows,
+            expected_angle_shard_columns=plan.angle_shard_columns,
         )
 
     def prepare(root: zarr.Group) -> tuple[zarr.Group]:
@@ -1003,7 +1076,10 @@ def materialize_eye_angles(
     keypoint_run: str | None,
     run_name: str,
     chunk_rows: int = DEFAULT_CHUNK_ROWS,
+    angle_chunk_rows: int = DEFAULT_ANGLE_CHUNK_ROWS,
+    angle_chunk_columns: int = DEFAULT_ANGLE_CHUNK_COLUMNS,
     output_shard_rows: int = DEFAULT_OUTPUT_SHARD_ROWS,
+    angle_shard_columns: int = DEFAULT_ANGLE_SHARD_COLUMNS,
     execution_backend: str = eye_writer.DASK_WORKER_EXECUTION_BACKEND,
     scheduler: str = "processes",
     num_workers: int = DEFAULT_NUM_WORKERS,
@@ -1026,7 +1102,10 @@ def materialize_eye_angles(
         keypoint_run=keypoint_run,
         run_name=run_name,
         chunk_rows=chunk_rows,
+        angle_chunk_rows=angle_chunk_rows,
+        angle_chunk_columns=angle_chunk_columns,
         output_shard_rows=output_shard_rows,
+        angle_shard_columns=angle_shard_columns,
         execution_backend=execution_backend,
         scheduler=scheduler,
         num_workers=num_workers,
@@ -1062,6 +1141,10 @@ def materialize_eye_angles(
             plan.run_name,
             "--chunk-size",
             str(plan.chunk_rows),
+            "--dense-chunk-rows",
+            str(plan.angle_chunk_rows),
+            "--dense-chunk-columns",
+            str(plan.angle_chunk_columns),
             "--execution-backend",
             plan.execution_backend,
             "--scheduler",
@@ -1086,6 +1169,10 @@ def materialize_eye_angles(
             frame_count=plan.frame_count,
             expected_source_contract_sha256=plan.source_contract_sha256,
             require_sharded=False,
+            expected_angle_chunk_rows=plan.angle_chunk_rows,
+            expected_angle_chunk_columns=plan.angle_chunk_columns,
+            expected_angle_shard_rows=plan.output_shard_rows,
+            expected_angle_shard_columns=plan.angle_shard_columns,
         )
         # The validation contract requires materialization provenance, which is
         # appended immediately after validating the scientific writer surface.
@@ -1117,6 +1204,8 @@ def materialize_eye_angles(
                     ),
                     "duration_seconds": compute_seconds,
                     "chunk_rows": plan.chunk_rows,
+                    "angle_chunk_rows": plan.angle_chunk_rows,
+                    "angle_chunk_columns": plan.angle_chunk_columns,
                     "execution_backend": plan.execution_backend,
                     "scheduler": plan.scheduler,
                     "num_workers": plan.num_workers,
@@ -1125,6 +1214,7 @@ def materialize_eye_angles(
                     "fps_source": plan.fps_source,
                     "smoothing_window": plan.smoothing_window,
                     "layout": eye_writer.EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2,
+                    "angle_column_order_profile": eye_writer.EYE_ANGLE_COLUMN_ORDER_PROFILE,
                 },
                 "regular_validation": {
                     **regular_validation,
@@ -1166,6 +1256,14 @@ def materialize_eye_angles(
             plan.sharded_run,
             row_count_array=None,
             shard_rows=plan.output_shard_rows,
+            array_layouts={
+                array_name: ShardedArrayLayout(
+                    inner_chunks=(plan.angle_chunk_rows, plan.angle_chunk_columns),
+                    outer_shards=(plan.output_shard_rows, plan.angle_shard_columns),
+                    layout_profile=eye_writer.EYE_ANGLE_COLUMN_ORDER_PROFILE,
+                )
+                for array_name in ("roi_angles", "frame_angles")
+            },
             workers=plan.shard_workers,
         )
         sharding_summary = {
@@ -1173,6 +1271,11 @@ def materialize_eye_angles(
             for key, value in sharding.items()
             if key not in {"arrays", "shards", "static_arrays"}
         }
+        sharding_summary["angle_array_layouts"] = [
+            item
+            for item in sharding["arrays"]
+            if item["path"] in {"roi_angles", "frame_angles"}
+        ]
         sharded = open_zarr_root(plan.sharded_run, mode="a")
         materialization_payload["sharding"] = json_attr_safe(sharding_summary)
         sharded.attrs["node_local_materialization"] = materialization_payload
@@ -1188,6 +1291,10 @@ def materialize_eye_angles(
             frame_count=plan.frame_count,
             expected_source_contract_sha256=plan.source_contract_sha256,
             require_sharded=True,
+            expected_angle_chunk_rows=plan.angle_chunk_rows,
+            expected_angle_chunk_columns=plan.angle_chunk_columns,
+            expected_angle_shard_rows=plan.output_shard_rows,
+            expected_angle_shard_columns=plan.angle_shard_columns,
         )
         if not sharded_validation["valid"]:
             raise RuntimeError(
@@ -1235,9 +1342,24 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scratch-root", type=Path)
     parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_ROWS)
     parser.add_argument(
+        "--angle-chunk-rows",
+        type=int,
+        default=DEFAULT_ANGLE_CHUNK_ROWS,
+    )
+    parser.add_argument(
+        "--angle-chunk-columns",
+        type=int,
+        default=DEFAULT_ANGLE_CHUNK_COLUMNS,
+    )
+    parser.add_argument(
         "--output-shard-rows",
         type=int,
         default=DEFAULT_OUTPUT_SHARD_ROWS,
+    )
+    parser.add_argument(
+        "--angle-shard-columns",
+        type=int,
+        default=DEFAULT_ANGLE_SHARD_COLUMNS,
     )
     parser.add_argument(
         "--execution-backend",
@@ -1272,7 +1394,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         keypoint_run=args.keypoint_run,
         run_name=args.run_name,
         chunk_rows=args.chunk_size,
+        angle_chunk_rows=args.angle_chunk_rows,
+        angle_chunk_columns=args.angle_chunk_columns,
         output_shard_rows=args.output_shard_rows,
+        angle_shard_columns=args.angle_shard_columns,
         execution_backend=args.execution_backend,
         scheduler=args.scheduler,
         num_workers=args.num_workers,

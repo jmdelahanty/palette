@@ -100,6 +100,10 @@ EYE_ANGLE_LAYOUT_HIERARCHICAL_V1 = "hierarchical_v1"
 EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2 = "compact_dense_v2"
 EYE_ANGLE_LAYOUT_CHOICES = (EYE_ANGLE_LAYOUT_HIERARCHICAL_V1, EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2)
 EYE_ANGLE_LAYOUT_DEFAULT = EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2
+EYE_ANGLE_COLUMN_ORDER_SCHEMA_ID = "palette.eye_angle_semantic_column_order.v1"
+EYE_ANGLE_COLUMN_ORDER_PROFILE = "semantic_bundles_v1"
+EYE_ANGLE_DENSE_CHUNK_ROWS = 2_048
+EYE_ANGLE_DENSE_CHUNK_COLUMNS = 8
 MAJOR_AXIS_MARGINAL_DOT_THRESHOLD = 0.1
 
 _BASE_ROI_RESULT_FIELDS: tuple[tuple[str, str], ...] = (
@@ -1564,6 +1568,113 @@ def _ordered_union(*name_lists: Sequence[str]) -> list[str]:
     return ordered
 
 
+_SEMANTIC_ANGLE_BASE_BUNDLES: tuple[tuple[str, ...], ...] = (
+    ("left_eye_angle_deg", "right_eye_angle_deg", "vergence_eye_angle_deg"),
+    ("left_gaze_signed_deg", "right_gaze_signed_deg", "vergence_gaze_deg"),
+    (
+        "left_nasal_gaze_deg",
+        "right_nasal_gaze_deg",
+        "mean_eye_vergence_gaze_deg",
+    ),
+    ("left_major_signed_deg", "right_major_signed_deg", "vergence_major_signed_deg"),
+    ("left_centroid_deg", "right_centroid_deg", "vergence_centroid_deg"),
+    ("left_deg", "right_deg", "vergence_deg"),
+    ("left_signed_deg", "right_signed_deg", "vergence_signed_deg"),
+    (
+        "left_minor_signed_deg",
+        "right_minor_signed_deg",
+        "vergence_minor_signed_deg",
+    ),
+    ("left_gaze_deg", "right_gaze_deg", "vergence_gaze_signed_deg"),
+)
+
+_SEMANTIC_ANGLE_KINEMATIC_BUNDLES: tuple[tuple[str, ...], ...] = (
+    ("left_speed_deg_s", "right_speed_deg_s", "vergence_speed_deg_s"),
+    (
+        "left_gaze_speed_deg_s",
+        "right_gaze_speed_deg_s",
+        "vergence_gaze_speed_deg_s",
+    ),
+    ("left_accel_deg_s2", "right_accel_deg_s2", "vergence_accel_deg_s2"),
+    (
+        "left_gaze_accel_deg_s2",
+        "right_gaze_accel_deg_s2",
+        "vergence_gaze_accel_deg_s2",
+    ),
+)
+
+
+def _angle_variant_name(base_name: str, variant: str) -> str:
+    if variant == "raw":
+        return base_name
+    if variant == "smoothed":
+        return f"{base_name}_smoothed"
+    stem = base_name[: -len("_deg")] if base_name.endswith("_deg") else base_name
+    if variant == "delta":
+        return f"{stem}_delta_deg"
+    if variant == "delta_smoothed":
+        return f"{stem}_delta_deg_smoothed"
+    raise ValueError(f"Unknown eye-angle channel variant: {variant!r}")
+
+
+def semantic_angle_channel_order(
+    channel_names: Sequence[str],
+    *,
+    block_width: int = EYE_ANGLE_DENSE_CHUNK_COLUMNS,
+) -> list[str]:
+    """Place commonly selected left/right/binocular channels together.
+
+    Channel names remain the sole logical contract.  This ordering is a
+    physical locality hint that keeps each available semantic bundle inside a
+    column chunk when enough non-bundle channels are available as padding.
+    """
+
+    width = int(block_width)
+    if width <= 0:
+        raise ValueError("Eye-angle semantic block width must be positive.")
+    available = set(str(name) for name in channel_names)
+    bundles: list[tuple[str, ...]] = []
+    for base_bundle in _SEMANTIC_ANGLE_BASE_BUNDLES:
+        for variant in ("raw", "smoothed", "delta", "delta_smoothed"):
+            bundle = tuple(
+                name
+                for name in (
+                    _angle_variant_name(base_name, variant)
+                    for base_name in base_bundle
+                )
+                if name in available
+            )
+            if len(bundle) >= 2:
+                bundles.append(bundle)
+    for candidate in _SEMANTIC_ANGLE_KINEMATIC_BUNDLES:
+        bundle = tuple(name for name in candidate if name in available)
+        if len(bundle) >= 2:
+            bundles.append(bundle)
+
+    priority = {name for bundle in bundles for name in bundle}
+    filler = [name for name in sorted(available) if name not in priority]
+    ordered: list[str] = []
+    used: set[str] = set()
+    for bundle in bundles:
+        fresh = [name for name in bundle if name not in used]
+        if not fresh:
+            continue
+        remaining = width - (len(ordered) % width) if ordered else width
+        if remaining != width and len(fresh) > remaining:
+            while filler and len(ordered) % width:
+                name = filler.pop(0)
+                ordered.append(name)
+                used.add(name)
+        for name in fresh:
+            ordered.append(name)
+            used.add(name)
+    ordered.extend(name for name in filler if name not in used)
+    ordered.extend(name for name in sorted(available) if name not in used and name not in filler)
+    if len(ordered) != len(available) or set(ordered) != available:
+        raise RuntimeError("Semantic eye-angle ordering lost or duplicated channel names.")
+    return ordered
+
+
 def _stack_scalar_channels(
     group: zarr.Group,
     channel_names: Sequence[str],
@@ -1749,6 +1860,9 @@ def _write_angle_channel_index(
             "channel_count": int(len(channel_names)),
             "encoding": "uint8_fixed_width_null_terminated_utf8",
             "axis": 1,
+            "logical_lookup": "name",
+            "physical_order_schema_id": EYE_ANGLE_COLUMN_ORDER_SCHEMA_ID,
+            "physical_order_profile": EYE_ANGLE_COLUMN_ORDER_PROFILE,
         }
     )
 
@@ -1816,8 +1930,18 @@ def _write_compact_dense_layout(
     num_frames: int,
     chunk_len: int,
     frame_chunk: int,
+    dense_chunk_rows: int = EYE_ANGLE_DENSE_CHUNK_ROWS,
+    dense_chunk_columns: int = EYE_ANGLE_DENSE_CHUNK_COLUMNS,
 ) -> None:
     """Pack completed hierarchical eye-angle outputs into compact dense arrays."""
+
+    if int(dense_chunk_rows) <= 0:
+        raise ValueError("Compact eye-angle chunk rows must be positive.")
+    if int(dense_chunk_columns) < 3:
+        raise ValueError(
+            "Compact eye-angle chunks require at least three columns so a "
+            "left/right/binocular semantic bundle remains indivisible."
+        )
 
     angles_group = run_group["angles"]
     roi_group = angles_group["roi"]
@@ -1828,7 +1952,10 @@ def _write_compact_dense_layout(
 
     roi_angle_names = _scalar_channel_names(roi_group, dtype_kinds="f")
     frame_angle_names = _scalar_channel_names(frame_group, dtype_kinds="f")
-    angle_names = _ordered_union(roi_angle_names, frame_angle_names)
+    angle_names = semantic_angle_channel_order(
+        _ordered_union(roi_angle_names, frame_angle_names),
+        block_width=dense_chunk_columns,
+    )
     roi_angle_name_set = set(roi_angle_names)
     frame_angle_name_set = set(frame_angle_names)
     _write_angle_channel_index(
@@ -1847,7 +1974,10 @@ def _write_compact_dense_layout(
             dtype=np.float32,
             fill_value=np.nan,
         ),
-        chunks=(max(1, min(int(chunk_len), max(1, int(total_detections)))), max(1, len(angle_names))),
+        chunks=(
+            max(1, min(int(dense_chunk_rows), max(1, int(total_detections)))),
+            max(1, min(int(dense_chunk_columns), max(1, len(angle_names)))),
+        ),
     )
     _replace_array(
         run_group,
@@ -1859,7 +1989,10 @@ def _write_compact_dense_layout(
             dtype=np.float32,
             fill_value=np.nan,
         ),
-        chunks=(max(1, min(int(frame_chunk), max(1, int(num_frames)))), max(1, len(angle_names))),
+        chunks=(
+            max(1, min(int(dense_chunk_rows), max(1, int(num_frames)))),
+            max(1, min(int(dense_chunk_columns), max(1, len(angle_names)))),
+        ),
     )
 
     roi_vector_names = _vector_channel_names(roi_group)
@@ -1941,9 +2074,27 @@ def _write_compact_dense_layout(
             "compact_dense_v2_angle_channel_count": int(len(angle_names)),
             "compact_dense_v2_vector_channel_count": int(len(vector_names)),
             "compact_dense_v2_qa_channel_count": int(len(qa_names)),
+            "angle_column_order_contract": {
+                "schema_id": EYE_ANGLE_COLUMN_ORDER_SCHEMA_ID,
+                "profile": EYE_ANGLE_COLUMN_ORDER_PROFILE,
+                "logical_lookup": "angle_channel_index/name",
+                "physical_index_semantics": False,
+                "semantic_bundle_width": int(dense_chunk_columns),
+                "requested_dense_inner_chunks": [
+                    int(dense_chunk_rows),
+                    int(dense_chunk_columns),
+                ],
+                "effective_roi_chunks": [
+                    int(value) for value in run_group["roi_angles"].chunks
+                ],
+                "effective_frame_chunks": [
+                    int(value) for value in run_group["frame_angles"].chunks
+                ],
+            },
             "compact_dense_v2_note": (
                 "Eye-angle scalar channels are stored in roi_angles/frame_angles and resolved "
-                "by angle_channel_index; logical hierarchical paths remain available through eye_angle_io."
+                "by angle_channel_index names; physical column indexes are not semantic. Logical "
+                "hierarchical paths remain available through eye_angle_io."
             ),
         }
     )
@@ -2030,6 +2181,24 @@ def build_parser() -> argparse.ArgumentParser:
             f"Output storage layout (default: {EYE_ANGLE_LAYOUT_DEFAULT}). "
             "compact_dense_v2 packs completed angle/QA outputs into dense channel tables; "
             "hierarchical_v1 writes one array per logical field for compatibility/debug runs."
+        ),
+    )
+    parser.add_argument(
+        "--dense-chunk-rows",
+        type=int,
+        default=EYE_ANGLE_DENSE_CHUNK_ROWS,
+        help=(
+            "Row dimension of compact roi_angles/frame_angles chunks "
+            f"(default: {EYE_ANGLE_DENSE_CHUNK_ROWS})."
+        ),
+    )
+    parser.add_argument(
+        "--dense-chunk-columns",
+        type=int,
+        default=EYE_ANGLE_DENSE_CHUNK_COLUMNS,
+        help=(
+            "Column dimension of compact roi_angles/frame_angles chunks "
+            f"(default: {EYE_ANGLE_DENSE_CHUNK_COLUMNS})."
         ),
     )
     return parser
@@ -3520,6 +3689,8 @@ def run(args: argparse.Namespace) -> None:
             num_frames=num_frames,
             chunk_len=chunk_len,
             frame_chunk=frame_chunk,
+            dense_chunk_rows=int(args.dense_chunk_rows),
+            dense_chunk_columns=int(args.dense_chunk_columns),
         )
 
     duration_seconds = float(time.perf_counter() - stage_start)
