@@ -2748,6 +2748,12 @@ def run(args: argparse.Namespace) -> None:
         ]
     for result in sorted(results, key=lambda item: int(dict(item["chunk_timing"]).get("chunk_index") or 0)):
         chunk_timings.append(dict(result["chunk_timing"]))
+    phase_seconds: dict[str, float] = {
+        "parallel_chunk_compute_and_base_write": float(
+            time.perf_counter() - stage_start
+        )
+    }
+    derived_materialization_started = time.perf_counter()
 
     roi_group = run_group["angles"]["roi"]
     qa_roi = run_group["qa"]["roi"]
@@ -3709,7 +3715,11 @@ def run(args: argparse.Namespace) -> None:
             overwrite=True,
         )
 
+    phase_seconds["derived_trace_and_frame_materialization"] = float(
+        time.perf_counter() - derived_materialization_started
+    )
     if output_layout == EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2:
+        compact_packing_started = time.perf_counter()
         _write_compact_dense_layout(
             run_group,
             total_detections=total_detections,
@@ -3719,6 +3729,14 @@ def run(args: argparse.Namespace) -> None:
             dense_chunk_rows=int(args.dense_chunk_rows),
             dense_chunk_columns=int(args.dense_chunk_columns),
         )
+        phase_seconds["compact_dense_packing"] = float(
+            time.perf_counter() - compact_packing_started
+        )
+
+    worker_chunk_summed_seconds = {
+        key: float(sum(float(item.get(key, 0.0)) for item in chunk_timings))
+        for key in ("read_seconds", "compute_seconds", "write_seconds", "total_seconds")
+    }
 
     duration_seconds = float(time.perf_counter() - stage_start)
     rows_per_second = float(total_detections / duration_seconds) if duration_seconds > 0.0 else float("inf")
@@ -3733,6 +3751,8 @@ def run(args: argparse.Namespace) -> None:
         "dask_version": getattr(dask, "__version__", "unknown"),
         "chunk_count": len(chunks),
         "chunk_timing_count": len(chunk_timings),
+        "phase_seconds": phase_seconds,
+        "worker_chunk_summed_seconds": worker_chunk_summed_seconds,
     }
     fps_source = (
         "cli_override"

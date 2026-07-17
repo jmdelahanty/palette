@@ -478,6 +478,19 @@ def test_eye_angle_algorithm_contract_records_resolved_sources_and_exact_methods
     assert persisted.attrs["provenance"]["algorithm_contract"]["delta"]["method"] == (
         "absolute_adjacent_finite_difference"
     )
+    timing = persisted.attrs["eye_angle_timing_summary"]
+    assert set(timing["phase_seconds"]) == {
+        "parallel_chunk_compute_and_base_write",
+        "derived_trace_and_frame_materialization",
+        "compact_dense_packing",
+    }
+    assert all(value >= 0.0 for value in timing["phase_seconds"].values())
+    assert set(timing["worker_chunk_summed_seconds"]) == {
+        "read_seconds",
+        "compute_seconds",
+        "write_seconds",
+        "total_seconds",
+    }
 
 
 def test_eye_geometry_resolution_prefers_latest_subject_shape_when_enabled() -> None:

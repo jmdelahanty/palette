@@ -72,3 +72,24 @@ workloads. It also compares three named channels across the complete bounded
 duration against the complete table and checks exact decoded-value equality
 after resolving every column by name. The source Zarr is always opened
 read-only.
+
+For full materialization timing, use the LSF wrapper rather than comparing
+independent production jobs:
+
+```bash
+scripts/submit_eye_angle_materialization_layout_benchmark_bsub.sh \
+  --zarr /groups/path/to/recording_analysis.zarr \
+  --subject-shape-run subject_shape_run_name \
+  --keypoint-run refined_keypoint_run_name \
+  --benchmark-id eye_layout_abba_YYYYMMDD_01 \
+  --queue short \
+  --submit
+```
+
+This benchmark stages the exact source surface once, then runs the previous
+all-column layout and the recommended 16-column layout in A/B/B/A order on one
+host. It separately reports parallel base computation, derived trace/frame
+materialization, compact dense packing, logical validation, and sharding.
+Decoded products are normalized by channel name and must match exactly across
+all trials. Trial outputs remain disposable on node-local scratch; the
+authoritative recording is never modified.
