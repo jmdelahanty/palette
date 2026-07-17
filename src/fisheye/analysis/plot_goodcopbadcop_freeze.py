@@ -35,7 +35,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sqlite3
 from pathlib import Path
 
 import numpy as np
@@ -46,25 +45,14 @@ import matplotlib.pyplot as plt
 
 from fisheye.analysis.chaser_response_regimes import build_chaser_response_regimes_result as build
 from fisheye.analysis.cra_primary_endpoint import resolve_object_roles_from_protocol_payload
+from fisheye.analysis.goodcopbadcop_common import resolve_cohort as cohort
 from fisheye.group_statistics.paired import wilcoxon_signed_rank_p_value, paired_sign_flip_p_value
 
-DB = "/nvme1/palette_registry.sqlite"
 # Figures live OUTSIDE the repo (this script is committed; its output is not).
 FIGURES_DIR = Path(os.environ.get("PALETTE_RECORDINGS_ROOT", "/nvme1/recordings")) / "figures"
 BAND = (7.0, 18.0); FAR = (25.0, 50.0); MIN_BIN = 20; MIN_BAND_FRAMES = 150
 AGG_C = "#c1435b"; INERT_C = "#3a7ca5"; GRID = "#e6e6e6"
-
-
-def cohort():
-    """Reachable GoodCopBadCop analysis zarrs, from the registry."""
-    c = sqlite3.connect(DB); c.row_factory = sqlite3.Row
-    try:
-        rows = c.execute(
-            "SELECT recording_id,zarr_path FROM dataset_context_current WHERE recording_id LIKE '%GoodCopBadCop%' "
-            "AND zarr_use='analysis' AND dataset_status='active' ORDER BY recording_id").fetchall()
-    finally:
-        c.close()
-    return [(r["recording_id"], r["zarr_path"]) for r in rows if Path(r["zarr_path"]).is_dir()]
+# cohort() is the shared, registry-resolved, duplicate-deduped resolver (see goodcopbadcop_common).
 
 
 def roles(res):

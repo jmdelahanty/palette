@@ -28,7 +28,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sqlite3
 from pathlib import Path
 
 import numpy as np
@@ -37,9 +36,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from fisheye.analysis.goodcopbadcop_common import resolve_cohort as cohort
 from fisheye.group_statistics.paired import wilcoxon_signed_rank_p_value
 
-DB = "/nvme1/palette_registry.sqlite"
 FIGURES_DIR = Path(os.environ.get("PALETTE_RECORDINGS_ROOT", "/nvme1/recordings")) / "figures"
 EPOCHS = ["pre", "chase", "post"]
 DEFAULT_EXAMPLE = "21-50-10Z_arena_3"
@@ -50,15 +49,7 @@ PANELS = [("rate", "Bouts per validly-tracked minute", "bouts/min"),
           ("pk", "Bout peak speed", "mm/s")]
 
 
-def cohort():
-    c = sqlite3.connect(DB); c.row_factory = sqlite3.Row
-    try:
-        rows = c.execute(
-            "SELECT recording_id,zarr_path FROM dataset_context_current WHERE recording_id LIKE '%GoodCopBadCop%' "
-            "AND zarr_use='analysis' AND dataset_status='active' ORDER BY recording_id").fetchall()
-    finally:
-        c.close()
-    return [(r["recording_id"], r["zarr_path"]) for r in rows if Path(r["zarr_path"]).is_dir()]
+# cohort() is the shared, registry-resolved, duplicate-deduped resolver (see goodcopbadcop_common).
 
 
 def load(zp):
