@@ -34,7 +34,9 @@ def _():
     )
     from apps.marimo.components.bout_kinematics import (
         available_bout_analysis_ids,
+        build_bout_controls,
         build_bout_kinematics_output,
+        load_bout_metric_projection,
     )
     from apps.marimo.components.goodcopbadcop_chaser import (
         available_chaser_analysis_ids,
@@ -80,6 +82,7 @@ def _():
         available_bout_analysis_ids,
         available_chaser_analysis_ids,
         build_arena_heatmap,
+        build_bout_controls,
         build_bout_kinematics_output,
         build_chaser_gaze_tracking_output,
         build_chaser_controls,
@@ -107,6 +110,7 @@ def _():
         group_specs_by_provider,
         load_core_behavior_projection,
         load_chaser_gaze_tracking_view,
+        load_bout_metric_projection,
         load_goodcopbadcop_view,
         mo,
         px,
@@ -359,6 +363,79 @@ def _(analysis_by_label, analysis_picker):
     )
     selected_analysis_id = selected_analysis.analysis_id if selected_analysis is not None else ""
     return selected_analysis, selected_analysis_id
+
+
+@app.cell(hide_code=True)
+def _(
+    build_bout_controls,
+    mo,
+    selected_analysis_id,
+    selected_provider,
+    selected_spec,
+    zarr_path,
+):
+    bout_controls_error = None
+    bout_controls = None
+    if (
+        selected_provider is not None
+        and selected_provider.provider_id == "bout_kinematics"
+        and selected_spec is not None
+        and selected_analysis_id in {"heading", "movement", "eye_gaze"}
+    ):
+        try:
+            bout_controls = build_bout_controls(
+                mo,
+                zarr_path=zarr_path,
+                selected_option=selected_spec,
+                analysis_id=selected_analysis_id,
+            )
+            bout_controls_output = (
+                bout_controls.view
+                if bout_controls is not None
+                else mo.md("No interactive bout metrics are declared by this spec.")
+            )
+        except Exception as exc:
+            bout_controls_error = f"{type(exc).__name__}: {exc}"
+            bout_controls_output = mo.callout(
+                f"Bout controls could not be created: `{bout_controls_error}`",
+                kind="danger",
+            )
+    else:
+        bout_controls_output = mo.md("")
+    bout_controls_output
+    return bout_controls, bout_controls_error
+
+
+@app.cell(hide_code=True)
+def _(
+    bout_controls,
+    load_bout_metric_projection,
+    selected_analysis_id,
+    selected_spec,
+    zarr_path,
+):
+    bout_projection = None
+    bout_projection_error = None
+    if bout_controls is not None and selected_spec is not None:
+        try:
+            bout_metric = bout_controls.metric_by_label[bout_controls.metric_picker.value]
+            bout_heading_level = (
+                str(bout_controls.heading_level_picker.value)
+                if bout_controls.heading_level_picker is not None
+                else None
+            )
+            bout_projection = load_bout_metric_projection(
+                zarr_path,
+                selected_spec,
+                analysis_id=selected_analysis_id,
+                metric=bout_metric,
+                heading_level=bout_heading_level,
+                bins=int(bout_controls.bins_picker.value),
+                valid_only=bool(bout_controls.valid_only.value),
+            )
+        except Exception as exc:
+            bout_projection_error = f"{type(exc).__name__}: {exc}"
+    return bout_projection, bout_projection_error
 
 
 @app.cell(hide_code=True)
@@ -649,7 +726,12 @@ def _(
 
 @app.cell(hide_code=True)
 def _(
+    bout_controls,
+    bout_controls_error,
+    bout_projection,
+    bout_projection_error,
     build_bout_kinematics_output,
+    go,
     mo,
     selected_analysis_id,
     selected_provider,
@@ -662,12 +744,25 @@ def _(
         and selected_spec is not None
         and selected_analysis_id
     ):
-        bout_output = build_bout_kinematics_output(
-            mo,
-            zarr_path=zarr_path,
-            selected_option=selected_spec,
-            analysis_id=selected_analysis_id,
-        )
+        if bout_controls_error or bout_projection_error:
+            bout_output = mo.callout(
+                f"Bout metric projection failed: `{bout_controls_error or bout_projection_error}`",
+                kind="danger",
+            )
+        else:
+            bout_output = build_bout_kinematics_output(
+                mo,
+                zarr_path=zarr_path,
+                selected_option=selected_spec,
+                analysis_id=selected_analysis_id,
+                go=go,
+                projection=bout_projection,
+                show_snapshot=(
+                    bool(bout_controls.show_snapshot.value)
+                    if bout_controls is not None
+                    else False
+                ),
+            )
     else:
         bout_output = mo.md("")
     bout_output

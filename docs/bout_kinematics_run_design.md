@@ -633,10 +633,21 @@ biological quantities into one overloaded artifact.
 
 The Recording Explorer groups these companion specs into one Bout kinematics
 provider per run. Heading, movement, and eye-gaze entries are exposed only when
-their corresponding persisted contracts exist. The initial renderer loads the
-bounded PNG snapshot declared by `snapshot_artifact`; it does not read the full
-per-bout metric tables merely to display the summary. Provenance remains
+their corresponding persisted contracts exist. The bounded PNG declared by
+`snapshot_artifact` remains available as an optional reference; displaying the
+interactive summary does not read the full per-bout table. Provenance remains
 available from the interactive spec and artifact attributes.
+
+The interactive distribution renderer treats the spec's histogram metrics as
+an allowlist. It reads only the selected metric column, the compact heading
+level index when required, and metric-specific validity columns. Histogram and
+cumulative-distribution bins are computed server-side; raw per-bout values are
+not embedded in the Plotly payload. Users may change the metric, heading
+representation, bin count, and validity filter, and may reveal the persisted
+PNG as an optional reference. When a materialized run retains source paths that
+name its parent run, the reader resolves the declared run-relative suffix
+against the actual owning run while preserving the original spec for
+provenance.
 
 ## Window Parameters
 
