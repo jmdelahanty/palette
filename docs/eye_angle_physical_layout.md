@@ -93,3 +93,31 @@ materialization, compact dense packing, logical validation, and sharding.
 Decoded products are normalized by channel name and must match exactly across
 all trials. Trial outputs remain disposable on node-local scratch; the
 authoritative recording is never modified.
+
+### Controlled Sleepyfish result (2026-07-17)
+
+The full A/B/B/A benchmark ran on one `h07u20` host with eight LSF slots
+(Intel Xeon Gold 6248R). All four disposable products matched exactly after
+normalization by channel name.
+
+| Measure | All-column `(8192,141)` | Semantic-16 `(4096,16)` | Semantic-16 change |
+| --- | ---: | ---: | ---: |
+| Writer median | 108.150 s | 111.377 s | +2.98% |
+| Base computation/write | 45.214 s | 45.275 s | +0.13% |
+| Derived trace/frame materialization | 40.988 s | 40.413 s | -1.40% |
+| Compact dense packing | 19.200 s | 22.776 s | +18.63% |
+| Sharding | 4.530 s | 5.756 s | +27.08% |
+| Writer plus sharding | 112.680 s | 117.133 s | +3.95% |
+| Sharded physical storage | 713.1 MiB | 982.7 MiB | +37.81% |
+
+The separately controlled read benchmark found that semantic-16 reduced a
+three-channel bounded read from 11.38 ms to 2.90 ms and a complete-duration
+three-channel read from 0.245 s to 0.212 s, while increasing a complete-table
+read from 0.231 s to 0.845 s. The production default therefore remains
+semantic-16: its common narrow interactive reads improve substantially for a
+small end-to-end materialization-time cost, while the physical-byte and
+complete-table penalties remain explicit tradeoffs rather than hidden wins.
+
+The authoritative benchmark report is stored with the recording processing
+logs at
+`eye_angle_benchmarks/sleepyfish_eye_layout_abba_20260717_01/report.json`.
