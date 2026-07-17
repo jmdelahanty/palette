@@ -220,8 +220,12 @@ The executor preserves these large-recording constraints:
   subject-shape eye ellipses and refined keypoints, transfers only those exact
   arrays to node-local scratch, records the authoritative and staged locations
   separately, and runs framewise computation against the staged archive.
-  Completed regular output is converted to 262,144-row indexed shards with
-  exact decoded validation before checksum-verified atomic publication;
+  Completed regular output is converted to indexed shards with exact decoded
+  validation before checksum-verified atomic publication. Compact
+  `roi_angles` and `frame_angles` use semantic name-local column order,
+  approximately `(2048, 8)` inner chunks, and `(131072, 32)` outer shards;
+  their requested and effective grids are persisted in materialization
+  provenance;
 - subject shape reads refined masks from the authoritative Zarr without
   mutation, computes into node-local 1,024-row logical blocks, assembles
   131,072-row indexed outer shards while preserving 256-row inner chunks,

@@ -118,6 +118,10 @@ uses a precise two-stage contract:
    refuses windows above the configured viewer row limit. Tail projections use
    binary search over the persisted sparse frame coordinate, default to ten
    seconds, and refuse more than 10,000 framewise rows.
+
+   New eye-angle materializations also arrange related named channels into
+   column-local semantic bundles. Numeric indexes remain non-semantic; see
+   [Eye-angle physical column layout](eye_angle_physical_layout.md).
 2. The resulting projection is represented as a `polars.LazyFrame`; filtering,
    column projection, grouping, and descriptive display queries remain lazy
    until collection.
