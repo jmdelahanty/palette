@@ -5,15 +5,27 @@ scrutiny, what was retracted, the methodological lessons, and where to pick up.
 Companion to `docs/diagnostics/goodcopbadcop_detection_dropout_2026-07-16.md`
 (the detection-quality half) and `docs/goodcopbadcop_avoidance_readout_survey.md`.
 
+> **Cohort correction (2026-07-17):** the behavior results below were computed
+> on an 11–12-recording June 14 analysis slice, but that limitation was caused by
+> discovery/selection, not missing data. The canonical registry currently resolves
+> 36 distinct pre-July analysis recordings on `/groups`: 4 from May 29, 12 from
+> June 14, and 20 from June 21. Treat the reported statistics as slice-level findings
+> until the durable analyses are rerun on all 36 recordings.
+
 ## Cohort / data reality (read first)
 
-- **12 reachable analysis zarrs** on `/groups/johnson/johnsonlab/jeremy/recordings`
-  (3 sessions, all 2026-06-14, 4 arenas each). One fish per arena.
-- **The 2026-05-29 session's 8 zarrs are registered but NOT on local disk** (their
-  `/nvme1` paths don't resolve). So everything below is n=11–12, not the 32-fish /
-  8-session cohort the earlier diagnostics used. **This underpowering is the single
-  biggest limitation** — several marginal calls would likely resolve on the full
-  cohort. Getting those 8 zarrs back is the top priority (see Open threads).
+- **36 distinct pre-July analysis recordings are live on `/groups`**, with one
+  expected subject per arena: May 29 (4 recordings / 1 session), June 14
+  (12 recordings / 3 sessions), and June 21 (20 recordings / 5 sessions).
+- The historical **32-fish / 8-session** diagnostic was the June-only cohort.
+  Adding May 29 produces the current 36-fish / 9-session ceiling.
+- A duplicate registry row for the June 14 arena 4
+  `jlcrsi/example_heartrate_recording` override was retired on 2026-07-17. The
+  standalone example archive remains on disk, so filesystem-based discovery must
+  still exclude it in favor of the canonical `/recordings/...` Zarr.
+- The analyses summarized below selected only 11–12 June 14 recordings. There is no
+  restore or inference-rerun prerequisite; the remaining work is to rerun the durable
+  behavior analyses with canonical registry discovery and a session-level effect.
 - Immobility/speed metrics: **use `speed_smoothed_mm`** (track_kinematics), NOT raw
   centroid diffs — see the artifact below. Bouts come from `chaser_bout_response`,
   detected on the `speed_exponential` signal (robust).
@@ -31,11 +43,12 @@ REAL (survived clean-signal + confound checks):
   it is present **pre-training (+1.54 mm/s, p=0.042) and does NOT grow with training**
   (post −0.65, Δ p=0.105) → **innate, not learned** (matches known innate red-avoidance).
 
-PLAUSIBLE BUT UNDERPOWERED / needs full cohort:
+PLAUSIBLE BUT UNDERPOWERED / needs the 36-recording rerun:
 - **Flee→freeze habituation over chase trials.** Freeze fraction early 0.44 → late
   0.61 (p=0.005, n=11); escape rate 0.84(trial1)→~0.2, early-vs-late p=0.21 at n=11
-  (full 32-fish diagnostic: 0.48→0.11, **p=0.0002**). This is the best *learning*
-  candidate. See the wall caveat below — do NOT dismiss it via the naïve wall control.
+  (earlier June-only 32-fish diagnostic: 0.48→0.11, **p=0.0002**). This is the best
+  *learning* candidate. See the wall caveat below — do NOT dismiss it via the naïve
+  wall control.
 
 RETRACTED / DIED:
 - **Mid-band immobility "avoidance" (Δ+0.177, p=0.002) — RAW-TRACKING-NOISE ARTIFACT.**
@@ -84,7 +97,9 @@ back to raw centroid with a `immobility_signal_fallback_raw_centroid` warning +
    mediation model, not a partial correlation on n=11.
 4. **"Thigmotaxis" ≠ radial wall-proximity.** Check the angular distribution before
    calling wall-hugging thigmotaxis.
-5. **n=11 is underpowering the marginal calls.** Get the full cohort before final claims.
+5. **n=11 is underpowering the marginal calls.** Rerun the durable analyses on the
+   36-recording canonical cohort before final claims; do not mistake the original
+   selection bug for unavailable data.
 
 ## Code changes landed (branch `sun`)
 
@@ -99,9 +114,13 @@ back to raw centroid with a `immobility_signal_fallback_raw_centroid` warning +
 
 Durable figure scripts (in repo, write figures OUTSIDE it): `plot_goodcopbadcop_freeze`,
 `plot_goodcopbadcop_trajectory_prepost`, `plot_goodcopbadcop_bout_rate`
-(all `src/fisheye/analysis/plot_*.py`, registry-resolved, `python -m ...`).
+(all `src/fisheye/analysis/plot_*.py`, registry-resolved, `scripts/py -m ...`).
 
-## Figures produced (in `/nvme1/recordings/figures/`, out-of-repo, dated 2026-07-17)
+## Historical slice figures (out-of-repo, dated 2026-07-17)
+
+These were written to `/nvme1/recordings/figures/` by the original 11–12-recording
+analysis. They are retained as historical diagnostics, not full-cohort outputs. New
+36-recording figures need fresh provenance and should not overwrite these files.
 
 - `goodcopbadcop_freeze_curve` / `_summary` — raw-vs-smoothed contrast (the artifact).
 - `goodcopbadcop_freeze_figures_2026-07-17_PROVENANCE.txt` — has a RETRACTED banner.
@@ -121,10 +140,11 @@ findings are kept, promote the load-bearing ones to durable `plot_*`/analysis sc
 
 ## Open threads / next steps (the handoff)
 
-1. **[TOP] Restore the 2026-05-29 session's 8 analysis zarrs to local disk** and re-run
-   on the full 32-fish / 8-session cohort with a **session random effect**. This is the
-   real fix for every marginal call (habituation especially) and lets the group-stats
-   machinery (`src/fisheye/group_statistics/goodcopbadcop.py`) do proper mixed models.
+1. **[TOP] Rerun the durable analyses on the canonical 36-fish / 9-session cohort**
+   with a **session random effect**. Registry discovery must deduplicate by
+   `recording_id`, prefer canonical `/recordings/...` analysis Zarrs, and exclude the
+   June 14 arena 4 example override. This lets the group-stats machinery
+   (`src/fisheye/group_statistics/goodcopbadcop.py`) do proper mixed models.
 2. **Habituation, done right.** With the full cohort: freeze/escape over trials as the
    learning signal, treating chaser-driven wall-proximity as a *mediator* (mediation
    analysis), not a nuisance to partial out. Also verify the freeze metric
@@ -135,8 +155,8 @@ findings are kept, promote the load-bearing ones to durable `plot_*`/analysis sc
    landing before the wall-mediation analysis.
 4. **Bout kinematics as the near-vs-far axis that works.** #1 in the survey doc's menu.
    Split by epoch and by escape-vs-ordinary; robust because bout-level.
-5. **Tail/C-start kinematics** would give a shape axis for near-vs-far, but
-   `subject_shape`/`tail_kinematics` is 0/12 materialized on this cohort.
+5. **Tail/C-start kinematics** would give a shape axis for near-vs-far, but the
+   registry currently reports `subject_shape`/`tail_kinematics` as 0/36 materialized.
 
 ## The honest framing for collaborators
 
