@@ -1708,7 +1708,7 @@ tables/summary_metrics
 tables/histograms
 signals/detector_signal_mm_s
 signals/detector_signal_signal_ids
-signals/frame_indices
+signals/frame_indices                    # schema-7 or declared embedded fallback
 ```
 
 Compact v2 replaces physical `<speed_level>` subgroups with `candidate_id` and
@@ -1723,6 +1723,28 @@ chunk (`palette_storage_policy="single_regular_chunk_v1"`). This measured
 exception favors the common complete-trace read; it does not apply to large
 framewise eye, tail, or track arrays. Readers should still resolve the signal
 row before requesting values so the logical lookup remains future-compatible.
+
+New compact runs use `palette.swim_bout_runs` schema version 8 and persist a
+run-level `frame_axis_contract` with schema id
+`palette.swim_bout_frame_axis_reference`, version 1. The contract pins the
+exact same-Zarr track-kinematics `frame_indices` path, source run, track id,
+shape, source dtype, and canonical content hash. The default
+`frame_axis_storage=reference` does not duplicate the axis.
+`frame_axis_storage=embedded` additionally writes `signals/frame_indices` as a
+portable fallback, but current Palette readers still prefer the authoritative
+path while it exists. Historical schema-7 compact runs have no reference
+contract and continue to read their embedded axis unchanged. A reference must
+name a concrete source run rather than a `latest` pointer; readers fail closed
+on shape, dtype, run, or track mismatch.
+
+This reference rule applies only when the downstream array retains the exact
+upstream row domain, ordering, and length. Coordinate axes such as this track
+frame axis may then be referenced directly. Identity and mapping arrays serve a
+different purpose: `instance_key` identifies a biological/detection instance,
+`source_row_indices` maps local rows to upstream rows, and `frame_offsets`
+indexes sparse frame groups. A stage that filters, duplicates, or reorders rows
+must persist the appropriate local identity or mapping even when its metadata
+also names an upstream authority.
 
 Run attrs also include `swim_bout_algorithm_contract`, a versioned,
 self-contained scientific contract (`analysis.swim_bout_algorithm_contract`,

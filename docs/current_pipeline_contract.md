@@ -129,9 +129,11 @@ Current rules:
   `analysis/track_kinematics_runs/<scope>/<run>/tracks/id_<track>`, not from
   legacy `analysis/movement_runs` or ad hoc subject-shape-origin differencing.
   Swim-bout event windows live in `analysis/swim_bout_runs`; new accepted
-  swim-bout runs default to the compact-v2 tabular layout, while
-  hierarchical-v1 remains an explicit compatibility option. Physical per-bout
-  measurements live in linked `analysis/bout_kinematics_runs`. The
+  swim-bout runs default to the compact-v2 tabular layout and use a versioned
+  same-Zarr reference to the exact source track frame axis. Embedded frame-axis
+  copies remain an explicit portability option, while hierarchical-v1 remains
+  an explicit compatibility option. Physical per-bout measurements live in
+  linked `analysis/bout_kinematics_runs`. The
   Crimson-facing reader contract is
   [`crimson_track_motion_read_contract.md`](./crimson_track_motion_read_contract.md).
 - Source stimulus timing and geometry should come from

@@ -20,6 +20,11 @@ from fisheye.analysis.detect_bouts_multi_level import (
     _bout_dtype,
 )
 from fisheye.analysis.swim_bout_io import load_default_swim_bout_tables
+from fisheye.analysis.swim_bout_frame_axis import (
+    FRAME_AXIS_CONTRACT_ATTR,
+    FRAME_AXIS_STORAGE_EMBEDDED,
+    build_frame_axis_contract,
+)
 
 
 def _one_bout(bout_id: int, start_frame: int, end_frame: int) -> np.ndarray:
@@ -218,6 +223,16 @@ def test_compact_v2_writer_helper_outputs_resolver_readable_tables() -> None:
         for level in speed_levels
     }
     frames = np.arange(20, dtype=np.int64)
+    frame_axis_contract = build_frame_axis_contract(
+        frames,
+        authoritative_path=(
+            "analysis/track_kinematics_runs/offline/tk_run/tracks/id_0/frame_indices"
+        ),
+        source_track_kinematics_run="tk_run",
+        track_id=0,
+        storage_mode=FRAME_AXIS_STORAGE_EMBEDDED,
+    )
+    run.attrs[FRAME_AXIS_CONTRACT_ATTR] = frame_axis_contract
     level_payloads = {}
     for idx, level in enumerate(speed_levels):
         bouts = _one_bout(idx + 1, idx * 2, idx * 2 + 1)
@@ -261,6 +276,7 @@ def test_compact_v2_writer_helper_outputs_resolver_readable_tables() -> None:
         speeds={
             "speed_exponential_mm": np.linspace(0.0, 1.0, frames.size, dtype=np.float64),
         },
+        frame_axis_contract=frame_axis_contract,
     )
 
     payload = load_default_swim_bout_tables(root)
@@ -291,8 +307,17 @@ def test_compact_v2_writer_helper_outputs_resolver_readable_tables() -> None:
 
 def test_detect_and_save_bouts_defaults_to_compact_v2_layout(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     zarr_path = tmp_path / "analysis.zarr"
-    zarr.open_group(str(zarr_path), mode="w")
+    root = zarr.open_group(str(zarr_path), mode="w")
     frames = np.arange(12, dtype=np.int64)
+    source_track = (
+        root.create_group("analysis")
+        .create_group("track_kinematics_runs")
+        .create_group("offline")
+        .create_group("tk_run")
+        .create_group("tracks")
+        .create_group("id_0")
+    )
+    source_track.create_array("frame_indices", data=frames)
     speed = np.asarray([0, 0, 1, 1, 0, 0, 2, 2, 0, 0, 0, 0], dtype=np.float64)
     transition_valid = np.ones(frames.size, dtype=bool)
     transition_valid[0] = False
@@ -322,6 +347,14 @@ def test_detect_and_save_bouts_defaults_to_compact_v2_layout(tmp_path, monkeypat
             "track_id": track_id,
             "positions_mm": np.column_stack((frames, frames)).astype(np.float64),
             "positions_px": np.column_stack((frames * 10, frames * 10)).astype(np.float64),
+            "source_array_paths": {
+                "frame_indices": (
+                    "analysis/track_kinematics_runs/offline/tk_run/"
+                    "tracks/id_0/frame_indices"
+                )
+            },
+            "source_frame_indices_dtype": "int64",
+            "source_frame_indices_shape": [frames.size],
         }
         return speeds, metadata
 
@@ -347,11 +380,21 @@ def test_detect_and_save_bouts_defaults_to_compact_v2_layout(tmp_path, monkeypat
     run = root["analysis"]["swim_bout_runs"]["compact_run"]
     payload = load_default_swim_bout_tables(root)
 
-    assert run.attrs["schema_version"] == 7
+    assert run.attrs["schema_version"] == 8
     assert run.attrs["layout"] == SWIM_BOUT_STORED_LAYOUT_COMPACT_V2
     assert "speed_exponential" not in run
+    assert "frame_indices" not in run["signals"]
+    frame_axis_contract = run.attrs[FRAME_AXIS_CONTRACT_ATTR]
+    assert frame_axis_contract["storage_mode"] == "reference"
+    assert frame_axis_contract["authoritative_path"] == (
+        "analysis/track_kinematics_runs/offline/tk_run/tracks/id_0/frame_indices"
+    )
+    assert frame_axis_contract["shape"] == [frames.size]
+    assert frame_axis_contract["authoritative_dtype"] == "int64"
+    assert run.attrs["provenance"]["frame_axis_contract"] == frame_axis_contract
     assert payload.signal.speed_level == "speed_exponential"
     assert payload.bouts.size > 0
+    np.testing.assert_array_equal(payload.series["frame_indices"], frames)
 
     algorithm_contract = run.attrs["swim_bout_algorithm_contract"]
     assert algorithm_contract["schema_id"] == "analysis.swim_bout_algorithm_contract"

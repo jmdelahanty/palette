@@ -90,6 +90,11 @@ def test_detect_bouts_load_speed_levels_uses_track_kinematics_resolver(tmp_path:
     assert metadata["track_kinematics_run"] == "tk_test"
     assert metadata["track_kinematics_scope"] == "offline"
     assert metadata["track_kinematics_git_commit"] == "abc"
+    assert metadata["source_frame_indices_dtype"] == "int64"
+    assert metadata["source_frame_indices_shape"] == [3]
+    assert metadata["source_array_paths"]["frame_indices"] == (
+        "analysis/track_kinematics_runs/offline/tk_test/tracks/id_0/frame_indices"
+    )
     np.testing.assert_array_equal(speeds["frames"], [10, 11, 12])
     np.testing.assert_allclose(speeds["speed_filtered_mm"], [40.0, 50.0, 60.0])
     np.testing.assert_allclose(speeds["frame_path_distance_filtered_mm"], [4.0, 5.0, 6.0])

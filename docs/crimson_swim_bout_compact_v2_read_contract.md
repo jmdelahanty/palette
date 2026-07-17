@@ -8,6 +8,13 @@ UI validation confirm direct compact-v2 reads work. Palette changed the
 `detect_bouts_multi_level` default writer layout to compact-v2 on 2026-05-11;
 hierarchical v1 remains an explicit compatibility option.
 
+Frame-axis reference update, 2026-07-17: compact table structure remains
+`compact_tabular_v2`, but new Palette swim-bout runs use run schema version 8
+and make the exact source track-kinematics array authoritative. Schema-7 runs
+remain unchanged and embed `signals/frame_indices`. Schema-8 runs carry a
+versioned `frame_axis_contract`; reference-only output is the default, while
+`--frame-axis-storage embedded` also writes a portable fallback.
+
 Crimson consumer validation update, 2026-05-11: Crimson loaded the feeding
 canary and reported both compact-v2 swim-bout runs plus compact-v2
 bout-kinematics metrics:
@@ -173,7 +180,7 @@ tables/peak_events                  # optional for timeline metadata
 tables/inter_bout_intervals          # optional
 signals/detector_signal_mm_s         # optional dense detector traces
 signals/detector_signal_signal_ids   # maps dense signal rows to signal_id
-signals/frame_indices                # frame axis for dense detector traces
+signals/frame_indices                # schema-7 or declared schema-8 fallback
 ```
 
 Candidate selection:
@@ -211,11 +218,28 @@ Detector trace:
 - If `signals/detector_signal_mm_s` exists, read
   `signals/detector_signal_signal_ids`.
 - Find the row whose value equals the selected `signal_id`.
-- Use that row as the detector trace and read `signals/frame_indices` as the
-  frame axis. New Palette runs retain the logical `(signal_id, frame)` shape
-  and store the small detector payload as one regular recording-length chunk.
-  Select the row before reading values to retain compatibility if more detector
-  signals or another physical layout are introduced later.
+- Use that row as the detector trace. New Palette runs retain the logical
+  `(signal_id, frame)` shape and store the small detector payload as one regular
+  recording-length chunk. Select the row before reading values to retain
+  compatibility if more detector signals or another physical layout are
+  introduced later.
+- Resolve its frame axis as follows:
+  1. If `run.attrs["frame_axis_contract"]` is absent, read the historical
+     schema-7 `signals/frame_indices` array.
+  2. Otherwise require schema id
+     `palette.swim_bout_frame_axis_reference`, schema version `1`, and
+     `reference_scope == "same_zarr_root"`.
+  3. Resolve `authoritative_path` relative to the same opened Zarr root. The
+     path must pin a concrete track-kinematics run and must not contain a
+     `latest` path segment.
+  4. Require its source run and `track_id` to match the swim-bout run attrs,
+     and require the physical array shape and dtype to match the contract.
+  5. If the authoritative node is absent, use `embedded_path` only when the
+     contract explicitly declares it. A present-but-mismatched authoritative
+     node is an error and must not silently fall back.
+  6. Require the resolved frame-axis length to equal the detector trace length.
+- `content_sha256` hashes canonical little-endian `int64` values and is for
+  provenance/auditing. Normal interactive reads need not recompute it.
 - This replaces the v1 path
   `<run>/<speed_level>/detection_signal_mm_s`.
 

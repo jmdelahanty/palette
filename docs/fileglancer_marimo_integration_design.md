@@ -331,6 +331,20 @@ registry, export, visualization, and report contracts. Keeping the manifest
 and app with Palette allows one immutable commit to identify both. A curated
 pointer or catalog listing in FileGlancer infrastructure can be added later.
 
+### Resolve derived-array references inside Palette
+
+The FileGlancer recording explorer and editable recording workspace must use
+Palette's logical readers for derived analyses instead of assuming every
+coordinate array is copied into every run. In particular, run-schema-8 compact
+swim-bout detector traces carry a versioned `frame_axis_contract` whose
+archive-relative `authoritative_path` points to the exact source
+track-kinematics `frame_indices` array. `fisheye.analysis.swim_bout_io` resolves
+that path and retains schema-7 or explicitly embedded fallback compatibility,
+so the FileGlancer runners require no additional mount: the source and derived
+run are inside the same read-only Zarr root. The generic Zarr workspace may
+display the reference metadata and source array separately, but scientific
+renderers should use the logical resolver.
+
 ## Implementation sequence
 
 1. Refactor `group_analytics_explorer.py` to accept `--export-root` and an

@@ -1,9 +1,9 @@
 """Logical readers for Palette swim-bout runs.
 
-This module provides a compatibility layer over the current hierarchical
-``analysis/swim_bout_runs/<run>/<speed_level>`` layout. The public objects are
-shaped to match the planned compact v2 schema so downstream code can stop
-depending on physical path names before the writer changes.
+This module provides a compatibility layer over historical hierarchical and
+current compact-tabular layouts. Compact detector traces may use a versioned
+same-Zarr reference to the authoritative track-kinematics frame axis; callers
+do not need to depend on that physical storage choice.
 """
 
 from __future__ import annotations
@@ -15,6 +15,10 @@ import numpy as np
 import zarr
 
 from fisheye.shared.zarr.columnar import load_structured_dataset
+from fisheye.analysis.swim_bout_frame_axis import (
+    SwimBoutFrameAxisError,
+    resolve_swim_bout_frame_axis,
+)
 from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.shared.zarr_helpers import (
     normalize_zarr_path as _normalize_path,
@@ -243,6 +247,7 @@ def load_swim_bout_tables(
     is_latest = str(parent.attrs.get("latest")) == str(resolved_name)
     if _is_compact_v2_group(run_group):
         return _load_compact_v2_tables(
+            root,
             run_group,
             run_name=resolved_name,
             is_latest=is_latest,
@@ -549,6 +554,7 @@ def _signals_from_compact_v2_rows(
 
 
 def _load_compact_v2_tables(
+    root: zarr.Group,
     run_group: zarr.Group,
     *,
     run_name: str,
@@ -608,7 +614,7 @@ def _load_compact_v2_tables(
         global_metrics=_summary_metrics_to_legacy(summary_metrics),
         trials=np.zeros(0, dtype=[]),
         bout_points=bout_points,
-        series=_load_compact_signal_series(run_group, signal=signal),
+        series=_load_compact_signal_series(root, run_group, signal=signal),
         run_attrs=_attrs_dict(run_group),
         signal_attrs=_record_to_dict(signal_row) if signal_row is not None else signal.attrs,
     )
@@ -727,6 +733,7 @@ def _histogram_rows_to_legacy(records: np.ndarray) -> np.ndarray:
 
 
 def _load_compact_signal_series(
+    root: zarr.Group,
     run_group: zarr.Group,
     *,
     signal: SwimBoutSignalVariant,
@@ -761,12 +768,21 @@ def _load_compact_signal_series(
                 series["detection_signal_mm_s"] = values
                 if signal.speed_level == "speed_exponential":
                     series["speed_exponential_mm"] = values
-    frame_indices = _get_child(signals_group, "frame_indices")
+    expected_length = None
+    if "detection_signal_mm_s" in series:
+        expected_length = int(series["detection_signal_mm_s"].size)
+    try:
+        frame_indices = resolve_swim_bout_frame_axis(
+            root,
+            run_group,
+            expected_length=expected_length,
+        )
+    except SwimBoutFrameAxisError as exc:
+        raise SwimBoutIOError(
+            f"Cannot resolve frame axis for swim-bout run {signal.run_name!r}: {exc}"
+        ) from exc
     if frame_indices is not None:
-        try:
-            series["frame_indices"] = np.asarray(frame_indices[:])
-        except Exception:
-            pass
+        series["frame_indices"] = frame_indices
     return series
 
 

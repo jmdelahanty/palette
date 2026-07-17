@@ -298,6 +298,14 @@ detection primitive and parameters, gap/overlap and boundary rules, interval
 semantics, validity handling, and physical metric sources. A persisted SHA-256
 binds the two copies.
 
+Compact swim-bout run schema 8 also stores
+`palette.swim_bout_frame_axis_reference` version 1. It pins the exact
+archive-relative track-kinematics `frame_indices` path and records source run,
+track, shape, dtype, and canonical value hash. The default is reference-only;
+an embedded fallback is opt-in for standalone portability. Palette and
+FileGlancer-hosted Marimo readers resolve the authority first and retain
+schema-7 embedded compatibility.
+
 For a subject-shape-only cluster run, render and then submit the DAG target. A
 32-core node matches the measured canary configuration; request enough memory
 for the observed 36.7 GB peak:
