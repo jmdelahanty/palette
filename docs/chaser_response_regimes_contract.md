@@ -87,7 +87,19 @@ of dozen frames. With them it correctly reports nothing.
 Adjacent-frame centroid difference, requiring **both** agents resolved on **both** sides of
 the step. This matters: differencing across a tracking gap turns the fish's displacement
 during the gap into one enormous fictitious escape bout. The pair mask drops those steps
-(there is a test for it).
+(there is a test for it). This computed speed feeds the reported `mean_speed_mm_s` /
+`median_speed_mm_s` and the radial-velocity components.
+
+**Immobile/moving classification uses the smoothed signal, not this raw centroid speed**
+(2026-07-17). Raw centroid speed has a jitter noise floor of ~1.6 mm/s that straddles the
+1 mm/s immobility threshold, so `immobile_fraction` on raw partly measures tracking noise, not
+stillness — it produced a spurious pre→post "avoidance" effect that flipped sign above the
+noise floor and vanished on a clean signal (see
+`docs/diagnostics/goodcopbadcop_detection_dropout_2026-07-16.md`). The component now thresholds
+`speed_smoothed_mm` from the offline `track_kinematics` run (deadbanded between bouts, so
+`immobile_fraction` reads as "fraction of time not in a bout"). `diagnostics.immobility_signal_source`
+records which signal was used; if the track-kinematics run is absent it falls back to raw
+centroid speed and emits an `immobility_signal_fallback_raw_centroid` warning.
 
 ## Parameters
 

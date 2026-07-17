@@ -265,6 +265,7 @@ def _compute_regime_arrays(
     clamp_tolerance_mm: float,
     min_band_frames: float,
     min_bin_frames: float,
+    immobility_speed: Optional[np.ndarray] = None,
 ) -> tuple[dict[str, np.ndarray], list[TrackingQC], dict[str, Any], tuple[str, ...]]:
     n_epochs = len(epochs)
     n_chasers = int(chaser_indices.shape[0])
@@ -336,8 +337,17 @@ def _compute_regime_arrays(
             vr_fish = np.sum(v_fish * unit, axis=1)      # + = fish toward chaser
             vr_chaser = -np.sum(v_chaser * unit, axis=1)  # + = chaser toward fish
             speed = np.hypot(v_fish[:, 0], v_fish[:, 1])
+            # Immobile/moving are decided on the smoothed signal when available -- raw centroid
+            # jitter (~1.6 mm/s floor) straddles the 1 mm/s threshold. Computed speed still feeds
+            # the reported mean/median. Aligned to the earlier frame of each transition.
+            im_speed = (
+                np.asarray(immobility_speed[slc], dtype=np.float64)[:-1]
+                if immobility_speed is not None else speed
+            )
 
             usable = pair & np.isfinite(dist) & np.isfinite(vr_fish) & np.isfinite(vr_chaser)
+            if immobility_speed is not None:
+                usable = usable & np.isfinite(im_speed)
             n_pairs = int(np.count_nonzero(usable))
             tracking.append(
                 TrackingQC(
@@ -370,8 +380,9 @@ def _compute_regime_arrays(
             vr_f = vr_fish[usable]
             vr_c = vr_chaser[usable]
             sp = speed[usable]
-            immobile = sp < float(immobility_speed_threshold_mm_s)
-            moving = sp > float(moving_speed_threshold_mm_s)
+            im_sp = im_speed[usable]
+            immobile = im_sp < float(immobility_speed_threshold_mm_s)
+            moving = im_sp > float(moving_speed_threshold_mm_s)
 
             if np.any(moving):
                 approach_fraction[e_idx, c_idx] = float(np.mean(vr_f[moving] > 0))
@@ -519,6 +530,49 @@ def _build_summary(
     return summary
 
 
+def _load_smoothed_immobility_speed(root, total_frames: int) -> tuple[Optional[np.ndarray], str]:
+    """Dense per-frame smoothed physical speed (mm/s) from the offline track_kinematics run,
+    aligned to the chaser-distance frame axis, for the immobile/moving classification.
+
+    Thresholding the RAW centroid speed is unreliable: its jitter noise floor (~1.6 mm/s)
+    straddles the 1 mm/s immobility threshold, so "immobile fraction" partly measures tracking
+    noise rather than stillness. ``speed_smoothed_mm`` separates bouts from between-bout stillness
+    cleanly (deadbanded to 0 between bouts). Returns (dense_speed, source); (None, 'raw_centroid')
+    if the track-kinematics run is absent -- the caller then falls back to computed speed and warns.
+    """
+
+    def _child(group, name):
+        try:
+            return group[name] if name in list(group.group_keys()) else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    try:
+        node = root
+        for part in ("analysis", "track_kinematics_runs", "offline"):
+            node = _child(node, part)
+            if node is None:
+                return None, "raw_centroid"
+        runs = sorted(node.group_keys())
+        if not runs:
+            return None, "raw_centroid"
+        tracks = _child(node[runs[-1]], "tracks")
+        track_ids = sorted(tracks.group_keys()) if tracks is not None else []
+        if not track_ids:
+            return None, "raw_centroid"
+        track = tracks[track_ids[0]]
+        if "speed_smoothed_mm" not in track or "frame_indices" not in track:
+            return None, "raw_centroid"
+        fi = np.asarray(track["frame_indices"][:], dtype=np.int64).reshape(-1)
+        ss = np.asarray(track["speed_smoothed_mm"][:], dtype=np.float64).reshape(-1)
+        dense = np.full(int(total_frames), np.nan, dtype=np.float64)
+        keep = (fi >= 0) & (fi < int(total_frames)) & (np.arange(fi.shape[0]) < ss.shape[0])
+        dense[fi[keep]] = ss[keep]
+        return dense, "track_kinematics.speed_smoothed_mm"
+    except Exception:  # noqa: BLE001 -- never fail the component over the signal upgrade
+        return None, "raw_centroid"
+
+
 def build_chaser_response_regimes_result(
     zarr_path: Path,
     *,
@@ -609,6 +663,8 @@ def build_chaser_response_regimes_result(
     centers = ((edges[:-1] + edges[1:]) / 2.0).astype(np.float32)
     radii = _protocol_chaser_radii_mm(root, run_group, n_chasers=int(chaser_indices.shape[0]))
 
+    immobility_speed, immobility_signal_source = _load_smoothed_immobility_speed(root, total_frames)
+
     arrays, tracking, diagnostics, qc_warnings = _compute_regime_arrays(
         epochs=epochs,
         chaser_indices=chaser_indices,
@@ -630,7 +686,12 @@ def build_chaser_response_regimes_result(
         clamp_tolerance_mm=float(clamp_tolerance_mm),
         min_band_frames=float(min_band_frames),
         min_bin_frames=float(min_bin_frames),
+        immobility_speed=immobility_speed,
     )
+    diagnostics = dict(diagnostics)
+    diagnostics["immobility_signal_source"] = immobility_signal_source
+    if immobility_speed is None:
+        qc_warnings = tuple(qc_warnings) + ("immobility_signal_fallback_raw_centroid",)
 
     recording_id = str(run_group.attrs.get("recording_id") or root.attrs.get("recording_id") or Path(zarr_path).stem)
     summary = _build_summary(
