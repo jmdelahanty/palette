@@ -102,3 +102,35 @@ scripts/py -m fisheye.diagnostics.benchmark_columnar_zarr_sharding \
   --output-root /tmp/bout-small-run-benchmark \
   --shard-rows 262144
 ```
+
+## Persisted cluster trial
+
+LSF job `153131273` ran the production materializer from commit `e852b6a7` on
+`h07u20` and completed without stderr. It published the named candidate
+`bout_kinematics_sleepyfish_smallrun_candidate_20260717_01`; it did not
+promote that candidate.
+
+The source and published candidate have the same resolver-level scientific
+fingerprint:
+`af4bce16120f1bbe2f8a426e77f26445a8766b25dcb639308bb2be4bc14654db`.
+All 115 arrays passed final validation, with 104 stored as capped row-aligned
+shards and 11 single-chunk arrays retained in their regular layout. The
+candidate has 110 payload files and 12.6 MiB of physical data, compared with
+1,359 payload files and 12.5 MiB for the source. The node-local decoded copy
+processed 44.3 MiB in 2.55 seconds and performed exact decoded readback for
+each outer shard before publication.
+
+The shared publisher then copied 232 total files to a hidden PRFS sibling,
+validated the temporary and final run, and atomically installed the candidate.
+The parent pointers were identical before and after publication:
+
+```text
+latest          = bout_kinematics_sleepyfish_core_canary_20260713_01
+latest_complete = bout_kinematics_sleepyfish_core_canary_20260713_01
+```
+
+This verifies the intended architecture: the analysis Zarr remains the
+authoritative per-recording run archive, physical-layout improvements can be
+published as complete named runs with full lineage, and cross-recording
+Parquet exports can remain derived query products rather than competing
+authorities.
