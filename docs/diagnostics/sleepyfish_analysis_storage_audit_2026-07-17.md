@@ -1,0 +1,65 @@
+# Sleepyfish completed-analysis storage audit (2026-07-17)
+
+## Question
+
+After sharding the current subject-shape, tail-kinematics,
+track-kinematics, swim-bout, and eye-angle products, which completed analysis
+writer is the next useful storage/publication target?
+
+## Method
+
+The audit resolved only authoritative `latest_complete` pointers under
+`analysis/*_runs`. It read `zarr.json` metadata and statted payload files; it
+did not decode array values or write to the source archive. Root, family, and
+selected-run metadata hashes matched before and after the pass.
+
+```bash
+scripts/py -m fisheye.diagnostics.audit_analysis_storage_candidates \
+  /groups/johnson/johnsonlab/jeremy/recordings/\
+sleepyfish_2026_05_05_17_45_30_cam2010095/zarr/\
+sleepyfish_2026_05_05_17_45_30_cam2010095_analysis.zarr \
+  --include-family '^analysis/' \
+  --output-json /tmp/sleepyfish_analysis_storage_audit_20260717.json \
+  --output-markdown /tmp/sleepyfish_analysis_storage_audit_20260717.md
+```
+
+The six selected runs contain 520 arrays, 3,236 measured payload files,
+6.81 GiB logical data, and 3.84 GiB physical payload data.
+
+| Payload-file rank | Latest completed run | Arrays sharded | Payload files | Physical | Logical |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1 | `bout_kinematics_sleepyfish_core_canary_20260713_01` | 0 / 115 | 1,359 | 12.3 MiB | 44.3 MiB |
+| 2 | `subject_shape_materializer_canary_20260715_01` | 102 / 104 | 883 | 2.47 GiB | 4.34 GiB |
+| 3 | `tk_sleepyfish_sharded_canary_20260716_02` | 102 / 102 | 478 | 133.3 MiB | 416.4 MiB |
+| 4 | `eye_angles_sleepyfish_semantic16_20260717_01` | 39 / 39 | 253 | 937.0 MiB | 1.42 GiB |
+| 5 | `swim_bouts_sleepyfish_sharded_track_smoke_20260716_02` | 100 / 133 | 142 | 39.8 MiB | 135.0 MiB |
+| 6 | `tail_kinematics_hardened_w2_canary_20260715_01` | 25 / 27 | 121 | 279.5 MiB | 482.7 MiB |
+
+## Conclusion
+
+Bout kinematics is the next target. Its current latest pointer still selects a
+pre-sharding 2026-07-13 run. It occupies the least physical space but creates
+the most payload objects: 1,359 files for only 12.3 MiB, or about 9.2 KiB per
+file on average. At least 260 of those files are in repeated small column
+arrays. This is schema/object fanout, not a large-array compression problem.
+
+The next controlled step should rematerialize the same bout-kinematics product
+with the shared columnar sharding default, verify logical parity through the
+resolver, and measure file count, bytes, read latency, and writer time before
+promoting its `latest_complete` pointer. Because this writer does not yet
+record the shared staged-publication evidence, the same pass should determine
+whether it can use the common atomic publisher rather than adding another
+publication implementation.
+
+The current sharded track, eye, and tail products are not urgent object-count
+targets. Subject shape remains the largest byte surface, but 102 of 104 arrays
+are already sharded; its next question is selective-read behavior for three
+wide scientific matrices, not additional blanket sharding. The current
+swim-bout product is also low-object-count, although its publication strategy
+is not yet recorded.
+
+An exact all-family audit was intentionally deferred. Primary tracking,
+keypoint, and refined-mask surfaces contain enough objects that statting every
+payload takes minutes on PRFS; that should be a scheduled infrastructure audit,
+while a metadata-only expected-object mode would be more appropriate for quick
+interactive triage.

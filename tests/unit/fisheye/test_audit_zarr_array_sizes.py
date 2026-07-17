@@ -20,6 +20,7 @@ def _write_array(
     shape: list[int],
     chunks: list[int],
     dtype: str = "uint8",
+    shards: list[int] | None = None,
 ) -> None:
     path.mkdir(parents=True, exist_ok=True)
     (path / "zarr.json").write_text(
@@ -31,14 +32,28 @@ def _write_array(
                 "data_type": dtype,
                 "chunk_grid": {
                     "name": "regular",
-                    "configuration": {"chunk_shape": chunks},
+                    "configuration": {"chunk_shape": shards or chunks},
                 },
                 "chunk_key_encoding": {
                     "name": "default",
                     "configuration": {"separator": "/"},
                 },
                 "fill_value": 0,
-                "codecs": [],
+                "codecs": (
+                    [
+                        {
+                            "name": "sharding_indexed",
+                            "configuration": {
+                                "chunk_shape": chunks,
+                                "codecs": [],
+                                "index_codecs": [],
+                                "index_location": "end",
+                            },
+                        }
+                    ]
+                    if shards is not None
+                    else []
+                ),
                 "attributes": {},
             }
         ),
@@ -135,6 +150,28 @@ def test_scan_zarr_array_sizes_counts_physical_chunks_when_requested(tmp_path: P
     assert masks.physical_file_count == 2
     assert masks.physical_bytes == 8
     assert masks.compression_ratio_logical_to_physical == masks.logical_bytes / 8
+
+
+def test_scan_zarr_array_sizes_separates_inner_chunks_from_outer_shards(
+    tmp_path: Path,
+) -> None:
+    zarr_path = _make_zarr(tmp_path / "example_analysis.zarr")
+    _write_array(
+        zarr_path / "analysis" / "frame_angles",
+        shape=[1000, 141],
+        chunks=[100, 16],
+        shards=[500, 32],
+        dtype="float32",
+    )
+
+    rows = scan_zarr_array_sizes(zarr_path)
+    frame_angles = {row.array_path: row for row in rows}["analysis/frame_angles"]
+
+    assert frame_angles.chunk_shape == (100, 16)
+    assert frame_angles.chunk_count == 90
+    assert frame_angles.shard_shape == (500, 32)
+    assert frame_angles.shard_count == 10
+    assert frame_angles.physical_layout == "sharded"
 
 
 def test_main_emits_jsonl(tmp_path: Path, capsys) -> None:

@@ -96,6 +96,9 @@ class ZarrArrayAuditRow:
     chunk_shape: tuple[int, ...] | None
     chunk_count: int | None
     chunk_logical_bytes: int | None
+    shard_shape: tuple[int, ...] | None
+    shard_count: int | None
+    physical_layout: str
     physical_bytes: int | None
     physical_file_count: int | None
     compression_ratio_logical_to_physical: float | None
@@ -225,27 +228,44 @@ def _extract_v3_array_metadata(payload: Mapping[str, Any]) -> tuple[
     tuple[int, ...] | None,
     str,
     tuple[int, ...] | None,
+    tuple[int, ...] | None,
 ]:
     shape = _coerce_int_tuple(payload.get("shape"))
     dtype = _dtype_to_name(payload.get("data_type"))
     chunk_grid = payload.get("chunk_grid")
-    chunk_shape = None
+    grid_shape = None
     if isinstance(chunk_grid, Mapping):
         configuration = chunk_grid.get("configuration")
         if isinstance(configuration, Mapping):
-            chunk_shape = _coerce_int_tuple(configuration.get("chunk_shape"))
-    return shape, dtype, chunk_shape
+            grid_shape = _coerce_int_tuple(configuration.get("chunk_shape"))
+
+    # In Zarr v3 a sharded array uses the regular chunk grid for physical
+    # shards. The logical inner chunk shape lives in the sharding codec. Keep
+    # those concepts separate: worker-write safety and object count depend on
+    # the outer shard, while decoded over-read depends on the inner chunk.
+    codecs = payload.get("codecs")
+    if isinstance(codecs, Sequence) and not isinstance(codecs, (str, bytes, bytearray)):
+        for codec in codecs:
+            if not isinstance(codec, Mapping) or codec.get("name") != "sharding_indexed":
+                continue
+            configuration = codec.get("configuration")
+            if isinstance(configuration, Mapping):
+                inner_chunk = _coerce_int_tuple(configuration.get("chunk_shape"))
+                if inner_chunk is not None:
+                    return shape, dtype, inner_chunk, grid_shape
+    return shape, dtype, grid_shape, None
 
 
 def _extract_v2_array_metadata(payload: Mapping[str, Any]) -> tuple[
     tuple[int, ...] | None,
     str,
     tuple[int, ...] | None,
+    tuple[int, ...] | None,
 ]:
     shape = _coerce_int_tuple(payload.get("shape"))
     dtype = _dtype_to_name(payload.get("dtype"))
     chunk_shape = _coerce_int_tuple(payload.get("chunks"))
-    return shape, dtype, chunk_shape
+    return shape, dtype, chunk_shape, None
 
 
 def _surface_family(path: str) -> str:
@@ -331,6 +351,7 @@ def _row_from_array_metadata(
     shape: tuple[int, ...],
     dtype: str,
     chunk_shape: tuple[int, ...] | None,
+    shard_shape: tuple[int, ...] | None,
     collect_physical: bool,
     preload_threshold_bytes: int,
     large_chunk_threshold_bytes: int,
@@ -339,6 +360,7 @@ def _row_from_array_metadata(
     logical = _logical_bytes(shape, itemsize)
     chunk_count = _ceil_chunk_count(shape, chunk_shape)
     chunk_logical = _logical_bytes(chunk_shape, itemsize) if chunk_shape else None
+    shard_count = _ceil_chunk_count(shape, shard_shape)
     physical_file_count = None
     physical_bytes = None
     if collect_physical:
@@ -371,6 +393,9 @@ def _row_from_array_metadata(
         chunk_shape=chunk_shape,
         chunk_count=chunk_count,
         chunk_logical_bytes=chunk_logical,
+        shard_shape=shard_shape,
+        shard_count=shard_count,
+        physical_layout="sharded" if shard_shape is not None else "regular",
         physical_bytes=physical_bytes,
         physical_file_count=physical_file_count,
         compression_ratio_logical_to_physical=compression_ratio,
@@ -418,9 +443,9 @@ def scan_zarr_array_sizes(
     rows: list[ZarrArrayAuditRow] = []
     for array_dir, zarr_format, payload in iter_array_metadata_dirs(zarr_path):
         if zarr_format == 3:
-            shape, dtype, chunk_shape = _extract_v3_array_metadata(payload)
+            shape, dtype, chunk_shape, shard_shape = _extract_v3_array_metadata(payload)
         else:
-            shape, dtype, chunk_shape = _extract_v2_array_metadata(payload)
+            shape, dtype, chunk_shape, shard_shape = _extract_v2_array_metadata(payload)
         if shape is None:
             continue
         array_path = _array_path(zarr_path, array_dir)
@@ -436,6 +461,7 @@ def scan_zarr_array_sizes(
                 shape=shape,
                 dtype=dtype,
                 chunk_shape=chunk_shape,
+                shard_shape=shard_shape,
                 collect_physical=collect_physical,
                 preload_threshold_bytes=preload_threshold_bytes,
                 large_chunk_threshold_bytes=large_chunk_threshold_bytes,
@@ -474,7 +500,7 @@ def discover_zarr_roots(paths: Iterable[Path], *, recursive: bool = False) -> li
 
 def _as_jsonable(row: ZarrArrayAuditRow) -> dict[str, Any]:
     payload = asdict(row)
-    for key in ("shape", "chunk_shape"):
+    for key in ("shape", "chunk_shape", "shard_shape"):
         if payload[key] is not None:
             payload[key] = list(payload[key])
     return payload
@@ -521,6 +547,8 @@ def _print_table(rows: Sequence[ZarrArrayAuditRow]) -> None:
                 "chunk",
                 "chunk_bytes",
                 "chunks",
+                "shard",
+                "shards",
                 "files",
                 "family",
                 "memory",
@@ -538,6 +566,8 @@ def _print_table(rows: Sequence[ZarrArrayAuditRow]) -> None:
                     _format_tuple(row.chunk_shape),
                     _format_bytes(row.chunk_logical_bytes),
                     str(row.chunk_count) if row.chunk_count is not None else "-",
+                    _format_tuple(row.shard_shape),
+                    str(row.shard_count) if row.shard_count is not None else "-",
                     str(row.physical_file_count) if row.physical_file_count is not None else "-",
                     row.surface_family,
                     row.memory_strategy,
@@ -552,6 +582,7 @@ def _summary(rows: Sequence[ZarrArrayAuditRow]) -> dict[str, Any]:
     logical_total = sum(row.logical_bytes or 0 for row in rows)
     physical_values = [row.physical_bytes for row in rows if row.physical_bytes is not None]
     physical_total = sum(int(value) for value in physical_values)
+    sharded_array_count = sum(row.shard_shape is not None for row in rows)
     family_counts: dict[str, int] = {}
     memory_counts: dict[str, int] = {}
     write_counts: dict[str, int] = {}
@@ -563,6 +594,7 @@ def _summary(rows: Sequence[ZarrArrayAuditRow]) -> dict[str, Any]:
         "array_count": len(rows),
         "logical_bytes": logical_total,
         "physical_bytes": physical_total if physical_values else None,
+        "sharded_array_count": sharded_array_count,
         "surface_family_counts": dict(sorted(family_counts.items())),
         "memory_strategy_counts": dict(sorted(memory_counts.items())),
         "write_strategy_counts": dict(sorted(write_counts.items())),
