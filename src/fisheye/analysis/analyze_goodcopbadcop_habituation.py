@@ -10,11 +10,13 @@ Run (palette env):
     python -m fisheye.analysis.analyze_goodcopbadcop_habituation
     python -m fisheye.analysis.analyze_goodcopbadcop_habituation --example 21-50-10Z_arena_3
 
-Key result (2026-07-17): freeze fraction rises early ~0.44 -> late ~0.61 (p~0.005, n=11);
-escape rate falls across trials. PLAUSIBLE BUT UNDERPOWERED at n=11 -- needs the full
-cohort. IMPORTANT: chaser-driven wall-proximity is a MEDIATOR of the chase response, not
-a nuisance to partial out (see analyze_goodcopbadcop_wall_mediator). Do NOT dismiss this
-via a freeze~trial|wall partial correlation -- that over-controls.
+Key result (full canonical cohort): the within-training learning signal is STRONGLY
+significant -- freeze fraction early ~0.41 -> late ~0.60 (p<0.001, n=29); escape rate
+early ~0.62 -> late ~0.15 (p<0.001, n=28). This was only "plausible but underpowered"
+on the n=11 June-14 slice (freeze p~0.005, escape p~0.21). On the full cohort it even
+SURVIVES partialling out wall-distance (partial r=+0.23, p=0.003; see
+analyze_goodcopbadcop_wall_mediator) -- wall-proximity is a chase mediator, and the
+habituation is robust to it. This is the clearest learning result in the dataset.
 """
 from __future__ import annotations
 

@@ -22,10 +22,13 @@ Open dish, no physical trapping -- this is a position/mediation question, not "c
 Run (palette env):
     python -m fisheye.analysis.analyze_goodcopbadcop_wall_mediator
 
-Key result (2026-07-17): chase ~91% near-wall, angular R rises pre ~0.30 -> chase ~0.55
-(localized, NOT uniform thigmotaxis). freeze~trial|wall partial ~0.11 (p~0.47) is an
-over-control; the raw freeze-over-trials signal should be read via mediation, not this
-partial. See docs/diagnostics/goodcopbadcop_behavior_synthesis_handoff_2026-07-17.md.
+Key result (full canonical cohort): chase is heavily near-wall and angular R rises from
+pre to chase (localized, NOT uniform thigmotaxis) -- the chaser drives the fish to a
+wall sector. On the full cohort (n=28) the freeze-over-trials habituation SURVIVES even
+the wall over-control: partial r(freeze, trial | wall) = +0.23, p=0.003 (raw r=+0.28,
+p<0.001). At n=11 this partial was +0.11, p=0.47 (looked killed) -- an underpowering
+artifact, not evidence against the habituation. Read wall as a mediator regardless.
+See docs/diagnostics/goodcopbadcop_behavior_synthesis_handoff_2026-07-17.md.
 """
 from __future__ import annotations
 

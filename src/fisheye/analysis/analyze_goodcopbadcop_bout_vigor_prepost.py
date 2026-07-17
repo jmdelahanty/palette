@@ -8,10 +8,11 @@ would grow from pre to post. This script splits the gradient by epoch and tests 
 Run (palette env):
     python -m fisheye.analysis.analyze_goodcopbadcop_bout_vigor_prepost
 
-Key result (2026-07-17, n=12): the aggressive near-far peak gradient is already present
-PRE-training (~+1.54 mm/s, p~0.042 vs 0) and does NOT grow with training (post ~-0.65,
-Δ post-pre p~0.105) -> INNATE, not learned. Matches known innate red-avoidance. This is
-why "learned spatial avoidance of the red object" is not supported.
+Key result (full canonical cohort, n=29): the near-object bout-vigor gradient WEAKENS to
+non-significance -- aggressive pre gradient ~+1.05 mm/s, p~0.14 vs 0 (was +1.54, p~0.042
+on the n=12 slice); learned-vs-innate Δ p~0.11. The gradient does NOT grow with training
+(so still not "learned avoidance"), but the innate red-vigor claim is marginal at full n
+-- the n=12 slice was optimistic. Report this as weak/suggestive, not established.
 """
 from __future__ import annotations
 

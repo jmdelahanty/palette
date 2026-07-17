@@ -9,9 +9,10 @@ minute, computed pre vs chase. The per-bout peak is taken from `speed_smoothed_m
 Run (palette env):
     python -m fisheye.analysis.analyze_goodcopbadcop_escape
 
-Key result (2026-07-17, n=12): escape rate pre ~0.66 -> chase ~8.0 per validly-tracked
-minute (~12x, 12/12, p~0.0005 on the smoothed peak; ~7.8x on the bout-table peak). This
-is the strongest, most robust GoodCopBadCop result: a proximity-triggered flee response.
+Key result (full canonical cohort, n=32): escape rate pre ~0.35 -> chase ~7.8 per
+validly-tracked minute (~22x, 32/32, p<0.0001 on the smoothed peak; ~10x on the
+bout-table peak). Strengthened from the earlier n=12 June-14 slice (~12x, p~0.0005).
+This is the strongest, most robust GoodCopBadCop result: a proximity-triggered flee.
 """
 from __future__ import annotations
 

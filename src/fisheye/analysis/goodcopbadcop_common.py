@@ -9,7 +9,10 @@ provenance plus the content-hash-suffixed row). A naive
 which would silently double-count those fish in every cohort statistic.
 `resolve_cohort()` dedupes by `recording_id` so each fish is counted once.
 
-Registry path: `$PALETTE_REGISTRY_PATH` if set, else `/nvme1/palette_registry.sqlite`.
+Registry path: `$PALETTE_REGISTRY_PATH` if set, else the canonical live registry on
+`/groups`. The `/nvme1/palette_registry.sqlite` copy is STALE -- it is missing the
+June 21 and July 2 sessions and still carries the retired May duplicate rows, so
+querying it silently resolves only the 12 June-14 recordings.
 Figures: `$PALETTE_RECORDINGS_ROOT/figures` (default `/nvme1/recordings/figures`) --
 committed scripts, out-of-repo figures.
 """
@@ -28,10 +31,15 @@ from fisheye.analysis.cra_primary_endpoint import resolve_object_roles_from_prot
 # Canonical epoch keys used across the analyses.
 EPOCHS = ("pre", "chase", "post")
 
+# The live registry on /groups (matches DEFAULT_REGISTRY in fisheye.cluster.*). The
+# /nvme1 copy is stale (June-14 only, plus retired May duplicate rows).
+CANONICAL_REGISTRY = "/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite"
+
 
 def registry_db() -> str:
-    """Path to the registry SQLite (env-overridable so these are not /nvme1-locked)."""
-    return os.environ.get("PALETTE_REGISTRY_PATH", "/nvme1/palette_registry.sqlite")
+    """Path to the registry SQLite. `$PALETTE_REGISTRY_PATH` wins; else the canonical
+    /groups registry (NOT the stale /nvme1 copy)."""
+    return os.environ.get("PALETTE_REGISTRY_PATH", CANONICAL_REGISTRY)
 
 
 def figures_dir() -> Path:

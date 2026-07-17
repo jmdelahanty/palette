@@ -9,10 +9,10 @@ near the inert one. Bout-level -> robust, above the raw-speed noise floor.
 Run (palette env):
     python -m fisheye.analysis.analyze_goodcopbadcop_bout_kinematics_distance
 
-Key result (2026-07-17, n=12): faster bouts near the aggressive object; peak-speed
-near-minus-far, aggressive vs inert (diff-in-diff) ~+2.7 mm/s, p~0.034. This is the
-near-object bout-vigor gradient; see analyze_goodcopbadcop_bout_vigor_prepost for the
-pre/post split showing it is innate, not learned.
+Key result (full canonical cohort, n=32): peak-speed near-minus-far, aggressive vs inert
+(diff-in-diff) ~+1.24 mm/s, p~0.063 -- MARGINAL (the n=12 June-14 slice gave +2.7,
+p~0.034; the effect shrank on the full cohort). See analyze_goodcopbadcop_bout_vigor_prepost
+for the pre/post split; the near-object vigor gradient is weak/suggestive at full n.
 """
 from __future__ import annotations
 
