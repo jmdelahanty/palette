@@ -117,44 +117,29 @@ cardiac axis as a **design goal for a future rig**, not a current option.
 
 ## Ranked, actionable now
 
-1. **Mid-band immobility curve (`chaser_response_regimes`) — TRIED 2026-07-16,
-   works, with a correction.** Do NOT use the near−far `freeze_index` this doc
-   originally implied. The near band (≤5mm) is sample-starved — the fish avoids
-   getting that close, so `immobile_fraction_near` is `nan` in most recordings
-   and worse post-training, the same near-band wall that kills occupancy.
-   Instead read the distance-resolved `immobile_fraction` in the **moderate
-   band (7–18mm)** — the same shell where the steering signal lives — which is
-   well-supported. Empirical result on the 12 reachable analysis zarrs (3
-   sessions, all 2026-06-14; the May session's 8 zarrs were offline): P(centroid
-   immobile) at 7–18mm from the aggressive red object rises **0.377 → 0.550
-   pre→post, Δ +0.173, 10/10 recordings up, Wilcoxon p=0.002, sign-flip
-   p=0.002**. It is **aggressive-specific** (inert object Δ +0.015, p=0.52),
-   **distance-specific** (far band 25–50mm Δ +0.037, p=0.11 — not global
-   arousal), present in all three sessions, and — unlike steering — looks
-   **learned, not innate** (pre-training the fish is immobile *less* near the
-   future-aggressive object than near the inert one, 0.377 vs 0.445). Caveats:
-   n=10 recordings / 3 sessions is not the 32/8 cohort, so session clustering
-   (which killed the speed effect in the diagnostics) is untested; the
-   colour/position confound is untouched (every aggressive object is
-   `#ff0000`); detector dropout censors the hardest freezes, so post is a
-   conservative lower bound and the two no-support recordings are not
-   missing-at-random. That dropout is now traced to three fixable mechanisms
-   (jump-anchor cascade, an undersized dish mask that censors wall-proximal
-   frames, and genuine inference misses) — see
-   `docs/diagnostics/goodcopbadcop_detection_dropout_2026-07-16.md`; the freeze
-   and thigmotaxis numbers must be recomputed after the dish-mask buffer +
-   re-refine. **Promote this to a `DEFAULT_METRICS` family, keyed on the 7–18mm
-   band, not the near−far index.**
-
-   *What "immobile" means here:* a frame is scored immobile when the fish
-   *centroid* translational speed is `< 1.0 mm/s`
-   (`immobility_speed_threshold_mm_s`), computed only on frame pairs where both
-   fish and chaser are validly tracked. It is a **locomotor immobility proxy,
-   not ethological freezing** — it cannot separate a truly frozen fish from one
-   making postural/tail movements without translating (no tail data on this
-   cohort), and true fear-freezing would be confirmed by the bradycardia axis
-   this rig cannot deliver. Report it as *centroid-immobile fraction* until a
-   second axis confirms.
+1. **Mid-band immobility curve (`chaser_response_regimes`) — RETRACTED 2026-07-17:
+   the effect was a raw-tracking-noise artifact.** Tried 2026-07-16, it *looked*
+   strong: distance-resolved `immobile_fraction` at 7–18 mm from the aggressive
+   object rose 0.377 → 0.550 pre→post (Δ +0.177, 10/10 recordings, Wilcoxon
+   p=0.002), aggressive- and distance-specific. **It does not survive.**
+   Immobility was thresholded on RAW centroid speed, whose jitter noise floor
+   (~1.6 mm/s median) straddles the 1 mm/s threshold — so the metric partly
+   measured tracking noise. The tell is a threshold sweep: the raw effect is
+   +0.276 at 0.5 mm/s, +0.177 at 1 mm/s, then FLIPS to −0.075 (p=0.002) by 3 mm/s.
+   A real "more still" effect stays positive at every threshold; a sign flip means
+   the noise *distribution* reshaped, not stillness. On the pipeline's
+   `speed_smoothed_mm` (deadbanded between bouts) the effect is **Δ +0.004,
+   p=0.85 — gone.** Bout rate near the object is flat (p=0.70), per-bout vigor
+   (peak speed / path / duration) is unchanged, and there are no ≥2 s holds. So
+   there is **no trustworthy mid-band immobility avoidance effect.**
+   `chaser_response_regimes` was fixed to classify immobility on `speed_smoothed_mm`
+   (commit 2026-07-17; see the contract doc). Corrected figures (raw-vs-smoothed
+   contrast) are at
+   `/nvme1/recordings/figures/goodcopbadcop_freeze_{curve,summary}_2026-07-17.png`.
+   **Do NOT promote this as an avoidance readout.** Lesson: any raw-centroid
+   speed-threshold metric near the ~1.6 mm/s noise floor is untrustworthy — use
+   the smoothed / bout-level signals. What survived the clean-signal check is the
+   escape result (12× during chase on `speed_smoothed_mm`, 12/12, p=0.0005).
 2. **Tail / fast-start kinematics — NOT runnable on this cohort (checked
    2026-07-16).** Although `subject_shape_runs` hit production evidence
    2026-07-15, **none of the 12 GoodCopBadCop analysis zarrs have subject_shape
@@ -198,17 +183,16 @@ the existing data:
 
 ## Recommendation
 
-The highest-value immediate move is **not** the GLM-HMM. A 2026-07-16 trial
-(see item 1) confirmed the `chaser_response_regimes` **mid-band immobility
-curve** already separates pre→post strongly and aggressive-specifically
-(Δ +0.173, p=0.002, 10/10) — promote it to a `DEFAULT_METRICS` family, keyed
-on the 7–18mm band rather than the sample-starved near−far index. Tail
-fast-start kinematics is the best second axis but must be **materialized on the
-chaser cohort first** (0/12 today; see item 2). Both measure defensive
-behavior on axes never tested here and are more confound-resistant than
-anything currently in `DEFAULT_METRICS`, though the colour/position confound
-and the session-clustering caveat (n=3 sessions reachable) still apply. The
-GLM-HMM remains downstream of a defensible, non-circular split and
+The 2026-07-16 mid-band immobility "avoidance" result was **retracted 2026-07-17
+as a raw-tracking-noise artifact** (see item 1) — do not build on it. What
+survived the clean-signal (smoothed) check is the **escape result** (12× during
+the chase, 12/12 recordings, p=0.0005): that is the solid GoodCopBadCop
+avoidance finding and it lives far above the noise floor. **Tail fast-start
+kinematics** remains the best untested second axis but must be **materialized on
+the chaser cohort first** (0/12 today; see item 2). General lesson from this
+episode: prefer the pipeline's smoothed / bout-level signals over raw
+centroid-speed thresholds, which are unreliable near the ~1.6 mm/s noise floor.
+The GLM-HMM remains downstream of a defensible, non-circular split and
 counterbalanced data (see the prerequisites section of the companion doc).
 
 ## References

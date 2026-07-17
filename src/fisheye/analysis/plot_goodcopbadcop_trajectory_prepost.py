@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """Reproducible pre/post trajectory + immobility figure for one GoodCopBadCop recording.
 
-Shows the fish path (grey) and where it holds still (dark points, centroid speed
-< 1 mm/s) relative to the aggressive (red) vs inert object, before and after chase
-training. Illustrates SPATIAL/OCCUPANCY avoidance (a low-density void around the red
-object post-training). NOTE: occupancy-specificity was NOT significant cohort-wide
-(p=0.20); the significant result is CONDITIONAL immobility (the freeze-curve figures).
-This figure is an illustrative single-recording example only.
+Shows the fish path (grey) and where it holds still (dark points) relative to the
+aggressive vs inert object, before and after chase training. Immobility uses the
+SMOOTHED signal (speed_smoothed_mm < 1 mm/s, ≈ not in a bout) -- the raw centroid-speed
+version was a tracking-noise artifact (see chaser_response_regimes contract).
+Illustrative single recording only: neither the occupancy void nor mid-band immobility
+reaches cohort significance. The solid GoodCopBadCop result is the escape response.
 
 Run (palette env):
     ~/miniconda3/envs/palette-py311/bin/python -m fisheye.analysis.plot_goodcopbadcop_trajectory_prepost
@@ -43,7 +43,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 
-from fisheye.analysis.chaser_response_regimes import build_chaser_response_regimes_result as build
+from fisheye.analysis.chaser_response_regimes import (
+    build_chaser_response_regimes_result as build,
+    _load_smoothed_immobility_speed,
+)
 from fisheye.analysis.cra_primary_endpoint import resolve_object_roles_from_protocol_payload
 
 REGISTRY = "/nvme1/palette_registry.sqlite"
@@ -70,14 +73,12 @@ def resolve_zarr(recording_like: str) -> tuple[str, str]:
     return row["recording_id"], row["zarr_path"]
 
 
-def immobile_mask(fish_mm: np.ndarray, valid: np.ndarray, sl: slice, fps: float):
-    f = fish_mm[sl]; v = valid[sl]
-    pair = v[:-1] & v[1:]
-    sp = np.full(f.shape[0], np.nan)
-    sp[1:] = np.hypot(*(f[1:] - f[:-1]).T) * fps
-    im = np.zeros(f.shape[0], bool)
-    im[1:] = pair & (sp[1:] < 1.0)
-    return v, im
+def immobile_mask(smoothed_speed: np.ndarray, valid: np.ndarray, sl: slice):
+    """Immobile = smoothed speed < 1 mm/s. speed_smoothed_mm is deadbanded between
+    bouts, so this reads as "not in a bout" -- NOT the raw centroid diff, whose
+    ~1.6 mm/s jitter floor made the raw immobility metric a tracking-noise artifact."""
+    sp = smoothed_speed[sl]; tracked = valid[sl] & np.isfinite(sp)
+    return tracked, tracked & (sp < 1.0)
 
 
 def main(argv=None) -> int:
@@ -109,6 +110,10 @@ def main(argv=None) -> int:
     agg_lbl, inert_lbl = f"aggressive ({agg_hex})", f"inert ({inert_hex})"
     em = {e.label.split("_")[0]: e for e in res.epochs}
     fps = float(res.fps)
+    smoothed_speed, _imm_src = _load_smoothed_immobility_speed(r, fish.shape[0])
+    if smoothed_speed is None:
+        raise SystemExit("track_kinematics speed_smoothed_mm unavailable; refusing to plot on raw "
+                         "centroid speed (that immobility metric is a tracking-noise artifact).")
 
     def epoch_slice(lbl):
         e = em[lbl]; return slice(e.start_frame, e.end_frame + 1)
@@ -116,7 +121,7 @@ def main(argv=None) -> int:
     fig, axes = plt.subplots(1, 2, figsize=(11, 5.8), sharex=True, sharey=True)
     for ax, lbl, ttl in zip(axes, ["pre", "post"], ["Pre-training", "Post-training (after chase)"]):
         sl = epoch_slice(lbl)
-        v, im = immobile_mask(fish, fvalid, sl, fps)
+        v, im = immobile_mask(smoothed_speed, fvalid, sl)
         f = fish[sl]; cv = cvalid[sl]
 
         def obj_xy(idx):
@@ -127,7 +132,7 @@ def main(argv=None) -> int:
         fv = f.copy(); fv[~v] = np.nan
         ax.plot(fv[:, 0], fv[:, 1], "-", color="#c9c9c9", lw=0.4, alpha=0.7, zorder=1)
         ax.scatter(f[im, 0], f[im, 1], s=6, color=IMMOB_C, alpha=0.35, edgecolors="none", zorder=2,
-                   label="immobile (<1 mm/s)")
+                   label="immobile (smoothed <1 mm/s ≈ not in a bout)")
         for rr in (7, 18):
             ax.add_patch(Circle(ax_pos, rr, fill=False, ec=agg_hex, ls="--", lw=1.0, alpha=0.6, zorder=3))
         ax.scatter(*ax_pos, s=260, color=agg_hex, edgecolors="black", lw=1.2, marker="o", zorder=5, label=agg_lbl)
@@ -144,14 +149,15 @@ def main(argv=None) -> int:
     fig.text(0.5, -0.035, "Dark = immobile positions; grey = path. Dashed rings = 7–18 mm shell around the aggressive object. "
              "Note the reduced occupancy around the aggressive object post-training (spatial avoidance).",
              ha="center", fontsize=8.5, color="#666")
-    fig.text(0.5, -0.075, "Illustrative single recording. Occupancy-specificity was NOT significant "
-             "cohort-wide (p=0.20); the significant result is conditional immobility (freeze-curve figures).",
+    fig.text(0.5, -0.075, "Illustrative single recording. Immobility uses the smoothed signal (≈ not in a bout). "
+             "Neither the occupancy void nor mid-band immobility reaches cohort significance; the solid "
+             "GoodCopBadCop result is the escape response (12x during chase).",
              ha="center", fontsize=8.0, color="#999", style="italic")
     fig.tight_layout()
     fig.savefig(out, bbox_inches="tight", dpi=160)
     print(f"recording: {rid}\nzarr: {zpath}\nwrote {out}")
     for lbl in ("pre", "post"):
-        v, im = immobile_mask(fish, fvalid, epoch_slice(lbl), fps)
+        v, im = immobile_mask(smoothed_speed, fvalid, epoch_slice(lbl))
         print(f"  {lbl}: tracked {int(v.sum())} frames, immobile {int(im.sum())} "
               f"({100*im.sum()/max(v.sum(),1):.1f}%)")
     return 0

@@ -9,18 +9,14 @@ GoodCopBadCop analysis zarrs (resolved from the registry, so path-move safe):
   2. goodcopbadcop_freeze_paired_<tag>.png    paired 7-18mm band pre->post per recording
   3. goodcopbadcop_freeze_summary_<tag>.png   the three contrasts (red mid, inert mid, red far)
 
-Result (as of 2026-07-17, n=10-12 recordings / 3 sessions):
-  Red mid-band 7-18mm:  0.377 -> 0.550  Δ+0.173  10/10 up  Wilcoxon p=0.002
-  Inert mid-band:       Δ+0.015  p=0.519    Red far-band 25-50mm: Δ+0.037  p=0.110
-
-CAVEATS (state these when presenting; full list in the provenance sidecar):
-  - PROVISIONAL / lower bound: detections censored by dish-mask + jump refinement bugs
-    (see docs/diagnostics/goodcopbadcop_detection_dropout_2026-07-16.md); numbers shift
-    after re-refine. Wall-proximal frames are preferentially dropped.
-  - n = 12 recordings, 3 sessions, NOT the 32/8 cohort; p-values are recording-level
-    (naive), no session mixed model. Present as "strong preliminary, grouped stats pending".
-  - "Immobile" = centroid speed < 1 mm/s: a locomotor proxy, not ethological freezing.
-  - Colour/position not counterbalanced (aggressive = red at fixed positions).
+RETRACTED (2026-07-17): the mid-band immobility "avoidance" effect this script was written to
+show (raw Δ+0.177, p=0.002) was a RAW-TRACKING-NOISE ARTIFACT. chaser_response_regimes now
+classifies immobility on speed_smoothed_mm, so this script draws the NULL (aggressive mid-band
+Δ~+0.004, p~0.85; inert and far also ~0). The definitive figure is the raw-vs-smoothed contrast
+in scratch/freeze_corrected_plots (curve/summary PNGs). Keep this script only for the null; do
+NOT present its output as an avoidance result. What survived the clean-signal check: the escape
+response (12x during chase, 12/12, p=0.0005). See docs/goodcopbadcop_avoidance_readout_survey.md
+item 1 and the chaser_response_regimes contract.
 
 Run (palette env):
     ~/miniconda3/envs/palette-py311/bin/python -m fisheye.analysis.plot_goodcopbadcop_freeze
@@ -169,7 +165,7 @@ def main(argv=None) -> int:
         ax.fill_between(centers[ok], (m - sem)[ok], (m + sem)[ok], color=c, alpha=0.12, zorder=1)
     ax.set_xlim(3, 52); ax.set_ylim(0, 0.8)
     ax.set_xlabel("Distance to object (mm)"); ax.set_ylabel("P(fish immobile)")
-    ax.set_title("Fish become immobile at moderate range from the aggressive object after training",
+    ax.set_title("No mid-band immobility difference on the smoothed signal (pre vs post)",
                  fontsize=13, weight="bold", pad=12)
     ax.text(12.5, 0.045, "avoidance shell\n7–18 mm", ha="center", va="bottom", fontsize=9, color="#8a6d00")
     ax.legend(frameon=False, fontsize=10, loc="upper right")
@@ -198,7 +194,7 @@ def main(argv=None) -> int:
         ax.set_title(f"{ttl}\nΔ={np.nanmean(d):+.3f}  ({int((d>0).sum())}/{nn} up)  Wilcoxon p={wp:.3f}", fontsize=11)
         ax.grid(axis="x", visible=False)
     axes[0].set_ylabel("P(fish immobile), 7–18 mm band"); axes[0].set_ylim(0.15, 0.8)
-    fig.suptitle("Post-training immobility near the object rises for the aggressive object only",
+    fig.suptitle("No post-training immobility change near either object (smoothed signal)",
                  fontsize=13, weight="bold", y=1.0)
     fig.tight_layout(); fig.savefig(OUT / f"goodcopbadcop_freeze_paired_{args.tag}.png", bbox_inches="tight")
     plt.close(fig)
@@ -221,7 +217,7 @@ def main(argv=None) -> int:
     ax.axvline(0, color="#999", lw=1, ls="--")
     ax.set_yticks(ys); ax.set_yticklabels([r[0] for r in rows]); ax.set_ylim(-0.6, len(rows) - 0.4)
     ax.set_xlim(-0.25, 0.85); ax.set_xlabel("Δ P(immobile), post − pre")
-    ax.set_title("Immobility increase is object- and distance-specific", fontsize=13, weight="bold", pad=10)
+    ax.set_title("No immobility change on the smoothed signal (any object or band)", fontsize=13, weight="bold", pad=10)
     ax.text(0.5, -0.17, "Each dot = one recording (post − pre Δ); black = mean ± SEM across recordings.",
             transform=ax.transAxes, ha="center", fontsize=8, color="#666")
     ax.grid(axis="y", visible=False)

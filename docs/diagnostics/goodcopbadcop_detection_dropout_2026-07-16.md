@@ -146,10 +146,13 @@ it will NOT recover mechanisms 1 or 2, which are post-inference filtering.
 
 ## Impact on the science
 
-- The freeze-curve avoidance result (mid-band immobility +0.173 pre→post,
-  `avoidance_readout_survey.md`) is computed on censored data and is a **lower
-  bound**. arena_2 carried the largest single effect (Δ+0.266) on a post epoch
-  that is 44% censored, 76% of it recoverable — recompute it after re-refine.
+- The freeze-curve "avoidance" result (mid-band immobility +0.177 pre→post) was
+  **RETRACTED 2026-07-17 as a raw-tracking-noise artifact** — it vanishes on the
+  smoothed signal (Δ+0.004, p=0.85; see `avoidance_readout_survey.md` item 1). So
+  it was never a dropout/censoring issue: the metric was thresholding raw centroid
+  speed at the noise floor. `chaser_response_regimes` now classifies immobility on
+  `speed_smoothed_mm`. (The escape result, by contrast, survives the clean signal:
+  12× during chase, 12/12, p=0.0005.)
 - The dish mask preferentially censored **wall-proximal / high-thigmotaxis**
   frames. So the thigmotaxis result (+0.138, session-RE p=0.040) and any
   wall/edge-referenced metric must be **re-checked after the mask buffer +
@@ -165,8 +168,9 @@ it will NOT recover mechanisms 1 or 2, which are post-inference filtering.
    jump-anchor fix in `detect_quality.py` (recovers ~18k in arena_2). Also fix
    the `refine_detect.py:663` keep_mask overwrite.
 2. **Model work:** lower inference floor + retrain for the genuine-miss half.
-3. **Re-run** freeze-curve and thigmotaxis on the re-refined data and update the
-   survey doc + `goodcopbadcop_cohort_results_2026-07-14.md` numbers.
+3. **Re-run** thigmotaxis on the re-refined data and update the numbers. (The
+   freeze curve is retracted — see above — so it is no longer part of this
+   sequence; only thigmotaxis and any wall/edge metric need the re-refine.)
 
 ## Code references
 
