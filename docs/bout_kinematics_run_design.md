@@ -612,6 +612,13 @@ active duration, interpolated physical active duration, physical path length,
 mean speed, and peak speed. Keeping this separate from the heading plot avoids
 mixing physical movement units with angular units.
 
+Its dedicated renderer ID is `palette-bout-kinematics-movement-v1`. The
+heading summary uses `palette-bout-kinematics-heading-v1`, and the optional
+eye-gaze summary below uses `palette-bout-kinematics-eye-gaze-v1`. Older runs
+may persist the generic `matplotlib_static_plotly_spec.v1` renderer. Readers
+must recognize that legacy value only when it is paired with one of the exact
+bout plot schema IDs; the generic renderer alone is not a bout contract.
+
 When the run contains `eye_gaze/per_bout_metrics`, the writer should also persist
 a separate eye-gaze visualization pair under `visualizations/`:
 
@@ -623,6 +630,13 @@ focus on bout-aligned eye summaries such as pre/post vergence, within-bout mean
 and maximum vergence, within-bout vergence range, and optional converged
 fractions. Keeping this separate from the heading plot avoids mixing different
 biological quantities into one overloaded artifact.
+
+The Recording Explorer groups these companion specs into one Bout kinematics
+provider per run. Heading, movement, and eye-gaze entries are exposed only when
+their corresponding persisted contracts exist. The initial renderer loads the
+bounded PNG snapshot declared by `snapshot_artifact`; it does not read the full
+per-bout metric tables merely to display the summary. Provenance remains
+available from the interactive spec and artifact attributes.
 
 ## Window Parameters
 

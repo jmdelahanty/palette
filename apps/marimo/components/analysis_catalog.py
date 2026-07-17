@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Mapping
 
+from fisheye.visualization.bout_kinematics_interactive import BOUT_HEADING_PLOT_RENDERER
+
 from .registry import InteractiveSpecOption, renderer_registration_for
 
 
@@ -82,9 +84,40 @@ CHASER_PROVIDER = ProviderDefinition(
 )
 
 
+BOUT_KINEMATICS_PROVIDER = ProviderDefinition(
+    provider_id="bout_kinematics",
+    label="Bout kinematics",
+    description="Persisted per-bout heading, movement, and eye-gaze summaries.",
+    component_key="bout_kinematics",
+    analyses=(
+        AnalysisDefinition(
+            "heading",
+            "Heading kinematics",
+            "Net heading change and within-bout angular-motion summaries.",
+        ),
+        AnalysisDefinition(
+            "movement",
+            "Physical movement",
+            "Bout duration, physical path length, and speed summaries.",
+        ),
+        AnalysisDefinition(
+            "eye_gaze",
+            "Eye gaze and convergence",
+            "Bout-aligned eye-gaze, convergence, and validity summaries when persisted.",
+        ),
+        AnalysisDefinition(
+            "provenance",
+            "Provenance",
+            "Visualization specs, parameters, source paths, and artifact metadata.",
+        ),
+    ),
+)
+
+
 PROVIDERS: Mapping[str, ProviderDefinition] = {
     CORE_BEHAVIOR_PROVIDER.provider_id: CORE_BEHAVIOR_PROVIDER,
     CHASER_PROVIDER.provider_id: CHASER_PROVIDER,
+    BOUT_KINEMATICS_PROVIDER.provider_id: BOUT_KINEMATICS_PROVIDER,
 }
 
 
@@ -106,6 +139,7 @@ def group_specs_by_provider(
         options,
         key=lambda item: (
             0 if "chaser-dashboard" in item.renderer or "chaser-protocol-dashboard" in item.renderer else 1,
+            0 if item.renderer == BOUT_HEADING_PLOT_RENDERER else 1,
             item.artifact_path,
         ),
     )
@@ -126,6 +160,14 @@ def group_specs_by_provider(
             continue
         provider_seen.add(run_key)
         grouped.setdefault(provider_id, []).append(option)
+    if "bout_kinematics" in grouped:
+        grouped["bout_kinematics"].sort(
+            key=lambda item: (
+                str(item.attrs.get("created_at_utc") or ""),
+                item.run_name,
+            ),
+            reverse=True,
+        )
     return grouped
 
 

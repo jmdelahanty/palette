@@ -32,6 +32,10 @@ def _():
         discover_core_behavior_options,
         load_core_behavior_projection,
     )
+    from apps.marimo.components.bout_kinematics import (
+        available_bout_analysis_ids,
+        build_bout_kinematics_output,
+    )
     from apps.marimo.components.goodcopbadcop_chaser import (
         available_chaser_analysis_ids,
         build_arena_heatmap,
@@ -73,8 +77,10 @@ def _():
         Path,
         RecordingExplorationWorkspace,
         analyses_for_provider,
+        available_bout_analysis_ids,
         available_chaser_analysis_ids,
         build_arena_heatmap,
+        build_bout_kinematics_output,
         build_chaser_gaze_tracking_output,
         build_chaser_controls,
         build_core_behavior_output,
@@ -309,6 +315,7 @@ def _(source_by_label, source_picker):
 def _(
     CoreBehaviorSource,
     analyses_for_provider,
+    available_bout_analysis_ids,
     available_chaser_analysis_ids,
     mo,
     selected_provider,
@@ -321,6 +328,8 @@ def _(
     elif selected_provider.provider_id == "core_behavior":
         core_source = CoreBehaviorSource(zarr_path, selected_spec)
         available_ids = core_source.available_analysis_ids()
+    elif selected_provider.provider_id == "bout_kinematics":
+        available_ids = available_bout_analysis_ids(zarr_path, selected_spec)
     else:
         available_ids = available_chaser_analysis_ids(zarr_path, selected_spec)
     definitions = {
@@ -635,6 +644,33 @@ def _(
     else:
         core_output = mo.md("")
     core_output
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    build_bout_kinematics_output,
+    mo,
+    selected_analysis_id,
+    selected_provider,
+    selected_spec,
+    zarr_path,
+):
+    if (
+        selected_provider is not None
+        and selected_provider.provider_id == "bout_kinematics"
+        and selected_spec is not None
+        and selected_analysis_id
+    ):
+        bout_output = build_bout_kinematics_output(
+            mo,
+            zarr_path=zarr_path,
+            selected_option=selected_spec,
+            analysis_id=selected_analysis_id,
+        )
+    else:
+        bout_output = mo.md("")
+    bout_output
     return
 
 

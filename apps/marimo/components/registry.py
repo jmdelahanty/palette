@@ -21,6 +21,16 @@ from fisheye.visualization.goodcopbadcop_interactive import (
     CHASER_DASHBOARD_RENDERERS,
     LEGACY_GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
 )
+from fisheye.visualization.bout_kinematics_interactive import (
+    BOUT_EYE_GAZE_PLOT_RENDERER,
+    BOUT_HEADING_PLOT_RENDERER,
+    BOUT_MOVEMENT_PLOT_RENDERER,
+    BOUT_PLOT_RENDERERS,
+    BOUT_PLOT_SPEC_SCHEMA_IDS,
+    LEGACY_BOUT_PLOT_RENDERER,
+    bout_schema_for_artifact_name,
+    effective_bout_renderer,
+)
 from .common import join_path, normalize_path
 
 
@@ -72,6 +82,24 @@ DEFAULT_RENDERER_REGISTRY: dict[str, RendererRegistration] = {
             "Projected speed, heading, position, and swim-bout views from one "
             "persisted track-kinematics run."
         ),
+    ),
+    BOUT_HEADING_PLOT_RENDERER: RendererRegistration(
+        renderer=BOUT_HEADING_PLOT_RENDERER,
+        label="Bout heading kinematics",
+        component_key="bout_kinematics",
+        description="Persisted per-bout heading-change and angular-motion summaries.",
+    ),
+    BOUT_MOVEMENT_PLOT_RENDERER: RendererRegistration(
+        renderer=BOUT_MOVEMENT_PLOT_RENDERER,
+        label="Bout physical movement",
+        component_key="bout_kinematics",
+        description="Persisted per-bout duration, path-length, and speed summaries.",
+    ),
+    BOUT_EYE_GAZE_PLOT_RENDERER: RendererRegistration(
+        renderer=BOUT_EYE_GAZE_PLOT_RENDERER,
+        label="Bout eye gaze",
+        component_key="bout_kinematics",
+        description="Persisted bout-aligned eye-gaze and convergence summaries.",
     ),
     CHASER_DASHBOARD_RENDERER: RendererRegistration(
         renderer=CHASER_DASHBOARD_RENDERER,
@@ -198,10 +226,17 @@ def _read_option(root: zarr.Group, zarr_path: Path, artifact_path: str) -> Optio
     except Exception:
         return None
     attrs = dict(getattr(node, "attrs", {}))
-    renderer = str(spec.get("renderer") or attrs.get("renderer") or "").strip()
+    schema_id = str(spec.get("schema_id") or attrs.get("plot_schema_id") or "").strip()
+    persisted_renderer = str(spec.get("renderer") or attrs.get("renderer") or "").strip()
+    renderer = effective_bout_renderer(persisted_renderer, schema_id)
     run_path, artifact_name = _split_artifact_path(artifact_path)
     fallback_run_name = normalize_path(run_path).split("/")[-1] if run_path else ""
     run_name = str(spec.get("run_name") or fallback_run_name).strip()
+    if schema_id in BOUT_PLOT_SPEC_SCHEMA_IDS and fallback_run_name:
+        # Materialized copies may retain the source spec's run_name. Display
+        # the actual owning run while leaving the persisted spec untouched for
+        # provenance inspection.
+        run_name = fallback_run_name
     title = str(spec.get("title") or attrs.get("description") or artifact_name).strip()
     registration = renderer_registration_for(renderer)
     return InteractiveSpecOption(
@@ -210,7 +245,7 @@ def _read_option(root: zarr.Group, zarr_path: Path, artifact_path: str) -> Optio
         run_path=normalize_path(run_path),
         artifact_name=str(artifact_name),
         renderer=renderer,
-        schema_id=str(spec.get("schema_id")) if spec.get("schema_id") is not None else None,
+        schema_id=schema_id or None,
         title=title,
         run_name=run_name,
         label=_option_label(
@@ -363,6 +398,90 @@ def _discover_track_kinematics_specs_fast(
     return sorted(options, key=lambda item: (not item.is_supported, item.run_path, item.artifact_name))
 
 
+def _discover_bout_kinematics_specs_fast(
+    root: zarr.Group,
+    archive: Path,
+    *,
+    renderer_filter: Optional[str],
+    run_path_filter: Optional[str],
+    artifact_filter: Optional[str],
+) -> list[InteractiveSpecOption]:
+    """Discover only exact bout schemas without walking the whole archive."""
+
+    renderer_wanted = str(renderer_filter).strip() if renderer_filter else None
+    run_path_wanted = normalize_path(str(run_path_filter)) if run_path_filter else None
+    artifact_wanted = normalize_path(str(artifact_filter)) if artifact_filter else None
+    if renderer_wanted not in {None, LEGACY_BOUT_PLOT_RENDERER, *BOUT_PLOT_RENDERERS}:
+        return []
+    if artifact_wanted and "/" not in artifact_wanted:
+        if bout_schema_for_artifact_name(artifact_wanted) is None:
+            return []
+
+    if artifact_wanted and "/" in artifact_wanted:
+        candidate_paths = [artifact_wanted]
+    else:
+        if run_path_wanted:
+            run_paths = [run_path_wanted]
+        else:
+            try:
+                parent = root["analysis/bout_kinematics_runs"]
+            except Exception:
+                return []
+            run_names = _group_names(parent)
+            preferred_run_names: list[str] = []
+            parent_attrs = getattr(parent, "attrs", {})
+            for pointer_name in ("latest_complete", "latest"):
+                pointed_run = str(parent_attrs.get(pointer_name) or "").strip()
+                if pointed_run in run_names and pointed_run not in preferred_run_names:
+                    preferred_run_names.append(pointed_run)
+            ordered_run_names = preferred_run_names + [
+                run_name for run_name in reversed(run_names) if run_name not in preferred_run_names
+            ]
+            run_paths = [
+                f"analysis/bout_kinematics_runs/{run_name}" for run_name in ordered_run_names
+            ]
+        candidate_paths = []
+        for run_path in run_paths:
+            if artifact_wanted:
+                candidate_paths.append(artifact_path_for(run_path, artifact_wanted))
+                continue
+            try:
+                visualizations = root[join_path(run_path, "visualizations")]
+            except Exception:
+                continue
+            candidate_paths.extend(
+                artifact_path_for(run_path, artifact_name)
+                for artifact_name in _group_names(visualizations)
+                if bout_schema_for_artifact_name(artifact_name) is not None
+            )
+
+    options: list[InteractiveSpecOption] = []
+    seen: set[str] = set()
+    for artifact_path in candidate_paths:
+        normalized_path = normalize_path(artifact_path)
+        if not normalized_path or normalized_path in seen:
+            continue
+        seen.add(normalized_path)
+        option = _read_option(root, archive, normalized_path)
+        if option is None:
+            continue
+        if option.schema_id not in BOUT_PLOT_SPEC_SCHEMA_IDS:
+            continue
+        if option.renderer not in BOUT_PLOT_RENDERERS:
+            continue
+        if renderer_wanted not in {None, LEGACY_BOUT_PLOT_RENDERER, option.renderer}:
+            continue
+        if run_path_wanted and option.run_path != run_path_wanted:
+            continue
+        if artifact_wanted and artifact_wanted not in {option.artifact_name, option.artifact_path}:
+            continue
+        options.append(option)
+    run_order = {
+        run_path: index for index, run_path in enumerate(dict.fromkeys(option.run_path for option in options))
+    }
+    return sorted(options, key=lambda item: (run_order[item.run_path], item.artifact_name))
+
+
 def discover_recording_explorer_spec_options(
     zarr_path: Path | str,
     *,
@@ -381,6 +500,8 @@ def discover_recording_explorer_spec_options(
     if renderer_wanted and renderer_wanted not in {
         TRACK_KINEMATICS_PLOT_RENDERER,
         *CHASER_DASHBOARD_RENDERERS,
+        *BOUT_PLOT_RENDERERS,
+        LEGACY_BOUT_PLOT_RENDERER,
     }:
         return discover_interactive_spec_options(
             archive,
@@ -408,6 +529,16 @@ def discover_recording_explorer_spec_options(
                 artifact_filter=artifact_filter,
             )
         )
+    if renderer_wanted in {None, LEGACY_BOUT_PLOT_RENDERER, *BOUT_PLOT_RENDERERS}:
+        options.extend(
+            _discover_bout_kinematics_specs_fast(
+                root,
+                archive,
+                renderer_filter=renderer_wanted,
+                run_path_filter=run_path_filter,
+                artifact_filter=artifact_filter,
+            )
+        )
     return sorted(options, key=lambda item: (not item.is_supported, item.renderer, item.run_path, item.artifact_name))
 
 
@@ -429,6 +560,14 @@ def discover_interactive_spec_options(
         return _discover_goodcopbadcop_chaser_specs_fast(
             root,
             archive,
+            run_path_filter=run_path_wanted,
+            artifact_filter=artifact_wanted,
+        )
+    if renderer_wanted in {LEGACY_BOUT_PLOT_RENDERER, *BOUT_PLOT_RENDERERS}:
+        return _discover_bout_kinematics_specs_fast(
+            root,
+            archive,
+            renderer_filter=renderer_wanted,
             run_path_filter=run_path_wanted,
             artifact_filter=artifact_wanted,
         )

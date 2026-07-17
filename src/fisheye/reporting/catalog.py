@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from fisheye.visualization.bout_kinematics_interactive import (
+    BOUT_HEADING_PLOT_RENDERER,
+    BOUT_MOVEMENT_PLOT_RENDERER,
+)
+
 from .models import (
     AnalysisFamilySpec,
     ArtifactSelector,
@@ -156,7 +161,7 @@ VISUALIZATIONS: dict[str, VisualizationSpec] = {
             entity_scope=EntityScope.TRACK,
             entity_source_family_id="core.track_kinematics",
             visualization_contract_id="palette.core.bout_kinematics.movement.v1",
-            renderer="matplotlib_static_plotly_spec.v1",
+            renderer=BOUT_MOVEMENT_PLOT_RENDERER,
             renderer_version="1",
         ),
         VisualizationSpec(
@@ -170,7 +175,7 @@ VISUALIZATIONS: dict[str, VisualizationSpec] = {
             entity_scope=EntityScope.TRACK,
             entity_source_family_id="core.track_kinematics",
             visualization_contract_id="palette.core.bout_kinematics.heading.v1",
-            renderer="matplotlib_static_plotly_spec.v1",
+            renderer=BOUT_HEADING_PLOT_RENDERER,
             renderer_version="1",
         ),
         VisualizationSpec(

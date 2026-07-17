@@ -395,10 +395,12 @@ def test_compute_and_save_bout_kinematics_writes_hierarchical_heading_levels(tmp
     assert movement_png.attrs["visualization_contract_id"] == (
         bout_kinematics_module.BOUT_MOVEMENT_VISUALIZATION_CONTRACT_ID
     )
+    assert movement_png.attrs["renderer"] == bout_kinematics_module.BOUT_MOVEMENT_PLOT_RENDERER
     assert movement_png.attrs["parameters"]["physical_active"]["measurement_signal_level"] == "speed_filtered"
     movement_spec = visualizations["bout_movement_summary_track_0_interactive"]
     assert movement_spec.attrs["snapshot_artifact"] == "bout_movement_summary_track_0_png"
     assert movement_spec.attrs["plot_schema_id"] == "palette.plot_spec.bout_movement_summary.v1"
+    assert movement_spec.attrs["renderer"] == bout_kinematics_module.BOUT_MOVEMENT_PLOT_RENDERER
     movement_payload = np.asarray(movement_spec["spec_json"][:], dtype=np.uint8).tobytes()
     assert b"bout_physical_movement_histograms" in movement_payload
     assert b"physical_active_peak_speed_mm_s" in movement_payload
@@ -653,9 +655,11 @@ def test_compute_and_save_bout_kinematics_writes_optional_eye_gaze_metrics(
         bout_kinematics_module.BOUT_EYE_GAZE_VISUALIZATION_CONTRACT_ID
     )
     assert png.attrs["source_runs"]["eye_angle"] == "eye_1"
+    assert png.attrs["renderer"] == bout_kinematics_module.BOUT_EYE_GAZE_PLOT_RENDERER
     spec_artifact = visualizations["bout_eye_gaze_summary_track_0_interactive"]
     assert spec_artifact.attrs["snapshot_artifact"] == "bout_eye_gaze_summary_track_0_png"
     assert spec_artifact.attrs["plot_schema_id"] == "palette.plot_spec.bout_eye_gaze_summary.v1"
+    assert spec_artifact.attrs["renderer"] == bout_kinematics_module.BOUT_EYE_GAZE_PLOT_RENDERER
     spec_payload = np.asarray(spec_artifact["spec_json"][:], dtype=np.uint8).tobytes()
     assert b"bout_eye_gaze_histograms" in spec_payload
 
