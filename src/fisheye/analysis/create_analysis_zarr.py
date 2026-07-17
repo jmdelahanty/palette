@@ -201,6 +201,8 @@ def _ensure_archive(plan: CreationPlan) -> None:
         attrs.setdefault("source_video", plan.video_path.name)
         attrs.setdefault("source_video_path", str(plan.video_path))
         attrs.setdefault("source_path", str(plan.video_path))
+    if plan.recording_dir is not None:
+        attrs.setdefault("recording_path", str(plan.recording_dir))
     root.attrs.put(attrs)
 
 
@@ -209,7 +211,13 @@ def _apply_video_metadata(plan: CreationPlan, *, overwrite: bool) -> dict[str, i
     assert plan.video_path is not None
     root = zarr.open_group(str(plan.output_path), mode="r+")
     meta = probe_video_metadata(plan.video_path)
-    updates = write_video_metadata(root, meta, overwrite=overwrite, import_purpose="analysis")
+    updates = write_video_metadata(
+        root,
+        meta,
+        overwrite=overwrite,
+        import_purpose="analysis",
+        recording_path=plan.recording_dir,
+    )
     return {
         "root_attrs_updated": len(updates.get("root", {})),
         "raw_video_attrs_updated": len(updates.get("raw_video", {})),

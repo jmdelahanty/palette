@@ -8,6 +8,7 @@ from fisheye.shared.import_source_fingerprint import (
     source_stat_fingerprint_attrs,
 )
 from fisheye.shared.import_video_metadata import probe_video_metadata, write_video_metadata
+from fisheye.shared.source_video_metadata import SOURCE_VIDEO_METADATA_SCHEMA_ID
 
 
 def test_source_stat_fingerprint_attrs_are_stable_for_same_stat_and_metadata(tmp_path):
@@ -67,6 +68,15 @@ def test_write_video_metadata_stamps_metadata_only_profile_and_source_fingerprin
     assert raw.attrs["source_video_fingerprint_payload"]["frame_count"] == 1000
     assert raw.attrs["source_video_size_bytes"] == len(b"video")
     assert root.attrs["source_video_fingerprint"] == raw.attrs["source_video_fingerprint"]
+    assert root.attrs["source_video_metadata"]["schema_id"] == SOURCE_VIDEO_METADATA_SCHEMA_ID
+    assert root.attrs["source_video_metadata"]["layout"] == "single_video"
+    assert root.attrs["source_video_metadata"]["locator"] == {
+        "kind": "absolute",
+        "path": str(source.resolve()),
+    }
+    assert root.attrs["source_video_metadata"]["file_fingerprint"][
+        "relocation_stable"
+    ] is False
     assert raw.attrs["video_color_range"] == "tv"
     assert raw.attrs["video_color_space"] == "bt709"
     assert raw.attrs["source_video_colorimetry_source"] == "ffprobe_stream"
@@ -117,3 +127,30 @@ def test_probe_video_metadata_parses_ffprobe_stream_colorimetry(tmp_path, monkey
     assert meta["video_color_transfer"] == "bt709"
     assert meta["video_color_primaries"] == "bt709"
     assert meta["source_video_colorimetry_source"] == "ffprobe_stream"
+
+
+def test_write_video_metadata_does_not_partially_upgrade_existing_legacy_object(tmp_path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    root = zarr.open_group(str(tmp_path / "analysis.zarr"), mode="w", zarr_format=3)
+    legacy = {"source_path": str(source), "width": 640, "height": 480}
+    root.attrs["source_video_metadata"] = legacy
+
+    write_video_metadata(
+        root,
+        {
+            "source_video": source.name,
+            "source_path": str(source),
+            "width": 640,
+            "height": 480,
+            "total_frames": 10,
+            "fps": 10.0,
+            "codec": "hevc",
+            "pix_fmt": "yuv420p",
+        },
+        overwrite=False,
+        import_purpose="analysis",
+    )
+
+    assert root.attrs["source_video_metadata"] == legacy
+    assert "source_video_metadata_schema_id" not in root.attrs

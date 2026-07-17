@@ -166,7 +166,13 @@ def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> Optional[dict[str, o
 def apply_video_metadata(plan: RecordingAnalysisPlan, *, overwrite: bool) -> dict[str, int]:
     root = zarr.open_group(str(plan.zarr_path), mode="r+")
     meta = probe_video_metadata(plan.cam_video)
-    updates = write_video_metadata(root, meta, overwrite=overwrite, import_purpose="analysis")
+    updates = write_video_metadata(
+        root,
+        meta,
+        overwrite=overwrite,
+        import_purpose="analysis",
+        recording_path=plan.recording_dir,
+    )
     h5_updates = _write_source_h5_fingerprint(root, plan.h5_path, overwrite=overwrite)
     return {
         "root_attrs_updated": len(updates.get("root", {})) + h5_updates["root_attrs_updated"],

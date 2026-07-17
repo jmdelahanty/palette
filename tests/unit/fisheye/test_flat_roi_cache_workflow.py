@@ -262,6 +262,58 @@ def test_plan_binding_marks_geometry_only_external_video_as_nvdec_bundle_eligibl
     )
 
 
+def test_plan_binding_resolves_v2_root_video_locator(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    recording = tmp_path / "recording"
+    video = recording / "cams" / "source.mp4"
+    analysis_zarr = recording / "zarr" / "analysis.zarr"
+    crop = _FakeGroup(
+        {
+            "roi_coordinates_full": SimpleNamespace(shape=(11, 4)),
+            "frame_indices": SimpleNamespace(shape=(11,)),
+        },
+        attrs={
+            "roi_size": [512, 512],
+            "crop_signature": {"source": "video-a"},
+            "crop_revision": "revision-001",
+            "crop_storage_mode": "geometry_only",
+        },
+    )
+    root = _FakeGroup(
+        {"crop_runs": _FakeGroup({"crop_001": crop})},
+        attrs={
+            "recording_path": str(recording),
+            "source_video_path": str(video),
+            "source_video_metadata": {
+                "schema_id": "palette.source_video_metadata.v2",
+                "layout": "single_video",
+                "locator": {
+                    "kind": "recording_relative",
+                    "relative_path": "cams/source.mp4",
+                },
+            },
+            "video_width": 4512,
+            "video_height": 4512,
+        },
+    )
+    monkeypatch.setattr(mod, "open_zarr_group_direct", lambda *_args, **_kwargs: root)
+    monkeypatch.setattr(
+        mod, "is_run_complete_in_parent", lambda *_args, **_kwargs: True
+    )
+
+    binding = mod.plan_flat_roi_cache_binding(
+        analysis_zarr=analysis_zarr,
+        crop_run="crop_001",
+        manifest_path=tmp_path / "cache" / "recording.flat_roi_cache.json",
+        producer_job_key="cache:recording_a",
+    )
+
+    assert binding.source_kind == "source_video_path"
+    assert binding.nvdec_bundle_eligible
+
+
 def _planned_target(
     tmp_path: Path,
     target_id: str,

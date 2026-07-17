@@ -16,7 +16,8 @@ treated as the runtime-validation counterpart to this document.
 - `schema_version`, `zarr_format`
 - `created_at`, `pipeline_version`, `command_line_args`
 - `git_info`, `platform_info`
-- `source_video_metadata` (width, height, fps, frames, codec, path)
+- `source_video_metadata` (versioned width, height, fps, frames, codec, and
+  recording-relative locator; see `docs/source_video_metadata_contract.md`)
 - `session_uuid`, `recording_id`, `recording_name`, `recording_path`
 - `recording_type`, `recording_subtype`, `behavior_mode`,
   `artifact_schema_id`

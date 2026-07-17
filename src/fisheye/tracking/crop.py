@@ -1658,9 +1658,9 @@ def _load_external_roi_cache_inputs(
     video_path = (
         crop_group.attrs.get("source_video_path")
         or crop_group.attrs.get("video_source_path")
-        or root.attrs.get("source_video_path")
-        or root.attrs.get("video_source_path")
     )
+    if not video_path:
+        video_path = get_video_source_path(root, zarr_path=source_zarr_path)
     if not video_path:
         raise ValueError(
             f"Unable to determine source video path for crop run '{crop_run_name}' in {source_zarr_path}"
@@ -1957,7 +1957,7 @@ def crop_from_external_video(
             # === Video Source ===
             'video_source_type': 'external',
             'video_source_path': str(video_path),
-            'source_video_path': root.attrs.get('source_video_path', str(video_path)),
+            'source_video_path': str(video_path),
             'total_frames': num_frames,
             'width': video_width,
             'height': video_height,

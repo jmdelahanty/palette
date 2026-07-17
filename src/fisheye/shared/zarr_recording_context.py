@@ -5,6 +5,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from fisheye.shared.source_video_metadata import (
+    SourceVideoMetadataMissingError,
+    resolve_source_video_from_attrs,
+)
+
 
 def _read_attrs(group_dir: Path) -> dict[str, object]:
     zarr_json = group_dir / "zarr.json"
@@ -58,6 +63,7 @@ def infer_recording_context(zarr_path: Path) -> ZarrRecordingContext:
     )
 
     root_attrs = _read_attrs(resolved_zarr)
+    raw_video_attrs = _read_attrs(resolved_zarr / "raw_video")
     analysis_attrs = _read_attrs(resolved_zarr / "analysis_metadata")
 
     recording_id = (
@@ -67,15 +73,24 @@ def infer_recording_context(zarr_path: Path) -> ZarrRecordingContext:
         or _norm_text(analysis_attrs.get("session_uuid"))
     )
 
-    source_video_text = (
-        _norm_text(root_attrs.get("source_video_path"))
-        or _norm_text(root_attrs.get("source_path"))
-        or _norm_text(root_attrs.get("video_source_path"))
-    )
-    source_video_path = Path(source_video_text).expanduser().resolve() if source_video_text else None
+    try:
+        resolved_source = resolve_source_video_from_attrs(
+            root_attrs,
+            raw_video_attrs=raw_video_attrs,
+            zarr_path=resolved_zarr,
+        )
+    except SourceVideoMetadataMissingError:
+        source_video_path = None
+    else:
+        source_video_path = resolved_source.path
+
+    source_video_text = str(source_video_path) if source_video_path is not None else None
+    declared_recording_path = _norm_text(root_attrs.get("recording_path"))
 
     recording_dir = (
-        _path_recording_dir(source_video_text)
+        Path(declared_recording_path).expanduser().resolve()
+        if declared_recording_path
+        else _path_recording_dir(source_video_text)
         or _path_recording_dir(_norm_text(root_attrs.get("source_h5_path")))
         or fallback_recording_dir
     )

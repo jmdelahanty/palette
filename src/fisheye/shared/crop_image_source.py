@@ -29,6 +29,10 @@ from fisheye.shared.roi_pixel_contract import (
     crop_run_pixel_contract,
     normalize_pixel_contract,
 )
+from fisheye.shared.source_video_metadata import (
+    SourceVideoMetadataMissingError,
+    resolve_source_video,
+)
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.shared.zarr_run_completion import is_run_complete_in_parent
 
@@ -858,8 +862,21 @@ class CropImageSource:
                     source_video_path = (
                         crop_group.attrs.get("source_video_path")
                         or crop_group.attrs.get("video_source_path")
-                        or root.attrs.get("source_video_path")
                     )
+                    if not source_video_path:
+                        try:
+                            source_video_path = str(
+                                resolve_source_video(
+                                    root,
+                                    zarr_path=(
+                                        Path(zarr_path)
+                                        if zarr_path is not None
+                                        else None
+                                    ),
+                                ).path
+                            )
+                        except SourceVideoMetadataMissingError:
+                            source_video_path = None
                     if not source_video_path:
                         raise ValueError(
                             "Geometry-only crop run requires raw_video/images_full or source_video_path provenance."

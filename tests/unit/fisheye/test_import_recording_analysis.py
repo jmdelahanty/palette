@@ -226,6 +226,13 @@ def test_apply_video_metadata_stamps_source_h5_fingerprint(monkeypatch, tmp_path
     assert raw.attrs["source_h5_fingerprint_strategy"] == "stat_v1"
     assert root.attrs["source_h5_fingerprint"] == raw.attrs["source_h5_fingerprint"]
     assert raw.attrs["source_h5_size_bytes"] == len(b"h5")
+    assert root.attrs["source_video_metadata"]["schema_id"] == (
+        "palette.source_video_metadata.v2"
+    )
+    assert root.attrs["source_video_metadata"]["locator"] == {
+        "kind": "recording_relative",
+        "relative_path": f"cams/{video.name}",
+    }
 
 
 def test_ensure_analysis_archive_imports_acquisition_video_stream_inventory(

@@ -112,6 +112,7 @@ def test_ensure_archive_sets_analysis_attrs(monkeypatch, tmp_path: Path) -> None
     assert fake_root.attrs.get("zarr_purpose") == "analysis"
     assert fake_root.attrs.get("source_video_path") == str(video)
     assert fake_root.attrs.get("source_video") == video.name
+    assert fake_root.attrs.get("recording_path") == str(plan.recording_dir)
 
 
 def test_apply_video_metadata_uses_analysis_import_purpose(tmp_path: Path, monkeypatch) -> None:
@@ -142,11 +143,13 @@ def test_apply_video_metadata_uses_analysis_import_purpose(tmp_path: Path, monke
         *,
         overwrite: bool,
         import_purpose: str,
+        recording_path: Path | None = None,
     ) -> dict[str, object]:
         calls["overwrite"] = overwrite
         calls["import_purpose"] = import_purpose
         calls["meta"] = meta
         calls["root"] = root
+        calls["recording_path"] = recording_path
         return {"root": {"width": 4512}, "raw_video": {"video_codec": "hevc"}}
 
     monkeypatch.setattr(create_mod, "probe_video_metadata", _fake_probe)
@@ -158,6 +161,7 @@ def test_apply_video_metadata_uses_analysis_import_purpose(tmp_path: Path, monke
     assert calls["probe_path"] == video
     assert calls["overwrite"] is True
     assert calls["import_purpose"] == "analysis"
+    assert calls["recording_path"] == plan.recording_dir
     assert updates == {"root_attrs_updated": 1, "raw_video_attrs_updated": 1}
 
 

@@ -74,6 +74,46 @@ def test_resolve_video_array_uses_metadata_only_source_video_fallback(
     }
 
 
+def test_resolve_video_array_uses_v2_recording_relative_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    recording = tmp_path / "recording"
+    video_path = recording / "cams" / "source.mp4"
+    video_path.parent.mkdir(parents=True)
+    video_path.touch()
+    captured: dict[str, object] = {}
+
+    class FakePreviewArray:
+        def __init__(self, video_path_arg, *, frame_count, source_shape, preview_shape):
+            captured["video_path"] = video_path_arg
+            self.shape = (frame_count, *preview_shape)
+
+    monkeypatch.setattr(mod, "_SourceVideoPreviewArray", FakePreviewArray)
+    root = _FakeGroup(
+        attrs={
+            "recording_path": str(recording),
+            "source_video_path": str(video_path),
+            "source_video_metadata": {
+                "schema_id": "palette.source_video_metadata.v2",
+                "layout": "single_video",
+                "locator": {
+                    "kind": "recording_relative",
+                    "relative_path": "cams/source.mp4",
+                },
+            },
+            "source_video_resolution": [4512, 4512],
+            "total_frames": 100,
+        },
+        children={"raw_video": _FakeGroup(attrs={"total_frames": 100})},
+    )
+
+    array, _, _ = mod._resolve_video_array(root, use_full_res=True)
+
+    assert array.shape == (100, 4512, 4512)
+    assert captured["video_path"] == video_path.resolve()
+
+
 def test_resolve_video_array_reports_incomplete_metadata_only_source() -> None:
     root = _FakeGroup(children={"raw_video": _FakeGroup()})
 

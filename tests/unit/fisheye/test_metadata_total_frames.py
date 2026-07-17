@@ -3,8 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import pytest
 
-from fisheye.shared.metadata import get_total_frames
+from fisheye.shared.metadata import get_total_frames, get_video_source_path
+from fisheye.shared.source_video_metadata import SourceVideoMetadataConflictError
 
 
 class _Array:
@@ -52,3 +54,52 @@ def test_get_total_frames_uses_sampled_raw_video_before_root_total() -> None:
     root = _Group(attrs={"total_frames": 1_188_000}, children={"raw_video": raw_video})
 
     assert get_total_frames(root) == 7
+
+
+def test_get_video_source_path_resolves_v2_recording_relative_locator(tmp_path) -> None:
+    recording = tmp_path / "recording"
+    video = recording / "cams" / "source.mp4"
+    root = _Group(
+        attrs={
+            "recording_path": str(recording),
+            "source_video_path": str(video),
+            "source_path": str(video),
+            "source_video_metadata": {
+                "schema_id": "palette.source_video_metadata.v2",
+                "layout": "single_video",
+                "locator": {
+                    "kind": "recording_relative",
+                    "relative_path": "cams/source.mp4",
+                },
+                "source_path": str(video),
+            },
+        },
+        children={"raw_video": _Group(attrs={"source_path": str(video)})},
+    )
+
+    assert get_video_source_path(root) == str(video.resolve())
+
+
+def test_get_video_source_path_keeps_missing_legacy_metadata_optional() -> None:
+    assert get_video_source_path(_Group()) is None
+
+
+def test_get_video_source_path_fails_closed_on_v2_mirror_conflict(tmp_path) -> None:
+    recording = tmp_path / "recording"
+    root = _Group(
+        attrs={
+            "recording_path": str(recording),
+            "source_video_path": str(tmp_path / "stale.mp4"),
+            "source_video_metadata": {
+                "schema_id": "palette.source_video_metadata.v2",
+                "layout": "single_video",
+                "locator": {
+                    "kind": "recording_relative",
+                    "relative_path": "cams/source.mp4",
+                },
+            },
+        }
+    )
+
+    with pytest.raises(SourceVideoMetadataConflictError):
+        get_video_source_path(root)

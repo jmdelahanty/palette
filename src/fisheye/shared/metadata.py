@@ -5,8 +5,14 @@ These lightweight utilities help read metadata fields consistently across
 the pipeline, following the unified metadata specification.
 """
 
+from pathlib import Path
 from typing import Dict, Optional
 import zarr
+
+from fisheye.shared.source_video_metadata import (
+    SourceVideoMetadataMissingError,
+    resolve_source_video,
+)
 
 
 def get_total_frames(root: zarr.Group, detect_group: Optional[zarr.Group] = None) -> Optional[int]:
@@ -125,7 +131,11 @@ def has_raw_video(root: zarr.Group) -> bool:
     return 'images_ds' in root['raw_video'] or 'images_full' in root['raw_video']
 
 
-def get_video_source_path(root: zarr.Group) -> Optional[str]:
+def get_video_source_path(
+    root: zarr.Group,
+    *,
+    zarr_path: Optional[str | Path] = None,
+) -> Optional[str]:
     """
     Get source video path following unified spec.
     
@@ -142,10 +152,21 @@ def get_video_source_path(root: zarr.Group) -> Optional[str]:
         ...     # Can re-open video if needed
         ...     cap = cv2.VideoCapture(video_path)
     """
-    return root.attrs.get('source_video_path')
+    try:
+        resolved = resolve_source_video(
+            root,
+            zarr_path=Path(zarr_path) if zarr_path is not None else None,
+        )
+    except SourceVideoMetadataMissingError:
+        return None
+    return str(resolved.path)
 
 
-def get_frame_source(root: zarr.Group) -> Dict[str, Optional[str]]:
+def get_frame_source(
+    root: zarr.Group,
+    *,
+    zarr_path: Optional[str | Path] = None,
+) -> Dict[str, Optional[str]]:
     """
     Resolve the frame source for this archive.
 
@@ -156,7 +177,7 @@ def get_frame_source(root: zarr.Group) -> Dict[str, Optional[str]]:
     """
     if has_raw_video(root):
         return {"type": "zarr", "path": None}
-    source_path = get_video_source_path(root)
+    source_path = get_video_source_path(root, zarr_path=zarr_path)
     if source_path:
         return {"type": "external", "path": source_path}
     return {"type": "unknown", "path": None}

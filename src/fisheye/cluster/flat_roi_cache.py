@@ -32,6 +32,7 @@ from fisheye.cluster.lsf.runtime import (
     build_runtime_command,
 )
 from fisheye.shared.flat_roi_cache import build_flat_roi_cache
+from fisheye.shared.metadata import get_video_source_path
 from fisheye.shared.run_provenance import json_ready
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.shared.zarr_run_completion import is_run_complete_in_parent
@@ -163,10 +164,13 @@ def _crop_shape_and_identity(
     ).strip()
     raw_video = root.get("raw_video")
     images_full = raw_video.get("images_full") if raw_video is not None else None
-    source_video_path = str(
+    crop_source_video_path = (
         crop_group.attrs.get("source_video_path")
         or crop_group.attrs.get("video_source_path")
-        or root.attrs.get("source_video_path")
+    )
+    source_video_path = str(
+        crop_source_video_path
+        or get_video_source_path(root, zarr_path=analysis_zarr)
         or ""
     ).strip()
     frame_width = (

@@ -155,6 +155,51 @@ def _make_external_geometry_only_root(source_video_path: str) -> _FakeGroup:
     return root
 
 
+def test_crop_image_source_uses_v2_root_locator_when_crop_has_no_video_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    recording = tmp_path / "recording"
+    source_video_path = recording / "cams" / "source.mp4"
+    root = _make_external_geometry_only_root(str(source_video_path))
+    crop = root["crop_runs"]["crop_geometry"]
+    del crop.attrs["source_video_path"]
+    root.attrs.update(
+        {
+            "recording_path": str(recording),
+            "source_video_metadata": {
+                "schema_id": "palette.source_video_metadata.v2",
+                "layout": "single_video",
+                "locator": {
+                    "kind": "recording_relative",
+                    "relative_path": "cams/source.mp4",
+                },
+                "source_path": str(source_video_path),
+            },
+        }
+    )
+    captured: dict[str, Path] = {}
+
+    class _FakeExternalReader:
+        def __init__(self, path: Path) -> None:
+            captured["path"] = path
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(crop_mod, "_ExternalFrameReader", _FakeExternalReader)
+
+    source = CropImageSource.open(
+        root,
+        roi_cache_policy="never",
+        roi_live_acceleration="cpu",
+    )
+
+    assert source.frame_source_path == str(source_video_path.resolve())
+    assert captured["path"] == source_video_path.resolve()
+    source.close()
+
+
 def _make_acquisition_crop_video_root(crop_video_path: str) -> _FakeGroup:
     root = _make_root()
 

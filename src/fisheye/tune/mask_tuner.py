@@ -21,6 +21,10 @@ rectangle_roi = None
 mask_mode = "circle"
 
 from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.shared.source_video_metadata import (
+    SourceVideoMetadataMissingError,
+    resolve_source_video,
+)
 from fisheye.utils.dish_mask_registry_sync import sync_dish_mask_registry_status
 
 
@@ -53,26 +57,10 @@ def _resolution_from_attr(value: Any) -> Optional[tuple[int, int]]:
 def _resolve_source_video_path(zarr_root) -> Optional[Path]:
     """Return the source video path recorded on a metadata-only production Zarr."""
 
-    candidates = [
-        zarr_root.attrs.get("source_video_path"),
-        zarr_root.attrs.get("source_path"),
-    ]
-    raw_video = zarr_root.get("raw_video") if hasattr(zarr_root, "get") else None
-    if raw_video is not None:
-        candidates.extend(
-            [
-                raw_video.attrs.get("source_path"),
-                raw_video.attrs.get("source_video_path"),
-            ]
-        )
-
-    for candidate in candidates:
-        if candidate is None:
-            continue
-        path = Path(str(candidate)).expanduser()
-        if path.exists():
-            return path
-    return None
+    try:
+        return resolve_source_video(zarr_root, require_exists=True).path
+    except SourceVideoMetadataMissingError:
+        return None
 
 
 def _resolve_source_video_shape(zarr_root) -> Optional[tuple[int, int]]:

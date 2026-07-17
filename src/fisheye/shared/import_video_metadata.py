@@ -18,6 +18,7 @@ from fisheye.shared.import_profile_contract import (
     PROFILE_METADATA_ONLY_ANALYSIS,
 )
 from fisheye.shared.import_source_fingerprint import optional_source_stat_fingerprint_attrs
+from fisheye.shared.source_video_metadata import build_source_video_metadata_v2
 
 
 SOURCE_VIDEO_COLORIMETRY_FIELDS = (
@@ -203,7 +204,14 @@ def _preview_updates(attrs: Any, payload: Dict[str, Any], *, overwrite: bool) ->
     return updates
 
 
-def _write_metadata(root: zarr.Group, meta: Dict[str, Any], *, overwrite: bool, import_purpose: str) -> Dict[str, Any]:
+def _write_metadata(
+    root: zarr.Group,
+    meta: Dict[str, Any],
+    *,
+    overwrite: bool,
+    import_purpose: str,
+    recording_path: str | Path | None = None,
+) -> Dict[str, Any]:
     raw = root.require_group("raw_video")
     has_arrays = any(name in raw for name in ("images_full", "images_ds", "images_ds_rgb"))
     imported_frames = None
@@ -229,6 +237,16 @@ def _write_metadata(root: zarr.Group, meta: Dict[str, Any], *, overwrite: bool, 
             "fps": meta.get("fps"),
             "frame_count": meta.get("total_frames"),
         },
+    )
+    resolved_recording_path = recording_path or root.attrs.get("recording_path")
+    if resolved_recording_path is None and meta.get("source_path"):
+        source_path = Path(str(meta["source_path"])).expanduser().resolve()
+        if source_path.parent.name == "cams":
+            resolved_recording_path = source_path.parent.parent
+    versioned_source_video_metadata = build_source_video_metadata_v2(
+        meta,
+        recording_path=resolved_recording_path,
+        fingerprint_attrs=source_video_fingerprint_attrs,
     )
 
     raw_payload = {
@@ -280,6 +298,11 @@ def _write_metadata(root: zarr.Group, meta: Dict[str, Any], *, overwrite: bool, 
         "source_video": meta.get("source_video"),
         "source_video_path": meta.get("source_path"),
         "source_path": meta.get("source_path"),
+        "recording_path": (
+            str(Path(resolved_recording_path).expanduser().resolve())
+            if resolved_recording_path is not None
+            else None
+        ),
         "width": meta.get("width"),
         "height": meta.get("height"),
         "fps": meta.get("fps"),
@@ -288,7 +311,7 @@ def _write_metadata(root: zarr.Group, meta: Dict[str, Any], *, overwrite: bool, 
         "duration_seconds": meta.get("duration_seconds"),
         "video_codec": meta.get("codec"),
         "video_pix_fmt": meta.get("pix_fmt"),
-        "source_video_metadata": meta,
+        "source_video_metadata": versioned_source_video_metadata,
         "source_video_format_tags": meta.get("format_tags"),
         "source_video_total_frames": meta.get("total_frames"),
     }
@@ -318,6 +341,13 @@ def write_video_metadata(
     *,
     overwrite: bool,
     import_purpose: str,
+    recording_path: str | Path | None = None,
 ) -> Dict[str, Any]:
     """Public wrapper for writing normalized video metadata onto a Zarr root."""
-    return _write_metadata(root, meta, overwrite=overwrite, import_purpose=import_purpose)
+    return _write_metadata(
+        root,
+        meta,
+        overwrite=overwrite,
+        import_purpose=import_purpose,
+        recording_path=recording_path,
+    )
