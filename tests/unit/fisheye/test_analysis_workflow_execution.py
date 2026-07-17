@@ -129,6 +129,16 @@ def test_execution_plan_renders_exact_dependency_runs_and_parallel_backends(
     assert execution.output_runs["track_kinematics_visualization"] == "track_a"
 
     bout = commands["bout_kinematics"].argv
+    assert bout[:4] == (
+        "/palette/python",
+        "-m",
+        "fisheye.analysis_workflows.materializers.bout_kinematics",
+        str(tmp_path / "recording_analysis.zarr"),
+    )
+    assert "--compute" in bout
+    assert "--apply" in bout
+    assert bout[bout.index("--output-shard-rows") + 1] == "262144"
+    assert "--" in bout
     assert bout[bout.index("--swim-bout-run") + 1] == (
         "swim_bouts_canary_20260713_01"
     )

@@ -23,6 +23,10 @@ import numpy as np
 import zarr
 
 from fisheye.shared.zarr.columnar import (
+    COLUMNAR_SHARD_ALIGNMENT_POLICY,
+    COLUMNAR_SHARD_POLICY,
+    COLUMNAR_STORAGE_SCHEMA_ID,
+    DEFAULT_COLUMNAR_SHARD_ROWS,
     load_structured_dataset,
     write_columnar_dataset,
 )
@@ -88,6 +92,9 @@ LAYOUT_HIERARCHICAL_V1 = "hierarchical_v1"
 LAYOUT_COMPACT_TABULAR_V2 = "compact_tabular_v2"
 BOUT_KINEMATICS_LAYOUTS = (LAYOUT_HIERARCHICAL_V1, LAYOUT_COMPACT_TABULAR_V2)
 BOUT_KINEMATICS_LAYOUT_DEFAULT = LAYOUT_COMPACT_TABULAR_V2
+BOUT_KINEMATICS_PHYSICAL_LAYOUT_SCHEMA_ID = (
+    "palette.bout_kinematics_physical_layout.v1"
+)
 COMPACT_LEVEL_INDEX = "level_index"
 COMPACT_MOVEMENT_TABLE = "movement_metrics"
 COMPACT_HEADING_TABLE = "heading_metrics"
@@ -408,6 +415,7 @@ def _write_compact_bout_kinematics_tables(
     heading_table_attrs: Mapping[str, object],
     eye_gaze_metrics: Optional[np.ndarray],
     eye_gaze_attrs: Optional[Mapping[str, object]],
+    output_shard_rows: int,
 ) -> None:
     level_index = _compact_level_index_records(
         heading_levels=heading_levels,
@@ -425,6 +433,7 @@ def _write_compact_bout_kinematics_tables(
             "schema_version": SCHEMA_VERSION,
             "layout": LAYOUT_COMPACT_TABULAR_V2,
         },
+        shard_rows=int(output_shard_rows),
     )
     write_columnar_dataset(
         run_group,
@@ -441,6 +450,7 @@ def _write_compact_bout_kinematics_tables(
             "layout": LAYOUT_COMPACT_TABULAR_V2,
             "analysis_level": MOVEMENT_LEVEL,
         },
+        shard_rows=int(output_shard_rows),
     )
 
     heading_metrics = _concat_heading_compact_records(metrics_by_level, heading_levels=heading_levels)
@@ -458,6 +468,7 @@ def _write_compact_bout_kinematics_tables(
                 "heading_levels": list(heading_levels),
                 "default_heading_level": default_heading_level,
             },
+            shard_rows=int(output_shard_rows),
         )
 
     if eye_gaze_metrics is not None and eye_gaze_attrs is not None:
@@ -476,7 +487,45 @@ def _write_compact_bout_kinematics_tables(
                 "layout": LAYOUT_COMPACT_TABULAR_V2,
                 "analysis_level": EYE_GAZE_LEVEL,
             },
+            shard_rows=int(output_shard_rows),
         )
+
+
+def _iter_run_arrays(group: zarr.Group, prefix: str = ""):
+    for name, array in sorted(group.arrays(), key=lambda item: item[0]):
+        yield f"{prefix}/{name}" if prefix else str(name), array
+    for name, child in sorted(group.groups(), key=lambda item: item[0]):
+        child_prefix = f"{prefix}/{name}" if prefix else str(name)
+        yield from _iter_run_arrays(child, child_prefix)
+
+
+def _physical_storage_layout(
+    run_group: zarr.Group,
+    *,
+    output_shard_rows: int,
+) -> dict[str, object]:
+    """Summarize the native writer's physical layout for validation/provenance."""
+
+    array_count = 0
+    sharded_array_count = 0
+    regular_array_count = 0
+    for _path, array in _iter_run_arrays(run_group):
+        array_count += 1
+        if getattr(array, "shards", None) is None:
+            regular_array_count += 1
+        else:
+            sharded_array_count += 1
+    return {
+        "schema_id": BOUT_KINEMATICS_PHYSICAL_LAYOUT_SCHEMA_ID,
+        "storage_schema_id": COLUMNAR_STORAGE_SCHEMA_ID,
+        "layout": "zarr_v3_indexed_sharding",
+        "shard_policy": COLUMNAR_SHARD_POLICY,
+        "shard_alignment_policy": COLUMNAR_SHARD_ALIGNMENT_POLICY,
+        "requested_outer_shard_rows": int(output_shard_rows),
+        "array_count": int(array_count),
+        "sharded_array_count": int(sharded_array_count),
+        "regular_array_count": int(regular_array_count),
+    }
 
 
 def _metrics_dtype() -> np.dtype:
@@ -2761,6 +2810,7 @@ def write_bout_kinematics_visualization_artifacts(
 def compute_and_save_bout_kinematics(
     zarr_path: Path | str,
     *,
+    output_zarr_path: Path | str | None = None,
     run_name: Optional[str] = None,
     track_kinematics_run: str = "latest",
     track_scope: str = "offline",
@@ -2790,6 +2840,7 @@ def compute_and_save_bout_kinematics(
     visualization_bins: int = 40,
     visualization_dpi: int = 150,
     layout: str = BOUT_KINEMATICS_LAYOUT_DEFAULT,
+    output_shard_rows: int = DEFAULT_COLUMNAR_SHARD_ROWS,
     overwrite: bool = False,
     command: Optional[str] = None,
 ) -> str:
@@ -2819,6 +2870,8 @@ def compute_and_save_bout_kinematics(
         raise ValueError("physical_active_threshold_mm_s must be >= 0.")
     if float(physical_active_boundary_margin_s) < 0:
         raise ValueError("physical_active_boundary_margin_s must be >= 0.")
+    if int(output_shard_rows) <= 0:
+        raise ValueError("output_shard_rows must be positive.")
 
     default_heading_level = normalize_heading_level(default_heading_level)
     normalized_heading_levels = tuple(dict.fromkeys(normalize_heading_level(level) for level in heading_levels))
@@ -2834,9 +2887,18 @@ def compute_and_save_bout_kinematics(
     physical_active_suffix = _speed_level_suffix(physical_active_level)
 
     zarr_path = Path(zarr_path)
-    root = open_zarr_root(zarr_path, mode="r+")
+    source_root = open_zarr_root(
+        zarr_path,
+        mode="r" if output_zarr_path is not None else "r+",
+    )
+    if output_zarr_path is None:
+        output_path = zarr_path
+        output_root = source_root
+    else:
+        output_path = Path(output_zarr_path)
+        output_root = open_zarr_root(output_path, mode="a")
     track_run_group, track_run_name, track_run_path, resolved_scope = _resolve_track_run(
-        root,
+        source_root,
         track_kinematics_run,
         track_scope=track_scope,
     )
@@ -2950,7 +3012,7 @@ def compute_and_save_bout_kinematics(
     }
 
     swim_payload = load_swim_bout_tables(
-        root,
+        source_root,
         run_name=swim_bout_run,
         speed_level=speed_level,
     )
@@ -2983,10 +3045,10 @@ def compute_and_save_bout_kinematics(
         if len(loaded_peak_events) == len(bouts) and _records_align_by_bout_id(bouts, loaded_peak_events):
             peak_events = loaded_peak_events
 
-    if "analysis" not in root:
-        analysis = root.create_group("analysis")
+    if "analysis" not in output_root:
+        analysis = output_root.create_group("analysis")
     else:
-        analysis = root["analysis"]
+        analysis = output_root["analysis"]
     parent = require_runs_parent(analysis, "bout_kinematics_runs")
 
     if run_name is None:
@@ -3026,7 +3088,7 @@ def compute_and_save_bout_kinematics(
     eye_series: Optional[dict[str, np.ndarray]] = None
     if include_eye_gaze:
         eye_series, eye_source_refs = _load_eye_gaze_frame_series(
-            root,
+            source_root,
             eye_angle_run=eye_angle_run,
             eye_angle_family=eye_angle_family,
             frames=frames,
@@ -3047,6 +3109,7 @@ def compute_and_save_bout_kinematics(
     source_peak_event_fields = list(peak_events.dtype.names if peak_events is not None else [])
     parameters = {
         "layout": layout,
+        "output_shard_rows": int(output_shard_rows),
         "default_heading_level": default_heading_level,
         "heading_levels": list(normalized_heading_levels),
         "pre_post_mode": pre_post_mode,
@@ -3148,6 +3211,7 @@ def compute_and_save_bout_kinematics(
             "per_bout_metrics",
             movement_metrics,
             attrs=movement_attrs,
+            shard_rows=int(output_shard_rows),
         )
 
     written_levels: list[str] = []
@@ -3200,6 +3264,7 @@ def compute_and_save_bout_kinematics(
                     "source_interpolated_threshold_fields": source_interpolated_threshold_fields,
                     "source_peak_event_fields": source_peak_event_fields,
                 },
+                shard_rows=int(output_shard_rows),
             )
         written_levels.append(heading_level)
         metrics_by_level[heading_level] = metrics
@@ -3247,6 +3312,7 @@ def compute_and_save_bout_kinematics(
                 "per_bout_metrics",
                 eye_gaze_metrics,
                 attrs=eye_gaze_attrs,
+                shard_rows=int(output_shard_rows),
             )
         written_analysis_levels.append(EYE_GAZE_LEVEL)
 
@@ -3272,10 +3338,11 @@ def compute_and_save_bout_kinematics(
             },
             eye_gaze_metrics=eye_gaze_metrics,
             eye_gaze_attrs=eye_gaze_attrs,
+            output_shard_rows=int(output_shard_rows),
         )
 
     git_info = get_git_info()
-    env_info = get_environment_info(disk_path=str(zarr_path), capture_env_vars=False)
+    env_info = get_environment_info(disk_path=str(output_path), capture_env_vars=False)
     provenance = build_stage_provenance(
         stage="bout_kinematics",
         created_at_utc=created_at_utc,
@@ -3288,6 +3355,7 @@ def compute_and_save_bout_kinematics(
         platform=env_info.get("platform"),
         artifacts={
             "run_path": f"analysis/bout_kinematics_runs/{run_name}",
+            "output_zarr_path": str(output_path),
             "layout": layout,
             "heading_levels": written_levels,
             "analysis_levels": written_analysis_levels,
@@ -3329,6 +3397,11 @@ def compute_and_save_bout_kinematics(
             mark_run_failed(run_group, error=f"{type(exc).__name__}: {exc}")
             raise
 
+    run_group.attrs["physical_storage_layout"] = _physical_storage_layout(
+        run_group,
+        output_shard_rows=int(output_shard_rows),
+    )
+
     run_group.attrs["status"] = "complete"
     mark_run_complete(
         run_group,
@@ -3343,6 +3416,15 @@ def compute_and_save_bout_kinematics(
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Compute per-bout heading kinematics.")
     parser.add_argument("zarr_path", type=Path, help="Path to the Palette Zarr archive.")
+    parser.add_argument(
+        "--output-zarr-path",
+        type=Path,
+        default=None,
+        help=(
+            "Optional separate output Zarr. When set, the authoritative input "
+            "archive is opened read-only and the new run is written here."
+        ),
+    )
     parser.add_argument("--run-name", type=str, default=None, help="Output bout-kinematics run name.")
     parser.add_argument("--overwrite", action="store_true", help="Replace --run-name if it exists.")
     parser.add_argument("--track-kinematics-run", type=str, default="latest", help="Track kinematics run name/path.")
@@ -3437,10 +3519,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument("--visualization-bins", type=int, default=40)
     parser.add_argument("--visualization-dpi", type=int, default=150)
+    parser.add_argument(
+        "--output-shard-rows",
+        type=int,
+        default=DEFAULT_COLUMNAR_SHARD_ROWS,
+        help="Requested capped row-shard size for native columnar outputs.",
+    )
     args = parser.parse_args(argv)
 
     compute_and_save_bout_kinematics(
         zarr_path=args.zarr_path,
+        output_zarr_path=args.output_zarr_path,
         run_name=args.run_name,
         track_kinematics_run=args.track_kinematics_run,
         track_scope=args.track_scope,
@@ -3470,6 +3559,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         visualization_bins=args.visualization_bins,
         visualization_dpi=args.visualization_dpi,
         layout=args.layout,
+        output_shard_rows=args.output_shard_rows,
         overwrite=args.overwrite,
         command=" ".join(sys.argv if argv is None else [sys.argv[0], *argv]),
     )

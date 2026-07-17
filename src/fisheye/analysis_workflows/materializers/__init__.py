@@ -6,24 +6,32 @@ from importlib import import_module
 from typing import Any
 
 __all__ = [
+    "BoutKinematicsComputePlan",
     "BoutKinematicsStoragePlan",
     "EyeAngleMaterializationPlan",
     "TailKinematicsMaterializationPlan",
     "TrackKinematicsMaterializationPlan",
+    "build_bout_kinematics_compute_plan",
     "build_bout_kinematics_storage_plan",
     "build_eye_angle_materialization_plan",
     "build_tail_kinematics_materialization_plan",
     "build_track_kinematics_materialization_plan",
+    "materialize_bout_kinematics_compute",
     "materialize_bout_kinematics_storage",
+    "promote_bout_kinematics_candidate",
     "materialize_eye_angles",
     "materialize_tail_kinematics",
     "materialize_track_kinematics",
 ]
 
 _MODULE_BY_NAME = {
+    "BoutKinematicsComputePlan": ".bout_kinematics",
     "BoutKinematicsStoragePlan": ".bout_kinematics",
+    "build_bout_kinematics_compute_plan": ".bout_kinematics",
     "build_bout_kinematics_storage_plan": ".bout_kinematics",
+    "materialize_bout_kinematics_compute": ".bout_kinematics",
     "materialize_bout_kinematics_storage": ".bout_kinematics",
+    "promote_bout_kinematics_candidate": ".bout_kinematics",
     "EyeAngleMaterializationPlan": ".eye_angles",
     "build_eye_angle_materialization_plan": ".eye_angles",
     "materialize_eye_angles": ".eye_angles",

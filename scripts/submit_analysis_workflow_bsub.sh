@@ -51,8 +51,8 @@ Options:
   -h, --help                   Show this help
 
 Export-product targets remain unsupported until their immutable streaming
-execution adapters are implemented. Subject shape, tail kinematics, and eye
-angles use dedicated node-local, sharded, atomic-publication materializers.
+execution adapters are implemented. Track, bout, subject-shape, tail, and eye
+kinematics use dedicated node-local, sharded, atomic-publication materializers.
 USAGE
 }
 

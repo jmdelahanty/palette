@@ -197,11 +197,22 @@ def _track_kinematics_visualization_command(
 
 
 def _bout_kinematics_command(context: StageCommandContext) -> tuple[str, ...]:
-    command = _module_command(context, "fisheye.analysis.bout_kinematics")
+    command = _module_command(
+        context,
+        "fisheye.analysis_workflows.materializers.bout_kinematics",
+    )
     command.extend(
         (
+            "--compute",
             "--run-name",
             context.output_run,
+            "--output-shard-rows",
+            "262144",
+            "--copy-backend",
+            "rsync",
+            "--apply",
+            "--json",
+            "--",
             "--track-kinematics-run",
             context.dependency_run("track_kinematics"),
             "--track-scope",

@@ -157,6 +157,38 @@ def test_bout_kinematics_layout_default_is_compact_v2(monkeypatch: pytest.Monkey
     assert captured["layout"] == BOUT_KINEMATICS_LAYOUT_DEFAULT
 
 
+def test_compute_can_write_separate_node_local_output_without_mutating_source(
+    tmp_path: Path,
+) -> None:
+    zarr_path = _make_archive(tmp_path)
+    output_zarr = tmp_path / "node-local-output.zarr"
+
+    run_name = compute_and_save_bout_kinematics(
+        zarr_path,
+        output_zarr_path=output_zarr,
+        run_name="bout_local",
+        track_kinematics_run="tk_1",
+        track_id=0,
+        swim_bout_run="bouts_1",
+        speed_level="filtered",
+        write_visualizations=False,
+        output_shard_rows=8_192,
+    )
+
+    source = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    assert "bout_kinematics_runs" not in source["analysis"]
+    output = zarr.open_group(str(output_zarr), mode="r", use_consolidated=False)
+    parent = output["analysis/bout_kinematics_runs"]
+    assert parent.attrs["latest_complete"] == run_name
+    run = parent[run_name]
+    assert run.attrs["palette_run_completion_status"] == "complete"
+    assert run.attrs["parameters"]["output_shard_rows"] == 8_192
+    assert run.attrs["physical_storage_layout"]["shard_policy"] == (
+        "multi_chunk_capped"
+    )
+    assert run.attrs["physical_storage_layout"]["array_count"] > 0
+
+
 def test_compute_and_save_bout_kinematics_writes_hierarchical_heading_levels(tmp_path: Path) -> None:
     zarr_path = _make_archive(tmp_path)
 

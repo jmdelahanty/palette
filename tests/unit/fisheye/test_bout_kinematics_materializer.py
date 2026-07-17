@@ -3,12 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.analysis.bout_kinematics import LAYOUT_COMPACT_TABULAR_V2
 from fisheye.analysis_workflows.materializers.bout_kinematics import (
+    build_bout_kinematics_compute_plan,
     build_bout_kinematics_storage_plan,
+    materialize_bout_kinematics_compute,
     materialize_bout_kinematics_storage,
+    promote_bout_kinematics_candidate,
 )
 from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.zarr.columnar import write_columnar_dataset
@@ -18,6 +22,7 @@ from fisheye.shared.zarr_run_completion import (
     require_runs_parent,
 )
 from fisheye.shared.zarr_sharded_copy import SHARD_POLICY_MULTI_CHUNK_CAPPED
+from fisheye.shared.zarr_sharded_copy import copy_completed_run_to_sharded
 
 
 def _make_archive(tmp_path: Path) -> Path:
@@ -170,3 +175,136 @@ def test_materialize_bout_kinematics_storage_publishes_without_promotion(
     assert candidate["movement_metrics/bout_id"].shards is not None
     assert candidate["heading_metrics/heading_level_bytes"].shards is not None
     assert candidate["visualizations/summary_png"].shards is None
+
+
+def test_promote_bout_candidate_validates_then_updates_both_pointers(
+    tmp_path: Path,
+) -> None:
+    source = _make_archive(tmp_path)
+    materialize_bout_kinematics_storage(
+        source,
+        source_run="bout_source",
+        scratch_root=tmp_path / "storage-scratch",
+        run_name="bout_candidate",
+        output_shard_rows=8_192,
+        workers=1,
+        copy_backend="python",
+        apply=True,
+    )
+
+    planned = promote_bout_kinematics_candidate(
+        source,
+        run_name="bout_candidate",
+        apply=False,
+    )
+    assert planned["status"] == "planned"
+    assert planned["latest_before"] == "bout_source"
+
+    promoted = promote_bout_kinematics_candidate(
+        source,
+        run_name="bout_candidate",
+        apply=True,
+        approved_by="test",
+        note="validated storage candidate",
+    )
+
+    assert promoted["status"] == "complete"
+    assert promoted["promoted"] is True
+    root = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    parent = root["analysis/bout_kinematics_runs"]
+    assert parent.attrs["latest"] == "bout_candidate"
+    assert parent.attrs["latest_complete"] == "bout_candidate"
+    receipt = parent["bout_candidate"].attrs["storage_promotion"]
+    assert receipt["approved_by"] == "test"
+    assert receipt["previous_latest"] == "bout_source"
+
+
+def test_compute_plan_is_read_only_and_rejects_managed_writer_arguments(
+    tmp_path: Path,
+) -> None:
+    source = _make_archive(tmp_path)
+    before = sorted(path.relative_to(source) for path in source.rglob("*"))
+
+    plan = build_bout_kinematics_compute_plan(
+        source,
+        scratch_root=tmp_path / "compute-scratch",
+        run_name="bout_fresh",
+        writer_arguments=("--speed-level", "exponential"),
+    )
+
+    assert plan.local_run_path == (
+        tmp_path
+        / "compute-scratch"
+        / "bout-output.zarr"
+        / "analysis"
+        / "bout_kinematics_runs"
+        / "bout_fresh"
+    )
+    assert not plan.scratch_root.exists()
+    assert before == sorted(path.relative_to(source) for path in source.rglob("*"))
+
+    with pytest.raises(ValueError, match="owns these writer arguments"):
+        build_bout_kinematics_compute_plan(
+            source,
+            scratch_root=tmp_path / "other-scratch",
+            run_name="bout_other",
+            writer_arguments=("--run-name", "wrong"),
+        )
+
+
+def test_compute_materializer_publishes_and_promotes_local_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _make_archive(tmp_path)
+
+    def fake_writer_main(argv: list[str]) -> int:
+        output_zarr = Path(argv[argv.index("--output-zarr-path") + 1])
+        run_name = argv[argv.index("--run-name") + 1]
+        local_run = (
+            output_zarr
+            / "analysis"
+            / "bout_kinematics_runs"
+            / run_name
+        )
+        copy_completed_run_to_sharded(
+            source / "analysis/bout_kinematics_runs/bout_source",
+            local_run,
+            row_count_array=None,
+            shard_rows=8_192,
+            shard_policy=SHARD_POLICY_MULTI_CHUNK_CAPPED,
+            workers=1,
+        )
+        group = zarr.open_group(str(local_run), mode="a", use_consolidated=False)
+        group.attrs["palette_run_name"] = run_name
+        return 0
+
+    monkeypatch.setattr(
+        "fisheye.analysis_workflows.materializers.bout_kinematics.bout_writer.main",
+        fake_writer_main,
+    )
+    scratch = tmp_path / "compute-scratch"
+    result = materialize_bout_kinematics_compute(
+        source,
+        scratch_root=scratch,
+        run_name="bout_fresh",
+        output_shard_rows=8_192,
+        writer_arguments=("--speed-level", "exponential"),
+        copy_backend="python",
+        apply=True,
+    )
+
+    assert result["status"] == "complete"
+    assert result["promoted"] is True
+    assert not scratch.exists()
+    root = zarr.open_group(str(source), mode="r", use_consolidated=False)
+    parent = root["analysis/bout_kinematics_runs"]
+    assert parent.attrs["latest"] == "bout_fresh"
+    assert parent.attrs["latest_complete"] == "bout_fresh"
+    fresh = parent["bout_fresh"]
+    assert fresh.attrs["node_local_materialization"]["compute_output"] == (
+        "node_local_zarr"
+    )
+    assert fresh.attrs["cluster_output_staging"]["promotion_policy"] == (
+        "completion_last_then_latest_pointer_update"
+    )

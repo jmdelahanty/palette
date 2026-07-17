@@ -81,8 +81,11 @@ nodes:
     kind: analysis
     stage_id: bout_kinematics
     depends_on: [track_kinematics, swim_bouts, track_kinematics_visualization]
-    execution_policy: recording_driver_single_writer
-    description: Compute sparse per-bout movement and heading metrics.
+    execution_policy: node_local_compute_atomic_publish
+    description: >-
+      Compute sparse per-bout movement and heading metrics from read-only
+      authoritative inputs into node-local sharded output, validate it, and
+      publish completion-last through the shared atomic run publisher.
 
   - id: eye_angles
     kind: analysis

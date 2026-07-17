@@ -17,6 +17,7 @@ from fisheye.shared.json_safety import decode_null_terminated_text
 
 __all__ = [
     "COLUMNAR_SHARD_ALIGNMENT_POLICY",
+    "COLUMNAR_SHARD_POLICY",
     "COLUMNAR_STORAGE_SCHEMA_ID",
     "DEFAULT_COLUMNAR_SHARD_ROWS",
     "load_structured_dataset",
@@ -29,6 +30,7 @@ __all__ = [
 
 COLUMNAR_STORAGE_SCHEMA_ID = "palette.columnar_zarr_storage.v1"
 DEFAULT_COLUMNAR_SHARD_ROWS = 262_144
+COLUMNAR_SHARD_POLICY = "multi_chunk_capped"
 COLUMNAR_SHARD_ALIGNMENT_POLICY = (
     "ceil_requested_rows_to_logical_chunk_grid_capped_to_array"
 )
@@ -237,7 +239,7 @@ def write_columnar_dataset(
                 int(shard_rows) if shard_rows is not None else None
             ),
             "columnar_shard_alignment_policy": COLUMNAR_SHARD_ALIGNMENT_POLICY,
-            "columnar_sharding_policy": "shard_fields_with_multiple_logical_row_chunks",
+            "columnar_sharding_policy": COLUMNAR_SHARD_POLICY,
             "columnar_sharded_field_count": int(sharded_field_count),
             "columnar_regular_field_count": int(len(field_names) - sharded_field_count),
         }
