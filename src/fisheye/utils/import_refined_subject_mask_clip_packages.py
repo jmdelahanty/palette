@@ -43,6 +43,9 @@ from fisheye.utils.finalize_subject_mask_clip_package import PACKAGE_SCHEMA_ID a
 IMPORT_SCHEMA_ID = "palette_refined_subject_mask_clip_package_import_v1"
 SKIPPED_DERIVED_GROUPS = {"mask_bitpacked", "mask_rle"}
 SKIPPED_REGENERATED_ARRAY_NAMES = {"reason_bytes"}
+SKIPPED_REGENERATED_ARRAY_PATHS = {"frame_counts"}
+FRAME_COUNTS_INNER_ROWS = 16_384
+FRAME_COUNTS_SHARD_ROWS = 131_072
 COLLECTION_INHERITED_ATTR_DROP_EXACT = {
     "clip_package_host",
     "clip_package_lsb_jobid",
@@ -204,6 +207,8 @@ def _iter_array_paths(group: zarr.Group, prefix: str = "") -> list[str]:
         path = f"{prefix}/{key}" if prefix else str(key)
         if path.split("/", 1)[0] in SKIPPED_DERIVED_GROUPS:
             continue
+        if path in SKIPPED_REGENERATED_ARRAY_PATHS:
+            continue
         if PurePosixPath(path).name in SKIPPED_REGENERATED_ARRAY_NAMES:
             continue
         child = group[key]
@@ -330,6 +335,162 @@ def _create_array_like(
     if fill_value is not None:
         kwargs["fill_value"] = fill_value
     return parent.create_array(name, **kwargs)
+
+
+def _positive_int(value: object) -> int | None:
+    try:
+        result = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return result if result > 0 else None
+
+
+def _recording_frame_count_candidates(
+    root: zarr.Group,
+    reference_run: zarr.Group,
+    *,
+    source_crop_run: str,
+) -> dict[str, int]:
+    candidates: dict[str, int] = {}
+    root_count = _positive_int(root.attrs.get("recording_frame_index_row_count"))
+    if root_count is not None:
+        candidates["root.recording_frame_index_row_count"] = root_count
+
+    crop = root.get(f"crop_runs/{source_crop_run}")
+    if not isinstance(crop, zarr.Group):
+        raise ValueError(f"Missing canonical source crop run crop_runs/{source_crop_run}.")
+    crop_count = _positive_int(crop.attrs.get("recording_frame_index_row_count"))
+    if crop_count is not None:
+        candidates[f"crop_runs/{source_crop_run}.recording_frame_index_row_count"] = crop_count
+    crop_frame_counts = crop.get("frame_counts")
+    if crop_frame_counts is not None:
+        shape = tuple(int(value) for value in crop_frame_counts.shape)
+        if len(shape) != 1 or shape[0] <= 0:
+            raise ValueError(
+                f"crop_runs/{source_crop_run}/frame_counts must be a nonempty vector, got {shape}."
+            )
+        candidates[f"crop_runs/{source_crop_run}/frame_counts"] = int(shape[0])
+
+    assignment_group = str(reference_run.attrs.get("assignment_keypoint_group") or "")
+    assignment_run = str(
+        reference_run.attrs.get("assignment_keypoints_run")
+        or reference_run.attrs.get("assignment_keypoint_run")
+        or ""
+    )
+    if assignment_group and assignment_run:
+        assignment = root.get(f"{assignment_group}/{assignment_run}")
+        if not isinstance(assignment, zarr.Group):
+            raise ValueError(
+                "Missing assignment keypoint run "
+                f"{assignment_group}/{assignment_run} required by refined-mask packages."
+            )
+        assignment_frame_counts = assignment.get("frame_counts")
+        if assignment_frame_counts is None:
+            raise ValueError(
+                f"{assignment_group}/{assignment_run} is missing frame_counts."
+            )
+        shape = tuple(int(value) for value in assignment_frame_counts.shape)
+        if len(shape) != 1 or shape[0] <= 0:
+            raise ValueError(
+                f"{assignment_group}/{assignment_run}/frame_counts must be a nonempty vector, got {shape}."
+            )
+        candidates[f"{assignment_group}/{assignment_run}/frame_counts"] = int(shape[0])
+
+    return candidates
+
+
+def resolve_recording_frame_count(
+    root: zarr.Group,
+    reference_run: zarr.Group,
+    *,
+    source_crop_run: str,
+) -> tuple[int, dict[str, int]]:
+    candidates = _recording_frame_count_candidates(
+        root,
+        reference_run,
+        source_crop_run=source_crop_run,
+    )
+    if not candidates:
+        raise ValueError(
+            "Cannot establish the recording frame universe. Expected "
+            "root.recording_frame_index_row_count, a canonical crop frame_counts vector, "
+            "or the explicitly assigned keypoint run frame_counts vector."
+        )
+    values = sorted(set(candidates.values()))
+    if len(values) != 1:
+        raise ValueError(f"Recording frame-count authorities disagree: {candidates!r}.")
+    return int(values[0]), candidates
+
+
+def compute_recording_frame_counts(
+    frame_indices: Any,
+    *,
+    recording_frame_count: int,
+) -> np.ndarray:
+    total_frames = int(recording_frame_count)
+    if total_frames <= 0:
+        raise ValueError("recording_frame_count must be positive.")
+    shape = tuple(int(value) for value in frame_indices.shape)
+    if len(shape) != 1:
+        raise ValueError(f"frame_indices must be a vector, got {shape}.")
+    counts = np.zeros((total_frames,), dtype=np.int64)
+    chunks = getattr(frame_indices, "chunks", None)
+    row_step = int(chunks[0]) if chunks else FRAME_COUNTS_SHARD_ROWS
+    row_step = max(1, row_step)
+    for start in range(0, int(shape[0]), row_step):
+        stop = min(int(shape[0]), start + row_step)
+        values = np.asarray(frame_indices[start:stop], dtype=np.int64).reshape(-1)
+        if values.size and (int(values.min()) < 0 or int(values.max()) >= total_frames):
+            raise ValueError(
+                f"frame_indices rows {start}:{stop} fall outside [0, {total_frames})."
+            )
+        np.add.at(counts, values, 1)
+    if counts.size and int(counts.max()) > np.iinfo(np.int32).max:
+        raise ValueError("frame_counts exceeds the canonical int32 range.")
+    return counts.astype(np.int32, copy=False)
+
+
+def write_recording_frame_counts(
+    run: zarr.Group,
+    counts: np.ndarray,
+    *,
+    name: str = "frame_counts",
+    source_candidates: Mapping[str, int] | None = None,
+) -> zarr.Array:
+    values = np.asarray(counts, dtype=np.int32).reshape(-1)
+    if values.size <= 0:
+        raise ValueError("Cannot write an empty recording frame_counts vector.")
+    inner_rows = min(FRAME_COUNTS_INNER_ROWS, int(values.size))
+    logical_chunks = (int(values.size) + inner_rows - 1) // inner_rows
+    maximum_useful_shard_rows = logical_chunks * inner_rows
+    shard_rows = min(FRAME_COUNTS_SHARD_ROWS, maximum_useful_shard_rows)
+    create_kwargs: dict[str, Any] = {
+        "data": values,
+        "chunks": (inner_rows,),
+        "overwrite": True,
+    }
+    if shard_rows > inner_rows:
+        create_kwargs["shards"] = (shard_rows,)
+    array = run.create_array(name, **create_kwargs)
+    array.attrs.update(
+        {
+            "frame_counts_semantics": "recording_parent_frame_index_0_based",
+            "frame_counts_generation": "bincount_of_assembled_frame_indices_v1",
+            "palette_physical_layout": (
+                "indexed_sharding_v1" if shard_rows > inner_rows else "regular_chunks_v1"
+            ),
+            "palette_logical_chunk_shape": [int(inner_rows)],
+            "palette_shard_rows_requested": int(FRAME_COUNTS_SHARD_ROWS),
+            "palette_shard_rows_effective": (
+                int(shard_rows) if shard_rows > inner_rows else None
+            ),
+            "recording_frame_count_authorities": dict(source_candidates or {}),
+        }
+    )
+    observed = np.asarray(array[:], dtype=np.int32).reshape(-1)
+    if not np.array_equal(observed, values):
+        raise ValueError(f"Verification failed after writing {name}.")
+    return array
 
 
 def _write_runs_by_mapping(
@@ -1039,6 +1200,16 @@ def import_refined_subject_mask_clip_packages(
                     f"Package source_crop_run values {target_crop_runs!r} do not match expected "
                     f"{expected_target_crop_run!r}."
                 )
+            if len(target_crop_runs) != 1 or not target_crop_runs[0]:
+                raise ValueError(
+                    "Refined-mask collection packages must bind exactly one canonical source_crop_run; "
+                    f"observed {target_crop_runs!r}."
+                )
+            recording_frame_count, frame_count_authorities = resolve_recording_frame_count(
+                root,
+                reference,
+                source_crop_run=target_crop_runs[0],
+            )
 
             for array_path in _iter_array_paths(reference):
                 if _is_contour_array_path(array_path):
@@ -1129,6 +1300,26 @@ def import_refined_subject_mask_clip_packages(
                     dest_parent.create_array(array_name, **kwargs)
 
             dest_run["source_crop_row_ids"][:] = sorted_crop_rows
+            frame_indices = dest_run.get("frame_indices")
+            if frame_indices is None:
+                raise ValueError(
+                    "Assembled refined subject-mask collection is missing frame_indices; "
+                    "cannot generate recording-wide frame_counts."
+                )
+            frame_counts = compute_recording_frame_counts(
+                frame_indices,
+                recording_frame_count=recording_frame_count,
+            )
+            if int(frame_counts.sum(dtype=np.int64)) != total_rows:
+                raise ValueError(
+                    "Generated recording frame_counts does not sum to the assembled mask row count: "
+                    f"{int(frame_counts.sum(dtype=np.int64))} != {total_rows}."
+                )
+            write_recording_frame_counts(
+                dest_run,
+                frame_counts,
+                source_candidates=frame_count_authorities,
+            )
         except Exception:
             if output_run in parent:
                 del parent[output_run]
@@ -1163,6 +1354,9 @@ def import_refined_subject_mask_clip_packages(
         dest_run.attrs["array_copy_strategy"] = "chunk_owned_parallel" if int(array_copy_workers) > 1 else "chunk_owned_serial"
         dest_run.attrs["row_copy_index_strategy"] = "precomputed_chunk_placements_v1"
         dest_run.attrs["row_copy_index_row_chunks"] = sorted(int(value) for value in row_chunk_copy_plans)
+        dest_run.attrs["recording_frame_count"] = int(recording_frame_count)
+        dest_run.attrs["frame_counts_generation"] = "bincount_of_assembled_frame_indices_v1"
+        dest_run.attrs["frame_counts_authorities"] = dict(frame_count_authorities)
         dest_run.attrs["masks_roi_publication_strategy"] = (
             "encoded_global_chunk_copy_v1"
             if encoded_mask_publication is not None

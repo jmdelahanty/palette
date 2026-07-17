@@ -25,6 +25,7 @@ from fisheye.utils.validate_refined_subject_mask_contract import (
 
 
 REPORT_SCHEMA = "palette.clipped_inference_target_validation.v1"
+VALIDATION_ROW_CHUNK = 131_072
 
 
 def _read_plan_target(plan_path: Path, target_id: str) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
@@ -40,7 +41,17 @@ def _read_plan_target(plan_path: Path, target_id: str) -> tuple[Mapping[str, Any
     return payload, exact[0]
 
 
-def _instance_keys(run: Any, *, label: str) -> dict[str, Any]:
+def _required_vector(run: Any, name: str, *, label: str) -> Any:
+    array = run.get(name)
+    if array is None:
+        raise RuntimeError(f"Modern production run is missing {name}: {label}")
+    shape = tuple(int(value) for value in array.shape)
+    if len(shape) != 1:
+        raise RuntimeError(f"{label}/{name} must be a vector, got {shape!r}.")
+    return array
+
+
+def _instance_key_values(run: Any, *, label: str) -> tuple[dict[str, Any], np.ndarray]:
     array = run.get("instance_key")
     if array is None:
         raise RuntimeError(f"Modern production run is missing instance_key: {label}")
@@ -57,7 +68,76 @@ def _instance_keys(run: Any, *, label: str) -> dict[str, Any]:
         "row_count": int(values.size),
         "unique_count": unique,
         "dtype": str(values.dtype),
-    }
+    }, values
+
+
+def _instance_keys(run: Any, *, label: str) -> dict[str, Any]:
+    report, _values = _instance_key_values(run, label=label)
+    return report
+
+
+def _require_exact_vector(
+    array: Any,
+    expected: np.ndarray,
+    *,
+    label: str,
+    dtype: Any,
+) -> None:
+    shape = tuple(int(value) for value in array.shape)
+    if shape != (int(expected.shape[0]),):
+        raise RuntimeError(
+            f"{label} shape {shape!r} does not match expected {(int(expected.shape[0]),)!r}."
+        )
+    for start in range(0, int(expected.shape[0]), VALIDATION_ROW_CHUNK):
+        stop = min(int(expected.shape[0]), start + VALIDATION_ROW_CHUNK)
+        observed = np.asarray(array[start:stop], dtype=dtype).reshape(-1)
+        if not np.array_equal(observed, expected[start:stop]):
+            mismatch = np.flatnonzero(observed != expected[start:stop])
+            first = start + int(mismatch[0]) if mismatch.size else start
+            raise RuntimeError(f"{label} differs from its canonical lineage at row {first}.")
+
+
+def _validate_run_frame_counts(
+    run: Any,
+    *,
+    label: str,
+    expected_row_count: int,
+    expected_counts: np.ndarray | None = None,
+) -> tuple[dict[str, Any], np.ndarray]:
+    frames = _required_vector(run, "frame_indices", label=label)
+    counts_array = _required_vector(run, "frame_counts", label=label)
+    if int(frames.shape[0]) != int(expected_row_count):
+        raise RuntimeError(
+            f"{label}/frame_indices row count {int(frames.shape[0])} != {int(expected_row_count)}."
+        )
+    total_frames = int(counts_array.shape[0])
+    if total_frames <= 0:
+        raise RuntimeError(f"{label}/frame_counts is empty.")
+    rebuilt = np.zeros((total_frames,), dtype=np.int64)
+    for start in range(0, int(expected_row_count), VALIDATION_ROW_CHUNK):
+        stop = min(int(expected_row_count), start + VALIDATION_ROW_CHUNK)
+        values = np.asarray(frames[start:stop], dtype=np.int64).reshape(-1)
+        if values.size and (int(values.min()) < 0 or int(values.max()) >= total_frames):
+            raise RuntimeError(
+                f"{label}/frame_indices rows {start}:{stop} fall outside [0, {total_frames})."
+            )
+        np.add.at(rebuilt, values, 1)
+    observed = np.asarray(counts_array[:], dtype=np.int64).reshape(-1)
+    if not np.array_equal(observed, rebuilt):
+        mismatch = np.flatnonzero(observed != rebuilt)
+        first = int(mismatch[0]) if mismatch.size else 0
+        raise RuntimeError(
+            f"{label}/frame_counts does not equal bincount(frame_indices); first mismatch at frame {first}."
+        )
+    if expected_counts is not None and not np.array_equal(observed, expected_counts):
+        raise RuntimeError(f"{label}/frame_counts does not match the canonical crop frame universe.")
+    return {
+        "frame_count": total_frames,
+        "row_count": int(expected_row_count),
+        "sum": int(observed.sum(dtype=np.int64)),
+        "exact_bincount_match": True,
+        "exact_canonical_match": expected_counts is not None,
+    }, observed
 
 
 def _refined_instance_keys(run: Any, *, label: str) -> dict[str, Any]:
@@ -65,6 +145,17 @@ def _refined_instance_keys(run: Any, *, label: str) -> dict[str, Any]:
     if instances is None:
         raise RuntimeError(f"Modern refined detection run is missing instances: {label}")
     return _instance_keys(instances, label=f"{label}/instances")
+
+
+def _refined_instance_key_values(
+    run: Any,
+    *,
+    label: str,
+) -> tuple[dict[str, Any], np.ndarray]:
+    instances = run.get("instances")
+    if instances is None:
+        raise RuntimeError(f"Modern refined detection run is missing instances: {label}")
+    return _instance_key_values(instances, label=f"{label}/instances")
 
 
 def _cache_manifest_report(path: Path, *, zarr_path: Path, collection_id: str, clip_id: str) -> dict[str, Any]:
@@ -117,7 +208,24 @@ def _cache_manifest_report(path: Path, *, zarr_path: Path, collection_id: str, c
     }
 
 
-def validate_target(plan_path: Path, *, target_id: str, sample_rows: int = 16) -> dict[str, Any]:
+def _cache_validation_mode(*, cleaned_cache_count: int, clip_count: int) -> str:
+    cleaned = int(cleaned_cache_count)
+    total = int(clip_count)
+    if cleaned not in {0, total}:
+        raise RuntimeError(
+            "Post-cleanup cache validation found a partial cache set: "
+            f"{cleaned}/{total} manifests are absent."
+        )
+    return "post_cleanup_all_absent" if cleaned == total else "live_payloads"
+
+
+def validate_target(
+    plan_path: Path,
+    *,
+    target_id: str,
+    sample_rows: int = 16,
+    allow_cleaned_caches: bool = False,
+) -> dict[str, Any]:
     if sample_rows <= 0:
         raise ValueError("sample_rows must be positive.")
     plan_path = plan_path.expanduser().resolve()
@@ -131,11 +239,11 @@ def validate_target(plan_path: Path, *, target_id: str, sample_rows: int = 16) -
         root, "detect_collection_sources", quality_source_run
     )
     quality = _require_complete_run(root, "detect_quality_runs", quality_run)
-    quality_source_identity = _instance_keys(
+    quality_source_identity, quality_source_keys = _instance_key_values(
         quality_source,
         label=f"detect_collection_sources/{quality_source_run}",
     )
-    quality_identity = _instance_keys(
+    quality_identity, quality_keys = _instance_key_values(
         quality,
         label=f"detect_quality_runs/{quality_run}",
     )
@@ -143,6 +251,10 @@ def validate_target(plan_path: Path, *, target_id: str, sample_rows: int = 16) -
         raise RuntimeError(
             "Collection quality identity summary does not match its source: "
             f"{quality_identity!r} != {quality_source_identity!r}."
+        )
+    if not np.array_equal(quality_keys, quality_source_keys):
+        raise RuntimeError(
+            "Collection quality instance_key order does not exactly match its source."
         )
     expected_quality_source = str(target["detect_quality_source_group_path"])
     if normalize_attr(quality.attrs.get("source_detection_group_path")) != expected_quality_source:
@@ -163,25 +275,39 @@ def validate_target(plan_path: Path, *, target_id: str, sample_rows: int = 16) -
     detection_reports: list[dict[str, Any]] = []
     cache_reports: list[dict[str, Any]] = []
     raw_mask_reports: list[dict[str, Any]] = []
+    detection_key_parts: list[np.ndarray] = []
     detection_rows = 0
     cache_rows = 0
+    cleaned_cache_count = 0
     for clip in target["clips"]:
         refined_path = str(clip["refined_detect_group_path"])
         refined = root
         for part in Path(refined_path).parts:
             refined = refined[part]
-        identity = _refined_instance_keys(refined, label=refined_path)
+        identity, keys = _refined_instance_key_values(refined, label=refined_path)
         detection_rows += int(identity["row_count"])
+        detection_key_parts.append(keys)
         detection_reports.append({"clip_id": str(clip["clip_id"]), "instance_key": identity})
 
-        cache = _cache_manifest_report(
-            Path(str(clip["cache_manifest"])),
-            zarr_path=zarr_path,
-            collection_id=collection_id,
-            clip_id=str(clip["clip_id"]),
-        )
-        cache_rows += int(cache["shape"][0])
-        cache_reports.append(cache)
+        cache_path = Path(str(clip["cache_manifest"])).expanduser().resolve()
+        if not cache_path.is_file() and allow_cleaned_caches:
+            cleaned_cache_count += 1
+            cache_reports.append(
+                {
+                    "clip_id": str(clip["clip_id"]),
+                    "manifest": str(cache_path),
+                    "status": "intentionally_absent_post_cleanup",
+                }
+            )
+        else:
+            cache = _cache_manifest_report(
+                cache_path,
+                zarr_path=zarr_path,
+                collection_id=collection_id,
+                clip_id=str(clip["clip_id"]),
+            )
+            cache_rows += int(cache["shape"][0])
+            cache_reports.append(cache)
 
         raw = _require_complete_run(
             root,
@@ -191,23 +317,105 @@ def validate_target(plan_path: Path, *, target_id: str, sample_rows: int = 16) -
         raw_report = _validate_raw_masks(raw, sample_rows=sample_rows)
         raw_mask_reports.append({"clip_id": str(clip["clip_id"]), **raw_report})
 
+    detection_keys = np.concatenate(detection_key_parts).astype(np.uint64, copy=False)
+    detection_unique = int(np.unique(detection_keys).size)
+    if detection_unique != int(detection_keys.size):
+        raise RuntimeError(
+            "Selected refined detections contain duplicate instance_key values across clips: "
+            f"{detection_unique}/{int(detection_keys.size)} unique."
+        )
+    sorted_quality_keys = np.sort(quality_source_keys)
+    quality_positions = np.searchsorted(sorted_quality_keys, detection_keys)
+    selected_keys_in_quality = bool(
+        quality_positions.size == detection_keys.size
+        and np.all(quality_positions < sorted_quality_keys.size)
+        and np.array_equal(sorted_quality_keys[quality_positions], detection_keys)
+    )
+    if not selected_keys_in_quality:
+        raise RuntimeError(
+            "At least one selected refined-detection instance_key is absent from the quality source."
+        )
+
+    crop_run = str(target["merged_proxy_crop_run"])
+    crop = root.get(f"crop_runs/{crop_run}")
+    if crop is None:
+        raise RuntimeError(f"Missing merged proxy crop run crop_runs/{crop_run}.")
+    crop_identity, crop_keys = _instance_key_values(
+        crop,
+        label=f"crop_runs/{crop_run}",
+    )
+    if not np.array_equal(crop_keys, detection_keys):
+        raise RuntimeError(
+            "Merged crop proxy instance_key order does not exactly match selected refined detections."
+        )
+
     keypoints = _require_complete_run(root, "keypoints_runs", str(target["keypoint_run"]))
     refined_keypoints = _require_complete_run(
         root, "refined_keypoints_runs", str(target["refined_keypoint_run"])
     )
-    keypoint_identity = _instance_keys(keypoints, label=f"keypoints_runs/{target['keypoint_run']}")
-    refined_keypoint_identity = _instance_keys(
+    keypoint_identity, keypoint_keys = _instance_key_values(
+        keypoints,
+        label=f"keypoints_runs/{target['keypoint_run']}",
+    )
+    refined_keypoint_identity, refined_keypoint_keys = _instance_key_values(
         refined_keypoints,
         label=f"refined_keypoints_runs/{target['refined_keypoint_run']}",
     )
     expected_rows = int(keypoint_identity["row_count"])
-    for label, count in (
+    clip_count = len(target["clips"])
+    cache_validation_mode = _cache_validation_mode(
+        cleaned_cache_count=cleaned_cache_count,
+        clip_count=clip_count,
+    )
+    row_counts_to_check = [
         ("refined detections", detection_rows),
-        ("flat ROI caches", cache_rows),
         ("refined keypoints", int(refined_keypoint_identity["row_count"])),
-    ):
+    ]
+    if cleaned_cache_count == 0:
+        row_counts_to_check.append(("flat ROI caches", cache_rows))
+    for label, count in row_counts_to_check:
         if count != expected_rows:
             raise RuntimeError(f"{label} row count {count} != keypoint row count {expected_rows}.")
+    for label, values in (
+        ("keypoints", keypoint_keys),
+        ("refined keypoints", refined_keypoint_keys),
+    ):
+        if not np.array_equal(values, detection_keys):
+            raise RuntimeError(
+                f"{label} instance_key order does not exactly match selected refined detections."
+            )
+
+    recording_frame_count = int(root.attrs.get("recording_frame_index_row_count") or 0)
+    if recording_frame_count <= 0:
+        raise RuntimeError(
+            "Root recording_frame_index_row_count is required for clipped collection validation."
+        )
+    crop_frames_array = _required_vector(crop, "frame_indices", label=f"crop_runs/{crop_run}")
+    crop_frames = np.asarray(crop_frames_array[:], dtype=np.int64).reshape(-1)
+    if int(crop_frames.size) != expected_rows:
+        raise RuntimeError(
+            f"Merged crop proxy frame_indices row count {int(crop_frames.size)} != {expected_rows}."
+        )
+    if crop_frames.size and (
+        int(crop_frames.min()) < 0 or int(crop_frames.max()) >= recording_frame_count
+    ):
+        raise RuntimeError(
+            "Merged crop proxy frame_indices fall outside the canonical recording frame universe."
+        )
+    canonical_frame_counts = np.bincount(
+        crop_frames,
+        minlength=recording_frame_count,
+    ).astype(np.int64, copy=False)
+    for label, run in (
+        (f"keypoints_runs/{target['keypoint_run']}", keypoints),
+        (f"refined_keypoints_runs/{target['refined_keypoint_run']}", refined_keypoints),
+    ):
+        _require_exact_vector(
+            _required_vector(run, "frame_indices", label=label),
+            crop_frames,
+            label=f"{label}/frame_indices",
+            dtype=np.int64,
+        )
 
     refined_masks = _require_complete_run(
         root,
@@ -226,6 +434,34 @@ def validate_target(plan_path: Path, *, target_id: str, sample_rows: int = 16) -
         raise RuntimeError(
             f"Refined-mask keypoint assignment mismatch: {assignment!r} != {expected_assignment!r}."
         )
+    refined_mask_identity, refined_mask_keys = _instance_key_values(
+        refined_masks,
+        label=f"refined_subject_masks_runs/{target['refined_subject_mask_run']}",
+    )
+    if not np.array_equal(refined_mask_keys, detection_keys):
+        raise RuntimeError(
+            "Refined subject-mask instance_key order does not exactly match selected refined detections."
+        )
+    mask_label = f"refined_subject_masks_runs/{target['refined_subject_mask_run']}"
+    _require_exact_vector(
+        _required_vector(refined_masks, "frame_indices", label=mask_label),
+        crop_frames,
+        label=f"{mask_label}/frame_indices",
+        dtype=np.int64,
+    )
+    frame_count_reports: dict[str, Any] = {}
+    for label, run in (
+        (f"keypoints_runs/{target['keypoint_run']}", keypoints),
+        (f"refined_keypoints_runs/{target['refined_keypoint_run']}", refined_keypoints),
+        (mask_label, refined_masks),
+    ):
+        report, _counts = _validate_run_frame_counts(
+            run,
+            label=label,
+            expected_row_count=expected_rows,
+            expected_counts=canonical_frame_counts,
+        )
+        frame_count_reports[label] = report
     refined_report = _validate_refined_masks(refined_masks, sample_rows=max(32, sample_rows))
     if int(refined_report["shape"][0]) != expected_rows:
         raise RuntimeError(
@@ -251,14 +487,21 @@ def validate_target(plan_path: Path, *, target_id: str, sample_rows: int = 16) -
         "detect_quality_run": quality_run,
         "detect_quality_source": quality_source_identity,
         "detect_quality": quality_identity,
-        "clip_count": len(target["clips"]),
+        "clip_count": clip_count,
         "row_count": expected_rows,
+        "collection_instance_key_unique_count": detection_unique,
+        "selected_instance_keys_present_in_quality_source": selected_keys_in_quality,
         "detections": detection_reports,
         "caches": cache_reports,
+        "cache_validation_mode": cache_validation_mode,
+        "cleaned_cache_count": int(cleaned_cache_count),
+        "crop_proxy": crop_identity,
         "keypoints": keypoint_identity,
         "refined_keypoints": refined_keypoint_identity,
         "raw_subject_masks": raw_mask_reports,
         "refined_subject_masks": refined_report,
+        "refined_subject_mask_identity": refined_mask_identity,
+        "frame_counts": frame_count_reports,
         "refined_subject_mask_contract": contract,
         "assignment_keypoint_group": assignment[0],
         "assignment_keypoint_run": assignment[1],
@@ -270,12 +513,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--plan", required=True, type=Path)
     parser.add_argument("--target-id", required=True)
     parser.add_argument("--sample-rows", type=int, default=16)
+    parser.add_argument(
+        "--allow-cleaned-caches",
+        action="store_true",
+        help=(
+            "Permit all planned ROI cache manifests to be absent after intentional workflow cleanup. "
+            "A partial cache set still fails closed."
+        ),
+    )
     parser.add_argument("--output-json", type=Path)
     args = parser.parse_args(argv)
     report = validate_target(
         args.plan,
         target_id=args.target_id,
         sample_rows=int(args.sample_rows),
+        allow_cleaned_caches=bool(args.allow_cleaned_caches),
     )
     if args.output_json is not None:
         write_json_snapshot(args.output_json, report)

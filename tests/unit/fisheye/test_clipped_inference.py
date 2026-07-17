@@ -21,7 +21,13 @@ from fisheye.cluster.clipped_detection import (
     compose_detection_workflow,
 )
 from fisheye.cluster.clipped_inference_cleanup import cleanup
-from fisheye.cluster.clipped_inference_validate import _instance_keys, _refined_instance_keys
+from fisheye.cluster.clipped_inference_validate import (
+    _cache_validation_mode,
+    _instance_keys,
+    _refined_instance_keys,
+    _require_exact_vector,
+    _validate_run_frame_counts,
+)
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -38,6 +44,54 @@ def test_refined_detection_identity_uses_instances_subgroup() -> None:
     report = _refined_instance_keys(run, label="refined_detect_runs/example")
 
     assert report == {"row_count": 2, "unique_count": 2, "dtype": "uint64"}
+
+
+def test_clipped_validator_requires_exact_identity_order() -> None:
+    with pytest.raises(RuntimeError, match="canonical lineage at row 0"):
+        _require_exact_vector(
+            np.asarray([11, 10], dtype=np.uint64),
+            np.asarray([10, 11], dtype=np.uint64),
+            label="refined_subject_masks/instance_key",
+            dtype=np.uint64,
+        )
+
+
+def test_clipped_validator_requires_recording_wide_exact_frame_counts() -> None:
+    run = {
+        "frame_indices": np.asarray([0, 2, 2, 4], dtype=np.int64),
+        "frame_counts": np.asarray([1, 0, 2, 0, 1, 0], dtype=np.int32),
+    }
+    expected = np.asarray([1, 0, 2, 0, 1, 0], dtype=np.int64)
+
+    report, observed = _validate_run_frame_counts(
+        run,
+        label="refined_subject_masks/example",
+        expected_row_count=4,
+        expected_counts=expected,
+    )
+
+    assert report["frame_count"] == 6
+    assert report["sum"] == 4
+    assert report["exact_bincount_match"] is True
+    np.testing.assert_array_equal(observed, expected)
+
+    run["frame_counts"] = np.asarray([1, 0, 2, 0, 0, 1], dtype=np.int32)
+    with pytest.raises(RuntimeError, match="first mismatch at frame 4"):
+        _validate_run_frame_counts(
+            run,
+            label="refined_subject_masks/example",
+            expected_row_count=4,
+            expected_counts=expected,
+        )
+
+
+def test_clipped_validator_post_cleanup_mode_requires_all_caches_absent() -> None:
+    assert _cache_validation_mode(cleaned_cache_count=0, clip_count=22) == "live_payloads"
+    assert _cache_validation_mode(cleaned_cache_count=22, clip_count=22) == (
+        "post_cleanup_all_absent"
+    )
+    with pytest.raises(RuntimeError, match="partial cache set"):
+        _cache_validation_mode(cleaned_cache_count=3, clip_count=22)
 
 
 def _target(tmp_path: Path, name: str = "sleepyfish_cam2010093") -> workflow.CampaignTarget:
