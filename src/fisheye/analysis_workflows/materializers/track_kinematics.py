@@ -165,6 +165,18 @@ def _validate_track_run(path: Path, *, require_sharded: bool) -> dict[str, Any]:
     group = open_zarr_root(path, mode="r")
     if str(group.attrs.get("palette_run_completion_status")) != "complete":
         errors.append("run is not complete")
+    if str(group.attrs.get("schema_id")) != "analysis.track_kinematics_runs":
+        errors.append("missing or invalid track-kinematics schema_id")
+    if int(group.attrs.get("schema_version", -1)) != 1:
+        errors.append("missing or invalid track-kinematics schema_version")
+    if str(group.attrs.get("method_version")) != "track_kinematics.v1":
+        errors.append("missing or invalid track-kinematics method_version")
+    if str(group.attrs.get("row_axis")) != "track_samples":
+        errors.append("missing or invalid track-kinematics row_axis")
+    if not isinstance(group.attrs.get("source_refs"), dict):
+        errors.append("missing track-kinematics source_refs")
+    if not isinstance(group.attrs.get("parameters"), dict):
+        errors.append("missing track-kinematics parameters")
     tracks = group.get("tracks")
     if not isinstance(tracks, zarr.Group):
         errors.append("missing tracks group")
