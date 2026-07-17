@@ -147,7 +147,10 @@ def test_execution_plan_renders_exact_dependency_runs_and_parallel_backends(
     assert eyes[eyes.index("--keypoint-run") + 1] == "refined_kp_a"
     assert eyes[eyes.index("--execution-backend") + 1] == "dask_worker_chunks"
     assert eyes[eyes.index("--num-workers") + 1] == "8"
-    assert eyes[eyes.index("--output-shard-rows") + 1] == "262144"
+    assert eyes[eyes.index("--angle-chunk-rows") + 1] == "4096"
+    assert eyes[eyes.index("--angle-chunk-columns") + 1] == "16"
+    assert eyes[eyes.index("--output-shard-rows") + 1] == "131072"
+    assert eyes[eyes.index("--angle-shard-columns") + 1] == "32"
     assert eyes[eyes.index("--shard-workers") + 1] == "8"
     assert eyes[eyes.index("--native-threads") + 1] == "1"
     assert "--apply" in eyes
