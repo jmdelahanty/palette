@@ -331,6 +331,66 @@ source_row_signature
 target_row_index
 ```
 
+### Per-row source signature and revision contract
+
+The canonical comparison primitive is implemented in
+`fisheye.shared.row_source_signature`. A materializer computes
+`source_row_signature` as a `uint8[N, 32]` SHA-256 array, in bounded row
+batches, and stores the full versioned signature specification in attrs.
+Signatures are addressed and compared by `instance_key`; physical row order is
+not part of their meaning.
+
+Version 1 hashes:
+
+```text
+schema/version and signature-spec digest
+instance_key
+stage-relevant fixed-width numeric content components
+stage-relevant nonnegative row-revision components
+```
+
+The signature-spec digest covers the stage name, component names, component
+basis (`content` or `revision`), normalized dtype/trailing shape, the named
+producer authority for every revision component, and a strict JSON
+compatibility context. The context is where a caller binds global inputs
+such as the source-pixel fingerprint, coordinate contract, skeleton/component
+schema, preprocessing version, or another upstream signature contract. A
+context change invalidates the complete signature set. Model artifact,
+configuration, method, and exact source/reuse-run references must also remain
+explicit in the materialization plan even when duplicated in this context.
+
+Content components are canonicalized to little-endian C-order bytes. Float NaN
+and signed-zero representations are normalized. Revision components are
+canonical nonnegative `uint64` values so an `int32` versus `int64` storage
+choice cannot create false invalidation. Strings, objects, and other ambiguous
+variable-width values are not accepted as row components; callers must encode
+them through a versioned enum or a separately defined digest.
+
+A row revision may substitute for source content only when its named authority
+guarantees that every accepted change relevant to the consuming stage
+increments that revision atomically with the edit. Refined subject-mask
+component `row_revision` values satisfy this model for dense-authority edits.
+Where no such producer guarantee exists, the actual relevant content must be
+hashed. A run-wide `edit_revision` remains a publication/concurrency gate; it
+does not replace per-row signatures because it cannot identify which rows are
+reusable.
+
+The digest intentionally does not infer the relevant inputs for a stage. The
+stage adapter declares them. Initial adapters should use:
+
+| Target stage | Required per-row basis | Required global compatibility context |
+| --- | --- | --- |
+| Crop | frame index and bbox/crop geometry content | source video/pixel identity and coordinate/crop contract |
+| Raw keypoints | exact crop-row signature | pose model, preprocessing, ROI shape, and skeleton schema |
+| Raw subject masks | exact crop-row signature | mask model, preprocessing, ROI shape, and component schema |
+| Refined keypoints | raw-keypoint signature plus accepted manual row revision/content | refinement method/config and skeleton schema |
+| Refined subject masks | raw-mask signature plus per-component accepted dense row revisions | refinement/finalization method/config and component schema |
+
+The batch API produces the same signatures whether called for the whole rowset
+or one storage shard at a time. Materializers therefore must not load an entire
+recording merely to compute signatures. They should read, compare, and write
+one bounded source/output shard at a time while retaining a compact keyed plan.
+
 ## Change And Invalidation Matrix
 
 | Change | Expensive computation required | Complete replacement behavior |
@@ -576,7 +636,8 @@ practice.
 - [x] Make clipped production validation compare exact ordered keys for cache
   row indexes and raw mask shards as well as merged crops, keypoints, and refined
   masks.
-- Define the per-row source signature/revision contract used for reuse.
+- [x] Define and implement the versioned, bounded-batch per-row source
+  signature/revision contract used for reuse.
 
 ### Phase 1: shared planner and crop proof
 
@@ -670,16 +731,15 @@ row additions or edits.
 The architecture is decided, but these physical details still need focused
 prototypes:
 
-1. Exact schema and canonicalization for per-row source signatures.
-2. Whether large unchanged dense payloads should be copied row-wise, by aligned
+1. Whether large unchanged dense payloads should be copied row-wise, by aligned
    chunk, or by a storage-level reference/copy mechanism.
-3. Which derived caches are cheaper and safer to rebuild run-wide versus copy
+2. Which derived caches are cheaper and safer to rebuild run-wide versus copy
    forward by row.
-4. Storage-retention policy for superseded complete runs created by frequent
+3. Storage-retention policy for superseded complete runs created by frequent
    review edits.
-5. Whether the first reconciler stores keyed deltas in Zarr, registry tables, or
+4. Whether the first reconciler stores keyed deltas in Zarr, registry tables, or
    immutable sidecar manifests.
-6. Stage-specific thresholds for choosing delta materialization versus a full
+5. Stage-specific thresholds for choosing delta materialization versus a full
    deterministic transformation when no model inference is involved.
 
 These choices must not weaken the core rule: ordinary localized observation

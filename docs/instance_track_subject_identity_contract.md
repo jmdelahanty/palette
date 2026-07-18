@@ -104,6 +104,22 @@ Writers snapshot rowset identity at input resolution and verify it again before
 publication. Downstream keyed consumers require the recorded fingerprint and
 key set to match their source.
 
+## Per-row source signatures
+
+Rowset fingerprints prove membership, not row-content compatibility. Copy-
+forward materialization additionally uses the versioned
+`source_row_signature` contract from
+`fisheye.shared.row_source_signature`. Each `uint8[32]` digest is attached to
+one `instance_key` and covers the explicitly declared content and/or trusted
+row revisions that affect a target stage, plus a stage compatibility context.
+
+Changing a bbox while preserving `instance_key` therefore preserves identity
+but changes the crop/keypoint/mask source signature. Physical reorder preserves
+the keyed signature mapping. Run-wide `edit_revision` and rowset fingerprint
+remain publication gates; neither is a substitute for this per-row invalidation
+signal. See `docs/stable_identity_incremental_materialization_decision.md` for
+the full reuse contract and stage matrix.
+
 ## Tracker API
 
 Tracking methods consume one `TrackingObservations` contract and return one

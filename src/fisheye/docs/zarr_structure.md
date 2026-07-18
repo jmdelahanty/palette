@@ -1310,6 +1310,32 @@ Small corrections should patch touched rows, increment an `edit_revision`, and
 append an edit event while keeping `source_rowset_path` fixed. See
 `docs/mutable_review_runs_contract.md`.
 
+### Incremental materialization source signatures
+
+New copy-forward materializations store row-aligned source compatibility as:
+
+```text
+source_row_signature       uint8[N, 32]
+```
+
+The run attrs use the `source_row_signature_` prefix and include
+`schema_id=palette.row_source_signature`, schema version, algorithm,
+canonicalization, stage, basis, specification digest, and the complete
+JSON-safe specification. The specification names every content/revision
+component and the global compatibility context used to create the digests.
+The array must share the output row axis and be joined by `instance_key` rather
+than physical position across runs.
+
+This is a source-compatibility surface, not a replacement observation ID and
+not an output-content checksum. Writers may compute it one bounded storage
+shard at a time. In immutable tabular snapshots it follows the existing
+lineage grid: full 32-byte trailing dimension, 16,384-row inner chunks, and a
+requested 131,072-row indexed outer shard. That is about 38 MB logical for 1.2
+million observations and roughly nine data shards, before compression. Small
+single-owner delta partitions remain ordinarily chunked rather than indexed-
+sharded. See
+`docs/stable_identity_incremental_materialization_decision.md`.
+
 ---
 
 ## `calibration/`
