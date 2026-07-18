@@ -8,7 +8,6 @@ import zarr
 import fisheye.shared.refined_detect_curation as refined_detect_curation_module
 from fisheye.shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from fisheye.shared.refined_detect_curation import (
-    REFINED_DETECT_STATUS_CODE_MAP,
     REFINED_SOURCE_DETECTION_DECISION_CODE_MAP,
     REFINED_SOURCE_KIND_CODE_MAP,
     build_source_detection_decision_summary,
@@ -957,11 +956,66 @@ def _dense_root_kwargs_with_manual_row() -> dict[str, Any]:
     )
 
 
+def _write_keyed_instance_rows(
+    root: _FakeGroup,
+    *,
+    frame_indices: list[int],
+    bbox_norm_coords: list[list[float]],
+    source_detect_row_index: list[int],
+    refined_row_ids: list[int],
+    class_ids: list[int] | None = None,
+    reason_labels: list[str] | None = None,
+    source_kind_labels: list[str] | None = None,
+    review_notes: list[str] | None = None,
+) -> None:
+    row_count = len(frame_indices)
+    write_curated_refined_detect_surfaces(
+        root,  # type: ignore[arg-type]
+        refined_run_name="refined_detect_001",
+        instance_frame_indices=np.asarray(frame_indices, dtype=np.int32),
+        instance_bbox_norm_coords=np.asarray(bbox_norm_coords, dtype=np.float64).reshape(-1, 4),
+        instance_source_kind_labels=np.asarray(
+            source_kind_labels or ["manual"] * row_count,
+            dtype=object,
+        ),
+        instance_reason_labels=np.asarray(reason_labels or ["manual_add"] * row_count, dtype=object),
+        instance_source_detect_row_index=np.asarray(source_detect_row_index, dtype=np.int32),
+        instance_manual_edit_flags=np.ones(row_count, dtype=bool),
+        instance_confidence_scores=np.ones(row_count, dtype=np.float32),
+        instance_class_ids=np.asarray(class_ids or [0] * row_count, dtype=np.int32),
+        instance_refined_row_ids=np.asarray(refined_row_ids, dtype=np.int64),
+        instance_review_notes=(
+            np.asarray(review_notes, dtype=object)
+            if review_notes is not None
+            else None
+        ),
+        source_detection_source_detect_row_index=np.asarray([0, 1], dtype=np.int32),
+        source_detection_frame_indices=np.asarray([1, 3], dtype=np.int32),
+        source_detection_bbox_norm_coords=np.asarray(
+            [[0.5, 0.5, 0.2, 0.4], [0.25, 0.25, 0.1, 0.2]],
+            dtype=np.float64,
+        ),
+        source_detection_decision_labels=np.asarray(["filtered", "filtered"], dtype=object),
+        source_detection_reason_labels=np.asarray(["raw", "raw"], dtype=object),
+        source_detection_instance_key=np.asarray([111, 222], dtype=np.uint64),
+    )
+
+
+def _stored_key_by_refined_row_id(root: _FakeGroup) -> dict[int, int]:
+    instances = root["refined_detect_runs/refined_detect_001/instances"]
+    return dict(
+        zip(
+            np.asarray(instances["refined_row_ids"][:], dtype=np.int64).tolist(),
+            np.asarray(instances["instance_key"][:], dtype=np.uint64).tolist(),
+            strict=True,
+        )
+    )
+
+
 def test_write_curated_refined_detect_root_mints_keys_for_manual_rows() -> None:
     from fisheye.shared.instance_keys import (
-        INSTANCE_KEY_CONTEXT_MANUAL_CURATION,
         INSTANCE_KEY_ORIGIN_CODE_MAP,
-        mint_detection_instance_keys,
+        mint_manual_curation_instance_keys,
     )
 
     root = _build_root()
@@ -969,12 +1023,12 @@ def test_write_curated_refined_detect_root_mints_keys_for_manual_rows() -> None:
 
     write_curated_refined_detect_root(root, **_dense_root_kwargs_with_manual_row())  # type: ignore[arg-type]
 
-    expected_minted = mint_detection_instance_keys(
+    expected_minted = mint_manual_curation_instance_keys(
         recording_identity="unknown_recording",
+        refined_row_ids=np.asarray([2], dtype=np.int64),
         frame_indices=np.asarray([2], dtype=np.int64),
         bbox_norm_coords=np.asarray([[0.3, 0.6, 0.1, 0.1]], dtype=np.float64),
         class_ids=np.asarray([-1], dtype=np.int64),
-        payload_context=INSTANCE_KEY_CONTEXT_MANUAL_CURATION,
     )
 
     instances = root["refined_detect_runs"]["refined_detect_001"]["instances"]
@@ -1006,6 +1060,147 @@ def test_write_curated_refined_detect_root_minted_keys_are_deterministic_across_
     second = root["refined_detect_runs"]["refined_detect_001"]["instances"]["instance_key"][:].tolist()
 
     assert first == second
+
+
+def test_manual_instance_key_survives_bbox_metadata_edit_and_physical_reorder() -> None:
+    root = _build_root()
+    _add_detect_instance_keys(root, keys=[111, 222])
+    _write_keyed_instance_rows(
+        root,
+        frame_indices=[1, 2],
+        bbox_norm_coords=[[0.5, 0.5, 0.2, 0.4], [0.3, 0.6, 0.1, 0.1]],
+        source_detect_row_index=[0, -1],
+        refined_row_ids=[10, 11],
+        source_kind_labels=["raw_detect", "manual"],
+        reason_labels=["clean", "manual_add"],
+        review_notes=["", "initial"],
+    )
+    before = _stored_key_by_refined_row_id(root)
+
+    _write_keyed_instance_rows(
+        root,
+        frame_indices=[2, 1],
+        bbox_norm_coords=[[0.7, 0.2, 0.2, 0.15], [0.5, 0.5, 0.2, 0.4]],
+        source_detect_row_index=[-1, 0],
+        refined_row_ids=[11, 10],
+        class_ids=[3, 0],
+        source_kind_labels=["manual", "raw_detect"],
+        reason_labels=["manual_correction", "approved"],
+        review_notes=["bbox, class, and note changed", "approved"],
+    )
+
+    assert _stored_key_by_refined_row_id(root) == before
+    instances = root["refined_detect_runs/refined_detect_001/instances"]
+    assert instances["refined_row_ids"][:].tolist() == [10, 11]
+    assert instances["review_notes"][:].tolist() == ["approved", "bbox, class, and note changed"]
+
+
+def test_deleted_manual_identity_is_not_reused_when_identical_box_is_readded() -> None:
+    import pytest
+
+    root = _build_root()
+    _add_detect_instance_keys(root, keys=[111, 222])
+    bbox = [[0.3, 0.6, 0.1, 0.1]]
+    _write_keyed_instance_rows(
+        root,
+        frame_indices=[2],
+        bbox_norm_coords=bbox,
+        source_detect_row_index=[-1],
+        refined_row_ids=[10],
+    )
+    deleted_key = _stored_key_by_refined_row_id(root)[10]
+
+    _write_keyed_instance_rows(
+        root,
+        frame_indices=[],
+        bbox_norm_coords=[],
+        source_detect_row_index=[],
+        refined_row_ids=[],
+    )
+    refined = root["refined_detect_runs/refined_detect_001"]
+    assert refined.attrs["next_refined_row_id"] == 11
+
+    with pytest.raises(ValueError, match="reuse retired identity"):
+        _write_keyed_instance_rows(
+            root,
+            frame_indices=[2],
+            bbox_norm_coords=bbox,
+            source_detect_row_index=[-1],
+            refined_row_ids=[10],
+        )
+
+    _write_keyed_instance_rows(
+        root,
+        frame_indices=[2],
+        bbox_norm_coords=bbox,
+        source_detect_row_index=[-1],
+        refined_row_ids=[-1],
+    )
+    readded = _stored_key_by_refined_row_id(root)
+    assert list(readded) == [11]
+    assert readded[11] != deleted_key
+    assert refined.attrs["next_refined_row_id"] == 12
+
+
+def test_split_and_merge_tombstone_inputs_and_mint_fresh_identities() -> None:
+    root = _build_root()
+    _add_detect_instance_keys(root, keys=[111, 222])
+    _write_keyed_instance_rows(
+        root,
+        frame_indices=[2],
+        bbox_norm_coords=[[0.5, 0.5, 0.2, 0.2]],
+        source_detect_row_index=[-1],
+        refined_row_ids=[20],
+    )
+    original_key = _stored_key_by_refined_row_id(root)[20]
+
+    _write_keyed_instance_rows(
+        root,
+        frame_indices=[2, 2],
+        bbox_norm_coords=[[0.45, 0.5, 0.1, 0.2], [0.55, 0.5, 0.1, 0.2]],
+        source_detect_row_index=[-1, -1],
+        refined_row_ids=[-1, -1],
+    )
+    split_keys = _stored_key_by_refined_row_id(root)
+    assert list(split_keys) == [21, 22]
+    assert original_key not in split_keys.values()
+
+    _write_keyed_instance_rows(
+        root,
+        frame_indices=[2],
+        bbox_norm_coords=[[0.5, 0.5, 0.2, 0.2]],
+        source_detect_row_index=[-1],
+        refined_row_ids=[-1],
+    )
+    merged_keys = _stored_key_by_refined_row_id(root)
+    assert list(merged_keys) == [23]
+    assert merged_keys[23] not in split_keys.values()
+    assert root["refined_detect_runs/refined_detect_001"].attrs["next_refined_row_id"] == 24
+
+
+def test_surviving_detector_identity_cannot_be_retargeted_to_another_source_row() -> None:
+    import pytest
+
+    root = _build_root()
+    _add_detect_instance_keys(root, keys=[111, 222])
+    _write_keyed_instance_rows(
+        root,
+        frame_indices=[1],
+        bbox_norm_coords=[[0.5, 0.5, 0.2, 0.4]],
+        source_detect_row_index=[0],
+        refined_row_ids=[10],
+        source_kind_labels=["raw_detect"],
+    )
+
+    with pytest.raises(ValueError, match="refusing to retarget"):
+        _write_keyed_instance_rows(
+            root,
+            frame_indices=[3],
+            bbox_norm_coords=[[0.25, 0.25, 0.1, 0.2]],
+            source_detect_row_index=[1],
+            refined_row_ids=[10],
+            source_kind_labels=["raw_detect"],
+        )
 
 
 def test_write_curated_refined_detect_root_rejects_duplicate_copied_instance_keys() -> None:

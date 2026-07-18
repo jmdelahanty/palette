@@ -722,6 +722,9 @@ Required arrays:
 
 Common optional arrays:
 
+- `instance_key`: stable observation identity; required for modern keyed runs
+- `instance_key_origin_codes`: `0` for copied detector identity and `1` for a
+  key minted when a manual observation is first created
 - `confidence_scores`
 - `class_ids`
 - `source_detect_row_index`
@@ -742,6 +745,14 @@ Reader rule:
   path or finalized collection identity
 - current sparse rows should be sorted by `frame_indices` then
   `refined_row_ids`; `frame_offsets` and `frame_counts` must match that order
+- surviving `refined_row_ids` retain their stored `instance_key` across bbox,
+  class, review, note, and physical-order changes
+- `next_refined_row_id` on the refined run is the monotonic allocator high-water
+  mark; IDs below it that are absent from `instances/` are retired and must not
+  be reused
+- a new manual observation uses its newly allocated `refined_row_id` in the
+  key-minting namespace; split and merge outputs therefore receive fresh row
+  IDs and fresh keys
 
 #### `source_detections/`
 

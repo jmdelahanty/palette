@@ -184,9 +184,12 @@ to detector-origin rows.
 - Merging multiple logical observations tombstones the inputs and mints a new
   key for the merged observation.
 
-The current curation path recomputes manual-origin keys from current bbox
-content during a rewrite. That behavior is a contract gap and must be corrected
-before relying on manual additions for incremental materialization.
+The curation writer preserves keys for surviving `refined_row_id` values and
+uses a monotonic, non-reusing row-ID allocator. New manual-origin keys include
+their assigned row ID in the minting namespace, so delete-and-recreate, split,
+and merge operations cannot reuse a retired observation key. Supplying a
+negative row ID explicitly requests a fresh identity; explicitly reusing a
+retired non-negative ID fails closed.
 
 ## Canonical Storage And Authority
 
@@ -562,8 +565,11 @@ practice.
 
 ### Phase 0: close identity correctness gaps
 
-- Preserve existing manual-origin `instance_key` values across ordinary edits.
-- Add regression tests for bbox edits, reorder, delete, split, and merge.
+- [x] Preserve existing manual-origin `instance_key` values across ordinary edits.
+- [x] Add regression tests for bbox edits, reorder, delete, split, and merge.
+- [x] Reject one-sided `instance_key` loss instead of silently falling back to
+  positional lineage comparison; label two-keyless compatibility as
+  `legacy_positional`.
 - Make modern refined identity validation inspect key presence and uniqueness.
 - Define the per-row source signature/revision contract used for reuse.
 

@@ -9,14 +9,15 @@ import numpy as np
 import zarr
 from zarr.core.dtype import VariableLengthUTF8
 
-from .crop_geometry import bbox_img_xyxy_to_norm_cxcywh, bbox_norm_cxcywh_to_img_xyxy
-from .detect_reason_codec import read_reason_labels, update_reason_rows, write_reason_columns
+from .crop_geometry import bbox_norm_cxcywh_to_img_xyxy
+from .detect_reason_codec import read_reason_labels, write_reason_columns
 from .frame_domains import FrameDomain, FrameDomainError, FrameDomains
 from .instance_keys import (
     INSTANCE_KEY_CONTEXT_MANUAL_CURATION,
     INSTANCE_KEY_ORIGIN_ARRAY,
     INSTANCE_KEY_ORIGIN_CODE_MAP,
     mint_detection_instance_keys,
+    mint_manual_curation_instance_keys,
     resolve_recording_identity,
 )
 from .json_safety import json_attr_safe
@@ -61,6 +62,8 @@ REFINED_ARTIFACT_STATE_CODE_MAP: Dict[str, int] = {
 }
 FIXED_WIDTH_BBOX_ARRAY_NAMES = frozenset({"bbox_img_xyxy", "bbox_norm_coords"})
 DEFAULT_REFINED_DETECT_ROW_CHUNK = 65_536
+NEXT_REFINED_ROW_ID_ATTR = "next_refined_row_id"
+REFINED_ROW_ID_ALLOCATOR_POLICY = "monotonic_non_reusing_v1"
 
 CURATED_REFINED_REQUIRED_ARRAYS: Tuple[str, ...] = (
     "refined_row_ids",
@@ -1364,6 +1367,14 @@ def _ensure_optional_numeric_array(
 def _next_refined_row_id(existing_run: Optional[zarr.Group]) -> int:
     max_row_id = -1
     if existing_run is not None:
+        stored_next = existing_run.attrs.get(NEXT_REFINED_ROW_ID_ATTR)
+        if stored_next is not None:
+            parsed_next = as_int(stored_next)
+            if parsed_next is None or parsed_next < 0:
+                raise ValueError(
+                    f"{NEXT_REFINED_ROW_ID_ATTR} must be a non-negative integer when present."
+                )
+            max_row_id = max(max_row_id, int(parsed_next) - 1)
         if has_sparse_curated_refined_detect_instances_arrays(existing_run):
             instances = _get_child_group_if_present(existing_run, "instances")
             if instances is not None:
@@ -1391,9 +1402,10 @@ def _assign_sparse_instance_row_ids(
     if frame_indices_arr.shape[0] != source_detect_row_index_arr.shape[0]:
         raise ValueError("source_detect_row_index length does not match instance frame_indices length.")
 
+    explicit_row_ids = refined_row_ids is not None
     assigned = (
         np.asarray(refined_row_ids, dtype=np.int64).reshape(-1).copy()
-        if refined_row_ids is not None
+        if explicit_row_ids
         else np.full(frame_indices_arr.shape[0], -1, dtype=np.int64)
     )
     if assigned.shape[0] != frame_indices_arr.shape[0]:
@@ -1401,6 +1413,7 @@ def _assign_sparse_instance_row_ids(
 
     by_source: dict[int, int] = {}
     by_frame: dict[int, int] = {}
+    existing_ids: set[int] = set()
     if existing_run is not None:
         if has_sparse_curated_refined_detect_instances_arrays(existing_run):
             instances = _get_child_group_if_present(existing_run, "instances")
@@ -1420,6 +1433,7 @@ def _assign_sparse_instance_row_ids(
                     old_frames.tolist(),
                     old_source_rows.tolist(),
                 ):
+                    existing_ids.add(int(row_id))
                     if int(source_row_index) >= 0 and int(source_row_index) not in by_source:
                         by_source[int(source_row_index)] = int(row_id)
                     if unique_frame_map.get(int(frame_index), 0) == 1 and int(frame_index) not in by_frame:
@@ -1439,6 +1453,7 @@ def _assign_sparse_instance_row_ids(
                 old_entities.tolist(),
                 old_source_rows.tolist(),
             ):
+                existing_ids.add(int(row_id))
                 if int(entity_id) != 0:
                     continue
                 if int(source_row_index) >= 0 and int(source_row_index) not in by_source:
@@ -1447,11 +1462,29 @@ def _assign_sparse_instance_row_ids(
                     by_frame[int(frame_index)] = int(row_id)
 
     next_row_id = _next_refined_row_id(existing_run)
+    explicit_existing_ids = [int(value) for value in assigned.tolist() if int(value) >= 0]
+    if len(set(explicit_existing_ids)) != len(explicit_existing_ids):
+        raise ValueError("Explicit refined_row_ids must be unique.")
+    if explicit_row_ids:
+        retired_ids = sorted(
+            value
+            for value in explicit_existing_ids
+            if value < next_row_id and value not in existing_ids
+        )
+        if retired_ids:
+            raise ValueError(
+                "Explicit refined_row_ids attempt to reuse retired identity values: "
+                f"{retired_ids[:5]}. Use a negative value to allocate a fresh row ID."
+            )
     new_frame_counts: dict[int, int] = {}
     for frame_index in frame_indices_arr.tolist():
         new_frame_counts[int(frame_index)] = new_frame_counts.get(int(frame_index), 0) + 1
     used_ids = {int(value) for value in assigned.tolist() if int(value) >= 0}
-    use_frame_identity = all(int(count) == 1 for count in new_frame_counts.values())
+    use_frame_identity = (
+        not existing_ids
+        and next_row_id == 0
+        and all(int(count) == 1 for count in new_frame_counts.values())
+    )
 
     for idx, (frame_index, source_row_index) in enumerate(
         zip(frame_indices_arr.tolist(), source_detect_row_index_arr.tolist())
@@ -1459,20 +1492,145 @@ def _assign_sparse_instance_row_ids(
         if int(assigned[idx]) >= 0:
             continue
         candidate: Optional[int] = None
-        if int(source_row_index) >= 0:
-            candidate = by_source.get(int(source_row_index))
-        if candidate is None and new_frame_counts.get(int(frame_index), 0) == 1:
-            candidate = by_frame.get(int(frame_index))
-        if candidate is None and use_frame_identity and int(frame_index) not in used_ids:
-            candidate = int(frame_index)
+        if not explicit_row_ids:
+            if int(source_row_index) >= 0:
+                candidate = by_source.get(int(source_row_index))
+            if candidate is None and new_frame_counts.get(int(frame_index), 0) == 1:
+                candidate = by_frame.get(int(frame_index))
+            if candidate is None and use_frame_identity and int(frame_index) not in used_ids:
+                candidate = int(frame_index)
         if candidate is not None and int(candidate) not in used_ids:
             assigned[idx] = int(candidate)
             used_ids.add(int(candidate))
             continue
+        while int(next_row_id) in used_ids:
+            next_row_id += 1
         assigned[idx] = int(next_row_id)
         used_ids.add(int(next_row_id))
         next_row_id += 1
     return assigned.astype(np.int64, copy=False)
+
+
+def _existing_sparse_instance_identity(
+    refined_run: zarr.Group,
+) -> tuple[dict[int, int], dict[int, int]]:
+    """Return validated prior ``refined_row_id`` to key/origin mappings."""
+
+    if not has_sparse_curated_refined_detect_instances_arrays(refined_run):
+        return {}, {}
+    instances = _get_child_group_if_present(refined_run, "instances")
+    if instances is None or "instance_key" not in instances:
+        return {}, {}
+
+    row_ids = np.asarray(instances["refined_row_ids"][:], dtype=np.int64).reshape(-1)
+    keys = np.asarray(instances["instance_key"][:], dtype=np.uint64).reshape(-1)
+    if row_ids.shape[0] != keys.shape[0]:
+        raise ValueError("Existing curated refined_row_ids and instance_key lengths differ.")
+    if int(np.unique(row_ids).shape[0]) != int(row_ids.shape[0]):
+        raise ValueError("Existing curated refined_row_ids are not unique.")
+    if int(np.unique(keys).shape[0]) != int(keys.shape[0]):
+        raise ValueError("Existing curated instance_key values are not unique.")
+
+    key_by_row_id = {
+        int(row_id): int(key)
+        for row_id, key in zip(row_ids.tolist(), keys.tolist(), strict=True)
+    }
+    origin_by_row_id: dict[int, int] = {}
+    if INSTANCE_KEY_ORIGIN_ARRAY in instances:
+        origins = np.asarray(instances[INSTANCE_KEY_ORIGIN_ARRAY][:], dtype=np.int8).reshape(-1)
+        if origins.shape[0] != row_ids.shape[0]:
+            raise ValueError(
+                "Existing curated instance_key_origin_codes length does not match refined_row_ids."
+            )
+        valid_origin_codes = set(INSTANCE_KEY_ORIGIN_CODE_MAP.values())
+        invalid = sorted({int(value) for value in origins.tolist()} - valid_origin_codes)
+        if invalid:
+            raise ValueError(
+                "Existing curated instance_key_origin_codes contain unknown values: "
+                f"{invalid}."
+            )
+        origin_by_row_id = {
+            int(row_id): int(origin)
+            for row_id, origin in zip(row_ids.tolist(), origins.tolist(), strict=True)
+        }
+    return key_by_row_id, origin_by_row_id
+
+
+def _preserve_existing_curated_instance_keys(
+    refined_run: zarr.Group,
+    *,
+    refined_row_ids: np.ndarray,
+    source_detect_row_index: np.ndarray,
+    candidate_keys: Optional[np.ndarray],
+    candidate_origin_codes: Optional[np.ndarray],
+) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Preserve surviving observation identity and reject incompatible rewrites."""
+
+    key_by_row_id, origin_by_row_id = _existing_sparse_instance_identity(refined_run)
+    if not key_by_row_id:
+        return candidate_keys, candidate_origin_codes
+
+    row_ids = np.asarray(refined_row_ids, dtype=np.int64).reshape(-1)
+    source_rows = np.asarray(source_detect_row_index, dtype=np.int32).reshape(-1)
+    if row_ids.shape[0] != source_rows.shape[0]:
+        raise ValueError("refined_row_ids and source_detect_row_index lengths differ.")
+
+    if candidate_keys is None:
+        missing = [int(row_id) for row_id in row_ids.tolist() if int(row_id) not in key_by_row_id]
+        if missing:
+            raise ValueError(
+                "Cannot add curated rows to a modern keyed run without candidate instance_key "
+                f"values; new refined_row_ids include {missing[:5]}."
+            )
+        preserved_keys = np.asarray(
+            [key_by_row_id[int(row_id)] for row_id in row_ids.tolist()],
+            dtype=np.uint64,
+        )
+        if len(origin_by_row_id) == len(key_by_row_id):
+            preserved_origins: Optional[np.ndarray] = np.asarray(
+                [origin_by_row_id[int(row_id)] for row_id in row_ids.tolist()],
+                dtype=np.int8,
+            )
+        else:
+            preserved_origins = None
+        return preserved_keys, preserved_origins
+
+    keys = np.asarray(candidate_keys, dtype=np.uint64).reshape(-1).copy()
+    if keys.shape[0] != row_ids.shape[0]:
+        raise ValueError("candidate instance_key length does not match refined_row_ids.")
+    origins = (
+        np.asarray(candidate_origin_codes, dtype=np.int8).reshape(-1).copy()
+        if candidate_origin_codes is not None
+        else None
+    )
+    if origins is not None and origins.shape[0] != row_ids.shape[0]:
+        raise ValueError("candidate instance_key_origin_codes length does not match refined_row_ids.")
+    if origins is None and all(int(row_id) in origin_by_row_id for row_id in row_ids.tolist()):
+        origins = np.asarray(
+            [origin_by_row_id[int(row_id)] for row_id in row_ids.tolist()],
+            dtype=np.int8,
+        )
+
+    manual_origin = INSTANCE_KEY_ORIGIN_CODE_MAP["minted_at_curation"]
+    for idx, (row_id, source_row) in enumerate(zip(row_ids.tolist(), source_rows.tolist(), strict=True)):
+        prior_key = key_by_row_id.get(int(row_id))
+        if prior_key is None:
+            continue
+        candidate_key = int(keys[idx])
+        prior_origin = origin_by_row_id.get(int(row_id))
+        if candidate_key != prior_key:
+            if prior_origin != manual_origin and not (prior_origin is None and int(source_row) < 0):
+                raise ValueError(
+                    "Existing detector-origin instance_key conflicts with the candidate key for "
+                    f"refined_row_id {int(row_id)}; refusing to retarget a surviving identity."
+                )
+            keys[idx] = np.uint64(prior_key)
+        if origins is not None and prior_origin is not None:
+            origins[idx] = np.int8(prior_origin)
+
+    if int(np.unique(keys).shape[0]) != int(keys.shape[0]):
+        raise ValueError("Curated instance_key values are not unique after preserving prior identity.")
+    return keys, origins
 
 
 def _write_sparse_instances_arrays(
@@ -2168,6 +2326,8 @@ def resolve_curated_instance_keys(
     instance_class_ids: Optional[np.ndarray],
     instance_source_detect_row_index: np.ndarray,
     source_detection_instance_key: np.ndarray,
+    instance_refined_row_ids: Optional[np.ndarray] = None,
+    source_detection_row_indices: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Combine detect-copied and curation-minted instance keys for a curated rowset.
 
@@ -2181,11 +2341,31 @@ def resolve_curated_instance_keys(
     row_index = np.asarray(instance_source_detect_row_index, dtype=np.int64).reshape(-1)
     row_count = int(row_index.shape[0])
     source_keys = np.asarray(source_detection_instance_key, dtype=np.uint64).reshape(-1)
-    copied_mask = (row_index >= 0) & (row_index < int(source_keys.shape[0]))
+    source_row_ids = (
+        np.asarray(source_detection_row_indices, dtype=np.int64).reshape(-1)
+        if source_detection_row_indices is not None
+        else np.arange(source_keys.shape[0], dtype=np.int64)
+    )
+    if source_row_ids.shape[0] != source_keys.shape[0]:
+        raise ValueError("source_detection_row_indices length does not match source instance keys.")
+    if np.any(source_row_ids < 0) or int(np.unique(source_row_ids).shape[0]) != int(source_row_ids.shape[0]):
+        raise ValueError("source_detection_row_indices must be non-negative and unique.")
+    source_key_by_row = {
+        int(source_row): int(key)
+        for source_row, key in zip(source_row_ids.tolist(), source_keys.tolist(), strict=True)
+    }
+    copied_mask = np.asarray(
+        [int(source_row) in source_key_by_row for source_row in row_index.tolist()],
+        dtype=bool,
+    )
     minted_mask = ~copied_mask
 
     instance_key = np.zeros(row_count, dtype=np.uint64)
-    instance_key[copied_mask] = source_keys[row_index[copied_mask]]
+    if bool(np.any(copied_mask)):
+        instance_key[copied_mask] = np.asarray(
+            [source_key_by_row[int(source_row)] for source_row in row_index[copied_mask].tolist()],
+            dtype=np.uint64,
+        )
     origin_codes = np.full(
         row_count,
         INSTANCE_KEY_ORIGIN_CODE_MAP["copied_from_detect"],
@@ -2203,17 +2383,32 @@ def resolve_curated_instance_keys(
                 int(source_keys.shape[0]),
             )
         recording_identity = resolve_recording_identity(root.attrs, fallback_path=zarr_path)
-        instance_key[minted_mask] = mint_detection_instance_keys(
-            recording_identity=recording_identity,
-            frame_indices=np.asarray(instance_frame_indices, dtype=np.int64).reshape(-1)[minted_mask],
-            bbox_norm_coords=np.asarray(instance_bbox_norm_coords, dtype=np.float64).reshape(-1, 4)[minted_mask],
-            class_ids=(
-                np.asarray(instance_class_ids, dtype=np.int64).reshape(-1)[minted_mask]
-                if instance_class_ids is not None
-                else None
-            ),
-            payload_context=INSTANCE_KEY_CONTEXT_MANUAL_CURATION,
+        minted_frames = np.asarray(instance_frame_indices, dtype=np.int64).reshape(-1)[minted_mask]
+        minted_bboxes = np.asarray(instance_bbox_norm_coords, dtype=np.float64).reshape(-1, 4)[minted_mask]
+        minted_classes = (
+            np.asarray(instance_class_ids, dtype=np.int64).reshape(-1)[minted_mask]
+            if instance_class_ids is not None
+            else None
         )
+        if instance_refined_row_ids is not None:
+            refined_row_ids = np.asarray(instance_refined_row_ids, dtype=np.int64).reshape(-1)
+            if refined_row_ids.shape[0] != row_count:
+                raise ValueError("instance_refined_row_ids length does not match curated rows.")
+            instance_key[minted_mask] = mint_manual_curation_instance_keys(
+                recording_identity=recording_identity,
+                refined_row_ids=refined_row_ids[minted_mask],
+                frame_indices=minted_frames,
+                bbox_norm_coords=minted_bboxes,
+                class_ids=minted_classes,
+            )
+        else:
+            instance_key[minted_mask] = mint_detection_instance_keys(
+                recording_identity=recording_identity,
+                frame_indices=minted_frames,
+                bbox_norm_coords=minted_bboxes,
+                class_ids=minted_classes,
+                payload_context=INSTANCE_KEY_CONTEXT_MANUAL_CURATION,
+            )
 
     if int(np.unique(instance_key).shape[0]) != row_count:
         values, counts = np.unique(instance_key, return_counts=True)
@@ -2237,6 +2432,8 @@ def _resolve_curated_instance_keys(
     instance_class_ids: Optional[np.ndarray],
     instance_source_detect_row_index: np.ndarray,
     source_detection_instance_key: np.ndarray,
+    instance_refined_row_ids: Optional[np.ndarray] = None,
+    source_detection_row_indices: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     return resolve_curated_instance_keys(
         root,
@@ -2246,6 +2443,8 @@ def _resolve_curated_instance_keys(
         instance_class_ids=instance_class_ids,
         instance_source_detect_row_index=instance_source_detect_row_index,
         source_detection_instance_key=source_detection_instance_key,
+        instance_refined_row_ids=instance_refined_row_ids,
+        source_detection_row_indices=source_detection_row_indices,
     )
 
 
@@ -2435,6 +2634,51 @@ def write_curated_refined_detect_surfaces(
     if source_detection_review_notes_arr is not None and source_detection_review_notes_arr.shape[0] != source_row_count:
         raise ValueError("source_detection_review_notes length does not match source row count.")
 
+    if instance_key_arr is None and instance_row_count:
+        resolved_source_keys: Optional[np.ndarray] = None
+        resolved_source_rows: Optional[np.ndarray] = None
+        detect_group, _source_detect_run = _resolve_bound_source_detect_group(root, refined_run)
+        if detect_group is not None and "instance_key" in detect_group:
+            resolved_source_keys = np.asarray(
+                detect_group["instance_key"][:],
+                dtype=np.uint64,
+            ).reshape(-1)
+        elif source_detection_instance_key_arr is not None:
+            resolved_source_keys = source_detection_instance_key_arr
+            resolved_source_rows = source_detection_source_row_arr.astype(np.int64, copy=False)
+
+        if resolved_source_keys is not None:
+            instance_key_arr, instance_key_origin_codes_arr = resolve_curated_instance_keys(
+                root,
+                zarr_path=zarr_path,
+                instance_frame_indices=instance_frame_indices_arr,
+                instance_bbox_norm_coords=instance_bbox_norm_arr,
+                instance_class_ids=instance_class_ids_arr,
+                instance_source_detect_row_index=instance_source_detect_row_index_arr,
+                source_detection_instance_key=resolved_source_keys,
+                instance_refined_row_ids=instance_refined_row_ids_arr,
+                source_detection_row_indices=resolved_source_rows,
+            )
+        elif bool(np.all(instance_source_detect_row_index_arr < 0)):
+            instance_key_arr, instance_key_origin_codes_arr = resolve_curated_instance_keys(
+                root,
+                zarr_path=zarr_path,
+                instance_frame_indices=instance_frame_indices_arr,
+                instance_bbox_norm_coords=instance_bbox_norm_arr,
+                instance_class_ids=instance_class_ids_arr,
+                instance_source_detect_row_index=instance_source_detect_row_index_arr,
+                source_detection_instance_key=np.empty((0,), dtype=np.uint64),
+                instance_refined_row_ids=instance_refined_row_ids_arr,
+            )
+
+    instance_key_arr, instance_key_origin_codes_arr = _preserve_existing_curated_instance_keys(
+        refined_run,
+        refined_row_ids=instance_refined_row_ids_arr,
+        source_detect_row_index=instance_source_detect_row_index_arr,
+        candidate_keys=instance_key_arr,
+        candidate_origin_codes=instance_key_origin_codes_arr,
+    )
+
     instance_row_id_by_source: dict[int, int] = {}
     for row_id, source_row_index in zip(
         instance_refined_row_ids_arr.tolist(),
@@ -2501,6 +2745,9 @@ def write_curated_refined_detect_surfaces(
         instance_key=source_detection_instance_key_arr,
         review_notes=source_detection_review_notes_arr,
     )
+
+    refined_run.attrs[NEXT_REFINED_ROW_ID_ATTR] = int(_next_refined_row_id(refined_run))
+    refined_run.attrs["refined_row_id_allocator_policy"] = REFINED_ROW_ID_ALLOCATOR_POLICY
 
     refined_run.attrs["refined_storage_semantics"] = "sparse_instances_v1"
     refined_run.attrs["curated_primary_surface"] = "instances"
@@ -2987,17 +3234,7 @@ def write_curated_refined_detect_root(
             raise ValueError("detect instance_key length does not match source detection row count.")
         instance_key = None
         instance_key_origin_codes = None
-        if source_detection_instance_key is not None:
-            instance_key, instance_key_origin_codes = _resolve_curated_instance_keys(
-                root,
-                zarr_path=zarr_path,
-                instance_frame_indices=instance_frame_indices,
-                instance_bbox_norm_coords=instance_bbox_norm_coords,
-                instance_class_ids=instance_class_ids,
-                instance_source_detect_row_index=instance_source_detect_row_index,
-                source_detection_instance_key=source_detection_instance_key,
-            )
-        elif int(instance_frame_indices.shape[0]):
+        if source_detection_instance_key is None and int(instance_frame_indices.shape[0]):
             logger.warning(
                 "Source detect run bound to refined run %r has no instance_key array; "
                 "curated instances will be written without instance keys.",

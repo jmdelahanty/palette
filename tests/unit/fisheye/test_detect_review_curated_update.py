@@ -429,9 +429,8 @@ def test_write_dense_curated_edit_payload_sparse_branch_threads_instance_keys(tm
     import zarr
 
     from fisheye.shared.instance_keys import (
-        INSTANCE_KEY_CONTEXT_MANUAL_CURATION,
         INSTANCE_KEY_ORIGIN_CODE_MAP,
-        mint_detection_instance_keys,
+        mint_manual_curation_instance_keys,
         resolve_recording_identity,
     )
     from fisheye.shared.refined_detect_curation import write_curated_refined_detect_root
@@ -516,12 +515,12 @@ def test_write_dense_curated_edit_payload_sparse_branch_threads_instance_keys(tm
         source_context={"editor": "detect_review", "edit_mode": "manual"},
     )
 
-    expected_minted = mint_detection_instance_keys(
+    expected_minted = mint_manual_curation_instance_keys(
         recording_identity=resolve_recording_identity(root.attrs, fallback_path=zarr_path),
+        refined_row_ids=np.asarray([4], dtype=np.int64),
         frame_indices=np.asarray([2], dtype=np.int64),
         bbox_norm_coords=np.asarray([[0.3, 0.6, 0.1, 0.1]], dtype=np.float64),
         class_ids=np.asarray([0], dtype=np.int64),
-        payload_context=INSTANCE_KEY_CONTEXT_MANUAL_CURATION,
     )
 
     instances = refined["instances"]
@@ -533,5 +532,7 @@ def test_write_dense_curated_edit_payload_sparse_branch_threads_instance_keys(tm
         INSTANCE_KEY_ORIGIN_CODE_MAP["minted_at_curation"],
         INSTANCE_KEY_ORIGIN_CODE_MAP["copied_from_detect"],
     ]
+    assert instances["refined_row_ids"][:].tolist() == [1, 4, 3]
+    assert root["refined_detect_runs/refined_detect_001"].attrs["next_refined_row_id"] == 5
     source_detections = refined["source_detections"]
     assert source_detections["instance_key"][:].tolist() == [111, 222]

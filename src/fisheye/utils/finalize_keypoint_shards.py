@@ -66,6 +66,7 @@ REQUIRED_ROW_ARRAYS: tuple[str, ...] = (
 COUNT_ARRAYS: tuple[str, ...] = ("frame_counts", "n_rois", "n_keypoints")
 
 CROP_REBASE_IDENTITY_ARRAYS: tuple[str, ...] = (
+    "instance_key",
     "source_clip_indices",
     "source_clip_local_frame_indices",
     "source_refined_row_ids",
@@ -75,6 +76,7 @@ CROP_REBASE_IDENTITY_ARRAYS: tuple[str, ...] = (
 )
 
 CROP_REBASE_COPY_ARRAYS: tuple[str, ...] = (
+    "instance_key",
     "frame_indices",
     "source_frame_indices",
     "source_clip_indices",
@@ -179,6 +181,38 @@ def _as_array(group: zarr.Group, name: str) -> np.ndarray:
     return np.asarray(group[name][:])
 
 
+def _validated_instance_keys(
+    group: zarr.Group,
+    *,
+    label: str,
+    expected_rows: int,
+    require_unique: bool,
+) -> np.ndarray:
+    if "instance_key" not in group:
+        raise ValueError(
+            f"{label} is missing required modern identity array 'instance_key'; "
+            "legacy positional finalization is not permitted."
+        )
+    array = group["instance_key"]
+    if array.ndim != 1:
+        raise ValueError(f"{label}/instance_key must be 1D, got shape {array.shape}.")
+    if np.dtype(array.dtype) != np.dtype(np.uint64):
+        raise ValueError(f"{label}/instance_key must have dtype uint64, got {array.dtype}.")
+    keys = np.asarray(array[:], dtype=np.uint64).reshape(-1)
+    if int(keys.shape[0]) != int(expected_rows):
+        raise ValueError(
+            f"{label}/instance_key has {int(keys.shape[0])} rows; expected {int(expected_rows)}."
+        )
+    if require_unique and int(np.unique(keys).shape[0]) != int(keys.shape[0]):
+        values, counts = np.unique(keys, return_counts=True)
+        duplicates = values[counts > 1]
+        raise ValueError(
+            f"{label}/instance_key contains {int(duplicates.shape[0])} duplicate value(s), "
+            f"e.g. {[int(value) for value in duplicates[:5].tolist()]}."
+        )
+    return keys
+
+
 def _array_chunks(source: object | None, data: np.ndarray, *, default_row_chunk: int = 2048) -> tuple[int, ...] | None:
     if data.ndim == 0:
         return None
@@ -267,15 +301,37 @@ def _resolve_shard(root: zarr.Group, shard_name: str) -> Shard:
     crop_group = root.get(f"crop_runs/{source_crop_run}")
     if crop_group is None:
         raise ValueError(f"{KEYPOINT_SHARD_PARENT}/{shard_name} references missing crop_runs/{source_crop_run}.")
-    if "frame_indices" in crop_group:
-        crop_rows = int(crop_group["frame_indices"].shape[0])
-        crop_row_ids = _as_array(group, SOURCE_CROP_ROW_IDS_ARRAY).astype(np.int64, copy=False).reshape(-1)
-        if crop_row_ids.size and (int(crop_row_ids.min()) < 0 or int(crop_row_ids.max()) >= crop_rows):
-            raise ValueError(f"{KEYPOINT_SHARD_PARENT}/{shard_name} has source_crop_row_ids outside crop row range.")
-        crop_frames = _as_array(crop_group, "frame_indices").astype(np.int64, copy=False).reshape(-1)
-        shard_frames = _as_array(group, "frame_indices").astype(np.int64, copy=False).reshape(-1)
-        if not np.array_equal(shard_frames, crop_frames[crop_row_ids]):
-            raise ValueError(f"{KEYPOINT_SHARD_PARENT}/{shard_name} source_crop_row_ids do not match crop frames.")
+    if "frame_indices" not in crop_group:
+        raise ValueError(f"crop_runs/{source_crop_run} is missing required array 'frame_indices'.")
+    crop_rows = int(crop_group["frame_indices"].shape[0])
+    crop_row_ids = _as_array(group, SOURCE_CROP_ROW_IDS_ARRAY).astype(np.int64, copy=False).reshape(-1)
+    if crop_row_ids.size and (int(crop_row_ids.min()) < 0 or int(crop_row_ids.max()) >= crop_rows):
+        raise ValueError(f"{KEYPOINT_SHARD_PARENT}/{shard_name} has source_crop_row_ids outside crop row range.")
+    crop_frames = _as_array(crop_group, "frame_indices").astype(np.int64, copy=False).reshape(-1)
+    shard_frames = _as_array(group, "frame_indices").astype(np.int64, copy=False).reshape(-1)
+    if not np.array_equal(shard_frames, crop_frames[crop_row_ids]):
+        raise ValueError(f"{KEYPOINT_SHARD_PARENT}/{shard_name} source_crop_row_ids do not match crop frames.")
+    crop_keys = _validated_instance_keys(
+        crop_group,
+        label=f"crop_runs/{source_crop_run}",
+        expected_rows=crop_rows,
+        require_unique=False,
+    )
+    shard_keys = _validated_instance_keys(
+        group,
+        label=f"{KEYPOINT_SHARD_PARENT}/{shard_name}",
+        expected_rows=total_rows,
+        require_unique=True,
+    )
+    expected_shard_keys = crop_keys[crop_row_ids]
+    if not np.array_equal(shard_keys, expected_shard_keys):
+        mismatch = np.flatnonzero(shard_keys != expected_shard_keys)
+        first = int(mismatch[0]) if mismatch.size else -1
+        raise ValueError(
+            f"{KEYPOINT_SHARD_PARENT}/{shard_name}/instance_key does not exactly match "
+            f"crop_runs/{source_crop_run}/instance_key at source_crop_row_ids; "
+            f"first mismatch is shard row {first}."
+        )
 
     frame_axis_len = 0
     for name in COUNT_ARRAYS:
@@ -440,6 +496,74 @@ def _apply_crop_rebase(row_arrays: dict[str, np.ndarray], rebase: CropRebase | N
     return out
 
 
+def _validate_final_instance_key_alignment(
+    root: zarr.Group,
+    *,
+    row_arrays: Mapping[str, np.ndarray],
+    source_crop_run: str,
+) -> dict[str, Any]:
+    crop_group = root.get(f"crop_runs/{source_crop_run}")
+    if crop_group is None:
+        raise ValueError(f"source crop run not found: crop_runs/{source_crop_run}")
+    if "frame_indices" not in crop_group:
+        raise ValueError(f"crop_runs/{source_crop_run} is missing required array 'frame_indices'.")
+
+    crop_rows = int(crop_group["frame_indices"].shape[0])
+    crop_keys = _validated_instance_keys(
+        crop_group,
+        label=f"crop_runs/{source_crop_run}",
+        expected_rows=crop_rows,
+        require_unique=True,
+    )
+    output_rows = int(np.asarray(row_arrays["frame_indices"]).shape[0])
+    output_keys = np.asarray(row_arrays["instance_key"])
+    if output_keys.ndim != 1 or np.dtype(output_keys.dtype) != np.dtype(np.uint64):
+        raise ValueError(
+            "Merged keypoint instance_key must be a 1D uint64 array before publication."
+        )
+    output_keys = output_keys.astype(np.uint64, copy=False).reshape(-1)
+    if int(output_keys.shape[0]) != output_rows:
+        raise ValueError(
+            f"Merged keypoint instance_key has {int(output_keys.shape[0])} rows; expected {output_rows}."
+        )
+    if int(np.unique(output_keys).shape[0]) != output_rows:
+        values, counts = np.unique(output_keys, return_counts=True)
+        duplicates = values[counts > 1]
+        raise ValueError(
+            "Merged keypoint instance_key is not unique: "
+            f"{int(duplicates.shape[0])} duplicate value(s), e.g. "
+            f"{[int(value) for value in duplicates[:5].tolist()]}."
+        )
+
+    crop_row_ids = np.asarray(
+        row_arrays[SOURCE_CROP_ROW_IDS_ARRAY],
+        dtype=np.int64,
+    ).reshape(-1)
+    if crop_row_ids.shape[0] != output_rows:
+        raise ValueError("Merged source_crop_row_ids length does not match instance_key rows.")
+    if crop_row_ids.size and (
+        int(crop_row_ids.min()) < 0 or int(crop_row_ids.max()) >= crop_rows
+    ):
+        raise ValueError("Merged source_crop_row_ids fall outside the target crop row range.")
+
+    expected_keys = crop_keys[crop_row_ids]
+    if not np.array_equal(output_keys, expected_keys):
+        mismatch = np.flatnonzero(output_keys != expected_keys)
+        first = int(mismatch[0]) if mismatch.size else -1
+        raise ValueError(
+            "Merged keypoint instance_key does not exactly match target crop instance_key "
+            f"at source_crop_row_ids; first mismatch is output row {first}."
+        )
+    return {
+        "mode": "instance_key",
+        "status": "exact",
+        "order_check": "source_crop_row_ids_indexed_exact",
+        "source_crop_run": str(source_crop_run),
+        "row_count": output_rows,
+        "unique_count": int(np.unique(output_keys).shape[0]),
+    }
+
+
 def _merge_count_arrays(shards: Sequence[Shard], name: str) -> np.ndarray:
     frame_axis_len = max((shard.frame_axis_len for shard in shards), default=0)
     out = np.zeros(frame_axis_len, dtype=np.int32)
@@ -511,6 +635,11 @@ def finalize_keypoint_shards(
     row_arrays = _apply_crop_rebase(row_arrays, rebase)
     row_arrays, sort_order = _sort_and_validate_row_arrays(row_arrays)
     source_crop_run = rebase.target_crop_run if rebase is not None else shards[0].source_crop_run
+    identity_validation = _validate_final_instance_key_alignment(
+        root,
+        row_arrays=row_arrays,
+        source_crop_run=source_crop_run,
+    )
     total_rows = int(row_arrays["frame_indices"].shape[0])
     keypoint_count = int(row_arrays["keypoints_roi"].shape[1])
     count_arrays = {name: _merge_count_arrays(shards, name) for name in COUNT_ARRAYS}
@@ -543,6 +672,7 @@ def finalize_keypoint_shards(
         "source_keypoint_shard_crop_runs": source_shard_crop_runs,
         "target_crop_run": target_crop_run,
         "total_rois": total_rows,
+        "identity_validation": identity_validation,
         "sort_policy": "source_crop_row_ids_stable_ascending",
         "sort_changed_order": bool(not np.array_equal(sort_order, np.arange(sort_order.shape[0]))),
         "summary_statistics": summary_stats,
@@ -613,6 +743,11 @@ def finalize_keypoint_shards(
                 "run_group_parent": KEYPOINT_OUTPUT_PARENT,
                 "source_keypoint_shard_count": int(len(shards)),
                 "keypoints_processed": total_rows,
+                "instance_key_status": "present",
+                "row_identity_mode": "instance_key",
+                "instance_key_alignment_status": "exact",
+                "instance_key_alignment_source_crop_run": source_crop_run,
+                "row_identity_validation": identity_validation,
                 "success_rate": summary_stats["success_rate_percent"],
                 "summary_statistics": summary_stats,
                 "keypoint_storage_layout": "indexed_sharding_v1",
@@ -640,6 +775,8 @@ def finalize_keypoint_shards(
                 "output_run": resolved_output_run,
                 "target_crop_run": target_crop_run,
                 "sort_policy": "source_crop_row_ids_stable_ascending",
+                "row_identity_mode": "instance_key",
+                "instance_key_alignment_status": "exact",
                 "row_shard_rows": int(row_shard_rows),
                 "frame_shard_rows": int(frame_shard_rows),
             },

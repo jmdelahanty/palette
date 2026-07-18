@@ -43,6 +43,12 @@ PER_ROI_ROW_LINEAGE_ARRAYS = {
 }
 COUNT_ROW_LINEAGE_ARRAYS = {"frame_counts"}
 SOURCE_CROP_ROW_IDS_ARRAY = "source_crop_row_ids"
+ROW_IDENTITY_MODE_INSTANCE_KEY = "instance_key"
+ROW_IDENTITY_MODE_LEGACY_POSITIONAL = "legacy_positional"
+ROW_IDENTITY_MODE_SCHEMA = "palette.row_identity_mode.v1"
+ROW_IDENTITY_MODES = frozenset(
+    {ROW_IDENTITY_MODE_INSTANCE_KEY, ROW_IDENTITY_MODE_LEGACY_POSITIONAL}
+)
 
 
 @dataclass(frozen=True)
@@ -527,21 +533,67 @@ def _assert_instance_keyed_sources_equal(
             raise ValueError(f"Alignment mismatch for {name}")
 
 
-def _both_sources_have_instance_key(
+def resolve_row_lineage_identity_mode(
     reference_arrays: Mapping[str, object | None],
     other_arrays: Mapping[str, object | None],
-) -> bool:
-    return (
-        reference_arrays.get(INSTANCE_KEY_ARRAY) is not None
-        and other_arrays.get(INSTANCE_KEY_ARRAY) is not None
+    *,
+    requested_mode: str | None = None,
+    allow_legacy_positional: bool = False,
+) -> str:
+    """Resolve an explicit keyed or historical positional comparison mode.
+
+    One-sided key presence always fails. Two keyless historical sources require
+    an explicit ``legacy_positional`` request, or a caller that deliberately
+    opts into legacy compatibility with ``allow_legacy_positional=True``.
+    """
+
+    reference_has_key = reference_arrays.get(INSTANCE_KEY_ARRAY) is not None
+    other_has_key = other_arrays.get(INSTANCE_KEY_ARRAY) is not None
+    if reference_has_key != other_has_key:
+        missing_label = "other source" if reference_has_key else "reference source"
+        present_label = "reference source" if reference_has_key else "other source"
+        raise ValueError(
+            f"Alignment mismatch: {present_label} has instance_key but {missing_label} does not; "
+            "refusing positional fallback after one-sided key loss."
+        )
+
+    normalized_mode = str(requested_mode).strip() if requested_mode is not None else None
+    if normalized_mode is not None and normalized_mode not in ROW_IDENTITY_MODES:
+        raise ValueError(
+            f"Unknown row identity mode {normalized_mode!r}; expected one of "
+            f"{sorted(ROW_IDENTITY_MODES)}."
+        )
+
+    if reference_has_key:
+        if normalized_mode == ROW_IDENTITY_MODE_LEGACY_POSITIONAL:
+            raise ValueError(
+                "Cannot use legacy_positional alignment when instance_key is present; "
+                "refusing an explicit identity downgrade."
+            )
+        return ROW_IDENTITY_MODE_INSTANCE_KEY
+
+    if normalized_mode == ROW_IDENTITY_MODE_INSTANCE_KEY:
+        raise ValueError("instance_key alignment was requested, but both sources are keyless.")
+    if normalized_mode == ROW_IDENTITY_MODE_LEGACY_POSITIONAL or allow_legacy_positional:
+        return ROW_IDENTITY_MODE_LEGACY_POSITIONAL
+    raise ValueError(
+        "Both sources lack instance_key; pass identity_mode='legacy_positional' "
+        "for explicitly labeled historical compatibility."
     )
 
 
 def assert_row_lineage_alignment_equal(
     reference: Mapping[str, object],
     other: Mapping[str, object],
+    *,
+    identity_mode: str | None = None,
 ) -> None:
-    if _both_sources_have_instance_key(reference, other):
+    resolved_mode = resolve_row_lineage_identity_mode(
+        reference,
+        other,
+        requested_mode=identity_mode,
+    )
+    if resolved_mode == ROW_IDENTITY_MODE_INSTANCE_KEY:
         _assert_instance_keyed_sources_equal(reference, other)
         return
     assert_optional_row_lineage_equal(
@@ -561,8 +613,15 @@ def assert_row_lineage_alignment_equal(
 def assert_row_lineage_sources_equal(
     reference_arrays: Mapping[str, object | None],
     other_arrays: Mapping[str, object | None],
+    *,
+    identity_mode: str | None = None,
 ) -> None:
-    if _both_sources_have_instance_key(reference_arrays, other_arrays):
+    resolved_mode = resolve_row_lineage_identity_mode(
+        reference_arrays,
+        other_arrays,
+        requested_mode=identity_mode,
+    )
+    if resolved_mode == ROW_IDENTITY_MODE_INSTANCE_KEY:
         _assert_instance_keyed_sources_equal(reference_arrays, other_arrays)
         return
     _assert_optional_row_lineage_sources_equal(

@@ -23,6 +23,7 @@ INSTANCE_KEY_DUPLICATE_POLICY = "duplicate_base_keys_get_detect_time_occurrence_
 # guarantees a manual box that quantizes identically to a detection cannot
 # collide with that detection's copied key.
 INSTANCE_KEY_CONTEXT_MANUAL_CURATION = "manual_curation"
+INSTANCE_KEY_CONTEXT_MANUAL_CURATION_ROW_ID = "manual_curation_refined_row_id_v1"
 
 # Per-row provenance for curated rowsets that mix copied and minted keys.
 INSTANCE_KEY_ORIGIN_ARRAY = "instance_key_origin_codes"
@@ -125,6 +126,55 @@ def mint_detection_instance_keys(
     unique_count = int(np.unique(out).shape[0])
     if unique_count != int(out.shape[0]):
         raise ValueError("instance_key hash collision detected within detection run.")
+    return out
+
+
+def mint_manual_curation_instance_keys(
+    *,
+    recording_identity: str,
+    refined_row_ids: np.ndarray,
+    frame_indices: np.ndarray,
+    bbox_norm_coords: np.ndarray,
+    class_ids: np.ndarray | None = None,
+) -> np.ndarray:
+    """Mint keys once for new manual observations using their stable row IDs.
+
+    ``refined_row_id`` is included in the manual-origin namespace so deleting
+    and later recreating an otherwise identical box cannot reuse the retired
+    observation key. Surviving observations must copy their stored key rather
+    than call this function again after an edit.
+    """
+
+    row_ids = np.asarray(refined_row_ids, dtype=np.int64).reshape(-1)
+    frames = np.asarray(frame_indices, dtype=np.int64).reshape(-1)
+    bboxes = np.asarray(bbox_norm_coords, dtype=np.float64).reshape(-1, 4)
+    classes = (
+        np.zeros(frames.shape[0], dtype=np.int64)
+        if class_ids is None
+        else np.asarray(class_ids, dtype=np.int64).reshape(-1)
+    )
+    if not (row_ids.shape[0] == frames.shape[0] == bboxes.shape[0] == classes.shape[0]):
+        raise ValueError("Manual curation key inputs must agree on row count.")
+    if np.any(row_ids < 0):
+        raise ValueError("Manual curation keys require assigned non-negative refined_row_ids.")
+    if int(np.unique(row_ids).shape[0]) != int(row_ids.shape[0]):
+        raise ValueError("Manual curation keys require unique refined_row_ids.")
+
+    out = np.empty(row_ids.shape[0], dtype=np.uint64)
+    for idx, row_id in enumerate(row_ids.tolist()):
+        out[idx] = mint_detection_instance_keys(
+            recording_identity=recording_identity,
+            frame_indices=frames[idx : idx + 1],
+            bbox_norm_coords=bboxes[idx : idx + 1],
+            class_ids=classes[idx : idx + 1],
+            payload_context=(
+                f"{INSTANCE_KEY_CONTEXT_MANUAL_CURATION_ROW_ID}:"
+                f"refined_row_id={int(row_id)}"
+            ),
+        )[0]
+
+    if int(np.unique(out).shape[0]) != int(out.shape[0]):
+        raise ValueError("Manual curation instance_key hash collision detected.")
     return out
 
 

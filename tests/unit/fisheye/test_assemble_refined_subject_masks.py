@@ -303,6 +303,32 @@ def test_validate_source_alignment_allows_metadata_only_refined_source_view_mism
     assemble_mod._validate_source_alignment(reference, other)  # noqa: SLF001
 
 
+def test_validate_source_alignment_rejects_one_sided_instance_key_loss_without_zarr() -> None:
+    shared = {
+        "crop_run": "crop_001",
+        "source_crop_snapshot": {
+            "source_crop_storage_mode": "geometry_only",
+            "source_crop_signature": "sig-001",
+            "source_crop_revision": 4,
+        },
+        "masks_roi": np.zeros((2, 1, 8, 8), dtype=np.uint8),
+        "detection_source": np.zeros((2,), dtype=np.int8),
+        "frame_indices": np.asarray([10, 11], dtype=np.int32),
+        "frame_counts": np.asarray([1, 1], dtype=np.int32),
+        "detection_indices": np.asarray([0, 1], dtype=np.int32),
+        "source_refined_row_ids": np.asarray([100, 101], dtype=np.int64),
+        "source_detect_row_index": np.asarray([0, 1], dtype=np.int32),
+    }
+    reference = SimpleNamespace(
+        **shared,
+        instance_key=np.asarray([1001, 1002], dtype=np.uint64),
+    )
+    other = SimpleNamespace(**shared)
+
+    with pytest.raises(ValueError, match="one-sided key loss"):
+        assemble_mod._validate_source_alignment(reference, other)  # noqa: SLF001
+
+
 def test_validate_source_alignment_rejects_source_view_mismatch_with_real_signature_drift_without_zarr() -> None:
     reference = SimpleNamespace(
         crop_run="crop_001",
@@ -364,6 +390,8 @@ def test_assemble_refined_subject_run_creates_finalized_mixed_source_run(monkeyp
     )
 
     assert summary["status"] == "updated"
+    assert summary["row_identity_mode"] == "legacy_positional"
+    assert summary["row_identity_mode_schema"] == "palette.row_identity_mode.v1"
     assert summary["component_names"] == ["subject_body", "eye_left", "eye_right", "swim_bladder"]
     assert summary["source_subject_mask_runs"] == {
         "subject_body": "body_run_001",
@@ -376,6 +404,8 @@ def test_assemble_refined_subject_run_creates_finalized_mixed_source_run(monkeyp
     assert run.attrs["label_schema_id"] == "subject_v1_lr"
     assert run.attrs["method"] == assemble_mod.ASSEMBLE_REFINED_SUBJECT_METHOD
     assert run.attrs["assembly_semantics"] == "multi_source_component_seed"
+    assert run.attrs["row_identity_mode"] == "legacy_positional"
+    assert run.attrs["row_identity_mode_schema"] == "palette.row_identity_mode.v1"
     assert run.attrs["source_subject_mask_run"] == "body_run_001"
     assert run.attrs["source_body_subject_mask_run"] == "body_run_001"
     assert run.attrs["source_eye_subject_mask_run"] == "eye_run_001"

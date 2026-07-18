@@ -6,12 +6,15 @@ import numpy as np
 import pytest
 
 from fisheye.shared.row_lineage import (
+    ROW_IDENTITY_MODE_INSTANCE_KEY,
+    ROW_IDENTITY_MODE_LEGACY_POSITIONAL,
     ROW_LINEAGE_ARRAYS,
     assert_row_lineage_alignment_equal,
     assert_row_lineage_sources_equal,
     copy_row_lineage_arrays,
     copy_row_lineage_arrays_from_sources,
     copy_row_lineage_arrays_with_fallback,
+    resolve_row_lineage_identity_mode,
 )
 
 
@@ -165,7 +168,7 @@ def test_copy_row_lineage_arrays_with_fallback_rejects_mismatch() -> None:
         copy_row_lineage_arrays_with_fallback(target, crop, keypoints, total_rois=3)
 
 
-def test_assert_row_lineage_alignment_allows_missing_optional_identity() -> None:
+def test_assert_row_lineage_alignment_rejects_one_sided_instance_key_loss() -> None:
     reference = _FakeGroup()
     other = _FakeGroup()
     _seed_lineage(reference)
@@ -173,7 +176,20 @@ def test_assert_row_lineage_alignment_allows_missing_optional_identity() -> None
     other.create_array("frame_counts", data=reference["frame_counts"][:], overwrite=True)
     other.create_array("detection_indices", data=reference["detection_indices"][:], overwrite=True)
 
-    assert_row_lineage_alignment_equal(reference, other)
+    with pytest.raises(ValueError, match="one-sided key loss"):
+        assert_row_lineage_alignment_equal(reference, other)
+
+
+def test_assert_row_lineage_alignment_rejects_reverse_one_sided_instance_key_loss() -> None:
+    reference = _FakeGroup()
+    other = _FakeGroup()
+    _seed_lineage(other)
+    reference.create_array("frame_indices", data=other["frame_indices"][:], overwrite=True)
+    reference.create_array("frame_counts", data=other["frame_counts"][:], overwrite=True)
+    reference.create_array("detection_indices", data=other["detection_indices"][:], overwrite=True)
+
+    with pytest.raises(ValueError, match="one-sided key loss"):
+        assert_row_lineage_alignment_equal(reference, other)
 
 
 def test_assert_row_lineage_alignment_rejects_optional_identity_mismatch_when_present() -> None:
@@ -264,4 +280,49 @@ def test_assert_row_lineage_sources_equal_legacy_without_instance_key_uses_posit
     assert_row_lineage_sources_equal(
         {name: reference.get(name) for name in ROW_LINEAGE_ARRAYS},
         {name: other.get(name) for name in ROW_LINEAGE_ARRAYS},
+        identity_mode=ROW_IDENTITY_MODE_LEGACY_POSITIONAL,
+    )
+
+
+def test_assert_row_lineage_sources_equal_requires_explicit_legacy_mode() -> None:
+    reference = _FakeGroup()
+    other = _FakeGroup()
+    _seed_lineage(reference)
+    _seed_lineage(other)
+    del reference["instance_key"]
+    del other["instance_key"]
+
+    with pytest.raises(ValueError, match="explicitly labeled historical compatibility"):
+        assert_row_lineage_sources_equal(
+            {name: reference.get(name) for name in ROW_LINEAGE_ARRAYS},
+            {name: other.get(name) for name in ROW_LINEAGE_ARRAYS},
+        )
+
+
+def test_resolve_row_lineage_identity_mode_rejects_keyed_downgrade() -> None:
+    reference = _FakeGroup()
+    other = _FakeGroup()
+    _seed_lineage(reference)
+    _seed_lineage(other)
+
+    with pytest.raises(ValueError, match="explicit identity downgrade"):
+        resolve_row_lineage_identity_mode(
+            {"instance_key": reference["instance_key"]},
+            {"instance_key": other["instance_key"]},
+            requested_mode=ROW_IDENTITY_MODE_LEGACY_POSITIONAL,
+        )
+
+
+def test_resolve_row_lineage_identity_mode_labels_modern_keyed_sources() -> None:
+    reference = _FakeGroup()
+    other = _FakeGroup()
+    _seed_lineage(reference)
+    _seed_lineage(other)
+
+    assert (
+        resolve_row_lineage_identity_mode(
+            {"instance_key": reference["instance_key"]},
+            {"instance_key": other["instance_key"]},
+        )
+        == ROW_IDENTITY_MODE_INSTANCE_KEY
     )

@@ -68,6 +68,14 @@ fast path, not the identity contract. Legacy runs without keys remain readable
 through an explicitly labeled `legacy_positional` mode, but a keyed source must
 not silently consume a legacy tracking run.
 
+This rule applies to generic cross-stage row-lineage comparisons as well as
+tracking. If exactly one source exposes `instance_key`, validation fails closed;
+it must never downgrade to a positional comparison. If both sources are keyless,
+the caller must deliberately select `legacy_positional`. New outputs that record
+the decision use `row_identity_mode` with schema
+`palette.row_identity_mode.v1`; modern outputs use `instance_key` and historical
+compatibility outputs use `legacy_positional`.
+
 ## Source Rowset Fingerprint
 
 Arena assignment and tracking bind to one exact source rowset using a distinct

@@ -21,7 +21,8 @@ wired into keypoint/subject-mask/detect review approval. The `Recording` accesso
 `sun`. **Rec 2 (content-derived instance keys) is DELIVERED** (2026-07-04 audit):
 minted at detect in `src/fisheye/shared/instance_keys.py`, copied verbatim through
 crop/refined-detect/keypoints/subject-mask lineage, and verified by key equality in
-`src/fisheye/shared/row_lineage.py` with positional fallback for legacy runs. The
+`src/fisheye/shared/row_lineage.py`. One-sided key loss now fails closed; positional
+comparison requires an explicitly labeled `legacy_positional` pair. The
 related RedScare `n_keypoints` frame-axis sizing bug is fixed on `sun` (662eea3);
 only the optional backfill of the two affected historical runs remains. **Rec 3 (a
 single `FrameDomains` resolver) remains open** — no resolver exists; consumers still

@@ -25,7 +25,12 @@ from ..shared.provenance_attrs import (
     resolve_assignment_keypoints_run,
     resolve_source_keypoints_run,
 )
-from ..shared.row_lineage import assert_row_lineage_sources_equal, resolve_source_crop_row_ids
+from ..shared.row_lineage import (
+    ROW_IDENTITY_MODE_SCHEMA,
+    assert_row_lineage_sources_equal,
+    resolve_row_lineage_identity_mode,
+    resolve_source_crop_row_ids,
+)
 from ..shared.subject_mask_registry_status import emit_refined_subject_mask_stage_completion
 from ..shared.zarr_run_completion import require_runs_parent
 from ..tune.refined_subject_mask_review import (
@@ -204,7 +209,7 @@ def _source_lineage_arrays(source: SourceSubjectMaskRun) -> dict[str, object | N
     }
 
 
-def _validate_source_alignment(reference: SourceSubjectMaskRun, other: SourceSubjectMaskRun) -> None:
+def _validate_source_alignment(reference: SourceSubjectMaskRun, other: SourceSubjectMaskRun) -> str:
     if reference.crop_run != other.crop_run:
         raise ValueError(
             f"Alignment mismatch for source_crop_run: {reference.crop_run!r} != {other.crop_run!r}."
@@ -226,13 +231,25 @@ def _validate_source_alignment(reference: SourceSubjectMaskRun, other: SourceSub
             f"ROI shape mismatch: {reference.masks_roi.shape[2:]} != {other.masks_roi.shape[2:]}."
         )
     _required_array_equal("detection_source", reference.detection_source, other.detection_source)
-    assert_row_lineage_sources_equal(_source_lineage_arrays(reference), _source_lineage_arrays(other))
+    reference_lineage = _source_lineage_arrays(reference)
+    other_lineage = _source_lineage_arrays(other)
+    row_identity_mode = resolve_row_lineage_identity_mode(
+        reference_lineage,
+        other_lineage,
+        allow_legacy_positional=True,
+    )
+    assert_row_lineage_sources_equal(
+        reference_lineage,
+        other_lineage,
+        identity_mode=row_identity_mode,
+    )
     if crop_snapshot_mismatches and not _is_allowed_source_view_crop_snapshot_mismatch(reference, other):
         raise ValueError(
             "Alignment mismatch for crop snapshot fields: "
             + "; ".join(crop_snapshot_mismatches)
             + "."
         )
+    return row_identity_mode
 
 
 def _shared_value(sources: Sequence[SourceSubjectMaskRun], attr_name: str) -> Optional[str]:
@@ -997,10 +1014,21 @@ def assemble_refined_subject_run(
     if reference_source is None and refined_component_sources:
         reference_source = next(iter(refined_component_sources.values()))
     assert reference_source is not None
+    reference_lineage = _source_lineage_arrays(reference_source)
+    row_identity_mode = resolve_row_lineage_identity_mode(
+        reference_lineage,
+        reference_lineage,
+        allow_legacy_positional=True,
+    )
     for source in provided_sources:
         if source is reference_source:
             continue
-        _validate_source_alignment(reference_source, source)
+        source_identity_mode = _validate_source_alignment(reference_source, source)
+        if source_identity_mode != row_identity_mode:
+            raise ValueError(
+                "Alignment mismatch: component sources resolved different row identity modes "
+                f"({row_identity_mode!r} != {source_identity_mode!r})."
+            )
 
     component_seeds, component_names, review_overrides, eyes_union_assignment_summary = _collect_component_seeds(
         root=root,
@@ -1072,6 +1100,8 @@ def assemble_refined_subject_run(
         "source_subject_mask_runs": source_component_runs,
         "source_component_sources": source_component_sources,
         "source_crop_run": reference_source.crop_run,
+        "row_identity_mode": row_identity_mode,
+        "row_identity_mode_schema": ROW_IDENTITY_MODE_SCHEMA,
         "promote_source_review": bool(promote_source_review),
         "source_input_subject_mask_run": subject_source.run_name if subject_source is not None else None,
         "eyes_union_assignment_summary": eyes_union_assignment_summary,
@@ -1116,6 +1146,8 @@ def assemble_refined_subject_run(
     extra_attrs = {
         "assembly_semantics": assembly_semantics,
         "assembly_primary_source_component": primary_component,
+        "row_identity_mode": row_identity_mode,
+        "row_identity_mode_schema": ROW_IDENTITY_MODE_SCHEMA,
         "source_component_runs": source_component_runs,
         "source_subject_mask_runs": source_component_runs,
         "source_component_sources": source_component_sources,
@@ -1144,6 +1176,8 @@ def assemble_refined_subject_run(
     shared_keypoint_group = _shared_value(provided_sources, "source_keypoint_group")
     provenance_inputs = {
         "assembly_semantics": assembly_semantics,
+        "row_identity_mode": row_identity_mode,
+        "row_identity_mode_schema": ROW_IDENTITY_MODE_SCHEMA,
         "source_component_runs": source_component_runs,
         "source_subject_mask_runs": source_component_runs,
         "source_component_sources": source_component_sources,

@@ -197,6 +197,14 @@ def test_finalize_keypoint_shards_writes_canonical_keypoint_run(tmp_path: Path) 
     assert result["ok"] is True
     assert result["total_rois"] == 3
     assert result["sort_changed_order"] is True
+    assert result["identity_validation"] == {
+        "mode": "instance_key",
+        "status": "exact",
+        "order_check": "source_crop_row_ids_indexed_exact",
+        "source_crop_run": "crop_proxy",
+        "row_count": 3,
+        "unique_count": 3,
+    }
 
     reopened = zarr.open_group(store=zarr_path, mode="r")
     parent = reopened["keypoints_runs"]
@@ -210,6 +218,9 @@ def test_finalize_keypoint_shards_writes_canonical_keypoint_run(tmp_path: Path) 
     assert run.attrs["source_crop_run"] == "crop_proxy"
     assert run.attrs["stage_selector_eligible"] is True
     assert run.attrs["keypoint_storage_layout"] == "indexed_sharding_v1"
+    assert run.attrs["row_identity_mode"] == "instance_key"
+    assert run.attrs["instance_key_alignment_status"] == "exact"
+    assert run.attrs["row_identity_validation"] == result["identity_validation"]
     assert run.attrs["keypoint_roi_shard_rows"] == 131_072
     assert run["keypoints_roi"].shards == (3, 3, 2)
     assert run["instance_key"].shards == (3,)
@@ -230,6 +241,82 @@ def test_finalize_keypoint_shards_rejects_duplicate_source_crop_rows(tmp_path: P
         finalize_keypoint_shards(
             zarr_path=zarr_path,
             shard_runs=["shard_a", "shard_b"],
+            output_run="keypoints_collection_test",
+        )
+
+    reopened = zarr.open_group(store=zarr_path, mode="r")
+    assert "keypoints_runs" not in reopened
+
+
+def test_finalize_keypoint_shards_rejects_instance_key_mismatch_before_publication(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "sample_analysis.zarr"
+    root = _make_archive(zarr_path)
+    _write_shard(root, "shard_a", crop_rows=[0, 1])
+    root["keypoint_shard_runs/shard_a/instance_key"][1] = np.uint64(999)
+
+    with pytest.raises(ValueError, match="does not exactly match.*source_crop_row_ids"):
+        finalize_keypoint_shards(
+            zarr_path=zarr_path,
+            shard_runs=["shard_a"],
+            output_run="keypoints_collection_test",
+        )
+
+    reopened = zarr.open_group(store=zarr_path, mode="r")
+    assert "keypoints_runs" not in reopened
+
+
+def test_finalize_keypoint_shards_rejects_duplicate_instance_keys_before_publication(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "sample_analysis.zarr"
+    root = _make_archive(zarr_path)
+    _write_shard(root, "shard_a", crop_rows=[0, 1])
+    root["keypoint_shard_runs/shard_a/instance_key"][1] = np.uint64(1)
+
+    with pytest.raises(ValueError, match="instance_key contains 1 duplicate"):
+        finalize_keypoint_shards(
+            zarr_path=zarr_path,
+            shard_runs=["shard_a"],
+            output_run="keypoints_collection_test",
+        )
+
+    reopened = zarr.open_group(store=zarr_path, mode="r")
+    assert "keypoints_runs" not in reopened
+
+
+def test_finalize_keypoint_shards_rejects_keyless_crop_as_legacy_positional(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "sample_analysis.zarr"
+    root = _make_archive(zarr_path)
+    _write_shard(root, "shard_a", crop_rows=[0, 1])
+    del root["crop_runs/crop_proxy/instance_key"]
+
+    with pytest.raises(ValueError, match="legacy positional finalization is not permitted"):
+        finalize_keypoint_shards(
+            zarr_path=zarr_path,
+            shard_runs=["shard_a"],
+            output_run="keypoints_collection_test",
+        )
+
+    reopened = zarr.open_group(store=zarr_path, mode="r")
+    assert "keypoints_runs" not in reopened
+
+
+def test_finalize_keypoint_shards_rejects_keyless_shard_as_legacy_positional(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "sample_analysis.zarr"
+    root = _make_archive(zarr_path)
+    _write_shard(root, "shard_a", crop_rows=[0, 1])
+    del root["keypoint_shard_runs/shard_a/instance_key"]
+
+    with pytest.raises(ValueError, match="missing required arrays.*instance_key"):
+        finalize_keypoint_shards(
+            zarr_path=zarr_path,
+            shard_runs=["shard_a"],
             output_run="keypoints_collection_test",
         )
 
@@ -283,6 +370,8 @@ def test_finalize_keypoint_shards_rebases_mixed_proxy_crop_runs_to_target(tmp_pa
     assert result["source_crop_run"] == "crop_proxy_collection"
     assert result["source_keypoint_shard_crop_runs"] == ["crop_proxy_a", "crop_proxy_b"]
     assert result["sort_changed_order"] is True
+    assert result["identity_validation"]["status"] == "exact"
+    assert result["identity_validation"]["source_crop_run"] == "crop_proxy_collection"
 
     root_after = zarr.open_group(store=zarr_path, mode="r")
     run = root_after["keypoints_runs/keypoints_collection_test"]
@@ -291,3 +380,34 @@ def test_finalize_keypoint_shards_rebases_mixed_proxy_crop_runs_to_target(tmp_pa
     np.testing.assert_array_equal(run["source_crop_row_ids"][:], np.array([0, 1, 2, 3], dtype=np.int64))
     np.testing.assert_array_equal(run["frame_indices"][:], np.array([10, 11, 20, 21], dtype=np.int64))
     np.testing.assert_array_equal(run["detection_indices"][:], np.array([0, 1, 2, 3], dtype=np.int64))
+
+
+def test_finalize_keypoint_shards_rebase_rejects_target_instance_key_mismatch(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "sample_analysis.zarr"
+    root = zarr.open_group(store=zarr_path, mode="w")
+    root.create_group("crop_runs")
+    _write_proxy_crop(root, "crop_proxy_a", frames=[10, 11], clip_index=0, refined_offset=100)
+    _write_proxy_crop(root, "crop_proxy_b", frames=[20, 21], clip_index=1, refined_offset=200)
+    merge_clipped_proxy_crop_runs(
+        zarr_path=zarr_path,
+        source_crop_runs=["crop_proxy_b", "crop_proxy_a"],
+        output_run="crop_proxy_collection",
+    )
+
+    reopened = zarr.open_group(store=zarr_path, mode="a")
+    _write_shard(reopened, "shard_a", crop_rows=[0, 1], source_crop_run="crop_proxy_a")
+    _write_shard(reopened, "shard_b", crop_rows=[0, 1], source_crop_run="crop_proxy_b")
+    reopened["crop_runs/crop_proxy_collection/instance_key"][0] = np.uint64(999_999)
+
+    with pytest.raises(ValueError, match="Could not map.*into crop_runs/crop_proxy_collection"):
+        finalize_keypoint_shards(
+            zarr_path=zarr_path,
+            shard_runs=["shard_b", "shard_a"],
+            output_run="keypoints_collection_test",
+            target_crop_run="crop_proxy_collection",
+        )
+
+    root_after = zarr.open_group(store=zarr_path, mode="r")
+    assert "keypoints_runs" not in root_after

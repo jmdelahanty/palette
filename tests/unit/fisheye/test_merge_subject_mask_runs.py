@@ -26,6 +26,7 @@ def _create_subject_run(
     frame_counts: np.ndarray | None = None,
     detection_indices: np.ndarray | None = None,
     source_crop_row_ids: np.ndarray | None = None,
+    instance_key: np.ndarray | None = None,
     detection_source: np.ndarray | None = None,
     source_keypoints_run: str = "refined_keypoints_001",
     source_keypoint_group: str = "refined_keypoints_runs",
@@ -76,6 +77,8 @@ def _create_subject_run(
     run.create_array("frame_counts", data=frame_counts_arr, overwrite=True)
     run.create_array("detection_indices", data=detection_indices_arr, overwrite=True)
     run.create_array("source_crop_row_ids", data=source_crop_row_ids_arr, overwrite=True)
+    if instance_key is not None:
+        run.create_array("instance_key", data=np.asarray(instance_key, dtype=np.uint64), overwrite=True)
     run.create_array("detection_source", data=detection_source_arr, overwrite=True)
     run.create_array(
         "masks_roi",
@@ -212,9 +215,12 @@ def test_merge_subject_mask_runs_combines_body_and_eye_components(
     )
 
     assert summary["status"] == "updated"
+    assert summary["row_identity_mode"] == "legacy_positional"
     subject_parent = root["subject_mask_runs"]
     assert subject_parent.attrs["latest"] == "subject_masks_canary_body_eyes_001"
     run = subject_parent["subject_masks_canary_body_eyes_001"]
+    assert run.attrs["row_identity_mode"] == "legacy_positional"
+    assert run.attrs["row_identity_mode_schema"] == "palette.row_identity_mode.v1"
 
     expected_masks = np.asarray(
         [
@@ -515,6 +521,82 @@ def test_merge_subject_mask_runs_rejects_detection_index_mismatch(tmp_path: Path
             run_name="merged_001",
             apply=False,
         )
+
+
+def test_merge_subject_mask_runs_rejects_one_sided_instance_key_loss(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_training.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+
+    _create_subject_run(
+        root,
+        run_name="body_001",
+        mask_labels=["subject_body", "eyes_union", "swim_bladder"],
+        available_channels=np.asarray([True, False, False], dtype=bool),
+        masks=np.zeros((2, 3, 2, 2), dtype=np.uint8),
+        probs=np.zeros((2, 3, 2, 2), dtype=np.float16),
+        instance_key=np.asarray([1001, 1002], dtype=np.uint64),
+    )
+    _create_subject_run(
+        root,
+        run_name="eyes_001",
+        mask_labels=["subject_body", "eye_left", "eye_right", "swim_bladder"],
+        available_channels=np.asarray([False, True, True, False], dtype=bool),
+        masks=np.zeros((2, 4, 2, 2), dtype=np.uint8),
+        probs=None,
+    )
+
+    with pytest.raises(ValueError, match="one-sided key loss"):
+        mod.merge_subject_mask_runs(
+            zarr_path,
+            body_run="body_001",
+            eye_run="eyes_001",
+            run_name="merged_001",
+            apply=False,
+        )
+
+
+def test_merge_subject_mask_runs_preserves_resolved_instance_keys(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_training.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    crop = root.require_group("crop_runs").create_group("crop_001")
+    crop.create_array(
+        "instance_key",
+        data=np.asarray([1001, 1002], dtype=np.uint64),
+        overwrite=True,
+    )
+
+    _create_subject_run(
+        root,
+        run_name="body_001",
+        mask_labels=["subject_body", "eyes_union", "swim_bladder"],
+        available_channels=np.asarray([True, False, False], dtype=bool),
+        masks=np.zeros((2, 3, 2, 2), dtype=np.uint8),
+        probs=np.zeros((2, 3, 2, 2), dtype=np.float16),
+    )
+    _create_subject_run(
+        root,
+        run_name="eyes_001",
+        mask_labels=["subject_body", "eye_left", "eye_right", "swim_bladder"],
+        available_channels=np.asarray([False, True, True, False], dtype=bool),
+        masks=np.zeros((2, 4, 2, 2), dtype=np.uint8),
+        probs=None,
+    )
+
+    summary = mod.merge_subject_mask_runs(
+        zarr_path,
+        body_run="body_001",
+        eye_run="eyes_001",
+        run_name="merged_001",
+        apply=True,
+    )
+
+    assert summary["row_identity_mode"] == "instance_key"
+    merged = root["subject_mask_runs/merged_001"]
+    assert merged.attrs["row_identity_mode"] == "instance_key"
+    np.testing.assert_array_equal(
+        np.asarray(merged["instance_key"][:], dtype=np.uint64),
+        np.asarray([1001, 1002], dtype=np.uint64),
+    )
 
 
 def test_merge_subject_mask_runs_rejects_crop_snapshot_mismatch(tmp_path: Path) -> None:

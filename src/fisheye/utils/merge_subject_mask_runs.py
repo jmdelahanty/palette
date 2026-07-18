@@ -8,7 +8,6 @@ import argparse
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -29,7 +28,12 @@ from fisheye.shared.mask_probability_encoding import (
     decode_probability_values,
     probabilities_encoding_from_attrs,
 )
-from fisheye.shared.row_lineage import assert_row_lineage_sources_equal, copy_row_lineage_arrays
+from fisheye.shared.row_lineage import (
+    ROW_IDENTITY_MODE_SCHEMA,
+    assert_row_lineage_sources_equal,
+    copy_row_lineage_arrays_from_sources,
+    resolve_row_lineage_identity_mode,
+)
 from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
@@ -63,8 +67,13 @@ class ResolvedSubjectRun:
     available_channels: np.ndarray
     detection_source: zarr.Array
     frame_indices: Optional[zarr.Array]
+    source_frame_indices: Optional[zarr.Array]
+    source_clip_indices: Optional[zarr.Array]
+    source_clip_local_frame_indices: Optional[zarr.Array]
     frame_counts: Optional[zarr.Array]
     detection_indices: Optional[zarr.Array]
+    instance_key: Optional[zarr.Array]
+    source_crop_row_ids: Optional[zarr.Array]
     source_refined_row_ids: Optional[zarr.Array]
     source_detect_row_index: Optional[zarr.Array]
     source_keypoints_run: Optional[str]
@@ -156,8 +165,13 @@ def _resolve_subject_run(root: zarr.Group, run_name: str) -> ResolvedSubjectRun:
         available_channels=np.asarray(available[:], dtype=bool),
         detection_source=detection_source,
         frame_indices=_lineage_array("frame_indices"),
+        source_frame_indices=_lineage_array("source_frame_indices"),
+        source_clip_indices=_lineage_array("source_clip_indices"),
+        source_clip_local_frame_indices=_lineage_array("source_clip_local_frame_indices"),
         frame_counts=_lineage_array("frame_counts"),
         detection_indices=_lineage_array("detection_indices"),
+        instance_key=_lineage_array("instance_key"),
+        source_crop_row_ids=_lineage_array("source_crop_row_ids"),
         source_refined_row_ids=_lineage_array("source_refined_row_ids"),
         source_detect_row_index=_lineage_array("source_detect_row_index"),
         source_keypoints_run=normalize_attr(resolve_source_keypoints_run(group.attrs)),
@@ -178,8 +192,13 @@ def _required_array_equal(name: str, left: zarr.Array, right: zarr.Array) -> Non
 def _source_lineage_arrays(source: ResolvedSubjectRun) -> dict[str, object | None]:
     return {
         "frame_indices": source.frame_indices,
+        "source_frame_indices": source.source_frame_indices,
+        "source_clip_indices": source.source_clip_indices,
+        "source_clip_local_frame_indices": source.source_clip_local_frame_indices,
         "frame_counts": source.frame_counts,
         "detection_indices": source.detection_indices,
+        "instance_key": source.instance_key,
+        "source_crop_row_ids": source.source_crop_row_ids,
         "source_refined_row_ids": source.source_refined_row_ids,
         "source_detect_row_index": source.source_detect_row_index,
     }
@@ -323,7 +342,18 @@ def merge_subject_mask_runs(
             f"ROI shape mismatch: {body_source.mask_store.shape[2:]} != {eye_source.mask_store.shape[2:]}."
         )
     _required_array_equal("detection_source", body_source.detection_source, eye_source.detection_source)
-    assert_row_lineage_sources_equal(_source_lineage_arrays(body_source), _source_lineage_arrays(eye_source))
+    body_lineage = _source_lineage_arrays(body_source)
+    eye_lineage = _source_lineage_arrays(eye_source)
+    row_identity_mode = resolve_row_lineage_identity_mode(
+        body_lineage,
+        eye_lineage,
+        allow_legacy_positional=True,
+    )
+    assert_row_lineage_sources_equal(
+        body_lineage,
+        eye_lineage,
+        identity_mode=row_identity_mode,
+    )
 
     total_rows = int(body_source.mask_store.shape[0])
     height = int(body_source.mask_store.shape[2])
@@ -376,6 +406,8 @@ def merge_subject_mask_runs(
         "available_channels": [bool(v) for v in TARGET_AVAILABLE_CHANNELS.tolist()],
         "source_crop_run": body_source.crop_run,
         "source_crop_snapshot": dict(shared_crop_snapshot),
+        "row_identity_mode": row_identity_mode,
+        "row_identity_mode_schema": ROW_IDENTITY_MODE_SCHEMA,
         "component_provenance": component_provenance,
     }
     if not apply:
@@ -407,6 +439,8 @@ def merge_subject_mask_runs(
             "component_provenance": component_provenance,
             "source_body_subject_mask_run": body_source.run_name,
             "source_eye_subject_mask_run": eye_source.run_name,
+            "row_identity_mode": row_identity_mode,
+            "row_identity_mode_schema": ROW_IDENTITY_MODE_SCHEMA,
         }
     )
     write_subject_mask_component_provenance(
@@ -460,7 +494,7 @@ def merge_subject_mask_runs(
     )
     platform_info = env_info.get("platform", {})
 
-    copy_row_lineage_arrays(run_group, body_source.run_group, total_rois=total_rows)
+    copy_row_lineage_arrays_from_sources(run_group, body_lineage, total_rois=total_rows)
     run_group.create_array("detection_source", data=np.asarray(body_source.detection_source[:], dtype=np.int8), overwrite=True)
 
     storage_chunks = _target_mask_chunks(total_rows, height, width)

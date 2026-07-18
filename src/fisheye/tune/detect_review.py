@@ -38,7 +38,6 @@ from fisheye.shared.refined_detect_curation import (
     has_sparse_curated_refined_detect_instances_arrays,
     materialize_refined_detect_curation,
     resolve_bound_source_detect_group,
-    resolve_curated_instance_keys,
     update_curated_refined_detect_rows,
     write_curated_refined_detect_surfaces,
 )
@@ -963,15 +962,6 @@ def _write_dense_curated_edit_payload(
                     "instance keys against a mismatched detect binding."
                 )
             source_detection_instance_key = detect_instance_keys[source_rows]
-            instance_key, instance_key_origin_codes = resolve_curated_instance_keys(
-                root,
-                zarr_path=Path(zarr_path),
-                instance_frame_indices=instance_frame_indices,
-                instance_bbox_norm_coords=instance_bbox_norm_coords,
-                instance_class_ids=instance_class_ids,
-                instance_source_detect_row_index=instance_source_detect_row_index,
-                source_detection_instance_key=detect_instance_keys,
-            )
 
         write_curated_refined_detect_surfaces(
             root,

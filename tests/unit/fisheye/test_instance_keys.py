@@ -9,6 +9,7 @@ from fisheye.shared.instance_keys import (
     INSTANCE_KEY_ORIGIN_CODE_MAP,
     instance_key_attrs,
     mint_detection_instance_keys,
+    mint_manual_curation_instance_keys,
     resolve_recording_identity,
 )
 
@@ -90,6 +91,30 @@ def test_mint_detection_instance_keys_payload_context_namespaces_identical_conte
     # deterministic across calls.
     assert not np.any(np.isin(curation_keys, detect_keys))
     np.testing.assert_array_equal(curation_keys, curation_keys_again)
+
+
+def test_mint_manual_curation_instance_keys_uses_stable_row_identity() -> None:
+    kwargs = {
+        "recording_identity": "rec_a",
+        "frame_indices": np.asarray([5, 5], dtype=np.int32),
+        "bbox_norm_coords": np.asarray(
+            [[0.5, 0.5, 0.2, 0.4], [0.5, 0.5, 0.2, 0.4]],
+            dtype=np.float64,
+        ),
+        "class_ids": np.asarray([0, 0], dtype=np.int32),
+    }
+
+    keys = mint_manual_curation_instance_keys(
+        refined_row_ids=np.asarray([10, 11], dtype=np.int64),
+        **kwargs,
+    )
+    repeated = mint_manual_curation_instance_keys(
+        refined_row_ids=np.asarray([10, 11], dtype=np.int64),
+        **kwargs,
+    )
+
+    assert keys[0] != keys[1]
+    np.testing.assert_array_equal(keys, repeated)
 
 
 def test_mint_detection_instance_keys_empty_and_blank_context_match_no_context() -> None:

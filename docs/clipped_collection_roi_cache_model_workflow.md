@@ -435,6 +435,7 @@ keypoint_shard_runs/<run>/
   source_refined_row_ids
   source_detect_row_index
   detection_indices
+  instance_key
 ```
 
 Shard attrs:
@@ -520,8 +521,10 @@ The finalizer writes a normal `keypoints_runs/<collection_run>` from completed
 `keypoint_shard_runs`. Without `--target-crop-run`, it still requires all
 shards to reference the same `source_crop_run`. With `--target-crop-run`, it
 allows mixed per-clip proxy crop runs by mapping each shard row onto the merged
-proxy crop run using clip/refined/frame row identity. The published keypoint run
-then carries one downstream-compatible `source_crop_run`, which keeps current
+proxy crop run using `instance_key` plus clip/refined/frame row identity. Before
+publication, the finalizer requires the sorted keypoint `instance_key` array to
+exactly equal `target_crop.instance_key[source_crop_row_ids]`. The published
+keypoint run then carries one downstream-compatible `source_crop_run`, which keeps current
 `refine_keypoints.py`, Crimson, registry extractors, and review/export tools on
 the ordinary single-crop-run contract.
 
@@ -530,12 +533,16 @@ The implemented v1 finalizer:
 1. Resolves explicit `--shard-run` names or a JSON `--shard-runs-file`.
 2. Verifies every shard is complete when completion attrs are present.
 3. Requires core model-output arrays, `frame_counts`, `n_rois`, `n_keypoints`,
-   `source_crop_run`, and `source_crop_row_ids`.
+   `source_crop_run`, `source_crop_row_ids`, and modern `uint64 instance_key`
+   arrays on every shard and source/target crop run. Keyless positional
+   finalization is rejected.
 4. Requires schema/model compatibility attrs to match across shards.
 5. Fails on mixed `source_crop_run` values unless `--target-crop-run` is set.
 6. When rebasing, verifies each source proxy crop row maps to exactly one row in
-   the target merged proxy crop run.
-7. Fails on duplicate rebased `source_crop_row_ids`.
+   the target merged proxy crop run using the exact observation key and the
+   remaining clip/refined/frame/geometry identity.
+7. Fails on duplicate rebased `source_crop_row_ids`, duplicate
+   `instance_key` values, or any source/target key mismatch.
 8. Sorts rows by target `source_crop_row_ids` for deterministic crop-row order.
 9. Concatenates all per-ROI arrays and copied row-lineage arrays.
 10. Sums frame-domain `frame_counts` and `n_rois`, then recomputes
@@ -543,7 +550,9 @@ The implemented v1 finalizer:
 11. Stamps `source_keypoint_shard_runs`, `source_keypoint_shard_run_paths`,
     `source_crop_run`, `source_keypoint_shard_crop_runs`, and
     `collection_finalizer_schema`.
-12. Publishes `keypoints_runs.latest_complete`, `keypoints_runs.latest`, and
+12. Records `row_identity_mode=instance_key`, an exact alignment status, and a
+    structured identity-validation summary.
+13. Publishes `keypoints_runs.latest_complete`, `keypoints_runs.latest`, and
     `root.attrs["current_keypoint_group_path"]` only after validation passes.
 
 This preserves the existing downstream contract while retaining clip-local
