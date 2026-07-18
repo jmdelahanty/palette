@@ -22,7 +22,7 @@ BASELINE_SAMPLE_RATE_HZ=10
 BASELINE_FULL_RESOLUTION_SAMPLES=0
 BASELINE_SPATIAL_GRID_SIZE=12
 INCLUDE_BASELINE_SAMPLES=0
-TABLES="baseline_behavior_summary,baseline_behavior_time_bins,position_occupancy_histogram_2d,chaser_epoch_spatial_occupancy_zones,chaser_epoch_distance_summary,chaser_epoch_behavior_summary,chaser_epoch_bout_events,chaser_epoch_bout_histogram,chaser_epoch_inter_bout_interval_histogram,chaser_epoch_center_distance_histogram,chaser_speed_distance_bins,chaser_epoch_distance_histogram,chaser_cra_primary_endpoint_summary,chaser_cra_primary_endpoint_object_phase,chaser_cra_quadrant_occupancy,chaser_cra_near_field_summary,chaser_cra_near_field_object_phase,chaser_cra_near_field_radial_density,chaser_cra_near_field_distance_cdf,chaser_egocentric_epoch_summary,chaser_egocentric_distance_bearing_histogram"
+TABLES="baseline_behavior_summary,baseline_behavior_time_bins,position_occupancy_histogram_2d,chaser_epoch_spatial_occupancy_zones,chaser_epoch_distance_summary,chaser_epoch_behavior_summary,chaser_epoch_bout_events,chaser_epoch_bout_histogram,chaser_epoch_inter_bout_interval_histogram,chaser_epoch_center_distance_histogram,chaser_speed_distance_bins,chaser_epoch_distance_histogram,chaser_quadrant_occupancy_summary,chaser_quadrant_occupancy_chaser_phase,chaser_quadrant_occupancy_density,chaser_near_field_occupancy_summary,chaser_near_field_occupancy_chaser_phase,chaser_near_field_occupancy_radial_density,chaser_near_field_occupancy_distance_cdf,chaser_egocentric_epoch_summary,chaser_egocentric_distance_bearing_histogram"
 
 usage() {
   cat <<'USAGE'
@@ -119,7 +119,8 @@ if [[ "$INCLUDE_BASELINE_SAMPLES" == "1" && ",$TABLES," != *,baseline_kinematic_
   TABLES="${TABLES},baseline_kinematic_samples"
 fi
 [[ -f "$COLLECTION_MANIFEST" ]] || fail "Collection manifest not found: $COLLECTION_MANIFEST"
-[[ -d "$PALETTE_REPO/.git" ]] || fail "Palette checkout not found: $PALETTE_REPO"
+git -C "$PALETTE_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
+  fail "Palette checkout not found: $PALETTE_REPO"
 [[ -x "$PALETTE_REPO/scripts/py" ]] || fail "Palette scripts/py is not executable: $PALETTE_REPO"
 if [[ "$INDEX_REGISTRY" == "1" ]]; then
   [[ -n "$REGISTRY" ]] || fail "--index-registry requires --registry"
