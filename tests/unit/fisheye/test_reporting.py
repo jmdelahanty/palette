@@ -494,6 +494,22 @@ def test_semantic_montage_uses_ready_contracted_artifact(
     )
     assert result["nonready_count"] == 0
     assert composed_sizes == [(200, 100)]
+    assert result["publication_policy"] == {
+        "serialization": "nonblocking_advisory_flock_per_output_directory",
+        "temporary_file_policy": "hidden_unique_sibling_then_atomic_replace",
+    }
+    assert not tuple((tmp_path / "montages").glob(".*.tmp.*"))
+
+
+def test_semantic_montage_output_lock_refuses_a_concurrent_publisher(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "montages"
+
+    with reporting_montage._semantic_montage_output_lock(output_dir):
+        with pytest.raises(RuntimeError, match="already holds the output lock"):
+            with reporting_montage._semantic_montage_output_lock(output_dir):
+                pass
 
 
 @pytest.mark.parametrize("materialization_policy", ["reference", "copy"])
