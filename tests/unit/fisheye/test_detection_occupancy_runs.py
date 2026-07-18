@@ -9,6 +9,7 @@ from fisheye.analysis.detection_occupancy_runs import (
     IMAGE_QUADRANTS_ZONE_SET_ID,
     SESSION_VISUALIZATION_CONTRACT_ID,
     OccupancyWindow,
+    _resolve_epoch_run,
     build_detection_occupancy_result,
     build_session_occupancy_result,
     write_detection_occupancy_run,
@@ -55,6 +56,26 @@ def _make_detection_archive(tmp_path: Path) -> Path:
     _write_array(instances, "bbox_img_xyxy", _bbox_from_centers(centers))
     _write_array(instances, "confidence_scores", np.asarray([0.9, 0.1, 0.8, 0.9, 0.9, 0.9, 0.9, 0.9]))
     return zarr_path
+
+
+def test_latest_epoch_selector_resolves_authoritative_completed_run(
+    tmp_path: Path,
+) -> None:
+    root = zarr.open_group(
+        str(tmp_path / "epochs.zarr"),
+        mode="w",
+        use_consolidated=False,
+    )
+    parent = root.require_group("analysis").require_group("stimulus_epoch_runs")
+    parent.create_group("epochs_complete")
+    parent.attrs["latest"] = "stale_epoch"
+    parent.attrs["latest_complete"] = "epochs_complete"
+
+    group, run_name, run_path = _resolve_epoch_run(root, "latest")
+
+    assert group.name.endswith("/epochs_complete")
+    assert run_name == "epochs_complete"
+    assert run_path == "analysis/stimulus_epoch_runs/epochs_complete"
 
 
 def test_detection_occupancy_writes_image_quadrant_spatial_summary(tmp_path: Path) -> None:
