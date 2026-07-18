@@ -3,6 +3,7 @@
 <!-- decision-meta
 status: accepted-design
 created: 2026-07-10
+last_updated: 2026-07-18
 owner: jeremy
 scope: observation identity, downstream invalidation, copy-forward materialization,
   and asynchronous reconciliation
@@ -641,11 +642,112 @@ practice.
 
 ### Phase 1: shared planner and crop proof
 
-- Implement a shared keyed delta planner.
-- Materialize a complete crop run by copying unchanged crops and computing only
+- [x] Implement a shared keyed delta planner.
+- [x] Materialize a complete crop run by copying unchanged crops and computing only
   new/geometry-changed rows.
-- Record row-level action/reason provenance.
-- Prove atomic failure behavior and exact-rowset validation.
+- [x] Record row-level action/reason provenance.
+- [x] Prove atomic failure behavior and exact-rowset validation.
+
+#### Phase 1 implementation evidence
+
+Phase 1 is implemented by:
+
+- `fisheye.shared.keyed_delta`, the stage-neutral NumPy planner;
+- `fisheye.tracking.incremental_crop`, the first complete-run adapter;
+- `fisheye.utils.materialize_incremental_crop`, the dry-run-first operator CLI;
+- `tools/benchmark_incremental_crop.py`, the deterministic I/O benchmark.
+
+The planner does not construct a Python dictionary containing one tuple per
+observation. It keeps compact NumPy key/signature/action arrays and matches
+keys with stable sort plus `searchsorted`. Its persisted
+`materialization_plan` is a columnar Zarr v3 group with 131,072 requested outer
+rows per indexed shard. The row columns are:
+
+```text
+instance_key
+target_row_index
+source_row_index
+action_codes
+reason_codes
+omitted_instance_key
+omitted_source_row_index
+omitted_reason_codes
+```
+
+Version 1 action codes are `copy=0`, `compute=1`, and
+`preserve_manual=2`. Reason codes distinguish unchanged, added,
+source-changed, signature-spec-changed, no-reuse-source, and
+preserved-manual rows. Deleted source-only keys are recorded in the omitted
+columns. The writer validates action/reason consistency, unique target and
+omitted keys, one-to-one source references, and complete target-row coverage
+before storing the plan.
+
+The crop adapter requires modern unique `instance_key` values and computes the
+row source signature from the full normalized bbox, frame index, source pixel
+fingerprint, source rowset family, ROI size, frame shape, center-rounding rule,
+padding rule, and pixel representation. Optional clipped/refined lineage
+columns are copied from the target source rowset and revalidated before
+publication. A historical crop without the Phase 1 signature contract cannot
+silently become a reuse source; the first replacement computes every row and
+then becomes eligible as a base.
+
+Dense ROI pixels are streamed one complete logical output chunk at a time. The
+single driver owns every output chunk, group, attr, completion marker, and
+pointer update. Compact identity/geometry/signature/plan arrays may remain in
+memory; source frames and the full dense ROI payload do not. Every output ROI
+chunk is read back and compared before publication. Immediately before
+selection, the writer recomputes the source row signatures and rowset
+fingerprint, rechecks optional lineage, and checks the expected prior crop
+publication generation. It then marks the run complete and changes
+`latest`, `latest_complete`, `latest_materialized`, and `latest_any` in one
+parent-attrs update. Source mutation, frame-read failure, or a newer competing
+publication leaves the staging run failed and does not overwrite the prior or
+newer selected run.
+
+This publication rule depends on serialized ownership of the `crop_runs`
+parent. The generation comparison detects a changed parent before publication,
+but a generic POSIX Zarr attrs write is not a multi-process compare-and-swap.
+The production reconciler must therefore ensure only one publisher owns a
+recording/stage parent at a time. Phase 1 does not claim lock-free concurrent
+publication.
+
+The CLI is read-only unless `--apply` is supplied:
+
+```bash
+scripts/py -m fisheye.utils.materialize_incremental_crop \
+  /path/to/recording_analysis.zarr \
+  --source-rowset-path refined_detect_runs/<exact-run> \
+  --source-pixel-fingerprint <stable-pixel-fingerprint> \
+  --roi-size 512 512 \
+  --base-crop-run <exact-phase1-base> \
+  --output-run <new-run>
+```
+
+Production `--apply` execution belongs in an LSF compute job, not on a login
+node. The first adapter is deliberately narrow: Zarr v3,
+`raw_video/images_full` grayscale `uint8` frames, a directly materialized
+modern source row group, and a Phase 1 base. External-video decode, clipped
+proxy resolution, and reuse from unsigned legacy crops remain later adapters;
+they fail closed here instead of weakening reuse checks.
+
+The retained reproducible benchmark command is:
+
+```bash
+scripts/py tools/benchmark_incremental_crop.py \
+  --rows 8192 --roi-size 64 --frame-size 128 --delta-fraction 0.01
+```
+
+On the 2026-07-18 workstation run, the delta contained 8,028 copied rows, 82
+geometry-changed rows, 82 additions, and 82 omissions. It reduced computed
+rows from 8,192 to 164 and source-frame bytes read from 4.00 MiB to 1.38 MiB.
+It still wrote and validated the complete 32.0 MiB dense target and read 31.36
+MiB from the base. Consequently, the final synthetic no-decode pass took 1.29 s
+for the delta versus 1.02 s for full computation. That is an expected and
+useful result: Phase 1 proves localized expensive computation and complete
+atomic output, but physical row copying still performs O(N) dense I/O. Real
+video decode/model work can make that worthwhile; if dense copying dominates,
+the next physical optimization is the already-decided immutable base-plus-delta
+resolver or provable aligned object reuse, not weakening identity validation.
 
 ### Phase 2: keypoint copy-forward
 
