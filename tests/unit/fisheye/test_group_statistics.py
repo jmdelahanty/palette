@@ -87,7 +87,7 @@ def _make_goodcopbadcop_export(root: Path, export_run_id: str = "source_export")
     _write_rows(
         export_root
         / "v1"
-        / "chaser_cra_primary_endpoint_object_phase"
+        / "chaser_quadrant_occupancy_chaser_phase"
         / f"export_run_id={export_run_id}",
         object_phase_rows,
     )
@@ -98,12 +98,12 @@ def _make_goodcopbadcop_export(root: Path, export_run_id: str = "source_export")
         "table_contracts": contract_snapshot(
             [
                 "chaser_epoch_distance_summary",
-                "chaser_cra_primary_endpoint_object_phase",
+                "chaser_quadrant_occupancy_chaser_phase",
             ]
         ),
         "row_counts_by_table": {
             "chaser_epoch_distance_summary": len(rows),
-            "chaser_cra_primary_endpoint_object_phase": len(object_phase_rows),
+            "chaser_quadrant_occupancy_chaser_phase": len(object_phase_rows),
         },
         "collection_manifest": {
             "collection_id": "collection_test",
@@ -123,49 +123,72 @@ def _make_goodcopbadcop_cra_export(root: Path, export_run_id: str = "source_expo
     export_root = root / "palette_analytics"
     rows = [
         {
-            "recording_id": "r1",
+            "recording_id": recording_id,
             "fish_id": "0",
             "endpoint_status": "computed",
-            "delta_agg": 1.0,
-            "delta_occ_agg": -0.1,
-            "specificity_distance": 0.5,
-            "specificity_occupancy": -0.2,
-            "delta_inert": 0.0,
-            "delta_occ_inert": 0.0,
-        },
-        {
-            "recording_id": "r2",
-            "fish_id": "0",
-            "endpoint_status": "computed",
-            "delta_agg": 2.0,
-            "delta_occ_agg": -0.2,
-            "specificity_distance": 1.0,
-            "specificity_occupancy": -0.1,
-            "delta_inert": 0.0,
-            "delta_occ_inert": 0.1,
-        },
-        {
-            "recording_id": "r3",
-            "fish_id": "0",
-            "endpoint_status": "computed",
-            "delta_agg": 3.0,
-            "delta_occ_agg": -0.3,
-            "specificity_distance": 1.5,
-            "specificity_occupancy": -0.3,
-            "delta_inert": 0.0,
-            "delta_occ_inert": -0.1,
-        },
+            "chaser_count": 2,
+            "pairwise_role_contrast_policy": "not_computed_at_recording_level",
+        }
+        for recording_id in ("r1", "r2", "r3")
     ]
+    deltas = {
+        "r1": {"aggressive": (1.0, -0.1), "inert": (0.5, 0.1)},
+        "r2": {"aggressive": (2.0, -0.2), "inert": (1.0, -0.1)},
+        "r3": {"aggressive": (3.0, -0.3), "inert": (1.5, 0.0)},
+    }
+    phase_rows: list[dict] = []
+    for recording_id, role_deltas in deltas.items():
+        for object_index, (role, (distance_delta, occupancy_delta)) in enumerate(
+            role_deltas.items()
+        ):
+            for phase_axis_index, (phase_label, distance, occupancy) in enumerate(
+                (
+                    ("pre_static", 10.0, 0.5),
+                    ("post_static", 10.0 + distance_delta, 0.5 + occupancy_delta),
+                )
+            ):
+                phase_rows.append(
+                    {
+                        "recording_id": recording_id,
+                        "fish_id": "0",
+                        "phase_axis_index": phase_axis_index,
+                        "phase_label": phase_label,
+                        "object_column_index": object_index,
+                        "object_index": object_index,
+                        "object_role": role,
+                        "behavior_class": role,
+                        "median_distance_mm": distance,
+                        "occupancy_fraction": occupancy,
+                    }
+                )
     _write_rows(
-        export_root / "v1" / "chaser_cra_primary_endpoint_summary" / f"export_run_id={export_run_id}",
+        export_root
+        / "v1"
+        / "chaser_quadrant_occupancy_summary"
+        / f"export_run_id={export_run_id}",
         rows,
+    )
+    _write_rows(
+        export_root
+        / "v1"
+        / "chaser_quadrant_occupancy_chaser_phase"
+        / f"export_run_id={export_run_id}",
+        phase_rows,
     )
     manifest = {
         "export_run_id": export_run_id,
         "schema_id": EXPORT_SCHEMA_ID,
         "schema_version": EXPORT_SCHEMA_VERSION,
-        "table_contracts": contract_snapshot(["chaser_cra_primary_endpoint_summary"]),
-        "row_counts_by_table": {"chaser_cra_primary_endpoint_summary": len(rows)},
+        "table_contracts": contract_snapshot(
+            [
+                "chaser_quadrant_occupancy_summary",
+                "chaser_quadrant_occupancy_chaser_phase",
+            ]
+        ),
+        "row_counts_by_table": {
+            "chaser_quadrant_occupancy_summary": len(rows),
+            "chaser_quadrant_occupancy_chaser_phase": len(phase_rows),
+        },
         "collection_manifest": {
             "collection_id": "collection_test",
             "manifest_sha256": "abc123",
@@ -308,11 +331,11 @@ def test_goodcopbadcop_statistics_computes_and_writes_summary(tmp_path: Path) ->
 
     assert manifest["status_counts"] == {"computed": 18}
     assert manifest["input_tables"] == [
-        "chaser_cra_primary_endpoint_object_phase",
         "chaser_epoch_distance_summary",
+        "chaser_quadrant_occupancy_chaser_phase",
     ]
     assert manifest["parameters"]["role_mapping_table"] == (
-        "chaser_cra_primary_endpoint_object_phase"
+        "chaser_quadrant_occupancy_chaser_phase"
     )
     assert manifest["row_counts_by_table"][SUMMARY_TABLE] == 18
     assert len(descriptive_rows) == 18
@@ -388,11 +411,14 @@ def test_goodcopbadcop_statistics_computes_cra_primary_endpoint_wilcoxon(tmp_pat
     rows, manifest = compute_goodcopbadcop_statistics(config)
 
     assert manifest["status_counts"] == {"computed": 6}
-    assert manifest["input_tables"] == ["chaser_cra_primary_endpoint_summary"]
+    assert manifest["input_tables"] == [
+        "chaser_quadrant_occupancy_chaser_phase",
+        "chaser_quadrant_occupancy_summary",
+    ]
     assert manifest["row_counts_by_table"][SUMMARY_TABLE] == 6
     target = next(row for row in rows if row["metric_name"] == "delta_agg")
     assert target["metric_family"] == "cra_primary_endpoint"
-    assert target["source_table"] == "chaser_cra_primary_endpoint_summary"
+    assert target["source_table"] == "chaser_quadrant_occupancy_summary"
     assert target["contrast_name"] == "vs-zero"
     assert target["condition_a"] == "zero"
     assert target["condition_b"] == "observed"
@@ -412,8 +438,8 @@ def test_goodcopbadcop_statistics_computes_cra_primary_endpoint_wilcoxon(tmp_pat
 
     inert = next(row for row in rows if row["metric_name"] == "delta_inert")
     assert inert["primary"] is False
-    assert inert["p_value"] == pytest.approx(1.0)
-    assert inert["effect_size"] == pytest.approx(0.0)
+    assert inert["p_value"] == pytest.approx(0.25)
+    assert inert["effect_size"] == pytest.approx(1.0)
 
 
 def test_goodcopbadcop_statistics_computes_epoch_behavior_metrics(tmp_path: Path) -> None:

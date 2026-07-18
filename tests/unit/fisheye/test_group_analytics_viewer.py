@@ -159,13 +159,13 @@ def _make_goodcopbadcop_export(tmp_path: Path):
             "chaser_epoch_center_distance_histogram",
             "chaser_speed_distance_bins",
             "chaser_epoch_distance_histogram",
-            "chaser_cra_primary_endpoint_summary",
-            "chaser_cra_primary_endpoint_object_phase",
-            "chaser_cra_quadrant_occupancy",
-            "chaser_cra_near_field_summary",
-            "chaser_cra_near_field_object_phase",
-            "chaser_cra_near_field_radial_density",
-            "chaser_cra_near_field_distance_cdf",
+            "chaser_quadrant_occupancy_summary",
+            "chaser_quadrant_occupancy_chaser_phase",
+            "chaser_quadrant_occupancy_density",
+            "chaser_near_field_occupancy_summary",
+            "chaser_near_field_occupancy_chaser_phase",
+            "chaser_near_field_occupancy_radial_density",
+            "chaser_near_field_occupancy_distance_cdf",
             "chaser_egocentric_epoch_summary",
             "chaser_egocentric_distance_bearing_histogram",
         ),
@@ -212,13 +212,20 @@ def test_group_analytics_viewer_queries_goodcopbadcop_export(tmp_path: Path) -> 
     assert summary["row_counts_by_table"]["chaser_epoch_center_distance_histogram"] == 9
     assert summary["row_counts_by_table"]["chaser_speed_distance_bins"] == 18
     assert summary["row_counts_by_table"]["chaser_epoch_distance_histogram"] == 18
-    assert summary["row_counts_by_table"]["chaser_cra_primary_endpoint_summary"] == 1
-    assert summary["row_counts_by_table"]["chaser_cra_primary_endpoint_object_phase"] == 4
-    assert summary["row_counts_by_table"]["chaser_cra_quadrant_occupancy"] == 8
-    assert summary["row_counts_by_table"]["chaser_cra_near_field_summary"] == 1
-    assert summary["row_counts_by_table"]["chaser_cra_near_field_object_phase"] == 4
-    assert summary["row_counts_by_table"]["chaser_cra_near_field_radial_density"] == 12
-    assert summary["row_counts_by_table"]["chaser_cra_near_field_distance_cdf"] == 8
+    assert summary["row_counts_by_table"]["chaser_quadrant_occupancy_summary"] == 1
+    assert summary["row_counts_by_table"]["chaser_quadrant_occupancy_chaser_phase"] == 4
+    assert summary["row_counts_by_table"]["chaser_quadrant_occupancy_density"] == 8
+    assert summary["row_counts_by_table"]["chaser_near_field_occupancy_summary"] == 1
+    assert (
+        summary["row_counts_by_table"]["chaser_near_field_occupancy_chaser_phase"] == 4
+    )
+    assert (
+        summary["row_counts_by_table"]["chaser_near_field_occupancy_radial_density"]
+        == 12
+    )
+    assert (
+        summary["row_counts_by_table"]["chaser_near_field_occupancy_distance_cdf"] == 8
+    )
     assert summary["row_counts_by_table"]["chaser_egocentric_epoch_summary"] == 6
     assert summary["row_counts_by_table"]["chaser_egocentric_distance_bearing_histogram"] == 72
     assert summary["statistics"]["available"] is False

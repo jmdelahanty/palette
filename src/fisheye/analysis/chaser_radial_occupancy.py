@@ -37,7 +37,7 @@ from io import BytesIO
 import json
 import math
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import matplotlib
 
@@ -47,7 +47,7 @@ import numpy as np  # noqa: E402
 import zarr  # noqa: E402
 
 from fisheye.analysis.chaser_distance_runs import _bytes_array, _write_array
-from fisheye.analysis.cra_near_field import _rectangle_annulus_area_mm2
+from fisheye.analysis.chaser_near_field_occupancy import _rectangle_annulus_area_mm2
 from fisheye.shared.arena_geometry import (
     ArenaGeometry,
     out_of_bounds_notes,

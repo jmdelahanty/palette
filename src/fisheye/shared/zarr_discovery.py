@@ -199,6 +199,7 @@ def discover_registry_zarr_entries(
     arena_id: Optional[str] = None,
     camera_id: Optional[str] = None,
     protocol_name: Optional[str] = None,
+    require_chaser_metadata: bool = False,
     path_contains: Optional[str] = None,
     require_steps_ok: Optional[Sequence[str]] = None,
     exclude_step_ok: Optional[str] = None,
@@ -227,11 +228,29 @@ def discover_registry_zarr_entries(
         if exclude_step_ok is not None:
             query_kwargs["exclude_step_ok"] = exclude_step_ok
         rows = registry.query_datasets(**query_kwargs)
+        chaser_dataset_ids: set[str] | None = None
+        if require_chaser_metadata:
+            try:
+                chaser_dataset_ids = {
+                    str(row[0])
+                    for row in registry.conn.execute(
+                        "SELECT DISTINCT dataset_id FROM recording_chasers;"
+                    ).fetchall()
+                }
+            except Exception as exc:
+                raise ValueError(
+                    "registry chaser capability selection requires recording_chasers metadata"
+                ) from exc
     finally:
         registry.close()
 
     entries: list[RegistryZarrEntry] = []
     for row in rows:
+        if (
+            chaser_dataset_ids is not None
+            and str(row["dataset_id"]) not in chaser_dataset_ids
+        ):
+            continue
         if protocol_name is not None:
             try:
                 row_protocol = normalize_attr(row["protocol_name"])

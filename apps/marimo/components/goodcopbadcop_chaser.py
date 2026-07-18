@@ -201,7 +201,12 @@ def available_chaser_analysis_ids(
             component_names.update(components.group_keys())
     except Exception:
         component_names = set()
-    if any("cra_primary" in name or "object_relative" in name for name in component_names):
+    if any(
+        "chaser_quadrant_occupancy" in name
+        or "cra_primary" in name
+        or "object_relative" in name
+        for name in component_names
+    ):
         available.append("cra_quadrant")
     if any("near_field" in name for name in component_names):
         available.append("cra_near_field")
@@ -1044,7 +1049,7 @@ def build_summary(mo: Any, *, loaded: GoodCopBadCopLoadedView, option: Interacti
     )
     return mo.vstack(
         [
-            mo.md(f"## GoodCopBadCop Chaser Dashboard\n\n`{data.zarr_path}`"),
+            mo.md(f"## Chaser Dashboard\n\n`{data.zarr_path}`"),
             mo.hstack(
                 [
                     mo.stat(label="Run", value=option.run_name or data.run_name),
@@ -1057,12 +1062,20 @@ def build_summary(mo: Any, *, loaded: GoodCopBadCopLoadedView, option: Interacti
                     mo.stat(label="Egocentric rows", value=f"{loaded.egocentric_bearing_df.height:,}"),
                     mo.stat(label="Epoch summary rows", value=f"{loaded.epoch_summary_df.height:,}"),
                     mo.stat(
-                        label="CRA endpoint",
-                        value=loaded.cra_endpoint.component_name if loaded.cra_endpoint is not None else "none",
+                        label="Quadrant occupancy",
+                        value=(
+                            loaded.cra_endpoint.component_name
+                            if loaded.cra_endpoint is not None
+                            else "none"
+                        ),
                     ),
                     mo.stat(
-                        label="CRA near-field",
-                        value=loaded.cra_near_field.component_name if loaded.cra_near_field is not None else "none",
+                        label="Near-field occupancy",
+                        value=(
+                            loaded.cra_near_field.component_name
+                            if loaded.cra_near_field is not None
+                            else "none"
+                        ),
                     ),
                     mo.stat(
                         label="Escape/freezing",
@@ -2925,17 +2938,27 @@ def _summary_metric(summary: Mapping[str, Any], key: str) -> object:
     return summary.get(key, None)
 
 
-def _role_colors_from_objects(objects_df: pl.DataFrame) -> dict[str, str]:
+def _chaser_colors_from_objects(objects_df: pl.DataFrame) -> dict[int, str]:
     if objects_df.is_empty():
         return {}
     return {
-        str(row.get("object_role") or ""): str(row.get("raw_color_hex") or "#64748b")
-        for row in objects_df.to_dicts()
+        int(row.get("object_index", index)): str(row.get("raw_color_hex") or "#64748b")
+        for index, row in enumerate(objects_df.to_dicts())
     }
 
 
-def _role_colors(endpoint: GoodCopBadCopCRAEndpointData) -> dict[str, str]:
-    return _role_colors_from_objects(endpoint.objects_df)
+def _chaser_descriptors(frame: pl.DataFrame) -> list[tuple[int, str]]:
+    if frame.is_empty() or "object_index" not in frame.columns:
+        return []
+    return sorted(
+        {
+            (
+                int(row.get("object_index", 0)),
+                str(row.get("object_role") or "unknown"),
+            )
+            for row in frame.select("object_index", "object_role").to_dicts()
+        }
+    )
 
 
 def _cra_metric_bars(
@@ -2950,18 +2973,18 @@ def _cra_metric_bars(
     frame = endpoint.per_object_phase_df
     if frame.is_empty() or metric not in frame.columns:
         return None
-    colors = _role_colors(endpoint)
+    colors = _chaser_colors_from_objects(endpoint.objects_df)
     fig = go.Figure()
-    for role in ("aggressive", "random_non_chasing", "inert"):
-        rows = frame.filter(pl.col("object_role") == role).sort("phase_index")
+    for chaser_index, role in _chaser_descriptors(frame):
+        rows = frame.filter(pl.col("object_index") == chaser_index).sort("phase_index")
         if rows.is_empty():
             continue
         fig.add_trace(
             go.Bar(
                 x=rows["phase_label"].to_list(),
                 y=rows[metric].to_numpy(),
-                name=role,
-                marker=dict(color=colors.get(role, "#64748b")),
+                name=f"chaser {chaser_index}: {role}",
+                marker=dict(color=colors.get(chaser_index, "#64748b")),
                 customdata=np.column_stack(
                     [
                         rows["object_quadrant"].to_numpy(),
@@ -3020,7 +3043,8 @@ def _cra_phase_quadrant_figure(
 
     for row in rows.to_dicts():
         color = str(row.get("raw_color_hex") or "#64748b")
-        role = str(row.get("object_role") or "object")
+        role = str(row.get("object_role") or "unknown")
+        chaser_index = int(row.get("object_index", 0))
         code = int(row.get("object_quadrant_code") or -1)
         rect = _quadrant_rect(code, width=width, height=height)
         if rect is not None:
@@ -3040,8 +3064,8 @@ def _cra_phase_quadrant_figure(
                 x=[float(row.get("object_x_px", np.nan))],
                 y=[float(row.get("object_y_px", np.nan))],
                 mode="markers+text",
-                name=role,
-                text=[role],
+                name=f"chaser {chaser_index}: {role}",
+                text=[f"chaser {chaser_index}: {role}"],
                 textposition="top center",
                 marker=dict(
                     size=18,
@@ -3063,7 +3087,7 @@ def _cra_phase_quadrant_figure(
     fig.update_yaxes(autorange="reversed", scaleanchor="x", scaleratio=1, title="Arena Y (px, down)")
     fig.update_xaxes(title="Arena X (px)")
     fig.update_layout(
-        title=f"CRA Object-Relative Quadrants ({phase_label})",
+        title=f"Chaser-Relative Quadrants ({phase_label})",
         height=420,
         margin=dict(l=52, r=20, t=58, b=64),
         legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="left", x=0.0),
@@ -3074,21 +3098,21 @@ def _cra_phase_quadrant_figure(
 def build_cra_primary_endpoint_output(mo: Any, go: Any, *, loaded: GoodCopBadCopLoadedView) -> Any:
     endpoint = loaded.cra_endpoint
     if endpoint is None:
-        return mo.md("No CRA primary endpoint component is linked to this chaser-distance run.")
+        return mo.md("No chaser quadrant-occupancy component is linked to this run.")
 
     summary = endpoint.summary
     distance_fig = _cra_metric_bars(
         go,
         endpoint=endpoint,
         metric="median_distance_mm",
-        title="CRA Primary Endpoint: Median Distance",
+        title="Chaser Quadrant Occupancy: Median Distance",
         yaxis_title="Median distance (mm)",
     )
     occupancy_fig = _cra_metric_bars(
         go,
         endpoint=endpoint,
         metric="occupancy_fraction",
-        title="CRA Primary Endpoint: Object-Quadrant Occupancy",
+        title="Chaser Quadrant Occupancy: Chaser-Quadrant Occupancy",
         yaxis_title="Fraction of valid frames",
         yaxis_range=[0, 1],
     )
@@ -3096,48 +3120,35 @@ def build_cra_primary_endpoint_output(mo: Any, go: Any, *, loaded: GoodCopBadCop
         _cra_phase_quadrant_figure(go, endpoint=endpoint, phase_label=str(phase_label))
         for phase_label in endpoint.phases_df.sort("phase_index")["phase_label"].to_list()
     ]
-    summary_rows = [
-        {
-            "metric": "delta_agg",
-            "value": _summary_metric(summary, "delta_agg"),
-            "meaning": "post - pre aggressive distance",
-        },
-        {
-            "metric": "delta_benign",
-            "value": _summary_metric(summary, "delta_benign"),
-            "meaning": "post - pre inert distance (legacy metric key)",
-        },
-        {
-            "metric": "specificity_distance",
-            "value": _summary_metric(summary, "specificity_distance"),
-            "meaning": "aggressive distance delta - inert distance delta",
-        },
-        {
-            "metric": "delta_occ_agg",
-            "value": _summary_metric(summary, "delta_occ_agg"),
-            "meaning": "post - pre aggressive object-quadrant occupancy",
-        },
-        {
-            "metric": "delta_occ_benign",
-            "value": _summary_metric(summary, "delta_occ_benign"),
-            "meaning": "post - pre inert object-quadrant occupancy (legacy metric key)",
-        },
-        {
-            "metric": "specificity_occupancy",
-            "value": _summary_metric(summary, "specificity_occupancy"),
-            "meaning": "aggressive occupancy delta - inert occupancy delta",
-        },
-    ]
+    per_chaser_summary = summary.get("per_chaser")
+    summary_rows = (
+        [
+            {
+                "chaser_index": row.get("chaser_index"),
+                "behavior_class": row.get("behavior_class"),
+                "distance_first_to_last_delta_mm": row.get(
+                    "first_to_last_delta_median_distance_mm"
+                ),
+                "occupancy_first_to_last_delta": row.get(
+                    "first_to_last_delta_occupancy_fraction"
+                ),
+            }
+            for row in per_chaser_summary
+            if isinstance(row, Mapping)
+        ]
+        if isinstance(per_chaser_summary, list)
+        else []
+    )
     warnings_text = ", ".join(endpoint.qc_warnings) if endpoint.qc_warnings else "none"
     items = [
-        mo.md(f"## CRA Primary Endpoint\n\n`{endpoint.component_path}`"),
+        mo.md(f"## Chaser Quadrant Occupancy\n\n`{endpoint.component_path}`"),
         mo.hstack(
             [
-                mo.stat(label="Agg distance delta", value=_metric_text(_summary_metric(summary, "delta_agg"), suffix=" mm")),
-                mo.stat(label="Distance specificity", value=_metric_text(_summary_metric(summary, "specificity_distance"), suffix=" mm")),
-                mo.stat(label="Agg occupancy delta", value=_metric_text(_summary_metric(summary, "delta_occ_agg"))),
-                mo.stat(label="Occupancy specificity", value=_metric_text(_summary_metric(summary, "specificity_occupancy"))),
-                mo.stat(label="Post dropout", value=_metric_text(_summary_metric(summary, "frac_tracking_dropout_post"))),
+                mo.stat(label="Chasers", value=str(summary.get("chaser_count", 0))),
+                mo.stat(
+                    label="Phases", value=str(len(summary.get("phase_labels", [])))
+                ),
+                mo.stat(label="QC warnings", value=str(len(endpoint.qc_warnings))),
             ]
         ),
         mo.md(f"QC warnings: `{warnings_text}`"),
@@ -3151,18 +3162,22 @@ def build_cra_primary_endpoint_output(mo: Any, go: Any, *, loaded: GoodCopBadCop
     items.append(
         mo.accordion(
             {
-                "Phase windows": mo.ui.table(endpoint.phases_df, selection=None, page_size=10),
-                "Object positions and drift": mo.ui.table(
+                "Phase windows": mo.ui.table(
+                    endpoint.phases_df, selection=None, page_size=10
+                ),
+                "Chaser positions and drift": mo.ui.table(
                     endpoint.object_phase_df,
                     selection=None,
                     page_size=10,
                 ),
-                "Per-object phase metrics": mo.ui.table(
+                "Per-chaser phase metrics": mo.ui.table(
                     endpoint.per_object_phase_df,
                     selection=None,
                     page_size=10,
                 ),
-                "Object roles": mo.ui.table(endpoint.objects_df, selection=None, page_size=10),
+                "Chaser roles": mo.ui.table(
+                    endpoint.objects_df, selection=None, page_size=10
+                ),
             }
         )
     )
@@ -3190,18 +3205,18 @@ def _near_field_metric_bars(
     frame = near_field.per_object_phase_df
     if frame.is_empty() or metric not in frame.columns:
         return None
-    colors = _role_colors_from_objects(near_field.objects_df)
+    colors = _chaser_colors_from_objects(near_field.objects_df)
     fig = go.Figure()
-    for role in ("aggressive", "random_non_chasing", "inert"):
-        rows = frame.filter(pl.col("object_role") == role).sort("phase_index")
+    for chaser_index, role in _chaser_descriptors(frame):
+        rows = frame.filter(pl.col("object_index") == chaser_index).sort("phase_index")
         if rows.is_empty():
             continue
         fig.add_trace(
             go.Bar(
                 x=rows["phase_label"].to_list(),
                 y=rows[metric].to_numpy(),
-                name=role,
-                marker=dict(color=colors.get(role, "#64748b")),
+                name=f"chaser {chaser_index}: {role}",
+                marker=dict(color=colors.get(chaser_index, "#64748b")),
                 customdata=np.column_stack(
                     [
                         rows["valid_distance_count"].to_numpy(),
@@ -3240,20 +3255,21 @@ def _near_field_radial_density_figure(
     density_column: str = "radial_density_per_mm2",
     fraction_column: str = "radial_fraction",
     area_column: str = "radial_available_area_mm2",
-    title: str = "CRA Near-Field: Radial Occupancy Density",
+    title: str = "Chaser Near-Field Occupancy: Radial Density",
 ) -> Any:
     frame = near_field.radial_density_df
     if frame.is_empty() or density_column not in frame.columns:
         return None
-    colors = _role_colors_from_objects(near_field.objects_df)
+    colors = _chaser_colors_from_objects(near_field.objects_df)
     fig = go.Figure()
     phase_dash = {"pre_static": "solid", "post_static": "dash"}
     trace_count = 0
-    for role in ("aggressive", "random_non_chasing", "inert"):
+    for chaser_index, role in _chaser_descriptors(frame):
         for phase_label in frame["phase_label"].unique().sort().to_list():
-            rows = frame.filter((pl.col("object_role") == role) & (pl.col("phase_label") == phase_label)).sort(
-                "radial_bin_index"
-            )
+            rows = frame.filter(
+                (pl.col("object_index") == chaser_index)
+                & (pl.col("phase_label") == phase_label)
+            ).sort("radial_bin_index")
             if rows.is_empty():
                 continue
             if not np.isfinite(rows[density_column].to_numpy()).any():
@@ -3263,9 +3279,12 @@ def _near_field_radial_density_figure(
                     x=rows["radial_bin_center_mm"].to_numpy(),
                     y=rows[density_column].to_numpy(),
                     mode="lines+markers",
-                    name=f"{phase_label} {role}",
-                    marker=dict(color=colors.get(role, "#64748b"), size=7),
-                    line=dict(color=colors.get(role, "#64748b"), dash=phase_dash.get(str(phase_label), "solid")),
+                    name=f"{phase_label} chaser {chaser_index}: {role}",
+                    marker=dict(color=colors.get(chaser_index, "#64748b"), size=7),
+                    line=dict(
+                        color=colors.get(chaser_index, "#64748b"),
+                        dash=phase_dash.get(str(phase_label), "solid"),
+                    ),
                     customdata=np.column_stack(
                         [
                             rows["radial_bin_start_mm"].to_numpy(),
@@ -3292,7 +3311,7 @@ def _near_field_radial_density_figure(
         return None
     fig.update_layout(
         title=title,
-        xaxis_title="Distance to object (mm)",
+        xaxis_title="Distance to chaser (mm)",
         yaxis_title="Fraction per mm2",
         height=430,
         margin=dict(l=62, r=20, t=58, b=78),
@@ -3305,14 +3324,15 @@ def _near_field_cdf_figure(go: Any, *, near_field: GoodCopBadCopCRANearFieldData
     frame = near_field.cdf_df
     if frame.is_empty():
         return None
-    colors = _role_colors_from_objects(near_field.objects_df)
+    colors = _chaser_colors_from_objects(near_field.objects_df)
     fig = go.Figure()
     phase_dash = {"pre_static": "solid", "post_static": "dash"}
-    for role in ("aggressive", "random_non_chasing", "inert"):
+    for chaser_index, role in _chaser_descriptors(frame):
         for phase_label in frame["phase_label"].unique().sort().to_list():
-            rows = frame.filter((pl.col("object_role") == role) & (pl.col("phase_label") == phase_label)).sort(
-                "threshold_index"
-            )
+            rows = frame.filter(
+                (pl.col("object_index") == chaser_index)
+                & (pl.col("phase_label") == phase_label)
+            ).sort("threshold_index")
             if rows.is_empty():
                 continue
             fig.add_trace(
@@ -3320,9 +3340,12 @@ def _near_field_cdf_figure(go: Any, *, near_field: GoodCopBadCopCRANearFieldData
                     x=rows["threshold_mm"].to_numpy(),
                     y=rows["cdf_fraction"].to_numpy(),
                     mode="lines+markers",
-                    name=f"{phase_label} {role}",
-                    marker=dict(color=colors.get(role, "#64748b"), size=7),
-                    line=dict(color=colors.get(role, "#64748b"), dash=phase_dash.get(str(phase_label), "solid")),
+                    name=f"{phase_label} chaser {chaser_index}: {role}",
+                    marker=dict(color=colors.get(chaser_index, "#64748b"), size=7),
+                    line=dict(
+                        color=colors.get(chaser_index, "#64748b"),
+                        dash=phase_dash.get(str(phase_label), "solid"),
+                    ),
                     hovertemplate=(
                         "threshold=%{x:.2f} mm<br>"
                         "P(distance <= threshold)=%{y:.4f}"
@@ -3332,9 +3355,9 @@ def _near_field_cdf_figure(go: Any, *, near_field: GoodCopBadCopCRANearFieldData
             )
     per_phase = near_field.per_object_phase_df
     if not per_phase.is_empty() and "approach_p05_mm" in per_phase.columns:
-        marker_rows = per_phase.sort(["object_role", "phase_index"])
-        for role in ("aggressive", "random_non_chasing", "inert"):
-            rows = marker_rows.filter(pl.col("object_role") == role)
+        marker_rows = per_phase.sort(["object_index", "phase_index"])
+        for chaser_index, role in _chaser_descriptors(marker_rows):
+            rows = marker_rows.filter(pl.col("object_index") == chaser_index)
             if rows.is_empty():
                 continue
             cdf_y = (
@@ -3347,9 +3370,9 @@ def _near_field_cdf_figure(go: Any, *, near_field: GoodCopBadCopCRANearFieldData
                     x=rows["approach_p05_mm"].to_numpy(),
                     y=cdf_y,
                     mode="markers",
-                    name=f"p05 check {role}",
+                    name=f"p05 check chaser {chaser_index}: {role}",
                     marker=dict(
-                        color=colors.get(role, "#64748b"),
+                        color=colors.get(chaser_index, "#64748b"),
                         symbol="diamond-open",
                         size=10,
                         line=dict(width=1.6),
@@ -3371,7 +3394,7 @@ def _near_field_cdf_figure(go: Any, *, near_field: GoodCopBadCopCRANearFieldData
                 )
             )
     fig.update_layout(
-        title="CRA Near-Field: Distance CDF",
+        title="Chaser Near-Field Occupancy: Distance CDF",
         xaxis_title="Distance threshold (mm)",
         yaxis_title="Fraction of valid frames",
         height=430,
@@ -3412,7 +3435,7 @@ def _near_field_control_reference_cdf_figure(go: Any, *, near_field: GoodCopBadC
                 )
             )
     fig.update_layout(
-        title="CRA Near-Field: Dish-Center Control CDF",
+        title="Chaser Near-Field Occupancy: Dish-Center Control CDF",
         xaxis_title="Distance threshold (mm)",
         yaxis_title="Fraction of valid frames",
         height=400,
@@ -3463,7 +3486,7 @@ def _near_field_control_reference_radial_density_figure(go: Any, *, near_field: 
                 )
             )
     fig.update_layout(
-        title="CRA Near-Field: Dish-Center Control Radial Density",
+        title="Chaser Near-Field Occupancy: Dish-Center Control Radial Density",
         xaxis_title="Distance to reference (mm)",
         yaxis_title="Fraction per mm2",
         height=400,
@@ -3548,7 +3571,7 @@ def _near_field_thigmotaxis_figure(go: Any, *, near_field: GoodCopBadCopCRANearF
             col=2,
         )
     fig.update_layout(
-        title="CRA Near-Field: Global-State QC",
+        title="Chaser Near-Field Occupancy: Global-State QC",
         barmode="group",
         height=360,
         margin=dict(l=56, r=20, t=58, b=64),
@@ -3562,11 +3585,10 @@ def _near_field_thigmotaxis_figure(go: Any, *, near_field: GoodCopBadCopCRANearF
 def build_cra_near_field_output(mo: Any, go: Any, *, loaded: GoodCopBadCopLoadedView) -> Any:
     near_field = loaded.cra_near_field
     if near_field is None:
-        return mo.md("No CRA near-field component is linked to this chaser-distance run.")
+        return mo.md("No chaser near-field occupancy component is linked to this run.")
 
     summary = near_field.summary
     approach_metric = _first_approach_metric_column(near_field.per_object_phase_df)
-    approach_key = approach_metric[:-3] if approach_metric and approach_metric.endswith("_mm") else None
     figures = []
     if approach_metric:
         figures.append(
@@ -3574,7 +3596,7 @@ def build_cra_near_field_output(mo: Any, go: Any, *, loaded: GoodCopBadCopLoaded
                 go,
                 near_field=near_field,
                 metric=approach_metric,
-                title="CRA Near-Field: Close-Approach Distance",
+                title="Chaser Near-Field Occupancy: Close-Approach Distance",
                 yaxis_title="Distance percentile (mm)",
             )
         )
@@ -3584,7 +3606,7 @@ def build_cra_near_field_output(mo: Any, go: Any, *, loaded: GoodCopBadCopLoaded
                 go,
                 near_field=near_field,
                 metric="near_zone_occupancy_fraction",
-                title="CRA Near-Field: Near-Zone Occupancy",
+                title="Chaser Near-Field Occupancy: Near-Zone Occupancy",
                 yaxis_title="Fraction of valid distance frames",
                 yaxis_range=[0, 1],
             ),
@@ -3592,7 +3614,7 @@ def build_cra_near_field_output(mo: Any, go: Any, *, loaded: GoodCopBadCopLoaded
                 go,
                 near_field=near_field,
                 metric="near_zone_entry_rate_per_min",
-                title="CRA Near-Field: Near-Zone Entry Rate",
+                title="Chaser Near-Field Occupancy: Near-Zone Entry Rate",
                 yaxis_title="Entries per minute",
             ),
             _near_field_radial_density_figure(go, near_field=near_field),
@@ -3602,7 +3624,7 @@ def build_cra_near_field_output(mo: Any, go: Any, *, loaded: GoodCopBadCopLoaded
                 density_column="radial_density_wall_excluded_per_mm2",
                 fraction_column="radial_fraction_wall_excluded",
                 area_column="radial_available_area_wall_excluded_mm2",
-                title="CRA Near-Field: Wall-Band-Excluded Radial Density",
+                title="Chaser Near-Field Occupancy: Wall-Band-Excluded Radial Density",
             ),
             _near_field_cdf_figure(go, near_field=near_field),
             _near_field_control_reference_radial_density_figure(go, near_field=near_field),
@@ -3612,30 +3634,33 @@ def build_cra_near_field_output(mo: Any, go: Any, *, loaded: GoodCopBadCopLoaded
     )
     figures = [figure for figure in figures if figure is not None]
 
-    summary_rows = [
-        {"metric": key, "value": value}
-        for key, value in sorted(summary.items())
-        if key.startswith("approach_") or key.startswith("nearzone_") or key.startswith("thigmotaxis_")
-    ]
-    warnings_text = ", ".join(near_field.qc_warnings) if near_field.qc_warnings else "none"
+    per_chaser_summary = summary.get("per_chaser")
+    summary_rows = (
+        [
+            {
+                "chaser_index": row.get("chaser_index"),
+                "behavior_class": row.get("behavior_class"),
+                "phase_values": row.get("phase_values"),
+            }
+            for row in per_chaser_summary
+            if isinstance(row, Mapping)
+        ]
+        if isinstance(per_chaser_summary, list)
+        else []
+    )
+    warnings_text = (
+        ", ".join(near_field.qc_warnings) if near_field.qc_warnings else "none"
+    )
     items = [
-        mo.md(f"## CRA Near-Field Avoidance\n\n`{near_field.component_path}`"),
+        mo.md(f"## Chaser Near-Field Occupancy\n\n`{near_field.component_path}`"),
         mo.hstack(
             [
+                mo.stat(label="Chasers", value=str(summary.get("chaser_count", 0))),
                 mo.stat(
-                    label="Approach specificity",
-                    value=_metric_text(
-                        _summary_metric(summary, f"{approach_key}_specificity") if approach_key else None,
-                        suffix=" mm",
-                    ),
+                    label="Phases", value=str(len(summary.get("phase_labels", [])))
                 ),
                 mo.stat(
-                    label="Near-zone specificity",
-                    value=_metric_text(_summary_metric(summary, "nearzone_occ_specificity")),
-                ),
-                mo.stat(
-                    label="Entry-rate specificity",
-                    value=_metric_text(_summary_metric(summary, "nearzone_entry_rate_specificity")),
+                    label="Geometry", value=near_field.geometry_status or "unknown"
                 ),
                 mo.stat(label="Geometry", value=near_field.geometry_status or "unknown"),
                 mo.stat(label="Arena", value=near_field.arena_shape or "unknown"),
@@ -3681,8 +3706,12 @@ def build_cra_near_field_output(mo: Any, go: Any, *, loaded: GoodCopBadCopLoaded
                     selection=None,
                     page_size=10,
                 ),
-                "Object roles": mo.ui.table(near_field.objects_df, selection=None, page_size=10),
-                "Phase windows": mo.ui.table(near_field.phases_df, selection=None, page_size=10),
+                "Chaser roles": mo.ui.table(
+                    near_field.objects_df, selection=None, page_size=10
+                ),
+                "Phase windows": mo.ui.table(
+                    near_field.phases_df, selection=None, page_size=10
+                ),
             }
         ),
     ]

@@ -17,9 +17,10 @@ import polars as pl
 
 from fisheye.analytics_exports.capabilities import resolve_capabilities
 from fisheye.analytics_exports.contracts import (
-    CHASER_CRA_NEAR_FIELD_SUMMARY_TABLE,
-    CHASER_CRA_OBJECT_PHASE_TABLE,
-    CHASER_CRA_SUMMARY_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE,
     CHASER_DISTANCE_SUMMARY_TABLE,
     CHASER_EGOCENTRIC_SUMMARY_TABLE,
     CHASER_EPOCH_BEHAVIOR_TABLE,
@@ -45,9 +46,10 @@ from .paired import (
 
 
 SUMMARY_TABLE = STATISTICS_TABLE
-CRA_SUMMARY_TABLE = CHASER_CRA_SUMMARY_TABLE
-CRA_OBJECT_PHASE_TABLE = CHASER_CRA_OBJECT_PHASE_TABLE
-CRA_NEAR_FIELD_SUMMARY_TABLE = CHASER_CRA_NEAR_FIELD_SUMMARY_TABLE
+CRA_SUMMARY_TABLE = CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE
+CRA_OBJECT_PHASE_TABLE = CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE
+CRA_NEAR_FIELD_SUMMARY_TABLE = CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE
+CRA_NEAR_FIELD_OBJECT_PHASE_TABLE = CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE
 EPOCH_BEHAVIOR_TABLE = CHASER_EPOCH_BEHAVIOR_TABLE
 SCHEMA_VERSION = EXPORT_SCHEMA_VERSION
 DEFAULT_CONTRASTS = (
@@ -406,6 +408,10 @@ ROLE_GROUPED_SOURCE_TABLES = {
 
 def _statistics_input_tables(metrics: Sequence[MetricSpec]) -> list[str]:
     tables = {spec.source_table for spec in metrics}
+    if any(spec.source_table == CRA_SUMMARY_TABLE for spec in metrics):
+        tables.add(CRA_OBJECT_PHASE_TABLE)
+    if any(spec.source_table == CRA_NEAR_FIELD_SUMMARY_TABLE for spec in metrics):
+        tables.add(CRA_NEAR_FIELD_OBJECT_PHASE_TABLE)
     if any(
         spec.source_table in ROLE_GROUPED_SOURCE_TABLES
         and "behavior_class" in spec.group_keys
@@ -413,6 +419,163 @@ def _statistics_input_tables(metrics: Sequence[MetricSpec]) -> list[str]:
     ):
         tables.add(CRA_OBJECT_PHASE_TABLE)
     return sorted(tables)
+
+
+def _derive_profile_role_contrasts(
+    frames: dict[str, pl.DataFrame],
+    metrics: Sequence[MetricSpec],
+) -> None:
+    """Add protocol-profile contrasts to generic recording summaries.
+
+    The recording contracts remain N-chaser and do not persist a privileged
+    aggressive/inert comparison.  This GoodCopBadCop statistics profile owns
+    that comparison and averages repeated chasers within a role before taking
+    pre/post differences.
+    """
+
+    requested_by_table: dict[str, set[str]] = {}
+    for spec in metrics:
+        if spec.source_table in {CRA_SUMMARY_TABLE, CRA_NEAR_FIELD_SUMMARY_TABLE}:
+            requested_by_table.setdefault(spec.source_table, set()).add(
+                spec.metric_name
+            )
+
+    def phase_kind(row: Mapping[str, Any]) -> str:
+        for key in ("phase_label", "source_window_label", "window_label"):
+            label = str(row.get(key) or "").strip().lower()
+            if label.startswith("pre"):
+                return "pre"
+            if label.startswith("post"):
+                return "post"
+        return ""
+
+    def derive(
+        *,
+        summary_table: str,
+        phase_table: str,
+        source_metrics: Mapping[str, tuple[str, str, str]],
+    ) -> None:
+        requested = requested_by_table.get(summary_table, set())
+        if not requested:
+            return
+        summary = frames[summary_table]
+        phase = frames[phase_table]
+        required = {
+            "recording_id",
+            "object_role",
+            "phase_label",
+            *(spec[0] for spec in source_metrics.values()),
+        }
+        missing = sorted(required - set(phase.columns))
+        if missing:
+            raise ValueError(
+                f"{phase_table} is missing columns required for profile contrasts: {missing}"
+            )
+        grouped: dict[tuple[str, str, str, str], list[float]] = {}
+        for row in phase.to_dicts():
+            recording_id = str(row.get("recording_id") or "")
+            role = (
+                str(row.get("object_role") or row.get("behavior_class") or "")
+                .strip()
+                .lower()
+            )
+            kind = phase_kind(row)
+            if (
+                not recording_id
+                or role not in {"aggressive", "inert"}
+                or kind not in {"pre", "post"}
+            ):
+                continue
+            for analysis_key, (
+                source_column,
+                _delta_stem,
+                _specificity_name,
+            ) in source_metrics.items():
+                value = _safe_float(row.get(source_column))
+                if value is not None:
+                    grouped.setdefault(
+                        (recording_id, role, kind, analysis_key), []
+                    ).append(value)
+
+        def mean(key: tuple[str, str, str, str]) -> float | None:
+            values = grouped.get(key, [])
+            return float(sum(values) / len(values)) if values else None
+
+        derived_by_recording: dict[str, dict[str, float | None]] = {}
+        for recording_id in (
+            summary.get_column("recording_id").cast(pl.String).to_list()
+        ):
+            values: dict[str, float | None] = {}
+            for role, suffix in (("aggressive", "agg"), ("inert", "inert")):
+                for analysis_key, (
+                    _source_column,
+                    delta_stem,
+                    _specificity_name,
+                ) in source_metrics.items():
+                    pre = mean((recording_id, role, "pre", analysis_key))
+                    post = mean((recording_id, role, "post", analysis_key))
+                    values[f"{delta_stem}_{suffix}"] = (
+                        None if pre is None or post is None else post - pre
+                    )
+            for _analysis_key, (
+                _source_column,
+                delta_stem,
+                specificity_name,
+            ) in source_metrics.items():
+                aggressive = values.get(f"{delta_stem}_agg")
+                inert = values.get(f"{delta_stem}_inert")
+                values[specificity_name] = (
+                    None if aggressive is None or inert is None else aggressive - inert
+                )
+            derived_by_recording[recording_id] = values
+
+        additions: list[pl.Series] = []
+        recording_ids = summary.get_column("recording_id").cast(pl.String).to_list()
+        for metric_name in sorted(requested):
+            if metric_name in summary.columns:
+                continue
+            additions.append(
+                pl.Series(
+                    metric_name,
+                    [
+                        derived_by_recording.get(recording_id, {}).get(metric_name)
+                        for recording_id in recording_ids
+                    ],
+                    dtype=pl.Float64,
+                )
+            )
+        if additions:
+            frames[summary_table] = summary.with_columns(additions)
+
+    derive(
+        summary_table=CRA_SUMMARY_TABLE,
+        phase_table=CRA_OBJECT_PHASE_TABLE,
+        source_metrics={
+            "distance": ("median_distance_mm", "delta", "specificity_distance"),
+            "occupancy": ("occupancy_fraction", "delta_occ", "specificity_occupancy"),
+        },
+    )
+    derive(
+        summary_table=CRA_NEAR_FIELD_SUMMARY_TABLE,
+        phase_table=CRA_NEAR_FIELD_OBJECT_PHASE_TABLE,
+        source_metrics={
+            "approach_p05": (
+                "approach_p05_mm",
+                "approach_p05_delta",
+                "approach_p05_specificity",
+            ),
+            "nearzone_occ": (
+                "near_zone_occupancy_fraction",
+                "nearzone_occ_delta",
+                "nearzone_occ_specificity",
+            ),
+            "nearzone_entry_rate": (
+                "near_zone_entry_rate_per_min",
+                "nearzone_entry_rate_delta",
+                "nearzone_entry_rate_specificity",
+            ),
+        },
+    )
 
 
 def _enrich_role_grouped_frames(
@@ -989,6 +1152,7 @@ def compute_goodcopbadcop_statistics(config: GoodCopBadCopStatisticsConfig) -> t
         for table in tables
     }
     _enrich_role_grouped_frames(frames, config.metrics)
+    _derive_profile_role_contrasts(frames, config.metrics)
 
     rows: list[dict[str, Any]] = []
     for spec in config.metrics:
@@ -1063,6 +1227,7 @@ def compute_goodcopbadcop_descriptive_summaries(config: GoodCopBadCopStatisticsC
         for table in tables
     }
     _enrich_role_grouped_frames(frames, config.metrics)
+    _derive_profile_role_contrasts(frames, config.metrics)
 
     rows: list[dict[str, Any]] = []
     for spec in config.metrics:

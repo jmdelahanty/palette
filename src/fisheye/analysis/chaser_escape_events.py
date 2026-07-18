@@ -81,7 +81,7 @@ from fisheye.analysis.chaser_bout_response import (
     BoutReference,
 )
 from fisheye.analysis.chaser_distance_runs import _bytes_array, _write_array
-from fisheye.analysis.chaser_escape_freeze import (
+from fisheye.analysis.chaser_escape_freeze_summary import (
     _controller_trial_segments,
     _dense_controller_state,
     _load_chaser_states,
@@ -603,7 +603,6 @@ def build_chaser_escape_events_result(
             root, source_stimulus_path=stim_path, chaser_states=chaser_states,
             chaser_index=active_index, trigger_radius_mm=None,
         )
-        obj_col = {int(v): i for i, v in enumerate(chaser_indices)}.get(active_index, 0)
         obj_ref = next(
             (i for i, rr in enumerate(references)
              if rr.kind == REFERENCE_KIND_OBJECT and rr.chaser_index == active_index),

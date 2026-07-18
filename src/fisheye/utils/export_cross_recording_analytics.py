@@ -20,7 +20,7 @@ import socket
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -33,13 +33,13 @@ from fisheye.analytics_exports.contracts import (
     CHASER_BOUT_EVENTS_TABLE,
     CHASER_BOUT_HISTOGRAM_TABLE,
     CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
-    CHASER_CRA_NEAR_FIELD_CDF_TABLE,
-    CHASER_CRA_NEAR_FIELD_OBJECT_PHASE_TABLE,
-    CHASER_CRA_NEAR_FIELD_RADIAL_TABLE,
-    CHASER_CRA_NEAR_FIELD_SUMMARY_TABLE,
-    CHASER_CRA_OBJECT_PHASE_TABLE,
-    CHASER_CRA_QUADRANT_TABLE,
-    CHASER_CRA_SUMMARY_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE,
     CHASER_DISTANCE_HISTOGRAM_TABLE,
     CHASER_DISTANCE_SUMMARY_TABLE,
     CHASER_EGOCENTRIC_HISTOGRAM_TABLE,
@@ -48,7 +48,6 @@ from fisheye.analytics_exports.contracts import (
     CHASER_IBI_HISTOGRAM_TABLE,
     CHASER_SPATIAL_TABLE,
     CHASER_SPEED_DISTANCE_TABLE,
-    CHASER_TABLES,
     DEFAULT_TABLES,
     EXPORT_SCHEMA_ID,
     EXPORT_SCHEMA_VERSION,
@@ -68,7 +67,10 @@ from fisheye.analytics_exports.baseline import (
 )
 from fisheye.analysis.bout_kinematics import resolve_bout_kinematics_tables
 from fisheye.analysis.chaser_behavior import canonical_behavior_label
-from fisheye.analysis.cra_primary_endpoint import QUADRANT_LABELS, quadrant_code_for_xy
+from fisheye.analysis.chaser_quadrant_occupancy import (
+    QUADRANT_LABELS,
+    quadrant_code_for_xy,
+)
 from fisheye.shared.zarr.columnar import load_structured_dataset
 from fisheye.analysis.swim_bout_io import (
     SwimBoutIOError,
@@ -101,24 +103,24 @@ _SOURCE_TABLE_BY_V2 = {
     CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE: "goodcopbadcop_epoch_center_distance_histogram",
     CHASER_SPEED_DISTANCE_TABLE: "goodcopbadcop_speed_distance_bins",
     CHASER_DISTANCE_HISTOGRAM_TABLE: "goodcopbadcop_chaser_distance_histogram",
-    CHASER_CRA_SUMMARY_TABLE: "goodcopbadcop_cra_primary_endpoint_summary",
-    CHASER_CRA_OBJECT_PHASE_TABLE: "goodcopbadcop_cra_primary_endpoint_object_phase",
-    CHASER_CRA_QUADRANT_TABLE: "goodcopbadcop_cra_quadrant_occupancy",
-    CHASER_CRA_NEAR_FIELD_SUMMARY_TABLE: "goodcopbadcop_cra_near_field_summary",
-    CHASER_CRA_NEAR_FIELD_OBJECT_PHASE_TABLE: "goodcopbadcop_cra_near_field_object_phase",
-    CHASER_CRA_NEAR_FIELD_RADIAL_TABLE: "goodcopbadcop_cra_near_field_radial_density",
-    CHASER_CRA_NEAR_FIELD_CDF_TABLE: "goodcopbadcop_cra_near_field_distance_cdf",
+    CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE: "goodcopbadcop_cra_primary_endpoint_summary",
+    CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE: "goodcopbadcop_cra_primary_endpoint_object_phase",
+    CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE: "goodcopbadcop_cra_quadrant_occupancy",
+    CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE: "goodcopbadcop_cra_near_field_summary",
+    CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE: "goodcopbadcop_cra_near_field_object_phase",
+    CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE: "goodcopbadcop_cra_near_field_radial_density",
+    CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE: "goodcopbadcop_cra_near_field_distance_cdf",
     CHASER_EGOCENTRIC_SUMMARY_TABLE: "goodcopbadcop_egocentric_epoch_summary",
     CHASER_EGOCENTRIC_HISTOGRAM_TABLE: "goodcopbadcop_egocentric_distance_bearing_histogram",
 }
 _V2_TABLE_BY_SOURCE = {source: target for target, source in _SOURCE_TABLE_BY_V2.items()}
 
-CRA_PRIMARY_ENDPOINT_COMPONENT_PARENT = "cra_primary_endpoint"
+CRA_PRIMARY_ENDPOINT_COMPONENT_PARENT = "chaser_quadrant_occupancy"
 CRA_PRIMARY_ENDPOINT_ALLOWED_STATUSES = {"computed", "complete"}
-CRA_NEAR_FIELD_COMPONENT_PARENT = "cra_near_field"
+CRA_NEAR_FIELD_COMPONENT_PARENT = "chaser_near_field_occupancy"
 CRA_NEAR_FIELD_ALLOWED_STATUSES = {"computed", "complete"}
 EPOCH_BEHAVIOR_COMPONENT_PARENT = "epoch_behavior_summary"
-EPOCH_BEHAVIOR_SCHEMA_ID = "palette.goodcopbadcop.epoch_behavior_summary.v1"
+EPOCH_BEHAVIOR_SCHEMA_ID = "palette.chaser.epoch_behavior_summary.v1"
 
 
 @dataclass(frozen=True)
@@ -1662,23 +1664,6 @@ def _chaser_behaviors_for_run(
             class_id = _array_int(class_ids, column) or 0
             label = canonical_behavior_label(labels[column]) if column < len(labels) and labels[column] else "unknown"
             by_index[index] = (class_id, label)
-    component, _component_name, _error = _latest_cra_primary_endpoint_component(run_group)
-    if component is not None and _has_child(component, "objects"):
-        objects = component["objects"]
-        indices = _read_1d_array(objects, "object_index")
-        labels = _read_canonical_behavior_labels(objects)
-        class_ids = _read_1d_array(objects, "behavior_class_id")
-        label_to_id = {"unknown": 0, "aggressive": 1, "random_non_chasing": 2, "inert": 3}
-        for column, raw_index in enumerate(indices if indices is not None else []):
-            index = _safe_int(raw_index)
-            if index is None:
-                continue
-            existing_label = by_index.get(index, (0, "unknown"))[1]
-            if existing_label != "unknown":
-                continue
-            label = labels[column] if column < len(labels) and labels[column] else "unknown"
-            class_id = _array_int(class_ids, column)
-            by_index[index] = (label_to_id.get(label, 0) if class_id is None else class_id, label)
     return [by_index.get(int(index), (0, "unknown")) for index in chaser_indices]
 
 
@@ -3239,12 +3224,22 @@ def _latest_cra_primary_endpoint_component(
     if not candidate and group_names:
         candidate = group_names[-1]
     if not candidate or candidate not in group_names:
-        return None, None, "no CRA primary endpoint component found"
+        return None, None, "no chaser quadrant occupancy component found"
     component = parent[candidate]
     component_attrs = _attrs_dict(component)
     status = str(component_attrs.get("status") or "").strip().lower()
     if status and status not in CRA_PRIMARY_ENDPOINT_ALLOWED_STATUSES:
-        return None, None, f"CRA primary endpoint component is not computed: {candidate}"
+        return (
+            None,
+            None,
+            f"chaser quadrant occupancy component is not computed: {candidate}",
+        )
+    if component_attrs.get("schema_id") != "palette.chaser.quadrant_occupancy.v1":
+        return (
+            None,
+            None,
+            "chaser quadrant occupancy component has an unsupported schema",
+        )
     return component, candidate, None
 
 
@@ -3263,12 +3258,22 @@ def _latest_cra_near_field_component(
     if not candidate and group_names:
         candidate = group_names[-1]
     if not candidate or candidate not in group_names:
-        return None, None, "no CRA near-field component found"
+        return None, None, "no chaser near-field occupancy component found"
     component = parent[candidate]
     component_attrs = _attrs_dict(component)
     status = str(component_attrs.get("status") or "").strip().lower()
     if status and status not in CRA_NEAR_FIELD_ALLOWED_STATUSES:
-        return None, None, f"CRA near-field component is not computed: {candidate}"
+        return (
+            None,
+            None,
+            f"chaser near-field occupancy component is not computed: {candidate}",
+        )
+    if component_attrs.get("schema_id") != "palette.chaser.near_field_occupancy.v1":
+        return (
+            None,
+            None,
+            "chaser near-field occupancy component has an unsupported schema",
+        )
     return component, candidate, None
 
 
@@ -3358,12 +3363,22 @@ def _cra_near_field_common_fields(
         "endpoint_status": attrs.get("status"),
         "cra_near_field_source_refs_json": _source_refs_json(source_refs),
         "cra_near_field_parameters_json": _source_refs_json(parameters),
-        "qc_warnings_json": _json_dumps_safe(_parse_jsonish(attrs.get("qc_warnings")) or []),
-        "diagnostics_json": _json_dumps_safe(_parse_jsonish(attrs.get("diagnostics")) or {}),
-        "source_chaser_distance_run": source_refs.get("source_chaser_distance_run") or run_name,
-        "source_chaser_distance_path": source_refs.get("source_chaser_distance_path") or run_path,
-        "source_cra_primary_endpoint_component": source_refs.get("source_cra_primary_endpoint_component"),
-        "source_cra_primary_endpoint_path": source_refs.get("source_cra_primary_endpoint_path"),
+        "qc_warnings_json": _json_dumps_safe(
+            _parse_jsonish(attrs.get("qc_warnings")) or []
+        ),
+        "diagnostics_json": _json_dumps_safe(
+            _parse_jsonish(attrs.get("diagnostics")) or {}
+        ),
+        "source_chaser_distance_run": source_refs.get("source_chaser_distance_run")
+        or run_name,
+        "source_chaser_distance_path": source_refs.get("source_chaser_distance_path")
+        or run_path,
+        "source_quadrant_occupancy_component": source_refs.get(
+            "source_quadrant_occupancy_component"
+        ),
+        "source_quadrant_occupancy_path": source_refs.get(
+            "source_quadrant_occupancy_path"
+        ),
         "source_stimulus_run": source_refs.get("source_stimulus_run"),
         "source_stimulus_path": source_refs.get("source_stimulus_path"),
         "source_stimulus_epoch_run": source_refs.get("source_stimulus_epoch_run"),
@@ -3509,7 +3524,7 @@ def _load_goodcopbadcop_cra_primary_endpoint_object_phase(
             "chaser_distance_run": run_name,
         })
         return []
-    required = ("objects", "phases", "object_phase", "per_object_phase")
+    required = ("chasers", "phases", "chaser_phase", "per_chaser_phase")
     missing = [name for name in required if not _has_child(component, name)]
     if missing:
         diagnostics.append({
@@ -3529,12 +3544,12 @@ def _load_goodcopbadcop_cra_primary_endpoint_object_phase(
         run_name=run_name,
         run_path=run_path,
     )
-    objects = component["objects"]
+    objects = component["chasers"]
     phases = component["phases"]
-    object_phase = component["object_phase"]
-    per_object = component["per_object_phase"]
+    object_phase = component["chaser_phase"]
+    per_object = component["per_chaser_phase"]
 
-    object_indices = _read_1d_array(objects, "object_index")
+    object_indices = _read_1d_array(objects, "chaser_index")
     object_roles = _read_canonical_behavior_labels(objects)
     raw_colors = _decode_text_column(_read_array(objects, "raw_color_hex_bytes"))
     enable_chase = _read_1d_array(objects, "enable_chase")
@@ -3551,26 +3566,30 @@ def _load_goodcopbadcop_cra_primary_endpoint_object_phase(
     effective_end = _read_1d_array(phases, "effective_end_frame")
     settle_excluded = _read_1d_array(phases, "settle_excluded_frame_count")
 
-    object_x_px = _read_array(object_phase, "object_x_px")
+    object_x_px = _read_array(object_phase, "chaser_x_px")
     if object_x_px is None or np.asarray(object_x_px).ndim != 2:
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": "object_phase/object_x_px missing or not 2D",
-            "chaser_distance_run": run_name,
-            "cra_primary_endpoint_component": component_name,
-        })
+        diagnostics.append(
+            {
+                "table": table,
+                "status": "skipped",
+                "reason": "chaser_phase/chaser_x_px missing or not 2D",
+                "chaser_distance_run": run_name,
+                "cra_primary_endpoint_component": component_name,
+            }
+        )
         return []
     object_x_px = np.asarray(object_x_px)
     n_phases, n_objects = int(object_x_px.shape[0]), int(object_x_px.shape[1])
-    object_y_px = _read_array(object_phase, "object_y_px")
-    object_x_mm = _read_array(object_phase, "object_x_mm")
-    object_y_mm = _read_array(object_phase, "object_y_mm")
-    quadrant_code = _read_array(object_phase, "object_quadrant_code")
-    quadrant_labels = _decode_text_column(_read_array(object_phase, "object_quadrant_label_bytes"))
-    sample_count = _read_array(object_phase, "object_position_sample_count")
-    max_drift = _read_array(object_phase, "object_max_drift_mm")
-    median_drift = _read_array(object_phase, "object_median_drift_mm")
+    object_y_px = _read_array(object_phase, "chaser_y_px")
+    object_x_mm = _read_array(object_phase, "chaser_x_mm")
+    object_y_mm = _read_array(object_phase, "chaser_y_mm")
+    quadrant_code = _read_array(object_phase, "chaser_quadrant_code")
+    quadrant_labels = _decode_text_column(
+        _read_array(object_phase, "chaser_quadrant_label_bytes")
+    )
+    sample_count = _read_array(object_phase, "chaser_position_sample_count")
+    max_drift = _read_array(object_phase, "chaser_max_drift_mm")
+    median_drift = _read_array(object_phase, "chaser_median_drift_mm")
 
     median_distance = _read_array(per_object, "median_distance_mm")
     mean_distance = _read_array(per_object, "mean_distance_mm")
@@ -3696,8 +3715,10 @@ def _load_goodcopbadcop_cra_quadrant_occupancy(
             "cra_primary_endpoint_component": component_name,
         })
         return []
-    required_component = ("objects", "phases", "object_phase")
-    missing_component = [name for name in required_component if not _has_child(component, name)]
+    required_component = ("chasers", "phases", "chaser_phase")
+    missing_component = [
+        name for name in required_component if not _has_child(component, name)
+    ]
     required_positions = ("fish_centroid_arena_xy", "fish_valid")
     missing_positions = [name for name in required_positions if not _has_child(run_group["positions"], name)]
     if missing_component or missing_positions:
@@ -3730,12 +3751,12 @@ def _load_goodcopbadcop_cra_quadrant_occupancy(
         })
         return []
 
-    objects = component["objects"]
+    objects = component["chasers"]
     phases = component["phases"]
-    object_phase = component["object_phase"]
+    object_phase = component["chaser_phase"]
     positions = run_group["positions"]
 
-    object_indices = _read_1d_array(objects, "object_index")
+    object_indices = _read_1d_array(objects, "chaser_index")
     object_roles = _read_canonical_behavior_labels(objects)
     raw_colors = _decode_text_column(_read_array(objects, "raw_color_hex_bytes"))
     aggressive_cols = [idx for idx, role in enumerate(object_roles) if role == "aggressive"]
@@ -3758,17 +3779,19 @@ def _load_goodcopbadcop_cra_quadrant_occupancy(
     effective_start = _read_1d_array(phases, "effective_start_frame")
     effective_end = _read_1d_array(phases, "effective_end_frame")
     settle_excluded = _read_1d_array(phases, "settle_excluded_frame_count")
-    object_x_px = _read_array(object_phase, "object_x_px")
-    object_y_px = _read_array(object_phase, "object_y_px")
-    object_quadrant_code = _read_array(object_phase, "object_quadrant_code")
+    object_x_px = _read_array(object_phase, "chaser_x_px")
+    object_y_px = _read_array(object_phase, "chaser_y_px")
+    object_quadrant_code = _read_array(object_phase, "chaser_quadrant_code")
     if object_quadrant_code is None or np.asarray(object_quadrant_code).ndim != 2:
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": "object_phase/object_quadrant_code missing or not 2D",
-            "chaser_distance_run": run_name,
-            "cra_primary_endpoint_component": component_name,
-        })
+        diagnostics.append(
+            {
+                "table": table,
+                "status": "skipped",
+                "reason": "chaser_phase/chaser_quadrant_code missing or not 2D",
+                "chaser_distance_run": run_name,
+                "cra_primary_endpoint_component": component_name,
+            }
+        )
         return []
 
     try:
@@ -3980,8 +4003,12 @@ def _load_goodcopbadcop_cra_near_field_summary(
         "zarr_path": str(zarr_path),
         "chaser_distance_run": run_name,
         "cra_near_field_component": component_name,
-        "source_component_fingerprint": component_common.get("source_component_fingerprint"),
-        "source_cra_primary_endpoint_path": near_refs.get("source_cra_primary_endpoint_path"),
+        "source_component_fingerprint": component_common.get(
+            "source_component_fingerprint"
+        ),
+        "source_quadrant_occupancy_path": near_refs.get(
+            "source_quadrant_occupancy_path"
+        ),
         "source_detection_path": run_common.get("source_detection_path"),
         "source_stimulus_run": near_refs.get("source_stimulus_run"),
         "source_stimulus_epoch_run": near_refs.get("source_stimulus_epoch_run"),
@@ -4048,7 +4075,7 @@ def _load_goodcopbadcop_cra_near_field_object_phase(
             "chaser_distance_run": run_name,
         })
         return []
-    required = ("objects", "phases", "per_object_phase")
+    required = ("chasers", "phases", "per_chaser_phase")
     missing = [name for name in required if not _has_child(component, name)]
     if missing:
         diagnostics.append({
@@ -4068,14 +4095,14 @@ def _load_goodcopbadcop_cra_near_field_object_phase(
         run_name=run_name,
         run_path=run_path,
     )
-    objects = component["objects"]
+    objects = component["chasers"]
     phases = component["phases"]
-    per_object = component["per_object_phase"]
+    per_object = component["per_chaser_phase"]
 
-    object_indices = _read_1d_array(objects, "object_index")
+    object_indices = _read_1d_array(objects, "chaser_index")
     object_roles = _read_canonical_behavior_labels(objects)
     raw_colors = _decode_text_column(_read_array(objects, "raw_color_hex_bytes"))
-    object_role_code = _read_1d_array(objects, "object_role_code")
+    object_role_code = _read_1d_array(objects, "behavior_class_id")
 
     phase_indices = _read_1d_array(phases, "phase_index")
     phase_labels = _decode_text_column(_read_array(phases, "phase_label_bytes"))
@@ -4086,13 +4113,15 @@ def _load_goodcopbadcop_cra_near_field_object_phase(
     approach = _read_array(per_object, "approach_percentile_mm")
     near_zone_occupancy = _read_array(per_object, "near_zone_occupancy_fraction")
     if near_zone_occupancy is None or np.asarray(near_zone_occupancy).ndim != 2:
-        diagnostics.append({
-            "table": table,
-            "status": "skipped",
-            "reason": "per_object_phase/near_zone_occupancy_fraction missing or not 2D",
-            "chaser_distance_run": run_name,
-            "cra_near_field_component": component_name,
-        })
+        diagnostics.append(
+            {
+                "table": table,
+                "status": "skipped",
+                "reason": "per_chaser_phase/near_zone_occupancy_fraction missing or not 2D",
+                "chaser_distance_run": run_name,
+                "cra_near_field_component": component_name,
+            }
+        )
         return []
     near_zone_occupancy = np.asarray(near_zone_occupancy)
     n_phases, n_objects = int(near_zone_occupancy.shape[0]), int(near_zone_occupancy.shape[1])
@@ -4118,8 +4147,12 @@ def _load_goodcopbadcop_cra_near_field_object_phase(
                 "zarr_path": str(zarr_path),
                 "chaser_distance_run": run_name,
                 "cra_near_field_component": component_name,
-                "source_component_fingerprint": component_common.get("source_component_fingerprint"),
-                "source_cra_primary_endpoint_path": near_refs.get("source_cra_primary_endpoint_path"),
+                "source_component_fingerprint": component_common.get(
+                    "source_component_fingerprint"
+                ),
+                "source_quadrant_occupancy_path": near_refs.get(
+                    "source_quadrant_occupancy_path"
+                ),
                 "source_detection_path": run_common.get("source_detection_path"),
                 "source_stimulus_run": near_refs.get("source_stimulus_run"),
                 "source_stimulus_epoch_run": near_refs.get("source_stimulus_epoch_run"),
@@ -4196,7 +4229,7 @@ def _load_goodcopbadcop_cra_near_field_radial_density(
             "chaser_distance_run": run_name,
         })
         return []
-    required = ("objects", "phases", "config", "radial_density")
+    required = ("chasers", "phases", "config", "radial_density")
     missing = [name for name in required if not _has_child(component, name)]
     if missing:
         diagnostics.append({
@@ -4216,12 +4249,12 @@ def _load_goodcopbadcop_cra_near_field_radial_density(
         run_name=run_name,
         run_path=run_path,
     )
-    objects = component["objects"]
+    objects = component["chasers"]
     phases = component["phases"]
     config = component["config"]
     radial = component["radial_density"]
 
-    object_indices = _read_1d_array(objects, "object_index")
+    object_indices = _read_1d_array(objects, "chaser_index")
     object_roles = _read_canonical_behavior_labels(objects)
     raw_colors = _decode_text_column(_read_array(objects, "raw_color_hex_bytes"))
     phase_indices = _read_1d_array(phases, "phase_index")
@@ -4269,8 +4302,12 @@ def _load_goodcopbadcop_cra_near_field_radial_density(
                     "zarr_path": str(zarr_path),
                     "chaser_distance_run": run_name,
                     "cra_near_field_component": component_name,
-                    "source_component_fingerprint": component_common.get("source_component_fingerprint"),
-                    "source_cra_primary_endpoint_path": near_refs.get("source_cra_primary_endpoint_path"),
+                    "source_component_fingerprint": component_common.get(
+                        "source_component_fingerprint"
+                    ),
+                    "source_quadrant_occupancy_path": near_refs.get(
+                        "source_quadrant_occupancy_path"
+                    ),
                     "source_detection_path": run_common.get("source_detection_path"),
                     "source_stimulus_run": near_refs.get("source_stimulus_run"),
                     "source_stimulus_epoch_run": near_refs.get("source_stimulus_epoch_run"),
@@ -4346,7 +4383,7 @@ def _load_goodcopbadcop_cra_near_field_distance_cdf(
             "chaser_distance_run": run_name,
         })
         return []
-    required = ("objects", "phases", "config", "distance_cdf")
+    required = ("chasers", "phases", "config", "distance_cdf")
     missing = [name for name in required if not _has_child(component, name)]
     if missing:
         diagnostics.append({
@@ -4366,12 +4403,12 @@ def _load_goodcopbadcop_cra_near_field_distance_cdf(
         run_name=run_name,
         run_path=run_path,
     )
-    objects = component["objects"]
+    objects = component["chasers"]
     phases = component["phases"]
     config = component["config"]
     cdf_group = component["distance_cdf"]
 
-    object_indices = _read_1d_array(objects, "object_index")
+    object_indices = _read_1d_array(objects, "chaser_index")
     object_roles = _read_canonical_behavior_labels(objects)
     raw_colors = _decode_text_column(_read_array(objects, "raw_color_hex_bytes"))
     phase_indices = _read_1d_array(phases, "phase_index")
@@ -4405,8 +4442,12 @@ def _load_goodcopbadcop_cra_near_field_distance_cdf(
                     "zarr_path": str(zarr_path),
                     "chaser_distance_run": run_name,
                     "cra_near_field_component": component_name,
-                    "source_component_fingerprint": component_common.get("source_component_fingerprint"),
-                    "source_cra_primary_endpoint_path": near_refs.get("source_cra_primary_endpoint_path"),
+                    "source_component_fingerprint": component_common.get(
+                        "source_component_fingerprint"
+                    ),
+                    "source_quadrant_occupancy_path": near_refs.get(
+                        "source_quadrant_occupancy_path"
+                    ),
                     "source_detection_path": run_common.get("source_detection_path"),
                     "source_stimulus_run": near_refs.get("source_stimulus_run"),
                     "source_stimulus_epoch_run": near_refs.get("source_stimulus_epoch_run"),

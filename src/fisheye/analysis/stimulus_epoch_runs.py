@@ -12,6 +12,12 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 import zarr
 
+from fisheye.analysis.chaser_profiles import (
+    ChaserProtocolProfile,
+    default_goodcopbadcop_source_profile_path,
+    load_chaser_protocol_profile,
+    resolve_profile_windows,
+)
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.run_provenance import build_writer_run_provenance
 from fisheye.shared.run_lineage_fingerprint import (
@@ -36,7 +42,7 @@ from fisheye.visualization.plot_detection_epoch_heatmaps import (
 
 SCHEMA_ID = "palette.stimulus_epoch_windows.v1"
 SCHEMA_VERSION = 1
-METHOD = "goodcopbadcop_chaser_epochs"
+METHOD = "event_alias_windows"
 METHOD_VERSION = "1"
 PARENT_NAME = "stimulus_epoch_runs"
 
@@ -67,9 +73,19 @@ class StimulusEpochResult:
     fps: float
     total_frames: int
     windows: tuple[StimulusEpochWindow, ...]
+    protocol_profile_id: str
+    protocol_profile_version: int
+    protocol_profile_sha256: str
+    protocol_profile_source: str
+    source_adapter_id: str
+    source_adapter_version: int
+    role_resolver_id: str
+    role_resolver_version: int
+    window_policy_id: str
+    window_policy_version: int
 
 
-def utc_run_name(prefix: str = "goodcopbadcop_epochs") -> str:
+def utc_run_name(prefix: str = "stimulus_epochs") -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"{prefix}_{stamp}"
 
@@ -174,80 +190,62 @@ def _event_frames_from_stimulus(root: zarr.Group, stimulus_group: zarr.Group) ->
     return event_frames
 
 
-def _first_event(event_frames: Mapping[str, int], names: Sequence[str]) -> tuple[str, Optional[int]]:
-    for name in names:
-        if name in event_frames:
-            return name, int(event_frames[name])
-    return "", None
-
-
 def build_goodcopbadcop_windows(
     event_frames: Mapping[str, int],
     *,
     fps: float,
     total_frames: int,
 ) -> tuple[StimulusEpochWindow, ...]:
-    """Resolve GoodCopBadCop pre/training/post windows from stimulus events."""
+    """Compatibility wrapper for the versioned GoodCopBadCop source profile."""
 
-    pre_name, pre_start = _first_event(event_frames, ("CHASER_PRE_PERIOD_START", "PROTOCOL_START"))
-    training_name, training_start = _first_event(event_frames, ("CHASER_TRAINING_START",))
-    post_name, post_start = _first_event(event_frames, ("CHASER_POST_PERIOD_START",))
-    finish_name, finish = _first_event(
+    profile = load_chaser_protocol_profile(default_goodcopbadcop_source_profile_path())
+    return _windows_from_profile(
+        profile,
         event_frames,
-        ("PROTOCOL_FINISH", "PROTOCOL_STOP", "STEP_END", "CHASER_PRESENTATION_END"),
+        fps=float(fps),
+        total_frames=int(total_frames),
     )
 
-    if training_start is None:
-        raise ValueError("Stimulus events do not include CHASER_TRAINING_START.")
-    if post_start is None:
-        raise ValueError("Stimulus events do not include CHASER_POST_PERIOD_START.")
-    policy_notes: list[str] = []
-    if pre_start is None:
-        pre_name = "RECORDING_START_FALLBACK"
-        pre_start = 0
-        policy_notes.append("missing_pre_start_used_frame_0")
-    if finish is None:
-        finish_name = "RECORDING_END_FALLBACK"
-        finish = int(total_frames) if total_frames > 0 else int(post_start)
-        policy_notes.append("missing_finish_used_total_frames")
 
-    max_frame = int(total_frames) - 1 if total_frames > 0 else max(int(finish) - 1, int(post_start))
-
-    def make(
-        window_id: int,
-        label: str,
-        start_frame: int,
-        end_boundary_frame: int,
-        start_event_name: str,
-        end_event_name: str,
-    ) -> StimulusEpochWindow:
-        start = max(0, int(start_frame))
-        end = min(max_frame, max(start, int(end_boundary_frame) - 1))
-        start_s = float(start) / float(fps)
-        end_s = float(end + 1) / float(fps)
-        policy = "inclusive_start_exclusive_end_event_boundary"
-        if policy_notes:
-            policy += ";" + ";".join(policy_notes)
-        return StimulusEpochWindow(
-            window_id=int(window_id),
-            label=label,
-            start_frame=start,
-            end_frame=end,
-            start_time_s=start_s,
-            end_time_s=end_s,
-            duration_s=max(0.0, end_s - start_s),
-            source_start_event_name=start_event_name,
-            source_end_event_name=end_event_name,
-            source_start_event_frame=int(start_frame),
-            source_end_event_frame=int(end_boundary_frame),
-            source_policy=policy,
+def _windows_from_profile(
+    profile: ChaserProtocolProfile,
+    event_frames: Mapping[str, int],
+    *,
+    fps: float,
+    total_frames: int,
+) -> tuple[StimulusEpochWindow, ...]:
+    safe_fps = float(fps)
+    resolved = resolve_profile_windows(
+        profile, event_frames, total_frames=int(total_frames)
+    )
+    return tuple(
+        StimulusEpochWindow(
+            window_id=window.window_id,
+            label=window.label,
+            start_frame=window.start_frame,
+            end_frame=window.end_frame,
+            start_time_s=float(window.start_frame) / safe_fps,
+            end_time_s=float(window.end_frame + 1) / safe_fps,
+            duration_s=max(
+                0.0, float(window.end_frame + 1 - window.start_frame) / safe_fps
+            ),
+            source_start_event_name=window.source_start_event_name,
+            source_end_event_name=window.source_end_event_name,
+            source_start_event_frame=window.source_start_event_frame,
+            source_end_event_frame=window.source_end_event_frame,
+            source_policy=window.source_policy,
         )
-
-    return (
-        make(0, "pre_event", int(pre_start), int(training_start), pre_name, training_name),
-        make(1, "training_event", int(training_start), int(post_start), training_name, post_name),
-        make(2, "post_event", int(post_start), int(finish), post_name, finish_name),
+        for window in resolved
     )
+
+
+def _coerce_protocol_profile(
+    value: ChaserProtocolProfile | str | Path | None,
+) -> ChaserProtocolProfile:
+    if isinstance(value, ChaserProtocolProfile):
+        return value
+    path = default_goodcopbadcop_source_profile_path() if value is None else Path(value)
+    return load_chaser_protocol_profile(path)
 
 
 def build_stimulus_epoch_result(
@@ -255,13 +253,22 @@ def build_stimulus_epoch_result(
     *,
     run_name: str,
     stimulus_run: Optional[str] = None,
+    protocol_profile: ChaserProtocolProfile | str | Path | None = None,
 ) -> StimulusEpochResult:
     root = _open_root(zarr_path, mode="r")
     stimulus_group, stimulus_run_name, stimulus_path = _resolve_stimulus_run(root, stimulus_run)
     fps, total_frames = _resolve_dimensions(root)
     event_frames = _event_frames_from_stimulus(root, stimulus_group)
-    windows = build_goodcopbadcop_windows(event_frames, fps=fps, total_frames=total_frames)
-    recording_id = _attr_text(root.attrs, "recording_id", "recording_name") or Path(zarr_path).stem
+    profile = _coerce_protocol_profile(protocol_profile)
+    windows = _windows_from_profile(
+        profile,
+        event_frames,
+        fps=fps,
+        total_frames=total_frames,
+    )
+    recording_id = (
+        _attr_text(root.attrs, "recording_id", "recording_name") or Path(zarr_path).stem
+    )
     return StimulusEpochResult(
         zarr_path=str(zarr_path),
         recording_id=recording_id,
@@ -271,6 +278,16 @@ def build_stimulus_epoch_result(
         fps=fps,
         total_frames=total_frames,
         windows=windows,
+        protocol_profile_id=profile.profile_id,
+        protocol_profile_version=profile.profile_version,
+        protocol_profile_sha256=profile.sha256,
+        protocol_profile_source=profile.source_path,
+        source_adapter_id=profile.source_adapter_id,
+        source_adapter_version=profile.source_adapter_version,
+        role_resolver_id=profile.role_resolver_id,
+        role_resolver_version=profile.role_resolver_version,
+        window_policy_id=profile.window_policy_id,
+        window_policy_version=profile.window_policy_version,
     )
 
 
@@ -369,12 +386,30 @@ def write_stimulus_epoch_run(
             "source_stimulus_run": result.stimulus_run_name,
             "source_stimulus_path": result.stimulus_path,
         }
-        parameters = {"epoch_policy": METHOD, "fps": result.fps, "total_frames": result.total_frames}
+        method = result.window_policy_id
+        method_version = str(result.window_policy_version)
+        profile_ref = {
+            "profile_id": result.protocol_profile_id,
+            "profile_version": result.protocol_profile_version,
+            "profile_sha256": result.protocol_profile_sha256,
+            "profile_source": result.protocol_profile_source,
+            "source_adapter_id": result.source_adapter_id,
+            "source_adapter_version": result.source_adapter_version,
+            "role_resolver_id": result.role_resolver_id,
+            "role_resolver_version": result.role_resolver_version,
+        }
+        parameters = {
+            "epoch_policy": method,
+            "epoch_policy_version": result.window_policy_version,
+            "protocol_profile": profile_ref,
+            "fps": result.fps,
+            "total_frames": result.total_frames,
+        }
         attrs = {
             "schema_id": SCHEMA_ID,
             "schema_version": SCHEMA_VERSION,
-            "method": METHOD,
-            "method_version": METHOD_VERSION,
+            "method": method,
+            "method_version": method_version,
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
             "row_axis": "epoch_windows",
             "run_name": run_name,
@@ -386,7 +421,9 @@ def write_stimulus_epoch_run(
                 "event_name_fields": ["event_name", "event_type_name", "name", "event_type_id"],
                 "frame_fields": ["camera_frame_id", "camera_frame_num", "triggering_camera_frame_id"],
             },
-            "epoch_policy": METHOD,
+            "epoch_policy": method,
+            "epoch_policy_version": result.window_policy_version,
+            "protocol_profile": profile_ref,
             "source_refs": source_refs,
             "parameters": parameters,
             "fps": float(result.fps),
@@ -405,9 +442,13 @@ def write_stimulus_epoch_run(
         run.attrs.update(json_attr_safe(attrs))
         lineage_payload = build_run_lineage_payload(
             run_family="analysis/stimulus_epoch_runs",
-            analysis_schema={"schema_id": SCHEMA_ID, "schema_version": SCHEMA_VERSION, "row_axis": "epoch_windows"},
-            method=METHOD,
-            method_version=METHOD_VERSION,
+            analysis_schema={
+                "schema_id": SCHEMA_ID,
+                "schema_version": SCHEMA_VERSION,
+                "row_axis": "epoch_windows",
+            },
+            method=method,
+            method_version=method_version,
             source_refs=source_refs,
             parameters=parameters,
             code={"git_commit": git.get("commit_hash"), "git_dirty": git.get("is_dirty")},
@@ -439,6 +480,15 @@ def _result_payload(result: StimulusEpochResult) -> dict[str, Any]:
         "stimulus_path": result.stimulus_path,
         "fps": result.fps,
         "total_frames": result.total_frames,
+        "protocol_profile_id": result.protocol_profile_id,
+        "protocol_profile_version": result.protocol_profile_version,
+        "protocol_profile_sha256": result.protocol_profile_sha256,
+        "source_adapter_id": result.source_adapter_id,
+        "source_adapter_version": result.source_adapter_version,
+        "role_resolver_id": result.role_resolver_id,
+        "role_resolver_version": result.role_resolver_version,
+        "window_policy_id": result.window_policy_id,
+        "window_policy_version": result.window_policy_version,
         "windows": [asdict(window) for window in result.windows],
     }
 
@@ -448,8 +498,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("zarr_path", type=Path, help="Analysis zarr archive.")
     parser.add_argument("--run-name", default=utc_run_name(), help="Stimulus epoch run name.")
     parser.add_argument("--stimulus-run", help="Explicit source stimulus run name.")
-    parser.add_argument("--apply", action="store_true", help="Write analysis/stimulus_epoch_runs/<run>.")
-    parser.add_argument("--overwrite", action="store_true", help="Overwrite an existing run with the same name.")
+    parser.add_argument(
+        "--protocol-profile",
+        type=Path,
+        default=default_goodcopbadcop_source_profile_path(),
+        help="Versioned protocol adapter/window profile (default: GoodCopBadCop source v1).",
+    )
+    parser.add_argument(
+        "--apply", action="store_true", help="Write analysis/stimulus_epoch_runs/<run>."
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite an existing run with the same name.",
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON summary.")
     return parser
 
@@ -460,6 +522,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         Path(args.zarr_path),
         run_name=str(args.run_name),
         stimulus_run=args.stimulus_run,
+        protocol_profile=args.protocol_profile,
     )
     path = None
     if args.apply:

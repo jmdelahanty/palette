@@ -22,6 +22,12 @@ from fisheye.analysis.chaser_behavior import (
     BEHAVIOR_CLASS_LABELS,
     resolve_configured_chaser_behaviors,
 )
+from fisheye.analysis.chaser_contracts import (
+    CHASER_SOURCE_SCHEMA_ID,
+    CHASER_SOURCE_SCHEMA_VERSION,
+    ROLE_INTERVAL_BOUNDARY_POLICY,
+    canonical_chaser_set_from_protocol_payload,
+)
 from fisheye.shared.zarr.columnar import load_structured_dataset
 from fisheye.analysis.detection_occupancy_runs import _read_epoch_windows, _resolve_epoch_run
 from fisheye.shared.coordinate_transform import load_calibration_transform, projector_to_camera_px
@@ -149,6 +155,10 @@ class ChaserDistanceResult:
     histogram_bin_centers_mm: np.ndarray
     histogram_counts: np.ndarray
     histogram_density: np.ndarray
+    chaser_stimulus_instance_ids: tuple[str, ...] = ()
+    chaser_source_track_keys: tuple[str, ...] = ()
+    chaser_raw_color_rgba: Optional[np.ndarray] = None
+    chaser_role_interval_rows: tuple[Mapping[str, Any], ...] = ()
 
 
 def utc_run_name(prefix: str = "chaser_distance") -> str:
@@ -330,9 +340,16 @@ def _dense_chaser_positions(
     stim_to_camera: Mapping[int, int],
     total_frames: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, str, str]:
-    dtype_names = chaser_states.dtype.names or ()
-    stim_field = _field_name(chaser_states, "stimulus_frame_num", "frame_number", "stim_frame_num", required=False)
-    camera_field = _field_name(chaser_states, "camera_frame_id", "triggering_camera_frame_id", required=False)
+    stim_field = _field_name(
+        chaser_states,
+        "stimulus_frame_num",
+        "frame_number",
+        "stim_frame_num",
+        required=False,
+    )
+    camera_field = _field_name(
+        chaser_states, "camera_frame_id", "triggering_camera_frame_id", required=False
+    )
     if camera_field is None and stim_field is None:
         raise ValueError("chaser_states must include camera_frame_id or stimulus_frame_num.")
 
@@ -549,8 +566,12 @@ def build_chaser_distance_result(
         stim_to_camera=stim_to_camera,
         total_frames=total_frames,
     )
+    protocol_payload: Mapping[str, Any] = {}
     try:
-        protocol_payload = json.loads(str(stim_group.attrs.get("protocol_json") or "{}"))
+        decoded_payload = json.loads(str(stim_group.attrs.get("protocol_json") or "{}"))
+        protocol_payload = (
+            decoded_payload if isinstance(decoded_payload, Mapping) else {}
+        )
         configured_behaviors = resolve_configured_chaser_behaviors(protocol_payload)
     except (TypeError, ValueError, json.JSONDecodeError):
         configured_behaviors = ()
@@ -561,6 +582,69 @@ def build_chaser_distance_result(
     )
     chaser_behavior_labels = tuple(
         BEHAVIOR_CLASS_LABELS.get(int(class_id), "unknown") for class_id in chaser_behavior_class_id
+    )
+    try:
+        canonical_chasers = canonical_chaser_set_from_protocol_payload(
+            protocol_payload,
+            total_frames=total_frames,
+        )
+    except (TypeError, ValueError):
+        canonical_chasers = None
+    identity_by_index = {
+        int(identity.chaser_index): identity
+        for identity in (
+            canonical_chasers.identities if canonical_chasers is not None else ()
+        )
+    }
+    chaser_stimulus_instance_ids = tuple(
+        (
+            identity_by_index[int(index)].stimulus_instance_id
+            if int(index) in identity_by_index
+            else f"chaser:{int(index)}"
+        )
+        for index in chaser_indices
+    )
+    chaser_source_track_keys = tuple(
+        (
+            identity_by_index[int(index)].source_track_key
+            if int(index) in identity_by_index
+            else f"chaser_index:{int(index)}"
+        )
+        for index in chaser_indices
+    )
+    chaser_raw_color_rgba = np.asarray(
+        [
+            (
+                identity_by_index[int(index)].raw_color_rgba
+                if int(index) in identity_by_index
+                else (np.nan, np.nan, np.nan, np.nan)
+            )
+            for index in chaser_indices
+        ],
+        dtype=np.float32,
+    )
+    index_by_instance = {
+        identity.stimulus_instance_id: int(identity.chaser_index)
+        for identity in (
+            canonical_chasers.identities if canonical_chasers is not None else ()
+        )
+    }
+    chaser_role_interval_rows = tuple(
+        {
+            "stimulus_instance_id": interval.stimulus_instance_id,
+            "chaser_index": index_by_instance[interval.stimulus_instance_id],
+            "behavior_class_id": int(interval.role_class_id),
+            "behavior_class": interval.role,
+            "start_frame": int(interval.start_frame),
+            "end_frame": interval.end_frame,
+            "source": interval.source,
+        }
+        for interval in (
+            canonical_chasers.role_intervals if canonical_chasers is not None else ()
+        )
+        if interval.stimulus_instance_id in index_by_instance
+        and index_by_instance[interval.stimulus_instance_id]
+        in set(int(value) for value in chaser_indices)
     )
 
     if coordinate_frame != "arena_relative_canvas_px":
@@ -665,6 +749,10 @@ def build_chaser_distance_result(
         histogram_bin_centers_mm=distributions[1],
         histogram_counts=distributions[2],
         histogram_density=distributions[3],
+        chaser_stimulus_instance_ids=chaser_stimulus_instance_ids,
+        chaser_source_track_keys=chaser_source_track_keys,
+        chaser_raw_color_rgba=chaser_raw_color_rgba,
+        chaser_role_interval_rows=chaser_role_interval_rows,
     )
 
 
@@ -769,8 +857,9 @@ def render_chaser_distance_epoch_median_png(result: ChaserDistanceResult, *, dpi
     return buf.getvalue()
 
 
-def render_chaser_distance_epoch_distribution_png(result: ChaserDistanceResult, *, dpi: int = 150) -> bytes:
-    n_chasers = int(result.chaser_indices.shape[0])
+def render_chaser_distance_epoch_distribution_png(
+    result: ChaserDistanceResult, *, dpi: int = 150
+) -> bytes:
     labels = [_display_epoch_label(w.label) for w in result.windows]
     fig, axes = plt.subplots(
         1,
@@ -883,6 +972,44 @@ def write_goodcopbadcop_chaser_dashboard_spec_artifact(*args: Any, **kwargs: Any
     write_chaser_dashboard_spec_artifact(*args, **kwargs)
 
 
+def _normalized_chaser_source_contract(
+    result: ChaserDistanceResult,
+) -> tuple[tuple[str, ...], tuple[str, ...], np.ndarray, tuple[dict[str, Any], ...]]:
+    indices = np.asarray(result.chaser_indices, dtype=np.int64).reshape(-1)
+    n_chasers = int(indices.shape[0])
+    instance_ids = tuple(str(value) for value in result.chaser_stimulus_instance_ids)
+    if len(instance_ids) != n_chasers:
+        instance_ids = tuple(f"chaser:{int(index)}" for index in indices)
+    track_keys = tuple(str(value) for value in result.chaser_source_track_keys)
+    if len(track_keys) != n_chasers:
+        track_keys = tuple(f"chaser_index:{int(index)}" for index in indices)
+    color_rgba = (
+        np.asarray(result.chaser_raw_color_rgba, dtype=np.float32)
+        if result.chaser_raw_color_rgba is not None
+        else np.full((n_chasers, 4), np.nan, dtype=np.float32)
+    )
+    if color_rgba.shape != (n_chasers, 4):
+        raise ValueError(
+            "chaser_raw_color_rgba must have shape "
+            f"({n_chasers}, 4); got {color_rgba.shape}"
+        )
+    rows = tuple(dict(row) for row in result.chaser_role_interval_rows)
+    if not rows:
+        rows = tuple(
+            {
+                "stimulus_instance_id": instance_ids[column],
+                "chaser_index": int(index),
+                "behavior_class_id": int(result.chaser_behavior_class_id[column]),
+                "behavior_class": str(result.chaser_behavior_labels[column]),
+                "start_frame": 0,
+                "end_frame": max(0, int(result.total_frames) - 1),
+                "source": "chaser_distance_result_behavior_class",
+            }
+            for column, index in enumerate(indices)
+        )
+    return instance_ids, track_keys, color_rgba, rows
+
+
 def write_chaser_distance_run(
     zarr_path: Path,
     result: ChaserDistanceResult,
@@ -903,6 +1030,9 @@ def write_chaser_distance_run(
     mark_run_pending(parent, run_name)
     mark_run_started(run, run_name=run_name, stage="chaser_distance")
     try:
+        instance_ids, track_keys, raw_color_rgba, role_rows = (
+            _normalized_chaser_source_contract(result)
+        )
         frames = run.require_group("frames")
         _write_array(frames, "camera_frame_id", result.camera_frame_id)
         _write_array(frames, "stimulus_frame_num", result.stimulus_frame_num)
@@ -912,6 +1042,17 @@ def write_chaser_distance_run(
 
         chasers = run.require_group("chasers")
         _write_array(chasers, "chaser_index", result.chaser_indices)
+        _write_array(
+            chasers,
+            "stimulus_instance_id_bytes",
+            _bytes_array(instance_ids, width=96),
+        )
+        _write_array(
+            chasers,
+            "source_track_key_bytes",
+            _bytes_array(track_keys, width=96),
+        )
+        _write_array(chasers, "raw_color_rgba", raw_color_rgba)
         _write_array(chasers, "behavior_class_id", result.chaser_behavior_class_id)
         _write_array(
             chasers,
@@ -921,12 +1062,76 @@ def write_chaser_distance_run(
         chasers.attrs.update(
             {
                 "row_axis": "chasers",
+                "source_contract_schema_id": CHASER_SOURCE_SCHEMA_ID,
+                "source_contract_schema_version": CHASER_SOURCE_SCHEMA_VERSION,
+                "behavior_class_scope": "whole_recording_summary",
+                "authoritative_role_intervals_path": (
+                    f"analysis/{PARENT_NAME}/{run_name}/chaser_role_intervals"
+                ),
                 "behavior_class_vocabulary": {
                     "0": "unknown",
                     "1": "aggressive",
                     "2": "random_non_chasing",
                     "3": "inert",
                 },
+            }
+        )
+
+        role_intervals = run.require_group("chaser_role_intervals")
+        _write_array(
+            role_intervals,
+            "stimulus_instance_id_bytes",
+            _bytes_array(
+                [str(row["stimulus_instance_id"]) for row in role_rows],
+                width=96,
+            ),
+        )
+        _write_array(
+            role_intervals,
+            "chaser_index",
+            np.asarray([int(row["chaser_index"]) for row in role_rows], dtype=np.int16),
+        )
+        _write_array(
+            role_intervals,
+            "behavior_class_id",
+            np.asarray(
+                [int(row["behavior_class_id"]) for row in role_rows],
+                dtype=np.int8,
+            ),
+        )
+        _write_array(
+            role_intervals,
+            "behavior_class_label_bytes",
+            _bytes_array([str(row["behavior_class"]) for row in role_rows], width=32),
+        )
+        _write_array(
+            role_intervals,
+            "start_frame",
+            np.asarray([int(row["start_frame"]) for row in role_rows], dtype=np.int64),
+        )
+        _write_array(
+            role_intervals,
+            "end_frame",
+            np.asarray(
+                [
+                    -1 if row.get("end_frame") is None else int(row["end_frame"])
+                    for row in role_rows
+                ],
+                dtype=np.int64,
+            ),
+        )
+        _write_array(
+            role_intervals,
+            "source_bytes",
+            _bytes_array([str(row["source"]) for row in role_rows], width=128),
+        )
+        role_intervals.attrs.update(
+            {
+                "row_axis": "chaser_role_intervals",
+                "source_contract_schema_id": CHASER_SOURCE_SCHEMA_ID,
+                "source_contract_schema_version": CHASER_SOURCE_SCHEMA_VERSION,
+                "boundary_policy": ROLE_INTERVAL_BOUNDARY_POLICY,
+                "open_end_frame_sentinel": -1,
             }
         )
 
@@ -1059,6 +1264,15 @@ def write_chaser_distance_run(
             "x_axis_direction": "right",
             "y_axis_direction": "down",
             "arena_origin_in_canvas_xy": list(result.arena_origin_in_canvas_xy),
+            "chaser_source_contract": {
+                "schema_id": CHASER_SOURCE_SCHEMA_ID,
+                "schema_version": CHASER_SOURCE_SCHEMA_VERSION,
+                "identity_path": f"analysis/{PARENT_NAME}/{run_name}/chasers",
+                "role_intervals_path": (
+                    f"analysis/{PARENT_NAME}/{run_name}/chaser_role_intervals"
+                ),
+                "role_interval_boundary_policy": ROLE_INTERVAL_BOUNDARY_POLICY,
+            },
             "source_refs": source_refs,
             "parameters": parameters,
             "summary": summary,

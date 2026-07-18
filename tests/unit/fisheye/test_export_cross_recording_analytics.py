@@ -62,7 +62,7 @@ def _array(group, name: str, values) -> None:
     group.create_array(name, data=np.asarray(values), overwrite=True)
 
 
-def test_exporter_replaces_unknown_chaser_roles_from_cra_objects() -> None:
+def test_exporter_does_not_guess_unknown_roles_from_derived_components() -> None:
     run = zarr.group()
     chasers = run.create_group("chasers")
     _array(chasers, "chaser_index", [0, 1])
@@ -72,12 +72,13 @@ def test_exporter_replaces_unknown_chaser_roles_from_cra_objects() -> None:
         "behavior_class_label_bytes",
         np.asarray([b"unknown", b"unknown"], dtype="S16"),
     )
-    parent = run.create_group("cra_primary_endpoint")
+    parent = run.create_group("chaser_quadrant_occupancy")
     parent.attrs["latest_complete"] = "roles"
     component = parent.create_group("roles")
     component.attrs["status"] = "computed"
-    objects = component.create_group("objects")
-    _array(objects, "object_index", [0, 1])
+    component.attrs["schema_id"] = "palette.chaser.quadrant_occupancy.v1"
+    objects = component.create_group("chasers")
+    _array(objects, "chaser_index", [0, 1])
     _array(objects, "behavior_class_id", [1, 3])
     _array(
         objects,
@@ -85,10 +86,7 @@ def test_exporter_replaces_unknown_chaser_roles_from_cra_objects() -> None:
         np.asarray([b"aggressive", b"inert"], dtype="S16"),
     )
 
-    assert _chaser_behaviors_for_run(run, [0, 1]) == [
-        (1, "aggressive"),
-        (3, "inert"),
-    ]
+    assert _chaser_behaviors_for_run(run, [0, 1]) == [(0, "unknown"), (0, "unknown")]
 
 
 def _add_goodcopbadcop_cra_protocol_metadata(zarr_path: Path) -> None:
@@ -765,13 +763,13 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
             "chaser_epoch_center_distance_histogram",
             "chaser_speed_distance_bins",
             "chaser_epoch_distance_histogram",
-            "chaser_cra_primary_endpoint_summary",
-            "chaser_cra_primary_endpoint_object_phase",
-            "chaser_cra_quadrant_occupancy",
-            "chaser_cra_near_field_summary",
-            "chaser_cra_near_field_object_phase",
-            "chaser_cra_near_field_radial_density",
-            "chaser_cra_near_field_distance_cdf",
+            "chaser_quadrant_occupancy_summary",
+            "chaser_quadrant_occupancy_chaser_phase",
+            "chaser_quadrant_occupancy_density",
+            "chaser_near_field_occupancy_summary",
+            "chaser_near_field_occupancy_chaser_phase",
+            "chaser_near_field_occupancy_radial_density",
+            "chaser_near_field_occupancy_distance_cdf",
             "chaser_egocentric_epoch_summary",
             "chaser_egocentric_distance_bearing_histogram",
         ),
@@ -793,20 +791,30 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
     assert manifest["row_counts_by_table"]["chaser_epoch_center_distance_histogram"] == 9
     assert manifest["row_counts_by_table"]["chaser_speed_distance_bins"] == 18
     assert manifest["row_counts_by_table"]["chaser_epoch_distance_histogram"] == 18
-    assert manifest["row_counts_by_table"]["chaser_cra_primary_endpoint_summary"] == 1
-    assert manifest["row_counts_by_table"]["chaser_cra_primary_endpoint_object_phase"] == 4
-    assert manifest["row_counts_by_table"]["chaser_cra_quadrant_occupancy"] == 8
-    assert manifest["row_counts_by_table"]["chaser_cra_near_field_summary"] == 1
-    assert manifest["row_counts_by_table"]["chaser_cra_near_field_object_phase"] == 4
-    assert manifest["row_counts_by_table"]["chaser_cra_near_field_radial_density"] == 12
-    assert manifest["row_counts_by_table"]["chaser_cra_near_field_distance_cdf"] == 8
+    assert manifest["row_counts_by_table"]["chaser_quadrant_occupancy_summary"] == 1
+    assert (
+        manifest["row_counts_by_table"]["chaser_quadrant_occupancy_chaser_phase"] == 4
+    )
+    assert manifest["row_counts_by_table"]["chaser_quadrant_occupancy_density"] == 8
+    assert manifest["row_counts_by_table"]["chaser_near_field_occupancy_summary"] == 1
+    assert (
+        manifest["row_counts_by_table"]["chaser_near_field_occupancy_chaser_phase"] == 4
+    )
+    assert (
+        manifest["row_counts_by_table"]["chaser_near_field_occupancy_radial_density"]
+        == 12
+    )
+    assert (
+        manifest["row_counts_by_table"]["chaser_near_field_occupancy_distance_cdf"] == 8
+    )
     assert manifest["row_counts_by_table"]["chaser_egocentric_epoch_summary"] == 6
     assert manifest["row_counts_by_table"]["chaser_egocentric_distance_bearing_histogram"] == 72
     assert manifest["schema_id"] == EXPORT_SCHEMA_ID
     assert manifest["schema_version"] == EXPORT_SCHEMA_VERSION
     assert "chaser.epoch.behavior_summary" in manifest["capabilities"]
     assert "position.epoch.occupancy_histogram_2d" in manifest["capabilities"]
-    assert "chaser.cra.primary" in manifest["capabilities"]
+    assert "chaser.quadrant_occupancy" in manifest["capabilities"]
+    assert "chaser.near_field_occupancy" in manifest["capabilities"]
     assert "chaser.egocentric" in manifest["capabilities"]
     assert "core.baseline.behavior_summary" in manifest["capabilities"]
     assert "core.baseline.behavior_time_bins" in manifest["capabilities"]
@@ -1083,38 +1091,44 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
 
     cra_summary_rows = _read_dataset(
         output,
-        "chaser_cra_primary_endpoint_summary",
+        "chaser_quadrant_occupancy_summary",
         "goodcopbadcop_export",
     )
     assert len(cra_summary_rows) == 1
     cra_summary = cra_summary_rows[0]
     assert cra_summary["export_schema_version"] == EXPORT_SCHEMA_VERSION
-    assert cra_summary["table_name"] == "chaser_cra_primary_endpoint_summary"
+    assert cra_summary["table_name"] == "chaser_quadrant_occupancy_summary"
     assert not any("benign" in key.lower() for key in cra_summary)
     assert "benign" not in {str(value).lower() for value in cra_summary.values()}
     assert cra_summary["export_run_id"] == "goodcopbadcop_export"
     assert cra_summary["cra_primary_endpoint_component"] == DEFAULT_CRA_COMPONENT_NAME
-    assert cra_summary["cra_primary_endpoint_schema_id"] == "palette.goodcopbadcop.cra_primary_endpoint.v1"
-    assert cra_summary["source_component_schema_id"] == "palette.goodcopbadcop.cra_primary_endpoint.v1"
+    assert (
+        cra_summary["cra_primary_endpoint_schema_id"]
+        == "palette.chaser.quadrant_occupancy.v1"
+    )
+    assert (
+        cra_summary["source_component_schema_id"]
+        == "palette.chaser.quadrant_occupancy.v1"
+    )
     assert len(cra_summary["source_component_fingerprint"]) == 64
     assert cra_summary["source_cra_primary_endpoint_path"].endswith(
-        f"/cra_primary_endpoint/{DEFAULT_CRA_COMPONENT_NAME}"
+        f"/chaser_quadrant_occupancy/{DEFAULT_CRA_COMPONENT_NAME}"
     )
     assert cra_summary["source_chaser_distance_run"] == "chaser_distance_1"
     assert cra_summary["fish_id"] == "0"
-    assert cra_summary["aggressive_color"] == "#ff0000"
-    assert cra_summary["inert_color"] == "#0000ff"
-    assert cra_summary["pre_aggressive_quadrant"] == "top_left"
-    assert cra_summary["post_aggressive_quadrant"] == "bottom_right"
-    assert cra_summary["pre_inert_quadrant"] == "top_right"
-    assert cra_summary["post_inert_quadrant"] == "bottom_left"
-    np.testing.assert_allclose(cra_summary["delta_occ_agg"], -1.0)
-    np.testing.assert_allclose(cra_summary["occ_post_inert"], 1.0)
+    assert cra_summary["chaser_count"] == 2
+    assert (
+        cra_summary["pairwise_role_contrast_policy"]
+        == "not_computed_at_recording_level"
+    )
+    per_chaser = json.loads(cra_summary["per_chaser"])
+    assert [row["chaser_index"] for row in per_chaser] == [0, 1]
+    assert [row["behavior_class"] for row in per_chaser] == ["aggressive", "inert"]
     assert len(cra_summary["source_lineage_hash"]) == 64
 
     cra_object_phase_rows = _read_dataset(
         output,
-        "chaser_cra_primary_endpoint_object_phase",
+        "chaser_quadrant_occupancy_chaser_phase",
         "goodcopbadcop_export",
     )
     post_aggressive = next(
@@ -1143,7 +1157,7 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
 
     cra_quadrant_rows = _read_dataset(
         output,
-        "chaser_cra_quadrant_occupancy",
+        "chaser_quadrant_occupancy_density",
         "goodcopbadcop_export",
     )
     assert len(cra_quadrant_rows) == 8
@@ -1177,23 +1191,35 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
 
     near_field_summary_rows = _read_dataset(
         output,
-        "chaser_cra_near_field_summary",
+        "chaser_near_field_occupancy_summary",
         "goodcopbadcop_export",
     )
     assert len(near_field_summary_rows) == 1
     near_field_summary = near_field_summary_rows[0]
-    assert near_field_summary["cra_near_field_component"] == DEFAULT_CRA_NEAR_FIELD_COMPONENT_NAME
-    assert near_field_summary["cra_near_field_schema_id"] == "palette.goodcopbadcop.cra_near_field.v1"
-    assert near_field_summary["source_cra_primary_endpoint_path"] == cra_summary["source_cra_primary_endpoint_path"]
+    assert (
+        near_field_summary["cra_near_field_component"]
+        == DEFAULT_CRA_NEAR_FIELD_COMPONENT_NAME
+    )
+    assert (
+        near_field_summary["cra_near_field_schema_id"]
+        == "palette.chaser.near_field_occupancy.v1"
+    )
+    assert (
+        near_field_summary["source_quadrant_occupancy_path"]
+        == cra_summary["source_cra_primary_endpoint_path"]
+    )
     assert near_field_summary["geometry_status"] == "circle"
     assert near_field_summary["arena_shape"] == "circle"
-    np.testing.assert_allclose(near_field_summary["nearzone_occ_delta_agg"], -1.0)
-    np.testing.assert_allclose(near_field_summary["nearzone_occ_specificity"], -1.0)
+    assert near_field_summary["chaser_count"] == 2
+    assert (
+        near_field_summary["pairwise_role_contrast_policy"]
+        == "not_computed_at_recording_level"
+    )
     assert len(near_field_summary["source_lineage_hash"]) == 64
 
     near_field_object_phase_rows = _read_dataset(
         output,
-        "chaser_cra_near_field_object_phase",
+        "chaser_near_field_occupancy_chaser_phase",
         "goodcopbadcop_export",
     )
     near_field_post_aggressive = next(
@@ -1202,9 +1228,18 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
         if row["phase_label"] == "post_static" and row["object_role"] == "aggressive"
     )
     assert near_field_post_aggressive["export_run_id"] == "goodcopbadcop_export"
-    assert near_field_post_aggressive["cra_near_field_component"] == DEFAULT_CRA_NEAR_FIELD_COMPONENT_NAME
-    assert near_field_post_aggressive["source_cra_near_field_path"] == near_field_summary["source_cra_near_field_path"]
-    assert near_field_post_aggressive["source_cra_primary_endpoint_path"] == cra_summary["source_cra_primary_endpoint_path"]
+    assert (
+        near_field_post_aggressive["cra_near_field_component"]
+        == DEFAULT_CRA_NEAR_FIELD_COMPONENT_NAME
+    )
+    assert (
+        near_field_post_aggressive["source_cra_near_field_path"]
+        == near_field_summary["source_cra_near_field_path"]
+    )
+    assert (
+        near_field_post_aggressive["source_quadrant_occupancy_path"]
+        == cra_summary["source_cra_primary_endpoint_path"]
+    )
     assert near_field_post_aggressive["object_index"] == 0
     assert near_field_post_aggressive["raw_color_hex"] == "#ff0000"
     assert near_field_post_aggressive["phase_label"] == "post_static"
@@ -1215,24 +1250,33 @@ def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: P
 
     near_field_radial_rows = _read_dataset(
         output,
-        "chaser_cra_near_field_radial_density",
+        "chaser_near_field_occupancy_radial_density",
         "goodcopbadcop_export",
     )
     assert len(near_field_radial_rows) == 12
     pre_radial_aggressive = next(
         row
         for row in near_field_radial_rows
-        if row["phase_label"] == "pre_static" and row["object_role"] == "aggressive" and row["radial_bin_index"] == 0
+        if row["phase_label"] == "pre_static"
+        and row["object_role"] == "aggressive"
+        and row["radial_bin_index"] == 0
+    )
+    assert (
+        pre_radial_aggressive["cra_near_field_component"]
+        == DEFAULT_CRA_NEAR_FIELD_COMPONENT_NAME
+    )
+    assert (
+        pre_radial_aggressive["source_quadrant_occupancy_path"]
+        == cra_summary["source_cra_primary_endpoint_path"]
     )
     assert pre_radial_aggressive["cra_near_field_component"] == DEFAULT_CRA_NEAR_FIELD_COMPONENT_NAME
-    assert pre_radial_aggressive["source_cra_primary_endpoint_path"] == cra_summary["source_cra_primary_endpoint_path"]
     assert pre_radial_aggressive["radial_bin_left_mm"] == 0.0
     assert pre_radial_aggressive["radial_bin_right_mm"] == 2.0
     assert pre_radial_aggressive["radial_density_per_mm2"] is not None
 
     near_field_cdf_rows = _read_dataset(
         output,
-        "chaser_cra_near_field_distance_cdf",
+        "chaser_near_field_occupancy_distance_cdf",
         "goodcopbadcop_export",
     )
     assert len(near_field_cdf_rows) == 8

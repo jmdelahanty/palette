@@ -440,7 +440,7 @@ function linearScale(domainMin, domainMax, rangeMin, rangeMax) {
 
 function craSpecificitySvg(data) {
   if (!data || !data.available) {
-    return '<div class="empty">No CRA specificity rows found.</div>';
+    return '<div class="empty">No chaser role-specificity rows found.</div>';
   }
   const width = 920;
   const rowH = 250;
@@ -519,7 +519,7 @@ function craSpecificitySvg(data) {
   }
 
   let svg = `<svg viewBox="0 0 ${width} ${height}" role="img">`;
-  svg += `<text x="${margin.left}" y="20" fill="#182026" font-size="14" font-weight="700">CRA confirmatory specificity contrasts</text>`;
+  svg += `<text x="${margin.left}" y="20" fill="#182026" font-size="14" font-weight="700">Chaser role-specificity contrasts</text>`;
   svg += `<text x="${margin.left}" y="38" fill="#637080" font-size="11">Distance specificity is primary; occupancy index is the phase-relative quadrant companion.</text>`;
   svg += slopePanel(distanceRows, "aggressive", "Distance: aggressive", distanceDomain, xAgg, margin.top, "#b54848", "median fish-object distance (mm)");
   svg += slopePanel(distanceRows, "inert", "Distance: inert", distanceDomain, xBenign, margin.top, "#2f6fbd", "same y-axis as aggressive");
@@ -534,7 +534,7 @@ function craSpecificitySvg(data) {
 
 function quadrantOccupancyDensitySvg(data) {
   if (!data || !data.available || !data.rows || !data.rows.length) {
-    return '<div class="empty">No CRA quadrant occupancy export found.</div>';
+    return '<div class="empty">No chaser quadrant occupancy export found.</div>';
   }
   const phases = (data.phases || []).slice().sort((a, b) => Number(a.phase_axis_index) - Number(b.phase_axis_index));
   const width = 920;
@@ -651,7 +651,7 @@ function quadrantOccupancyDensitySvg(data) {
 
 function nearFieldCurvesSvg(data) {
   if (!data || !data.available) {
-    return '<div class="empty">No CRA near-field curve export found.</div>';
+    return '<div class="empty">No chaser near-field curve export found.</div>';
   }
   const width = 920;
   const height = 520;
@@ -763,23 +763,23 @@ async function loadSummary() {
     0
   );
   document.getElementById("summary-cra").textContent = fmt(
-    summary.row_counts_by_table.chaser_cra_primary_endpoint_summary,
+    summary.row_counts_by_table.chaser_quadrant_occupancy_summary,
     0
   );
   document.getElementById("summary-cra-object-phase").textContent = fmt(
-    summary.row_counts_by_table.chaser_cra_primary_endpoint_object_phase,
+    summary.row_counts_by_table.chaser_quadrant_occupancy_chaser_phase,
     0
   );
   document.getElementById("summary-cra-quadrant").textContent = fmt(
-    summary.row_counts_by_table.chaser_cra_quadrant_occupancy,
+    summary.row_counts_by_table.chaser_quadrant_occupancy_density,
     0
   );
   document.getElementById("summary-cra-near-field").textContent = fmt(
-    summary.row_counts_by_table.chaser_cra_near_field_summary,
+    summary.row_counts_by_table.chaser_near_field_occupancy_summary,
     0
   );
   document.getElementById("summary-cra-near-field-object-phase").textContent = fmt(
-    summary.row_counts_by_table.chaser_cra_near_field_object_phase,
+    summary.row_counts_by_table.chaser_near_field_occupancy_chaser_phase,
     0
   );
   document.getElementById("summary-egocentric").textContent = fmt(
@@ -1118,9 +1118,9 @@ async function loadCraSpecificity() {
   const payload = await fetchJson("/api/chaser/cra-specificity");
   const data = payload.cra_specificity;
   if (!data.available) {
-    document.getElementById("cra-specificity-meta").textContent = data.message || "No CRA specificity rows";
+    document.getElementById("cra-specificity-meta").textContent = data.message || "No chaser role-specificity rows";
     document.getElementById("cra-specificity-chart").innerHTML =
-      '<div class="empty">No CRA specificity rows found for this cohort.</div>';
+      '<div class="empty">No chaser role-specificity rows found for this cohort.</div>';
     document.getElementById("cra-specificity-table").innerHTML = "";
     return;
   }
@@ -1150,9 +1150,9 @@ async function loadCraStatistics() {
   const payload = await fetchJson("/api/chaser/statistics?metric_family=cra_primary_endpoint");
   const data = payload.statistics;
   if (!data.available || !data.rows.length) {
-    document.getElementById("cra-statistics-meta").textContent = data.message || "No CRA statistics";
+    document.getElementById("cra-statistics-meta").textContent = data.message || "No chaser role-contrast statistics";
     document.getElementById("cra-statistics-table").innerHTML =
-      '<div class="empty">No CRA statistics export found for this cohort.</div>';
+      '<div class="empty">No chaser role-contrast statistics export found for this cohort.</div>';
     return;
   }
   document.getElementById("cra-statistics-meta").textContent =
@@ -1177,9 +1177,9 @@ async function loadCraQuadrantDensity() {
   const payload = await fetchJson("/api/chaser/cra-quadrant-occupancy-density");
   const data = payload.cra_quadrant_occupancy_density;
   if (!data.available) {
-    document.getElementById("cra-quadrant-density-meta").textContent = data.message || "No CRA quadrant table";
+    document.getElementById("cra-quadrant-density-meta").textContent = data.message || "No chaser quadrant table";
     document.getElementById("cra-quadrant-density-chart").innerHTML =
-      '<div class="empty">No CRA quadrant occupancy export found for this cohort.</div>';
+      '<div class="empty">No chaser quadrant occupancy export found for this cohort.</div>';
     document.getElementById("cra-quadrant-density-table").innerHTML = "";
     document.getElementById("cra-quadrant-density-paired-table").innerHTML = "";
     return;
@@ -1218,7 +1218,7 @@ async function loadCraNearFieldCurves() {
   if (!data.available) {
     document.getElementById("cra-near-field-curves-meta").textContent = data.message || "No near-field curves";
     document.getElementById("cra-near-field-curves-chart").innerHTML =
-      '<div class="empty">No CRA near-field curve export found for this cohort.</div>';
+      '<div class="empty">No chaser near-field curve export found for this cohort.</div>';
     document.getElementById("cra-near-field-curves-table").innerHTML = "";
     return;
   }
@@ -1310,7 +1310,7 @@ async function loadCraNearFieldStatistics() {
   if (!data.available || !data.rows.length) {
     document.getElementById("cra-near-field-statistics-meta").textContent = data.message || "No near-field statistics";
     document.getElementById("cra-near-field-statistics-table").innerHTML =
-      '<div class="empty">No CRA near-field statistics export found for this cohort.</div>';
+      '<div class="empty">No chaser near-field statistics export found for this cohort.</div>';
     return;
   }
   document.getElementById("cra-near-field-statistics-meta").textContent =
@@ -1399,12 +1399,12 @@ async function loadRecordings() {
     { key: "pre_event_mean_speed_mm_s", label: "Pre speed" },
     { key: "training_event_mean_speed_mm_s", label: "Train speed" },
     { key: "post_event_mean_speed_mm_s", label: "Post speed" },
-    { key: "cra_endpoint_status", label: "CRA status" },
-    { key: "cra_delta_agg_mm", label: "CRA dAgg" },
-    { key: "cra_delta_inert_mm", label: "CRA dInert" },
-    { key: "cra_specificity_distance_mm", label: "CRA spec dist" },
-    { key: "cra_delta_occ_agg", label: "CRA dOcc agg" },
-    { key: "cra_specificity_occupancy", label: "CRA spec occ" },
+    { key: "cra_endpoint_status", label: "Quadrant status" },
+    { key: "cra_delta_agg_mm", label: "Aggressive distance delta" },
+    { key: "cra_delta_inert_mm", label: "Inert distance delta" },
+    { key: "cra_specificity_distance_mm", label: "Distance role specificity" },
+    { key: "cra_delta_occ_agg", label: "Aggressive occupancy delta" },
+    { key: "cra_specificity_occupancy", label: "Occupancy role specificity" },
     { key: "pre_event_chaser_0_alignment", label: "Pre c0 align" },
     { key: "pre_event_chaser_1_alignment", label: "Pre c1 align" },
     { key: "post_event_chaser_0_alignment", label: "Post c0 align" },

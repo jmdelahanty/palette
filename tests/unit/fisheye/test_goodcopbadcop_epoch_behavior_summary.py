@@ -4,11 +4,11 @@ import numpy as np
 import zarr
 
 from fisheye.shared.zarr.columnar import load_structured_dataset
-from fisheye.analysis.goodcopbadcop_epoch_behavior_summary import (
+from fisheye.analysis.chaser_epoch_behavior_summary import (
     DEFAULT_COMPONENT_NAME,
     SCHEMA_ID,
-    build_goodcopbadcop_epoch_behavior_summary_result,
-    write_goodcopbadcop_epoch_behavior_summary_component,
+    build_chaser_epoch_behavior_summary_result as build_goodcopbadcop_epoch_behavior_summary_result,
+    write_chaser_epoch_behavior_summary_component as write_goodcopbadcop_epoch_behavior_summary_component,
 )
 from fisheye.visualization.goodcopbadcop_interactive import load_goodcopbadcop_epoch_behavior_data
 from tests.unit.fisheye.test_marimo_palette_explorer_components import (
