@@ -17,7 +17,11 @@ import numpy as np
 import zarr
 
 from fisheye.shared.keypoint_summary import build_frame_keypoint_counts
-from fisheye.shared.row_lineage import ROW_IDENTITY_ARRAYS, SOURCE_CROP_ROW_IDS_ARRAY
+from fisheye.shared.row_lineage import (
+    ROW_IDENTITY_ARRAYS,
+    ROW_IDENTITY_MODE_SCHEMA,
+    SOURCE_CROP_ROW_IDS_ARRAY,
+)
 from fisheye.shared.run_provenance import build_writer_run_provenance, json_ready, stable_json
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.shared.zarr.chunk_profiles import (
@@ -745,6 +749,7 @@ def finalize_keypoint_shards(
                 "keypoints_processed": total_rows,
                 "instance_key_status": "present",
                 "row_identity_mode": "instance_key",
+                "row_identity_mode_schema": ROW_IDENTITY_MODE_SCHEMA,
                 "instance_key_alignment_status": "exact",
                 "instance_key_alignment_source_crop_run": source_crop_run,
                 "row_identity_validation": identity_validation,
@@ -776,6 +781,7 @@ def finalize_keypoint_shards(
                 "target_crop_run": target_crop_run,
                 "sort_policy": "source_crop_row_ids_stable_ascending",
                 "row_identity_mode": "instance_key",
+                "row_identity_mode_schema": ROW_IDENTITY_MODE_SCHEMA,
                 "instance_key_alignment_status": "exact",
                 "row_shard_rows": int(row_shard_rows),
                 "frame_shard_rows": int(frame_shard_rows),

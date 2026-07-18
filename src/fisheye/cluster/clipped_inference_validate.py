@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+import pyarrow.parquet as pq
 
 from fisheye.cluster.clipped_inference import PLAN_SCHEMA
 from fisheye.cluster.lsf import write_json_snapshot
@@ -51,11 +52,12 @@ def _required_vector(run: Any, name: str, *, label: str) -> Any:
     return array
 
 
-def _instance_key_values(run: Any, *, label: str) -> tuple[dict[str, Any], np.ndarray]:
-    array = run.get("instance_key")
-    if array is None:
-        raise RuntimeError(f"Modern production run is missing instance_key: {label}")
-    values = np.asarray(array[:], dtype=np.uint64).reshape(-1)
+def _validate_instance_key_values(
+    values: np.ndarray,
+    *,
+    label: str,
+) -> tuple[dict[str, Any], np.ndarray]:
+    values = np.asarray(values, dtype=np.uint64).reshape(-1)
     if values.size == 0:
         raise RuntimeError(f"Modern production run has no instance_key rows: {label}")
     unique = int(np.unique(values).size)
@@ -71,9 +73,38 @@ def _instance_key_values(run: Any, *, label: str) -> tuple[dict[str, Any], np.nd
     }, values
 
 
+def _instance_key_values(run: Any, *, label: str) -> tuple[dict[str, Any], np.ndarray]:
+    array = run.get("instance_key")
+    if array is None:
+        raise RuntimeError(f"Modern production run is missing instance_key: {label}")
+    return _validate_instance_key_values(np.asarray(array[:]), label=label)
+
+
 def _instance_keys(run: Any, *, label: str) -> dict[str, Any]:
     report, _values = _instance_key_values(run, label=label)
     return report
+
+
+def _require_exact_instance_key_order(
+    observed: np.ndarray,
+    expected: np.ndarray,
+    *,
+    label: str,
+) -> None:
+    observed_values = np.asarray(observed, dtype=np.uint64).reshape(-1)
+    expected_values = np.asarray(expected, dtype=np.uint64).reshape(-1)
+    if observed_values.shape != expected_values.shape:
+        raise RuntimeError(
+            f"{label} instance_key row count {int(observed_values.size)} does not match "
+            f"the canonical row count {int(expected_values.size)}."
+        )
+    if not np.array_equal(observed_values, expected_values):
+        mismatch = np.flatnonzero(observed_values != expected_values)
+        first = int(mismatch[0]) if mismatch.size else 0
+        raise RuntimeError(
+            f"{label} instance_key order does not exactly match canonical refined detections; "
+            f"first mismatch at row {first}."
+        )
 
 
 def _require_exact_vector(
@@ -158,7 +189,13 @@ def _refined_instance_key_values(
     return _instance_key_values(instances, label=f"{label}/instances")
 
 
-def _cache_manifest_report(path: Path, *, zarr_path: Path, collection_id: str, clip_id: str) -> dict[str, Any]:
+def _cache_manifest_report(
+    path: Path,
+    *,
+    zarr_path: Path,
+    collection_id: str,
+    clip_id: str,
+) -> tuple[dict[str, Any], np.ndarray]:
     manifest = load_flat_roi_cache_manifest(path)
     if not bool(manifest.get("cache_complete")):
         raise RuntimeError(f"Cache manifest is not complete: {path}")
@@ -199,13 +236,32 @@ def _cache_manifest_report(path: Path, *, zarr_path: Path, collection_id: str, c
         raise RuntimeError(f"Cache payload or row index is missing for {clip_id}.")
     if int(row_index.get("row_count") or -1) != int(shape[0]):
         raise RuntimeError(f"Cache row count mismatch for {clip_id}.")
+    columns = row_index.get("columns")
+    if not isinstance(columns, list) or "instance_key" not in columns:
+        raise RuntimeError(f"Cache row index is missing instance_key for {clip_id}.")
+    try:
+        key_table = pq.read_table(row_path, columns=["instance_key"])
+    except Exception as exc:
+        raise RuntimeError(
+            f"Unable to read cache instance_key row index for {clip_id}: {row_path}"
+        ) from exc
+    if int(key_table.num_rows) != int(shape[0]):
+        raise RuntimeError(
+            f"Cache instance_key row count mismatch for {clip_id}: "
+            f"{int(key_table.num_rows)} != {int(shape[0])}."
+        )
+    key_report, instance_keys = _validate_instance_key_values(
+        np.asarray(key_table["instance_key"].combine_chunks().to_numpy()),
+        label=f"cache row index {clip_id}",
+    )
     return {
         "clip_id": clip_id,
         "manifest": str(path),
         "shape": [int(value) for value in shape],
         "payload": str(bin_path.resolve()),
         "row_index": str(row_path.resolve()),
-    }
+        "instance_key": key_report,
+    }, instance_keys
 
 
 def _cache_validation_mode(*, cleaned_cache_count: int, clip_count: int) -> str:
@@ -300,11 +356,16 @@ def validate_target(
                 }
             )
         else:
-            cache = _cache_manifest_report(
+            cache, cache_keys = _cache_manifest_report(
                 cache_path,
                 zarr_path=zarr_path,
                 collection_id=collection_id,
                 clip_id=str(clip["clip_id"]),
+            )
+            _require_exact_instance_key_order(
+                cache_keys,
+                keys,
+                label=f"Flat ROI cache for {clip['clip_id']}",
             )
             cache_rows += int(cache["shape"][0])
             cache_reports.append(cache)
@@ -315,7 +376,22 @@ def validate_target(
             str(clip["subject_mask_shard_run"]),
         )
         raw_report = _validate_raw_masks(raw, sample_rows=sample_rows)
-        raw_mask_reports.append({"clip_id": str(clip["clip_id"]), **raw_report})
+        raw_identity, raw_keys = _instance_key_values(
+            raw,
+            label=f"subject_mask_shard_runs/{clip['subject_mask_shard_run']}",
+        )
+        _require_exact_instance_key_order(
+            raw_keys,
+            keys,
+            label=f"Raw subject-mask shard for {clip['clip_id']}",
+        )
+        raw_mask_reports.append(
+            {
+                "clip_id": str(clip["clip_id"]),
+                "instance_key": raw_identity,
+                **raw_report,
+            }
+        )
 
     detection_keys = np.concatenate(detection_key_parts).astype(np.uint64, copy=False)
     detection_unique = int(np.unique(detection_keys).size)

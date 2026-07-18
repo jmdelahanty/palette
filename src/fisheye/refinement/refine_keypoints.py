@@ -72,7 +72,12 @@ from ..registry.stage_complete import (
     emit_stage_completion,
     extract_dataset_metadata,
 )
-from ..shared.row_lineage import copy_row_lineage_arrays, resolve_source_crop_row_ids, write_direct_source_crop_row_ids
+from ..shared.row_lineage import (
+    copy_row_lineage_arrays,
+    resolve_source_crop_row_ids,
+    stamp_row_identity_mode,
+    write_direct_source_crop_row_ids,
+)
 from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import as_float, normalize_attr
@@ -1218,6 +1223,11 @@ def create_refined_keypoint_run(
             write_direct_source_crop_row_ids(kp_refined, total_rois=total_rois)
     if "n_rois" in kp_source:
         _copy_array(kp_source["n_rois"], kp_refined, "n_rois")
+    stamp_row_identity_mode(
+        kp_refined,
+        kp_refined,
+        requested_mode=normalize_attr(kp_source.attrs.get("row_identity_mode")),
+    )
 
     heading_chunks = kp_source["heading"].chunks or (min(1024, total_rois),)
     if "detection_source" in kp_source:
@@ -1414,7 +1424,7 @@ def create_refined_keypoint_run(
         fill_value=False,
         overwrite=True,
     )
-    heading_finite_dst = kp_refined.create_array(
+    kp_refined.create_array(
         "heading_finite",
         shape=(total_rois,),
         chunks=heading_chunks,
@@ -1422,7 +1432,7 @@ def create_refined_keypoint_run(
         fill_value=False,
         overwrite=True,
     )
-    heading_usable_dst = kp_refined.create_array(
+    kp_refined.create_array(
         "heading_usable",
         shape=(total_rois,),
         chunks=heading_chunks,

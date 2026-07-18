@@ -525,6 +525,11 @@ def test_write_dense_curated_edit_payload_sparse_branch_threads_instance_keys(tm
 
     instances = refined["instances"]
     assert instances.attrs["instance_key_status"] == "present"
+    refreshed_refined = zarr.open_group(str(zarr_path), mode="r")[
+        "refined_detect_runs/refined_detect_001"
+    ]
+    assert refreshed_refined.attrs["row_identity_mode"] == "instance_key"
+    assert refreshed_refined.attrs["row_identity_mode_schema"] == "palette.row_identity_mode.v1"
     assert instances["frame_indices"][:].tolist() == [1, 2, 3]
     assert instances["instance_key"][:].tolist() == [111, int(expected_minted[0]), 222]
     assert instances["instance_key_origin_codes"][:].tolist() == [

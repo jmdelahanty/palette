@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from fisheye.cluster import clipped_inference as workflow
@@ -22,12 +24,15 @@ from fisheye.cluster.clipped_detection import (
 )
 from fisheye.cluster.clipped_inference_cleanup import cleanup
 from fisheye.cluster.clipped_inference_validate import (
+    _cache_manifest_report,
     _cache_validation_mode,
     _instance_keys,
     _refined_instance_keys,
+    _require_exact_instance_key_order,
     _require_exact_vector,
     _validate_run_frame_counts,
 )
+from fisheye.shared.flat_roi_cache import FLAT_ROI_CACHE_LAYOUT, FLAT_ROI_CACHE_SCHEMA
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -54,6 +59,60 @@ def test_clipped_validator_requires_exact_identity_order() -> None:
             label="refined_subject_masks/instance_key",
             dtype=np.uint64,
         )
+
+
+def test_clipped_validator_rejects_equal_sized_unrelated_identity_rowsets() -> None:
+    with pytest.raises(RuntimeError, match="first mismatch at row 1"):
+        _require_exact_instance_key_order(
+            np.asarray([10, 99, 30], dtype=np.uint64),
+            np.asarray([10, 20, 30], dtype=np.uint64),
+            label="raw subject-mask shard",
+        )
+
+
+def test_cache_manifest_report_reads_canonical_instance_keys(tmp_path: Path) -> None:
+    archive = tmp_path / "recording_analysis.zarr"
+    archive.mkdir()
+    manifest_path = tmp_path / "cache.json"
+    payload_path = tmp_path / "cache.bin"
+    row_path = tmp_path / "cache.rows.parquet"
+    payload_path.write_bytes(bytes(12))
+    pq.write_table(
+        pa.table({"instance_key": pa.array([10, 20, 30], type=pa.uint64())}),
+        row_path,
+    )
+    _write_json(
+        manifest_path,
+        {
+            "schema": FLAT_ROI_CACHE_SCHEMA,
+            "layout": FLAT_ROI_CACHE_LAYOUT,
+            "cache_complete": True,
+            "source": {
+                "archive_path": str(archive),
+                "collection_id": "collection_001",
+                "selection": {"clip_ids": ["clip_000001"]},
+            },
+            "array": {
+                "shape": [3, 2, 2],
+                "bin_path": payload_path.name,
+            },
+            "row_index": {
+                "path": row_path.name,
+                "row_count": 3,
+                "columns": ["instance_key"],
+            },
+        },
+    )
+
+    report, keys = _cache_manifest_report(
+        manifest_path,
+        zarr_path=archive.resolve(),
+        collection_id="collection_001",
+        clip_id="clip_000001",
+    )
+
+    assert report["instance_key"]["unique_count"] == 3
+    np.testing.assert_array_equal(keys, np.asarray([10, 20, 30], dtype=np.uint64))
 
 
 def test_clipped_validator_requires_recording_wide_exact_frame_counts() -> None:

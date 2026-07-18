@@ -1969,6 +1969,8 @@ def test_finalize_subject_mask_run_copies_instance_key_from_source(monkeypatch) 
 
     run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_001"]
     assert "instance_key" in run
+    assert run.attrs["row_identity_mode"] == "instance_key"
+    assert run.attrs["row_identity_mode_schema"] == "palette.row_identity_mode.v1"
     copied = np.asarray(run["instance_key"][:], dtype=np.uint64)
     np.testing.assert_array_equal(copied, keys)
 
@@ -1986,3 +1988,5 @@ def test_finalize_subject_mask_run_omits_instance_key_for_legacy_source(monkeypa
 
     run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_001"]
     assert "instance_key" not in run
+    assert run.attrs["row_identity_mode"] == "legacy_positional"
+    assert run.attrs["row_identity_mode_schema"] == "palette.row_identity_mode.v1"

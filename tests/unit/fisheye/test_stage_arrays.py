@@ -16,6 +16,11 @@ from fisheye.shared.mask_store import (
     write_bitpacked_mask_store_from_dense,
     write_component_rle_mask_store_from_dense,
 )
+from fisheye.shared.row_lineage import (
+    ROW_IDENTITY_MODE_INSTANCE_KEY,
+    ROW_IDENTITY_MODE_LEGACY_POSITIONAL,
+    ROW_IDENTITY_MODE_SCHEMA,
+)
 from fisheye.shared.zarr.stage_arrays import (
     ARENA_ASSIGNMENT_SPEC,
     BOUT_KINEMATICS_SPEC,
@@ -592,3 +597,92 @@ def test_validate_run_refined_detect_reports_missing_root_array() -> None:
     result = validate_run(group, REFINED_DETECT_SPEC)
     assert not result.valid
     assert any("missing required array 'source_kind_codes'" in msg for msg in result.errors)
+
+
+@pytest.mark.parametrize(
+    ("stage_spec", "identity_subgroup"),
+    (
+        (REFINED_DETECT_SPEC, "instances"),
+        (REFINED_KEYPOINTS_SPEC, None),
+        (REFINED_SUBJECT_MASKS_SPEC, None),
+    ),
+)
+def test_refined_identity_validation_requires_keys_for_modern_mode(
+    stage_spec: StageSpec,
+    identity_subgroup: str | None,
+) -> None:
+    group = zarr.group()
+    _write_required_arrays(group, stage_spec)
+    group.attrs["row_identity_mode"] = ROW_IDENTITY_MODE_INSTANCE_KEY
+    group.attrs["row_identity_mode_schema"] = ROW_IDENTITY_MODE_SCHEMA
+
+    result = validate_run(group, stage_spec)
+
+    assert not result.valid
+    assert any("requires instance_key" in message for message in result.errors)
+
+    identity_group = group[identity_subgroup] if identity_subgroup is not None else group
+    row_axis_array = (
+        identity_group["frame_indices"]
+        if "frame_indices" in identity_group
+        else identity_group["source_crop_row_ids"]
+    )
+    row_count = int(row_axis_array.shape[0])
+    identity_group.create_array(
+        "instance_key",
+        data=np.arange(1, row_count + 1, dtype=np.uint64),
+        overwrite=True,
+    )
+    result = validate_run(group, stage_spec)
+    assert result.valid, result.errors
+
+
+def test_refined_identity_validation_rejects_duplicate_modern_keys() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, REFINED_KEYPOINTS_SPEC)
+    group.attrs["row_identity_mode"] = ROW_IDENTITY_MODE_INSTANCE_KEY
+    group.attrs["row_identity_mode_schema"] = ROW_IDENTITY_MODE_SCHEMA
+    row_count = int(group["frame_indices"].shape[0])
+    group.create_array(
+        "instance_key",
+        data=np.ones((row_count,), dtype=np.uint64),
+        overwrite=True,
+    )
+
+    result = validate_run(group, REFINED_KEYPOINTS_SPEC)
+
+    assert not result.valid
+    assert any("duplicate values" in message for message in result.errors)
+
+
+def test_refined_identity_validation_labels_historical_keyless_mode() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, REFINED_KEYPOINTS_SPEC)
+    group.attrs["row_identity_mode"] = ROW_IDENTITY_MODE_LEGACY_POSITIONAL
+    group.attrs["row_identity_mode_schema"] = ROW_IDENTITY_MODE_SCHEMA
+
+    result = validate_run(group, REFINED_KEYPOINTS_SPEC)
+
+    assert result.valid, result.errors
+    assert any("explicit legacy_positional compatibility mode" in message for message in result.warnings)
+    assert not any(
+        "missing optional array 'instance_key'" in message for message in result.warnings
+    )
+
+
+def test_refined_identity_validation_rejects_explicit_identity_downgrade() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, REFINED_KEYPOINTS_SPEC)
+    group.attrs["row_identity_mode"] = ROW_IDENTITY_MODE_LEGACY_POSITIONAL
+    group.attrs["row_identity_mode_schema"] = ROW_IDENTITY_MODE_SCHEMA
+    row_count = int(group["frame_indices"].shape[0])
+    group.create_array(
+        "instance_key",
+        data=np.arange(1, row_count + 1, dtype=np.uint64),
+        overwrite=True,
+    )
+
+    result = validate_run(group, REFINED_KEYPOINTS_SPEC)
+
+    assert not result.valid
+    assert any("refusing an identity downgrade" in message for message in result.errors)

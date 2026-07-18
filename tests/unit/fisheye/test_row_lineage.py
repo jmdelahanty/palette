@@ -15,6 +15,7 @@ from fisheye.shared.row_lineage import (
     copy_row_lineage_arrays_from_sources,
     copy_row_lineage_arrays_with_fallback,
     resolve_row_lineage_identity_mode,
+    stamp_row_identity_mode,
 )
 
 
@@ -326,3 +327,15 @@ def test_resolve_row_lineage_identity_mode_labels_modern_keyed_sources() -> None
         )
         == ROW_IDENTITY_MODE_INSTANCE_KEY
     )
+
+
+def test_stamp_row_identity_mode_records_versioned_contract() -> None:
+    source = _FakeGroup()
+    target = _FakeGroup()
+    _seed_lineage(source)
+
+    mode = stamp_row_identity_mode(target, source)
+
+    assert mode == ROW_IDENTITY_MODE_INSTANCE_KEY
+    assert target.attrs["row_identity_mode"] == ROW_IDENTITY_MODE_INSTANCE_KEY
+    assert target.attrs["row_identity_mode_schema"] == "palette.row_identity_mode.v1"

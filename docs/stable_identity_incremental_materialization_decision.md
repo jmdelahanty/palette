@@ -570,7 +570,12 @@ practice.
 - [x] Reject one-sided `instance_key` loss instead of silently falling back to
   positional lineage comparison; label two-keyless compatibility as
   `legacy_positional`.
-- Make modern refined identity validation inspect key presence and uniqueness.
+- [x] Make refined-detect, refined-keypoint, and refined-subject-mask validation
+  enforce explicit modern key presence and uniqueness while reporting historical
+  keyless runs as legacy compatibility.
+- [x] Make clipped production validation compare exact ordered keys for cache
+  row indexes and raw mask shards as well as merged crops, keypoints, and refined
+  masks.
 - Define the per-row source signature/revision contract used for reuse.
 
 ### Phase 1: shared planner and crop proof

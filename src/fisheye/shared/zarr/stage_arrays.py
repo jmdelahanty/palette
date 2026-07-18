@@ -6,6 +6,13 @@ from typing import Dict, List, Tuple, Union
 import numpy as np
 import zarr
 
+from fisheye.shared.row_lineage import (
+    ROW_IDENTITY_MODE_INSTANCE_KEY,
+    ROW_IDENTITY_MODE_LEGACY_POSITIONAL,
+    ROW_IDENTITY_MODE_SCHEMA,
+    ROW_IDENTITY_MODES,
+)
+
 ShapeDim = Union[str, int]
 
 
@@ -198,6 +205,105 @@ def _validate_specs(
                 errors.append(
                     f"{group_label}: leading dimension mismatch for '{leading_key}' ({spec.name} has {current}, expected {previous})"
                 )
+
+
+_REFINED_IDENTITY_TARGETS = {
+    "refined_detect": "instances",
+    "refined_keypoints": None,
+    "refined_subject_masks": None,
+}
+
+
+def _validate_refined_instance_key_identity(
+    group: zarr.Group,
+    spec: StageSpec,
+    *,
+    errors: List[str],
+    warnings: List[str],
+) -> None:
+    if spec.stage_name not in _REFINED_IDENTITY_TARGETS:
+        return
+
+    subgroup_name = _REFINED_IDENTITY_TARGETS[spec.stage_name]
+    identity_group = group
+    identity_label = spec.stage_name
+    if subgroup_name is not None:
+        if subgroup_name not in group or not _is_group_like(group[subgroup_name]):
+            return
+        identity_group = group[subgroup_name]
+        identity_label = f"{spec.stage_name}/{subgroup_name}"
+
+    missing_optional = f"{identity_label}: missing optional array 'instance_key'"
+    warnings[:] = [message for message in warnings if message != missing_optional]
+
+    attrs = getattr(group, "attrs", {})
+    raw_mode = attrs.get("row_identity_mode")
+    mode = str(raw_mode).strip() if raw_mode is not None else None
+    schema = attrs.get("row_identity_mode_schema")
+    key_array = identity_group.get("instance_key")
+    has_keys = key_array is not None
+
+    if mode is not None and mode not in ROW_IDENTITY_MODES:
+        errors.append(
+            f"{spec.stage_name}: unknown row_identity_mode {mode!r}; "
+            f"expected one of {sorted(ROW_IDENTITY_MODES)}"
+        )
+        return
+    if mode is not None and schema != ROW_IDENTITY_MODE_SCHEMA:
+        errors.append(
+            f"{spec.stage_name}: row_identity_mode_schema must be "
+            f"{ROW_IDENTITY_MODE_SCHEMA!r} when row_identity_mode is set"
+        )
+
+    if mode == ROW_IDENTITY_MODE_INSTANCE_KEY and not has_keys:
+        errors.append(
+            f"{identity_label}: modern row_identity_mode='instance_key' requires instance_key"
+        )
+        return
+    if mode == ROW_IDENTITY_MODE_LEGACY_POSITIONAL and has_keys:
+        errors.append(
+            f"{identity_label}: legacy_positional mode cannot contain instance_key; "
+            "refusing an identity downgrade"
+        )
+        return
+
+    instance_key_status = getattr(identity_group, "attrs", {}).get("instance_key_status")
+    if not has_keys:
+        if instance_key_status == "present":
+            errors.append(
+                f"{identity_label}: instance_key_status='present' but instance_key is missing"
+            )
+        elif mode == ROW_IDENTITY_MODE_LEGACY_POSITIONAL:
+            warnings.append(
+                f"{identity_label}: modern identity array absent; explicit legacy_positional compatibility mode"
+            )
+        elif mode is None:
+            warnings.append(
+                f"{identity_label}: modern identity array absent; inferred legacy compatibility mode"
+            )
+        return
+
+    if instance_key_status == "missing":
+        errors.append(
+            f"{identity_label}: instance_key_status='missing' but instance_key is present"
+        )
+
+    if np.dtype(key_array.dtype) != np.dtype(np.uint64):
+        errors.append(
+            f"{identity_label}/instance_key: dtype must be uint64, got {key_array.dtype}"
+        )
+    values = np.asarray(key_array[:], dtype=np.uint64).reshape(-1)
+    unique_count = int(np.unique(values).size)
+    if unique_count != int(values.size):
+        errors.append(
+            f"{identity_label}/instance_key: duplicate values "
+            f"({unique_count}/{int(values.size)} unique)"
+        )
+    if mode is None:
+        warnings.append(
+            f"{identity_label}: instance_key present but row_identity_mode is unstamped; "
+            "inferred instance_key compatibility mode"
+        )
 
 
 _REFINED_SUBJECT_MASK_RLE_COMPONENT_SPECS: Tuple[ArraySpec, ...] = (
@@ -531,6 +637,13 @@ def validate_run(group: zarr.Group, spec: StageSpec) -> ValidationResult:
                 errors=errors,
                 warnings=warnings,
             )
+
+    _validate_refined_instance_key_identity(
+        group,
+        spec,
+        errors=errors,
+        warnings=warnings,
+    )
 
     if spec.stage_name == "refined_subject_masks":
         _validate_refined_subject_mask_storage(group, errors=errors, warnings=warnings)

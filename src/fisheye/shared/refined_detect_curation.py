@@ -21,6 +21,7 @@ from .instance_keys import (
     resolve_recording_identity,
 )
 from .json_safety import json_attr_safe
+from .row_lineage import stamp_row_identity_mode
 from .stage_provenance import build_stage_provenance
 from .type_conversions import as_int, clean_mapping, normalize_attr
 from .zarr_run_completion import resolve_latest_complete_run_name
@@ -2744,6 +2745,11 @@ def write_curated_refined_detect_surfaces(
         class_ids=source_detection_class_ids_arr,
         instance_key=source_detection_instance_key_arr,
         review_notes=source_detection_review_notes_arr,
+    )
+    stamp_row_identity_mode(
+        refined_run,
+        refined_run["instances"],
+        requested_mode=normalize_attr(refined_run.attrs.get("row_identity_mode")),
     )
 
     refined_run.attrs[NEXT_REFINED_ROW_ID_ATTR] = int(_next_refined_row_id(refined_run))

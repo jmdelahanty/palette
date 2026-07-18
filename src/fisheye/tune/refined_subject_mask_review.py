@@ -52,7 +52,11 @@ from ..shared.provenance_attrs import (
     resolve_source_keypoints_run,
 )
 from ..shared.refined_subject_component_contours import mark_component_rows_updated
-from ..shared.row_lineage import copy_row_lineage_arrays_from_sources, resolve_source_crop_row_ids
+from ..shared.row_lineage import (
+    copy_row_lineage_arrays_from_sources,
+    resolve_source_crop_row_ids,
+    stamp_row_identity_mode,
+)
 from ..shared.subject_mask_chunks import (
     refined_subject_mask_metric_row_chunk,
     refined_subject_mask_storage_chunks,
@@ -1865,6 +1869,16 @@ def _create_refined_subject_run_from_component_seeds(
     if extra_attrs:
         for key, value in extra_attrs.items():
             run_group.attrs[str(key)] = value
+    requested_identity_mode = run_group.attrs.get("row_identity_mode")
+    if requested_identity_mode is None:
+        requested_identity_mode = reference_source.group.attrs.get("row_identity_mode")
+    stamp_row_identity_mode(
+        run_group,
+        run_group,
+        requested_mode=(
+            str(requested_identity_mode) if requested_identity_mode is not None else None
+        ),
+    )
 
     component_reviews = {
         component_name: _review_payload(

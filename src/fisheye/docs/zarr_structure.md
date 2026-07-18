@@ -725,6 +725,10 @@ Common optional arrays:
 - `instance_key`: stable observation identity; required for modern keyed runs
 - `instance_key_origin_codes`: `0` for copied detector identity and `1` for a
   key minted when a manual observation is first created
+- `row_identity_mode`: run attr set to `instance_key` for modern keyed runs or
+  `legacy_positional` for explicitly labeled historical compatibility
+- `row_identity_mode_schema`: run attr set to `palette.row_identity_mode.v1`
+  whenever `row_identity_mode` is present
 - `confidence_scores`
 - `class_ids`
 - `source_detect_row_index`

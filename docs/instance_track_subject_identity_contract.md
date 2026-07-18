@@ -76,6 +76,12 @@ the decision use `row_identity_mode` with schema
 `palette.row_identity_mode.v1`; modern outputs use `instance_key` and historical
 compatibility outputs use `legacy_positional`.
 
+Current refined-detect, refined-keypoint, and refined-subject-mask writers stamp
+that contract on new runs. Their shared validator requires an explicitly modern
+run to contain unique keys, rejects an explicit positional downgrade when keys
+exist, and gives historical unstamped keyless runs a distinct legacy-compatibility
+warning rather than describing `instance_key` as merely optional.
+
 ## Source Rowset Fingerprint
 
 Arena assignment and tracking bind to one exact source rowset using a distinct

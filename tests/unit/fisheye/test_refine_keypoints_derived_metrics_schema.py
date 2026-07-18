@@ -172,6 +172,7 @@ def _make_keypoint_root() -> _FakeGroup:
     run.create_array("frame_counts", data=np.asarray([1], dtype=np.int32), chunks=(1,))
     run.create_array("n_rois", data=np.asarray([1], dtype=np.int32), chunks=(1,))
     run.create_array("detection_indices", data=np.asarray([0], dtype=np.int32), chunks=(1,))
+    run.create_array("instance_key", data=np.asarray([1001], dtype=np.uint64), chunks=(1,))
     run.create_array(
         "keypoints_roi",
         data=np.asarray([[[1.0, 1.0], [5.0, 1.0], [3.0, 4.0]]], dtype=np.float64),
@@ -313,6 +314,9 @@ def test_create_refined_keypoint_run_emits_derived_metrics_schema(monkeypatch) -
     schema = dict(refined.attrs["derived_metrics_schema"])
 
     assert refined.attrs["source_refined_run"] == "refined_detect_001"
+    assert refined.attrs["row_identity_mode"] == "instance_key"
+    assert refined.attrs["row_identity_mode_schema"] == "palette.row_identity_mode.v1"
+    assert refined["instance_key"][:].tolist() == [1001]
     assert refined.attrs["skeleton_id"] == "fish_v1"
     assert refined.attrs["kpt_shape"] == [3, 2]
     assert refined.attrs["pose_schema"]["skeleton_id"] == "fish_v1"

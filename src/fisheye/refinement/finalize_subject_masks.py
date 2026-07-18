@@ -40,7 +40,7 @@ from ..shared.provenance_attrs import (
     build_assignment_keypoint_attrs,
     build_source_keypoints_attrs,
 )
-from ..shared.row_lineage import copy_row_lineage_arrays_from_sources
+from ..shared.row_lineage import copy_row_lineage_arrays_from_sources, stamp_row_identity_mode
 from ..shared.run_provenance import build_run_provenance_from_stage_record
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.mask_store import (
@@ -2308,6 +2308,16 @@ def _create_refined_run_shell(
     run_group.attrs["duration_seconds"] = 0.0
     for key, value in extra_attrs.items():
         run_group.attrs[str(key)] = value
+    requested_identity_mode = run_group.attrs.get("row_identity_mode")
+    if requested_identity_mode is None:
+        requested_identity_mode = source.group.attrs.get("row_identity_mode")
+    stamp_row_identity_mode(
+        run_group,
+        run_group,
+        requested_mode=(
+            str(requested_identity_mode) if requested_identity_mode is not None else None
+        ),
+    )
 
     component_reviews = {
         component_name: _review_payload(

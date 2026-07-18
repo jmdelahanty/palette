@@ -582,6 +582,26 @@ def resolve_row_lineage_identity_mode(
     )
 
 
+def stamp_row_identity_mode(
+    target_group: zarr.Group,
+    source_arrays: Mapping[str, object | None],
+    *,
+    requested_mode: str | None = None,
+    allow_legacy_positional: bool = True,
+) -> str:
+    """Validate and record the row-identity mode inherited by a new run."""
+
+    resolved_mode = resolve_row_lineage_identity_mode(
+        source_arrays,
+        source_arrays,
+        requested_mode=requested_mode,
+        allow_legacy_positional=allow_legacy_positional,
+    )
+    target_group.attrs["row_identity_mode"] = resolved_mode
+    target_group.attrs["row_identity_mode_schema"] = ROW_IDENTITY_MODE_SCHEMA
+    return resolved_mode
+
+
 def assert_row_lineage_alignment_equal(
     reference: Mapping[str, object],
     other: Mapping[str, object],
