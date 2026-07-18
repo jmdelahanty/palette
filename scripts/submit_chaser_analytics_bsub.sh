@@ -47,11 +47,16 @@ NO_INTERACTIVE_SPEC=0
 TRACK_RUN="track_kinematics_chaser_v1_20260717"
 SWIM_BOUT_RUN="swim_bouts_chaser_v1_20260717"
 BOUT_KINEMATICS_RUN="bout_kinematics_chaser_v1_20260717"
+TRACK_RUN_EXPLICIT=0
+SWIM_BOUT_RUN_EXPLICIT=0
+BOUT_KINEMATICS_RUN_EXPLICIT=0
 INCLUDE_EYE_GAZE=1
 
 EPOCH_RUN="stimulus_epochs_chaser_v1_20260717"
 OCCUPANCY_RUN="detection_occupancy_chaser_v1_20260717"
 CHASER_DISTANCE_RUN="chaser_distance_chaser_v1_20260717"
+EPOCH_RUN_EXPLICIT=0
+CHASER_DISTANCE_RUN_EXPLICIT=0
 QUADRANT_OCCUPANCY_COMPONENT="quadrant_occupancy_v1_20260717"
 NEAR_FIELD_OCCUPANCY_COMPONENT="near_field_occupancy_v1_20260717"
 EPOCH_BEHAVIOR_COMPONENT="epoch_behavior_v1_20260717"
@@ -162,6 +167,12 @@ LSF options:
   --run-id ID                 Stable run id. Defaults to UTC timestamp.
   --dry-run                   Write manifest/job script and print bsub command; do not submit.
 
+Authoritative input resolution:
+  When a producer stage is skipped and its corresponding --*-run selector was
+  not explicitly supplied, each task resolves that input from the recording's
+  authoritative latest-complete pointer. Explicit selectors always win. This
+  permits registry cohorts whose completed prerequisite run names differ.
+
 Stage toggles:
   --skip-movement             Skip arena assignment, track kinematics, swim bouts, bout kinematics.
   --skip-stimulus-epoch       Skip stimulus epoch materialization.
@@ -271,12 +282,12 @@ while [[ $# -gt 0 ]]; do
       RUN_EPOCH_BEHAVIOR=0; RUN_EGOCENTRIC=0; RUN_ESCAPE_FREEZE=0
       RUN_EYE_ANGLES=0; RUN_GAZE_TRACKING=1; shift;;
     --preset) apply_preset "$2"; shift 2;;
-    --track-run) TRACK_RUN="$2"; shift 2;;
-    --swim-bout-run) SWIM_BOUT_RUN="$2"; shift 2;;
-    --bout-kinematics-run) BOUT_KINEMATICS_RUN="$2"; shift 2;;
-    --epoch-run) EPOCH_RUN="$2"; shift 2;;
+    --track-run) TRACK_RUN="$2"; TRACK_RUN_EXPLICIT=1; shift 2;;
+    --swim-bout-run) SWIM_BOUT_RUN="$2"; SWIM_BOUT_RUN_EXPLICIT=1; shift 2;;
+    --bout-kinematics-run) BOUT_KINEMATICS_RUN="$2"; BOUT_KINEMATICS_RUN_EXPLICIT=1; shift 2;;
+    --epoch-run) EPOCH_RUN="$2"; EPOCH_RUN_EXPLICIT=1; shift 2;;
     --occupancy-run) OCCUPANCY_RUN="$2"; shift 2;;
-    --chaser-distance-run) CHASER_DISTANCE_RUN="$2"; shift 2;;
+    --chaser-distance-run) CHASER_DISTANCE_RUN="$2"; CHASER_DISTANCE_RUN_EXPLICIT=1; shift 2;;
     --quadrant-occupancy-component) QUADRANT_OCCUPANCY_COMPONENT="$2"; shift 2;;
     --near-field-occupancy-component) NEAR_FIELD_OCCUPANCY_COMPONENT="$2"; shift 2;;
     --epoch-behavior-component) EPOCH_BEHAVIOR_COMPONENT="$2"; shift 2;;
@@ -306,6 +317,44 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown arg: $1" >&2; usage; exit 2;;
   esac
 done
+
+TRACK_RUN_SELECTION="configured_output"
+SWIM_BOUT_RUN_SELECTION="configured_output"
+BOUT_KINEMATICS_RUN_SELECTION="configured_output"
+EPOCH_RUN_SELECTION="configured_output"
+CHASER_DISTANCE_RUN_SELECTION="configured_output"
+
+if [[ "$RUN_MOVEMENT" == "0" ]]; then
+  TRACK_RUN_SELECTION="explicit_reuse"
+  SWIM_BOUT_RUN_SELECTION="explicit_reuse"
+  BOUT_KINEMATICS_RUN_SELECTION="explicit_reuse"
+  if [[ "$TRACK_RUN_EXPLICIT" == "0" ]]; then
+    TRACK_RUN="latest"
+    TRACK_RUN_SELECTION="authoritative_latest_complete"
+  fi
+  if [[ "$SWIM_BOUT_RUN_EXPLICIT" == "0" ]]; then
+    SWIM_BOUT_RUN="latest"
+    SWIM_BOUT_RUN_SELECTION="authoritative_latest_complete"
+  fi
+  if [[ "$BOUT_KINEMATICS_RUN_EXPLICIT" == "0" ]]; then
+    BOUT_KINEMATICS_RUN="latest"
+    BOUT_KINEMATICS_RUN_SELECTION="authoritative_latest_complete"
+  fi
+fi
+if [[ "$RUN_STIMULUS_EPOCH" == "0" ]]; then
+  EPOCH_RUN_SELECTION="explicit_reuse"
+  if [[ "$EPOCH_RUN_EXPLICIT" == "0" ]]; then
+    EPOCH_RUN="latest"
+    EPOCH_RUN_SELECTION="authoritative_latest_complete"
+  fi
+fi
+if [[ "$RUN_CHASER_DISTANCE" == "0" ]]; then
+  CHASER_DISTANCE_RUN_SELECTION="explicit_reuse"
+  if [[ "$CHASER_DISTANCE_RUN_EXPLICIT" == "0" ]]; then
+    CHASER_DISTANCE_RUN="latest"
+    CHASER_DISTANCE_RUN_SELECTION="authoritative_latest_complete"
+  fi
+fi
 
 if [[ "$SOURCE" != "filesystem" && "$SOURCE" != "registry" ]]; then
   echo "--source must be filesystem or registry, got: $SOURCE" >&2
@@ -583,10 +632,15 @@ write_var NO_INTERACTIVE_SPEC "$NO_INTERACTIVE_SPEC"
 write_var TRACK_RUN "$TRACK_RUN"
 write_var SWIM_BOUT_RUN "$SWIM_BOUT_RUN"
 write_var BOUT_KINEMATICS_RUN "$BOUT_KINEMATICS_RUN"
+write_var TRACK_RUN_SELECTION "$TRACK_RUN_SELECTION"
+write_var SWIM_BOUT_RUN_SELECTION "$SWIM_BOUT_RUN_SELECTION"
+write_var BOUT_KINEMATICS_RUN_SELECTION "$BOUT_KINEMATICS_RUN_SELECTION"
 write_var INCLUDE_EYE_GAZE "$INCLUDE_EYE_GAZE"
 write_var EPOCH_RUN "$EPOCH_RUN"
+write_var EPOCH_RUN_SELECTION "$EPOCH_RUN_SELECTION"
 write_var OCCUPANCY_RUN "$OCCUPANCY_RUN"
 write_var CHASER_DISTANCE_RUN "$CHASER_DISTANCE_RUN"
+write_var CHASER_DISTANCE_RUN_SELECTION "$CHASER_DISTANCE_RUN_SELECTION"
 write_var QUADRANT_OCCUPANCY_COMPONENT "$QUADRANT_OCCUPANCY_COMPONENT"
 write_var NEAR_FIELD_OCCUPANCY_COMPONENT "$NEAR_FIELD_OCCUPANCY_COMPONENT"
 write_var EPOCH_BEHAVIOR_COMPONENT "$EPOCH_BEHAVIOR_COMPONENT"
@@ -894,9 +948,21 @@ import numpy as np
 
 from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.shared.zarr_io import open_zarr_root
+from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
 
 root = open_zarr_root(Path(sys.argv[1]), mode="r")
-chasers = root[f"analysis/chaser_distance_runs/{sys.argv[2]}/chasers"]
+parent = root.get("analysis/chaser_distance_runs")
+if parent is None:
+    raise ValueError("Archive has no analysis/chaser_distance_runs group.")
+requested = str(sys.argv[2]).strip()
+resolved = requested
+if not resolved or resolved == "latest":
+    resolved = resolve_authoritative_run_name(parent) or ""
+if not resolved or resolved not in parent:
+    raise ValueError(
+        "No authoritative chaser-distance run found for escape/freeze discovery."
+    )
+chasers = parent[resolved]["chasers"]
 indices = np.asarray(chasers["chaser_index"][:], dtype=np.int64).reshape(-1)
 if "behavior_class_label_bytes" not in chasers:
     raise ValueError("all_applicable escape/freeze selection requires persisted behavior classes")

@@ -26,6 +26,7 @@ def test_goodcopbadcop_epoch_behavior_summary_builds_fish_and_chaser_tables(tmp_
     result = build_goodcopbadcop_epoch_behavior_summary_result(
         zarr_path,
         chaser_distance_run="chaser_distance_1",
+        track_kinematics_run="latest",
     )
 
     assert result.component_name == DEFAULT_COMPONENT_NAME
