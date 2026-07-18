@@ -1,11 +1,13 @@
 #!/usr/bin/env python
-"""Reproducible: pre-vs-post occupancy heatmaps for the top learned-spatial-avoidance fish.
+"""Reproducible: pre-vs-post occupancy heatmaps for the top learned-object-avoidance fish.
 
-Ranks fish by `occ_learned` (post-minus-pre near-object dwell vs a wall-matched virtual,
-from analyze_goodcopbadcop_per_fish) and plots each top fish's arena occupancy heatmap in
-pre vs post, with the aggressive object's position and its 15 mm near-zone marked. This is
-the visual confirmation of the individual "post heatmap stays off the chaser's zone" fish
-that the cohort mean (~null) hides.
+Ranks fish by `occ_did` (the aggressive-vs-inert diff-in-diff from
+analyze_goodcopbadcop_per_fish -- object-identity-specific learned avoidance, immune to a
+fixed wall preference because both objects relocate) and plots each top fish's arena
+occupancy heatmap in pre vs post, with BOTH objects' positions and 15 mm near-zones
+marked (green star = aggressive/red object, cyan star = inert/blue object). A genuine
+learner dwells near the inert object but leaves the aggressive object's zone empty post.
+This surfaces the individual learners the cohort mean (~null) hides.
 
 Run (palette env):
     python -m fisheye.analysis.plot_goodcopbadcop_occupancy_heatmaps            # top 6
@@ -35,7 +37,7 @@ from fisheye.analysis.goodcopbadcop_common import (
     resolve_cohort,
     resolve_object_roles,
 )
-from fisheye.analysis.analyze_goodcopbadcop_per_fish import spatial_avoidance
+from fisheye.analysis.analyze_goodcopbadcop_per_fish import spatial_avoidance_did
 from fisheye.shared.arena_geometry import resolve_arena_geometry
 
 NEAR_MM = 15.0
@@ -46,21 +48,19 @@ def load_positions(zp: str):
     r = zarr.open_group(zp, mode="r")
     cd = latest(nav(r, ["analysis", "chaser_distance_runs"]))
     roles = resolve_object_roles(r)
-    agg = roles["aggressive"]
+    agg, inr = roles["aggressive"], roles["inert"]
     fish = np.asarray(cd["positions"]["fish_centroid_arena_xy"][:], float)
     fvalid = np.asarray(cd["positions"]["fish_valid"][:], bool)
     chas = np.asarray(cd["positions"]["chaser_arena_xy"][:], float)
-    cvalid = np.asarray(cd["positions"]["chaser_valid"][:], bool)[:, agg]
+    cvalid = np.asarray(cd["positions"]["chaser_valid"][:], bool)
     ppm = float(cd.attrs.get("pixels_per_mm_projector"))
     geo, _ = resolve_arena_geometry(r, cd, pixels_per_mm=ppm)
     cx, cy = geo.center_x_px, geo.center_y_px
     if cx is None:
         raise ValueError("no arena geometry")
-    fx = (fish[:, 0] - cx) / ppm
-    fy = (fish[:, 1] - cy) / ppm
-    ox = (chas[:, agg, 0] - cx) / ppm
-    oy = (chas[:, agg, 1] - cy) / ppm
-    return {"fx": fx, "fy": fy, "fvalid": fvalid, "ox": ox, "oy": oy, "cvalid": cvalid,
+    return {"fx": (fish[:, 0] - cx) / ppm, "fy": (fish[:, 1] - cy) / ppm, "fvalid": fvalid,
+            "agg_x": (chas[:, agg, 0] - cx) / ppm, "agg_y": (chas[:, agg, 1] - cy) / ppm, "agg_valid": cvalid[:, agg],
+            "inr_x": (chas[:, inr, 0] - cx) / ppm, "inr_y": (chas[:, inr, 1] - cy) / ppm, "inr_valid": cvalid[:, inr],
             "radius_mm": geo.radius_px / ppm, "epochs": load_epochs(r)}
 
 
@@ -87,11 +87,11 @@ def main() -> None:
         scored = []
         for rid, zp in cohort:
             try:
-                ol = spatial_avoidance(zp).get("occ_learned", np.nan)
+                od = spatial_avoidance_did(zp).get("occ_did", np.nan)
             except Exception:
-                ol = np.nan
-            if np.isfinite(ol):
-                scored.append((rid, zp, ol))
+                od = np.nan
+            if np.isfinite(od):
+                scored.append((rid, zp, od))
         scored.sort(key=lambda t: t[2], reverse=True)
         selected = scored[:args.top]
     n = len(selected)
@@ -120,30 +120,32 @@ def main() -> None:
             ax.imshow(h.T, origin="lower", extent=ext, cmap="magma", aspect="equal",
                       vmax=np.percentile(h[h > 0], 98) if (h > 0).any() else None)
             ax.add_patch(Circle((0, 0), R, fill=False, ec="#88ccff", lw=1.2, alpha=0.7))
-            # aggressive object position this epoch (median over valid frames)
-            om = epoch_slice(d["cvalid"] & d["fvalid"], rng) & np.isfinite(d["ox"])
-            if om.sum() > 50:
-                ox, oy = np.median(d["ox"][om]), np.median(d["oy"][om])
-                ax.add_patch(Circle((ox, oy), NEAR_MM, fill=False, ec="#39ff14", lw=1.6, ls="--"))
-                ax.scatter([ox], [oy], marker="*", s=180, color="#39ff14", edgecolor="k", zorder=5,
-                           label="aggressive object")
+            # both objects' positions this epoch (median over valid frames)
+            for okey, oc, olab in (("agg", "#39ff14", "aggressive (red)"), ("inr", "#00e5ff", "inert (blue)")):
+                ox_, oy_, ov = d[f"{okey}_x"], d[f"{okey}_y"], d[f"{okey}_valid"]
+                om = epoch_slice(ov & d["fvalid"], rng) & np.isfinite(ox_)
+                if om.sum() > 50:
+                    mx, my = np.median(ox_[om]), np.median(oy_[om])
+                    ax.add_patch(Circle((mx, my), NEAR_MM, fill=False, ec=oc, lw=1.6, ls="--"))
+                    ax.scatter([mx], [my], marker="*", s=170, color=oc, edgecolor="k", zorder=5,
+                               label=(olab if (ri == 0 and ci == 1) else None))
             ax.set_xlim(ext[0], ext[1]); ax.set_ylim(ext[2], ext[3])
             ax.set_xticks([]); ax.set_yticks([])
             title = ep.upper()
             if ci == 0:
-                title = f"{rid.split('_GoodCop')[0]}\nocc_learned={ol:+.3f}   {ep.upper()}"
+                title = f"{rid.split('_GoodCop')[0]}\nocc_did={ol:+.3f}   {ep.upper()}"
             ax.set_title(title, fontsize=9, weight="bold" if ci == 0 else "normal")
     axes[0, 1].legend(frameon=False, fontsize=7, loc="upper right", labelcolor="#333")
-    fig.suptitle("Fish occupancy pre vs post — top learned-spatial-avoidance fish\n"
-                 "(green star = aggressive object; dashed = 15 mm near-zone it avoids)",
-                 fontsize=12, weight="bold", y=1.005)
+    fig.suptitle("Fish occupancy pre vs post — top learned OBJECT-avoidance fish (ranked by occ_did)\n"
+                 "green ★ = aggressive (red) object, cyan ★ = inert (blue); learner dwells by inert, avoids aggressive",
+                 fontsize=11, weight="bold", y=1.005)
     fig.tight_layout()
     tag = args.recording_id or f"top{args.top}"
     out = out_dir / f"goodcopbadcop_occupancy_heatmaps_{tag}_{args.tag}.png"
     fig.savefig(out, bbox_inches="tight", dpi=150)
     print(f"wrote {out}  (n={n})")
     for rid, zp, ol in selected:
-        print(f"  {rid.split('_GoodCop')[0]:30s} occ_learned={ol:+.3f}")
+        print(f"  {rid.split('_GoodCop')[0]:30s} occ_did={ol:+.3f}")
 
 
 if __name__ == "__main__":

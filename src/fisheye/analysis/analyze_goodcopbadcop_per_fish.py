@@ -17,6 +17,11 @@ correlatable. Columns:
   LEARNED SPATIAL AVOIDANCE (near-object dwell vs wall-matched virtual -- the heatmap read):
     occ_avoid_pre / occ_avoid_post   P(near virtual) - P(near object), <15mm, per epoch
     occ_learned                      occ_avoid_post - occ_avoid_pre  (> 0 = avoids MORE post)
+  LEARNED OBJECT AVOIDANCE (aggressive vs inert diff-in-diff -- the rigorous, design-matched read):
+    agg_spec_pre / agg_spec_post     P(near inert) - P(near aggressive), <15mm, per epoch
+    occ_did                          agg_spec_post - agg_spec_pre  (> 0 = singles out the RED
+                                     object more post; both objects relocate, so a fixed wall
+                                     preference nets out -- object-identity-specific)
   ORIENTATION:
     lat_excess_chase  near (<25mm) chase lateral-keeping, object minus virtual
 
@@ -48,7 +53,14 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from fisheye.analysis.goodcopbadcop_common import figures_dir, latest, nav, resolve_cohort
+from fisheye.analysis.goodcopbadcop_common import (
+    figures_dir,
+    latest,
+    load_epochs,
+    nav,
+    resolve_cohort,
+    resolve_object_roles,
+)
 from fisheye.analysis.analyze_goodcopbadcop_escape import load as escape_load, escape_rate
 from fisheye.analysis.analyze_goodcopbadcop_radial_turn_direction import load_rows as steer_load, _shell_mean
 from fisheye.analysis.analyze_goodcopbadcop_lateral_gaze import load as gaze_load, sector_fractions
@@ -152,6 +164,47 @@ def spatial_avoidance(zp):
     return out
 
 
+def spatial_avoidance_did(zp):
+    """Aggressive-vs-inert learned avoidance diff-in-diff (the object-identity-specific read).
+
+    Both objects relocate between pre and post (by design), so the inert object is the
+    ideal same-design control: a fixed wall preference avoids BOTH objects equally and
+    nets out. Per epoch: near-object dwell (<15mm) for aggressive and inert. Aggressive-
+    specific avoidance = P(near inert) - P(near aggressive)  (>0 = avoids the red object
+    more than the blue one). occ_did = post - pre of that: >0 = the fish singles out the
+    aggressive object more after training -- learned, wall-preference-immune.
+    """
+    thr = 15.0
+    r = zarr.open_group(zp, mode="r")
+    cd = latest(nav(r, ["analysis", "chaser_distance_runs"]))
+    roles = resolve_object_roles(r)
+    agg, inr = roles["aggressive"], roles["inert"]
+    fish = np.asarray(cd["positions"]["fish_centroid_arena_xy"][:], float)
+    fvalid = np.asarray(cd["positions"]["fish_valid"][:], bool)
+    chas = np.asarray(cd["positions"]["chaser_arena_xy"][:], float)
+    cvalid = np.asarray(cd["positions"]["chaser_valid"][:], bool)
+    ppm = float(cd.attrs.get("pixels_per_mm_projector"))
+    dA = np.hypot(fish[:, 0] - chas[:, agg, 0], fish[:, 1] - chas[:, agg, 1]) / ppm
+    dI = np.hypot(fish[:, 0] - chas[:, inr, 0], fish[:, 1] - chas[:, inr, 1]) / ppm
+    epochs = load_epochs(r)
+    out = {}
+    for name in ("pre", "post"):
+        if name not in epochs:
+            out[f"occ_agg_{name}"] = out[f"occ_inert_{name}"] = out[f"agg_spec_{name}"] = np.nan
+            continue
+        s, e = epochs[name]
+        mA = fvalid & cvalid[:, agg] & np.isfinite(dA); mA[:s] = False; mA[e + 1:] = False
+        mI = fvalid & cvalid[:, inr] & np.isfinite(dI); mI[:s] = False; mI[e + 1:] = False
+        na = float(np.mean(dA[mA] < thr)) if mA.sum() > 100 else np.nan
+        ni = float(np.mean(dI[mI] < thr)) if mI.sum() > 100 else np.nan
+        out[f"occ_agg_{name}"] = na
+        out[f"occ_inert_{name}"] = ni
+        out[f"agg_spec_{name}"] = (ni - na) if (np.isfinite(na) and np.isfinite(ni)) else np.nan
+    out["occ_did"] = (out["agg_spec_post"] - out["agg_spec_pre"]
+                      if np.isfinite(out.get("agg_spec_post", np.nan)) and np.isfinite(out.get("agg_spec_pre", np.nan)) else np.nan)
+    return out
+
+
 def spearman(a, b):
     m = np.isfinite(a) & np.isfinite(b)
     if m.sum() < 6:
@@ -167,11 +220,14 @@ def main() -> None:
     args = ap.parse_args()
     out_dir = args.out_dir or figures_dir()
 
-    metric_fns = (learning_index, escape_fold, steering_excess, lateral_excess_chase, spatial_avoidance)
+    metric_fns = (learning_index, escape_fold, steering_excess, lateral_excess_chase,
+                  spatial_avoidance, spatial_avoidance_did)
     cols = ["esc_early", "esc_late", "esc_delta", "frz_early", "frz_late", "frz_delta",
             "esc_rate_pre", "esc_rate_chase", "escape_fold",
             "steer_pre", "steer_post", "steer_learned", "lat_excess_chase",
-            "occ_avoid_pre", "occ_avoid_post", "occ_learned"]
+            "occ_avoid_pre", "occ_avoid_post", "occ_learned",
+            "occ_agg_pre", "occ_agg_post", "occ_inert_pre", "occ_inert_post",
+            "agg_spec_pre", "agg_spec_post", "occ_did"]
     rows = []
     for rid, zp in resolve_cohort():
         rec = {"recording_id": rid, "session": re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)", rid).group(1)}
@@ -200,57 +256,56 @@ def main() -> None:
     def col(name):
         return np.array([r[name] for r in rows], float)
 
-    print(f"{'recording':34s} {'esc_delta':>9s} {'frz_delta':>9s} {'esc_fold':>8s} {'steer_post':>10s} {'occ_learned':>11s}")
-    for r in sorted(rows, key=lambda x: (np.nan_to_num(x["occ_learned"], nan=-9))):
+    print(f"{'recording':34s} {'frz_delta':>9s} {'occ_learned':>11s} {'occ_did':>9s} {'agg_post':>8s} {'inert_post':>10s}")
+    for r in sorted(rows, key=lambda x: (np.nan_to_num(x["occ_did"], nan=-9)), reverse=True):
         def s(c, w=9, p=3):
             return (f"{r[c]:>{w}.{p}f}" if np.isfinite(r[c]) else " " * (w - 1) + ".")
-        print(f"{r['recording_id'][:34]:34s} {s('esc_delta')} {s('frz_delta')} {s('escape_fold',8,2)} {s('steer_post',10)} {s('occ_learned',11)}")
+        print(f"{r['recording_id'][:34]:34s} {s('frz_delta')} {s('occ_learned',11)} {s('occ_did')} {s('occ_agg_post',8)} {s('occ_inert_post',10)}")
 
     print("\n--- learner-direction counts (per fish) ---")
-    ed, fd, ol = col("esc_delta"), col("frz_delta"), col("occ_learned")
-    print(f"  escape decreased (learner):          {int((ed < 0).sum())}/{np.isfinite(ed).sum()}")
-    print(f"  freeze increased (learner):          {int((fd > 0).sum())}/{np.isfinite(fd).sum()}")
-    print(f"  learned SPATIAL avoidance (occ_learned>0): {int((ol > 0).sum())}/{np.isfinite(ol).sum()}  "
-          f"(cohort mean Δ={np.nanmean(ol):+.3f}) -- individual variation is the point")
+    ed, fd, ol, od = col("esc_delta"), col("frz_delta"), col("occ_learned"), col("occ_did")
+    print(f"  escape decreased (learner):                    {int((ed < 0).sum())}/{np.isfinite(ed).sum()}")
+    print(f"  freeze increased (learner):                    {int((fd > 0).sum())}/{np.isfinite(fd).sum()}")
+    print(f"  learned spatial avoidance vs virtual (occ_learned>0): {int((ol > 0).sum())}/{np.isfinite(ol).sum()}  (mean Δ={np.nanmean(ol):+.3f})")
+    print(f"  learned agg-vs-inert avoidance (occ_did>0):    {int((od > 0).sum())}/{np.isfinite(od).sum()}  (mean Δ={np.nanmean(od):+.3f})")
 
     print("\n--- do learners avoid more? (Spearman across fish; noisy, use a session RE for real inference) ---")
     for lname, lcol in (("freeze learning (frz_delta)", fd), ("escape learning (-esc_delta)", -ed)):
-        for aname, acol in (("steer_post", col("steer_post")), ("occ_learned", ol),
-                            ("lat_excess_chase", col("lat_excess_chase"))):
+        for aname, acol in (("occ_did", od), ("occ_learned", ol), ("steer_post", col("steer_post"))):
             rho, nn = spearman(lcol, acol)
-            print(f"  {lname:28s} vs {aname:16s}: rho={rho:+.2f} (n={nn})")
+            print(f"  {lname:28s} vs {aname:12s}: rho={rho:+.2f} (n={nn})")
 
     # figure: learning vs retained avoidance steering, colored by session
     sessions = sorted({r["session"] for r in rows})
     cmap = plt.cm.tab10(np.linspace(0, 1, len(sessions)))
     sc_color = {s: cmap[i] for i, s in enumerate(sessions)}
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.6))
-    # Panel A: freeze learning vs learned spatial avoidance
+    # Panel A: freeze learning vs learned aggressive-vs-inert avoidance (the rigorous metric)
     ax = axes[0]
     for r in rows:
-        if np.isfinite(r["frz_delta"]) and np.isfinite(r["occ_learned"]):
-            ax.scatter(r["frz_delta"], r["occ_learned"], color=sc_color[r["session"]], s=36, alpha=0.85)
+        if np.isfinite(r["frz_delta"]) and np.isfinite(r["occ_did"]):
+            ax.scatter(r["frz_delta"], r["occ_did"], color=sc_color[r["session"]], s=36, alpha=0.85)
     ax.axvline(0, color="#ccc", lw=1); ax.axhline(0, color="#ccc", lw=1)
-    rho, nn = spearman(fd, ol)
+    rho, nn = spearman(fd, od)
     ax.set_xlabel("freeze learning index (late − early)")
-    ax.set_ylabel("learned spatial avoidance (occ post − pre)")
-    ax.set_title(f"Learned freeze vs learned spatial avoidance\n(Spearman rho={rho:+.2f}, n={nn})", fontsize=10, weight="bold")
+    ax.set_ylabel("learned agg-vs-inert avoidance (occ_did)")
+    ax.set_title(f"Learned freeze vs learned object avoidance\n(Spearman rho={rho:+.2f}, n={nn})", fontsize=10, weight="bold")
     ax.spines[["top", "right"]].set_visible(False)
-    # Panel B: pre vs post spatial avoidance — above the diagonal = developed avoidance
+    # Panel B: aggressive-specific avoidance pre vs post — above the diagonal = developed it
     ax = axes[1]
-    ap, apo = col("occ_avoid_pre"), col("occ_avoid_post")
-    lim = np.nanmax(np.abs(np.concatenate([ap, apo]))) * 1.1
+    ap, apo = col("agg_spec_pre"), col("agg_spec_post")
+    lim = np.nanmax(np.abs(np.concatenate([ap, apo]))[np.isfinite(np.concatenate([ap, apo]))]) * 1.1
     ax.plot([-lim, lim], [-lim, lim], "--", color="#bbb", lw=1)
     for r in rows:
-        if np.isfinite(r["occ_avoid_pre"]) and np.isfinite(r["occ_avoid_post"]):
-            ax.scatter(r["occ_avoid_pre"], r["occ_avoid_post"], color=sc_color[r["session"]], s=36, alpha=0.85)
-    ax.set_xlabel("spatial avoidance PRE (virtual − object near-dwell)")
-    ax.set_ylabel("spatial avoidance POST")
-    ax.set_title("Above diagonal = fish that avoid MORE post\n(individual learned spatial avoidance)", fontsize=10, weight="bold")
+        if np.isfinite(r["agg_spec_pre"]) and np.isfinite(r["agg_spec_post"]):
+            ax.scatter(r["agg_spec_pre"], r["agg_spec_post"], color=sc_color[r["session"]], s=36, alpha=0.85)
+    ax.set_xlabel("agg-specific avoidance PRE (P near inert − P near agg)")
+    ax.set_ylabel("agg-specific avoidance POST")
+    ax.set_title("Above diagonal = fish that single out the RED\nobject more post (learned object avoidance)", fontsize=10, weight="bold")
     ax.spines[["top", "right"]].set_visible(False)
     handles = [plt.Line2D([], [], marker="o", ls="", color=sc_color[s], label=s[:10]) for s in sessions]
     ax.legend(handles=handles, frameon=False, fontsize=7, title="session", loc="best")
-    fig.suptitle(f"Per-fish learning vs avoidance (n={n}) — cohort mean is null but individuals vary (noisy, ~8 trials)",
+    fig.suptitle(f"Per-fish learning vs object-specific avoidance (n={n}) — cohort mean null, individuals vary (noisy, ~8 trials)",
                  fontsize=12, weight="bold", y=1.02)
     fig.tight_layout()
     out = out_dir / f"goodcopbadcop_per_fish_{args.tag}.png"
