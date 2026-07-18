@@ -1,0 +1,31 @@
+schema_id: palette.cohort_query
+schema_version: 1
+cohort_id: chaser_biology_template_v1
+cohort_name: Chaser recordings selected by protocol and biology
+purpose: Template only; replace example biological values before use.
+
+dataset:
+  statuses: [active]
+  zarr_uses: [analysis]
+  zarr_origins: [source]
+
+protocol:
+  stimulus_modes_any: [CHASER]
+  protocol_names_any: []
+  protocol_hashes_any: []
+
+subjects:
+  dpf:
+    min: 7
+    max: 9
+  line_strains_any: [example_strain]
+  genotypes_any: []
+  cross_ids_any: []
+  match_policy: unambiguous_recording
+
+prerequisites:
+  required_steps_ok: [tracks, stimulus]
+
+# `error` prevents a partially described recording from being silently
+# omitted. Use `exclude` only when omission is an intentional cohort rule.
+missing_selected_metadata: error

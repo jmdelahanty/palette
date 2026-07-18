@@ -109,6 +109,48 @@ def test_submit_analytics_export_bsub_uses_cluster_default_queue(tmp_path: Path)
     assert " -q " not in bsub_line
 
 
+def test_submit_analytics_export_accepts_future_manifest_with_dependency(
+    tmp_path: Path,
+) -> None:
+    repo = Path(__file__).resolve().parents[3]
+    future_collection = tmp_path / "future_collection.manifest.json"
+    output_root = tmp_path / "shared" / "palette_analytics"
+    log_dir = tmp_path / "logs"
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(repo / "scripts" / "submit_analytics_export_bsub.sh"),
+            "--collection-manifest",
+            str(future_collection),
+            "--export-run-id",
+            "future_collection_export_v1",
+            "--output-root",
+            str(output_root),
+            "--palette-repo",
+            str(repo),
+            "--log-dir",
+            str(log_dir),
+            "--dependency-done",
+            "123456",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    bsub_line = next(
+        line for line in result.stdout.splitlines() if line.startswith("bsub_command=")
+    )
+    assert "-w done\\(123456\\)" in bsub_line
+    job = (
+        log_dir
+        / "analytics_export_future_collection_export_v1"
+        / "run_analytics_export.sh"
+    ).read_text(encoding="utf-8")
+    assert "Collection manifest is unavailable after dependencies completed" in job
+
+
 def test_submit_analytics_export_bsub_sshes_only_bsub_command(tmp_path: Path) -> None:
     repo = Path(__file__).resolve().parents[3]
     collection = tmp_path / "collection.manifest.json"

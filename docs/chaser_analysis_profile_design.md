@@ -48,7 +48,8 @@ that vocabulary and record their adapter version.
 
 ## Versioned profiles
 
-`goodcopbadcop_source_v1.yaml` is a protocol adapter profile. It records:
+`chaser_event_windows_v1.yaml` is the generic default protocol adapter profile.
+It records:
 
 - the metadata adapter and role-resolver versions;
 - event aliases and fallbacks;
@@ -58,6 +59,10 @@ that vocabulary and record their adapter version.
 `chaser_behavior_v1.yaml` is protocol-neutral. It identifies generic modules,
 their schema contracts, dependencies, execution cardinality, and defaults.
 The runner snapshots both normalized profiles into provenance.
+
+`goodcopbadcop_source_v1.yaml` remains loadable as an immutable compatibility
+profile for runs that already named that adapter. New generic chaser releases
+do not use that protocol name as their default.
 
 ## Generic schemas
 

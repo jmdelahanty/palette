@@ -19,6 +19,7 @@ QUEUE=""
 MEM_GB=8
 WALLTIME="1:00"
 SUBMIT=0
+DEPENDENCY_DONE=()
 
 usage() {
   cat <<'USAGE'
@@ -49,6 +50,7 @@ Options:
   --queue NAME
   --mem-gb N                  Default: 8
   --walltime H:MM             Default: 1:00
+  --dependency-done JOBID     Submit after this LSF job succeeds. May repeat.
   --submit                    Submit; otherwise render only
   -h, --help
 
@@ -80,6 +82,7 @@ while [[ $# -gt 0 ]]; do
     --queue) QUEUE="$2"; shift 2;;
     --mem-gb) MEM_GB="$2"; shift 2;;
     --walltime) WALLTIME="$2"; shift 2;;
+    --dependency-done) DEPENDENCY_DONE+=("$2"); shift 2;;
     --submit) SUBMIT=1; shift;;
     -h|--help) usage; exit 0;;
     *) fail "unknown argument: $1";;
@@ -104,6 +107,10 @@ else
   SOURCE_MODE="zarr_list"
 fi
 [[ "$MEM_GB" =~ ^[1-9][0-9]*$ ]] || fail "--mem-gb must be positive"
+for dependency_job_id in "${DEPENDENCY_DONE[@]}"; do
+  [[ "$dependency_job_id" =~ ^[1-9][0-9]*$ ]] || \
+    fail "--dependency-done must be a positive numeric LSF job ID: $dependency_job_id"
+done
 git -C "$PALETTE_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
   fail "Palette checkout not found: $PALETTE_REPO"
 [[ -x "$PALETTE_REPO/scripts/py" ]] || fail "Palette scripts/py is not executable"
@@ -225,6 +232,14 @@ BSUB_ARGS=(
   -oo "${RUN_DIR}/%J.out"
   -eo "${RUN_DIR}/%J.err"
 )
+if [[ "${#DEPENDENCY_DONE[@]}" -gt 0 ]]; then
+  dependency_expression=""
+  for dependency_job_id in "${DEPENDENCY_DONE[@]}"; do
+    if [[ -n "$dependency_expression" ]]; then dependency_expression+=" && "; fi
+    dependency_expression+="done(${dependency_job_id})"
+  done
+  BSUB_ARGS+=(-w "$dependency_expression")
+fi
 if [[ -n "$QUEUE" ]]; then BSUB_ARGS+=(-q "$QUEUE"); fi
 BSUB_COMMAND=(bsub "${BSUB_ARGS[@]}" bash "$JOB_SCRIPT")
 

@@ -94,6 +94,8 @@ def test_skipped_producers_resolve_authoritative_inputs_per_recording(
         run_id="authoritative_inputs",
     )
 
+    assert config["PROTOCOL_PROFILE"].endswith("chaser_event_windows_v1.yaml")
+
     for key in (
         "TRACK_RUN",
         "SWIM_BOUT_RUN",

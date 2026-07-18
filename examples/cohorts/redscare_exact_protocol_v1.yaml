@@ -1,0 +1,29 @@
+schema_id: palette.cohort_query
+schema_version: 1
+cohort_id: redscare_exact_protocol_v1
+cohort_name: RedScare exact protocol cohort
+purpose: Exact, registry-frozen cohort for the current RedScare protocol snapshot.
+
+dataset:
+  statuses: [active]
+  zarr_uses: [analysis]
+  zarr_origins: [source]
+
+protocol:
+  stimulus_modes_any: [CHASER]
+  protocol_hashes_any:
+    - 578a2cd8b3aa5762994b61a2405b94e1cf5012d68c1fa6bfcb76a5e04eb45492
+
+subjects:
+  # Biological selectors are optional. When enabled, the default policy
+  # requires one unambiguous normalized value per recording.
+  match_policy: unambiguous_recording
+  dpf: {}
+  line_strains_any: []
+  genotypes_any: []
+  cross_ids_any: []
+
+prerequisites:
+  required_steps_ok: []
+
+missing_selected_metadata: error

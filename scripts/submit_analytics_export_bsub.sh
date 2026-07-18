@@ -17,6 +17,7 @@ WALLTIME="2:00"
 RUN_STATISTICS=1
 INDEX_REGISTRY=0
 SUBMIT=0
+DEPENDENCY_DONE=()
 BASELINE_TIME_BIN_S=5
 BASELINE_SAMPLE_RATE_HZ=10
 BASELINE_FULL_RESOLUTION_SAMPLES=0
@@ -60,6 +61,7 @@ Options:
   --mem-gb N                   Memory request in GB (default: 16)
   --walltime H:MM              LSF wall time (default: 2:00)
   --log-dir PATH               Submission artifacts (default: <output-root>/logs/lsf)
+  --dependency-done JOBID      Submit after this LSF job succeeds. May repeat.
   --submit                     Submit with local bsub or SSH only the bsub command
                                to --submit-host; otherwise only render the job
   -h, --help                   Show this message
@@ -98,6 +100,7 @@ while [[ $# -gt 0 ]]; do
     --mem-gb) MEM_GB="$2"; shift 2;;
     --walltime) WALLTIME="$2"; shift 2;;
     --log-dir) LOG_DIR="$2"; shift 2;;
+    --dependency-done) DEPENDENCY_DONE+=("$2"); shift 2;;
     --submit) SUBMIT=1; shift;;
     -h|--help) usage; exit 0;;
     *) fail "Unknown argument: $1";;
@@ -118,7 +121,13 @@ if [[ -z "$STATS_RUN_ID" ]]; then STATS_RUN_ID="${EXPORT_RUN_ID}_stats"; fi
 if [[ "$INCLUDE_BASELINE_SAMPLES" == "1" && ",$TABLES," != *,baseline_kinematic_samples,* ]]; then
   TABLES="${TABLES},baseline_kinematic_samples"
 fi
-[[ -f "$COLLECTION_MANIFEST" ]] || fail "Collection manifest not found: $COLLECTION_MANIFEST"
+for dependency_job_id in "${DEPENDENCY_DONE[@]}"; do
+  [[ "$dependency_job_id" =~ ^[1-9][0-9]*$ ]] || \
+    fail "--dependency-done must be a positive numeric LSF job ID: $dependency_job_id"
+done
+if [[ "${#DEPENDENCY_DONE[@]}" == "0" ]]; then
+  [[ -f "$COLLECTION_MANIFEST" ]] || fail "Collection manifest not found: $COLLECTION_MANIFEST"
+fi
 git -C "$PALETTE_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
   fail "Palette checkout not found: $PALETTE_REPO"
 [[ -x "$PALETTE_REPO/scripts/py" ]] || fail "Palette scripts/py is not executable: $PALETTE_REPO"
@@ -186,6 +195,11 @@ if [[ "\${ACTUAL_COMMIT}" != "\${EXPECTED_COMMIT}" ]]; then
   printf 'Palette commit mismatch: expected %s, found %s\n' "\${EXPECTED_COMMIT}" "\${ACTUAL_COMMIT}" >&2
   exit 2
 fi
+if [[ ! -f "\${COLLECTION_MANIFEST}" ]]; then
+  printf 'Collection manifest is unavailable after dependencies completed: %s\n' \
+    "\${COLLECTION_MANIFEST}" >&2
+  exit 2
+fi
 mkdir -p "\${OUTPUT_ROOT}" "\$(dirname -- "\${VALIDATION_JSON}")"
 export MPLCONFIGDIR="\$(dirname -- "\${VALIDATION_JSON}")/matplotlib"
 
@@ -247,6 +261,14 @@ BSUB_ARGS=(
   -oo "${RUN_DIR}/%J.out"
   -eo "${RUN_DIR}/%J.err"
 )
+if [[ "${#DEPENDENCY_DONE[@]}" -gt 0 ]]; then
+  dependency_expression=""
+  for dependency_job_id in "${DEPENDENCY_DONE[@]}"; do
+    if [[ -n "$dependency_expression" ]]; then dependency_expression+=" && "; fi
+    dependency_expression+="done(${dependency_job_id})"
+  done
+  BSUB_ARGS+=(-w "$dependency_expression")
+fi
 if [[ -n "$QUEUE" ]]; then BSUB_ARGS+=(-q "$QUEUE"); fi
 BSUB_COMMAND=(bsub "${BSUB_ARGS[@]}" bash "$JOB_SCRIPT")
 

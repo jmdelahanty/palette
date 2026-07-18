@@ -1,0 +1,50 @@
+schema_id: palette.chaser_protocol_profile
+schema_version: 1
+profile_id: chaser_event_windows_v1
+profile_version: 1
+
+source_adapter:
+  id: protocol_json_configured_chasers
+  version: 1
+
+role_resolver:
+  id: configured_chaser_behavior_flags
+  version: 1
+
+window_policy:
+  id: event_alias_windows
+  version: 1
+  boundary_policy: inclusive_start_exclusive_end_event_boundary
+  event_aliases:
+    pre_start: [CHASER_PRE_PERIOD_START, PROTOCOL_START]
+    training_start: [CHASER_TRAINING_START]
+    post_start: [CHASER_POST_PERIOD_START]
+    finish: [PROTOCOL_FINISH, PROTOCOL_STOP, STEP_END, CHASER_PRESENTATION_END]
+  event_fallbacks:
+    pre_start: recording_start
+    finish: recording_end
+  windows:
+    - window_id: 0
+      label: pre_event
+      start_event: pre_start
+      end_event: training_start
+    - window_id: 1
+      label: training_event
+      start_event: training_start
+      end_event: post_start
+    - window_id: 2
+      label: post_event
+      start_event: post_start
+      end_event: finish
+
+analysis_parameters:
+  chaser_quadrant_occupancy:
+    phase_labels: [pre_event, post_event]
+    post_settle_duration_source: protocol_json.steps[].parameters.position_transition_duration_s
+    post_settle_duration_fallback_s: 0.0
+  chaser_near_field_occupancy:
+    near_zone_radius_mm: 5.0
+    entry_radius_mm: 5.0
+    exit_radius_mm: 6.0
+  chaser_escape_freeze_summary:
+    selected_chasers: all_applicable

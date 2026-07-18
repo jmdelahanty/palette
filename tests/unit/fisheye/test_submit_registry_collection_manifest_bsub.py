@@ -133,6 +133,19 @@ def test_submitter_requires_exactly_one_collection_source(tmp_path: Path) -> Non
     assert "select exactly one source" in result.stderr
 
 
+def test_submitter_renders_lsf_dependency(tmp_path: Path) -> None:
+    repo = Path(__file__).resolve().parents[3]
+    args = _base_args(repo, tmp_path, "dependent_collection_v001")
+    args.extend(["--dependency-done", "123456"])
+
+    result = subprocess.run(args, check=True, text=True, capture_output=True)
+
+    bsub_line = next(
+        line for line in result.stdout.splitlines() if line.startswith("bsub_command=")
+    )
+    assert "-w done\\(123456\\)" in bsub_line
+
+
 def test_submitter_sshes_only_bsub_command(tmp_path: Path) -> None:
     repo = Path(__file__).resolve().parents[3]
     fake_bin = tmp_path / "bin"

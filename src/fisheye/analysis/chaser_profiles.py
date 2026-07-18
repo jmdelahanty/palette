@@ -452,6 +452,10 @@ def default_goodcopbadcop_source_profile_path() -> Path:
     return Path(__file__).resolve().parent / "profiles" / "goodcopbadcop_source_v1.yaml"
 
 
+def default_chaser_protocol_profile_path() -> Path:
+    return Path(__file__).resolve().parent / "profiles" / "chaser_event_windows_v1.yaml"
+
+
 def default_chaser_analysis_profile_path() -> Path:
     return Path(__file__).resolve().parent / "profiles" / "chaser_behavior_v1.yaml"
 
@@ -468,6 +472,7 @@ __all__ = [
     "ChaserWindowDefinition",
     "ResolvedChaserWindow",
     "default_chaser_analysis_profile_path",
+    "default_chaser_protocol_profile_path",
     "default_goodcopbadcop_source_profile_path",
     "load_chaser_analysis_profile",
     "load_chaser_protocol_profile",

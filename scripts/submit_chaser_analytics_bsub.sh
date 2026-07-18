@@ -17,6 +17,7 @@ ARENA_ID=""
 CAMERA_ID=""
 PROTOCOL_NAME=""
 REQUIRE_STEPS_OK=()
+DEPENDENCY_DONE=()
 
 QUEUE=""
 NCORES=4
@@ -25,7 +26,7 @@ MAX_ACTIVE=8
 LOG_DIR="/groups/johnson/johnsonlab/jeremy/recordings/logs/chaser_analytics/bsub_submissions"
 RUN_ID_OVERRIDE=""
 DRY_RUN=0
-PROTOCOL_PROFILE="src/fisheye/analysis/profiles/goodcopbadcop_source_v1.yaml"
+PROTOCOL_PROFILE="src/fisheye/analysis/profiles/chaser_event_windows_v1.yaml"
 CHASER_ANALYSIS_PROFILE="src/fisheye/analysis/profiles/chaser_behavior_v1.yaml"
 
 RUN_MOVEMENT=1
@@ -156,6 +157,8 @@ Target selection, choose at least one, or use --source registry:
   --camera-id ID              Registry camera_id filter.
   --protocol-name NAME        Exact, case-insensitive registry protocol filter.
   --require-step-ok STEP      Registry step-status filter. May be repeated.
+  --dependency-done JOBID     Submit only after an LSF job completes successfully.
+                              May be repeated.
   --palette-repo PATH         Clean cluster-visible Palette checkout.
   --submit-host HOST          Citrus SSH poller when bsub is unavailable locally.
   --protocol-profile PATH     Versioned protocol adapter/window profile.
@@ -252,6 +255,7 @@ while [[ $# -gt 0 ]]; do
     --camera-id) CAMERA_ID="$2"; shift 2;;
     --protocol-name) PROTOCOL_NAME="$2"; shift 2;;
     --require-step-ok) REQUIRE_STEPS_OK+=("$2"); shift 2;;
+    --dependency-done) DEPENDENCY_DONE+=("$2"); shift 2;;
     --palette-repo) PALETTE_REPO="$2"; shift 2;;
     --submit-host) SUBMIT_HOST="$2"; shift 2;;
     --protocol-profile) PROTOCOL_PROFILE="$2"; shift 2;;
@@ -365,6 +369,12 @@ if [[ "$SOURCE" != "filesystem" && "$SOURCE" != "registry" ]]; then
   echo "--source must be filesystem or registry, got: $SOURCE" >&2
   exit 2
 fi
+for dependency_job_id in "${DEPENDENCY_DONE[@]}"; do
+  if [[ ! "$dependency_job_id" =~ ^[1-9][0-9]*$ ]]; then
+    echo "--dependency-done must be a positive numeric LSF job ID: $dependency_job_id" >&2
+    exit 2
+  fi
+done
 
 if [[ ! -d "$PALETTE_REPO/.git" || ! -x "$PALETTE_REPO/scripts/py" ]]; then
   echo "Cluster-visible Palette checkout is unavailable: $PALETTE_REPO" >&2
@@ -1007,6 +1017,14 @@ JOB
 chmod +x "$JOB_SCRIPT"
 
 BSUB_ARGS=(-J "chaser_analytics[1-${target_count}]%${MAX_ACTIVE}" -n "$NCORES" -R "rusage[mem=${MEM_GB}G]" -oo "${RUN_DIR}/%J_%I.out" -eo "${RUN_DIR}/%J_%I.err")
+if [[ "${#DEPENDENCY_DONE[@]}" -gt 0 ]]; then
+  dependency_expression=""
+  for dependency_job_id in "${DEPENDENCY_DONE[@]}"; do
+    if [[ -n "$dependency_expression" ]]; then dependency_expression+=" && "; fi
+    dependency_expression+="done(${dependency_job_id})"
+  done
+  BSUB_ARGS+=(-w "$dependency_expression")
+fi
 if [[ -n "$QUEUE" ]]; then
   BSUB_ARGS=(-q "$QUEUE" "${BSUB_ARGS[@]}")
 fi
@@ -1027,12 +1045,19 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 
 if command -v bsub >/dev/null 2>&1; then
-  "${BSUB_COMMAND[@]}"
+  submit_output="$("${BSUB_COMMAND[@]}")"
 else
   if [[ -z "$SUBMIT_HOST" ]]; then
     echo "bsub is unavailable and --submit-host is empty" >&2
     exit 2
   fi
   printf -v remote_command '%q ' "${BSUB_COMMAND[@]}"
-  ssh "$SUBMIT_HOST" "$remote_command"
+  submit_output="$(ssh "$SUBMIT_HOST" "$remote_command")"
 fi
+printf '%s\n' "$submit_output"
+job_id="$(printf '%s\n' "$submit_output" | sed -n 's/^Job <\([0-9][0-9]*\)>.*/\1/p' | head -n 1)"
+if [[ -z "$job_id" ]]; then
+  echo "Could not parse an LSF job ID from submission output" >&2
+  exit 2
+fi
+printf 'job_id=%s\n' "$job_id"
