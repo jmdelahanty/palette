@@ -13,7 +13,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from queue import Queue
 from threading import Thread
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -32,7 +32,11 @@ from ..shared.provenance_attrs import (
     build_source_roi_pixel_attrs,
 )
 from ..shared.row_alignment import assert_row_alignment
-from ..shared.row_lineage import copy_row_lineage_arrays, write_direct_source_crop_row_ids
+from ..shared.row_lineage import (
+    copy_row_lineage_arrays,
+    copy_selected_crop_row_lineage_arrays,
+    write_direct_source_crop_row_ids,
+)
 from ..shared.run_provenance import append_input_artifacts, build_run_provenance_from_stage_record
 from ..shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
@@ -511,12 +515,21 @@ def _shard_attrs_from_args(args: argparse.Namespace, *, output_parent: str) -> d
     return attrs
 
 
-def _copy_detection_source_array(run_group: zarr.Group, crop_group: zarr.Group) -> None:
+def _copy_detection_source_array(
+    run_group: zarr.Group,
+    crop_group: zarr.Group,
+    *,
+    source_crop_row_ids: np.ndarray | None = None,
+) -> None:
     array_name = "detection_source"
     if array_name not in crop_group:
         return
     src = crop_group[array_name]
-    data = src[:]
+    data = (
+        src[:]
+        if source_crop_row_ids is None
+        else src[np.asarray(source_crop_row_ids, dtype=np.int64)]
+    )
     chunks = getattr(src, "chunks", None)
     if not chunks:
         chunks = tuple(max(1, min(dim, 1024)) for dim in data.shape)
@@ -1281,11 +1294,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Temporary ROI cache policy for geometry-only crop runs (default: auto).",
     )
     parser.add_argument("--roi-cache-dir", type=Path, default=None, help="Optional scratch directory for temporary ROI caches.")
-    parser.add_argument(
+    roi_manifest_group = parser.add_mutually_exclusive_group()
+    roi_manifest_group.add_argument(
         "--roi-cache-manifest",
         type=Path,
         default=None,
         help="Optional flat_bin_v1 ROI cache manifest to read instead of materializing/re-decoding ROIs.",
+    )
+    roi_manifest_group.add_argument(
+        "--roi-work-package-manifest",
+        type=Path,
+        default=None,
+        help=(
+            "Keyed subset ROI package for delta inference. Requires "
+            "--output-parent subject_mask_shard_runs."
+        ),
     )
     parser.add_argument(
         "--roi-cache-expected-archive-path",
@@ -1436,6 +1459,23 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     console = Console()
     console.print("[bold cyan]Running U-Net subject-mask inference[/bold cyan]\n")
 
+    output_parent = _output_parent_from_args(args)
+    if (
+        args.roi_work_package_manifest is not None
+        and not _is_shard_output_parent(output_parent)
+    ):
+        raise ValueError(
+            "Crop pixel work packages may write only to subject_mask_shard_runs; "
+            "finalize shards before publishing a canonical subject-mask run."
+        )
+    if args.roi_work_package_manifest is not None and (
+        args.assignment_keypoint_group or args.assignment_keypoint_run
+    ):
+        raise ValueError(
+            "Subset subject-mask inference does not consume assignment keypoints. "
+            "Bind the complete refined-keypoint run during mask finalization."
+        )
+
     checkpoint_value = args.checkpoint_option or args.checkpoint
     if checkpoint_value and args.resolve_model_from_registry:
         raise ValueError("Pass either a checkpoint path or --resolve-model-from-registry, not both.")
@@ -1461,20 +1501,29 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     zarr_path = Path(args.zarr_path).expanduser().resolve()
     root = zarr.open(str(zarr_path), mode="a", use_consolidated=False)
 
-    crop_source = CropImageSource.open(
-        root,
-        crop_run=args.crop_run,
-        zarr_path=zarr_path,
-        roi_cache_policy=args.roi_cache_policy,
-        roi_live_acceleration=args.roi_live_acceleration,
-        roi_live_gpu_chunk_frames=args.roi_live_gpu_chunk_frames,
-        roi_cache_dir=args.roi_cache_dir,
-        roi_cache_manifest=args.roi_cache_manifest,
-        roi_cache_expected_archive_path=args.roi_cache_expected_archive_path,
-        console=console,
-    )
+    if args.roi_work_package_manifest is not None:
+        crop_source = CropImageSource.open_work_package(
+            root,
+            manifest_path=args.roi_work_package_manifest,
+            zarr_path=zarr_path,
+            crop_run=args.crop_run,
+        )
+    else:
+        crop_source = CropImageSource.open(
+            root,
+            crop_run=args.crop_run,
+            zarr_path=zarr_path,
+            roi_cache_policy=args.roi_cache_policy,
+            roi_live_acceleration=args.roi_live_acceleration,
+            roi_live_gpu_chunk_frames=args.roi_live_gpu_chunk_frames,
+            roi_cache_dir=args.roi_cache_dir,
+            roi_cache_manifest=args.roi_cache_manifest,
+            roi_cache_expected_archive_path=args.roi_cache_expected_archive_path,
+            console=console,
+        )
     crop_group = crop_source.crop_group
     crop_run_name = crop_source.crop_run_name
+    selected_crop_rows = getattr(crop_source, "source_crop_row_ids", None)
     total_rois = int(crop_source.total_rois)
     if total_rois == 0:
         crop_source.close()
@@ -1505,7 +1554,6 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         capture_env_vars=False,
     )
     git_info = get_git_info()
-    output_parent = _output_parent_from_args(args)
     shard_output = _is_shard_output_parent(output_parent)
     run_group, resolved_run_name = _prepare_run_group(
         root,
@@ -1517,9 +1565,20 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     timing_profiler = InferenceTimingProfiler(enabled=bool(args.profile_timings))
 
     try:
-        copy_row_lineage_arrays(run_group, crop_group, total_rois=total_rois)
-        write_direct_source_crop_row_ids(run_group, total_rois=total_rois)
-        _copy_detection_source_array(run_group, crop_group)
+        if selected_crop_rows is not None:
+            copy_selected_crop_row_lineage_arrays(
+                run_group,
+                crop_group,
+                selected_crop_rows,
+            )
+        else:
+            copy_row_lineage_arrays(run_group, crop_group, total_rois=total_rois)
+            write_direct_source_crop_row_ids(run_group, total_rois=total_rois)
+        _copy_detection_source_array(
+            run_group,
+            crop_group,
+            source_crop_row_ids=selected_crop_rows,
+        )
         if "detection_source" not in run_group:
             run_group.create_array(
                 "detection_source",
@@ -1554,6 +1613,26 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         source_crop_storage_mode=crop_source.storage_mode,
     )
     crop_pixel_attrs = build_source_roi_pixel_attrs(crop_source)
+    work_package_attrs = {
+        "source_crop_pixel_work_package_id": getattr(
+            crop_source, "pixel_materialization_id", None
+        ),
+        "source_crop_pixel_work_package_manifest": (
+            getattr(crop_source, "pixel_materialization_manifest", None)
+        ),
+        "source_crop_pixel_work_package_rows": (
+            int(total_rois)
+            if getattr(crop_source, "pixel_materialization_id", None) is not None
+            else None
+        ),
+    }
+    if getattr(crop_source, "pixel_materialization_id", None) is not None:
+        work_package_attrs.update(
+            {
+                "incremental_materialization_role": "delta_replacement_rows",
+                "canonical_finalization_policy": "incremental_compaction_required",
+            }
+        )
     run_group.attrs.update(
         {
             "method": "unet_subject_mask_segmenter",
@@ -1562,6 +1641,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "source_crop_run": crop_run_name,
             **crop_snapshot_attrs,
             **crop_pixel_attrs,
+            **work_package_attrs,
             "source_roi_read_mode": crop_source.roi_read_mode,
             "roi_cache_policy": crop_source.roi_cache_policy,
             "source_roi_cache_used": bool(crop_source.roi_cache_used),
@@ -1702,6 +1782,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         "source_crop_run": str(crop_run_name),
         **crop_snapshot_attrs,
         **crop_pixel_attrs,
+        **work_package_attrs,
         "source_roi_read_mode": crop_source.roi_read_mode,
         "roi_cache_policy": crop_source.roi_cache_policy,
         "roi_cache_used": bool(crop_source.roi_cache_used),
@@ -1766,6 +1847,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "progress": bool(args.progress),
             "roi_cache_policy": crop_source.roi_cache_policy,
             "roi_cache_manifest": str(args.roi_cache_manifest) if args.roi_cache_manifest else None,
+            "roi_work_package_manifest": (
+                str(args.roi_work_package_manifest)
+                if args.roi_work_package_manifest
+                else None
+            ),
             "source_roi_cache_alias_manifest": (
                 str(args.source_roi_cache_alias_manifest)
                 if args.source_roi_cache_alias_manifest

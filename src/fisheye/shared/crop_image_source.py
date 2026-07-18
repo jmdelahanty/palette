@@ -702,6 +702,9 @@ class CropImageSource:
     roi_live_acceleration_effective: str | None = None
     roi_live_acceleration_fallback_reason: str | None = None
     roi_live_gpu_chunk_frames: int = _ROI_LIVE_GPU_CHUNK_FRAMES_DEFAULT
+    source_crop_row_ids: np.ndarray | None = None
+    pixel_materialization_id: str | None = None
+    pixel_materialization_manifest: str | None = None
     _roi_images: object | None = None
     _images_full: object | None = None
     _external_reader: _ExternalFrameReader | None = None
@@ -1008,6 +1011,78 @@ class CropImageSource:
                 console=console,
             )
         return source
+
+    @classmethod
+    def open_work_package(
+        cls,
+        root: zarr.Group,
+        *,
+        manifest_path: str | Path,
+        zarr_path: str | Path | None = None,
+        crop_run: str | None = None,
+        verify_payload: bool = True,
+        verify_pixel_rows: bool = True,
+    ) -> "CropImageSource":
+        """Open a keyed subset package while retaining its logical crop binding."""
+
+        from fisheye.shared.crop_pixel_work_package import (
+            open_crop_pixel_work_package,
+        )
+
+        archive_path = (
+            Path(zarr_path).expanduser().resolve() if zarr_path is not None else None
+        )
+        package = open_crop_pixel_work_package(
+            manifest_path,
+            expected_archive_path=archive_path,
+            expected_crop_run=crop_run,
+            root=root,
+            verify_payload=verify_payload,
+            verify_pixel_rows=verify_pixel_rows,
+        )
+        try:
+            crop_parent, crop_group, crop_run_name = resolve_crop_run(
+                root,
+                crop_run=package.crop_run_name,
+                zarr_path=archive_path,
+            )
+            del crop_parent
+            pixel_contract = dict(package.pixel_contract)
+            return cls(
+                root=root,
+                crop_group=crop_group,
+                crop_run_name=crop_run_name,
+                storage_mode=_resolve_storage_mode(crop_group),
+                roi_shape=package.roi_shape,
+                roi_coordinates_full=np.asarray(
+                    package.roi_coordinates_full, dtype=np.int32
+                ),
+                frame_indices=np.asarray(package.frame_indices, dtype=np.int64),
+                frame_source_kind="crop_pixel_work_package",
+                frame_source_path=None,
+                frame_shape=package.roi_shape,
+                roi_read_mode="crop_pixel_work_package",
+                roi_cache_policy="never",
+                roi_cache_used=True,
+                roi_cache_created=False,
+                roi_cache_key=package.package_id,
+                roi_cache_path=str(package.manifest_path),
+                roi_cache_canonical_path=str(package.manifest_path),
+                roi_cache_backend="keyed_flat_bin_v1",
+                roi_image_representation=_image_representation_from_contract(
+                    pixel_contract
+                ),
+                roi_pixel_contract=pixel_contract,
+                source_crop_row_ids=np.asarray(
+                    package.crop_row_indices, dtype=np.int64
+                ),
+                pixel_materialization_id=package.package_id,
+                pixel_materialization_manifest=str(package.manifest_path),
+                _roi_images=package.pixels,
+            )
+        except Exception:
+            package.close()
+            raise
 
     @property
     def total_rois(self) -> int:

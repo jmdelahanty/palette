@@ -432,12 +432,15 @@ which rows were copied versus computed.
 
 A committed detection edit records invalidation but does not, by itself,
 require eager crop-pixel persistence. When a crop-dependent materialization is
-requested, one crop-delta preparation step durably writes and validates the
-affected ROI pixels before keypoint and subject-mask inference fan out. Those
-branches may then run concurrently against the same exact pixels and retry
-independently. Preview-only crops may remain transient; pixels cited by a
-completed downstream run must come from an exact durable crop run. See
-`docs/composite_crop_storage_contract.md` for lifecycle and retention details.
+requested, one keyed crop pixel work package durably writes and validates only
+the affected ROI pixels before keypoint and subject-mask inference fan out.
+Those branches may then run concurrently against the same exact pixels and
+retry independently. The complete logical crop authority remains
+`crop_runs/<run>`; the package records its exact source rows and is not a
+canonical crop selector. Preview-only crops may remain transient. See
+`docs/crop_pixel_work_package_contract.md` for lifecycle and retention details,
+and `docs/composite_crop_storage_contract.md` for the optional long-lived
+base-plus-delta crop representation.
 
 ### Keypoints
 
@@ -672,6 +675,18 @@ depth-one immutable base-plus-delta schema and resolver, and
 `materialize_composite_incremental_crop_run` writes only computed ROI rows.
 The complete schema, reader boundary, selection behavior, retention guard, and
 future compaction rule are in `docs/composite_crop_storage_contract.md`.
+
+The incremental fan-out boundary is implemented separately by
+`fisheye.shared.crop_pixel_work_package`. It publishes a validated keyed
+`uint8[D,H,W]` subset with stable logical identity and generation-specific
+payload files. `CropImageSource` opens the package against its exact logical
+crop run, and keypoint/subject-mask inference accepts it only when writing
+noncanonical shard parents. Both outputs retain exact `source_crop_row_ids`.
+They are explicitly delta-only: ordinary collection finalizers reject them
+until the next phase's keyed compactor combines prior compatible rows plus
+replacements into a complete snapshot. The operator is
+`fisheye.utils.build_crop_pixel_work_package`; dry-run remains the default. The
+full contract is in `docs/crop_pixel_work_package_contract.md`.
 
 The planner does not construct a Python dictionary containing one tuple per
 observation. It keeps compact NumPy key/signature/action arrays and matches

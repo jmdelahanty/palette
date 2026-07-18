@@ -286,6 +286,12 @@ def _resolve_shard(root: zarr.Group, shard_name: str) -> Shard:
     status = normalize_attr(group.attrs.get(RUN_COMPLETION_STATUS_ATTR))
     if status is not None and not is_run_complete(group, legacy_default=False):
         raise ValueError(f"{KEYPOINT_SHARD_PARENT}/{shard_name} is not complete (status={status!r}).")
+    if normalize_attr(group.attrs.get("incremental_materialization_role")) == "delta_replacement_rows":
+        raise ValueError(
+            f"{KEYPOINT_SHARD_PARENT}/{shard_name} contains incremental delta rows, "
+            "not a complete collection partition. Publish it through the keyed "
+            "base-plus-delta compactor instead of the collection shard finalizer."
+        )
 
     missing = [name for name in (*REQUIRED_ROW_ARRAYS, *COUNT_ARRAYS) if name not in group]
     if missing:

@@ -32,18 +32,20 @@ crop-dependent consumer is requested, no canonical crop-pixel artifact is
 created merely because the authoring edit exists.
 
 Pixel persistence begins when reconciliation schedules work that consumes the
-crop, such as keypoint or subject-mask inference:
+crop, such as keypoint or subject-mask inference. The default incremental
+fan-out artifact is a keyed crop pixel work package, not a new composite crop
+run:
 
 ```text
 committed refined-detection revision
   -> record keyed invalidation/materialization plan
-  -> crop-delta preparation, when a pixel consumer is requested
+  -> crop pixel work-package preparation, when a pixel consumer is requested
        -> persist and validate affected ROI pixels once
        -> keypoint inference and subject-mask inference may fan out concurrently
   -> validate and publish downstream replacements independently
 ```
 
-The prepared crop delta is a durable shared derived cache, not authoring
+The prepared work package is a durable shared derived cache, not authoring
 authority. Detection geometry, `instance_key`, the source-pixel fingerprint,
 crop parameters, and the pixel contract define the reproducible crop. Persisting
 the delta at the fan-out boundary nevertheless matters because it:
@@ -61,16 +63,20 @@ must not be cited as a completed downstream source. Once a durable keypoint or
 mask run binds to a crop run, its provenance records that exact crop run and
 pixel contract; the referenced crop/base artifacts remain retained for audit.
 
-The current operator separates dry-run planning from `--apply`, but one apply
-invocation still performs delta preparation and crop-run completion together.
-The production reconciler/DAG has not yet split these into separately observable
-states. Its intended states are:
+The package contract and operator are defined in
+`docs/crop_pixel_work_package_contract.md`. Composite crop runs remain an
+optional complete base-plus-delta storage strategy when a long-lived logical
+crop snapshot should resolve unchanged pixels from a prior base. They are not a
+prerequisite for ordinary incremental inference.
+
+The production reconciler/DAG has not yet made work-package preparation a
+separately observable registry state. Its intended states are:
 
 ```text
-planned -> crop_delta_ready -> downstream_running -> downstream_complete
+planned -> crop_pixels_ready -> downstream_running -> downstream_complete
 ```
 
-Failure before `crop_delta_ready` leaves the prior complete crop selected and
+Failure before `crop_pixels_ready` leaves the prior complete crop selected and
 does not release keypoint or mask dependents. Failure in one downstream branch
 does not invalidate the prepared delta or prevent an independent branch from
 being retried according to DAG policy.

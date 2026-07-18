@@ -344,6 +344,100 @@ def copy_row_lineage_arrays(
     return RowLineageCopyResult(copied=tuple(copied), missing=tuple(missing))
 
 
+def copy_selected_crop_row_lineage_arrays(
+    target_group: zarr.Group,
+    crop_group: zarr.Group,
+    source_crop_row_ids: Sequence[int] | np.ndarray,
+    *,
+    names: Iterable[str] = ROW_LINEAGE_ARRAYS,
+    overwrite: bool = True,
+    use_geometry_preload_profile: bool = False,
+    shard_rows: int | None = None,
+    count_shard_rows: int | None = None,
+) -> RowLineageCopyResult:
+    """Copy a keyed crop subset while retaining exact source-crop row IDs.
+
+    This is the lineage counterpart to a crop pixel work package.  Per-row
+    arrays are gathered from the logical crop run, ``frame_counts`` is reduced
+    onto the same frame domain, and ``source_crop_row_ids`` records the source
+    positions rather than being renumbered to ``0..D-1``.
+    """
+
+    if "frame_indices" not in crop_group:
+        raise ValueError("Selected crop lineage requires crop frame_indices.")
+    crop_row_count = int(crop_group["frame_indices"].shape[0])
+    rows = np.asarray(source_crop_row_ids, dtype=np.int64).reshape(-1)
+    if rows.size == 0:
+        raise ValueError("Selected crop lineage requires at least one crop row.")
+    if int(rows.min()) < 0 or int(rows.max()) >= crop_row_count:
+        raise ValueError("Selected crop lineage contains an out-of-bounds crop row.")
+    if int(np.unique(rows).shape[0]) != int(rows.shape[0]):
+        raise ValueError("Selected crop lineage rows must be unique.")
+
+    requested_names = tuple(str(name) for name in names)
+    total_rois = int(rows.shape[0])
+    copied: list[str] = []
+    missing: list[str] = []
+    selected_frames = np.asarray(crop_group["frame_indices"][rows], dtype=np.int64)
+
+    for name in requested_names:
+        source_array = crop_group.get(name)
+        if name == SOURCE_CROP_ROW_IDS_ARRAY:
+            data = rows
+            source_array = None
+        elif name == "frame_counts":
+            if source_array is None:
+                missing.append(name)
+                continue
+            frame_domain_rows = int(source_array.shape[0])
+            if selected_frames.size and (
+                int(selected_frames.min()) < 0
+                or int(selected_frames.max()) >= frame_domain_rows
+            ):
+                raise ValueError(
+                    "Selected crop frame_indices exceed the crop frame_counts domain."
+                )
+            data = np.bincount(
+                selected_frames,
+                minlength=frame_domain_rows,
+            ).astype(np.dtype(source_array.dtype), copy=False)
+        elif name in PER_ROI_ROW_LINEAGE_ARRAYS:
+            if source_array is None:
+                missing.append(name)
+                continue
+            if int(source_array.shape[0]) != crop_row_count:
+                raise ValueError(
+                    f"Crop lineage array {name!r} has {source_array.shape[0]} rows, "
+                    f"expected {crop_row_count}."
+                )
+            data = np.asarray(source_array[rows])
+        else:
+            if source_array is None:
+                missing.append(name)
+                continue
+            data = np.asarray(source_array[:])
+
+        validate_row_lineage_array(name, np.asarray(data), total_rois=total_rois)
+        _write_array(
+            target_group,
+            name,
+            np.asarray(data),
+            source_array=source_array,
+            overwrite=overwrite,
+            geometry_preload_names=(
+                CRIMSON_LINEAGE_PRELOAD_ARRAYS
+                if use_geometry_preload_profile
+                else None
+            ),
+            shard_rows=(
+                count_shard_rows if name in COUNT_ROW_LINEAGE_ARRAYS else shard_rows
+            ),
+        )
+        copied.append(name)
+
+    return RowLineageCopyResult(copied=tuple(copied), missing=tuple(missing))
+
+
 def copy_row_lineage_arrays_from_sources(
     target_group: zarr.Group,
     source_arrays: Mapping[str, object | None],

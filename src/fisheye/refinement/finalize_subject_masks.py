@@ -635,6 +635,12 @@ def _load_subject_mask_shard_sources(
         status = str(group.attrs.get("palette_run_completion_status") or "")
         if status and status != "complete":
             raise ValueError(f"{SUBJECT_MASK_SHARD_PARENT}/{name} is not complete (status={status!r}).")
+        if str(group.attrs.get("incremental_materialization_role") or "") == "delta_replacement_rows":
+            raise ValueError(
+                f"{SUBJECT_MASK_SHARD_PARENT}/{name} contains incremental delta rows, "
+                "not a complete collection partition. Publish it through the keyed "
+                "base-plus-delta compactor instead of the collection shard finalizer."
+            )
         source = _load_source_subject_mask_run(alias_root, name)  # type: ignore[arg-type]
         if source.source_crop_row_ids is None:
             raise ValueError(f"{SUBJECT_MASK_SHARD_PARENT}/{name} missing source_crop_row_ids.")

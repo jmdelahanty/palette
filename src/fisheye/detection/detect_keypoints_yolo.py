@@ -38,7 +38,11 @@ from ..shared.keypoint_summary import build_frame_keypoint_counts
 from ..shared.model_input_transform import MODEL_INPUT_TRANSFORM_CHOICES, ModelInputTransform, resolve_model_input_transform
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs, build_source_roi_pixel_attrs
 from ..registry.stage_complete import emit_stage_completion
-from ..shared.row_lineage import copy_row_lineage_arrays, write_direct_source_crop_row_ids
+from ..shared.row_lineage import (
+    copy_row_lineage_arrays,
+    copy_selected_crop_row_lineage_arrays,
+    write_direct_source_crop_row_ids,
+)
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.artifact_fingerprint import fingerprint_artifact
 from ..shared.run_provenance import (
@@ -992,6 +996,7 @@ def detect_keypoints_yolo(
     roi_cache_policy: str = "auto",
     roi_cache_dir: Optional[Path] = None,
     roi_cache_manifest: Optional[Path] = None,
+    roi_work_package_manifest: Optional[Path] = None,
     roi_cache_source_tier: Optional[str] = None,
     roi_cache_staged_to_node_scratch: bool = False,
     roi_cache_staging_details: Optional[Dict[str, Any]] = None,
@@ -1016,6 +1021,20 @@ def detect_keypoints_yolo(
 
     console = console or Console()
     console.rule("[bold cyan]YOLO Pose Inference[/bold cyan]")
+
+    output_parent_name = _normalize_keypoint_output_parent(output_parent)
+    if roi_cache_manifest is not None and roi_work_package_manifest is not None:
+        raise ValueError(
+            "roi_cache_manifest and roi_work_package_manifest are mutually exclusive."
+        )
+    if (
+        roi_work_package_manifest is not None
+        and output_parent_name != "keypoint_shard_runs"
+    ):
+        raise ValueError(
+            "Crop pixel work packages may write only to keypoint_shard_runs; "
+            "finalize shards before publishing a canonical keypoint run."
+        )
 
     zarr_path = Path(zarr_path)
     if not zarr_path.exists():
@@ -1049,19 +1068,28 @@ def detect_keypoints_yolo(
         )
 
     root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
-    crop_source = CropImageSource.open(
-        root,
-        crop_run=crop_run,
-        zarr_path=zarr_path,
-        roi_cache_policy=roi_cache_policy,
-        roi_live_acceleration=roi_live_acceleration,
-        roi_live_gpu_chunk_frames=roi_live_gpu_chunk_frames,
-        roi_cache_dir=roi_cache_dir,
-        roi_cache_manifest=roi_cache_manifest,
-        console=console,
-    )
+    if roi_work_package_manifest is not None:
+        crop_source = CropImageSource.open_work_package(
+            root,
+            manifest_path=roi_work_package_manifest,
+            zarr_path=zarr_path,
+            crop_run=crop_run,
+        )
+    else:
+        crop_source = CropImageSource.open(
+            root,
+            crop_run=crop_run,
+            zarr_path=zarr_path,
+            roi_cache_policy=roi_cache_policy,
+            roi_live_acceleration=roi_live_acceleration,
+            roi_live_gpu_chunk_frames=roi_live_gpu_chunk_frames,
+            roi_cache_dir=roi_cache_dir,
+            roi_cache_manifest=roi_cache_manifest,
+            console=console,
+        )
     crop_group = crop_source.crop_group
     latest_crop = crop_source.crop_run_name
+    selected_crop_rows = getattr(crop_source, "source_crop_row_ids", None)
 
     roi_coords = crop_source.roi_coordinates_full.copy()
     frame_indices = crop_source.frame_indices.astype(np.int64, copy=True)
@@ -1074,8 +1102,12 @@ def detect_keypoints_yolo(
     roi_h, roi_w = crop_source.roi_shape
     source_detect_run = crop_group.attrs.get("source_detect_run")
     source_refined_run = crop_group.attrs.get("source_refined_run")
-    override_data = _prepare_refined_roi_overrides(
-        root, crop_group, total_rois, (roi_h, roi_w), console
+    override_data = (
+        None
+        if roi_work_package_manifest is not None
+        else _prepare_refined_roi_overrides(
+            root, crop_group, total_rois, (roi_h, roi_w), console
+        )
     )
     override_map: Optional[np.ndarray] = None
     override_rois: Optional[np.ndarray] = None
@@ -1099,7 +1131,6 @@ def detect_keypoints_yolo(
     )
     resolved_input_mode = _normalize_input_mode(input_mode)
 
-    output_parent_name = _normalize_keypoint_output_parent(output_parent)
     run_parent, run_group, resolved_run_name = _prepare_run_group_for_parent(
         root,
         run_name,
@@ -1129,16 +1160,32 @@ def detect_keypoints_yolo(
         shard_rows=keypoint_roi_shard_rows,
     )
 
-    lineage_result = copy_row_lineage_arrays(
-        run_group,
-        crop_group,
-        total_rois=total_rois,
-        use_geometry_preload_profile=True,
-        shard_rows=keypoint_roi_shard_rows,
-        count_shard_rows=(
-            keypoint_frame_shard_rows if keypoint_roi_shard_rows is not None else None
-        ),
-    )
+    if selected_crop_rows is not None:
+        lineage_result = copy_selected_crop_row_lineage_arrays(
+            run_group,
+            crop_group,
+            selected_crop_rows,
+            use_geometry_preload_profile=True,
+            shard_rows=keypoint_roi_shard_rows,
+            count_shard_rows=(
+                keypoint_frame_shard_rows
+                if keypoint_roi_shard_rows is not None
+                else None
+            ),
+        )
+    else:
+        lineage_result = copy_row_lineage_arrays(
+            run_group,
+            crop_group,
+            total_rois=total_rois,
+            use_geometry_preload_profile=True,
+            shard_rows=keypoint_roi_shard_rows,
+            count_shard_rows=(
+                keypoint_frame_shard_rows
+                if keypoint_roi_shard_rows is not None
+                else None
+            ),
+        )
     if "source_crop_row_ids" not in lineage_result.copied:
         write_direct_source_crop_row_ids(
             run_group,
@@ -1190,9 +1237,19 @@ def detect_keypoints_yolo(
         )
 
     crop_detection_source = crop_group.get("detection_source")
-    if crop_detection_source is not None and crop_detection_source.shape[0] != total_rois:
+    crop_source_row_count = (
+        int(total_rois)
+        if selected_crop_rows is None
+        else int(crop_group["frame_indices"].shape[0])
+    )
+    if (
+        crop_detection_source is not None
+        and crop_detection_source.shape[0] != crop_source_row_count
+    ):
         raise ValueError(
-            f"Crop run detection_source length {crop_detection_source.shape[0]} does not match ROI count {total_rois}"
+            "Crop run detection_source length "
+            f"{crop_detection_source.shape[0]} does not match crop row count "
+            f"{crop_source_row_count}"
         )
     scalar_chunk = arrays["heading"].chunks
     detection_source_dst = run_group.create_array(
@@ -1356,7 +1413,17 @@ def detect_keypoints_yolo(
 
             with timing_profiler.time("output_write", items=batch_count):
                 if crop_detection_source is not None:
-                    source_chunk = crop_detection_source[start:end].astype("i1", copy=False)
+                    if selected_crop_rows is None:
+                        source_chunk = crop_detection_source[start:end].astype(
+                            "i1", copy=False
+                        )
+                    else:
+                        source_chunk = np.asarray(
+                            crop_detection_source[
+                                selected_crop_rows[start:end]
+                            ],
+                            dtype="i1",
+                        )
                 else:
                     source_chunk = np.zeros(end - start, dtype="i1")
                 heading_finite_chunk = np.isfinite(batch_heading)
@@ -1463,6 +1530,26 @@ def detect_keypoints_yolo(
         if isinstance(roi_cache_staging_payload, dict)
         else None
     )
+    work_package_attrs = {
+        "source_crop_pixel_work_package_id": getattr(
+            crop_source, "pixel_materialization_id", None
+        ),
+        "source_crop_pixel_work_package_manifest": (
+            getattr(crop_source, "pixel_materialization_manifest", None)
+        ),
+        "source_crop_pixel_work_package_rows": (
+            int(total_rois)
+            if getattr(crop_source, "pixel_materialization_id", None) is not None
+            else None
+        ),
+    }
+    if getattr(crop_source, "pixel_materialization_id", None) is not None:
+        work_package_attrs.update(
+            {
+                "incremental_materialization_role": "delta_replacement_rows",
+                "canonical_finalization_policy": "incremental_compaction_required",
+            }
+        )
 
     run_group.attrs.update({
         "method": "yolo_pose",
@@ -1488,6 +1575,7 @@ def detect_keypoints_yolo(
         "source_crop_run": latest_crop,
         **crop_snapshot_attrs,
         **crop_pixel_attrs,
+        **work_package_attrs,
         "source_roi_read_mode": crop_source.roi_read_mode,
         "roi_cache_policy": crop_source.roi_cache_policy,
         "source_roi_cache_used": bool(crop_source.roi_cache_used),
@@ -1538,6 +1626,11 @@ def detect_keypoints_yolo(
             "roi_live_acceleration": str(roi_live_acceleration),
             "roi_live_gpu_chunk_frames": int(roi_live_gpu_chunk_frames),
             "roi_cache_manifest": str(roi_cache_manifest) if roi_cache_manifest is not None else None,
+            "roi_work_package_manifest": (
+                str(roi_work_package_manifest)
+                if roi_work_package_manifest is not None
+                else None
+            ),
             "roi_cache_source_tier": effective_roi_cache_source_tier,
             "roi_cache_staged_to_node_scratch": bool(roi_cache_staged_to_node_scratch),
             "roi_cache_staging_policy": roi_cache_staging_policy,
@@ -1623,6 +1716,11 @@ def detect_keypoints_yolo(
                 "mask_threshold": mask_threshold,
                 "roi_cache_policy": roi_cache_policy,
                 "roi_cache_manifest": str(roi_cache_manifest) if roi_cache_manifest is not None else None,
+                "roi_work_package_manifest": (
+                    str(roi_work_package_manifest)
+                    if roi_work_package_manifest is not None
+                    else None
+                ),
                 "roi_live_acceleration": roi_live_acceleration,
                 "model_input_transform_mode": model_input_transform_mode,
                 "input_mode": input_mode,
@@ -1673,6 +1771,7 @@ def detect_keypoints_yolo(
             "source_crop_run": latest_crop,
             **crop_snapshot_attrs,
             **crop_pixel_attrs,
+            **work_package_attrs,
             "source_roi_read_mode": crop_source.roi_read_mode,
             "roi_cache_policy": crop_source.roi_cache_policy,
             "roi_cache_used": bool(crop_source.roi_cache_used),
@@ -1755,6 +1854,7 @@ def detect_keypoints_yolo(
         "source_crop_run": latest_crop,
         **crop_snapshot_attrs,
         **crop_pixel_attrs,
+        **work_package_attrs,
         "source_roi_read_mode": crop_source.roi_read_mode,
         "roi_cache_policy": crop_source.roi_cache_policy,
         "roi_cache_used": bool(crop_source.roi_cache_used),
@@ -1938,11 +2038,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional scratch directory for temporary ROI caches.",
     )
-    parser.add_argument(
+    roi_manifest_group = parser.add_mutually_exclusive_group()
+    roi_manifest_group.add_argument(
         "--roi-cache-manifest",
         type=Path,
         default=None,
         help="Optional flat_bin_v1 ROI cache manifest to read instead of materializing/re-decoding ROIs.",
+    )
+    roi_manifest_group.add_argument(
+        "--roi-work-package-manifest",
+        type=Path,
+        default=None,
+        help=(
+            "Keyed subset ROI package for delta inference. Requires "
+            "--output-parent keypoint_shard_runs."
+        ),
     )
     parser.add_argument(
         "--roi-cache-source-tier",
@@ -2017,6 +2127,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         roi_cache_policy=args.roi_cache_policy,
         roi_cache_dir=args.roi_cache_dir,
         roi_cache_manifest=args.roi_cache_manifest,
+        roi_work_package_manifest=args.roi_work_package_manifest,
         roi_cache_source_tier=args.roi_cache_source_tier,
         roi_cache_staged_to_node_scratch=bool(args.roi_cache_staged_to_node_scratch),
         input_mode=args.input_mode,
