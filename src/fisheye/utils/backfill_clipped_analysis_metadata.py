@@ -37,6 +37,7 @@ PATH_COLUMNS = (
     "clip_recording_folder",
 )
 SUPPORTED_VIDEO_SUFFIXES = {".avi", ".mkv", ".mov", ".mp4"}
+MODULE_NAME = "fisheye.utils.backfill_clipped_analysis_metadata"
 
 
 @dataclass(frozen=True)
@@ -181,7 +182,7 @@ def _apply_attr_diff(current: Mapping[str, Any], diff: Mapping[str, Mapping[str,
         if item.get("will_update"):
             updated[key] = item.get("wanted")
     updated["clipped_analysis_metadata_backfilled_at_utc"] = utc_now()
-    updated["clipped_analysis_metadata_backfill_tool"] = __name__
+    updated["clipped_analysis_metadata_backfill_tool"] = MODULE_NAME
     return updated
 
 
@@ -265,7 +266,7 @@ def _apply_video_location_plan(
     updated_root_attrs["source_video_location_repair"] = {
         "schema_id": "palette.source_video_location_repair.v1",
         "repaired_at_utc": repaired_at,
-        "tool": __name__,
+        "tool": MODULE_NAME,
         "source_video_path": wanted,
         "previous_live_fields": {
             str(key): item.get("current")
@@ -276,6 +277,133 @@ def _apply_video_location_plan(
     }
     _write_zarr_attrs(zarr_path, updated_root_attrs)
     return {**dict(plan), "updated": True, "repaired_at_utc": repaired_at}
+
+
+def _analysis_context_plan(
+    zarr_path: Path,
+    source_zarr: Path,
+    *,
+    require_dish_mask: bool,
+    copy_experiment_setup: bool,
+    force: bool,
+) -> dict[str, Any]:
+    resolved_source = source_zarr.expanduser().resolve()
+    if not resolved_source.is_dir():
+        raise FileNotFoundError(f"Analysis-metadata source Zarr not found: {resolved_source}")
+    source_analysis_path = resolved_source / "analysis_metadata"
+    if not (source_analysis_path / "zarr.json").exists():
+        raise FileNotFoundError(
+            f"Source analysis_metadata group not found: {source_analysis_path}"
+        )
+    target_analysis_path = zarr_path / "analysis_metadata"
+    if not (target_analysis_path / "zarr.json").exists():
+        raise FileNotFoundError(
+            f"Target clipped analysis_metadata group not found: {target_analysis_path}"
+        )
+
+    source_analysis_attrs = _load_zarr_attrs(source_analysis_path)
+    source_root_attrs = _load_zarr_attrs(resolved_source)
+    target_analysis_attrs = _load_zarr_attrs(target_analysis_path)
+    target_root_attrs = _load_zarr_attrs(zarr_path)
+
+    dish_mask = source_analysis_attrs.get("dish_mask")
+    if dish_mask is not None and not isinstance(dish_mask, Mapping):
+        raise ValueError("Source analysis_metadata dish_mask is not an object.")
+    if require_dish_mask and dish_mask is None:
+        raise ValueError(
+            f"Required dish_mask is absent from source analysis_metadata: {resolved_source}"
+        )
+
+    experiment_setup = source_root_attrs.get("experiment_setup")
+    if experiment_setup is not None and not isinstance(experiment_setup, Mapping):
+        raise ValueError("Source root experiment_setup is not an object.")
+    if copy_experiment_setup and experiment_setup is None:
+        raise ValueError(
+            f"Requested experiment_setup copy, but source root has none: {resolved_source}"
+        )
+
+    current_dish_mask = target_analysis_attrs.get("dish_mask")
+    current_setup = target_root_attrs.get("experiment_setup")
+    if dish_mask is not None and current_dish_mask not in (None, dish_mask) and not force:
+        raise ValueError(
+            "Target analysis_metadata already has a conflicting dish_mask; pass --force only "
+            "after reviewing both geometries."
+        )
+    if (
+        copy_experiment_setup
+        and experiment_setup is not None
+        and current_setup not in (None, experiment_setup)
+        and not force
+    ):
+        raise ValueError(
+            "Target root already has a conflicting experiment_setup; pass --force only after review."
+        )
+
+    dish_mask_will_update = bool(
+        dish_mask is not None
+        and (
+            current_dish_mask != dish_mask
+            or target_analysis_attrs.get("dish_mask_source_zarr") != str(resolved_source)
+            or target_analysis_attrs.get("dish_mask_source_key")
+            != "analysis_metadata.attrs.dish_mask"
+            or target_analysis_attrs.get("dish_mask_copy_tool") != MODULE_NAME
+        )
+    )
+    experiment_setup_will_update = bool(
+        copy_experiment_setup
+        and experiment_setup is not None
+        and (
+            current_setup != experiment_setup
+            or target_root_attrs.get("experiment_setup_source_zarr") != str(resolved_source)
+            or target_root_attrs.get("experiment_setup_copy_tool") != MODULE_NAME
+        )
+    )
+    return {
+        "source_zarr": str(resolved_source),
+        "source_has_dish_mask": dish_mask is not None,
+        "source_has_experiment_setup": experiment_setup is not None,
+        "dish_mask_currently_present": current_dish_mask is not None,
+        "experiment_setup_currently_present": current_setup is not None,
+        "dish_mask_will_update": dish_mask_will_update,
+        "experiment_setup_will_update": experiment_setup_will_update,
+        "will_update": dish_mask_will_update or experiment_setup_will_update,
+    }
+
+
+def _apply_analysis_context_plan(
+    zarr_path: Path,
+    source_zarr: Path,
+    plan: Mapping[str, Any],
+    *,
+    copy_experiment_setup: bool,
+) -> dict[str, Any]:
+    if not plan.get("will_update"):
+        return {**dict(plan), "updated": False}
+
+    resolved_source = source_zarr.expanduser().resolve()
+    source_analysis_attrs = _load_zarr_attrs(resolved_source / "analysis_metadata")
+    source_root_attrs = _load_zarr_attrs(resolved_source)
+    copied_at = utc_now()
+
+    if plan.get("dish_mask_will_update"):
+        target_analysis_path = zarr_path / "analysis_metadata"
+        target_analysis_attrs = _load_zarr_attrs(target_analysis_path)
+        target_analysis_attrs["dish_mask"] = source_analysis_attrs["dish_mask"]
+        target_analysis_attrs["dish_mask_source_zarr"] = str(resolved_source)
+        target_analysis_attrs["dish_mask_source_key"] = "analysis_metadata.attrs.dish_mask"
+        target_analysis_attrs["dish_mask_copied_at_utc"] = copied_at
+        target_analysis_attrs["dish_mask_copy_tool"] = MODULE_NAME
+        _write_zarr_attrs(target_analysis_path, target_analysis_attrs)
+
+    if copy_experiment_setup and plan.get("experiment_setup_will_update"):
+        target_root_attrs = _load_zarr_attrs(zarr_path)
+        target_root_attrs["experiment_setup"] = source_root_attrs["experiment_setup"]
+        target_root_attrs["experiment_setup_source_zarr"] = str(resolved_source)
+        target_root_attrs["experiment_setup_copied_at_utc"] = copied_at
+        target_root_attrs["experiment_setup_copy_tool"] = MODULE_NAME
+        _write_zarr_attrs(zarr_path, target_root_attrs)
+
+    return {**dict(plan), "updated": True, "copied_at_utc": copied_at}
 
 
 def _iter_path_strings(table: pa.Table, columns: Iterable[str]) -> Iterable[str]:
@@ -455,6 +583,9 @@ def backfill_clipped_analysis_metadata(
     new_root: str | None = None,
     force: bool = False,
     apply: bool = False,
+    copy_analysis_metadata_from: Path | None = None,
+    require_dish_mask: bool = False,
+    copy_experiment_setup: bool = True,
 ) -> dict[str, Any]:
     context = _load_context(zarr_path, recording_root)
     manifest = _read_json(context.manifest_path)
@@ -468,6 +599,19 @@ def backfill_clipped_analysis_metadata(
         if source_video_path is not None
         else None
     )
+    analysis_context = (
+        _analysis_context_plan(
+            context.zarr_path,
+            copy_analysis_metadata_from,
+            require_dish_mask=require_dish_mask,
+            copy_experiment_setup=copy_experiment_setup,
+            force=force,
+        )
+        if copy_analysis_metadata_from is not None
+        else None
+    )
+    if require_dish_mask and copy_analysis_metadata_from is None:
+        raise ValueError("--require-dish-mask requires --copy-analysis-metadata-from.")
 
     path_plan: dict[str, Any] | None = None
     if rewrite_frame_index_paths:
@@ -490,6 +634,7 @@ def backfill_clipped_analysis_metadata(
         "frame_index_path": str(context.frame_index_path),
         "attr_changes": attr_diff,
         "video_location": video_location,
+        "analysis_context": analysis_context,
         "path_rewrite": path_plan,
         "registry": registry_result,
     }
@@ -506,6 +651,14 @@ def backfill_clipped_analysis_metadata(
         result["video_location"] = _apply_video_location_plan(
             context.zarr_path,
             video_location,
+        )
+
+    if analysis_context is not None and copy_analysis_metadata_from is not None:
+        result["analysis_context"] = _apply_analysis_context_plan(
+            context.zarr_path,
+            copy_analysis_metadata_from,
+            analysis_context,
+            copy_experiment_setup=copy_experiment_setup,
         )
 
     if rewrite_frame_index_paths and path_plan is not None and path_plan.get("rewrite_count", 0):
@@ -541,6 +694,24 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument("--registry", type=Path, help="Optional registry SQLite path to update.")
+    parser.add_argument(
+        "--copy-analysis-metadata-from",
+        type=Path,
+        help=(
+            "Copy analysis_metadata.dish_mask and, by default, root experiment_setup "
+            "from this existing Zarr with explicit provenance."
+        ),
+    )
+    parser.add_argument(
+        "--require-dish-mask",
+        action="store_true",
+        help="Fail closed unless the selected source contains analysis_metadata.dish_mask.",
+    )
+    parser.add_argument(
+        "--no-copy-experiment-setup",
+        action="store_true",
+        help="Copy only the dish mask, not root experiment_setup.",
+    )
     parser.add_argument("--rewrite-frame-index-paths", action="store_true", help="Rewrite stale active paths inside recording_frame_index.parquet and manifest.")
     parser.add_argument("--old-root", help="Old recording root prefix for frame-index path rewrite.")
     parser.add_argument("--new-root", help="New recording root prefix for frame-index path rewrite. Defaults to the resolved recording root.")
@@ -558,6 +729,9 @@ def main(argv: list[str] | None = None) -> int:
         new_root=args.new_root,
         force=args.force,
         apply=args.apply,
+        copy_analysis_metadata_from=args.copy_analysis_metadata_from,
+        require_dish_mask=args.require_dish_mask,
+        copy_experiment_setup=not args.no_copy_experiment_setup,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

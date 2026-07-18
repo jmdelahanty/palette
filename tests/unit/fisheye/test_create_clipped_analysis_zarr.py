@@ -80,6 +80,20 @@ def _write_clipped_recording(root: Path) -> None:
     build_recording_frame_index(root)
 
 
+def _write_analysis_context_source(
+    path: Path,
+    *,
+    dish_mask: dict[str, object] | None,
+    experiment_setup: dict[str, object] | None = None,
+) -> None:
+    root = zarr.open_group(str(path), mode="w", zarr_format=3)
+    analysis = root.create_group("analysis_metadata")
+    if dish_mask is not None:
+        analysis.attrs["dish_mask"] = dish_mask
+    if experiment_setup is not None:
+        root.attrs["experiment_setup"] = experiment_setup
+
+
 def test_create_clipped_analysis_zarr_writes_shell_layout(tmp_path: Path) -> None:
     root_dir = tmp_path / "rec_a"
     _write_clipped_recording(root_dir)
@@ -148,3 +162,121 @@ def test_create_clipped_analysis_zarr_refuses_existing_output_without_overwrite(
 
     assert result["status"] == "ok"
     assert result["wrote_zarr"] is True
+
+
+def test_create_clipped_analysis_zarr_discovers_and_copies_recording_context(
+    tmp_path: Path,
+) -> None:
+    root_dir = tmp_path / "rec_a"
+    _write_clipped_recording(root_dir)
+    source_zarr = root_dir / "zarr" / "rec_a_training.zarr"
+    dish_mask = {
+        "shape": "circle",
+        "detected_circle": {"center": [332, 326], "radius": 300},
+        "metrics": {
+            "image_shape": [640, 640],
+            "center_norm": [0.51875, 0.509375],
+            "radius_norm": 0.46875,
+        },
+    }
+    experiment_setup = {
+        "num_dishes": 1,
+        "fish_per_dish": 1,
+        "total_expected_fish": 1,
+        "setup_type": "single_dish",
+        "source": "test",
+    }
+    _write_analysis_context_source(
+        source_zarr,
+        dish_mask=dish_mask,
+        experiment_setup=experiment_setup,
+    )
+    output_zarr = root_dir / "zarr" / "rec_a_analysis.zarr"
+
+    result = create_clipped_analysis_zarr(
+        root_dir,
+        output_zarr=output_zarr,
+        require_dish_mask=True,
+    )
+
+    assert result["analysis_context_source"] == {
+        "source_zarr": str(source_zarr),
+        "has_dish_mask": True,
+        "has_experiment_setup": True,
+        "experiment_setup_source_zarr": None,
+    }
+    root = zarr.open_group(str(output_zarr), mode="r")
+    analysis = root["analysis_metadata"]
+    assert analysis.attrs["dish_mask"] == dish_mask
+    assert analysis.attrs["dish_mask_source_zarr"] == str(source_zarr)
+    assert analysis.attrs["dish_mask_source_key"] == "analysis_metadata.attrs.dish_mask"
+    assert analysis.attrs["dish_mask_copy_tool"] == "fisheye.utils.create_clipped_analysis_zarr"
+    assert root.attrs["experiment_setup"] == experiment_setup
+    assert root.attrs["experiment_setup_source_zarr"] == str(source_zarr)
+
+
+def test_create_clipped_analysis_zarr_require_dish_mask_fails_before_write(
+    tmp_path: Path,
+) -> None:
+    root_dir = tmp_path / "rec_a"
+    _write_clipped_recording(root_dir)
+    output_zarr = root_dir / "zarr" / "rec_a_analysis.zarr"
+
+    with pytest.raises(ValueError, match="no sibling Zarr supplies"):
+        create_clipped_analysis_zarr(
+            root_dir,
+            output_zarr=output_zarr,
+            require_dish_mask=True,
+            dry_run=True,
+        )
+
+    assert not output_zarr.exists()
+
+
+def test_create_clipped_analysis_zarr_rejects_conflicting_discovered_masks(
+    tmp_path: Path,
+) -> None:
+    root_dir = tmp_path / "rec_a"
+    _write_clipped_recording(root_dir)
+    zarr_dir = root_dir / "zarr"
+    _write_analysis_context_source(
+        zarr_dir / "rec_a_training.zarr",
+        dish_mask={"shape": "circle", "detected_circle": {"center": [1, 2], "radius": 3}},
+    )
+    _write_analysis_context_source(
+        zarr_dir / "rec_a_clipped_training.zarr",
+        dish_mask={"shape": "circle", "detected_circle": {"center": [4, 5], "radius": 6}},
+    )
+
+    with pytest.raises(ValueError, match="Conflicting sibling dish masks"):
+        create_clipped_analysis_zarr(
+            root_dir,
+            output_zarr=zarr_dir / "rec_a_analysis.zarr",
+            dry_run=True,
+        )
+
+
+def test_create_clipped_analysis_zarr_explicit_source_can_disable_discovery(
+    tmp_path: Path,
+) -> None:
+    root_dir = tmp_path / "rec_a"
+    _write_clipped_recording(root_dir)
+    source_zarr = tmp_path / "chosen_source.zarr"
+    chosen_mask = {
+        "shape": "circle",
+        "detected_circle": {"center": [10, 11], "radius": 12},
+    }
+    _write_analysis_context_source(source_zarr, dish_mask=chosen_mask)
+    output_zarr = root_dir / "zarr" / "rec_a_analysis.zarr"
+
+    create_clipped_analysis_zarr(
+        root_dir,
+        output_zarr=output_zarr,
+        copy_analysis_metadata_from=source_zarr,
+        require_dish_mask=True,
+        auto_discover_analysis_metadata=False,
+    )
+
+    root = zarr.open_group(str(output_zarr), mode="r")
+    assert root["analysis_metadata"].attrs["dish_mask"] == chosen_mask
+    assert root["analysis_metadata"].attrs["dish_mask_source_zarr"] == str(source_zarr)

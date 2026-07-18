@@ -174,6 +174,205 @@ def _dish_mask_policy_attrs(camera_serials: Sequence[str]) -> dict[str, Any]:
     }
 
 
+def _read_node_attrs(node_path: Path) -> dict[str, Any]:
+    """Read Zarr node attrs without opening the complete store."""
+
+    metadata_path = node_path / "zarr.json"
+    if metadata_path.exists():
+        payload = _read_json(metadata_path)
+        attrs = payload.get("attributes") if isinstance(payload, Mapping) else None
+        if attrs is None:
+            return {}
+        if not isinstance(attrs, Mapping):
+            raise ValueError(f"Zarr attributes are not an object: {metadata_path}")
+        return dict(attrs)
+
+    legacy_attrs_path = node_path / ".zattrs"
+    if legacy_attrs_path.exists():
+        payload = _read_json(legacy_attrs_path)
+        if not isinstance(payload, Mapping):
+            raise ValueError(f"Zarr attributes are not an object: {legacy_attrs_path}")
+        return dict(payload)
+    return {}
+
+
+def _analysis_context_payload(source_zarr: Path) -> dict[str, Any]:
+    resolved = source_zarr.expanduser().resolve()
+    if not resolved.is_dir():
+        raise FileNotFoundError(f"Analysis-metadata source Zarr not found: {resolved}")
+    analysis_attrs = _read_node_attrs(resolved / "analysis_metadata")
+    root_attrs = _read_node_attrs(resolved)
+    dish_mask = analysis_attrs.get("dish_mask")
+    experiment_setup = root_attrs.get("experiment_setup")
+    if dish_mask is not None and not isinstance(dish_mask, Mapping):
+        raise ValueError(
+            f"analysis_metadata.attrs['dish_mask'] is not an object: {resolved}"
+        )
+    if experiment_setup is not None and not isinstance(experiment_setup, Mapping):
+        raise ValueError(f"root attrs['experiment_setup'] is not an object: {resolved}")
+    return {
+        "source_zarr": str(resolved),
+        "dish_mask": dict(dish_mask) if isinstance(dish_mask, Mapping) else None,
+        "experiment_setup": (
+            dict(experiment_setup) if isinstance(experiment_setup, Mapping) else None
+        ),
+    }
+
+
+def _canonical_value(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=_json_default)
+
+
+def _discover_analysis_context_source(
+    *,
+    recording_path: Path,
+    output_zarr: Path,
+    camera_serials: Sequence[str],
+    explicit_source: Path | None,
+    auto_discover: bool,
+    require_dish_mask: bool,
+) -> dict[str, Any] | None:
+    """Resolve one unambiguous sibling source for mask/setup metadata."""
+
+    if explicit_source is not None:
+        selected = _analysis_context_payload(explicit_source)
+        if require_dish_mask and selected["dish_mask"] is None:
+            raise ValueError(
+                "--require-dish-mask was set, but the explicit analysis-metadata "
+                f"source has no dish_mask: {selected['source_zarr']}"
+            )
+        return selected
+
+    if not auto_discover:
+        if require_dish_mask:
+            raise ValueError(
+                "--require-dish-mask was set while analysis-metadata discovery was disabled; "
+                "pass --copy-analysis-metadata-from."
+            )
+        return None
+
+    # One top-level dish_mask represents one recording-camera geometry. Do not
+    # silently choose a camera-specific source for a multi-camera shell.
+    if len(camera_serials) != 1:
+        if require_dish_mask:
+            raise ValueError(
+                "Automatic dish-mask discovery requires exactly one camera; pass an explicit "
+                "source after defining the multi-camera mask contract."
+            )
+        return None
+
+    zarr_dir = recording_path / "zarr"
+    preferred = [
+        zarr_dir / f"{recording_path.name}_training.zarr",
+        zarr_dir / f"{recording_path.name}_clipped_training.zarr",
+    ]
+    candidates: list[Path] = []
+    if output_zarr.exists():
+        candidates.append(output_zarr)
+    candidates.extend(preferred)
+    if zarr_dir.exists():
+        candidates.extend(sorted(zarr_dir.glob("*.zarr")))
+
+    payloads: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve()
+        if resolved in seen or not resolved.is_dir():
+            continue
+        seen.add(resolved)
+        payload = _analysis_context_payload(resolved)
+        if payload["dish_mask"] is None and payload["experiment_setup"] is None:
+            continue
+        payloads.append(payload)
+
+    if not payloads:
+        if require_dish_mask:
+            raise ValueError(
+                "--require-dish-mask was set, but no sibling Zarr supplies "
+                "analysis_metadata.attrs['dish_mask']; pass --copy-analysis-metadata-from."
+            )
+        return None
+
+    distinct_masks = {
+        _canonical_value(payload["dish_mask"])
+        for payload in payloads
+        if payload["dish_mask"] is not None
+    }
+    if len(distinct_masks) > 1:
+        sources = ", ".join(str(payload["source_zarr"]) for payload in payloads)
+        raise ValueError(
+            "Conflicting sibling dish masks were discovered; pass "
+            f"--copy-analysis-metadata-from explicitly. Candidates: {sources}"
+        )
+    distinct_setups = {
+        _canonical_value(payload["experiment_setup"])
+        for payload in payloads
+        if payload["experiment_setup"] is not None
+    }
+    if len(distinct_setups) > 1:
+        sources = ", ".join(str(payload["source_zarr"]) for payload in payloads)
+        raise ValueError(
+            "Conflicting sibling experiment_setup values were discovered; pass "
+            f"--copy-analysis-metadata-from explicitly. Candidates: {sources}"
+        )
+
+    with_mask = [payload for payload in payloads if payload["dish_mask"] is not None]
+    if require_dish_mask and not with_mask:
+        raise ValueError(
+            "--require-dish-mask was set, but discovered sibling Zarrs have no dish_mask."
+        )
+    selection_pool = with_mask or payloads
+    # Prefer a source that carries both fields, then the original training Zarr
+    # over a derived clipped-training copy.
+    selection_pool.sort(
+        key=lambda payload: (
+            payload["experiment_setup"] is not None,
+            str(payload["source_zarr"]).endswith("_training.zarr")
+            and not str(payload["source_zarr"]).endswith("_clipped_training.zarr"),
+        ),
+        reverse=True,
+    )
+    selected = dict(selection_pool[0])
+
+    # If the chosen mask source lacks setup but another equivalent sibling has
+    # it, carry that independently with explicit provenance.
+    if selected["experiment_setup"] is None:
+        setup_source = next(
+            (payload for payload in payloads if payload["experiment_setup"] is not None),
+            None,
+        )
+        if setup_source is not None:
+            selected["experiment_setup"] = setup_source["experiment_setup"]
+            selected["experiment_setup_source_zarr"] = setup_source["source_zarr"]
+    return selected
+
+
+def _copy_analysis_context(
+    root: zarr.Group,
+    context: Mapping[str, Any] | None,
+) -> None:
+    if context is None:
+        return
+    copied_at = _utc_now()
+    source_zarr = str(context["source_zarr"])
+    dish_mask = context.get("dish_mask")
+    if isinstance(dish_mask, Mapping):
+        analysis_metadata = root["analysis_metadata"]
+        analysis_metadata.attrs["dish_mask"] = dict(dish_mask)
+        analysis_metadata.attrs["dish_mask_source_zarr"] = source_zarr
+        analysis_metadata.attrs["dish_mask_source_key"] = "analysis_metadata.attrs.dish_mask"
+        analysis_metadata.attrs["dish_mask_copied_at_utc"] = copied_at
+        analysis_metadata.attrs["dish_mask_copy_tool"] = MODULE_NAME
+
+    experiment_setup = context.get("experiment_setup")
+    if isinstance(experiment_setup, Mapping):
+        setup_source = str(context.get("experiment_setup_source_zarr") or source_zarr)
+        root.attrs["experiment_setup"] = dict(experiment_setup)
+        root.attrs["experiment_setup_source_zarr"] = setup_source
+        root.attrs["experiment_setup_copied_at_utc"] = copied_at
+        root.attrs["experiment_setup_copy_tool"] = MODULE_NAME
+
+
 def _create_common_groups(root: zarr.Group, *, camera_serials: Sequence[str]) -> None:
     raw_video = root.require_group("raw_video")
     _set_attrs(
@@ -292,6 +491,9 @@ def create_clipped_analysis_zarr(
     overwrite: bool = False,
     dry_run: bool = False,
     write_manifest: bool = True,
+    copy_analysis_metadata_from: str | Path | None = None,
+    require_dish_mask: bool = False,
+    auto_discover_analysis_metadata: bool = True,
 ) -> dict[str, Any]:
     """Create a clipped analysis-Zarr shell from recording sidecars."""
     started = datetime.now(timezone.utc)
@@ -328,6 +530,18 @@ def create_clipped_analysis_zarr(
     session_id = str(clip_index.get("session_id") or frame_manifest.get("session_id") or recording_id)
     zarr_path = Path(output_zarr).expanduser().resolve() if output_zarr else _default_output_zarr(recording_path)
     shell_manifest_path = zarr_path.parent / f"{zarr_path.name}_shell_manifest.json"
+    analysis_context = _discover_analysis_context_source(
+        recording_path=recording_path,
+        output_zarr=zarr_path,
+        camera_serials=camera_serials,
+        explicit_source=(
+            Path(copy_analysis_metadata_from).expanduser().resolve()
+            if copy_analysis_metadata_from is not None
+            else None
+        ),
+        auto_discover=bool(auto_discover_analysis_metadata),
+        require_dish_mask=bool(require_dish_mask),
+    )
 
     planned = {
         "status": "ok",
@@ -351,6 +565,19 @@ def create_clipped_analysis_zarr(
         "clip_ids": clip_ids,
         "shell_manifest_path": str(shell_manifest_path) if write_manifest else None,
         "dish_mask_policy": _dish_mask_policy_attrs(camera_serials),
+        "analysis_context_source": (
+            {
+                "source_zarr": analysis_context["source_zarr"],
+                "has_dish_mask": analysis_context.get("dish_mask") is not None,
+                "has_experiment_setup": analysis_context.get("experiment_setup") is not None,
+                "experiment_setup_source_zarr": analysis_context.get(
+                    "experiment_setup_source_zarr"
+                ),
+            }
+            if analysis_context is not None
+            else None
+        ),
+        "require_dish_mask": bool(require_dish_mask),
     }
 
     if dry_run:
@@ -401,6 +628,7 @@ def create_clipped_analysis_zarr(
         },
     )
     _create_common_groups(root, camera_serials=camera_serials)
+    _copy_analysis_context(root, analysis_context)
 
     clip_sources: list[dict[str, Any]] = []
     for row in sorted(rows, key=lambda item: (int(item.get("clip_index") or 0), str(item.get("camera_serial") or ""))):
@@ -443,6 +671,24 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-zarr", type=Path)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--copy-analysis-metadata-from",
+        type=Path,
+        help=(
+            "Explicit source Zarr for analysis_metadata.dish_mask and root "
+            "experiment_setup. By default, unambiguous sibling training Zarrs are discovered."
+        ),
+    )
+    parser.add_argument(
+        "--require-dish-mask",
+        action="store_true",
+        help="Fail before shell creation unless a dish mask can be copied.",
+    )
+    parser.add_argument(
+        "--no-auto-discover-analysis-metadata",
+        action="store_true",
+        help="Disable sibling training-Zarr discovery.",
+    )
     parser.add_argument("--no-manifest", action="store_true", help="Do not write the sibling shell manifest JSON.")
     parser.add_argument("--json", action="store_true")
     return parser
@@ -475,6 +721,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         overwrite=args.overwrite,
         dry_run=args.dry_run,
         write_manifest=not args.no_manifest,
+        copy_analysis_metadata_from=args.copy_analysis_metadata_from,
+        require_dish_mask=args.require_dish_mask,
+        auto_discover_analysis_metadata=not args.no_auto_discover_analysis_metadata,
     )
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True, default=_json_default))

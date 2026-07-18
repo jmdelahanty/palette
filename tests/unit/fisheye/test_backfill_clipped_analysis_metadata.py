@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from fisheye.utils.backfill_clipped_analysis_metadata import (
     backfill_clipped_analysis_metadata,
@@ -126,6 +127,7 @@ def _make_archive(tmp_path: Path) -> tuple[Path, Path, Path]:
             "source_path": str(old_video),
         },
     )
+    _write_zarr_json(zarr_path / "analysis_metadata", {})
     return zarr_path, recording_root, old_root
 
 
@@ -252,3 +254,91 @@ def test_backfill_rejects_missing_source_video(tmp_path: Path):
         assert "Source video not found" in str(error)
     else:  # pragma: no cover - defensive assertion
         raise AssertionError("Expected missing source video to be rejected")
+
+
+def test_backfill_copies_dish_mask_and_experiment_setup_with_provenance(
+    tmp_path: Path,
+) -> None:
+    zarr_path, _recording_root, _old_root = _make_archive(tmp_path)
+    source_zarr = tmp_path / "source_training.zarr"
+    dish_mask = {
+        "shape": "circle",
+        "detected_circle": {"center": [332, 326], "radius": 300},
+        "metrics": {
+            "image_shape": [640, 640],
+            "center_norm": [0.51875, 0.509375],
+            "radius_norm": 0.46875,
+        },
+    }
+    experiment_setup = {
+        "num_dishes": 1,
+        "fish_per_dish": 1,
+        "total_expected_fish": 1,
+        "setup_type": "single_dish",
+        "source": "video_only_intake_cli",
+    }
+    _write_zarr_json(source_zarr, {"experiment_setup": experiment_setup})
+    _write_zarr_json(source_zarr / "analysis_metadata", {"dish_mask": dish_mask})
+
+    planned = backfill_clipped_analysis_metadata(
+        zarr_path,
+        copy_analysis_metadata_from=source_zarr,
+        require_dish_mask=True,
+    )
+
+    assert planned["analysis_context"]["dish_mask_will_update"] is True
+    assert planned["analysis_context"]["experiment_setup_will_update"] is True
+    assert "dish_mask" not in _read_zarr_attrs(zarr_path / "analysis_metadata")
+
+    applied = backfill_clipped_analysis_metadata(
+        zarr_path,
+        copy_analysis_metadata_from=source_zarr,
+        require_dish_mask=True,
+        apply=True,
+    )
+
+    assert applied["analysis_context"]["updated"] is True
+    analysis_attrs = _read_zarr_attrs(zarr_path / "analysis_metadata")
+    root_attrs = _read_zarr_attrs(zarr_path)
+    assert analysis_attrs["dish_mask"] == dish_mask
+    assert analysis_attrs["dish_mask_source_zarr"] == str(source_zarr.resolve())
+    assert analysis_attrs["dish_mask_source_key"] == "analysis_metadata.attrs.dish_mask"
+    assert (
+        analysis_attrs["dish_mask_copy_tool"]
+        == "fisheye.utils.backfill_clipped_analysis_metadata"
+    )
+    assert root_attrs["experiment_setup"] == experiment_setup
+    assert root_attrs["experiment_setup_source_zarr"] == str(source_zarr.resolve())
+    assert (
+        root_attrs["experiment_setup_copy_tool"]
+        == "fisheye.utils.backfill_clipped_analysis_metadata"
+    )
+
+    repeated = backfill_clipped_analysis_metadata(
+        zarr_path,
+        copy_analysis_metadata_from=source_zarr,
+        require_dish_mask=True,
+        apply=True,
+    )
+    assert repeated["analysis_context"]["updated"] is False
+
+
+def test_backfill_rejects_conflicting_existing_dish_mask(tmp_path: Path) -> None:
+    zarr_path, _recording_root, _old_root = _make_archive(tmp_path)
+    source_zarr = tmp_path / "source_training.zarr"
+    _write_zarr_json(source_zarr, {"experiment_setup": {"setup_type": "single_dish"}})
+    _write_zarr_json(
+        source_zarr / "analysis_metadata",
+        {"dish_mask": {"detected_circle": {"center": [1, 2], "radius": 3}}},
+    )
+    _write_zarr_json(
+        zarr_path / "analysis_metadata",
+        {"dish_mask": {"detected_circle": {"center": [4, 5], "radius": 6}}},
+    )
+
+    with pytest.raises(ValueError, match="conflicting dish_mask"):
+        backfill_clipped_analysis_metadata(
+            zarr_path,
+            copy_analysis_metadata_from=source_zarr,
+            require_dish_mask=True,
+        )
