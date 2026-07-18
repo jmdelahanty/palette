@@ -217,6 +217,21 @@ def load_track_kinematics_track(
 ) -> TrackKinematicsTrackTables:
     """Load logical arrays for one track from ``analysis/track_kinematics_runs``."""
 
+    requested_speed_levels = tuple(
+        dict.fromkeys(str(level).strip() for level in required_speed_levels)
+    )
+    unsupported = tuple(
+        level
+        for level in requested_speed_levels
+        if level not in TRACK_KINEMATICS_SPEED_LEVELS
+    )
+    if unsupported:
+        supported = ", ".join(TRACK_KINEMATICS_SPEED_LEVELS)
+        raise ValueError(
+            "Unsupported physical track speed level(s): "
+            f"{', '.join(unsupported)}. Expected a subset of: {supported}."
+        )
+
     run_group, resolved_name, run_path = resolve_track_kinematics_run(
         root,
         run_name=run_name,
@@ -274,8 +289,7 @@ def load_track_kinematics_track(
         if smooth_accel_px is not None:
             smoothed_acceleration_px_by_level[level] = smooth_accel_px
 
-    for required in required_speed_levels:
-        required = str(required)
+    for required in requested_speed_levels:
         if required not in speed_mm_by_level:
             source_level = TRACK_KINEMATICS_SOURCE_SPEED_LEVELS[required]
             raise ValueError(f"{label} is missing required speed level '{source_level}_mm'")

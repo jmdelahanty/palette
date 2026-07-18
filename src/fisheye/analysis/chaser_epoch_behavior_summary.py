@@ -22,7 +22,10 @@ from fisheye.analysis.epoch_segments import (
     segments_from_window_objects,
 )
 from fisheye.analysis.swim_bout_io import load_default_swim_bout_tables
-from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
+from fisheye.analysis.track_kinematics_io import (
+    TRACK_KINEMATICS_SPEED_LEVELS,
+    load_track_kinematics_track,
+)
 from fisheye.shared.arena_geometry import resolve_arena_geometry as _resolve_shared_arena_geometry
 from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
 from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
@@ -67,6 +70,7 @@ class ChaserEpochBehaviorSummaryResult:
     source_track_kinematics_track_id: Optional[int]
     source_track_kinematics_track_path: Optional[str]
     source_speed_level: Optional[str]
+    source_speed_level_selection: str
     source_swim_bout_run: Optional[str]
     source_swim_bout_path: Optional[str]
     source_swim_bout_level_path: Optional[str]
@@ -210,7 +214,15 @@ def _speed_level_key(value: object | None) -> Optional[str]:
     text = str(value).strip()
     if not text:
         return None
-    return text.replace("speed_", "", 1)
+    level = text.replace("speed_", "", 1)
+    if level not in TRACK_KINEMATICS_SPEED_LEVELS:
+        supported = ", ".join(TRACK_KINEMATICS_SPEED_LEVELS)
+        raise ValueError(
+            f"Unsupported physical track speed level {text!r}; expected one of: "
+            f"{supported}. Detector-only signals such as 'exponential' are selected "
+            "by the persisted swim-bout run, not by --speed-level."
+        )
+    return level
 
 
 def _resolve_speed_sources(
@@ -228,6 +240,7 @@ def _resolve_speed_sources(
     Optional[str],
     Optional[int],
     Optional[str],
+    str,
     list[str],
 ]:
     warnings: list[str] = []
@@ -243,6 +256,11 @@ def _resolve_speed_sources(
     )
     source_track_id = track_id
     source_speed_level = _speed_level_key(speed_level)
+    speed_level_selection = (
+        "explicit_physical_track_speed_level"
+        if source_speed_level is not None
+        else "unresolved"
+    )
     if swim_tables is not None:
         source_track_run = (
             source_track_run
@@ -257,17 +275,19 @@ def _resolve_speed_sources(
             if swim_tables.candidate.track_id is not None
             else _safe_int(swim_tables.run_attrs.get("track_id"))
         )
-        source_speed_level = (
-            source_speed_level
-            or _speed_level_key(swim_tables.signal.source_level)
-            or _speed_level_key(swim_tables.signal.speed_level)
-        )
+        if source_speed_level is None and swim_tables.signal.source_level:
+            source_speed_level = _speed_level_key(swim_tables.signal.source_level)
+            speed_level_selection = "persisted_swim_bout_signal_physical_source_level"
+        if source_speed_level is None:
+            source_speed_level = _speed_level_key(swim_tables.signal.speed_level)
+            speed_level_selection = "persisted_swim_bout_signal_level"
     if source_track_run is None and track_selector == "latest":
         source_track_run = "latest"
     if source_track_id is None:
         source_track_id = 0
     if source_speed_level is None:
         source_speed_level = "filtered"
+        speed_level_selection = "default_filtered_physical_track_speed_level"
 
     track = None
     if source_track_run:
@@ -291,6 +311,7 @@ def _resolve_speed_sources(
         track_kinematics_scope if track is not None else None,
         int(source_track_id) if source_track_id is not None else None,
         source_speed_level,
+        speed_level_selection,
         warnings,
     )
 
@@ -1277,6 +1298,7 @@ def build_chaser_epoch_behavior_summary_result(
         source_track_scope,
         source_track_id,
         source_speed_level,
+        source_speed_level_selection,
         warnings,
     ) = _resolve_speed_sources(
         root,
@@ -1334,6 +1356,7 @@ def build_chaser_epoch_behavior_summary_result(
         source_track_kinematics_track_id=source_track_id,
         source_track_kinematics_track_path=track.track_path if track is not None else None,
         source_speed_level=source_speed_level,
+        source_speed_level_selection=source_speed_level_selection,
         source_swim_bout_run=swim_tables.run_name if swim_tables is not None else None,
         source_swim_bout_path=swim_tables.run_path if swim_tables is not None else None,
         source_swim_bout_level_path=swim_tables.level_path if swim_tables is not None else None,
@@ -1439,7 +1462,10 @@ def write_chaser_epoch_behavior_summary_component(
     }
     parameters = {
         "speed_level": result.source_speed_level,
+        "speed_level_semantics": "physical_track_kinematics_speed_for_epoch_summaries",
+        "speed_level_selection": result.source_speed_level_selection,
         "swim_bout_signal_level": result.source_swim_bout_signal_level,
+        "swim_bout_signal_semantics": "persisted_detector_signal_for_bout_events",
         "bout_assignment_rule": "first nonnegative peak/core_start/start frame within inclusive epoch; time fallback",
         "inter_bout_interval_assignment_rule": "prev_end and next_start within inclusive epoch; time fallback",
         "bout_heading_change_assignment_rule": "heading samples within bout start/end frame or time-derived frame bounds",

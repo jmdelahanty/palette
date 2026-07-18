@@ -72,7 +72,10 @@ OCCUPANCY_SMOOTH_SIGMA=1.0
 CHASER_THRESHOLD_MM=20.0
 CHASER_DISTRIBUTION_BIN_WIDTH_MM=2.0
 TRACK_ID=0
-SPEED_LEVEL="exponential"
+# Optional physical track-kinematics override for epoch speed/path summaries.
+# Empty means follow the persisted swim-bout detector signal's physical source
+# level (commonly speed_exponential derived from speed_filtered).
+SPEED_LEVEL=""
 EGOCENTRIC_DISTANCE_BIN_WIDTH_MM=""
 EGOCENTRIC_BEARING_BIN_WIDTH_DEG=""
 ESCAPE_CHASER_INDEX="all_applicable"
@@ -221,7 +224,9 @@ Parameters:
   --chaser-threshold-mm X
   --chaser-distribution-bin-width-mm X
   --track-id N
-  --speed-level NAME
+  --speed-level NAME          Physical track speed for epoch summaries
+                              (default: detector signal's persisted physical source;
+                              does not select the bout detector signal).
   --egocentric-distance-bin-width-mm X
   --egocentric-bearing-bin-width-deg X
   --escape-chaser-index N     Selected chaser, or all_applicable (default).
@@ -830,6 +835,10 @@ if [[ "$RUN_NEAR_FIELD_OCCUPANCY" == "1" ]]; then
 fi
 
 if [[ "$RUN_EPOCH_BEHAVIOR" == "1" ]]; then
+  epoch_speed_args=()
+  if [[ -n "$SPEED_LEVEL" ]]; then
+    epoch_speed_args+=(--speed-level "$SPEED_LEVEL")
+  fi
   run_log_step epoch_behavior "$py" -m fisheye.analysis.chaser_epoch_behavior_summary \
     "$zarr_path" \
     --chaser-distance-run "$CHASER_DISTANCE_RUN" \
@@ -838,7 +847,7 @@ if [[ "$RUN_EPOCH_BEHAVIOR" == "1" ]]; then
     --track-kinematics-run "$TRACK_RUN" \
     --track-kinematics-scope offline \
     --track-id "$TRACK_ID" \
-    --speed-level "$SPEED_LEVEL" \
+    "${epoch_speed_args[@]}" \
     "${overwrite_args[@]}"
 fi
 
