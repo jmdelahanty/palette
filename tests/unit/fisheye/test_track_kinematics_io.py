@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.analysis.detect_bouts_multi_level import _load_track_kinematics_track_speeds
@@ -79,6 +80,19 @@ def test_track_kinematics_logical_loader_prefers_grouped_speed_surface() -> None
     np.testing.assert_allclose(track.speed_mm_by_level["filtered"], [40.0, 50.0, 60.0])
     np.testing.assert_allclose(track.frame_path_distance_mm_by_level["filtered"], [4.0, 5.0, 6.0])
     np.testing.assert_allclose(track.positions_mm, [[1.0, 2.0], [2.0, 2.0], [3.0, 2.0]])
+
+
+def test_track_kinematics_loader_rejects_detector_only_speed_level() -> None:
+    root = _make_track_kinematics_archive()
+
+    with pytest.raises(ValueError, match="Unsupported physical track speed level"):
+        load_track_kinematics_track(
+            root,
+            run_name="latest",
+            scope="offline",
+            track_id=0,
+            required_speed_levels=("exponential",),
+        )
 
 
 def test_detect_bouts_load_speed_levels_uses_track_kinematics_resolver(tmp_path: Path) -> None:

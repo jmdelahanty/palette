@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.shared.zarr.columnar import load_structured_dataset
@@ -34,6 +35,7 @@ def test_goodcopbadcop_epoch_behavior_summary_builds_fish_and_chaser_tables(tmp_
     assert result.source_swim_bout_run == "bouts_1"
     assert result.source_track_kinematics_run == "tk_1"
     assert result.source_speed_level == "filtered"
+    assert result.source_speed_level_selection == "persisted_swim_bout_signal_level"
     assert result.per_epoch_fish.shape == (3,)
     assert result.per_epoch_chaser.shape == (6,)
     assert result.per_epoch_bouts.shape == (4,)
@@ -84,6 +86,19 @@ def test_goodcopbadcop_epoch_behavior_summary_builds_fish_and_chaser_tables(tmp_
     ][0]
     assert int(pre_chaser_0["distance_sample_count"]) > 0
     assert np.isfinite(float(pre_chaser_0["median_distance_mm"]))
+
+
+def test_epoch_behavior_rejects_detector_signal_as_physical_speed_level(tmp_path) -> None:
+    zarr_path = _make_archive_with_goodcopbadcop_egocentric_spec(tmp_path)
+    _add_swim_bout_run(zarr_path)
+    _add_circle_geometry(zarr_path)
+
+    with pytest.raises(ValueError, match="Detector-only signals"):
+        build_goodcopbadcop_epoch_behavior_summary_result(
+            zarr_path,
+            chaser_distance_run="chaser_distance_1",
+            speed_level="exponential",
+        )
 
 
 def test_goodcopbadcop_epoch_behavior_summary_writes_and_reads_component(tmp_path) -> None:

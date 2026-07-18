@@ -105,6 +105,9 @@ def test_skipped_producers_resolve_authoritative_inputs_per_recording(
         assert config[f"{key}_SELECTION"] == "authoritative_latest_complete"
     assert "resolve_authoritative_run_name" in job_script
     assert 'chasers = parent[resolved]["chasers"]' in job_script
+    assert config["SPEED_LEVEL"] == "''"
+    assert 'if [[ -n "$SPEED_LEVEL" ]]' in job_script
+    assert 'epoch_speed_args+=(--speed-level "$SPEED_LEVEL")' in job_script
 
 
 def test_explicit_reused_inputs_override_authoritative_resolution(
