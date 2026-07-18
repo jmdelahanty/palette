@@ -30,6 +30,7 @@ from fisheye.reporting import (
 )
 from fisheye.registry.db import Registry
 from fisheye.reporting import execution as reporting_execution
+from fisheye.reporting import montage as reporting_montage
 from fisheye.reporting.models import SelectedRecording
 from fisheye.reporting.models import ReportPlan
 
@@ -419,11 +420,14 @@ def test_execution_deduplicates_shared_track_renderer(monkeypatch: pytest.Monkey
     assert [result.status for result in results] == ["executed", "deduplicated"]
 
 
-def test_semantic_montage_uses_ready_contracted_artifact(tmp_path: Path) -> None:
+def test_semantic_montage_uses_ready_contracted_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     zarr_path = tmp_path / "recording.zarr"
     root = zarr.open_group(zarr_path, mode="w")
     track = _track_run(root, (0,))
-    image = Image.new("RGB", (40, 20), (20, 80, 140))
+    image = Image.new("RGB", (400, 200), (20, 80, 140))
     buffer = BytesIO()
     image.save(buffer, format="PNG")
     artifact = track.require_group("visualizations").create_array(
@@ -458,6 +462,21 @@ def test_semantic_montage_uses_ready_contracted_artifact(tmp_path: Path) -> None
         recordings=(recording_plan,),
     )
 
+    composed_sizes: list[tuple[int, int]] = []
+    original_compose = reporting_montage.compose_visualization_montage
+
+    def capture_compose(**kwargs):
+        composed_sizes.extend(
+            item.size for item in kwargs["images"] if item is not None
+        )
+        return original_compose(**kwargs)
+
+    monkeypatch.setattr(
+        reporting_montage,
+        "compose_visualization_montage",
+        capture_compose,
+    )
+
     result = build_semantic_visualization_montages(
         plan=report,
         output_dir=tmp_path / "montages",
@@ -474,6 +493,7 @@ def test_semantic_montage_uses_ready_contracted_artifact(tmp_path: Path) -> None
         "track_kinematics_summary_track_0_png"
     )
     assert result["nonready_count"] == 0
+    assert composed_sizes == [(200, 100)]
 
 
 @pytest.mark.parametrize("materialization_policy", ["reference", "copy"])
