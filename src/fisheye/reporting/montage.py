@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 from typing import Any, Sequence
 
+from PIL import Image
+
 from fisheye.montage.models import MontageArtifactSpec, MontageLayout, RegistryRecording
 from fisheye.montage.render import compose_visualization_montage, load_recording_tiles
 from fisheye.shared.json_safety import json_attr_safe
@@ -49,6 +51,24 @@ def _items_for_recording(
         if item.visualization_id == visualization_id
     )
     return matches or (None,)
+
+
+def _bound_loaded_image(
+    image: Image.Image | None,
+    *,
+    tile_width: int,
+    max_image_height: int,
+) -> Image.Image | None:
+    """Downsample one loaded tile before retaining it for cohort composition."""
+
+    if image is None:
+        return None
+    if image.width > tile_width or image.height > max_image_height:
+        image.thumbnail(
+            (tile_width, max_image_height),
+            Image.Resampling.LANCZOS,
+        )
+    return image
 
 
 def build_semantic_visualization_montages(
@@ -139,7 +159,13 @@ def build_semantic_visualization_montages(
                     fail_on_missing=fail_on_nonready,
                 )
                 tile = loaded[0]
-                tile_images.append(tile.image)
+                tile_images.append(
+                    _bound_loaded_image(
+                        tile.image,
+                        tile_width=tile_width,
+                        max_image_height=max_image_height,
+                    )
+                )
                 tile_errors.append(tile.error)
                 tile_manifest.append(
                     {
