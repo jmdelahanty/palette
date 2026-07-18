@@ -5,7 +5,7 @@ status: proposed
 created: 2026-07-03
 owner: jeremy
 related: docs/palette_cli_narrow_waist_design.md,
-         docs/provenance_enforcement_roadmap.md,
+         docs/archive/provenance_enforcement_roadmap.md,
          docs/labeling_platform_build_vs_adopt.md,
          docs/orchestration (core/pipeline.py legacy; per-stage bsub live path)
 -->
@@ -79,7 +79,7 @@ ones, and it *sharpens the urgency* of provenance enforcement:
 - **Provenance enforcement at finalization** — ⚠️ *this becomes critical, not optional.*
   A human running `palette detect` gets stamping via the waist; an unattended daemon has
   no one to remember. If provenance is not **enforced at the finalization layer** (see
-  `docs/provenance_enforcement_roadmap.md` Slice 2), autonomous runs will silently lack
+  `docs/archive/provenance_enforcement_roadmap.md` Slice 2), autonomous runs will silently lack
   code identity. **Autonomous execution is the strongest argument for that enforcement
   slice** — it removes the human backstop entirely.
 - **A transfer trigger / watcher** — 🆕 to build. A daemon (or cron, or an inotify/queue
@@ -115,7 +115,7 @@ existing ones, driving the waist.
 
 ## Sequencing (not urgent; forward-looking)
 
-1. **Provenance enforcement at finalization** (`provenance_enforcement_roadmap.md`
+1. **Provenance enforcement at finalization** (`archive/provenance_enforcement_roadmap.md`
    Slice 2) — precondition for trustworthy unattended runs; do before autonomous execution
    goes live.
 2. **The headless executor** — a `plan`-driven loop over the verbs, resumable via

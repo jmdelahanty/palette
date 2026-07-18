@@ -6,7 +6,7 @@ Stage 2** (the first true writer migration — it sets the writer pattern).
 **Do NOT push or merge — the commander verifies and merges each checkpoint.**
 Co-author trailer: `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
 
-**Read first:** `HANDOFF_2026-07-05.md` operating-notes section, then
+**Read first:** `docs/archive/HANDOFF_2026-07-05.md` operating-notes section, then
 `docs/diagnostics/frame_domains_consumer_census_2026-07-05.md` — this brief executes
 census items 5-remainder, 6, and 8, which are UNBLOCKED as of the vectorized resolver
 (`9ee35e9`): `FrameDomains.convert()` is now internally vectorized (lazy per-edge

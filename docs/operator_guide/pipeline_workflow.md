@@ -596,8 +596,9 @@ Computes per-trial behavioral metrics aligned to stimulus events. Requires
 stimulus data to have been imported during step 1.
 
 ```bash
-scripts/py -m fisheye.analysis.stimulus_response \
-  path/to/zarr/..._analysis.zarr
+scripts/py -m fisheye.analysis_workflows.materializers.stimulus_response \
+  path/to/zarr/..._analysis.zarr \
+  --run-name <run_name> --apply --
 ```
 
 **What it writes:** Per-fish, per-bout, and per-frame metrics including

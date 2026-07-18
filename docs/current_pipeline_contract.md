@@ -14,6 +14,10 @@ This document is the short current-state contract. Deeper design notes and TODOs
 remain useful, but operator/query behavior should be judged against this file
 first.
 
+The canonical family-by-family analytics schema, resolver, axis, layout, and
+publication index is
+[analytics_storage_schema_matrix.md](analytics_storage_schema_matrix.md).
+
 For a beginner-facing explanation of the coordinate systems, formulas, and
 behavioral analytics used by these stages, start with
 [`analytics_math_primer.md`](analytics_math_primer.md).
@@ -129,9 +133,11 @@ Current rules:
   `analysis/track_kinematics_runs/<scope>/<run>/tracks/id_<track>`, not from
   legacy `analysis/movement_runs` or ad hoc subject-shape-origin differencing.
   Swim-bout event windows live in `analysis/swim_bout_runs`; new accepted
-  swim-bout runs default to the compact-v2 tabular layout, while
-  hierarchical-v1 remains an explicit compatibility option. Physical per-bout
-  measurements live in linked `analysis/bout_kinematics_runs`. The
+  swim-bout runs default to the compact-v2 tabular layout and use a versioned
+  same-Zarr reference to the exact source track frame axis. Embedded frame-axis
+  copies remain an explicit portability option, while hierarchical-v1 remains
+  an explicit compatibility option. Physical per-bout measurements live in
+  linked `analysis/bout_kinematics_runs`. The
   Crimson-facing reader contract is
   [`crimson_track_motion_read_contract.md`](./crimson_track_motion_read_contract.md).
 - Source stimulus timing and geometry should come from
@@ -272,7 +278,7 @@ When reviewing new pipeline work, ask:
 - [derived_analysis_run_contract.md](derived_analysis_run_contract.md)
 - [segmentation_pipeline_step_todo.md](segmentation_pipeline_step_todo.md)
 - [subject_mask_refinement_todo.md](subject_mask_refinement_todo.md)
-- [subject_mask_stage_unification_todo.md](subject_mask_stage_unification_todo.md)
+- [subject_mask_stage_unification_todo.md](archive/subject_mask_stage_unification_todo.md)
 - [subject_shape_runs_contract.md](subject_shape_runs_contract.md)
 - [body_frame_contract.md](body_frame_contract.md)
 - [body_spline_tail_anchor_design.md](body_spline_tail_anchor_design.md)

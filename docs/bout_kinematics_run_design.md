@@ -779,6 +779,6 @@ swim-bout candidate" rather than exposing storage suffixes.
 ## Related Documents
 
 - [derived_analysis_run_contract.md](derived_analysis_run_contract.md)
-- [track_kinematics_bout_status.md](track_kinematics_bout_status.md)
+- [kinematics_zarr_access_guide.md](kinematics_zarr_access_guide.md)
 - [pose_kinematics_run_design.md](pose_kinematics_run_design.md)
 - [keypoint_heading_computation_contract.md](keypoint_heading_computation_contract.md)

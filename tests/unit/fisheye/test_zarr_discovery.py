@@ -215,3 +215,47 @@ def test_registry_discovery_excludes_missing_protocol_when_filtering(
     )
 
     assert entries == []
+
+
+def test_registry_discovery_can_select_normalized_chaser_capability(
+    tmp_path: Path,
+) -> None:
+    class _Cursor:
+        def fetchall(self) -> list[tuple[str]]:
+            return [("with-chaser",)]
+
+    class _Connection:
+        def execute(self, _sql: str) -> _Cursor:
+            return _Cursor()
+
+    class _FakeRegistry:
+        def __init__(self, _path: Path) -> None:
+            self.conn = _Connection()
+
+        def query_datasets(self, **_kwargs: object) -> list[dict[str, object]]:
+            return [
+                {
+                    "dataset_id": "with-chaser",
+                    "zarr_path": str(tmp_path / "keep_analysis.zarr"),
+                    "camera_id": "1",
+                    "protocol_name": "AnyChaserProtocol",
+                },
+                {
+                    "dataset_id": "without-chaser",
+                    "zarr_path": str(tmp_path / "drop_analysis.zarr"),
+                    "camera_id": "2",
+                    "protocol_name": "GoodCopBadCop",
+                },
+            ]
+
+        def close(self) -> None:
+            pass
+
+    entries = discover_registry_zarr_entries(
+        registry_path=tmp_path / "registry.sqlite",
+        scope_paths=[],
+        require_chaser_metadata=True,
+        registry_cls=_FakeRegistry,
+    )
+
+    assert [entry.zarr_path.name for entry in entries] == ["keep_analysis.zarr"]

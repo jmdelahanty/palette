@@ -52,12 +52,14 @@ exporter.
 
 ## Node and dependency model
 
-There are three node kinds:
+There are four node kinds:
 
 - `prerequisite`: an input authority that this workflow must reuse, such as
   curated keypoints or dense refined subject masks;
 - `analysis`: a canonical analysis stage from
   `fisheye.registry.stage_catalog`;
+- `visualization`: a bounded persisted renderer attached to an exact analysis
+  run and its declared source dependencies;
 - `export`: an immutable table or trace product derived from analysis nodes.
 
 The workflow references canonical stage IDs rather than inventing a second
@@ -145,7 +147,8 @@ The executor supports these canonical analysis stages in the core profile:
 - `track_kinematics_visualization`;
 - `bout_kinematics`;
 - `eye_angles`;
-- `subject_shape`.
+- `subject_shape`;
+- `tail_kinematics`.
 
 Track identities are a required persisted prerequisite rather than an
 analysis-workflow output. Planning a new track-kinematics run therefore blocks
@@ -265,15 +268,18 @@ The executor preserves these large-recording constraints:
 - framewise eye and tail exports must stream row groups or array chunks. They
   must not accumulate the complete recording as one in-memory table.
 
-Subject-shape, tail-kinematics, track-kinematics, and eye-angle publication share
+Subject-shape, tail-kinematics, track-kinematics, eye-angle, bout-kinematics,
+swim-bout, and stimulus-response production publication share
 `analysis_workflows.materializers.atomic_run_publisher`. Scientific validation,
 completion, and pointer rules remain family-specific callbacks, while the
 publisher owns the transaction: advisory locking, hidden same-parent copy,
 physical inventory verification (with optional full content checksums), atomic
 rename, pre-pointer and final validation, snapshots of every affected parent,
 and rollback of both the new run and parent attrs after any post-rename error.
-The per-family lock filenames and publish schema IDs remain stable. Published
-runs record the shared publisher schema/version and the parent snapshots in
+The per-family lock filenames and publish schema IDs remain stable. Lower-level
+writers may still target in-memory or disposable Zarr groups for tests, but
+operator CLIs and DAG execution publish authoritative runs through the shared
+transaction. Published runs record the shared publisher schema/version and the parent snapshots in
 `cluster_output_staging`, so each new materializer can reuse the same
 transaction implementation.
 
@@ -297,6 +303,14 @@ speed and frame axes, causal exponential recurrence and reset behavior, active
 detection primitive and parameters, gap/overlap and boundary rules, interval
 semantics, validity handling, and physical metric sources. A persisted SHA-256
 binds the two copies.
+
+Compact swim-bout run schema 8 also stores
+`palette.swim_bout_frame_axis_reference` version 1. It pins the exact
+archive-relative track-kinematics `frame_indices` path and records source run,
+track, shape, dtype, and canonical value hash. The default is reference-only;
+an embedded fallback is opt-in for standalone portability. Palette and
+FileGlancer-hosted Marimo readers resolve the authority first and retain
+schema-7 embedded compatibility.
 
 For a subject-shape-only cluster run, render and then submit the DAG target. A
 32-core node matches the measured canary configuration; request enough memory

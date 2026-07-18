@@ -18,13 +18,13 @@ from fisheye.analytics_exports.contracts import (
     CHASER_BOUT_EVENTS_TABLE,
     CHASER_BOUT_HISTOGRAM_TABLE,
     CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
-    CHASER_CRA_NEAR_FIELD_CDF_TABLE,
-    CHASER_CRA_NEAR_FIELD_OBJECT_PHASE_TABLE,
-    CHASER_CRA_NEAR_FIELD_RADIAL_TABLE,
-    CHASER_CRA_NEAR_FIELD_SUMMARY_TABLE,
-    CHASER_CRA_OBJECT_PHASE_TABLE,
-    CHASER_CRA_QUADRANT_TABLE,
-    CHASER_CRA_SUMMARY_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE,
     CHASER_DISTANCE_HISTOGRAM_TABLE,
     CHASER_DISTANCE_SUMMARY_TABLE,
     CHASER_EGOCENTRIC_HISTOGRAM_TABLE,
@@ -54,13 +54,13 @@ EPOCH_INTER_BOUT_INTERVAL_HISTOGRAM_TABLE = CHASER_IBI_HISTOGRAM_TABLE
 EPOCH_CENTER_DISTANCE_HISTOGRAM_TABLE = CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE
 SPEED_DISTANCE_TABLE = CHASER_SPEED_DISTANCE_TABLE
 CHASER_HISTOGRAM_TABLE = CHASER_DISTANCE_HISTOGRAM_TABLE
-CRA_SUMMARY_TABLE = CHASER_CRA_SUMMARY_TABLE
-CRA_OBJECT_PHASE_TABLE = CHASER_CRA_OBJECT_PHASE_TABLE
-CRA_QUADRANT_OCCUPANCY_TABLE = CHASER_CRA_QUADRANT_TABLE
-CRA_NEAR_FIELD_SUMMARY_TABLE = CHASER_CRA_NEAR_FIELD_SUMMARY_TABLE
-CRA_NEAR_FIELD_OBJECT_PHASE_TABLE = CHASER_CRA_NEAR_FIELD_OBJECT_PHASE_TABLE
-CRA_NEAR_FIELD_RADIAL_TABLE = CHASER_CRA_NEAR_FIELD_RADIAL_TABLE
-CRA_NEAR_FIELD_CDF_TABLE = CHASER_CRA_NEAR_FIELD_CDF_TABLE
+CRA_SUMMARY_TABLE = CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE
+CRA_OBJECT_PHASE_TABLE = CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE
+CRA_QUADRANT_OCCUPANCY_TABLE = CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE
+CRA_NEAR_FIELD_SUMMARY_TABLE = CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE
+CRA_NEAR_FIELD_OBJECT_PHASE_TABLE = CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE
+CRA_NEAR_FIELD_RADIAL_TABLE = CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE
+CRA_NEAR_FIELD_CDF_TABLE = CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE
 EGOCENTRIC_SUMMARY_TABLE = CHASER_EGOCENTRIC_SUMMARY_TABLE
 EGOCENTRIC_HISTOGRAM_TABLE = CHASER_EGOCENTRIC_HISTOGRAM_TABLE
 POSITION_OCCUPANCY_TABLE = POSITION_OCCUPANCY_HISTOGRAM_TABLE
@@ -1306,7 +1306,7 @@ def _enrich_chaser_behavior_rows(
     rows: Sequence[Mapping[str, Any]],
     object_phase_rows: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Fill unknown chaser roles from the exported CRA object-column mapping."""
+    """Fill unknown chaser roles from the exported quadrant-occupancy mapping."""
 
     metadata_by_recording_column: dict[tuple[str, int], tuple[str, str | None]] = {}
     for row in object_phase_rows:
@@ -1518,7 +1518,6 @@ def query_epoch_speed_summary(
             stats = _summary(values)
             summary_source = "computed_from_export_rows"
         value = stats["median"] if stat == "median" else stats["mean"]
-        recording_ids = sorted({str(row.get("recording_id")) for row in group_rows if row.get("recording_id")})
         out_rows.append(
             {
                 "window_index": window_index,
@@ -1985,7 +1984,7 @@ def query_cra_object_phase(
     include_recordings: bool = False,
 ) -> dict[str, Any]:
     if metric not in CRA_OBJECT_PHASE_METRICS:
-        raise ValueError(f"Unsupported CRA object-phase metric: {metric}")
+        raise ValueError(f"Unsupported chaser quadrant-occupancy metric: {metric}")
     if stat not in {"mean", "median"}:
         raise ValueError("stat must be one of: mean, median")
     rows = load_table_rows(context, CRA_OBJECT_PHASE_TABLE)
@@ -2059,6 +2058,98 @@ def query_cra_object_phase(
     return response
 
 
+def _profile_pairwise_quadrant_summary_rows(
+    summary_rows: Sequence[Mapping[str, Any]],
+    chaser_phase_rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Derive profile-level role contrasts from generic per-chaser rows.
+
+    Recording analyses intentionally do not persist an aggressive-vs-inert
+    contrast.  A cohort/profile viewer may derive one when those roles are
+    actually present.  Multiple chasers with the same role are averaged rather
+    than silently choosing an identity.
+    """
+
+    grouped: dict[tuple[str, str, str], list[Mapping[str, Any]]] = defaultdict(list)
+    for row in chaser_phase_rows:
+        recording_id = str(row.get("recording_id") or "")
+        role = str(row.get("object_role") or row.get("behavior_class") or "")
+        phase_kind = _phase_kind(row)
+        if (
+            recording_id
+            and role in {"aggressive", "inert"}
+            and phase_kind in {"pre", "post"}
+        ):
+            grouped[(recording_id, role, phase_kind)].append(row)
+
+    def mean_value(rows: Sequence[Mapping[str, Any]], key: str) -> float | None:
+        values = [_safe_float(row.get(key)) for row in rows]
+        finite = [float(value) for value in values if value is not None]
+        return sum(finite) / float(len(finite)) if finite else None
+
+    def unique_value(rows: Sequence[Mapping[str, Any]], key: str) -> Any:
+        values = {row.get(key) for row in rows if row.get(key) not in {None, ""}}
+        return next(iter(values)) if len(values) == 1 else None
+
+    out: list[dict[str, Any]] = []
+    for source in summary_rows:
+        row = dict(source)
+        recording_id = str(row.get("recording_id") or "")
+        for role, suffix in (("aggressive", "agg"), ("inert", "inert")):
+            pre_rows = grouped.get((recording_id, role, "pre"), [])
+            post_rows = grouped.get((recording_id, role, "post"), [])
+            d_pre = mean_value(pre_rows, "median_distance_mm")
+            d_post = mean_value(post_rows, "median_distance_mm")
+            occ_pre = mean_value(pre_rows, "occupancy_fraction")
+            occ_post = mean_value(post_rows, "occupancy_fraction")
+            row.setdefault(f"d_pre_{suffix}", d_pre)
+            row.setdefault(f"d_post_{suffix}", d_post)
+            row.setdefault(
+                f"delta_{suffix}",
+                None if d_pre is None or d_post is None else d_post - d_pre,
+            )
+            row.setdefault(f"occ_pre_{suffix}", occ_pre)
+            row.setdefault(f"occ_post_{suffix}", occ_post)
+            row.setdefault(
+                f"delta_occ_{suffix}",
+                None if occ_pre is None or occ_post is None else occ_post - occ_pre,
+            )
+            row.setdefault(
+                f"pre_{role}_quadrant",
+                unique_value(pre_rows, "object_quadrant_label"),
+            )
+            row.setdefault(
+                f"post_{role}_quadrant",
+                unique_value(post_rows, "object_quadrant_label"),
+            )
+            row.setdefault(
+                f"{role}_color",
+                unique_value((*pre_rows, *post_rows), "raw_color_hex"),
+            )
+        delta_agg = _safe_float(row.get("delta_agg"))
+        delta_inert = _safe_float(row.get("delta_inert"))
+        delta_occ_agg = _safe_float(row.get("delta_occ_agg"))
+        delta_occ_inert = _safe_float(row.get("delta_occ_inert"))
+        row.setdefault(
+            "specificity_distance",
+            (
+                None
+                if delta_agg is None or delta_inert is None
+                else delta_agg - delta_inert
+            ),
+        )
+        row.setdefault(
+            "specificity_occupancy",
+            (
+                None
+                if delta_occ_agg is None or delta_occ_inert is None
+                else delta_occ_agg - delta_occ_inert
+            ),
+        )
+        out.append(row)
+    return out
+
+
 def query_cra_summary(
     context: ViewerContext,
     *,
@@ -2067,8 +2158,11 @@ def query_cra_summary(
     include_rows: bool = True,
 ) -> dict[str, Any]:
     if metric is not None and metric not in CRA_SUMMARY_METRICS:
-        raise ValueError(f"Unsupported CRA summary metric: {metric}")
-    rows = load_table_rows(context, CRA_SUMMARY_TABLE)
+        raise ValueError(f"Unsupported chaser quadrant summary metric: {metric}")
+    rows = _profile_pairwise_quadrant_summary_rows(
+        load_table_rows(context, CRA_SUMMARY_TABLE),
+        load_optional_table_rows(context, CRA_OBJECT_PHASE_TABLE),
+    )
     if endpoint_status:
         rows = [row for row in rows if row.get("endpoint_status") == endpoint_status]
 
@@ -2276,7 +2370,11 @@ def query_cra_specificity(
     bootstrap_iterations: int = 10000,
     confidence_level: float = 0.95,
 ) -> dict[str, Any]:
-    summary_rows = load_optional_table_rows(context, CRA_SUMMARY_TABLE)
+    object_phase_rows = load_optional_table_rows(context, CRA_OBJECT_PHASE_TABLE)
+    summary_rows = _profile_pairwise_quadrant_summary_rows(
+        load_optional_table_rows(context, CRA_SUMMARY_TABLE),
+        object_phase_rows,
+    )
     if not summary_rows:
         return {
             "available": False,
@@ -2290,7 +2388,7 @@ def query_cra_specificity(
             "occupancy_index_slope_rows": [],
             "occupancy_index_specificity_rows": [],
             "occupancy_index_specificity_statistics": None,
-            "message": "No CRA primary endpoint summary export found for this cohort.",
+            "message": "No chaser quadrant occupancy summary export found for this cohort.",
         }
 
     distance_phase_rows: list[dict[str, Any]] = []
@@ -2350,8 +2448,9 @@ def query_cra_specificity(
     )
 
     quadrant_rows = load_optional_table_rows(context, CRA_QUADRANT_OCCUPANCY_TABLE)
-    object_phase_rows = load_optional_table_rows(context, CRA_OBJECT_PHASE_TABLE)
-    quadrants_by_recording_phase: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
+    quadrants_by_recording_phase: dict[tuple[str, str], list[Mapping[str, Any]]] = (
+        defaultdict(list)
+    )
     for row in quadrant_rows:
         recording_id = str(row.get("recording_id") or "")
         phase_label = str(row.get("phase_label") or "")
@@ -2442,7 +2541,7 @@ def query_cra_specificity(
             difference_definition="occupancy_index_specificity = delta_index_agg - delta_index_inert; tested against zero",
         ),
         "inference_note": (
-            "Distance specificity is the primary CRA contrast. Occupancy index is object-quadrant occupancy "
+            "Distance specificity is the profile-level role contrast. Occupancy index is chaser-quadrant occupancy "
             "minus the mean of the other three quadrants within the same phase."
         ),
     }
@@ -2553,7 +2652,7 @@ def query_cra_quadrant_occupancy_density(
             "available": False,
             "table_name": CRA_QUADRANT_OCCUPANCY_TABLE,
             "row_count": 0,
-            "message": "No CRA quadrant occupancy export table found for this cohort.",
+            "message": "No chaser quadrant occupancy export table found for this cohort.",
             "chance": 0.25,
             "rows": [],
             "fish_phase_rows": [],
@@ -2758,7 +2857,7 @@ def query_cra_near_field_object_phase(
     include_recordings: bool = False,
 ) -> dict[str, Any]:
     if metric not in CRA_NEAR_FIELD_OBJECT_PHASE_METRICS:
-        raise ValueError(f"Unsupported CRA near-field object-phase metric: {metric}")
+        raise ValueError(f"Unsupported chaser near-field metric: {metric}")
     if stat not in {"mean", "median"}:
         raise ValueError("stat must be one of: mean, median")
     rows = load_optional_table_rows(context, CRA_NEAR_FIELD_OBJECT_PHASE_TABLE)
@@ -2829,6 +2928,60 @@ def query_cra_near_field_object_phase(
     return response
 
 
+def _profile_pairwise_near_field_summary_rows(
+    summary_rows: Sequence[Mapping[str, Any]],
+    chaser_phase_rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Derive profile-specific role contrasts from generic near-field rows."""
+
+    grouped: dict[tuple[str, str, str], list[Mapping[str, Any]]] = defaultdict(list)
+    for row in chaser_phase_rows:
+        recording_id = str(row.get("recording_id") or "")
+        role = str(row.get("object_role") or row.get("behavior_class") or "")
+        phase_kind = _phase_kind(row)
+        if (
+            recording_id
+            and role in {"aggressive", "inert"}
+            and phase_kind in {"pre", "post"}
+        ):
+            grouped[(recording_id, role, phase_kind)].append(row)
+
+    def mean_value(rows: Sequence[Mapping[str, Any]], key: str) -> float | None:
+        values = [_safe_float(row.get(key)) for row in rows]
+        finite = [float(value) for value in values if value is not None]
+        return sum(finite) / float(len(finite)) if finite else None
+
+    out: list[dict[str, Any]] = []
+    metric_sources = {
+        "approach_p05": "approach_p05_mm",
+        "approach_p10": "approach_p10_mm",
+        "nearzone_occ": "near_zone_occupancy_fraction",
+        "nearzone_entry_rate": "near_zone_entry_rate_per_min",
+    }
+    for source in summary_rows:
+        row = dict(source)
+        recording_id = str(row.get("recording_id") or "")
+        for role, suffix in (("aggressive", "agg"), ("inert", "inert")):
+            pre_rows = grouped.get((recording_id, role, "pre"), [])
+            post_rows = grouped.get((recording_id, role, "post"), [])
+            for output_prefix, source_key in metric_sources.items():
+                pre = mean_value(pre_rows, source_key)
+                post = mean_value(post_rows, source_key)
+                row.setdefault(
+                    f"{output_prefix}_delta_{suffix}",
+                    None if pre is None or post is None else post - pre,
+                )
+        for output_prefix in metric_sources:
+            aggressive = _safe_float(row.get(f"{output_prefix}_delta_agg"))
+            inert = _safe_float(row.get(f"{output_prefix}_delta_inert"))
+            row.setdefault(
+                f"{output_prefix}_specificity",
+                None if aggressive is None or inert is None else aggressive - inert,
+            )
+        out.append(row)
+    return out
+
+
 def query_cra_near_field_summary(
     context: ViewerContext,
     *,
@@ -2837,8 +2990,11 @@ def query_cra_near_field_summary(
     include_rows: bool = True,
 ) -> dict[str, Any]:
     if metric is not None and metric not in CRA_NEAR_FIELD_SUMMARY_METRICS:
-        raise ValueError(f"Unsupported CRA near-field summary metric: {metric}")
-    rows = load_optional_table_rows(context, CRA_NEAR_FIELD_SUMMARY_TABLE)
+        raise ValueError(f"Unsupported chaser near-field summary metric: {metric}")
+    rows = _profile_pairwise_near_field_summary_rows(
+        load_optional_table_rows(context, CRA_NEAR_FIELD_SUMMARY_TABLE),
+        load_optional_table_rows(context, CRA_NEAR_FIELD_OBJECT_PHASE_TABLE),
+    )
     if endpoint_status:
         rows = [row for row in rows if row.get("endpoint_status") == endpoint_status]
 
@@ -2973,7 +3129,7 @@ def query_cra_near_field_curves(
             "cdf_row_count": 0,
             "radial_rows": [],
             "cdf_rows": [],
-            "message": "No CRA near-field radial/CDF curve export tables found for this cohort.",
+            "message": "No chaser near-field radial/CDF exports found for this cohort.",
         }
 
     radial_curve_rows = _aggregate_fish_level_curve(
@@ -3384,8 +3540,14 @@ def query_recordings(context: ViewerContext) -> dict[str, Any]:
     spatial = load_optional_table_rows(context, SPATIAL_TABLE)
     chaser = load_optional_table_rows(context, CHASER_SUMMARY_TABLE)
     speed = load_optional_table_rows(context, EPOCH_BEHAVIOR_TABLE)
-    cra_summary = load_optional_table_rows(context, CRA_SUMMARY_TABLE)
-    cra_near_field_summary = load_optional_table_rows(context, CRA_NEAR_FIELD_SUMMARY_TABLE)
+    cra_summary = _profile_pairwise_quadrant_summary_rows(
+        load_optional_table_rows(context, CRA_SUMMARY_TABLE),
+        load_optional_table_rows(context, CRA_OBJECT_PHASE_TABLE),
+    )
+    cra_near_field_summary = _profile_pairwise_near_field_summary_rows(
+        load_optional_table_rows(context, CRA_NEAR_FIELD_SUMMARY_TABLE),
+        load_optional_table_rows(context, CRA_NEAR_FIELD_OBJECT_PHASE_TABLE),
+    )
     egocentric = load_optional_table_rows(context, EGOCENTRIC_SUMMARY_TABLE)
     records: dict[str, dict[str, Any]] = {}
 

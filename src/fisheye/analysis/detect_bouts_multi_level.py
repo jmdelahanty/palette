@@ -11,8 +11,8 @@ Default storage structure (`--layout compact_v2`):
     analysis/swim_bout_runs/<run_name>/
     ├── indexes/
     ├── tables/
-    ├── series/
-    └── attrs: layout = "compact_tabular_v2"
+    ├── signals/
+    └── attrs: layout = "compact_tabular_v2", frame_axis_contract = {...}
 
 Compatibility storage structure (`--layout hierarchical_v1`):
     analysis/swim_bout_runs/<run_name>/
@@ -35,12 +35,12 @@ Compatibility storage structure (`--layout hierarchical_v1`):
     ├── default_level = "speed_exponential" or another stored speed level (attr)
     └── run_metadata (attrs: threshold, source_track_kinematics_run, etc.)
 
-Usage (basic):
+Lower-level disposable/local usage (basic):
     scripts/py -m fisheye.analysis.detect_bouts_multi_level /path/to/archive.zarr
 
     Auto-generates run name like: swim_bout_detect_20250905_143022
 
-Usage (with options):
+Lower-level disposable/local usage (with options):
     scripts/py -m fisheye.analysis.detect_bouts_multi_level /path/to/archive.zarr \\
         --run-name custom_run \\
         --track-kinematics-run latest \\
@@ -51,6 +51,10 @@ Usage (with options):
         --min-peak-distance-s 0.10 \\
         --peak-width-rel-height 0.98 \\
         --overwrite
+
+Authoritative recording runs should use
+``fisheye.analysis_workflows.materializers.swim_bouts`` so publication is
+validated and atomic.
 """
 
 from __future__ import annotations
@@ -72,6 +76,15 @@ from fisheye.shared.zarr.columnar import (
     write_columnar_dataset,
 )
 from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
+from fisheye.analysis.swim_bout_frame_axis import (
+    FRAME_AXIS_CONTRACT_ATTR,
+    FRAME_AXIS_CONTRACT_SHA256_ATTR,
+    FRAME_AXIS_EMBEDDED_PATH,
+    FRAME_AXIS_STORAGE_CHOICES,
+    FRAME_AXIS_STORAGE_DEFAULT,
+    FRAME_AXIS_STORAGE_EMBEDDED,
+    build_frame_axis_contract,
+)
 from fisheye.shared.json_safety import json_attr_safe, json_attr_safe_mapping, strict_json_dumps
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
@@ -125,6 +138,7 @@ BOUNDARY_FRAME_ROUNDING_POLICY = "round_seconds_times_fps"
 SWIM_BOUT_RUN_SCHEMA_ID = "palette.swim_bout_runs"
 SWIM_BOUT_RUN_SCHEMA_VERSION = 6
 SWIM_BOUT_RUN_SCHEMA_VERSION_COMPACT_V2 = 7
+SWIM_BOUT_RUN_SCHEMA_VERSION_FRAME_AXIS_REFERENCE = 8
 SWIM_BOUT_LAYOUT_HIERARCHICAL_V1 = "hierarchical_v1"
 SWIM_BOUT_LAYOUT_COMPACT_V2 = "compact_v2"
 SWIM_BOUT_STORED_LAYOUT_COMPACT_V2 = "compact_tabular_v2"
@@ -1816,6 +1830,7 @@ def _write_compact_v2_swim_bout_payloads(
     exponential_tau_s: float,
     frames: np.ndarray,
     speeds: Mapping[str, Optional[np.ndarray]],
+    frame_axis_contract: Mapping[str, Any],
     source_array_paths: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """Write the compact tabular v2 swim-bout representation."""
@@ -1992,12 +2007,27 @@ def _write_compact_v2_swim_bout_payloads(
             "detector_signal_signal_ids",
             np.asarray(detector_signal_ids, dtype=np.int32),
         )
-        store_array(
-            signals_group,
-            "frame_indices",
-            np.asarray(frames, dtype=np.int64),
-            attrs={"source": "track_kinematics.frame_indices"},
-        )
+        embedded_path = frame_axis_contract.get("embedded_path")
+        if embedded_path is not None:
+            if str(embedded_path) != FRAME_AXIS_EMBEDDED_PATH:
+                raise ValueError(
+                    "Compact swim-bout writer only supports the declared embedded "
+                    f"frame-axis path {FRAME_AXIS_EMBEDDED_PATH!r}."
+                )
+            store_array(
+                signals_group,
+                "frame_indices",
+                np.asarray(frames, dtype=np.int64),
+                attrs={
+                    "source": "track_kinematics.frame_indices",
+                    "authoritative_path": frame_axis_contract["authoritative_path"],
+                    "content_sha256": frame_axis_contract["content_sha256"],
+                    "frame_axis_contract_schema_id": frame_axis_contract["schema_id"],
+                    "frame_axis_contract_schema_version": frame_axis_contract[
+                        "schema_version"
+                    ],
+                },
+            )
 
     run_group.attrs.update(
         _json_safe_attrs(
@@ -2600,6 +2630,7 @@ def _load_track_kinematics_track_speeds(
     )
     speeds = track.speed_level_dict()
     source_array_paths = _resolved_track_source_array_paths(root, track)
+    source_frame_indices = root[source_array_paths["frame_indices"]]
 
     source_provenance = track.run_attrs.get('provenance')
     if not isinstance(source_provenance, dict):
@@ -2622,6 +2653,10 @@ def _load_track_kinematics_track_speeds(
         'track_kinematics_git_dirty': track.run_attrs.get('git_dirty', source_git.get('is_dirty')),
         'track_id': track_id,
         'source_array_paths': source_array_paths,
+        'source_frame_indices_dtype': str(np.dtype(source_frame_indices.dtype)),
+        'source_frame_indices_shape': [
+            int(value) for value in source_frame_indices.shape
+        ],
         'positions_mm': track.positions_mm,
         'positions_px': track.positions_px,
     }
@@ -2677,7 +2712,9 @@ def detect_and_save_bouts(
     exponential_tau_s: float = DEFAULT_EXPONENTIAL_TAU_S,
     exponential_source_level: str = DEFAULT_EXPONENTIAL_SOURCE_LEVEL,
     layout: str = SWIM_BOUT_LAYOUT_DEFAULT,
+    frame_axis_storage: str = FRAME_AXIS_STORAGE_DEFAULT,
     command: Optional[str] = None,
+    output_zarr_path: Optional[Path] = None,
 ) -> str:
     """
     Detect bouts from source and derived speed levels and save hierarchically.
@@ -2685,6 +2722,9 @@ def detect_and_save_bouts(
     Args:
         zarr_path: Path to capture zarr
         run_name: Name for this bout detection run (auto-generated if None)
+        output_zarr_path: Optional disposable/local Zarr receiving the output
+            run. Inputs are always read from ``zarr_path``. Production callers
+            use this to compute locally before atomic publication.
         track_kinematics_run: Track kinematics run name (or "latest")
         track_id: Track ID to analyze
         method: Detection method ("threshold", "peak", or "peak_event")
@@ -2727,6 +2767,10 @@ def detect_and_save_bouts(
             response candidate. Accepts raw/filtered/smoothed/averaged aliases.
         layout: Storage layout. hierarchical_v1 preserves the existing physical
             tree shape. compact_v2 writes the opt-in tabular v2 layout.
+        frame_axis_storage: For compact-v2 output, ``reference`` records the
+            exact authoritative track-kinematics Zarr path without copying the
+            frame axis. ``embedded`` additionally writes a portable fallback.
+            Hierarchical-v1 output retains its historical embedded axis.
         command: Optional command string to record in stage provenance.
 
     Returns:
@@ -2741,6 +2785,12 @@ def detect_and_save_bouts(
     if layout not in SWIM_BOUT_LAYOUT_CHOICES:
         expected = ", ".join(SWIM_BOUT_LAYOUT_CHOICES)
         raise ValueError(f"Unsupported layout {layout!r}; expected one of: {expected}")
+    if frame_axis_storage not in FRAME_AXIS_STORAGE_CHOICES:
+        expected = ", ".join(FRAME_AXIS_STORAGE_CHOICES)
+        raise ValueError(
+            f"Unsupported frame_axis_storage {frame_axis_storage!r}; "
+            f"expected one of: {expected}"
+        )
     if boundary_mode not in BOUNDARY_MODES:
         expected = ", ".join(BOUNDARY_MODES)
         raise ValueError(f"Unsupported boundary_mode {boundary_mode!r}; expected one of: {expected}")
@@ -2772,6 +2822,8 @@ def detect_and_save_bouts(
         print(f"Boundary window: {boundary_window_s} s")
     print(f"Exponential response: source={exponential_source_key}, tau={exponential_tau_s} s")
     print(f"Storage layout: {layout}")
+    if layout == SWIM_BOUT_LAYOUT_COMPACT_V2:
+        print(f"Frame axis storage: {frame_axis_storage}")
     if method == "threshold":
         print(f"Threshold: {threshold_mm} mm/s")
     elif method == "peak":
@@ -2971,7 +3023,8 @@ def detect_and_save_bouts(
     # Save to zarr
     print("Saving to zarr...")
     phase_started_at = perf_counter()
-    root = open_zarr_root(zarr_path, mode='r+')
+    output_path = Path(output_zarr_path) if output_zarr_path is not None else zarr_path
+    root = open_zarr_root(output_path, mode='a')
 
     # Create analysis/swim_bout_runs if needed
     if 'analysis' not in root:
@@ -3007,12 +3060,15 @@ def detect_and_save_bouts(
     )
     created_at_utc = datetime.now(timezone.utc).isoformat()
     schema_version = (
-        SWIM_BOUT_RUN_SCHEMA_VERSION_COMPACT_V2
+        SWIM_BOUT_RUN_SCHEMA_VERSION_FRAME_AXIS_REFERENCE
         if layout == SWIM_BOUT_LAYOUT_COMPACT_V2
         else SWIM_BOUT_RUN_SCHEMA_VERSION
     )
     run_group.attrs['schema_id'] = SWIM_BOUT_RUN_SCHEMA_ID
     run_group.attrs['schema_version'] = schema_version
+    run_group.attrs['method'] = method
+    run_group.attrs['method_version'] = METHOD_VERSION
+    run_group.attrs['row_axis'] = 'swim_bout_rows'
     run_group.attrs['layout'] = layout
     run_group.attrs['created_at_utc'] = created_at_utc
     run_group.attrs['detection_method'] = method
@@ -3075,6 +3131,33 @@ def detect_and_save_bouts(
         f"analysis/track_kinematics_runs/offline/"
         f"{metadata['track_kinematics_run']}/tracks/id_{int(track_id)}"
     )
+    frame_axis_contract: Optional[Dict[str, Any]] = None
+    frame_axis_contract_sha256: Optional[str] = None
+    if layout == SWIM_BOUT_LAYOUT_COMPACT_V2:
+        source_frame_path = dict(metadata.get('source_array_paths') or {}).get(
+            'frame_indices',
+            f"{source_track_path}/frame_indices",
+        )
+        source_frame_shape = metadata.get('source_frame_indices_shape')
+        if source_frame_shape is not None and list(source_frame_shape) != [int(len(frames))]:
+            raise ValueError(
+                "Authoritative track frame-axis shape changed while preparing the "
+                f"swim-bout run: metadata={source_frame_shape}, loaded={[int(len(frames))]}."
+            )
+        frame_axis_contract = _json_safe_attr_value(
+            build_frame_axis_contract(
+                np.asarray(frames, dtype=np.int64),
+                authoritative_path=str(source_frame_path),
+                source_track_kinematics_run=str(metadata['track_kinematics_run']),
+                track_id=int(track_id),
+                storage_mode=frame_axis_storage,
+                authoritative_dtype=metadata.get('source_frame_indices_dtype', 'int64'),
+            )
+        )
+        frame_axis_contract_sha256 = _sha256_json(frame_axis_contract)
+        run_group.attrs[FRAME_AXIS_CONTRACT_ATTR] = frame_axis_contract
+        run_group.attrs[FRAME_AXIS_CONTRACT_SHA256_ATTR] = frame_axis_contract_sha256
+        run_group.attrs['frame_axis_storage_mode'] = frame_axis_storage
 
     parameters = _json_safe_attr_value({
         'method': method,
@@ -3120,6 +3203,11 @@ def detect_and_save_bouts(
         'exponential_source_level': exponential_source_key,
         'speed_levels': list(speed_levels),
         'layout': layout,
+        'frame_axis_storage': (
+            frame_axis_storage
+            if layout == SWIM_BOUT_LAYOUT_COMPACT_V2
+            else FRAME_AXIS_STORAGE_EMBEDDED
+        ),
         'swim_bout_run_schema_id': SWIM_BOUT_RUN_SCHEMA_ID,
         'swim_bout_run_schema_version': schema_version,
         'bout_metric_schema_id': BOUT_METRIC_SCHEMA_ID,
@@ -3127,6 +3215,17 @@ def detect_and_save_bouts(
         'peak_event_schema_version': PEAK_EVENT_SCHEMA_VERSION,
         'distance_policy': 'path_length_from_track_frame_path_distance_only',
         'overwrite': bool(overwrite),
+    })
+    run_group.attrs['parameters'] = parameters
+    run_group.attrs['source_refs'] = _json_safe_attr_value({
+        'source_track_kinematics_path': source_track_path,
+        'source_track_id': int(track_id),
+        'source_frame_axis_path': (
+            frame_axis_contract.get('authoritative_path')
+            if frame_axis_contract is not None
+            else f"{source_track_path}/frame_indices"
+        ),
+        'frame_axis_contract_sha256': frame_axis_contract_sha256,
     })
     algorithm_contract = _json_safe_attr_value(
         _swim_bout_algorithm_contract(
@@ -3171,6 +3270,8 @@ def detect_and_save_bouts(
         'pixel_to_mm': metadata.get('pixel_to_mm'),
         'n_frames': int(metadata['n_frames']),
         'resolved_source_array_paths': metadata.get('source_array_paths'),
+        'frame_axis_contract': frame_axis_contract,
+        'frame_axis_contract_sha256': frame_axis_contract_sha256,
     })
     provenance = build_stage_provenance(
         stage="detect_bouts_multi_level",
@@ -3193,10 +3294,29 @@ def detect_and_save_bouts(
                 SWIM_BOUT_ALGORITHM_CONTRACT_SCHEMA_VERSION
             ),
             'algorithm_contract_sha256': algorithm_contract_sha256,
+            'frame_axis_contract_schema_id': (
+                frame_axis_contract.get('schema_id')
+                if frame_axis_contract is not None
+                else None
+            ),
+            'frame_axis_contract_schema_version': (
+                frame_axis_contract.get('schema_version')
+                if frame_axis_contract is not None
+                else None
+            ),
+            'frame_axis_contract_sha256': frame_axis_contract_sha256,
+            'frame_axis_storage_mode': (
+                frame_axis_storage
+                if layout == SWIM_BOUT_LAYOUT_COMPACT_V2
+                else FRAME_AXIS_STORAGE_EMBEDDED
+            ),
         },
     )
     provenance['algorithm_contract'] = algorithm_contract
     provenance['algorithm_contract_sha256'] = algorithm_contract_sha256
+    if frame_axis_contract is not None:
+        provenance['frame_axis_contract'] = frame_axis_contract
+        provenance['frame_axis_contract_sha256'] = frame_axis_contract_sha256
     provenance = _json_safe_attr_value(provenance)
     write_stage_provenance(run_group, provenance)
     _finish_timed_phase(
@@ -3313,6 +3433,8 @@ def detect_and_save_bouts(
 
     phase_started_at = perf_counter()
     if layout == SWIM_BOUT_LAYOUT_COMPACT_V2:
+        if frame_axis_contract is None:
+            raise RuntimeError("Compact swim-bout output is missing its frame-axis contract.")
         _write_compact_v2_swim_bout_payloads(
             run_group,
             run_name=run_name,
@@ -3332,6 +3454,7 @@ def detect_and_save_bouts(
             exponential_tau_s=float(exponential_tau_s),
             frames=frames,
             speeds=speeds,
+            frame_axis_contract=frame_axis_contract,
             source_array_paths=metadata.get('source_array_paths'),
         )
         for level in speed_levels:
@@ -3437,6 +3560,17 @@ def main():
     )
 
     parser.add_argument(
+        '--output-zarr-path',
+        type=Path,
+        default=None,
+        help=(
+            'Write the completed run to a separate disposable/local Zarr while '
+            'reading all inputs from zarr_path. Production materializers use '
+            'this before atomic publication.'
+        ),
+    )
+
+    parser.add_argument(
         '--run-name',
         type=str,
         default=None,
@@ -3458,6 +3592,19 @@ def main():
             'Storage layout for the output run. hierarchical_v1 preserves the existing '
             'tree-shaped layout. compact_v2 writes the tabular schema version 7. '
             f'Default: {SWIM_BOUT_LAYOUT_DEFAULT}.'
+        ),
+    )
+
+    parser.add_argument(
+        '--frame-axis-storage',
+        type=str,
+        choices=FRAME_AXIS_STORAGE_CHOICES,
+        default=FRAME_AXIS_STORAGE_DEFAULT,
+        help=(
+            'Frame-axis policy for compact_v2 output. reference resolves the exact '
+            'authoritative track-kinematics array in the same Zarr. embedded also '
+            'stores a portable fallback copy. '
+            f'Default: {FRAME_AXIS_STORAGE_DEFAULT}.'
         ),
     )
 
@@ -3673,6 +3820,7 @@ def main():
     run_name = detect_and_save_bouts(
         zarr_path=zarr_path,
         run_name=args.run_name,
+        output_zarr_path=args.output_zarr_path,
         track_kinematics_run=args.track_kinematics_run,
         track_id=args.track_id,
         method=args.method,
@@ -3697,6 +3845,7 @@ def main():
         exponential_tau_s=args.exponential_tau_s,
         exponential_source_level=args.exponential_source_level,
         layout=args.layout,
+        frame_axis_storage=args.frame_axis_storage,
         command=" ".join(sys.argv),
     )
 

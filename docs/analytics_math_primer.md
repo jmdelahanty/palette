@@ -490,7 +490,7 @@ interpretation.
 - [current_pipeline_contract.md](current_pipeline_contract.md)
 - [body_frame_contract.md](body_frame_contract.md)
 - [derived_analysis_run_contract.md](derived_analysis_run_contract.md)
-- [track_kinematics_bout_status.md](track_kinematics_bout_status.md)
+- [kinematics_zarr_access_guide.md](kinematics_zarr_access_guide.md)
 - [bout_kinematics_run_design.md](bout_kinematics_run_design.md)
 - [swim_bout_peak_event_detector_design.md](swim_bout_peak_event_detector_design.md)
 - [subject_shape_runs_contract.md](subject_shape_runs_contract.md)

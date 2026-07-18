@@ -227,7 +227,7 @@ Phase 1 is complete when each task has:
 ## Related Docs
 
 - [training_label_origin_provenance_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/training_label_origin_provenance_todo.md)
-- [provenance_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/provenance_todo.md)
+- [archived provenance TODO](archive/provenance_todo.md)
 - [detection_merged_export_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/detection_merged_export_contract.md)
 - [keypoint_merged_row_gate_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/keypoint_merged_row_gate_contract.md)
 - [provenance_workflow.md](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/docs/provenance_workflow.md)

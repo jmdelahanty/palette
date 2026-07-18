@@ -743,15 +743,22 @@ def test_goodcopbadcop_component_loads_and_renders_cra_endpoint(tmp_path) -> Non
 
     endpoint = loaded.cra_endpoint
     assert endpoint is not None
-    assert endpoint.component_path.endswith("/cra_primary_endpoint/object_relative_pre_post_v1")
-    assert endpoint.summary["delta_occ_agg"] == -1.0
-    assert endpoint.summary["pre_aggressive_quadrant"] == "top_left"
-    assert endpoint.summary["post_aggressive_quadrant"] == "bottom_right"
+    assert endpoint.component_path.endswith(
+        "/chaser_quadrant_occupancy/chaser_relative_pre_post_v1"
+    )
+    aggressive = endpoint.summary["per_chaser"][0]
+    assert aggressive["first_to_last_delta_occupancy_fraction"] == -1.0
+    assert aggressive["phase_values"][0]["quadrant"] == "top_left"
+    assert aggressive["phase_values"][1]["quadrant"] == "bottom_right"
 
     root = zarr.open_group(str(zarr_path), mode="r")
     component = root[endpoint.component_path]
-    stored_object_x = np.asarray(component["object_phase/object_x_px"][:], dtype=float).reshape(-1)
-    stored_occupancy = np.asarray(component["per_object_phase/occupancy_fraction"][:], dtype=float).reshape(-1)
+    stored_object_x = np.asarray(
+        component["chaser_phase/chaser_x_px"][:], dtype=float
+    ).reshape(-1)
+    stored_occupancy = np.asarray(
+        component["per_chaser_phase/occupancy_fraction"][:], dtype=float
+    ).reshape(-1)
     loaded_object_rows = endpoint.object_phase_df.sort(["phase_index", "object_index"])
     loaded_metric_rows = endpoint.per_object_phase_df.sort(["phase_index", "object_index"])
     np.testing.assert_allclose(loaded_object_rows["object_x_px"].to_numpy(), stored_object_x)
@@ -794,14 +801,14 @@ def test_goodcopbadcop_component_loads_and_renders_cra_endpoint(tmp_path) -> Non
     output = build_cra_primary_endpoint_output(_Mo, go, loaded=loaded)
     figures = [item for item in output if hasattr(item, "data")]
 
-    assert "CRA Primary Endpoint" in output[0]
+    assert "Chaser Quadrant Occupancy" in output[0]
     assert [figure.layout.title.text for figure in figures[:2]] == [
-        "CRA Primary Endpoint: Median Distance",
-        "CRA Primary Endpoint: Object-Quadrant Occupancy",
+        "Chaser Quadrant Occupancy: Median Distance",
+        "Chaser Quadrant Occupancy: Chaser-Quadrant Occupancy",
     ]
     assert [figure.layout.title.text for figure in figures[2:]] == [
-        "CRA Object-Relative Quadrants (pre_static)",
-        "CRA Object-Relative Quadrants (post_static)",
+        "Chaser-Relative Quadrants (pre_static)",
+        "Chaser-Relative Quadrants (post_static)",
     ]
     assert figures[2].layout.yaxis.autorange == "reversed"
 
@@ -814,10 +821,12 @@ def test_goodcopbadcop_component_loads_and_renders_cra_near_field(tmp_path) -> N
 
     near_field = loaded.cra_near_field
     assert near_field is not None
-    assert near_field.component_path.endswith("/cra_near_field/object_relative_near_field_v1")
+    assert near_field.component_path.endswith(
+        "/chaser_near_field_occupancy/chaser_relative_near_field_v1"
+    )
     assert near_field.geometry_status == "circle"
     assert near_field.arena_shape == "circle"
-    assert near_field.summary["nearzone_occ_delta_agg"] == -1.0
+    assert near_field.summary["per_chaser"][0]["chaser_index"] == 0
     assert "approach_p05_mm" in near_field.per_object_phase_df.columns
     assert "approach_p05_cdf_fraction" in near_field.per_object_phase_df.columns
     assert "object_distance_to_wall_mm" in near_field.per_object_phase_df.columns
@@ -861,17 +870,17 @@ def test_goodcopbadcop_component_loads_and_renders_cra_near_field(tmp_path) -> N
     output = build_cra_near_field_output(_Mo, go, loaded=loaded)
     figures = [item for item in output if hasattr(item, "data")]
 
-    assert "CRA Near-Field Avoidance" in output[0]
+    assert "Chaser Near-Field Occupancy" in output[0]
     assert [figure.layout.title.text for figure in figures] == [
-        "CRA Near-Field: Close-Approach Distance",
-        "CRA Near-Field: Near-Zone Occupancy",
-        "CRA Near-Field: Near-Zone Entry Rate",
-        "CRA Near-Field: Radial Occupancy Density",
-        "CRA Near-Field: Wall-Band-Excluded Radial Density",
-        "CRA Near-Field: Distance CDF",
-        "CRA Near-Field: Dish-Center Control Radial Density",
-        "CRA Near-Field: Dish-Center Control CDF",
-        "CRA Near-Field: Global-State QC",
+        "Chaser Near-Field Occupancy: Close-Approach Distance",
+        "Chaser Near-Field Occupancy: Near-Zone Occupancy",
+        "Chaser Near-Field Occupancy: Near-Zone Entry Rate",
+        "Chaser Near-Field Occupancy: Radial Density",
+        "Chaser Near-Field Occupancy: Wall-Band-Excluded Radial Density",
+        "Chaser Near-Field Occupancy: Distance CDF",
+        "Chaser Near-Field Occupancy: Dish-Center Control Radial Density",
+        "Chaser Near-Field Occupancy: Dish-Center Control CDF",
+        "Chaser Near-Field Occupancy: Global-State QC",
     ]
     assert figures[5].layout.yaxis.range == (0, 1)
 

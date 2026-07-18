@@ -104,7 +104,7 @@ def test_execution_plan_renders_exact_dependency_runs_and_parallel_backends(
     assert swim[:4] == (
         "/palette/python",
         "-m",
-        "fisheye.analysis.detect_bouts_multi_level",
+        "fisheye.analysis_workflows.materializers.swim_bouts",
         str(tmp_path / "recording_analysis.zarr"),
     )
     assert swim[swim.index("--track-kinematics-run") + 1] == "track_a"
@@ -481,6 +481,6 @@ def test_cli_renders_sleepyfish_style_swim_bout_command(
     captured = capsys.readouterr()
     assert exit_code == 0
     assert "status=planned" in captured.out
-    assert "fisheye.analysis.detect_bouts_multi_level" in captured.out
+    assert "fisheye.analysis_workflows.materializers.swim_bouts" in captured.out
     assert "--track-kinematics-run track_a" in captured.out
     assert captured.err == ""

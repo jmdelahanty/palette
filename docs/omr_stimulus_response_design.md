@@ -659,7 +659,8 @@ analysis/stimulus_response_runs/<run>/visualizations/
 Generate these either during analysis:
 
 ```bash
-scripts/py -m fisheye.analysis.stimulus_response <analysis.zarr> \
+scripts/py -m fisheye.analysis_workflows.materializers.stimulus_response <analysis.zarr> \
+  --run-name <run_name> --apply -- \
   ... \
   --write-zarr-artifacts
 ```

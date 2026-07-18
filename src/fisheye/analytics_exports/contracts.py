@@ -34,13 +34,19 @@ CHASER_IBI_HISTOGRAM_TABLE = "chaser_epoch_inter_bout_interval_histogram"
 CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE = "chaser_epoch_center_distance_histogram"
 CHASER_SPEED_DISTANCE_TABLE = "chaser_speed_distance_bins"
 CHASER_DISTANCE_HISTOGRAM_TABLE = "chaser_epoch_distance_histogram"
-CHASER_CRA_SUMMARY_TABLE = "chaser_cra_primary_endpoint_summary"
-CHASER_CRA_OBJECT_PHASE_TABLE = "chaser_cra_primary_endpoint_object_phase"
-CHASER_CRA_QUADRANT_TABLE = "chaser_cra_quadrant_occupancy"
-CHASER_CRA_NEAR_FIELD_SUMMARY_TABLE = "chaser_cra_near_field_summary"
-CHASER_CRA_NEAR_FIELD_OBJECT_PHASE_TABLE = "chaser_cra_near_field_object_phase"
-CHASER_CRA_NEAR_FIELD_RADIAL_TABLE = "chaser_cra_near_field_radial_density"
-CHASER_CRA_NEAR_FIELD_CDF_TABLE = "chaser_cra_near_field_distance_cdf"
+CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE = "chaser_quadrant_occupancy_summary"
+CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE = "chaser_quadrant_occupancy_chaser_phase"
+CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE = "chaser_quadrant_occupancy_density"
+CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE = "chaser_near_field_occupancy_summary"
+CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE = (
+    "chaser_near_field_occupancy_chaser_phase"
+)
+CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE = (
+    "chaser_near_field_occupancy_radial_density"
+)
+CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE = (
+    "chaser_near_field_occupancy_distance_cdf"
+)
 CHASER_EGOCENTRIC_SUMMARY_TABLE = "chaser_egocentric_epoch_summary"
 CHASER_EGOCENTRIC_HISTOGRAM_TABLE = "chaser_egocentric_distance_bearing_histogram"
 
@@ -386,53 +392,47 @@ TABLE_CONTRACTS: dict[str, TableContract] = {
         ("window_id", "chaser_index", "distance_bin_index", "hist_count"),
         {"bin_center_mm": "mm", "bin_left_mm": "mm", "bin_right_mm": "mm"},
     ),
-    CHASER_CRA_SUMMARY_TABLE: _contract(
-        CHASER_CRA_SUMMARY_TABLE,
-        "recording_x_cra_primary_endpoint",
+    CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE: _contract(
+        CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE,
+        "recording_x_chaser_quadrant_occupancy_summary",
         ("recording_id",),
-        ("delta_agg", "delta_inert", "specificity_distance"),
-        {"delta_agg": "mm", "delta_inert": "mm", "specificity_distance": "mm"},
+        ("chaser_count", "pairwise_role_contrast_policy"),
     ),
-    CHASER_CRA_OBJECT_PHASE_TABLE: _contract(
-        CHASER_CRA_OBJECT_PHASE_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE: _contract(
+        CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE,
         "recording_x_cra_phase_x_chaser_object",
         ("recording_id", "phase_axis_index", "object_index"),
         ("phase_label", "object_index", "object_role", "median_distance_mm"),
         {"median_distance_mm": "mm", "mean_distance_mm": "mm"},
     ),
-    CHASER_CRA_QUADRANT_TABLE: _contract(
-        CHASER_CRA_QUADRANT_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE: _contract(
+        CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE,
         "recording_x_cra_phase_x_quadrant",
         ("recording_id", "phase_axis_index", "quadrant_id"),
         ("phase_label", "quadrant_id", "occupancy_fraction"),
     ),
-    CHASER_CRA_NEAR_FIELD_SUMMARY_TABLE: _contract(
-        CHASER_CRA_NEAR_FIELD_SUMMARY_TABLE,
-        "recording_x_cra_near_field_endpoint",
+    CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE: _contract(
+        CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE,
+        "recording_x_chaser_near_field_occupancy_summary",
         ("recording_id",),
-        (
-            "approach_p05_delta_agg",
-            "approach_p05_delta_inert",
-            "nearzone_occ_specificity",
-        ),
-        {"approach_p05_delta_agg": "mm", "approach_p05_delta_inert": "mm"},
+        ("chaser_count", "pairwise_role_contrast_policy"),
     ),
-    CHASER_CRA_NEAR_FIELD_OBJECT_PHASE_TABLE: _contract(
-        CHASER_CRA_NEAR_FIELD_OBJECT_PHASE_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE: _contract(
+        CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE,
         "recording_x_cra_phase_x_chaser_object_near_field",
         ("recording_id", "phase_axis_index", "object_index"),
         ("phase_label", "object_index", "object_role", "approach_p05_mm"),
         {"approach_p05_mm": "mm", "approach_p10_mm": "mm"},
     ),
-    CHASER_CRA_NEAR_FIELD_RADIAL_TABLE: _contract(
-        CHASER_CRA_NEAR_FIELD_RADIAL_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE: _contract(
+        CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE,
         "recording_x_cra_phase_x_chaser_object_x_radial_bin",
         ("recording_id", "phase_axis_index", "object_index", "radial_bin_index"),
         ("phase_label", "object_role", "radial_bin_index", "radial_count"),
         {"radial_bin_center_mm": "mm", "radial_density_per_mm2": "1/mm^2"},
     ),
-    CHASER_CRA_NEAR_FIELD_CDF_TABLE: _contract(
-        CHASER_CRA_NEAR_FIELD_CDF_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE: _contract(
+        CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE,
         "recording_x_cra_phase_x_chaser_object_x_distance_threshold",
         ("recording_id", "phase_axis_index", "object_index", "cdf_threshold_index"),
         ("phase_label", "object_role", "cdf_threshold_index", "cdf_fraction"),
@@ -510,13 +510,13 @@ CHASER_TABLES = (
     CHASER_CENTER_DISTANCE_HISTOGRAM_TABLE,
     CHASER_SPEED_DISTANCE_TABLE,
     CHASER_DISTANCE_HISTOGRAM_TABLE,
-    CHASER_CRA_SUMMARY_TABLE,
-    CHASER_CRA_OBJECT_PHASE_TABLE,
-    CHASER_CRA_QUADRANT_TABLE,
-    CHASER_CRA_NEAR_FIELD_SUMMARY_TABLE,
-    CHASER_CRA_NEAR_FIELD_OBJECT_PHASE_TABLE,
-    CHASER_CRA_NEAR_FIELD_RADIAL_TABLE,
-    CHASER_CRA_NEAR_FIELD_CDF_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_CHASER_PHASE_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_DENSITY_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_SUMMARY_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_CHASER_PHASE_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_RADIAL_DENSITY_TABLE,
+    CHASER_NEAR_FIELD_OCCUPANCY_DISTANCE_CDF_TABLE,
     CHASER_EGOCENTRIC_SUMMARY_TABLE,
     CHASER_EGOCENTRIC_HISTOGRAM_TABLE,
 )

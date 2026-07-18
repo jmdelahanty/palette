@@ -403,7 +403,7 @@ contains **7 stages**: `arena_assignment`, `crop`, `detect`, `detect_quality`,
 `keypoints`, `refined_keypoints`, `tracking` (up from the 1-stage `detect_quality`
 allowlist at the 07-01/07-02 checkpoints; catalog reconciliation in e846e17). Still
 short of "every specced, non-deprecated stage" — see
-docs/provenance_enforcement_roadmap.md.
+docs/archive/provenance_enforcement_roadmap.md.
 
 **Catalog accuracy — landed.** `detect`'s `invalidates` no longer includes
 `background` (verified in `stage_catalog.py`; reconciled together with the `--force`

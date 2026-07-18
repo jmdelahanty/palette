@@ -58,6 +58,30 @@ def _make_memory_group() -> zarr.Group:
     return zarr.open_group("memory://", mode="w")
 
 
+def test_track_kinematics_contract_attrs_are_machine_readable() -> None:
+    attrs = mod._track_kinematics_contract_attrs(
+        run_type="online",
+        method="track_kinematics_online_refined",
+        parameters={"fps": 30.0},
+        inputs={
+            "refined_online_run": "refined_a",
+            "stimulus_run": "stim_a",
+            "chaser_index": 1,
+        },
+    )
+
+    assert attrs["schema_id"] == "analysis.track_kinematics_runs"
+    assert attrs["schema_version"] == 1
+    assert attrs["method_version"] == "track_kinematics.v1"
+    assert attrs["row_axis"] == "track_samples"
+    assert attrs["parameters"] == {"fps": 30.0}
+    assert attrs["source_refs"] == {
+        "source_refined_online_path": "refined_online_runs/refined_a",
+        "source_stimulus_path": "analysis/stimulus_runs/stim_a",
+        "source_chaser_index": 1,
+    }
+
+
 def test_build_track_datasets_computes_turning_series_for_all_tracks() -> None:
     track_ids = np.array([0, 0, 1, 1], dtype=np.int64)
     frames = np.array([0, 1, 0, 2], dtype=np.int64)

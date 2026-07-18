@@ -58,21 +58,65 @@ CORE_BEHAVIOR_PROVIDER = ProviderDefinition(
 CHASER_PROVIDER = ProviderDefinition(
     provider_id="stimulus_chaser",
     label="Chaser stimulus",
-    description="Distance, spatial, egocentric, CRA, and escape analyses.",
+    description="Distance, spatial, egocentric, quadrant, near-field, and escape analyses.",
     component_key="goodcopbadcop_chaser",
     analyses=(
-        AnalysisDefinition("distance", "Chaser distances", "Per-chaser distance traces and epoch selection."),
-        AnalysisDefinition("epoch_summary", "Epoch behavior", "Per-epoch chaser and fish summaries."),
-        AnalysisDefinition("egocentric_bearing", "Egocentric bearing", "Bearing distributions for selected chasers."),
-        AnalysisDefinition("polar_distance", "Polar bearing and distance", "Re-binnable polar small multiples."),
-        AnalysisDefinition("fish_heading", "Fish heading", "Heading traces over selected epochs."),
-        AnalysisDefinition("alignment", "Distance and alignment", "Egocentric distance/alignment summaries."),
-        AnalysisDefinition("position_heatmap", "Position heatmap", "Arena occupancy with optional chaser overlay."),
-        AnalysisDefinition("detection_occupancy", "Detection occupancy", "Persisted detection occupancy heatmap."),
-        AnalysisDefinition("spatial_occupancy", "Spatial occupancy", "Quadrant and configured-zone occupancy."),
-        AnalysisDefinition("cra_quadrant", "CRA quadrant relocation", "Chaser quadrant versus other quadrants."),
-        AnalysisDefinition("cra_near_field", "CRA near-field", "Near-field avoidance and radial density."),
-        AnalysisDefinition("escape_freeze", "Escape outcomes", "Successful escape and freezing diagnostics."),
+        AnalysisDefinition(
+            "distance",
+            "Chaser distances",
+            "Per-chaser distance traces and epoch selection.",
+        ),
+        AnalysisDefinition(
+            "epoch_summary", "Epoch behavior", "Per-epoch chaser and fish summaries."
+        ),
+        AnalysisDefinition(
+            "egocentric_bearing",
+            "Egocentric bearing",
+            "Bearing distributions for selected chasers.",
+        ),
+        AnalysisDefinition(
+            "polar_distance",
+            "Polar bearing and distance",
+            "Re-binnable polar small multiples.",
+        ),
+        AnalysisDefinition(
+            "fish_heading", "Fish heading", "Heading traces over selected epochs."
+        ),
+        AnalysisDefinition(
+            "alignment",
+            "Distance and alignment",
+            "Egocentric distance/alignment summaries.",
+        ),
+        AnalysisDefinition(
+            "position_heatmap",
+            "Position heatmap",
+            "Arena occupancy with optional chaser overlay.",
+        ),
+        AnalysisDefinition(
+            "detection_occupancy",
+            "Detection occupancy",
+            "Persisted detection occupancy heatmap.",
+        ),
+        AnalysisDefinition(
+            "spatial_occupancy",
+            "Spatial occupancy",
+            "Quadrant and configured-zone occupancy.",
+        ),
+        AnalysisDefinition(
+            "cra_quadrant",
+            "Chaser quadrant occupancy",
+            "Occupancy in each chaser's quadrant versus the other quadrants.",
+        ),
+        AnalysisDefinition(
+            "cra_near_field",
+            "Chaser near-field occupancy",
+            "Near-field dwell, visits, distance distributions, and radial density.",
+        ),
+        AnalysisDefinition(
+            "escape_freeze",
+            "Escape outcomes",
+            "Successful escape and freezing diagnostics.",
+        ),
         AnalysisDefinition(
             "gaze_tracking",
             "Eye–chaser tracking",

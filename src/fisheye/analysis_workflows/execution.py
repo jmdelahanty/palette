@@ -130,11 +130,19 @@ def _track_kinematics_command(context: StageCommandContext) -> tuple[str, ...]:
 
 
 def _swim_bout_command(context: StageCommandContext) -> tuple[str, ...]:
-    command = _module_command(context, "fisheye.analysis.detect_bouts_multi_level")
+    command = _module_command(
+        context,
+        "fisheye.analysis_workflows.materializers.swim_bouts",
+    )
     command.extend(
         (
             "--run-name",
             context.output_run,
+            "--copy-backend",
+            "rsync",
+            "--apply",
+            "--json",
+            "--",
             "--track-kinematics-run",
             context.dependency_run("track_kinematics"),
             "--track-id",

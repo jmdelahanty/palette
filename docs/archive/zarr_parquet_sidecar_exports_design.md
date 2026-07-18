@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-17: rejected in favor of recording-local Zarr authority and external immutable cross-recording exports. -->
+
 # Zarr-Local Parquet Sidecar Exports
 
 ## Status

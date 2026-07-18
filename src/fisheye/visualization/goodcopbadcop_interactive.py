@@ -63,12 +63,36 @@ GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER = LEGACY_GOODCOPBADCOP_CHASER_DASHBOARD_
 DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT = LEGACY_GOODCOPBADCOP_INTERACTIVE_ARTIFACT
 GOODCOPBADCOP_CRA_COMPONENT_PARENT = "cra_primary_endpoint"
 GOODCOPBADCOP_CRA_SCHEMA_ID = "palette.goodcopbadcop.cra_primary_endpoint.v1"
+CHASER_QUADRANT_OCCUPANCY_COMPONENT_PARENT = "chaser_quadrant_occupancy"
+CHASER_QUADRANT_OCCUPANCY_SCHEMA_IDS = frozenset(
+    {GOODCOPBADCOP_CRA_SCHEMA_ID, "palette.chaser.quadrant_occupancy.v1"}
+)
 GOODCOPBADCOP_CRA_NEAR_FIELD_COMPONENT_PARENT = "cra_near_field"
 GOODCOPBADCOP_CRA_NEAR_FIELD_SCHEMA_ID = "palette.goodcopbadcop.cra_near_field.v1"
+CHASER_NEAR_FIELD_OCCUPANCY_COMPONENT_PARENT = "chaser_near_field_occupancy"
+CHASER_NEAR_FIELD_OCCUPANCY_SCHEMA_IDS = frozenset(
+    {GOODCOPBADCOP_CRA_NEAR_FIELD_SCHEMA_ID, "palette.chaser.near_field_occupancy.v1"}
+)
 GOODCOPBADCOP_EPOCH_BEHAVIOR_COMPONENT_PARENT = "epoch_behavior_summary"
-GOODCOPBADCOP_EPOCH_BEHAVIOR_SCHEMA_ID = "palette.goodcopbadcop.epoch_behavior_summary.v1"
+GOODCOPBADCOP_EPOCH_BEHAVIOR_SCHEMA_ID = (
+    "palette.goodcopbadcop.epoch_behavior_summary.v1"
+)
+CHASER_EPOCH_BEHAVIOR_SCHEMA_IDS = frozenset(
+    {
+        GOODCOPBADCOP_EPOCH_BEHAVIOR_SCHEMA_ID,
+        "palette.chaser.epoch_behavior_summary.v1",
+    }
+)
 GOODCOPBADCOP_ESCAPE_FREEZE_COMPONENT_PARENT = "chaser_escape_freeze"
-GOODCOPBADCOP_ESCAPE_FREEZE_SCHEMA_ID = "palette.goodcopbadcop.chaser_escape_freeze_canary.v1"
+GOODCOPBADCOP_ESCAPE_FREEZE_SCHEMA_ID = (
+    "palette.goodcopbadcop.chaser_escape_freeze_canary.v1"
+)
+CHASER_ESCAPE_FREEZE_SCHEMA_IDS = frozenset(
+    {
+        GOODCOPBADCOP_ESCAPE_FREEZE_SCHEMA_ID,
+        "palette.chaser.escape_freeze_summary.v1",
+    }
+)
 GOODCOPBADCOP_ESCAPE_FREEZE_PER_TRIAL_PNG = "escape_freeze_per_trial_diagnostic_png"
 GOODCOPBADCOP_ESCAPE_FREEZE_FISH_CENTERED_PNG = "escape_freeze_fish_centered_diagnostic_png"
 GOODCOPBADCOP_ESCAPE_FREEZE_SCATTER_PNG = "escape_freeze_speed_displacement_scatter_png"
@@ -834,10 +858,20 @@ def resolve_latest_cra_primary_endpoint_component_path(
 ) -> Optional[str]:
     """Return the latest complete CRA primary endpoint component for a chaser run."""
 
-    parent_path = _join_path(run_path, GOODCOPBADCOP_CRA_COMPONENT_PARENT)
-    try:
-        parent = root[parent_path]
-    except Exception:
+    parent = None
+    parent_path = ""
+    for parent_name in (
+        CHASER_QUADRANT_OCCUPANCY_COMPONENT_PARENT,
+        GOODCOPBADCOP_CRA_COMPONENT_PARENT,
+    ):
+        candidate_path = _join_path(run_path, parent_name)
+        try:
+            parent = root[candidate_path]
+            parent_path = candidate_path
+            break
+        except Exception:
+            continue
+    if parent is None:
         return None
 
     keys = set(_group_keys(parent))
@@ -869,10 +903,20 @@ def resolve_latest_cra_near_field_component_path(
 ) -> Optional[str]:
     """Return the latest complete CRA near-field component for a chaser run."""
 
-    parent_path = _join_path(run_path, GOODCOPBADCOP_CRA_NEAR_FIELD_COMPONENT_PARENT)
-    try:
-        parent = root[parent_path]
-    except Exception:
+    parent = None
+    parent_path = ""
+    for parent_name in (
+        CHASER_NEAR_FIELD_OCCUPANCY_COMPONENT_PARENT,
+        GOODCOPBADCOP_CRA_NEAR_FIELD_COMPONENT_PARENT,
+    ):
+        candidate_path = _join_path(run_path, parent_name)
+        try:
+            parent = root[candidate_path]
+            parent_path = candidate_path
+            break
+        except Exception:
+            continue
+    if parent is None:
         return None
 
     keys = set(_group_keys(parent))
@@ -1064,11 +1108,17 @@ def _qc_warnings_from_cra_component(component: zarr.Group) -> tuple[str, ...]:
 
 
 def _load_cra_objects_dataframe(component: zarr.Group) -> pl.DataFrame:
+    group_name = "chasers" if "chasers" in component else "objects"
     try:
-        group = component["objects"]
+        group = component[group_name]
     except Exception:
         return pl.DataFrame()
-    object_index = np.asarray(group["object_index"][:], dtype=np.int64) if "object_index" in group else np.asarray([], dtype=np.int64)
+    index_name = "chaser_index" if "chaser_index" in group else "object_index"
+    object_index = (
+        np.asarray(group[index_name][:], dtype=np.int64)
+        if index_name in group
+        else np.asarray([], dtype=np.int64)
+    )
     n = int(object_index.shape[0])
     if "behavior_class_label_bytes" in group:
         roles = _decode_text_column(np.asarray(group["behavior_class_label_bytes"][:]))[:n]
@@ -1174,11 +1224,13 @@ def _load_cra_object_phase_dataframe(
     objects_df: pl.DataFrame,
     phases_df: pl.DataFrame,
 ) -> pl.DataFrame:
+    group_name = "chaser_phase" if "chaser_phase" in component else "object_phase"
     try:
-        group = component["object_phase"]
+        group = component[group_name]
     except Exception:
         return pl.DataFrame()
-    if objects_df.is_empty() or phases_df.is_empty() or "object_x_px" not in group:
+    prefix = "chaser" if group_name == "chaser_phase" else "object"
+    if objects_df.is_empty() or phases_df.is_empty() or f"{prefix}_x_px" not in group:
         return pl.DataFrame()
 
     object_rows = objects_df.to_dicts()
@@ -1192,18 +1244,18 @@ def _load_cra_object_phase_dataframe(
         return data if data.shape == shape else np.full(shape, default, dtype=dtype)
 
     labels = (
-        _decode_text_column(np.asarray(group["object_quadrant_label_bytes"][:]))
-        if "object_quadrant_label_bytes" in group
+        _decode_text_column(np.asarray(group[f"{prefix}_quadrant_label_bytes"][:]))
+        if f"{prefix}_quadrant_label_bytes" in group
         else list(GOODCOPBADCOP_CRA_QUADRANT_LABELS)
     )
-    x_px = array("object_x_px", np.float64)
-    y_px = array("object_y_px", np.float64)
-    x_mm = array("object_x_mm", np.float64)
-    y_mm = array("object_y_mm", np.float64)
-    q_codes = array("object_quadrant_code", np.int64, default=-1)
-    sample_count = array("object_position_sample_count", np.int64, default=0)
-    max_drift = array("object_max_drift_mm", np.float64)
-    median_drift = array("object_median_drift_mm", np.float64)
+    x_px = array(f"{prefix}_x_px", np.float64)
+    y_px = array(f"{prefix}_y_px", np.float64)
+    x_mm = array(f"{prefix}_x_mm", np.float64)
+    y_mm = array(f"{prefix}_y_mm", np.float64)
+    q_codes = array(f"{prefix}_quadrant_code", np.int64, default=-1)
+    sample_count = array(f"{prefix}_position_sample_count", np.int64, default=0)
+    max_drift = array(f"{prefix}_max_drift_mm", np.float64)
+    median_drift = array(f"{prefix}_median_drift_mm", np.float64)
 
     rows = []
     for phase_idx, phase in enumerate(phase_rows):
@@ -1238,8 +1290,11 @@ def _load_cra_per_object_phase_dataframe(
     *,
     object_phase_df: pl.DataFrame,
 ) -> pl.DataFrame:
+    group_name = (
+        "per_chaser_phase" if "per_chaser_phase" in component else "per_object_phase"
+    )
     try:
-        group = component["per_object_phase"]
+        group = component[group_name]
     except Exception:
         return pl.DataFrame()
     if object_phase_df.is_empty():
@@ -1321,8 +1376,11 @@ def _load_cra_near_field_per_object_phase_dataframe(
     objects_df: pl.DataFrame,
     phases_df: pl.DataFrame,
 ) -> pl.DataFrame:
+    group_name = (
+        "per_chaser_phase" if "per_chaser_phase" in component else "per_object_phase"
+    )
     try:
-        group = component["per_object_phase"]
+        group = component[group_name]
     except Exception:
         return pl.DataFrame()
     if objects_df.is_empty() or phases_df.is_empty():
@@ -1350,26 +1408,35 @@ def _load_cra_near_field_per_object_phase_dataframe(
         dtype=np.float64,
     )
 
+    source_prefix = "chaser" if group_name == "per_chaser_phase" else "object"
     metric_arrays = {
-        "object_x_px": _array_or_full(group, "object_x_px", shape=shape, dtype=np.float64),
-        "object_y_px": _array_or_full(group, "object_y_px", shape=shape, dtype=np.float64),
-        "object_x_mm": _array_or_full(group, "object_x_mm", shape=shape, dtype=np.float64),
-        "object_y_mm": _array_or_full(group, "object_y_mm", shape=shape, dtype=np.float64),
+        "object_x_px": _array_or_full(
+            group, f"{source_prefix}_x_px", shape=shape, dtype=np.float64
+        ),
+        "object_y_px": _array_or_full(
+            group, f"{source_prefix}_y_px", shape=shape, dtype=np.float64
+        ),
+        "object_x_mm": _array_or_full(
+            group, f"{source_prefix}_x_mm", shape=shape, dtype=np.float64
+        ),
+        "object_y_mm": _array_or_full(
+            group, f"{source_prefix}_y_mm", shape=shape, dtype=np.float64
+        ),
         "object_distance_to_arena_center_mm": _array_or_full(
             group,
-            "object_distance_to_arena_center_mm",
+            f"{source_prefix}_distance_to_arena_center_mm",
             shape=shape,
             dtype=np.float64,
         ),
         "object_distance_to_wall_mm": _array_or_full(
             group,
-            "object_distance_to_wall_mm",
+            f"{source_prefix}_distance_to_wall_mm",
             shape=shape,
             dtype=np.float64,
         ),
         "object_displacement_from_pre_mm": _array_or_full(
             group,
-            "object_displacement_from_pre_mm",
+            f"{source_prefix}_displacement_from_pre_mm",
             shape=shape,
             dtype=np.float64,
         ),
@@ -1713,7 +1780,16 @@ def load_goodcopbadcop_cra_primary_endpoint_data(
     root = open_zarr_root(archive, mode="r")
     normalized_run_path = _normalize_path(run_path)
     if component_name and str(component_name).strip() not in {"latest", ""}:
-        component_path = _join_path(normalized_run_path, GOODCOPBADCOP_CRA_COMPONENT_PARENT, str(component_name))
+        candidates = [
+            _join_path(normalized_run_path, parent_name, str(component_name))
+            for parent_name in (
+                CHASER_QUADRANT_OCCUPANCY_COMPONENT_PARENT,
+                GOODCOPBADCOP_CRA_COMPONENT_PARENT,
+            )
+        ]
+        component_path = next(
+            (path for path in candidates if path in root), candidates[0]
+        )
     else:
         component_path = resolve_latest_cra_primary_endpoint_component_path(root, run_path=normalized_run_path)
     if not component_path:
@@ -1725,7 +1801,7 @@ def load_goodcopbadcop_cra_primary_endpoint_data(
 
     attrs = dict(getattr(component, "attrs", {}))
     schema_id = str(attrs.get("schema_id") or "")
-    if schema_id and schema_id != GOODCOPBADCOP_CRA_SCHEMA_ID:
+    if schema_id and schema_id not in CHASER_QUADRANT_OCCUPANCY_SCHEMA_IDS:
         return None
 
     run_group = root[normalized_run_path]
@@ -1771,10 +1847,15 @@ def load_goodcopbadcop_cra_near_field_data(
     root = open_zarr_root(archive, mode="r")
     normalized_run_path = _normalize_path(run_path)
     if component_name and str(component_name).strip() not in {"latest", ""}:
-        component_path = _join_path(
-            normalized_run_path,
-            GOODCOPBADCOP_CRA_NEAR_FIELD_COMPONENT_PARENT,
-            str(component_name),
+        candidates = [
+            _join_path(normalized_run_path, parent_name, str(component_name))
+            for parent_name in (
+                CHASER_NEAR_FIELD_OCCUPANCY_COMPONENT_PARENT,
+                GOODCOPBADCOP_CRA_NEAR_FIELD_COMPONENT_PARENT,
+            )
+        ]
+        component_path = next(
+            (path for path in candidates if path in root), candidates[0]
         )
     else:
         component_path = resolve_latest_cra_near_field_component_path(root, run_path=normalized_run_path)
@@ -1787,7 +1868,7 @@ def load_goodcopbadcop_cra_near_field_data(
 
     attrs = dict(getattr(component, "attrs", {}))
     schema_id = str(attrs.get("schema_id") or "")
-    if schema_id and schema_id != GOODCOPBADCOP_CRA_NEAR_FIELD_SCHEMA_ID:
+    if schema_id and schema_id not in CHASER_NEAR_FIELD_OCCUPANCY_SCHEMA_IDS:
         return None
 
     run_group = root[normalized_run_path]
@@ -1878,7 +1959,7 @@ def load_goodcopbadcop_epoch_behavior_data(
 
     attrs = dict(getattr(component, "attrs", {}))
     schema_id = str(attrs.get("schema_id") or "")
-    if schema_id and schema_id != GOODCOPBADCOP_EPOCH_BEHAVIOR_SCHEMA_ID:
+    if schema_id and schema_id not in CHASER_EPOCH_BEHAVIOR_SCHEMA_IDS:
         return None
 
     try:
@@ -1965,7 +2046,7 @@ def load_goodcopbadcop_escape_freeze_data(
 
     attrs = dict(getattr(component, "attrs", {}))
     schema_id = str(attrs.get("schema_id") or "")
-    if schema_id and schema_id != GOODCOPBADCOP_ESCAPE_FREEZE_SCHEMA_ID:
+    if schema_id and schema_id not in CHASER_ESCAPE_FREEZE_SCHEMA_IDS:
         return None
 
     parameters = attrs.get("parameters")

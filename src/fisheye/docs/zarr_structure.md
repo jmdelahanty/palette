@@ -1161,8 +1161,8 @@ use `[128, 1, 348, 348]`. The default modern bitpacked cache policy is
 `(min(512, n_rois), min(4, C), H, ceil(W/8))`, so a 512x512 four-component cache
 uses chunks `[512, 4, 512, 64]`.
 Use `scripts/py -m fisheye.utils.materialize_refined_subject_mask_store` to
-dry-run, recreate, refresh, or delete the dense `masks_roi` compatibility cache
-for compact refined-subject runs. The same utility refreshes compact mirrors
+dry-run, create, or repair the dense authoritative `masks_roi` surface for
+historical compact-only refined-subject runs. The same utility refreshes compact mirrors
 from edited dense masks: `--refresh-bitpacked --components <name> --rows <idx>`
 updates fixed-size bitpacked row/channel cells, while `--refresh-rle
 --components <name>` rebuilds selected component RLE groups after the edit path
@@ -1642,6 +1642,11 @@ historical flat acceleration arrays only for older archives.
 
 Track-level arrays remain unchanged between online and offline runs; only the root-level chaser metrics are added for offline runs.
 
+Current run attrs include `schema_id = "analysis.track_kinematics_runs"`,
+`schema_version = 1`, `method = "track_kinematics"`,
+`method_version = "track_kinematics.v1"`, `row_axis = "track_samples"`, and
+exact `source_refs` for tracking, keypoint, and refined-keypoint inputs.
+
 ### `analysis/swim_bout_runs/`
 
 Bout segmentation candidates derived from track-kinematics speed traces.
@@ -1709,7 +1714,7 @@ tables/summary_metrics
 tables/histograms
 signals/detector_signal_mm_s
 signals/detector_signal_signal_ids
-signals/frame_indices
+signals/frame_indices                    # schema-7 or declared embedded fallback
 ```
 
 Compact v2 replaces physical `<speed_level>` subgroups with `candidate_id` and
@@ -1724,6 +1729,28 @@ chunk (`palette_storage_policy="single_regular_chunk_v1"`). This measured
 exception favors the common complete-trace read; it does not apply to large
 framewise eye, tail, or track arrays. Readers should still resolve the signal
 row before requesting values so the logical lookup remains future-compatible.
+
+New compact runs use `palette.swim_bout_runs` schema version 8 and persist a
+run-level `frame_axis_contract` with schema id
+`palette.swim_bout_frame_axis_reference`, version 1. The contract pins the
+exact same-Zarr track-kinematics `frame_indices` path, source run, track id,
+shape, source dtype, and canonical content hash. The default
+`frame_axis_storage=reference` does not duplicate the axis.
+`frame_axis_storage=embedded` additionally writes `signals/frame_indices` as a
+portable fallback, but current Palette readers still prefer the authoritative
+path while it exists. Historical schema-7 compact runs have no reference
+contract and continue to read their embedded axis unchanged. A reference must
+name a concrete source run rather than a `latest` pointer; readers fail closed
+on shape, dtype, run, or track mismatch.
+
+This reference rule applies only when the downstream array retains the exact
+upstream row domain, ordering, and length. Coordinate axes such as this track
+frame axis may then be referenced directly. Identity and mapping arrays serve a
+different purpose: `instance_key` identifies a biological/detection instance,
+`source_row_indices` maps local rows to upstream rows, and `frame_offsets`
+indexes sparse frame groups. A stage that filters, duplicates, or reorders rows
+must persist the appropriate local identity or mapping even when its metadata
+also names an upstream authority.
 
 Run attrs also include `swim_bout_algorithm_contract`, a versioned,
 self-contained scientific contract (`analysis.swim_bout_algorithm_contract`,
@@ -1835,6 +1862,11 @@ to source swim-bout rows, and records both metric values and validity state for
 the measurement logic used.
 
 **Structure**: `analysis/bout_kinematics_runs/<run_name>/`
+
+The default physical layout is `compact_tabular_v2`. Logical movement,
+heading, and eye-gaze tables are resolved through
+`fisheye.analysis.bout_kinematics_io`; the hierarchical paths below describe
+the compatibility layout and logical table names, not a required on-disk tree.
 
 **Run Attributes**:
 - `schema_id`: `"analysis.bout_kinematics_runs"`
@@ -2008,6 +2040,12 @@ Eye angle analysis results:
 - Per-ROI and per-frame eye-angle metrics
 - QA masks and quality indicators
 - `reason_codes` for data quality classification
+- The default physical layout is `compact_dense_v2`: comprehensive
+  `roi_angles` and `frame_angles` matrices plus a name index. Current
+  production storage uses semantic channel order, approximately `(4096, 16)`
+  inner chunks and `(131072, 32)` outer shards; consumers resolve named
+  channels through `fisheye.analysis.eye_angle_io` rather than persisting
+  numeric column positions.
 - Run attrs: `schema_id = "analysis.eye_angle_runs"`, `schema_version = 5`,
   `method = "ellipse_and_centroid_eye_angles"`,
   `method_version = "eye_angle_analysis.v5"`,
@@ -2085,7 +2123,7 @@ Eye angle analysis results:
 
 ### `analysis/subject_shape_runs/`
 
-Draft deterministic derived analysis stage for biological shape outputs
+Active deterministic derived analysis stage for biological shape outputs
 computed from canonical refined subject masks.
 
 **Structure**: `analysis/subject_shape_runs/<run_name>/`
@@ -2096,12 +2134,12 @@ Expected source:
 - optional refined-subject mask-local geometry primitives
 - optional keypoint, heading, tracking, or temporal context inputs
 
-Expected run attrs:
+Current run attrs:
 
 - `schema_id`: `"analysis.subject_shape_runs"`
-- `schema_version`
-- `method`
-- `method_version`
+- `schema_version`: `3`
+- `method`: the declared subject-shape method
+- `method_version`: current implementation version `10`
 - `created_at_utc`
 - `row_axis`: initially `"refined_subject_mask_rows"`
 - `source_refs`: exact input runs and paths
@@ -2380,6 +2418,13 @@ definitions and `docs/stimulus_response_implementation_plan.md` for design
 decisions.
 
 **Structure**: `analysis/stimulus_response_runs/<run_name>/`
+
+Schema `palette.stimulus_response` version 2 defaults to
+`compact_tabular_v2`, with summary, bout, window, and trial tables resolved by
+`fisheye.analysis.stimulus_response_io`. The hierarchical groups below are the
+explicit compatibility/debug layout; compact runs intentionally omit dense
+per-frame/time-series copies that can be reconstructed from exact upstream
+sources.
 
 **Run Attributes**:
 - `provenance`: Stage provenance contract (`palette_stage_provenance`)

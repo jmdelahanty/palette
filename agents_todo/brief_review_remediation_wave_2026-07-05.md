@@ -101,9 +101,9 @@ run_sam_subject_masks, run_subject_mask_batch_pipeline). Remaining per the desig
 own Phase 5: `require_runs_parent(...)` still stamps **epoch 1 by default**
 (`zarr_run_completion.py:101-104`), so unpatched stages finalize without provenance.
 
-**Read first:** `docs/provenance_finalization_enforcement_design.md` (Phase 5 +
+**Read first:** `docs/archive/provenance_finalization_enforcement_design.md` (Phase 5 +
 Acceptance Shape sections are the spec; do not re-litigate locked decisions),
-`docs/provenance_enforcement_roadmap.md`.
+`docs/archive/provenance_enforcement_roadmap.md`.
 
 Scope, in order:
 1. **Census first (the gate):** enumerate every `require_runs_parent` /

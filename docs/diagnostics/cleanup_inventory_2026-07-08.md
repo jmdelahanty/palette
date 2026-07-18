@@ -106,7 +106,7 @@ paths.
       contracts get a touch/update instead of archive)
 
 ```
-docs/analysis_dense_array_migration_todo.md
+docs/archive/analysis_dense_array_migration_todo.md
 docs/body_frame_contract.md
 docs/crimson_refined_detect_manual_contract.md
 docs/derived_metrics_schema_contract.md
@@ -154,7 +154,7 @@ docs/traditional_subject_segmentation_scaling_todo.md
 docs/training_dataset_versioning_todo.md
 docs/training_label_origin_phase1_audit.md
 docs/zarr_spec_runtime_drift_todo.md
-docs/zarr_transfer_benchmark_plan.md
+docs/archive/zarr_transfer_benchmark_plan.md
 docs/zebrobot_snapshot.md
 ```
 

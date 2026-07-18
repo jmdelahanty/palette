@@ -1,8 +1,8 @@
-# Subject Shape Runs Contract (Draft v1)
+# Subject Shape Runs Contract
 <!-- contract-meta
-version: 1
-status: draft
-last_verified: 2026-06-19
+version: 3
+status: active
+last_verified: 2026-07-17
 -->
 
 Purpose: define the downstream deterministic analysis layer for biological

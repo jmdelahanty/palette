@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-17: superseded by analysis_workflow_dag.md and analytics_storage_schema_matrix.md. -->
+
 # Analysis and Post-Detection Workflow Status
 
 Date anchored: 2026-03-06

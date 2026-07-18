@@ -410,10 +410,13 @@ def _swim_bout_command(plan: ArchivePlan, args: argparse.Namespace) -> list[str]
     cmd = [
         sys.executable,
         "-m",
-        "fisheye.analysis.detect_bouts_multi_level",
+        "fisheye.analysis_workflows.materializers.swim_bouts",
         plan.zarr_path,
         "--run-name",
         plan.swim_bout_run,
+        "--apply",
+        "--json",
+        "--",
         "--track-kinematics-run",
         plan.track_run,
         "--track-id",
@@ -443,8 +446,6 @@ def _swim_bout_command(plan: ArchivePlan, args: argparse.Namespace) -> list[str]
         "--gap-merge-policy",
         "sampled_frame_gap",
     ]
-    if args.overwrite:
-        cmd.append("--overwrite")
     return cmd
 
 

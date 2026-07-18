@@ -240,5 +240,5 @@ A reasonable build order, optimizing for "each scene unlocks the next":
 - `apps/marimo/track_kinematics_explorer.py` — interactive layout we
   can mirror in static form
 - `docs/analytics_math_primer.md`,
-  `docs/track_kinematics_bout_status.md`,
+  `docs/archive/track_kinematics_bout_status.md`,
   `docs/derived_analysis_run_contract.md` — algorithm intent

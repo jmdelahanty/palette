@@ -14,7 +14,7 @@ from fisheye.analysis.chaser_distance_runs import (
     ChaserDistanceWindow,
     write_chaser_distance_run,
 )
-from fisheye.analysis.cra_primary_endpoint import (
+from fisheye.analysis.chaser_quadrant_occupancy import (
     COMPONENT_PARENT_NAME,
     DEFAULT_COMPONENT_NAME,
     INTERACTIVE_ARTIFACT_NAME,
@@ -22,12 +22,13 @@ from fisheye.analysis.cra_primary_endpoint import (
     OVERVIEW_PNG_ARTIFACT_NAME,
     QUADRANT_LABELS,
     SCHEMA_ID,
-    build_cra_primary_endpoint_result,
+    build_chaser_quadrant_occupancy_result as build_cra_primary_endpoint_result,
     quadrant_code_for_xy,
     resolve_effective_phase_windows,
-    resolve_object_roles_from_protocol_payload,
-    write_cra_primary_endpoint_component,
+    resolve_chaser_roles_from_protocol_payload as resolve_object_roles_from_protocol_payload,
+    write_chaser_quadrant_occupancy_component as write_cra_primary_endpoint_component,
 )
+from fisheye.analysis.chaser_profiles import default_goodcopbadcop_source_profile_path
 from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.shared.plot_artifacts import INTERACTIVE_SPEC_SCHEMA_ID, PNG_ARTIFACT_SCHEMA_ID
 
@@ -188,7 +189,10 @@ def _decode_first(array: zarr.Array) -> str:
 def test_resolve_object_roles_from_protocol_payload_maps_protocol_metadata() -> None:
     roles = resolve_object_roles_from_protocol_payload(json.loads(_make_protocol_json()))
 
-    assert [(role.object_index, role.object_role) for role in roles] == [(0, "aggressive"), (1, "inert")]
+    assert [(role.chaser_index, role.behavior_class) for role in roles] == [
+        (0, "aggressive"),
+        (1, "inert"),
+    ]
     assert [role.behavior_class_id for role in roles] == [1, 3]
     assert roles[0].raw_color_hex == "#ff0000"
     assert roles[1].raw_color_hex == "#0000ff"
@@ -222,24 +226,32 @@ def test_build_and_write_cra_primary_endpoint_component(tmp_path: Path) -> None:
     zarr_path = _make_archive(tmp_path)
     write_chaser_distance_run(zarr_path, _make_chaser_result(zarr_path), overwrite=True)
 
-    result = build_cra_primary_endpoint_result(zarr_path, chaser_distance_run="chaser_distance_1")
+    result = build_cra_primary_endpoint_result(
+        zarr_path,
+        chaser_distance_run="chaser_distance_1",
+        protocol_profile=default_goodcopbadcop_source_profile_path(),
+    )
 
     assert result.endpoint_status == "computed"
     assert result.qc_warnings == ()
     assert result.quadrant_width_px == 20.0
     assert result.quadrant_height_px == 20.0
-    assert result.object_quadrant_code.tolist() == [[0, 1], [3, 2]]
+    assert result.chaser_quadrant_code.tolist() == [[0, 1], [3, 2]]
     assert result.occupancy_fraction.tolist() == [[1.0, 0.0], [0.0, 1.0]]
-    assert math.isclose(result.summary["occ_pre_agg"], 1.0)
-    assert math.isclose(result.summary["occ_post_agg"], 0.0)
-    assert math.isclose(result.summary["delta_occ_agg"], -1.0)
-    assert math.isclose(result.summary["occ_post_inert"], 1.0)
-    assert result.summary["occ_post_benign"] == result.summary["occ_post_inert"]
-    assert result.summary["pre_aggressive_quadrant"] == "top_left"
-    assert result.summary["post_aggressive_quadrant"] == "bottom_right"
+    aggressive = result.summary["per_chaser"][0]
+    inert = result.summary["per_chaser"][1]
+    assert math.isclose(aggressive["phase_values"][0]["occupancy_fraction"], 1.0)
+    assert math.isclose(aggressive["phase_values"][1]["occupancy_fraction"], 0.0)
+    assert math.isclose(aggressive["first_to_last_delta_occupancy_fraction"], -1.0)
+    assert math.isclose(inert["phase_values"][1]["occupancy_fraction"], 1.0)
+    assert aggressive["phase_values"][0]["quadrant"] == "top_left"
+    assert aggressive["phase_values"][1]["quadrant"] == "bottom_right"
     assert result.phases[1].effective_start_frame == 7
     assert result.phases[1].settle_excluded_frame_count == 1
-    assert math.isclose(result.summary["d_pre_agg"], float(np.median(result.median_distance_mm[0, 0:1])))
+    assert math.isclose(
+        aggressive["phase_values"][0]["median_distance_mm"],
+        float(np.median(result.median_distance_mm[0, 0:1])),
+    )
 
     component_path = write_cra_primary_endpoint_component(zarr_path, result, overwrite=True)
 
@@ -247,15 +259,32 @@ def test_build_and_write_cra_primary_endpoint_component(tmp_path: Path) -> None:
     run = root["analysis/chaser_distance_runs/chaser_distance_1"]
     assert _decode_first(run["chasers"]["behavior_class_label_bytes"]) == "aggressive"
     assert np.asarray(run["chasers"]["behavior_class_id"][:]).tolist() == [1, 3]
+    assert _decode_first(run["chasers"]["stimulus_instance_id_bytes"]) == "chaser:0"
+    assert run["chaser_role_intervals"]["chaser_index"][:].tolist() == [0, 1]
+    assert (
+        run["chaser_role_intervals"].attrs["boundary_policy"]
+        == "inclusive_start_inclusive_end"
+    )
     assert run[COMPONENT_PARENT_NAME].attrs["latest_complete"] == DEFAULT_COMPONENT_NAME
     component = root[component_path]
     assert component.attrs["schema_id"] == SCHEMA_ID
     assert component.attrs["status"] == "computed"
-    assert component.attrs["summary"]["delta_occ_agg"] == -1.0
-    assert component["object_phase"]["object_quadrant_code"][:].tolist() == [[0, 1], [3, 2]]
+    assert (
+        component.attrs["summary"]["per_chaser"][0][
+            "first_to_last_delta_occupancy_fraction"
+        ]
+        == -1.0
+    )
+    assert component["chaser_phase"]["chaser_quadrant_code"][:].tolist() == [
+        [0, 1],
+        [3, 2],
+    ]
     assert component["phases"]["effective_start_frame"][:].tolist() == [0, 7]
-    assert _decode_first(component["objects"]["behavior_class_label_bytes"]) == "aggressive"
-    assert float(component["summary"]["delta_occ_agg"][0]) == -1.0
+    assert (
+        _decode_first(component["chasers"]["behavior_class_label_bytes"])
+        == "aggressive"
+    )
+    assert "per_chaser_json_bytes" in component["summary"]
 
     component_visualizations = component["visualizations"]
     png = component_visualizations[OVERVIEW_PNG_ARTIFACT_NAME]
@@ -308,10 +337,17 @@ def test_cra_primary_endpoint_uses_single_nondefault_stimulus_arena_bounds(tmp_p
     )
     write_chaser_distance_run(zarr_path, _make_chaser_result(zarr_path), overwrite=True)
 
-    result = build_cra_primary_endpoint_result(zarr_path, chaser_distance_run="chaser_distance_1")
+    result = build_cra_primary_endpoint_result(
+        zarr_path,
+        chaser_distance_run="chaser_distance_1",
+        protocol_profile=default_goodcopbadcop_source_profile_path(),
+    )
 
-    assert result.quadrant_bounds_source == "analysis/stimulus_runs/*/stimulus_coordinates/arena_2"
-    assert result.object_quadrant_code.tolist() == [[0, 1], [3, 2]]
+    assert (
+        result.quadrant_bounds_source
+        == "analysis/stimulus_runs/*/stimulus_coordinates/arena_2"
+    )
+    assert result.chaser_quadrant_code.tolist() == [[0, 1], [3, 2]]
 
 
 def test_cra_primary_endpoint_dropout_warning_is_report_only_by_default(tmp_path: Path) -> None:
@@ -329,6 +365,7 @@ def test_cra_primary_endpoint_dropout_warning_is_report_only_by_default(tmp_path
         zarr_path,
         chaser_distance_run="chaser_distance_1",
         dropout_warning_fraction=0.2,
+        protocol_profile=default_goodcopbadcop_source_profile_path(),
     )
 
     assert result.endpoint_status == "computed"

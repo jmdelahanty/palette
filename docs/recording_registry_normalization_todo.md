@@ -8,7 +8,8 @@ Manifest field contract for ingestion is documented in:
 Future multi-camera / 3D analysis planning is tracked in:
 `docs/multicamera_3d_analysis_todo.md`.
 Analysis archive creation split planning is tracked in:
-`docs/analysis_zarr_creation_contract.md` and `docs/analysis_zarr_creation_todo.md`.
+`docs/recording_analysis_pipeline_contract.md` and the historical
+`docs/archive/analysis_zarr_creation_todo.md`.
 Detect-stage performance registry planning is tracked in:
 `docs/detect_performance_registry_todo.md`.
 Crop-review registry planning is tracked in:

@@ -233,15 +233,16 @@ One read gives the full chain from biological metric to source video.
 ## Usage
 
 ```bash
-scripts/py -m fisheye.analysis.stimulus_response <zarr_path> \
+scripts/py -m fisheye.analysis_workflows.materializers.stimulus_response <zarr_path> \
+    --run-name <run_name> --apply -- \
     --track-kinematics-type offline \
     --moving-threshold-mm-s 2.0 \
     --camera-to-projector-offset-deg 0.0 \
     --bin-size-s 1.0
 ```
 
-Optional flags: `--bout-run`, `--no-bouts`, `--follow-threshold`,
-`--follow-window-s`, `--run-name`.
+Writer flags after `--` include `--bout-run`, `--no-bouts`,
+`--follow-threshold`, and `--follow-window-s`.
 
 ## Multi-stimulus recordings
 
@@ -267,5 +268,5 @@ No stitching required — the annotation spans the whole recording.
 - `docs/stimulus_response_run_design.md` — storage layout and metric definitions
 - `docs/stimulus_response_implementation_plan.md` — design decisions and sequencing
 - `docs/grating_analysis_acquisition_questions.md` — calibration blockers for angular accuracy
-- `docs/analysis_dense_array_migration_todo.md` — future: dense arrays at track_kinematics source
+- `docs/analytics_storage_schema_matrix.md` — authoritative sparse axes and logical-reader boundary
 - `src/fisheye/docs/zarr_structure.md` — authoritative zarr layout reference

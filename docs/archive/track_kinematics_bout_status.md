@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-17: point-in-time status superseded by current family contracts and logical readers. -->
+
 # Track Kinematics and Swim Bout Status
 
 Date anchored: 2026-03-06
@@ -12,7 +14,7 @@ we can decide what to stabilize next.
 
 The current stack has a real upstream producer:
 
-- [`src/fisheye/analysis/track_kinematics.py`](../src/fisheye/analysis/track_kinematics.py)
+- [`src/fisheye/analysis/track_kinematics.py`](../../src/fisheye/analysis/track_kinematics.py)
 
 It writes rich per-track motion outputs under:
 
@@ -52,7 +54,7 @@ refactor:
 See:
 
 - [`pose_kinematics_run_design.md`](/home/delahantyj@hhmi.org/gitrepos/palette/docs/pose_kinematics_run_design.md)
-- [`crimson_track_motion_read_contract.md`](./crimson_track_motion_read_contract.md)
+- [`crimson_track_motion_read_contract.md`](../crimson_track_motion_read_contract.md)
   for the current Crimson-facing read contract for `track_kinematics_runs`,
   `swim_bout_runs`, and `bout_kinematics_runs`.
 
@@ -78,7 +80,7 @@ across only the valid positions in a time window, because that can invent
 movement across gaps.
 
 The next contract for this gap-handling work is
-[`track_validity_timeline_design.md`](./track_validity_timeline_design.md). That
+[`track_validity_timeline_design.md`](../track_validity_timeline_design.md). That
 doc defines the planned per-track validity arrays, transition reason codes,
 swim-bout metric implications, and future plot overlays for invalid detections
 or movement gaps.
@@ -112,11 +114,11 @@ room for tail / fin / richer body geometry in a separate analysis layer.
 
 Main module:
 
-- [`src/fisheye/analysis/track_kinematics.py`](../src/fisheye/analysis/track_kinematics.py)
+- [`src/fisheye/analysis/track_kinematics.py`](../../src/fisheye/analysis/track_kinematics.py)
 
 Core numeric helper:
 
-- [`src/fisheye/analysis/compute_speed.py`](../src/fisheye/analysis/compute_speed.py)
+- [`src/fisheye/analysis/compute_speed.py`](../../src/fisheye/analysis/compute_speed.py)
 
 Current offline lineage:
 
@@ -257,7 +259,7 @@ runs written with the old names should be regenerated from `track_kinematics`
 rather than silently read through compatibility fallbacks.
 
 Important behavior in
-[`compute_track_speed(...)`](../src/fisheye/analysis/compute_speed.py):
+[`compute_track_speed(...)`](../../src/fisheye/analysis/compute_speed.py):
 
 - only consecutive frames contribute to frame path distance and speed
 - non-consecutive frame jumps are treated as zero movement
@@ -452,7 +454,7 @@ This is still a gap policy, not a waveform-shape policy. A future
 between two peaks inside one threshold region, should be a separate opt-in
 policy with its own provenance rather than folded into `gap_merge_policy`.
 See
-[`swim_bout_peak_event_detector_design.md`](swim_bout_peak_event_detector_design.md)
+[`swim_bout_peak_event_detector_design.md`](../swim_bout_peak_event_detector_design.md)
 for the additive `peak_event` detector and vocabulary. The first implemented
 slice uses `scipy.signal.find_peaks`, relative-prominence-width boundaries, and
 an aligned `peak_events` table; valley-depth splitting remains future work.
@@ -580,7 +582,7 @@ immutable source artifact. Use `per_bout_metrics` there when the question is
 "what did this already-defined bout do biologically?", including heading change,
 pre/post position means, interbout-epoch displacement, within-bout heading
 excursion, and measurement validity. See
-[bout_kinematics_run_design.md](bout_kinematics_run_design.md).
+[bout_kinematics_run_design.md](../bout_kinematics_run_design.md).
 
 For the current 2026-01-28 arena 2 canary review, `tk_hyst4_low2_s005` is the
 preferred default candidate when it exists. This is a review default for the
@@ -713,7 +715,7 @@ enough about which of these should be treated as:
 
 Location:
 
-- [`src/fisheye/analysis/track_kinematics.py`](../src/fisheye/analysis/track_kinematics.py)
+- [`src/fisheye/analysis/track_kinematics.py`](../../src/fisheye/analysis/track_kinematics.py)
 
 Previous problem:
 
@@ -748,7 +750,7 @@ There are currently two downstream bout paths.
 
 Main module:
 
-- [`src/fisheye/analysis/detect_bouts_multi_level.py`](../src/fisheye/analysis/detect_bouts_multi_level.py)
+- [`src/fisheye/analysis/detect_bouts_multi_level.py`](../../src/fisheye/analysis/detect_bouts_multi_level.py)
 
 This is the newer track-kinematics-based bout detector.
 
@@ -774,7 +776,7 @@ canonical track kinematics artifact.
 
 Main module:
 
-- [`src/fisheye/analysis/swim_bout_statistics.py`](../src/fisheye/analysis/swim_bout_statistics.py)
+- [`src/fisheye/analysis/swim_bout_statistics.py`](../../src/fisheye/analysis/swim_bout_statistics.py)
 
 This is an older parallel path wrapping `EnhancedBoutAnalyzer`.
 
@@ -797,7 +799,7 @@ These are related, but not unified.
 
 Location:
 
-- [`_mirror_swim_bouts_to_tracks(...)`](../src/fisheye/analysis/track_kinematics.py)
+- [`_mirror_swim_bouts_to_tracks(...)`](../../src/fisheye/analysis/track_kinematics.py)
 
 Current behavior:
 
@@ -910,8 +912,8 @@ The next work should not start by redesigning everything. It should:
 
 ## Related Docs
 
-- [`tracking_runs_contract_status.md`](./tracking_runs_contract_status.md)
-- [`single_subject_per_arena_tracking_contract.md`](./single_subject_per_arena_tracking_contract.md)
-- [`track_identity_target_architecture.md`](./track_identity_target_architecture.md)
+- [`tracking_runs_contract_status.md`](../tracking_runs_contract_status.md)
+- [`single_subject_per_arena_tracking_contract.md`](../single_subject_per_arena_tracking_contract.md)
+- [`track_identity_target_architecture.md`](../track_identity_target_architecture.md)
 - [`analysis_post_detection_workflow_status.md`](./analysis_post_detection_workflow_status.md)
-- [`stimulus_response_run_design.md`](./stimulus_response_run_design.md)
+- [`stimulus_response_run_design.md`](../stimulus_response_run_design.md)

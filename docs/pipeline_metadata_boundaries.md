@@ -64,5 +64,5 @@ Recommended:
 
 - `docs/provenance_contract_draft.md`
 - `docs/provenance_checks.md`
-- `docs/provenance_todo.md`
+- `docs/zarr_run_completion_contract.md`
 - `src/fisheye/docs/provenance_workflow.md`

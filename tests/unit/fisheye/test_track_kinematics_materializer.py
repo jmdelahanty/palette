@@ -23,6 +23,13 @@ def _fake_track_writer(argv) -> None:
     run = offline.create_group(run_name)
     run.attrs.update(
         {
+            "schema_id": "analysis.track_kinematics_runs",
+            "schema_version": 1,
+            "method": "track_kinematics_offline",
+            "method_version": "track_kinematics.v1",
+            "row_axis": "track_samples",
+            "source_refs": {"source_keypoints_path": "refined_keypoints_runs/kp_1"},
+            "parameters": {"smoothing_seconds": 0.05},
             "palette_run_completion_status": "complete",
             "provenance": {
                 "stage": "track_kinematics",

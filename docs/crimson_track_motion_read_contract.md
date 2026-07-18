@@ -111,13 +111,21 @@ tables/peak_events
 tables/inter_bout_intervals
 signals/detector_signal_mm_s
 signals/detector_signal_signal_ids
-signals/frame_indices
+signals/frame_indices              # historical or declared portable fallback
 ```
 
 Crimson should create one selectable UI candidate per selected candidate row
 and signal row, using `candidate_id` and `signal_id` as stable identity inside
 the run. Do not require a physical `<speed_level>` subgroup when
 `layout == "compact_tabular_v2"`.
+
+For detector traces, new run-schema-8 outputs resolve the frame axis from the
+versioned run-level `frame_axis_contract`. Its `authoritative_path` points to
+the exact source track-kinematics `frame_indices` array relative to the same
+Zarr root. Schema-7 runs continue to use embedded `signals/frame_indices`, and
+schema-8 runs may declare that same path as an embedded portability fallback.
+Use the resolution and fail-closed checks in the detailed compact-v2 handoff;
+do not substitute a `latest` track pointer or reconstruct an `arange` axis.
 
 The `bouts` table includes frame and timing boundaries such as:
 

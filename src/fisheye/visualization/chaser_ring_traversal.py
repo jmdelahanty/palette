@@ -44,7 +44,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.animation import FFMpegWriter, FuncAnimation, PillowWriter  # noqa: E402
-from matplotlib.collections import LineCollection  # noqa: E402
 import numpy as np  # noqa: E402
 
 from fisheye.analysis.chaser_bout_response import _segment_visits
@@ -52,7 +51,7 @@ from fisheye.analysis.chaser_escape_events import (
     DEFAULT_HIGH_TURN_THRESHOLD_DEG,
     DEFAULT_PEAK_SPEED_THRESHOLD_MM_S,
 )
-from fisheye.analysis.chaser_escape_freeze import (
+from fisheye.analysis.chaser_escape_freeze_summary import (
     _heading_angles_from_chaser,
     chaser_frame_transform,
 )

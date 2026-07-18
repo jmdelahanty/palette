@@ -33,7 +33,7 @@ Out of scope:
 
 - `docs/provenance_checks.md`
   - operational diagnostics and CLI usage.
-- `docs/provenance_todo.md`
+- `docs/archive/provenance_todo.md`
   - backlog and migration items.
 - `docs/pipeline_metadata_boundaries.md`
   - repository-level ownership boundaries for provenance, contracts, code, and workflow docs.

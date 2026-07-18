@@ -50,10 +50,11 @@ bouts, and stimulus response all recording and validating the same
 This runner is canonical operational glue, not yet a `fisheye.core.pipeline`
 stage. Formal pipeline integration is tracked in Deferred Work below.
 
-Direct stimulus-response usage:
+Production stimulus-response usage:
 
 ```bash
-scripts/py -m fisheye.analysis.stimulus_response <zarr_path> \
+scripts/py -m fisheye.analysis_workflows.materializers.stimulus_response <zarr_path> \
+    --run-name <run_name> --apply -- \
     --track-kinematics-type offline \
     --moving-threshold-mm-s 2.0 \
     --camera-to-projector-offset-deg 0.0 \
@@ -93,7 +94,7 @@ This makes step slicing positional (`array[start:end]`), gaps are zeros,
 and coverage is `valid[start:end].mean()`.
 
 This expansion is local to stimulus_response. A future improvement
-(see `docs/analysis_dense_array_migration_todo.md`) would move dense
+(see the historical `docs/archive/analysis_dense_array_migration_todo.md`) would move dense
 production upstream to track_kinematics so all consumers benefit.
 
 ### Specs: lightweight input contract, proper output spec
@@ -224,7 +225,7 @@ rendered polarity, so attrs explicitly record
 - Eye angle integration (Layer 5)
 - Full ArraySpec coverage for existing analysis modules (Layer 6)
 - Dense array production at track_kinematics source
-  (see `docs/analysis_dense_array_migration_todo.md`)
+  (see historical `docs/archive/analysis_dense_array_migration_todo.md`)
 - Retire `compute_speed.py` as standalone stage
 - Consolidate bout producers (deprecate `swim_bout_statistics.py`)
 - Provenance retrofit for existing analysis modules
@@ -234,5 +235,5 @@ rendered polarity, so attrs explicitly record
 - `docs/stimulus_response_run_design.md` — storage layout and metric definitions
 - `docs/stimulus_response_compact_v2_design.md` — resolver-first compact layout plan
 - `docs/grating_analysis_acquisition_questions.md` — calibration blockers
-- `docs/track_kinematics_bout_status.md` — known issues with bout mirroring
-- `docs/analysis_dense_array_migration_todo.md` — future dense array work
+- `docs/archive/track_kinematics_bout_status.md` — historical bout-mirroring status
+- `docs/archive/analysis_dense_array_migration_todo.md` — rejected dense-array proposal

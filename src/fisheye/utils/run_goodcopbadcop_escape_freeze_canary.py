@@ -1,9 +1,6 @@
-"""Run one-recording GoodCopBadCop chaser escape/freeze canary."""
+"""Compatibility entry point for the generic chaser escape/freeze summary."""
 
-from __future__ import annotations
-
-from fisheye.analysis.chaser_escape_freeze import main
-
+from fisheye.utils.run_chaser_escape_freeze_summary import main
 
 if __name__ == "__main__":
     raise SystemExit(main())

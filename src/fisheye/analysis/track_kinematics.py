@@ -94,6 +94,11 @@ DEFAULT_HYSTERESIS_MIN_FRAMES = 3
 DEFAULT_HYSTERESIS_BAND_POLICY = "latch"
 DEFAULT_SMOOTHING_ALIGNMENT = "causal"
 
+TRACK_KINEMATICS_RUN_SCHEMA_ID = "analysis.track_kinematics_runs"
+TRACK_KINEMATICS_RUN_SCHEMA_VERSION = 1
+TRACK_KINEMATICS_METHOD_VERSION = "track_kinematics.v1"
+TRACK_KINEMATICS_ROW_AXIS = "track_samples"
+
 SPEED_DERIVATIVE_LEVELS = (
     "speed_raw",
     "speed_filtered",
@@ -126,6 +131,93 @@ MOVEMENT_SPEED_LEVEL_NAMES = {
     "speed_smoothed": "smoothed",
     "speed_averaged": "averaged",
 }
+
+
+def _track_kinematics_source_refs(
+    *,
+    run_type: str,
+    inputs: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Normalize exact archive-relative dependencies for one run."""
+
+    refs: Dict[str, Any] = {}
+
+    def _set_path(key: str, prefix: str, value: Any) -> None:
+        if value in (None, ""):
+            return
+        text = str(value)
+        refs[key] = text if "/" in text else f"{prefix}/{text}"
+
+    if run_type == "online":
+        _set_path(
+            "source_refined_online_path",
+            "refined_online_runs",
+            inputs.get("refined_online_run"),
+        )
+        _set_path(
+            "source_stimulus_path",
+            "analysis/stimulus_runs",
+            inputs.get("stimulus_run"),
+        )
+        if inputs.get("chaser_index") is not None:
+            refs["source_chaser_index"] = int(inputs["chaser_index"])
+        return refs
+
+    for source_key in ("detection_path", "position_source_path"):
+        value = inputs.get(source_key)
+        if value not in (None, ""):
+            refs[f"source_{source_key}"] = str(value)
+
+    keypoint_parent = (
+        "refined_keypoints_runs"
+        if inputs.get("keypoint_variant") == "refined"
+        else "keypoints_runs"
+    )
+    _set_path(
+        "source_keypoint_path",
+        keypoint_parent,
+        inputs.get("keypoint_run"),
+    )
+    _set_path("source_crop_path", "crop_runs", inputs.get("crop_run"))
+    _set_path(
+        "source_tracking_path",
+        "tracking_runs",
+        inputs.get("source_tracking_run"),
+    )
+    _set_path(
+        "source_arena_assignment_path",
+        "arena_assignment_runs",
+        inputs.get("source_arena_assignment_run"),
+    )
+    _set_path(
+        "source_swim_bout_path",
+        "analysis/swim_bout_runs",
+        inputs.get("swim_bout_run"),
+    )
+    return refs
+
+
+def _track_kinematics_contract_attrs(
+    *,
+    run_type: str,
+    method: str,
+    parameters: Mapping[str, Any],
+    inputs: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Return the shared derived-run contract attrs for track kinematics."""
+
+    return {
+        "schema_id": TRACK_KINEMATICS_RUN_SCHEMA_ID,
+        "schema_version": TRACK_KINEMATICS_RUN_SCHEMA_VERSION,
+        "method": method,
+        "method_version": TRACK_KINEMATICS_METHOD_VERSION,
+        "row_axis": TRACK_KINEMATICS_ROW_AXIS,
+        "parameters": dict(parameters),
+        "source_refs": _track_kinematics_source_refs(
+            run_type=run_type,
+            inputs=inputs,
+        ),
+    }
 
 
 @dataclass
@@ -2646,7 +2738,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                     # Backward-compatible top-level attrs.
                     run_group.attrs.update(
                         {
-                            "method": method,
+                            **_track_kinematics_contract_attrs(
+                                run_type="online",
+                                method=method,
+                                parameters=online_params,
+                                inputs=inputs,
+                            ),
                             "created_at_utc": created_at,
                             "fps": fps,
                             "smoothing_seconds": args.smooth_seconds,
@@ -3000,7 +3097,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         # Backward-compatible top-level attrs.
                         offline_group.attrs.update(
                             {
-                                "method": "track_kinematics_offline",
+                                **_track_kinematics_contract_attrs(
+                                    run_type="offline",
+                                    method="track_kinematics_offline",
+                                    parameters=offline_params,
+                                    inputs=offline_inputs,
+                                ),
                                 "created_at_utc": created_at,
                                 "fps": fps,
                                 "smoothing_seconds": args.smooth_seconds,

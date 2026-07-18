@@ -178,5 +178,5 @@ Palette's canonical archive remains:
 - sleap-io mask model reference:
   https://io.sleap.ai/latest/reference/sleap_io/model/mask/
 - Local companion: `docs/manual_add_row_propagation_design.md`
-- Local identity direction: `docs/v2_tabular_identity_migration_checklist.md`
+- Local identity direction: `docs/stable_identity_incremental_materialization_decision.md`
 - Local sparse detect target: `docs/refined_detect_sparse_instances_schema.md`

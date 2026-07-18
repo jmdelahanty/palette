@@ -1,3 +1,5 @@
+<!-- ARCHIVED 2026-07-17: implemented decision record; current behavior is in zarr_run_completion_contract.md. -->
+
 # Provenance Finalization Enforcement Design
 
 <!-- contract-meta

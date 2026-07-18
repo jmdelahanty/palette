@@ -85,7 +85,7 @@ extend this list; lines drift):
 contract-meta header (`status: proposed`, created 2026-07-05, owner jeremy, related:
 `identity_lineage_staleness_review.md`, `palette_cli_narrow_waist_design.md`,
 `run_resolution_semantics.md`). Match the register and structure of
-`docs/provenance_finalization_enforcement_design.md` — decisions with justifications,
+`docs/archive/provenance_finalization_enforcement_design.md` — decisions with justifications,
 alternatives considered, a tiers/sequencing table. Cite file:line for every claim about
 current code (they will be re-verified).
 

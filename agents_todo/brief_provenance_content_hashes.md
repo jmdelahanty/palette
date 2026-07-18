@@ -6,11 +6,11 @@
 concern. Do NOT push or merge — the commander verifies and merges.
 Co-author trailer: `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
 
-**Read first:** `docs/provenance_finalization_enforcement_design.md` (the landed Slice 2
-+ Phase 5 substrate you are extending), `docs/provenance_enforcement_roadmap.md`,
+**Read first:** `docs/archive/provenance_finalization_enforcement_design.md` (the landed Slice 2
++ Phase 5 substrate you are extending), `docs/archive/provenance_enforcement_roadmap.md`,
 `docs/diagnostics/tensorrt_export_realtime_context_2026-07-05.md` (engines context),
 `src/fisheye/shared/run_provenance.py` (the payload you are extending),
-`HANDOFF_2026-07-05.md` operating-notes section only.
+`docs/archive/HANDOFF_2026-07-05.md` operating-notes section only.
 
 ## Why this exists
 
@@ -137,11 +137,11 @@ Keep writer diffs minimal — resolve-then-fingerprint-then-append; no restructu
   whatever surface already inspects deployment artifacts (registry TUI/status if a
   natural hook exists — if none does, expose it as a function + test and note that no
   CLI surface consumes it yet; do NOT invent a new verb in this slice).
-- Docs: mark the content-hash slice landed in `docs/provenance_enforcement_roadmap.md`;
+- Docs: mark the content-hash slice landed in `docs/archive/provenance_enforcement_roadmap.md`;
   update the "Risks to manage" item 1 in
   `docs/diagnostics/tensorrt_export_realtime_context_2026-07-05.md` (engine identity —
   registration hashes now verifiable; realtime-side check still external); note the new
-  `input_artifacts` field in `docs/provenance_finalization_enforcement_design.md`'s
+  `input_artifacts` field in `docs/archive/provenance_finalization_enforcement_design.md`'s
   payload description or its addendum section.
 
 ## Explicitly OUT of scope

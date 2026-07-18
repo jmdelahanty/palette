@@ -9,7 +9,7 @@ import pytest
 
 from fisheye.analytics_exports.capabilities import resolve_capabilities
 from fisheye.analytics_exports.contracts import (
-    CHASER_CRA_SUMMARY_TABLE,
+    CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE,
     CHASER_EPOCH_BEHAVIOR_TABLE,
     EXPORT_SCHEMA_VERSION,
     EXPORT_SCHEMA_ID,
@@ -31,7 +31,7 @@ def test_v2_canonicalization_preserves_scientific_values_while_renaming_legacy_v
         "object_role": "benign",
     }
 
-    row = canonicalize_export_row(CHASER_CRA_SUMMARY_TABLE, source)
+    row = canonicalize_export_row(CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE, source)
 
     assert row["delta_agg"] == source["delta_agg"]
     assert row["delta_inert"] == source["delta_benign"]
@@ -39,7 +39,7 @@ def test_v2_canonicalization_preserves_scientific_values_while_renaming_legacy_v
     assert row["inert_color"] == source["benign_color"]
     assert row["object_role"] == "inert"
     assert row["export_schema_version"] == EXPORT_SCHEMA_VERSION
-    assert row["table_name"] == CHASER_CRA_SUMMARY_TABLE
+    assert row["table_name"] == CHASER_QUADRANT_OCCUPANCY_SUMMARY_TABLE
     assert not any("benign" in key.lower() for key in row)
 
 

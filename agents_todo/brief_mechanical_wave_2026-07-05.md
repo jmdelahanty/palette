@@ -8,7 +8,7 @@ C carries the wave's only semantic risk — don't stack it on a moving target).
 **Do NOT push or merge — the commander verifies and merges. Merge order: A → B → C.**
 Co-author trailer: `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
 
-**Read first (all agents):** `HANDOFF_2026-07-05.md` operating-notes section only.
+**Read first (all agents):** `docs/archive/HANDOFF_2026-07-05.md` operating-notes section only.
 Ground rules: local `sun` is ground truth (origin stale/unreachable); fresh worktree on
 `agent/<slice>` from CURRENT `sun`; env `~/miniconda3/envs/palette-py311/bin/python`
 (conda; never uv, never a `.venv`); sync code only; re-locate cited line numbers by
