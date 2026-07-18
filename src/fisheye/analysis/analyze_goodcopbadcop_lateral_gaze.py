@@ -21,10 +21,15 @@ mean-virtual lateral fraction per epoch. Tests: (1) does object laterality rise 
 wall-following? (3) does the object-minus-virtual excess itself develop pre->post?
 
 Run (palette env):
-    python -m fisheye.analysis.analyze_goodcopbadcop_lateral_gaze
-    python -m fisheye.analysis.analyze_goodcopbadcop_lateral_gaze --near-mm 25
+    python -m fisheye.analysis.analyze_goodcopbadcop_lateral_gaze                # epoch-level
+    python -m fisheye.analysis.analyze_goodcopbadcop_lateral_gaze --by-distance  # distance-resolved
 
-Reads the canonical registry (see goodcopbadcop_common).
+`--by-distance` profiles front/lateral/behind vs distance to the object, object vs virtual,
+per epoch. Key finding (n=33): object-specific lateral-keeping (excess over the virtual
+control) is confined to the near shell (~0-16 mm) -- strongest at contact (0-8 mm) during
+the chase (+0.15), and in the 8-16 mm shell pre/post (+0.08/+0.10, innate + retained, not
+grown); beyond ~25 mm orientation is wall geometry (excess ~0). Same near-shell locus as
+the avoidance steering and eye lock-on. Reads the canonical registry (goodcopbadcop_common).
 """
 from __future__ import annotations
 
@@ -53,8 +58,14 @@ VIRTUAL_ROT_DEG = (60.0, 120.0, 180.0, 240.0, 300.0)
 LATERAL = (45.0, 135.0)   # |bearing| in this band = object off to the side
 BEARING_EDGES = np.arange(-180.0, 180.001, 15.0)
 BEARING_CTR = 0.5 * (BEARING_EDGES[:-1] + BEARING_EDGES[1:])
+DIST_EDGES = (0.0, 8.0, 16.0, 25.0, 40.0, 60.0)
+DIST_LABELS = ("0-8", "8-16", "16-25", "25-40", "40-60")
+DIST_CTR = np.array([0.5 * (DIST_EDGES[i] + DIST_EDGES[i + 1]) for i in range(len(DIST_LABELS))])
 OBJECT_C = "#c1435b"
 VIRTUAL_C = "#8a8a8a"
+FRONT_C = "#3a7ca5"
+BEHIND_C = "#8a8a8a"
+EPOCH_C = {"pre": "#8a8a8a", "chase": "#c1435b", "post": "#1b3a6b"}
 
 
 def wrap180(a):
@@ -129,6 +140,21 @@ def sector_fractions(bearing, valid, dist, epoch_range, near_mm):
     return all_f, near_f
 
 
+def sector_in_range(bearing, valid, dist, epoch_range, dlo, dhi, min_frames=80):
+    """Front/lateral/behind fractions restricted to one epoch and one distance band."""
+    s, e = epoch_range
+    m = valid.copy()
+    m[:s] = False
+    m[e + 1:] = False
+    m &= np.isfinite(bearing) & (dist >= dlo) & (dist < dhi)
+    if m.sum() < min_frames:
+        return (np.nan, np.nan, np.nan, int(m.sum()))
+    ab = np.abs(bearing[m])
+    return (float(np.mean(ab < LATERAL[0])),
+            float(np.mean((ab >= LATERAL[0]) & (ab <= LATERAL[1]))),
+            float(np.mean(ab > LATERAL[1])), int(m.sum()))
+
+
 def bearing_hist(bearing, valid, epoch_range):
     s, e = epoch_range
     m = valid.copy(); m[:s] = False; m[e + 1:] = False; m &= np.isfinite(bearing)
@@ -136,9 +162,90 @@ def bearing_hist(bearing, valid, epoch_range):
     return h
 
 
+def emit_by_distance(bydist, n, args, out_dir):
+    """Distance-resolved orientation figure + tests (front/lateral/behind vs distance)."""
+    def A(e, db, key):
+        return np.array(bydist[e][db][key], float)
+
+    def msem(a):
+        a = a[np.isfinite(a)]
+        return (np.nan, np.nan) if a.size < 3 else (float(np.mean(a)), float(np.std(a) / np.sqrt(a.size)))
+
+    def excess(e, db):
+        return A(e, db, "o_lat") - A(e, db, "v_lat")
+
+    x = DIST_CTR
+    fig, axes = plt.subplots(2, 3, figsize=(13.5, 7.4), sharex=True)
+    for ei, e in enumerate(EPOCHS):
+        ax = axes[0, ei]
+        for key, col, lw, lab in (("o_front", FRONT_C, 1.5, "front |b|<45"),
+                                  ("o_lat", OBJECT_C, 2.2, "lateral 45-135"),
+                                  ("o_beh", BEHIND_C, 1.5, "behind |b|>135")):
+            m = [msem(A(e, db, key))[0] for db in DIST_LABELS]
+            s = [msem(A(e, db, key))[1] for db in DIST_LABELS]
+            ax.errorbar(x, m, yerr=s, fmt="-o", color=col, lw=lw, ms=4, capsize=2, label=lab)
+        vl = [msem(A(e, db, "v_lat"))[0] for db in DIST_LABELS]
+        ax.plot(x, vl, "--", color=VIRTUAL_C, lw=1.4, label="virtual lateral")
+        ax.set_title(e, fontsize=12, weight="bold")
+        ax.set_ylim(0, 0.8)
+        if ei == 0:
+            ax.set_ylabel("bearing-sector fraction (object)")
+            ax.legend(frameon=False, fontsize=8, loc="upper right")
+        ax = axes[1, ei]
+        exc = [msem(excess(e, db))[0] for db in DIST_LABELS]
+        es = [msem(excess(e, db))[1] for db in DIST_LABELS]
+        ax.axhline(0, color="#bbbbbb", lw=1)
+        ax.errorbar(x, exc, yerr=es, fmt="-o", color=EPOCH_C[e], lw=2, ms=4, capsize=2)
+        for di, db in enumerate(DIST_LABELS):
+            d = excess(e, db); d = d[np.isfinite(d)]
+            if d.size >= 6 and wilcoxon_signed_rank_p_value(d)[0] < 0.05:
+                ax.plot(x[di], exc[di], "o", color=EPOCH_C[e], ms=10, mfc="none", mew=1.9)
+        ax.set_ylim(-0.10, 0.22)
+        ax.set_xlabel("distance to object (mm)")
+        if ei == 0:
+            ax.set_ylabel("lateral excess (object − virtual)")
+    fig.suptitle(f"Orientation vs distance to the aggressive object — object vs virtual control (n={n})",
+                 fontsize=13, weight="bold", y=1.01)
+    fig.text(0.5, -0.01, "Open rings = object lateral fraction exceeds the wall-matched virtual control "
+             "(Wilcoxon p<0.05, fish = unit). Object-specific orienting is confined to the near shell.",
+             ha="center", fontsize=8, color="#666")
+    fig.tight_layout()
+    out = out_dir / f"goodcopbadcop_lateral_gaze_by_distance_{args.tag}.png"
+    fig.savefig(out, bbox_inches="tight")
+    print("wrote", out, f" (n_fish={n})\n")
+
+    # ---- text report ----
+    print("Orientation of the aggressive object vs distance (cohort mean; front|b|<45, lateral 45-135, behind>135)\n")
+    for e in EPOCHS:
+        print(f"[{e}]   dist(mm):  " + "  ".join(f"{db:>7s}" for db in DIST_LABELS))
+        for lab, key in (("front  ", "o_front"), ("lateral", "o_lat"), ("behind ", "o_beh")):
+            print(f"   {lab}      " + "  ".join(f"{msem(A(e, db, key))[0]:7.2f}" for db in DIST_LABELS))
+        print(f"   L-exc/vir   " + "  ".join(f"{msem(excess(e, db))[0]:+7.2f}" for db in DIST_LABELS))
+        specific = [db for db in DIST_LABELS
+                    if (excess(e, db)[np.isfinite(excess(e, db))].size >= 6
+                        and wilcoxon_signed_rank_p_value(excess(e, db)[np.isfinite(excess(e, db))])[0] < 0.05
+                        and np.nanmean(excess(e, db)) > 0)]
+        print(f"   object-specific lateral (excess>0, p<0.05) at: {', '.join(specific) or '(none)'} mm\n")
+
+    print("Development pre->post (paired, fish-level), per distance bin:")
+    for db in DIST_LABELS:
+        op, oo = A("pre", db, "o_lat"), A("post", db, "o_lat")
+        m = np.isfinite(op) & np.isfinite(oo)
+        dl = oo[m] - op[m]
+        xp, xo = excess("pre", db), excess("post", db)
+        me = np.isfinite(xp) & np.isfinite(xo)
+        dx = xo[me] - xp[me]
+        pl = wilcoxon_signed_rank_p_value(dl)[0] if dl.size >= 6 else np.nan
+        px = wilcoxon_signed_rank_p_value(dx)[0] if dx.size >= 6 else np.nan
+        print(f"  {db:>6s} mm: object lateral Δ={np.mean(dl) if dl.size else np.nan:+.3f} p={pl:.3f} (n={dl.size}); "
+              f"excess Δ={np.mean(dx) if dx.size else np.nan:+.3f} p={px:.3f}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--near-mm", type=float, default=25.0, help="Near-distance conditioning (mm).")
+    ap.add_argument("--by-distance", action="store_true",
+                    help="Profile orientation as a function of distance to the object (distance-resolved figure + tests).")
     ap.add_argument("--out-dir", type=Path, default=None)
     ap.add_argument("--tag", default="2026-07-18")
     args = ap.parse_args()
@@ -148,6 +255,8 @@ def main() -> None:
     lat = {sc: {"object": {e: [] for e in EPOCHS}, "virtual": {e: [] for e in EPOCHS}}
            for sc in ("all", "near")}
     hists = {"object": {e: [] for e in EPOCHS}, "virtual": {e: [] for e in EPOCHS}}
+    # per fish: front/lateral/behind (object) + lateral (virtual) per epoch per distance bin
+    bydist = {e: {db: {"o_front": [], "o_lat": [], "o_beh": [], "v_lat": []} for db in DIST_LABELS} for e in EPOCHS}
     n = 0
     for rid, zp in resolve_cohort():
         try:
@@ -170,6 +279,16 @@ def main() -> None:
             lat["all"]["virtual"][e].append(np.nanmean(v_all)); lat["near"]["virtual"][e].append(np.nanmean(v_near))
             hists["object"][e].append(bearing_hist(d["bearings"]["object"], d["valid"]["object"], rng))
             hists["virtual"][e].append(np.nanmean([bearing_hist(d["bearings"][vk], d["valid"][vk], rng) for vk in virt_keys], axis=0))
+            for di, db in enumerate(DIST_LABELS):
+                lo, hi = DIST_EDGES[di], DIST_EDGES[di + 1]
+                of, ol, ob, _ = sector_in_range(d["bearings"]["object"], d["valid"]["object"], d["dists"]["object"], rng, lo, hi)
+                vl = np.nanmean([sector_in_range(d["bearings"][vk], d["valid"][vk], d["dists"][vk], rng, lo, hi)[1] for vk in virt_keys])
+                bydist[e][db]["o_front"].append(of); bydist[e][db]["o_lat"].append(ol)
+                bydist[e][db]["o_beh"].append(ob); bydist[e][db]["v_lat"].append(vl)
+
+    if args.by_distance:
+        emit_by_distance(bydist, n, args, out_dir)
+        return
 
     def arr(sc, role, e):
         return np.array(lat[sc][role][e], float)
