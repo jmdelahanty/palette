@@ -606,13 +606,13 @@ def test_group_analytics_viewer_rejects_unknown_metric(tmp_path: Path) -> None:
         query_epoch_bout_histogram(context, metric="not_a_metric")
     with pytest.raises(ValueError, match="Unsupported epoch metric histogram metric"):
         query_epoch_inter_bout_interval_histogram(context, metric="not_a_metric")
-    with pytest.raises(ValueError, match="Unsupported CRA object-phase metric"):
+    with pytest.raises(ValueError, match="Unsupported chaser quadrant-occupancy metric"):
         query_cra_object_phase(context, metric="not_a_metric")
-    with pytest.raises(ValueError, match="Unsupported CRA summary metric"):
+    with pytest.raises(ValueError, match="Unsupported chaser quadrant summary metric"):
         query_cra_summary(context, metric="not_a_metric")
-    with pytest.raises(ValueError, match="Unsupported CRA near-field object-phase metric"):
+    with pytest.raises(ValueError, match="Unsupported chaser near-field metric"):
         query_cra_near_field_object_phase(context, metric="not_a_metric")
-    with pytest.raises(ValueError, match="Unsupported CRA near-field summary metric"):
+    with pytest.raises(ValueError, match="Unsupported chaser near-field summary metric"):
         query_cra_near_field_summary(context, metric="not_a_metric")
     with pytest.raises(ValueError, match="Unsupported egocentric metric"):
         query_egocentric_summary(context, metric="not_a_metric")
