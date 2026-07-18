@@ -9,6 +9,7 @@ SUBMIT_HOST="${PALETTE_LSF_SUBMIT_HOST:-login1-citrus-poller}"
 COLLECTION_ID=""
 COLLECTION_NAME=""
 STIMULUS_MODE=""
+ZARR_LIST=""
 PROFILE=""
 OUTPUT=""
 ZARR_USE="analysis"
@@ -30,7 +31,10 @@ virtual collection manifest, and validates its canonical hash.
 Required:
   --collection-id ID          Unique collection identifier
   --collection-name NAME      Human-readable collection name
-  --stimulus-mode MODE        Normalized stimulus mode, for example CHASER
+
+Select exactly one source:
+  --stimulus-mode MODE        Normalized registry stimulus mode, for example CHASER
+  --zarr-list PATH            Frozen newline-delimited analysis-Zarr selection
 
 Options:
   --registry PATH             Shared Palette registry
@@ -63,6 +67,7 @@ while [[ $# -gt 0 ]]; do
     --collection-id) COLLECTION_ID="$2"; shift 2;;
     --collection-name) COLLECTION_NAME="$2"; shift 2;;
     --stimulus-mode) STIMULUS_MODE="$2"; shift 2;;
+    --zarr-list) ZARR_LIST="$2"; shift 2;;
     --registry) REGISTRY="$2"; shift 2;;
     --output) OUTPUT="$2"; shift 2;;
     --output-root) OUTPUT_ROOT="$2"; shift 2;;
@@ -84,11 +89,23 @@ done
 [[ -n "$COLLECTION_ID" ]] || fail "--collection-id is required"
 [[ "$COLLECTION_ID" =~ ^[A-Za-z0-9._-]+$ ]] || fail "unsafe --collection-id: $COLLECTION_ID"
 [[ -n "$COLLECTION_NAME" ]] || fail "--collection-name is required"
-[[ -n "$STIMULUS_MODE" ]] || fail "--stimulus-mode is required"
-[[ "$STIMULUS_MODE" =~ ^[A-Za-z0-9._-]+$ ]] || fail "unsafe --stimulus-mode: $STIMULUS_MODE"
+if [[ -n "$STIMULUS_MODE" && -n "$ZARR_LIST" ]]; then
+  fail "select exactly one source: --stimulus-mode or --zarr-list"
+fi
+if [[ -z "$STIMULUS_MODE" && -z "$ZARR_LIST" ]]; then
+  fail "select exactly one source: --stimulus-mode or --zarr-list"
+fi
+if [[ -n "$STIMULUS_MODE" ]]; then
+  [[ "$STIMULUS_MODE" =~ ^[A-Za-z0-9._-]+$ ]] || fail "unsafe --stimulus-mode: $STIMULUS_MODE"
+  [[ -f "$REGISTRY" ]] || fail "registry not found: $REGISTRY"
+  SOURCE_MODE="registry_stimulus_mode"
+else
+  [[ -f "$ZARR_LIST" ]] || fail "Zarr list not found: $ZARR_LIST"
+  SOURCE_MODE="zarr_list"
+fi
 [[ "$MEM_GB" =~ ^[1-9][0-9]*$ ]] || fail "--mem-gb must be positive"
-[[ -f "$REGISTRY" ]] || fail "registry not found: $REGISTRY"
-[[ -d "$PALETTE_REPO/.git" ]] || fail "Palette checkout not found: $PALETTE_REPO"
+git -C "$PALETTE_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
+  fail "Palette checkout not found: $PALETTE_REPO"
 [[ -x "$PALETTE_REPO/scripts/py" ]] || fail "Palette scripts/py is not executable"
 
 if [[ -z "$OUTPUT" ]]; then
@@ -98,6 +115,12 @@ RUN_DIR="${OUTPUT_ROOT}/logs/lsf/collection_manifest_${COLLECTION_ID}"
 [[ ! -e "$RUN_DIR" ]] || fail "run directory already exists: $RUN_DIR"
 [[ ! -e "$OUTPUT" ]] || fail "manifest already exists: $OUTPUT"
 mkdir -p "$RUN_DIR"
+if [[ "$SOURCE_MODE" == "zarr_list" ]]; then
+  ZARR_LIST_SNAPSHOT="$RUN_DIR/zarr_paths.txt"
+  cp "$ZARR_LIST" "$ZARR_LIST_SNAPSHOT"
+else
+  ZARR_LIST_SNAPSHOT=""
+fi
 
 EXPECTED_COMMIT="$(git -C "$PALETTE_REPO" rev-parse HEAD)"
 JOB_SCRIPT="${RUN_DIR}/run_collection_manifest.sh"
@@ -110,6 +133,8 @@ q_output="$(printf '%q' "$OUTPUT")"
 q_collection_id="$(printf '%q' "$COLLECTION_ID")"
 q_collection_name="$(printf '%q' "$COLLECTION_NAME")"
 q_stimulus_mode="$(printf '%q' "$STIMULUS_MODE")"
+q_zarr_list="$(printf '%q' "$ZARR_LIST_SNAPSHOT")"
+q_source_mode="$(printf '%q' "$SOURCE_MODE")"
 q_profile="$(printf '%q' "$PROFILE")"
 q_zarr_use="$(printf '%q' "$ZARR_USE")"
 q_dataset_status="$(printf '%q' "$DATASET_STATUS")"
@@ -128,6 +153,8 @@ OUTPUT=${q_output}
 COLLECTION_ID=${q_collection_id}
 COLLECTION_NAME=${q_collection_name}
 STIMULUS_MODE=${q_stimulus_mode}
+ZARR_LIST=${q_zarr_list}
+SOURCE_MODE=${q_source_mode}
 PROFILE=${q_profile}
 ZARR_USE=${q_zarr_use}
 DATASET_STATUS=${q_dataset_status}
@@ -146,8 +173,6 @@ fi
 mkdir -p "\$(dirname -- "\${OUTPUT}")"
 cmd=(
   scripts/py -m fisheye.utils.build_virtual_collection_manifest
-  --registry "\${REGISTRY}"
-  --stimulus-mode "\${STIMULUS_MODE}"
   --collection-id "\${COLLECTION_ID}"
   --collection-name "\${COLLECTION_NAME}"
   --zarr-use "\${ZARR_USE}"
@@ -155,6 +180,16 @@ cmd=(
   --storage-tier "\${STORAGE_TIER}"
   --output "\${OUTPUT}"
 )
+if [[ "\${SOURCE_MODE}" == "registry_stimulus_mode" ]]; then
+  cmd+=(--registry "\${REGISTRY}" --stimulus-mode "\${STIMULUS_MODE}")
+else
+  mapfile -t zarr_paths < <(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "\${ZARR_LIST}")
+  if [[ "\${#zarr_paths[@]}" == "0" ]]; then
+    printf 'Zarr list contains no paths: %s\n' "\${ZARR_LIST}" >&2
+    exit 2
+  fi
+  cmd+=("\${zarr_paths[@]}")
+fi
 if [[ -n "\${PROFILE}" ]]; then
   cmd+=(--profile "\${PROFILE}")
 fi
@@ -171,6 +206,11 @@ MANIFEST_SHA256="\$(scripts/py -m fisheye.utils.virtual_collection_manifest hash
   printf 'job_id=%s\n' "\${LSB_JOBID:-manual}"
   printf 'palette_commit=%s\n' "\${ACTUAL_COMMIT}"
   printf 'collection_id=%s\n' "\${COLLECTION_ID}"
+  printf 'source_mode=%s\n' "\${SOURCE_MODE}"
+  if [[ -n "\${ZARR_LIST}" ]]; then
+    printf 'zarr_list=%s\n' "\${ZARR_LIST}"
+    printf 'zarr_list_sha256=%s\n' "\$(sha256sum "\${ZARR_LIST}" | awk '{print \$1}')"
+  fi
   printf 'manifest=%s\n' "\${OUTPUT}"
   printf 'manifest_sha256=%s\n' "\${MANIFEST_SHA256}"
 } >"\${STATUS_FILE}"
@@ -191,7 +231,9 @@ BSUB_COMMAND=(bsub "${BSUB_ARGS[@]}" bash "$JOB_SCRIPT")
 printf 'mode=%s\n' "$([[ "$SUBMIT" == "1" ]] && printf submit || printf render-only)"
 printf 'palette_commit=%s\n' "$EXPECTED_COMMIT"
 printf 'collection_id=%s\n' "$COLLECTION_ID"
+printf 'source_mode=%s\n' "$SOURCE_MODE"
 printf 'stimulus_mode=%s\n' "$STIMULUS_MODE"
+if [[ -n "$ZARR_LIST_SNAPSHOT" ]]; then printf 'zarr_list=%s\n' "$ZARR_LIST_SNAPSHOT"; fi
 printf 'manifest=%s\n' "$OUTPUT"
 printf 'job_script=%s\n' "$JOB_SCRIPT"
 printf 'bsub_command='; printf '%q ' "${BSUB_COMMAND[@]}"; printf '\n'
