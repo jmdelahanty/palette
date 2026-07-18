@@ -237,7 +237,10 @@ def _resolve_speed_sources(
     except Exception as exc:
         warnings.append(f"swim_bout_unavailable: {exc}")
 
-    source_track_run = track_kinematics_run
+    track_selector = str(track_kinematics_run or "").strip()
+    source_track_run = (
+        None if track_selector in {"", "latest"} else track_selector
+    )
     source_track_id = track_id
     source_speed_level = _speed_level_key(speed_level)
     if swim_tables is not None:
@@ -259,6 +262,8 @@ def _resolve_speed_sources(
             or _speed_level_key(swim_tables.signal.source_level)
             or _speed_level_key(swim_tables.signal.speed_level)
         )
+    if source_track_run is None and track_selector == "latest":
+        source_track_run = "latest"
     if source_track_id is None:
         source_track_id = 0
     if source_speed_level is None:
@@ -274,6 +279,7 @@ def _resolve_speed_sources(
                 track_id=int(source_track_id),
                 required_speed_levels=(source_speed_level,),
             )
+            source_track_run = track.run_name
         except Exception as exc:
             warnings.append(f"track_kinematics_unavailable: {exc}")
     else:
