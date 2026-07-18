@@ -246,7 +246,7 @@ def export_report_bundle(
             "report_plan": report_plan_to_dict(plan),
             "manifest_relative_path": "report_manifest.json",
         }
-        manifest["manifest_sha256"] = _sha256_bytes(_canonical_bytes(manifest))
+        manifest["manifest_sha256"] = report_manifest_sha256(manifest)
         manifest_path = temporary_dir / "report_manifest.json"
         manifest_path.write_text(
             json.dumps(json_attr_safe(manifest), indent=2, sort_keys=True) + "\n",
@@ -266,14 +266,21 @@ def verify_report_manifest_sha256(manifest: dict[str, Any]) -> bool:
     """Verify the embedded content hash of a loaded report manifest."""
 
     expected = manifest.get("manifest_sha256")
+    return isinstance(expected, str) and report_manifest_sha256(manifest) == expected
+
+
+def report_manifest_sha256(manifest: Mapping[str, Any]) -> str:
+    """Return the canonical digest for a report manifest without its digest field."""
+
     unsigned = dict(manifest)
     unsigned.pop("manifest_sha256", None)
-    return isinstance(expected, str) and _sha256_bytes(_canonical_bytes(unsigned)) == expected
+    return _sha256_bytes(_canonical_bytes(unsigned))
 
 
 __all__ = [
     "MATERIALIZATION_POLICIES",
     "REPORT_EXPORT_SCHEMA_ID",
     "export_report_bundle",
+    "report_manifest_sha256",
     "verify_report_manifest_sha256",
 ]

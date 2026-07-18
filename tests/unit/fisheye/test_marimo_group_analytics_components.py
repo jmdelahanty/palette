@@ -27,16 +27,22 @@ def test_available_group_panels_follow_export_capabilities() -> None:
     panels = available_group_panels(
         {
             "chaser.epoch.behavior_summary",
+            "chaser.quadrant_occupancy",
+            "chaser.near_field_occupancy",
             "chaser.egocentric",
             "group.statistics",
+            "report.semantic_montage",
         },
         statistics_available=True,
     )
 
     assert [panel.panel_id for panel in panels] == [
         "behavior",
+        "quadrant_occupancy",
+        "near_field",
         "egocentric",
         "statistics",
+        "published_montages",
         "inventory",
     ]
 
@@ -76,6 +82,9 @@ def test_panel_controls_only_expose_relevant_filters() -> None:
     assert egocentric.show_chaser is True
     assert egocentric.show_statistic is True
     assert egocentric.show_egocentric_bins is True
+
+    quadrant_occupancy = panel_control_spec("quadrant_occupancy")
+    assert quadrant_occupancy.analysis_label == "Quadrant-occupancy analysis"
 
     inventory = panel_control_spec("inventory")
     assert inventory.analysis_options_key is None

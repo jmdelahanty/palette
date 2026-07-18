@@ -43,6 +43,11 @@ def _():
         discover_export_catalog,
         select_export_run_id,
     )
+    from fisheye.group_analytics_viewer.artifacts import (
+        discover_published_image_artifacts,
+        has_semantic_montage_artifacts,
+        load_published_image_bytes,
+    )
     from fisheye.group_analytics_viewer.query import (
         build_context,
         build_health_report,
@@ -81,6 +86,7 @@ def _():
         chaser_selection_options,
         cra_quadrant_occupancy_figure,
         discover_export_catalog,
+        discover_published_image_artifacts,
         epoch_selection_options,
         egocentric_polar_figure,
         egocentric_probability_color_max,
@@ -89,7 +95,9 @@ def _():
         filter_rows_by_windows,
         group_egocentric_histogram_rows,
         grouped_bar_figure,
+        has_semantic_montage_artifacts,
         line_figure,
+        load_published_image_bytes,
         mo,
         os,
         panel_control_spec,
@@ -249,12 +257,27 @@ def _(
 
 @app.cell
 def _(
+    discover_published_image_artifacts,
+    export_root,
+    selected_export_run_id,
+):
+    published_artifact_catalog = discover_published_image_artifacts(
+        export_root,
+        selected_export_run_id,
+    )
+    return (published_artifact_catalog,)
+
+
+@app.cell
+def _(
     available_group_panels,
     build_health_report,
     context,
     export_catalog,
+    has_semantic_montage_artifacts,
     mo,
     pl,
+    published_artifact_catalog,
     query_export_summary,
     sample_grain_status_rows,
     selected_export_run_id,
@@ -269,6 +292,8 @@ def _(
         selected_capabilities.add("group.statistics")
         if summary["statistics"].get("descriptive_row_count") is not None:
             selected_capabilities.add("group.descriptive_statistics")
+    if has_semantic_montage_artifacts(published_artifact_catalog):
+        selected_capabilities.add("report.semantic_montage")
     panel_definitions = available_group_panels(
         selected_capabilities,
         statistics_available=bool(summary["statistics"].get("available")),
@@ -317,7 +342,35 @@ def _(
                                 page_size=8,
                             ),
                         ]
-                    )
+                    ),
+                    "Published artifact inventory": (
+                        mo.ui.table(
+                            pl.DataFrame(
+                                [
+                                    artifact.to_dict()
+                                    for artifact in published_artifact_catalog.artifacts
+                                ]
+                            ),
+                            selection=None,
+                            page_size=8,
+                        )
+                        if published_artifact_catalog.artifacts
+                        else mo.md("No copied image artifacts are bound to this export.")
+                    ),
+                    "Published artifact diagnostics": (
+                        mo.ui.table(
+                            pl.DataFrame(
+                                [
+                                    diagnostic.to_dict()
+                                    for diagnostic in published_artifact_catalog.diagnostics
+                                ]
+                            ),
+                            selection=None,
+                            page_size=8,
+                        )
+                        if published_artifact_catalog.diagnostics
+                        else mo.md("No published artifact diagnostics.")
+                    ),
                 }
             ),
         ]
@@ -430,7 +483,7 @@ def _(
         label=_chaser_spec.analysis_label,
         preferred=_chaser_spec.preferred_analysis,
     )
-    _cra_spec = panel_control_spec("cra")
+    _cra_spec = panel_control_spec("quadrant_occupancy")
     cra_metric_labels, cra_metric_picker = _metric_control(
         options[_cra_spec.analysis_options_key],
         label=_cra_spec.analysis_label,
@@ -478,6 +531,23 @@ def _(
 def _(panel_labels, panel_picker):
     selected_panel_id = panel_labels[panel_picker.value]
     return (selected_panel_id,)
+
+
+@app.cell
+def _(mo, published_artifact_catalog):
+    published_artifact_labels = {
+        f"{artifact.selection_label} [{artifact.visualization_id}]": index
+        for index, artifact in enumerate(published_artifact_catalog.artifacts)
+    }
+    if not published_artifact_labels:
+        published_artifact_labels = {"Unavailable": -1}
+    published_artifact_picker = mo.ui.dropdown(
+        options=list(published_artifact_labels),
+        value=next(iter(published_artifact_labels)),
+        label="Published montage",
+        searchable=True,
+    )
+    return published_artifact_labels, published_artifact_picker
 
 
 @app.cell
@@ -615,6 +685,7 @@ def _(
     position_grid_picker,
     position_x_bin_picker,
     position_y_bin_picker,
+    published_artifact_picker,
     selected_capabilities,
     selected_panel_id,
     spatial_metric_picker,
@@ -654,6 +725,8 @@ def _(
         _controls.extend(
             [position_grid_picker, position_x_bin_picker, position_y_bin_picker]
         )
+    if selected_panel_id == "published_montages":
+        _controls.append(published_artifact_picker)
     mo.hstack(_controls) if _controls else mo.md(
         f"**{panel_picker.value}** has no additional analysis controls."
     )
@@ -688,6 +761,9 @@ def _(
     position_x_bin_picker,
     position_y_bin_labels,
     position_y_bin_picker,
+    published_artifact_catalog,
+    published_artifact_labels,
+    published_artifact_picker,
     query_chaser_histogram,
     query_chaser_summary,
     query_cra_near_field_curves,
@@ -706,6 +782,7 @@ def _(
     query_speed_distance_bins,
     rebin_egocentric_histogram_rows,
     rebin_position_occupancy_rows,
+    load_published_image_bytes,
     selected_capabilities,
     selected_panel_id,
     spatial_metric_labels,
@@ -850,7 +927,10 @@ def _(
             selected_windows,
         )
         payloads["speed_distance"] = _speed_distance
-    if selected_panel_id == "cra" and "chaser.cra.primary" in selected_capabilities:
+    if (
+        selected_panel_id == "quadrant_occupancy"
+        and "chaser.quadrant_occupancy" in selected_capabilities
+    ):
         payloads["cra_phase"] = query_cra_object_phase(
             analysis_context,
             metric=cra_metric_labels[cra_metric_picker.value],
@@ -863,7 +943,7 @@ def _(
         )
     if (
         selected_panel_id == "near_field"
-        and "chaser.cra.near_field" in selected_capabilities
+        and "chaser.near_field_occupancy" in selected_capabilities
     ):
         payloads["near_phase"] = query_cra_near_field_object_phase(
             analysis_context,
@@ -917,6 +997,22 @@ def _(
         payloads["egocentric_histogram"] = _egocentric_histogram
     if selected_panel_id == "statistics" and "group.statistics" in selected_capabilities:
         payloads["statistics"] = query_group_statistics(analysis_context)
+    if selected_panel_id == "published_montages":
+        _artifact_index = published_artifact_labels[published_artifact_picker.value]
+        if _artifact_index >= 0:
+            _artifact = published_artifact_catalog.artifacts[_artifact_index]
+            try:
+                payloads["published_artifact"] = {
+                    "metadata": _artifact.to_dict(),
+                    "image_bytes": load_published_image_bytes(_artifact),
+                    "error": None,
+                }
+            except Exception as exc:
+                payloads["published_artifact"] = {
+                    "metadata": _artifact.to_dict(),
+                    "image_bytes": None,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
     if selected_panel_id == "inventory":
         payloads["recordings"] = query_recordings(analysis_context)
     return payloads, selected_chasers, selected_windows
@@ -1118,11 +1214,11 @@ def _(
                 ),
             ]
         )
-    elif selected_panel == "cra":
+    elif selected_panel == "quadrant_occupancy":
         _phase = payloads.get("cra_phase", {})
         _figure = grouped_bar_figure(
             _phase.get("rows", []),
-            title=f"CRA object phases · {_phase.get('metric_label', 'metric')}",
+            title=f"Chaser object phases · {_phase.get('metric_label', 'metric')}",
             x_key="phase_label",
             y_key="value",
             series_key="object_role",
@@ -1137,7 +1233,7 @@ def _(
         )
         panel_output = mo.vstack(
             [
-                mo.md("## CRA primary endpoints"),
+                mo.md("## Chaser quadrant occupancy"),
                 _figure_or_message(_figure),
                 mo.md("### Quadrant occupancy"),
                 _figure_or_message(_quadrant_figure),
@@ -1163,7 +1259,7 @@ def _(
         _phase = payloads.get("near_phase", {})
         _phase_figure = grouped_bar_figure(
             _phase.get("rows", []),
-            title=f"CRA near field · {_phase.get('metric_label', 'metric')}",
+            title=f"Chaser near field · {_phase.get('metric_label', 'metric')}",
             x_key="phase_label",
             y_key="value",
             series_key="object_role",
@@ -1192,7 +1288,7 @@ def _(
         _summary_data = payloads.get("near_summary", {})
         panel_output = mo.vstack(
             [
-                mo.md("## CRA near field"),
+                mo.md("## Chaser near-field occupancy"),
                 _figure_or_message(_phase_figure),
                 mo.hstack([_figure_or_message(_radial_figure), _figure_or_message(_cdf_figure)]),
                 mo.accordion(
@@ -1292,6 +1388,33 @@ def _(
                 mo.md("## Linked statistics"),
                 mo.md("Rows come from the statistics export linked to this immutable base export."),
                 _rows_table(_stats.get("rows", [])),
+            ]
+        )
+    elif selected_panel == "published_montages":
+        _published = payloads.get("published_artifact", {})
+        _metadata = _published.get("metadata", {})
+        if _published.get("error"):
+            _image_output = mo.callout(
+                mo.md(f"Published image refused: `{_published['error']}`"),
+                kind="danger",
+            )
+        elif _published.get("image_bytes"):
+            _image_output = mo.image(
+                _published["image_bytes"],
+                alt=str(_metadata.get("label") or "Published cohort montage"),
+                width="100%",
+            )
+        else:
+            _image_output = mo.md("No published montage is selected.")
+        panel_output = mo.vstack(
+            [
+                mo.md("## Published montages"),
+                mo.md(
+                    "The selected immutable PNG is loaded lazily and its SHA-256 "
+                    "is verified against the bound report manifest before display."
+                ),
+                _image_output,
+                _rows_table([_metadata] if _metadata else []),
             ]
         )
     else:
