@@ -23,6 +23,58 @@ source-signature validation, completion, or provenance requirements, and it is
 not an active partially materialized run. Every target row resolves at the time
 the run is marked complete.
 
+## Persistence Lifecycle And Downstream Fan-Out
+
+Committing an added detection or bbox edit does **not** eagerly persist new crop
+pixels. The committed refined-detection revision first records exact identity,
+geometry, source signatures, and downstream stale/invalidation state. If no
+crop-dependent consumer is requested, no canonical crop-pixel artifact is
+created merely because the authoring edit exists.
+
+Pixel persistence begins when reconciliation schedules work that consumes the
+crop, such as keypoint or subject-mask inference:
+
+```text
+committed refined-detection revision
+  -> record keyed invalidation/materialization plan
+  -> crop-delta preparation, when a pixel consumer is requested
+       -> persist and validate affected ROI pixels once
+       -> keypoint inference and subject-mask inference may fan out concurrently
+  -> validate and publish downstream replacements independently
+```
+
+The prepared crop delta is a durable shared derived cache, not authoring
+authority. Detection geometry, `instance_key`, the source-pixel fingerprint,
+crop parameters, and the pixel contract define the reproducible crop. Persisting
+the delta at the fan-out boundary nevertheless matters because it:
+
+- guarantees that keypoint and mask jobs consume identical pixels;
+- prevents each branch or retry from independently decoding and cropping the
+  same source frame;
+- gives independently scheduled jobs one stable, provenance-addressable input;
+- survives worker, node, or queue failure; and
+- allows the two inference branches to run concurrently after one prerequisite.
+
+Preview-only or exploratory reads may crop transiently through an approved live
+reader or temporary cache and need not publish a composite. Transient pixels
+must not be cited as a completed downstream source. Once a durable keypoint or
+mask run binds to a crop run, its provenance records that exact crop run and
+pixel contract; the referenced crop/base artifacts remain retained for audit.
+
+The current operator separates dry-run planning from `--apply`, but one apply
+invocation still performs delta preparation and crop-run completion together.
+The production reconciler/DAG has not yet split these into separately observable
+states. Its intended states are:
+
+```text
+planned -> crop_delta_ready -> downstream_running -> downstream_complete
+```
+
+Failure before `crop_delta_ready` leaves the prior complete crop selected and
+does not release keypoint or mask dependents. Failure in one downstream branch
+does not invalidate the prepared delta or prevent an independent branch from
+being retried according to DAG policy.
+
 ## Depth-One Schema
 
 The run root contains the complete compact target authority, including

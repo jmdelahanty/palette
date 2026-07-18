@@ -430,6 +430,15 @@ New or geometry-changed observations regenerate their crop rows.
 The output crop run covers the complete target observation rowset and records
 which rows were copied versus computed.
 
+A committed detection edit records invalidation but does not, by itself,
+require eager crop-pixel persistence. When a crop-dependent materialization is
+requested, one crop-delta preparation step durably writes and validates the
+affected ROI pixels before keypoint and subject-mask inference fan out. Those
+branches may then run concurrently against the same exact pixels and retry
+independently. Preview-only crops may remain transient; pixels cited by a
+completed downstream run must come from an exact durable crop run. See
+`docs/composite_crop_storage_contract.md` for lifecycle and retention details.
+
 ### Keypoints
 
 Raw keypoint predictions are copied for compatible unchanged crops and computed
