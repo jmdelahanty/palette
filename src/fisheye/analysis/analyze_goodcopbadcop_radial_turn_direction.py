@@ -47,12 +47,15 @@ from fisheye.analysis.goodcopbadcop_common import (
     resolve_cohort,
     resolve_object_roles,
 )
+from fisheye.group_statistics.paired import wilcoxon_signed_rank_p_value
 
 EPOCHS = (("pre", 0), ("chase", 1), ("post", 2))
 EDGES = np.arange(0.0, 48.001, 3.0)
 CTR = 0.5 * (EDGES[:-1] + EDGES[1:])
 NBIN = CTR.size
 MIN_CLUSTERS = 8          # min (fish,visit) clusters contributing to a bin, else NaN
+NEAR_SHELL_MM = (8.0, 22.0)   # the avoidance-steering shell (matches the frame-based readout)
+MIN_SHELL_BOUTS = 5           # min object-ahead bouts per fish/epoch to contribute a shell mean
 OBJECT_C = "#c1435b"
 VIRTUAL_C = "#8a8a8a"
 METRICS = [
@@ -128,6 +131,50 @@ def cluster_bootstrap(bin_idx, val, cluster, reps, rng):
     return boots
 
 
+def _shell_mean(valid, epoch, cols, epoch_idx, shell, min_bouts):
+    """Mean avoidance steering over object-ahead bouts in the near shell, one epoch.
+
+    cols is a list of (ref_col, dist, val, visit, ahead); virtual pools its 5 columns.
+    Returns (mean, n_bouts) or (nan, n_bouts) if fewer than min_bouts contribute.
+    """
+    vals = []
+    for _ref_col, dist, val, _vid, ahead in cols:
+        sel = (valid & (epoch == epoch_idx) & np.isfinite(val) & ahead
+               & (dist >= shell[0]) & (dist < shell[1]))
+        vals.append(val[sel])
+    allv = np.concatenate(vals) if vals else np.array([])
+    return (float(np.mean(allv)), allv.size) if allv.size >= min_bouts else (np.nan, allv.size)
+
+
+def near_shell_prepost(fish, shell, min_bouts):
+    """Fish-level near-shell steering excess (object - virtual) in pre and post, and tests.
+
+    Each fish contributes one pre and one post excess; the tests are across fish
+    (fish = the unit). Answers: is the shell present pre (innate)? retained post? and does
+    it STRENGTHEN pre->post (learned)?
+    """
+    pre_ex, post_ex = [], []
+    for f in fish:
+        obj_cols, vir_cols = f["cols"]("delta_predicted_miss_mm")
+        row = {}
+        for name, eidx in (("pre", 0), ("post", 2)):
+            om, _ = _shell_mean(f["valid"], f["epoch"], obj_cols, eidx, shell, min_bouts)
+            vm, _ = _shell_mean(f["valid"], f["epoch"], vir_cols, eidx, shell, min_bouts)
+            row[name] = (om - vm) if (np.isfinite(om) and np.isfinite(vm)) else np.nan
+        pre_ex.append(row["pre"]); post_ex.append(row["post"])
+    pre_ex, post_ex = np.array(pre_ex), np.array(post_ex)
+
+    def one_sample(a):
+        a = a[np.isfinite(a)]
+        return (np.mean(a), wilcoxon_signed_rank_p_value(a)[0], a.size) if a.size >= 6 else (np.nan, np.nan, a.size)
+
+    both = np.isfinite(pre_ex) & np.isfinite(post_ex)
+    d = post_ex[both] - pre_ex[both]
+    paired = (np.mean(d), wilcoxon_signed_rank_p_value(d)[0], int(both.sum())) if both.sum() >= 6 else (np.nan, np.nan, int(both.sum()))
+    return {"pre": one_sample(pre_ex), "post": one_sample(post_ex), "paired": paired,
+            "pre_arr": pre_ex, "post_arr": post_ex}
+
+
 def load_rows(zp: str):
     r = zarr.open_group(zp, mode="r")
     cd = latest(nav(r, ["analysis", "chaser_distance_runs"]))
@@ -163,6 +210,10 @@ def load_rows(zp: str):
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--reps", type=int, default=2000, help="Cluster-bootstrap resamples.")
+    ap.add_argument("--shell-lo", type=float, default=NEAR_SHELL_MM[0], help="Near-shell inner edge (mm).")
+    ap.add_argument("--shell-hi", type=float, default=NEAR_SHELL_MM[1], help="Near-shell outer edge (mm).")
+    ap.add_argument("--min-shell-bouts", type=int, default=MIN_SHELL_BOUTS,
+                    help="Min object-ahead bouts per fish/epoch to contribute a shell mean.")
     ap.add_argument("--out-dir", type=Path, default=None)
     ap.add_argument("--tag", default="2026-07-18")
     args = ap.parse_args()
@@ -252,6 +303,20 @@ def main() -> None:
             shell = ", ".join(f"{CTR[j]:.0f}mm" for j in np.where(sig)[0])
             print(f"  [{epoch}] object vs virtual differs at: {shell or '(no bins)'}")
         print()
+
+    # Near-shell avoidance-steering: innate (pre), retained (post), and learned (pre->post)?
+    shell = (args.shell_lo, args.shell_hi)
+    res = near_shell_prepost(fish, shell, args.min_shell_bouts)
+    print(f"=== Near-shell avoidance steering ({shell[0]:.0f}-{shell[1]:.0f}mm), object-minus-virtual, "
+          f"fish-level (delta predicted-miss, + = steer wider = avoidance) ===")
+    for label, key in (("PRE  (innate?)", "pre"), ("POST (retained?)", "post")):
+        m, p, nn = res[key]
+        verdict = "n/a" if not np.isfinite(p) else ("> 0" if (p < 0.05 and m > 0) else "n.s.")
+        print(f"  {label:18s} mean excess = {m:+.3f} mm/bout   vs 0: p={p:.3f}  n={nn}   [{verdict}]")
+    m, p, nn = res["paired"]
+    grew = "n/a" if not np.isfinite(p) else ("STRENGTHENS (learned)" if (p < 0.05 and m > 0)
+                                             else ("weakens" if (p < 0.05 and m < 0) else "no change (innate/retained, not learned)"))
+    print(f"  PAIRED post-pre     Δ = {m:+.3f} mm/bout   p={p:.3f}  n={nn}   -> {grew}")
 
 
 if __name__ == "__main__":
