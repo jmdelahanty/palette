@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import fcntl
 import json
 import math
 import os
 from pathlib import Path
 from typing import Any, Sequence
+import uuid
 
 from PIL import Image
 
@@ -20,6 +23,10 @@ from .models import PlanStatus, ReportPlan, VisualizationPlanItem
 
 
 SEMANTIC_MONTAGE_SCHEMA_ID = "palette.semantic_visualization_montages.v1"
+SEMANTIC_MONTAGE_PUBLICATION_POLICY = {
+    "serialization": "nonblocking_advisory_flock_per_output_directory",
+    "temporary_file_policy": "hidden_unique_sibling_then_atomic_replace",
+}
 
 
 def _output_name(visualization_id: str) -> str:
@@ -71,6 +78,31 @@ def _bound_loaded_image(
     return image
 
 
+@contextmanager
+def _semantic_montage_output_lock(output_dir: Path):
+    """Fail closed when another process is publishing the same montage set."""
+
+    output_dir = Path(output_dir).expanduser().resolve()
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = output_dir.parent / f".{output_dir.name}.publish.lock"
+    with lock_path.open("a+b") as lock_handle:
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(
+                "Another semantic montage publisher already holds the output lock: "
+                f"{lock_path}"
+            ) from exc
+        try:
+            yield lock_path
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def _temporary_sibling(path: Path) -> Path:
+    return path.with_name(f".{path.name}.tmp.{uuid.uuid4().hex}")
+
+
 def build_semantic_visualization_montages(
     *,
     plan: ReportPlan,
@@ -84,6 +116,33 @@ def build_semantic_visualization_montages(
 ) -> dict[str, Any]:
     """Write one contract-safe montage per semantic visualization ID."""
 
+    output_dir = Path(output_dir).expanduser().resolve()
+    with _semantic_montage_output_lock(output_dir):
+        return _build_semantic_visualization_montages_locked(
+            plan=plan,
+            output_dir=output_dir,
+            visualization_ids=visualization_ids,
+            columns=columns,
+            tile_width=tile_width,
+            max_image_height=max_image_height,
+            fail_on_nonready=fail_on_nonready,
+            overwrite=overwrite,
+        )
+
+
+def _build_semantic_visualization_montages_locked(
+    *,
+    plan: ReportPlan,
+    output_dir: Path,
+    visualization_ids: Sequence[str],
+    columns: int,
+    tile_width: int,
+    max_image_height: int,
+    fail_on_nonready: bool,
+    overwrite: bool,
+) -> dict[str, Any]:
+    """Build a semantic montage set while its output lock is held."""
+
     if not visualization_ids:
         raise ValueError("Select at least one semantic visualization ID.")
     unknown = sorted(set(visualization_ids) - set(VISUALIZATIONS))
@@ -92,7 +151,6 @@ def build_semantic_visualization_montages(
     if columns < 1 or tile_width < 160 or max_image_height < 120:
         raise ValueError("columns >= 1, tile_width >= 160, and max_image_height >= 120")
 
-    output_dir = Path(output_dir).expanduser().resolve()
     expected_outputs = [output_dir / _output_name(value) for value in visualization_ids]
     expected_outputs.append(output_dir / "semantic_montage_manifest.json")
     if not overwrite:
@@ -193,9 +251,12 @@ def build_semantic_visualization_montages(
             layout=layout,
         )
         output_path = output_dir / _output_name(visualization_id)
-        temporary = output_path.with_suffix(".png.tmp")
-        montage.save(temporary, format="PNG", optimize=True)
-        os.replace(temporary, output_path)
+        temporary = _temporary_sibling(output_path)
+        try:
+            montage.save(temporary, format="PNG", optimize=True)
+            os.replace(temporary, output_path)
+        finally:
+            temporary.unlink(missing_ok=True)
         outputs.append(
             {
                 "visualization_id": visualization_id,
@@ -221,13 +282,17 @@ def build_semantic_visualization_montages(
         "nonready_count": len(all_nonready),
         "nonready": all_nonready,
         "outputs": outputs,
+        "publication_policy": dict(SEMANTIC_MONTAGE_PUBLICATION_POLICY),
     }
     manifest_path = output_dir / "semantic_montage_manifest.json"
-    temporary_manifest = manifest_path.with_suffix(".json.tmp")
-    temporary_manifest.write_text(
-        json.dumps(json_attr_safe(manifest), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary_manifest, manifest_path)
+    temporary_manifest = _temporary_sibling(manifest_path)
+    try:
+        temporary_manifest.write_text(
+            json.dumps(json_attr_safe(manifest), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary_manifest, manifest_path)
+    finally:
+        temporary_manifest.unlink(missing_ok=True)
     manifest["manifest_path"] = str(manifest_path)
     return manifest
