@@ -14,6 +14,7 @@ from .execution import execute_report_plan, execution_result_to_dict
 from .export import MATERIALIZATION_POLICIES, export_report_bundle
 from .manifest import report_plan_json, report_plan_to_dict
 from .montage import build_semantic_visualization_montages
+from .montage_report import publish_semantic_montage_report
 from .planner import build_report_plan
 from .report_registry import (
     check_report_manifest,
@@ -122,6 +123,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
     export.add_argument("--source-collection-manifest", type=Path)
     export.add_argument("--compact", action="store_true", help="Emit compact JSON.")
 
+    publish_montage = subparsers.add_parser(
+        "publish-montage-report",
+        help=(
+            "Copy a completed semantic montage set into an immutable analytics "
+            "report bundle."
+        ),
+    )
+    publish_montage.add_argument("--registry", type=Path)
+    publish_montage.add_argument("--semantic-manifest", type=Path, required=True)
+    publish_montage.add_argument("--analytics-export-run-id", required=True)
+    publish_montage.add_argument("--report-id", required=True)
+    publish_montage.add_argument(
+        "--index-registry",
+        action="store_true",
+        help="Index the completed montage report under its analytics export.",
+    )
+    publish_montage.add_argument(
+        "--compact", action="store_true", help="Emit compact JSON."
+    )
+
     index_report = subparsers.add_parser(
         "index-report",
         help="Verify and index an immutable report manifest.",
@@ -220,6 +241,41 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if payload["ok"] else 1
 
     registry_path = args.registry or RegistryPaths.from_env(Path.cwd()).path
+    if args.command == "publish-montage-report":
+        report_id = validate_report_id(str(args.report_id))
+        binding = resolve_analytics_export_binding(
+            registry_path,
+            str(args.analytics_export_run_id),
+        )
+        output_dir = report_output_dir(binding, report_id)
+        payload = publish_semantic_montage_report(
+            semantic_manifest_path=args.semantic_manifest,
+            output_dir=output_dir,
+            report_id=report_id,
+            analytics_export=binding.to_dict(),
+        )
+        if args.index_registry:
+            registry = Registry(registry_path)
+            try:
+                indexed_export_run_id, indexed_report_id = index_report_manifest(
+                    registry,
+                    Path(payload["manifest_path"]),
+                )
+            finally:
+                registry.close()
+            payload["registry_index"] = {
+                "export_run_id": indexed_export_run_id,
+                "report_id": indexed_report_id,
+            }
+        print(
+            json.dumps(
+                payload,
+                indent=None if args.compact else 2,
+                sort_keys=True,
+                separators=(",", ":") if args.compact else None,
+            )
+        )
+        return 0
     if args.command == "index-report":
         registry = Registry(registry_path)
         try:

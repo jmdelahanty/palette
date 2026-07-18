@@ -77,16 +77,16 @@ GROUP_PANEL_DEFINITIONS = (
         all_capabilities=("chaser.distance.summary",),
     ),
     GroupPanelDefinition(
-        "cra",
-        "CRA primary endpoints",
-        "Pre/post aggressive and inert object-distance and quadrant-occupancy endpoints.",
-        all_capabilities=("chaser.cra.primary",),
+        "quadrant_occupancy",
+        "Chaser quadrant occupancy",
+        "Pre/post role-specific object-distance and quadrant-occupancy endpoints.",
+        all_capabilities=("chaser.quadrant_occupancy",),
     ),
     GroupPanelDefinition(
         "near_field",
-        "CRA near field",
+        "Chaser near-field occupancy",
         "Close-approach, near-zone, radial-density, and distance-CDF results.",
-        all_capabilities=("chaser.cra.near_field",),
+        all_capabilities=("chaser.near_field_occupancy",),
     ),
     GroupPanelDefinition(
         "egocentric",
@@ -100,6 +100,12 @@ GROUP_PANEL_DEFINITIONS = (
         "Persisted statistical results linked to the selected immutable export.",
         all_capabilities=("group.statistics",),
         requires_statistics=True,
+    ),
+    GroupPanelDefinition(
+        "published_montages",
+        "Published montages",
+        "Persisted cohort PNGs bound to the selected immutable analytics export.",
+        all_capabilities=("report.semantic_montage",),
     ),
     GroupPanelDefinition(
         "inventory",
@@ -166,10 +172,10 @@ PANEL_CONTROL_SPECS = {
         show_chaser=True,
         show_statistic=True,
     ),
-    "cra": PanelControlSpec(
-        "cra",
+    "quadrant_occupancy": PanelControlSpec(
+        "quadrant_occupancy",
         analysis_options_key="cra_object_phase_metrics",
-        analysis_label="CRA analysis",
+        analysis_label="Quadrant-occupancy analysis",
         preferred_analysis="median_distance_mm",
         show_statistic=True,
     ),
@@ -191,6 +197,7 @@ PANEL_CONTROL_SPECS = {
         show_egocentric_bins=True,
     ),
     "statistics": PanelControlSpec("statistics"),
+    "published_montages": PanelControlSpec("published_montages"),
     "inventory": PanelControlSpec("inventory"),
 }
 
