@@ -156,7 +156,7 @@ def _resolve_epoch_run(root: zarr.Group, epoch_run: Optional[str]) -> tuple[zarr
         raise ValueError("Archive has no analysis/stimulus_epoch_runs group.")
     parent = analysis["stimulus_epoch_runs"]
     resolved = str(epoch_run).strip() if epoch_run else None
-    if not resolved:
+    if not resolved or resolved == "latest":
         resolved = resolve_authoritative_run_name(parent)
     if not resolved:
         latest = parent.attrs.get("latest")
