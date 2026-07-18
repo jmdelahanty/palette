@@ -657,6 +657,13 @@ Phase 1 is implemented by:
 - `fisheye.utils.materialize_incremental_crop`, the dry-run-first operator CLI;
 - `tools/benchmark_incremental_crop.py`, the deterministic I/O benchmark.
 
+The Phase-1 physical follow-up is also implemented for crops as an
+unselected-by-default canary. `fisheye.shared.composite_crop` defines a
+depth-one immutable base-plus-delta schema and resolver, and
+`materialize_composite_incremental_crop_run` writes only computed ROI rows.
+The complete schema, reader boundary, selection behavior, retention guard, and
+future compaction rule are in `docs/composite_crop_storage_contract.md`.
+
 The planner does not construct a Python dictionary containing one tuple per
 observation. It keeps compact NumPy key/signature/action arrays and matches
 keys with stable sort plus `searchsorted`. Its persisted
@@ -748,6 +755,23 @@ atomic output, but physical row copying still performs O(N) dense I/O. Real
 video decode/model work can make that worthwhile; if dense copying dominates,
 the next physical optimization is the already-decided immutable base-plus-delta
 resolver or provable aligned object reuse, not weakening identity validation.
+
+The first base-plus-delta benchmark used the same 8,192-row, 64x64 ROI fixture.
+It wrote and read back 164 delta rows (0.64 MiB), read no base pixels during
+publication, and completed in 0.68 s versus 1.63 s for the standalone
+copy-forward delta. Logical pixels matched the standalone output exactly. The
+composite group occupied 0.37 MiB in this highly compressible fixture versus
+0.98 MiB for the standalone replacement. This is synthetic local-hot-cache
+evidence, not a PRFS durability claim.
+
+Composition adds a read-side cost: three repeated complete reads were about
+0.26 s composite versus 0.095 s standalone, and 256 random rows were about
+0.27 s versus 0.069 s. The resolver bounds intermediate dense reads to 64 MiB,
+but it still performs mapping, base/delta source reads, and output scatter.
+Consequently, composite storage is appropriate for edit deltas and canaries,
+not yet the unconditional selected production default. The next canary must
+measure real PRFS-to-compute inference access and the future standalone
+compaction path before broader promotion.
 
 ### Phase 2: keypoint copy-forward
 

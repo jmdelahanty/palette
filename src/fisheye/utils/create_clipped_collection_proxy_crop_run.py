@@ -15,6 +15,7 @@ import pyarrow.parquet as pq
 import zarr
 
 from fisheye.shared.clipped_collection_flat_roi_cache import CLIPPED_COLLECTION_ROW_INDEX_SCHEMA
+from fisheye.shared.composite_crop import assert_crop_run_unreferenced
 from fisheye.shared.flat_roi_cache import load_flat_roi_cache_manifest, open_flat_roi_cache
 from fisheye.shared.row_lineage import direct_source_crop_row_ids
 from fisheye.shared.zarr.chunk_profiles import create_geometry_preload_array
@@ -337,6 +338,7 @@ def create_clipped_collection_proxy_crop_run(
     if resolved_proxy_run in crop_parent:
         if not overwrite:
             raise ValueError(f"crop_runs/{resolved_proxy_run} already exists. Pass --overwrite to replace it.")
+        assert_crop_run_unreferenced(crop_parent, resolved_proxy_run)
         del crop_parent[resolved_proxy_run]
     crop_group = crop_parent.create_group(resolved_proxy_run)
 

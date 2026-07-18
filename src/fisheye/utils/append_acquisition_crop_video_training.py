@@ -14,6 +14,7 @@ from typing import Any, Callable, Optional, Sequence
 import numpy as np
 import zarr
 
+from fisheye.shared.composite_crop import assert_crop_run_unreferenced
 from fisheye.shared.crop_geometry import bbox_img_xyxy_to_norm_cxcywh, resolve_full_frame_shape
 from fisheye.shared.roi_pixel_contract import (
     APPLIED_RANGE_SEMANTICS_ORANGE_MONO_FULL_RANGE,
@@ -237,6 +238,7 @@ def _write_crop_run(
     if run_name in crop_parent:
         if not overwrite_run:
             raise FileExistsError(f"crop_runs/{run_name} already exists in {training_zarr}")
+        assert_crop_run_unreferenced(crop_parent, run_name)
         del crop_parent[run_name]
     crop_group = crop_parent.create_group(run_name)
     mark_run_started(crop_group, run_name=run_name, stage="crop")

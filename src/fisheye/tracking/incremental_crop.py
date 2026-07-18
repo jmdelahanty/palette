@@ -14,6 +14,15 @@ from typing import Any, Callable, Mapping
 
 import numpy as np
 
+from fisheye.shared.composite_crop import (
+    COMPOSITE_CROP_PAYLOAD_GROUP,
+    COMPOSITE_CROP_SCHEMA_ID,
+    COMPOSITE_CROP_SCHEMA_VERSION,
+    COMPOSITE_CROP_SOURCE_BASE,
+    COMPOSITE_CROP_SOURCE_DELTA,
+    COMPOSITE_CROP_STORAGE_MODE,
+    validate_composite_crop_run,
+)
 from fisheye.shared.crop_roi_layout import (
     DEFAULT_CANONICAL_CROP_ROI_CHUNK_LEN,
     build_canonical_crop_roi_layout,
@@ -884,6 +893,400 @@ def materialize_incremental_crop_run(
         raise
 
 
+def materialize_composite_incremental_crop_run(
+    root: Any,
+    *,
+    source_group: Any,
+    source_path: str,
+    frame_source: Any,
+    source_pixel_fingerprint: str,
+    roi_size: tuple[int, int],
+    run_name: str,
+    run_provenance: Mapping[str, Any],
+    base_run_name: str,
+    downsampled_frame_shape: tuple[int, int] | None = None,
+    roi_chunk_rows: int = DEFAULT_CANONICAL_CROP_ROI_CHUNK_LEN,
+    signature_batch_rows: int = DEFAULT_SIGNATURE_BATCH_ROWS,
+    tabular_shard_rows: int = DEFAULT_TABULAR_SHARD_ROWS,
+    promote: bool = False,
+    before_publish: Callable[[], None] | None = None,
+) -> IncrementalCropResult:
+    """Write a depth-one crop delta that resolves against one immutable base.
+
+    The run contains a complete compact target rowset, but only newly computed
+    ROI pixels. Reused pixels remain in the explicitly retained standalone
+    base. By default the new run is completed without changing any selection
+    pointer. Explicit promotion changes composite-aware pointers only and
+    deliberately preserves ``latest`` and ``latest_materialized``.
+    """
+
+    output_name = str(run_name).strip()
+    base_name = str(base_run_name).strip()
+    if not output_name or "/" in output_name:
+        raise IncrementalCropError("run_name must be one non-empty group name.")
+    if not base_name or "/" in base_name:
+        raise IncrementalCropError("base_run_name must be one non-empty group name.")
+    roi_shape = _normalize_roi_size(roi_size)
+    zarr_format = getattr(getattr(root, "metadata", None), "zarr_format", None)
+    if zarr_format != 3:
+        raise IncrementalCropError("Composite crop materialization requires Zarr v3.")
+
+    raw_frame_shape = tuple(int(value) for value in frame_source.shape[1:])
+    snapshot = capture_crop_source_snapshot(
+        source_group,
+        source_path=source_path,
+        source_pixel_fingerprint=source_pixel_fingerprint,
+        frame_shape=raw_frame_shape,
+        roi_size=roi_shape,
+        signature_batch_rows=signature_batch_rows,
+    )
+    frame_shape = _validate_frame_source(frame_source, snapshot)
+    parent = require_runs_parent(root, "crop_runs")
+    if output_name in parent:
+        raise IncrementalCropError(f"Crop run {output_name!r} already exists.")
+    if base_name not in parent:
+        raise IncrementalCropError(f"Reuse source crop run {base_name!r} does not exist.")
+    base_group = parent[base_name]
+    plan = build_incremental_crop_plan(
+        snapshot,
+        base_group=base_group,
+        roi_size=roi_shape,
+    )
+    provenance_result = validate_run_provenance(run_provenance)
+    if not provenance_result.valid:
+        raise IncrementalCropError(
+            "Invalid run provenance: " + "; ".join(provenance_result.errors)
+        )
+    normalized_provenance = provenance_result.normalized or dict(run_provenance)
+    expected_parent_state = {
+        "latest": parent.attrs.get("latest"),
+        RUN_LATEST_COMPLETE_ATTR: parent.attrs.get(RUN_LATEST_COMPLETE_ATTR),
+        "latest_materialized": parent.attrs.get("latest_materialized"),
+        "latest_any": parent.attrs.get("latest_any"),
+        "latest_composite": parent.attrs.get("latest_composite"),
+        "publication_generation": parent.attrs.get("publication_generation"),
+    }
+    run_group = parent.create_group(output_name)
+    mark_run_started(run_group, run_name=output_name, stage="crop")
+    if promote:
+        note_pending_latest(parent, output_name)
+
+    roi_coordinates = _roi_top_left(
+        snapshot.bbox_norm_coords,
+        frame_shape=frame_shape,
+        roi_size=roi_shape,
+    )
+    reusable = plan.action_codes != ACTION_CODE_MAP["compute"]
+    compute_target_rows = np.flatnonzero(~reusable).astype(np.int64, copy=False)
+    source_codes = np.full(
+        snapshot.row_count,
+        COMPOSITE_CROP_SOURCE_DELTA,
+        dtype=np.uint8,
+    )
+    source_codes[reusable] = COMPOSITE_CROP_SOURCE_BASE
+    source_row_indices = np.empty(snapshot.row_count, dtype=np.int64)
+    source_row_indices[reusable] = plan.source_row_indices[reusable]
+    source_row_indices[~reusable] = np.arange(
+        compute_target_rows.shape[0], dtype=np.int64
+    )
+
+    payload_bytes_written = 0
+    frame_bytes_read = 0
+    readback_bytes = 0
+    source_family = snapshot.source_path.split("/", maxsplit=1)[0]
+    detection_source_type = (
+        "refined" if source_family.startswith("refined_detect") else "detect"
+    )
+    try:
+        run_group.attrs.update(
+            {
+                "schema_id": INCREMENTAL_CROP_SCHEMA_ID,
+                "schema_version": INCREMENTAL_CROP_SCHEMA_VERSION,
+                "stage": "crop",
+                "status": "running",
+                "crop_storage_mode": COMPOSITE_CROP_STORAGE_MODE,
+                "composite_crop_schema_id": COMPOSITE_CROP_SCHEMA_ID,
+                "composite_crop_schema_version": COMPOSITE_CROP_SCHEMA_VERSION,
+                "composite_reference_depth": 1,
+                "composite_base_crop_run": base_name,
+                "crop_revision": 0,
+                "total_detections": snapshot.row_count,
+                "total_frames": int(frame_source.shape[0]),
+                "height": frame_shape[0],
+                "width": frame_shape[1],
+                "roi_size": list(roi_shape),
+                "detection_source_path": snapshot.source_path,
+                "detection_source_type": detection_source_type,
+                "video_source_type": "zarr",
+                "source_coords_path": snapshot.source_path,
+                "source_pixel_fingerprint": str(source_pixel_fingerprint),
+                "reuse_source_crop_run": base_name,
+                "writer_ownership": INCREMENTAL_CROP_WRITER_OWNERSHIP,
+                "publication_policy": INCREMENTAL_CROP_PUBLICATION_POLICY,
+                "selection_policy": (
+                    "explicit_composite_opt_in" if promote else "complete_unselected"
+                ),
+                "tabular_shard_rows_requested": int(tabular_shard_rows),
+                "signature_batch_rows": int(signature_batch_rows),
+                RUN_PROVENANCE_ATTR: normalized_provenance,
+                **snapshot.signature_spec.to_attrs(),
+                **snapshot.rowset_fingerprint.to_attrs(),
+            }
+        )
+        pixel_contract = crop_run_pixel_contract(
+            crop_storage_mode=COMPOSITE_CROP_STORAGE_MODE,
+            video_source_type="zarr",
+            acceleration="cpu",
+        )
+        run_group.attrs.update(
+            {
+                "roi_image_representation": pixel_contract["image_representation"],
+                "roi_pixel_contract": pixel_contract,
+                "roi_pixel_contract_name": pixel_contract["name"],
+                "center_rounding": CENTER_ROUNDING_NP_ROUND,
+            }
+        )
+        _write_compact_arrays(
+            run_group,
+            snapshot=snapshot,
+            roi_coordinates_full=roi_coordinates,
+            frame_count=int(frame_source.shape[0]),
+            downsampled_frame_shape=downsampled_frame_shape,
+            tabular_shard_rows=int(tabular_shard_rows),
+        )
+        plan_group = run_group.create_group("materialization_plan")
+        write_keyed_delta_plan(
+            plan_group,
+            plan,
+            shard_rows=int(tabular_shard_rows),
+        )
+        payload = run_group.create_group(COMPOSITE_CROP_PAYLOAD_GROUP)
+        store_array(
+            payload,
+            "source_codes",
+            source_codes,
+            shard_rows=int(tabular_shard_rows),
+        )
+        store_array(
+            payload,
+            "source_row_indices",
+            source_row_indices,
+            shard_rows=int(tabular_shard_rows),
+        )
+        store_array(
+            payload,
+            "delta_target_row_indices",
+            compute_target_rows,
+            shard_rows=int(tabular_shard_rows),
+        )
+        store_array(
+            payload,
+            "delta_instance_key",
+            snapshot.instance_keys[compute_target_rows],
+            shard_rows=int(tabular_shard_rows),
+        )
+        roi_layout = build_canonical_crop_roi_layout(
+            total_rois=int(compute_target_rows.shape[0]),
+            preferred_chunk_len=int(roi_chunk_rows),
+            roi_storage="compressed",
+            use_sharding=False,
+        )
+        run_group.attrs.update(
+            {
+                **crop_roi_layout_attrs(roi_layout),
+                "roi_layout_scope": "composite_delta_only",
+            }
+        )
+        delta_images = payload.create_array(
+            "roi_images_delta",
+            **build_crop_roi_create_kwargs(
+                total_rois=int(compute_target_rows.shape[0]),
+                roi_sz=roi_shape,
+                layout=roi_layout,
+                overwrite=True,
+            ),
+        )
+        output_chunk_rows = int(delta_images.chunks[0])
+        for delta_start in range(0, compute_target_rows.shape[0], output_chunk_rows):
+            delta_stop = min(
+                delta_start + output_chunk_rows,
+                compute_target_rows.shape[0],
+            )
+            target_rows = compute_target_rows[delta_start:delta_stop]
+            output = np.empty((target_rows.shape[0], *roi_shape), dtype=np.uint8)
+            frame_cache: dict[int, np.ndarray] = {}
+            for local_row, target_row_value in enumerate(target_rows):
+                target_row = int(target_row_value)
+                frame_index = int(snapshot.frame_indices[target_row])
+                frame = frame_cache.get(frame_index)
+                if frame is None:
+                    frame = np.asarray(frame_source[frame_index], dtype=np.uint8)
+                    if frame.shape != frame_shape:
+                        raise IncrementalCropError(
+                            "Source frame shape changed during processing."
+                        )
+                    frame_cache[frame_index] = frame
+                    frame_bytes_read += int(frame.nbytes)
+                output[local_row] = _crop_one(
+                    frame,
+                    top_left=roi_coordinates[target_row],
+                    roi_size=roi_shape,
+                )
+            delta_images[delta_start:delta_stop] = output
+            payload_bytes_written += int(output.nbytes)
+            persisted = np.asarray(
+                delta_images[delta_start:delta_stop], dtype=np.uint8
+            )
+            readback_bytes += int(persisted.nbytes)
+            if not np.array_equal(persisted, output):
+                raise IncrementalCropError(
+                    "Composite delta ROI readback differs from the written chunk."
+                )
+
+        validate_composite_crop_run(
+            parent,
+            run_group,
+            run_name=output_name,
+            require_complete=False,
+            verify_identity=True,
+        )
+        if before_publish is not None:
+            before_publish()
+        refreshed_source_group = root[snapshot.source_path]
+        refreshed = capture_crop_source_snapshot(
+            refreshed_source_group,
+            source_path=source_path,
+            source_pixel_fingerprint=source_pixel_fingerprint,
+            frame_shape=frame_shape,
+            roi_size=roi_shape,
+            signature_batch_rows=signature_batch_rows,
+        )
+        assert_rowset_fingerprint_matches(
+            snapshot.rowset_fingerprint,
+            refreshed.rowset_fingerprint,
+            require_complete=True,
+        )
+        if not np.array_equal(
+            snapshot.instance_keys, refreshed.instance_keys
+        ) or not np.array_equal(snapshot.signatures, refreshed.signatures):
+            raise IncrementalCropError(
+                "Source row identity or content changed during processing."
+            )
+        if snapshot.optional_row_arrays.keys() != refreshed.optional_row_arrays.keys() or any(
+            not np.array_equal(values, refreshed.optional_row_arrays[name])
+            for name, values in snapshot.optional_row_arrays.items()
+        ):
+            raise IncrementalCropError("Source row lineage changed during processing.")
+
+        publication_parent = root["crop_runs"]
+        if promote:
+            _assert_parent_state_unchanged(publication_parent, expected_parent_state)
+        summary = {
+            **plan.summary(),
+            "storage_strategy": "immutable_depth_one_base_plus_delta",
+            "base_crop_run": base_name,
+            "roi_payload_bytes_written": int(payload_bytes_written),
+            "roi_payload_bytes_read_from_base": 0,
+            "source_frame_bytes_read": int(frame_bytes_read),
+            "validation_readback_bytes": int(readback_bytes),
+        }
+        frames_with_crops = int(np.unique(snapshot.frame_indices).shape[0])
+        percent_frames = (
+            (frames_with_crops / int(frame_source.shape[0])) * 100.0
+            if int(frame_source.shape[0]) > 0
+            else 0.0
+        )
+        detection_source = snapshot.optional_row_arrays.get("detection_source")
+        interpolated_rows = (
+            int(np.count_nonzero(detection_source == 1))
+            if detection_source is not None
+            else 0
+        )
+        run_group.attrs.update(
+            {
+                "materialization_summary": summary,
+                "summary_statistics": {
+                    "total_frames": int(frame_source.shape[0]),
+                    "frames_with_crops": frames_with_crops,
+                    "total_rois_cropped": snapshot.row_count,
+                    "percent_frames_with_crops": round(percent_frames, 2),
+                    "roi_size": list(roi_shape),
+                    "roi_pixels_logically_complete": True,
+                    "roi_pixels_materialized": False,
+                    "roi_delta_rows_materialized": int(compute_target_rows.shape[0]),
+                },
+                "includes_interpolated": interpolated_rows > 0,
+                "n_real_detections": snapshot.row_count - interpolated_rows,
+                "n_interpolated_detections": interpolated_rows,
+                "status": "completed",
+                "validation_status": "passed",
+            }
+        )
+        mark_run_complete(
+            run_group,
+            run_name=output_name,
+            run_provenance=normalized_provenance,
+        )
+        validate_composite_crop_run(
+            publication_parent,
+            run_group,
+            run_name=output_name,
+            require_complete=True,
+            verify_identity=True,
+        )
+        if promote:
+            previous_generation = expected_parent_state["publication_generation"]
+            generation = 1 if previous_generation is None else int(previous_generation) + 1
+            publication_parent.attrs.update(
+                {
+                    RUN_LATEST_COMPLETE_ATTR: output_name,
+                    "latest_any": output_name,
+                    "latest_composite": output_name,
+                    "publication_generation": generation,
+                    "publication_policy": INCREMENTAL_CROP_PUBLICATION_POLICY,
+                }
+            )
+            if publication_parent.attrs.get(RUN_LATEST_PENDING_ATTR) == output_name:
+                try:
+                    del publication_parent.attrs[RUN_LATEST_PENDING_ATTR]
+                except Exception:
+                    pass
+        return IncrementalCropResult(
+            run_name=output_name,
+            plan=plan,
+            copied_rows=int(np.count_nonzero(reusable)),
+            computed_rows=int(compute_target_rows.shape[0]),
+            omitted_rows=int(plan.omitted_instance_keys.shape[0]),
+            roi_payload_bytes_written=int(payload_bytes_written),
+            roi_payload_bytes_read_from_base=0,
+            source_frame_bytes_read=int(frame_bytes_read),
+            validation_readback_bytes=int(readback_bytes),
+        )
+    except Exception as exc:
+        failure_parent = root["crop_runs"]
+        try:
+            run_group.attrs.update(
+                {
+                    "status": "failed",
+                    "validation_status": "failed",
+                }
+            )
+            if RUN_COMPLETED_AT_ATTR in run_group.attrs:
+                del run_group.attrs[RUN_COMPLETED_AT_ATTR]
+        except Exception:
+            pass
+        try:
+            mark_run_failed(
+                run_group,
+                parent_group=failure_parent,
+                run_name=output_name,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        except Exception:
+            pass
+        raise
+
+
 __all__ = [
     "INCREMENTAL_CROP_SCHEMA_ID",
     "INCREMENTAL_CROP_SCHEMA_VERSION",
@@ -899,4 +1302,5 @@ __all__ = [
     "capture_crop_source_snapshot",
     "build_incremental_crop_plan",
     "materialize_incremental_crop_run",
+    "materialize_composite_incremental_crop_run",
 ]

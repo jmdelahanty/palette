@@ -15,9 +15,13 @@ from typing import Any, Sequence
 import numpy as np
 import zarr
 
+from fisheye.shared.crop_image_source import CropImageSource
 from fisheye.shared.json_safety import write_json_atomic
 from fisheye.shared.run_provenance import build_writer_run_provenance
-from fisheye.tracking.incremental_crop import materialize_incremental_crop_run
+from fisheye.tracking.incremental_crop import (
+    materialize_composite_incremental_crop_run,
+    materialize_incremental_crop_run,
+)
 
 
 def _source(
@@ -48,6 +52,35 @@ def _stored_bytes(path: Path) -> int:
     return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
 
 
+def _timed_reads(
+    source: CropImageSource,
+    *,
+    random_rows: np.ndarray,
+    repetitions: int,
+) -> dict[str, Any]:
+    sequential_seconds: list[float] = []
+    random_seconds: list[float] = []
+    checksum = 0
+    for _ in range(int(repetitions)):
+        start = time.perf_counter()
+        sequential = source.read_slice(0, source.total_rois)
+        sequential_seconds.append(time.perf_counter() - start)
+        checksum ^= int(np.bitwise_xor.reduce(sequential.reshape(-1), initial=np.uint8(0)))
+        start = time.perf_counter()
+        random = source.read_indices(random_rows)
+        random_seconds.append(time.perf_counter() - start)
+        checksum ^= int(np.bitwise_xor.reduce(random.reshape(-1), initial=np.uint8(0)))
+    return {
+        "repetitions": int(repetitions),
+        "random_row_count": int(random_rows.shape[0]),
+        "sequential_seconds": sequential_seconds,
+        "sequential_median_seconds": float(np.median(sequential_seconds)),
+        "random_seconds": random_seconds,
+        "random_median_seconds": float(np.median(random_seconds)),
+        "checksum": checksum,
+    }
+
+
 def run_benchmark(
     *,
     workdir: Path,
@@ -55,6 +88,8 @@ def run_benchmark(
     roi_size: int,
     frame_size: int,
     delta_fraction: float,
+    read_repetitions: int = 3,
+    random_read_rows: int = 256,
 ) -> dict[str, Any]:
     if row_count < 128:
         raise ValueError("row_count must be at least 128")
@@ -142,16 +177,75 @@ def run_benchmark(
         roi_chunk_rows=32,
     )
     delta_seconds = time.perf_counter() - start
+    start = time.perf_counter()
+    composite = materialize_composite_incremental_crop_run(
+        root,
+        source_group=source_b,
+        source_path="refined_detect_runs/source_b",
+        frame_source=raw["images_full"],
+        source_pixel_fingerprint="synthetic-pixels-v1",
+        roi_size=(roi_size, roi_size),
+        run_name="crop_composite",
+        run_provenance=provenance,
+        base_run_name="crop_full",
+        roi_chunk_rows=32,
+        promote=False,
+    )
+    composite_seconds = time.perf_counter() - start
+    standalone_source = CropImageSource.open(root, crop_run="crop_delta")
+    composite_source = CropImageSource.open(root, crop_run="crop_composite")
+    random_count = min(max(1, int(random_read_rows)), row_count)
+    random_rows = np.random.default_rng(0).choice(
+        row_count,
+        size=random_count,
+        replace=False,
+    ).astype(np.int64, copy=False)
+    standalone_read = _timed_reads(
+        standalone_source,
+        random_rows=random_rows,
+        repetitions=read_repetitions,
+    )
+    composite_read = _timed_reads(
+        composite_source,
+        random_rows=random_rows,
+        repetitions=read_repetitions,
+    )
+    parity = np.array_equal(
+        standalone_source.read_slice(0, row_count),
+        composite_source.read_slice(0, row_count),
+    )
+    standalone_source.close()
+    composite_source.close()
+    crop_root = archive / "crop_runs"
     return {
         "schema_id": "palette.incremental_crop_benchmark",
-        "schema_version": 1,
+        "schema_version": 2,
         "row_count": row_count,
         "roi_size": [roi_size, roi_size],
         "frame_size": [frame_size, frame_size],
         "delta_fraction_requested": delta_fraction,
         "full": {"wall_seconds": full_seconds, **full.to_dict()},
         "delta": {"wall_seconds": delta_seconds, **delta.to_dict()},
+        "composite": {"wall_seconds": composite_seconds, **composite.to_dict()},
         "delta_speedup_over_full": full_seconds / delta_seconds,
+        "composite_speedup_over_standalone_delta": delta_seconds / composite_seconds,
+        "composite_logical_parity": bool(parity),
+        "stored_bytes_by_crop_run": {
+            name: _stored_bytes(crop_root / name)
+            for name in ("crop_full", "crop_delta", "crop_composite")
+        },
+        "reads": {
+            "standalone_delta": standalone_read,
+            "composite": composite_read,
+            "composite_sequential_slowdown": (
+                composite_read["sequential_median_seconds"]
+                / standalone_read["sequential_median_seconds"]
+            ),
+            "composite_random_slowdown": (
+                composite_read["random_median_seconds"]
+                / standalone_read["random_median_seconds"]
+            ),
+        },
         "process_peak_rss_kib": int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss),
         "archive_stored_bytes": _stored_bytes(archive),
     }
@@ -163,6 +257,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--roi-size", type=int, default=64)
     parser.add_argument("--frame-size", type=int, default=128)
     parser.add_argument("--delta-fraction", type=float, default=0.01)
+    parser.add_argument("--read-repetitions", type=int, default=3)
+    parser.add_argument("--random-read-rows", type=int, default=256)
     parser.add_argument("--workdir", type=Path, default=None)
     parser.add_argument("--output-json", type=Path, default=None)
     parser.add_argument("--keep", action="store_true")
@@ -185,6 +281,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             roi_size=args.roi_size,
             frame_size=args.frame_size,
             delta_fraction=args.delta_fraction,
+            read_repetitions=args.read_repetitions,
+            random_read_rows=args.random_read_rows,
         )
         report["workdir"] = str(workdir)
         if args.output_json is not None:

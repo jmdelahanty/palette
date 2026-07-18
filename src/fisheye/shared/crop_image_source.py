@@ -13,6 +13,10 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 import zarr
 
+from fisheye.shared.composite_crop import (
+    COMPOSITE_CROP_STORAGE_MODE,
+    CompositeCropArray,
+)
 from fisheye.shared.crop_roi_layout import (
     DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN,
     DEFAULT_SCRATCH_ROI_CACHE_GPU_CHUNK_FRAMES,
@@ -165,8 +169,13 @@ def resolve_materialized_crop_run(
         run_group = crop_parent[run_name]
         storage_mode = _resolve_storage_mode(run_group)
         if storage_mode != "materialized" or "roi_images" not in run_group:
+            detail = (
+                "is composite and must be resolved through CropImageSource"
+                if storage_mode == COMPOSITE_CROP_STORAGE_MODE
+                else "is not materialized"
+            )
             raise ValueError(
-                f"Crop run '{run_name}' is not materialized. Traditional pipelines require "
+                f"Crop run '{run_name}' {detail}. Traditional pipelines require "
                 "crop_runs/<run>/roi_images."
             )
         return crop_parent, run_group, run_name
@@ -189,9 +198,11 @@ def resolve_materialized_crop_run(
     latest_any = _normalize_run_name(crop_parent.attrs.get("latest_any"))
     if latest_any and latest_any in crop_parent and is_run_complete_in_parent(crop_parent, crop_parent[latest_any]):
         run_group = crop_parent[latest_any]
-        if _resolve_storage_mode(run_group) != "materialized":
+        latest_mode = _resolve_storage_mode(run_group)
+        if latest_mode != "materialized":
             raise ValueError(
-                f"Latest available crop run '{latest_any}' is geometry-only. Traditional pipelines require "
+                f"Latest available crop run '{latest_any}' uses {latest_mode!r} storage. "
+                "Traditional pipelines require "
                 "a materialized crop run with roi_images."
             )
 
@@ -202,7 +213,7 @@ def resolve_materialized_crop_run(
 
 def _normalize_storage_mode(value: object) -> str | None:
     text = _normalize_run_name(value)
-    if text in {"materialized", "geometry_only"}:
+    if text in {"materialized", "geometry_only", COMPOSITE_CROP_STORAGE_MODE}:
         return text
     return None
 
@@ -380,9 +391,10 @@ def _resolve_crop_group_pixel_contract(
         normalize_pixel_contract(crop_group.attrs.get("roi_pixel_contract"))
         or normalize_pixel_contract(crop_group.attrs.get("crop_pixel_contract"))
     )
-    if stored is not None and crop_storage_mode == "materialized":
+    pixel_stored_modes = {"materialized", COMPOSITE_CROP_STORAGE_MODE}
+    if stored is not None and crop_storage_mode in pixel_stored_modes:
         return stored
-    if crop_storage_mode == "materialized":
+    if crop_storage_mode in pixel_stored_modes:
         return crop_run_pixel_contract(
             crop_storage_mode=crop_storage_mode,
             video_source_type=str(video_source_type or ""),
@@ -720,7 +732,7 @@ class CropImageSource:
         manifest_path = Path(roi_cache_manifest).expanduser() if roi_cache_manifest is not None else None
         if crop_run is None and manifest_path is not None:
             crop_run = crop_run_name_from_manifest(manifest_path)
-        _crop_parent, crop_group, crop_run_name = resolve_crop_run(
+        crop_parent, crop_group, crop_run_name = resolve_crop_run(
             root,
             crop_run=crop_run,
             zarr_path=zarr_path,
@@ -739,7 +751,9 @@ class CropImageSource:
         elif storage_mode == "materialized":
             frame_indices = np.zeros(total_rois, dtype=np.int64)
         else:
-            raise ValueError("Geometry-only crop run is missing 'frame_indices'.")
+            raise ValueError(
+                f"{storage_mode!r} crop run is missing 'frame_indices'."
+            )
 
         if frame_indices.shape[0] != total_rois:
             raise ValueError(
@@ -761,6 +775,21 @@ class CropImageSource:
             external_reader = None
             frame_shape = roi_shape
             roi_read_mode = "materialized_crop_run"
+            live_acceleration_effective = None
+            live_acceleration_fallback_reason = None
+        elif storage_mode == COMPOSITE_CROP_STORAGE_MODE:
+            roi_images = CompositeCropArray.open(
+                crop_parent,
+                crop_group,
+                run_name=crop_run_name,
+                verify_identity=False,
+            )
+            frame_source_kind = "composite_crop"
+            frame_source_path = None
+            images_full = None
+            external_reader = None
+            frame_shape = roi_shape
+            roi_read_mode = "composite_base_delta"
             live_acceleration_effective = None
             live_acceleration_fallback_reason = None
         else:

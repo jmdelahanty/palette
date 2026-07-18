@@ -22,6 +22,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import zarr
 
+from fisheye.shared.composite_crop import assert_crop_run_unreferenced
 from fisheye.shared.crop_geometry import (
     bbox_img_xyxy_to_norm_cxcywh,
     bbox_norm_cxcywh_to_img_xyxy,
@@ -42,7 +43,7 @@ from fisheye.shared.roi_pixel_contract import (
 from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr.chunk_profiles import create_geometry_preload_array, stamp_geometry_preload_attrs
-from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_failed, mark_run_started, require_runs_parent
+from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_failed, mark_run_started
 from fisheye.shared.system_metadata import get_environment_info, get_git_info
 
 
@@ -824,6 +825,7 @@ def build_hybrid_acquisition_offline_crop_run(
     if resolved_run_name in crop_parent:
         if not overwrite:
             raise FileExistsError(f"crop_runs/{resolved_run_name} already exists.")
+        assert_crop_run_unreferenced(crop_parent, resolved_run_name)
         del crop_parent[resolved_run_name]
 
     supplemental_manifest: dict[str, Any] | None = None

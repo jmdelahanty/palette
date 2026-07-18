@@ -5,9 +5,14 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 import zarr
+
+from fisheye.shared.composite_crop import (
+    COMPOSITE_CROP_STORAGE_MODE,
+    assert_crop_run_unreferenced,
+)
 
 
 @dataclass
@@ -95,8 +100,19 @@ def _apply_plan(plan: CropCleanupPlan) -> CropCleanupPlan:
     crop_parent = root.get("crop_runs")
     if crop_parent is None:
         return plan
-    for run_name in plan.delete_runs:
+    ordered_deletions = sorted(
+        plan.delete_runs,
+        key=lambda name: (
+            crop_parent[name].attrs.get("crop_storage_mode")
+            != COMPOSITE_CROP_STORAGE_MODE
+            if name in crop_parent
+            else True,
+            name,
+        ),
+    )
+    for run_name in ordered_deletions:
         if run_name in crop_parent:
+            assert_crop_run_unreferenced(crop_parent, run_name)
             del crop_parent[run_name]
     latest = crop_parent.attrs.get("latest")
     if not latest or latest not in crop_parent:

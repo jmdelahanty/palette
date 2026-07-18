@@ -18,12 +18,14 @@ from fisheye.tracking.incremental_crop import (
     IncrementalCropError,
     build_incremental_crop_plan,
     capture_crop_source_snapshot,
+    materialize_composite_incremental_crop_run,
     materialize_incremental_crop_run,
 )
 
 
 REPORT_SCHEMA_ID = "palette.incremental_crop_cli_report"
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
+PAYLOAD_STRATEGIES = {"standalone", "composite"}
 
 
 def _normalize_group_path(value: str) -> str:
@@ -54,6 +56,8 @@ def plan_or_materialize_incremental_crop(
     signature_batch_rows: int,
     tabular_shard_rows: int,
     command: str,
+    payload_strategy: str = "standalone",
+    promote_composite: bool = False,
 ) -> dict[str, Any]:
     archive_path = zarr_path.expanduser().resolve()
     source_path = _normalize_group_path(source_rowset_path)
@@ -64,6 +68,15 @@ def plan_or_materialize_incremental_crop(
         raise IncrementalCropError("Archive is missing raw_video/images_full.")
     frame_source = root["raw_video/images_full"]
     frame_shape = tuple(int(value) for value in frame_source.shape[1:])
+    strategy = str(payload_strategy).strip().lower()
+    if strategy not in PAYLOAD_STRATEGIES:
+        raise IncrementalCropError(
+            "payload_strategy must be one of: " + ", ".join(sorted(PAYLOAD_STRATEGIES))
+        )
+    if strategy == "composite" and not base_crop_run:
+        raise IncrementalCropError("Composite crop output requires --base-crop-run.")
+    if strategy != "composite" and promote_composite:
+        raise IncrementalCropError("--promote-composite requires --payload-strategy=composite.")
     source_group = root[source_path]
     snapshot = capture_crop_source_snapshot(
         source_group,
@@ -97,11 +110,22 @@ def plan_or_materialize_incremental_crop(
         "source_pixel_fingerprint": str(source_pixel_fingerprint),
         "base_crop_run": base_crop_run,
         "output_run": output_run,
+        "payload_strategy": strategy,
+        "promote_composite": bool(promote_composite),
         "roi_size": list(roi_size),
         "roi_chunk_rows": int(roi_chunk_rows),
         "signature_batch_rows": int(signature_batch_rows),
         "tabular_shard_rows": int(tabular_shard_rows),
         "plan": plan.summary(),
+        "estimated_roi_payload_bytes": int(
+            (
+                plan.summary()["action_counts"]["compute"]
+                if strategy == "composite"
+                else snapshot.row_count
+            )
+            * int(roi_size[0])
+            * int(roi_size[1])
+        ),
     }
     if not apply:
         return report
@@ -122,27 +146,41 @@ def plan_or_materialize_incremental_crop(
             "roi_chunk_rows": int(roi_chunk_rows),
             "signature_batch_rows": int(signature_batch_rows),
             "tabular_shard_rows": int(tabular_shard_rows),
+            "payload_strategy": strategy,
+            "promote_composite": bool(promote_composite),
         },
         input_run_ids={
             "source_rowset": source_path,
             "reuse_crop_run": base_crop_run,
         },
     )
-    result = materialize_incremental_crop_run(
-        root,
-        source_group=source_group,
-        source_path=source_path,
-        frame_source=frame_source,
-        source_pixel_fingerprint=source_pixel_fingerprint,
-        roi_size=roi_size,
-        run_name=output_run,
-        run_provenance=provenance,
-        base_run_name=base_crop_run,
-        downsampled_frame_shape=ds_shape,
-        roi_chunk_rows=roi_chunk_rows,
-        signature_batch_rows=signature_batch_rows,
-        tabular_shard_rows=tabular_shard_rows,
-    )
+    common_kwargs = {
+        "source_group": source_group,
+        "source_path": source_path,
+        "frame_source": frame_source,
+        "source_pixel_fingerprint": source_pixel_fingerprint,
+        "roi_size": roi_size,
+        "run_name": output_run,
+        "run_provenance": provenance,
+        "downsampled_frame_shape": ds_shape,
+        "roi_chunk_rows": roi_chunk_rows,
+        "signature_batch_rows": signature_batch_rows,
+        "tabular_shard_rows": tabular_shard_rows,
+    }
+    if strategy == "composite":
+        assert base_crop_run is not None
+        result = materialize_composite_incremental_crop_run(
+            root,
+            base_run_name=base_crop_run,
+            promote=bool(promote_composite),
+            **common_kwargs,
+        )
+    else:
+        result = materialize_incremental_crop_run(
+            root,
+            base_run_name=base_crop_run,
+            **common_kwargs,
+        )
     report["status"] = "materialized"
     report["result"] = result.to_dict()
     return report
@@ -178,6 +216,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "--base-crop-run",
         default=None,
         help="Explicit complete Phase-1 crop run eligible for keyed reuse",
+    )
+    parser.add_argument(
+        "--payload-strategy",
+        choices=sorted(PAYLOAD_STRATEGIES),
+        default="standalone",
+        help=(
+            "standalone writes every target ROI; composite writes only computed rows "
+            "and retains a depth-one immutable base (default: standalone)"
+        ),
+    )
+    parser.add_argument(
+        "--promote-composite",
+        action="store_true",
+        help=(
+            "Explicitly select a completed composite through latest_any/latest_complete; "
+            "latest and latest_materialized remain on the standalone base"
+        ),
     )
     parser.add_argument(
         "--roi-chunk-rows",
@@ -221,6 +276,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             signature_batch_rows=args.signature_batch_rows,
             tabular_shard_rows=args.tabular_shard_rows,
             command=command,
+            payload_strategy=args.payload_strategy,
+            promote_composite=args.promote_composite,
         )
     except Exception as exc:
         parser.error(str(exc))
