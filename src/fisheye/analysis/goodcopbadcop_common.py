@@ -121,12 +121,26 @@ def load_epochs(root) -> dict:
     return ep
 
 
+def role_name(o) -> str:
+    """Canonical role ('aggressive'/'inert') across the legacy and behavior-profile APIs.
+
+    The chaser roles resolver was generalized (commit c0f5e158): it now returns
+    ChaserQuadrantRole (`.behavior_class`, `.chaser_index`) instead of the legacy object
+    (`.object_role`, `.object_index`). These accessors work with either.
+    """
+    return o.object_role if hasattr(o, "object_role") else o.behavior_class
+
+
+def role_index(o) -> int:
+    return o.object_index if hasattr(o, "object_index") else o.chaser_index
+
+
 def resolve_object_roles(root) -> dict:
-    """{object_role: object_index} from the recording's stimulus protocol payload."""
+    """{role: chaser/object index} from the recording's stimulus protocol payload."""
     stim_par = nav(root, ["analysis", "stimulus_runs"])
     stim = next(stim_par[k] for k in stim_par.group_keys() if "protocol_json" in dict(stim_par[k].attrs))
     payload = json.loads(str(stim.attrs["protocol_json"]))
-    return {o.object_role: o.object_index for o in resolve_object_roles_from_protocol_payload(payload)}
+    return {role_name(o): role_index(o) for o in resolve_object_roles_from_protocol_payload(payload)}
 
 
 def load_dense_kinematics(root, total_frames: int, fields=("speed_smoothed_mm",)):

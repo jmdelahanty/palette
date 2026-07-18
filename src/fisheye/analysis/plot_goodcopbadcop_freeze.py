@@ -46,6 +46,7 @@ import matplotlib.pyplot as plt
 from fisheye.analysis.chaser_response_regimes import build_chaser_response_regimes_result as build
 from fisheye.analysis.cra_primary_endpoint import resolve_object_roles_from_protocol_payload
 from fisheye.analysis.goodcopbadcop_common import resolve_cohort as cohort
+from fisheye.analysis.goodcopbadcop_common import role_index, role_name
 from fisheye.group_statistics.paired import wilcoxon_signed_rank_p_value, paired_sign_flip_p_value
 
 # Figures live OUTSIDE the repo (this script is committed; its output is not).
@@ -58,10 +59,10 @@ AGG_C = "#c1435b"; INERT_C = "#3a7ca5"; GRID = "#e6e6e6"
 def roles(res):
     """Object index AND rendered colour per role, from the experiment metadata."""
     r = zarr.open_group(res.zarr_path, mode="r"); stim = r[res.source_stimulus_path]
-    by = {o.object_role: o for o in resolve_object_roles_from_protocol_payload(
+    by = {role_name(o): o for o in resolve_object_roles_from_protocol_payload(
         json.loads(str(stim.attrs["protocol_json"])))}
     a, i = by["aggressive"], by["inert"]
-    return a.object_index, i.object_index, a.raw_color_hex, i.raw_color_hex
+    return role_index(a), role_index(i), a.raw_color_hex, i.raw_color_hex
 
 
 def emap(res):

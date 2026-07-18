@@ -28,7 +28,7 @@ import zarr
 
 from fisheye.analysis.chaser_response_regimes import build_chaser_response_regimes_result as build
 from fisheye.analysis.cra_primary_endpoint import resolve_object_roles_from_protocol_payload
-from fisheye.analysis.goodcopbadcop_common import resolve_cohort
+from fisheye.analysis.goodcopbadcop_common import resolve_cohort, role_index, role_name
 from fisheye.group_statistics.paired import paired_sign_flip_p_value, wilcoxon_signed_rank_p_value
 
 MID_BAND_MM = (7.0, 18.0)
@@ -39,8 +39,8 @@ def roles(res):
     r = zarr.open_group(res.zarr_path, mode="r")
     stim = r[res.source_stimulus_path]
     rr = resolve_object_roles_from_protocol_payload(json.loads(str(stim.attrs["protocol_json"])))
-    return (next(o.object_index for o in rr if o.object_role == "aggressive"),
-            next(o.object_index for o in rr if o.object_role == "inert"))
+    return (next(role_index(o) for o in rr if role_name(o) == "aggressive"),
+            next(role_index(o) for o in rr if role_name(o) == "inert"))
 
 
 def epoch_map(res):

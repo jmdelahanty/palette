@@ -48,6 +48,7 @@ from fisheye.analysis.chaser_response_regimes import (
     _load_smoothed_immobility_speed,
 )
 from fisheye.analysis.cra_primary_endpoint import resolve_object_roles_from_protocol_payload
+from fisheye.analysis.goodcopbadcop_common import role_index, role_name
 
 REGISTRY = "/nvme1/palette_registry.sqlite"
 # Figures live OUTSIDE the repo (this script is committed; its output is not).
@@ -101,10 +102,10 @@ def main(argv=None) -> int:
     cvalid = np.asarray(pos["chaser_valid"][:], bool)
     # Role AND rendered colour both come from the experiment metadata (protocol_json ->
     # CRA behavior classes). Label by ROLE (counterbalance-proof); annotate the actual hex.
-    role_by = {o.object_role: o for o in resolve_object_roles_from_protocol_payload(
+    role_by = {role_name(o): o for o in resolve_object_roles_from_protocol_payload(
         json.loads(str(r[res.source_stimulus_path].attrs["protocol_json"])))}
     agg_obj, inert_obj = role_by["aggressive"], role_by["inert"]
-    agg, inr = agg_obj.object_index, inert_obj.object_index
+    agg, inr = role_index(agg_obj), role_index(inert_obj)
     agg_hex = agg_obj.raw_color_hex or AGG_C
     inert_hex = inert_obj.raw_color_hex or INERT_C
     agg_lbl, inert_lbl = f"aggressive ({agg_hex})", f"inert ({inert_hex})"
