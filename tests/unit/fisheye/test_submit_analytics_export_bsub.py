@@ -46,6 +46,9 @@ def test_submit_analytics_export_bsub_renders_fail_closed_job(tmp_path: Path) ->
     assert "fisheye.utils.compute_group_statistics" in text
     assert "Palette commit mismatch" in text
     assert str(output_root) in text
+    assert "chaser_quadrant_occupancy_summary" in text
+    assert "chaser_near_field_occupancy_summary" in text
+    assert "chaser_cra_" not in text
 
 
 def test_submit_analytics_export_bsub_rejects_unsafe_run_id(tmp_path: Path) -> None:
