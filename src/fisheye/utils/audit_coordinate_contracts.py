@@ -216,12 +216,12 @@ from fisheye.shared.transform_authority import (
 
 
 AUDIT_SCHEMA_ID = "palette.coordinate_contract_inventory"
-AUDIT_SCHEMA_VERSION = 11
+AUDIT_SCHEMA_VERSION = 12
 CHECKPOINT_SCHEMA_ID = "palette.coordinate_contract_inventory.dataset_checkpoint"
-CHECKPOINT_SCHEMA_VERSION = 11
-ARTIFACT_SCHEMA_VERSION = 11
+CHECKPOINT_SCHEMA_VERSION = 12
+ARTIFACT_SCHEMA_VERSION = 12
 AUDIT_RULESET_ID = "palette.coordinate_contract_inventory.rules"
-AUDIT_RULESET_VERSION = 11
+AUDIT_RULESET_VERSION = 12
 
 _MAX_METADATA_PHYSICAL_CHUNK_GRID_ENTRIES = 1_000_000
 
@@ -994,6 +994,12 @@ def _ruleset_content_sha256() -> str:
                 for key, value in sorted(
                     _REGISTERED_OBSERVATION_COORDINATE_RECORDS.items()
                 )
+            },
+            "observation_coordinate_run_lifecycle": {
+                "coordinate_contract": "canonical_v2",
+                "completion_contract": "palette.zarr_run_completion.v1",
+                "completion_status": "complete",
+                "owner_families": ["detect_runs", "crop_runs"],
             },
             "known_acquisition_schema_attrs": dict(
                 sorted(_KNOWN_ACQUISITION_SCHEMA_ATTRS.items())
@@ -10188,13 +10194,38 @@ def _observation_coordinate_record_semantic_issues(
             )
         )
 
+    rowset = nodes.get(rowset_path)
+    lifecycle_attrs = rowset.attributes if rowset is not None else {}
+    lifecycle_valid = (
+        rowset is not None
+        and lifecycle_attrs.get("coordinate_contract") == "canonical_v2"
+        and lifecycle_attrs.get("palette_run_completion_contract")
+        == "palette.zarr_run_completion.v1"
+        and lifecycle_attrs.get("palette_run_completion_status") == "complete"
+    )
+    if not lifecycle_valid:
+        issues.append(
+            _issue(
+                "OBSERVATION_COORDINATE_RUN_LIFECYCLE_INVALID",
+                "error",
+                "Canonical detection/crop record graphs are trusted only on an explicitly canonical_v2, completion-v1, complete owner run.",
+                rowset_path=rowset_path,
+                coordinate_contract=lifecycle_attrs.get("coordinate_contract"),
+                completion_contract=lifecycle_attrs.get(
+                    "palette_run_completion_contract"
+                ),
+                completion_status=lifecycle_attrs.get(
+                    "palette_run_completion_status"
+                ),
+            )
+        )
+
     temporal_issues = _observation_source_temporal_authority_issues(
         rowset_path=rowset_path,
         contract=contract,
         nodes=nodes,
     )
     issues.extend(temporal_issues)
-    rowset = nodes.get(rowset_path)
     temporal_digest = (
         rowset.attributes.get(SOURCE_ROW_TEMPORAL_AUTHORITY_DIGEST_ATTR)
         if rowset is not None
@@ -11948,6 +11979,7 @@ def classify_surface_contract(
             "REGISTERED_COORDINATE_RECORD_DIGEST_MISMATCH",
             "REGISTERED_COORDINATE_RECORD_OWNER_INVALID",
             "OBSERVATION_COORDINATE_ROWSET_PATH_INVALID",
+            "OBSERVATION_COORDINATE_RUN_LIFECYCLE_INVALID",
             "OBSERVATION_COORDINATE_LINEAGE_REQUIRED",
             "OBSERVATION_ARRAY_PAYLOAD_METADATA_INVALID",
             "OBSERVATION_TEMPORAL_AUTHORITY_INVALID",
@@ -12668,6 +12700,7 @@ def _run_pointer_contract_issues(
         family_name = PurePosixPath(path).name
         pointer_names = _run_pointer_names(attrs)
         resolved_pointer_targets: set[str] = set()
+        run_identity_targets_checked: set[str] = set()
         partition_paths: set[str] = {
             f"{path}/{partition}"
             for partition in _EXPLICIT_RUN_PARTITIONS.get(
@@ -12734,17 +12767,23 @@ def _run_pointer_contract_issues(
                         completion_status=status,
                     )
                 )
-            run_name = target.attributes.get("palette_run_name")
-            if run_name not in (None, PurePosixPath(target_path).name):
-                issues.append(
-                    _issue(
-                        "RUN_POINTER_NAME_MISMATCH",
-                        "critical",
-                        "Persisted run identity disagrees with its selected child path.",
-                        target_path=target_path,
-                        declared_run_name=run_name,
+            if target_path not in run_identity_targets_checked:
+                run_identity_targets_checked.add(target_path)
+                expected_run_name = PurePosixPath(target_path).relative_to(
+                    PurePosixPath(path)
+                ).as_posix()
+                run_name = target.attributes.get("palette_run_name")
+                if run_name not in (None, expected_run_name):
+                    issues.append(
+                        _issue(
+                            "RUN_POINTER_NAME_MISMATCH",
+                            "critical",
+                            "Persisted run identity disagrees with its selected child path.",
+                            target_path=target_path,
+                            declared_run_name=run_name,
+                            expected_run_name=expected_run_name,
+                        )
                     )
-                )
         if strict_epoch:
             candidate_paths = {
                 child_path

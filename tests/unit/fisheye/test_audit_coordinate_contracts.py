@@ -448,6 +448,17 @@ def _canonical_detection_crop_metadata_nodes() -> dict[str, coordinate_audit.Met
             (crop_transform,)
         ),
     )
+    for rowset in (detect, crop):
+        rowset.attrs.update(
+            {
+                "coordinate_contract": "canonical_v2",
+                "palette_run_completion_contract": (
+                    "palette.zarr_run_completion.v1"
+                ),
+                "palette_run_completion_status": "complete",
+                "stage_selector_eligible": True,
+            }
+        )
 
     groups = {
         ".": _MemoryNode("archive_root", token=token, attrs=root_attrs),
@@ -1510,6 +1521,45 @@ def test_canonical_detection_crop_records_require_live_payload_validation(
 
 
 @pytest.mark.parametrize(
+    ("rowset_path", "surface_path"),
+    [
+        ("detect_runs/d1", "detect_runs/d1/bbox_img_xyxy"),
+        ("crop_runs/c1", "crop_runs/c1/bbox_img_xyxy"),
+    ],
+)
+@pytest.mark.parametrize(
+    "lifecycle",
+    ["running", "failed", "missing_status", "unmarked"],
+)
+def test_scanner_v12_rejects_noncomplete_canonical_observation_records_even_unselected(
+    rowset_path: str,
+    surface_path: str,
+    lifecycle: str,
+) -> None:
+    nodes = _canonical_detection_crop_metadata_nodes()
+    rowset = nodes[rowset_path]
+    attrs = json.loads(json.dumps(rowset.attributes))
+    if lifecycle in {"running", "failed"}:
+        attrs["palette_run_completion_status"] = lifecycle
+    elif lifecycle == "missing_status":
+        attrs.pop("palette_run_completion_status", None)
+    else:
+        attrs.pop("palette_run_completion_status", None)
+        attrs.pop("palette_run_completion_contract", None)
+    nodes[rowset_path] = replace(rowset, attributes=attrs)
+
+    _surface_type, result = _classify_metadata_surface(nodes, surface_path)
+
+    assert result["status"] == "ambiguous_fail_closed"
+    assert "OBSERVATION_COORDINATE_RUN_LIFECYCLE_INVALID" in {
+        issue["code"] for issue in result["issues"]
+    }
+    assert "OBSERVATION_COORDINATE_PAYLOAD_VALIDATION_REQUIRED" not in {
+        issue["code"] for issue in result["issues"]
+    }
+
+
+@pytest.mark.parametrize(
     ("field", "bad_value"),
     [
         ("direction", "source_camera_image_px_to_source_camera_normalized_xy"),
@@ -1747,13 +1797,13 @@ def test_acquisition_schema_hidden_under_wrong_attr_fails_inventory_closed(
     }
 
 
-def test_scanner_v11_versions_move_as_one_ruleset() -> None:
+def test_scanner_v12_versions_move_as_one_ruleset() -> None:
     assert {
         coordinate_audit.AUDIT_SCHEMA_VERSION,
         coordinate_audit.CHECKPOINT_SCHEMA_VERSION,
         coordinate_audit.ARTIFACT_SCHEMA_VERSION,
         coordinate_audit.AUDIT_RULESET_VERSION,
-    } == {11}
+    } == {12}
 
 
 def test_registry_is_query_only_and_every_row_is_preserved(tmp_path: Path) -> None:
@@ -3815,6 +3865,12 @@ def test_checkpoint_rejects_incomplete_digest_valid_bundle(
     checkpoint_path.write_text(json.dumps(payload), encoding="utf-8")
     audit_registry(registry, checkpoint_dir=checkpoint_dir)
     assert rescanned == ["checkpoint", "checkpoint", "checkpoint"]
+
+    payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    payload["checkpoint_schema_version"] = 11
+    checkpoint_path.write_text(json.dumps(payload), encoding="utf-8")
+    audit_registry(registry, checkpoint_dir=checkpoint_dir)
+    assert rescanned == ["checkpoint", "checkpoint", "checkpoint", "checkpoint"]
 
 
 def test_audit_registry_reads_recordings_and_datasets_in_one_snapshot(
@@ -6306,7 +6362,7 @@ def test_partitioned_run_pointers_validate_runs_not_partition_groups(
         attributes={
             "palette_run_completion_contract": "palette.zarr_run_completion.v1",
             "palette_run_completion_status": "complete",
-            "palette_run_name": "run-a",
+            "palette_run_name": "offline/run-a",
         },
     )
     registry = _make_registry(
@@ -6327,7 +6383,64 @@ def test_partitioned_run_pointers_validate_runs_not_partition_groups(
 
     assert "RUN_POINTER_UNRESOLVED" not in dataset["issue_codes"]
     assert "RUN_POINTER_COMPLETION_MISMATCH" not in dataset["issue_codes"]
+    assert "RUN_POINTER_NAME_MISMATCH" not in dataset["issue_codes"]
     assert "RUN_COMPLETION_SCHEMA_INVALID" not in dataset["issue_codes"]
+
+
+def test_partitioned_run_name_mismatch_is_deduplicated_per_target(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "partitioned-run-name-mismatch.zarr"
+    _write_node(zarr_path)
+    _ensure_groups(zarr_path, "analysis/track_kinematics_runs/offline/run-a/tracks")
+    _write_node(
+        zarr_path,
+        "analysis/track_kinematics_runs",
+        attributes={
+            "palette_completion_epoch": 1,
+            "latest": "offline/run-a",
+            "latest_complete": "offline/run-a",
+            "latest_offline": "run-a",
+        },
+    )
+    _write_node(
+        zarr_path,
+        "analysis/track_kinematics_runs/offline/run-a",
+        attributes={
+            "palette_run_completion_contract": "palette.zarr_run_completion.v1",
+            "palette_run_completion_status": "complete",
+            "palette_run_name": "run-a",
+        },
+    )
+    registry = _make_registry(
+        tmp_path / "partitioned-run-name-mismatch.sqlite",
+        [
+            {
+                "dataset_id": "partitioned-run-name-mismatch",
+                "recording_id": "rec",
+                "zarr_path": str(zarr_path),
+                "zarr_use": "analysis",
+                "artifact_kind": "source_recording",
+                "status": "active",
+            }
+        ],
+    )
+
+    dataset = _dataset_rows(audit_registry(registry))[0]
+    name_issues = [
+        issue
+        for issue in dataset["issues"]
+        if issue["code"] == "RUN_POINTER_NAME_MISMATCH"
+    ]
+
+    assert dataset["status"] == "ambiguous_fail_closed"
+    assert len(name_issues) == 1
+    evidence = name_issues[0]["evidence"]
+    assert evidence["target_path"] == (
+        "analysis/track_kinematics_runs/offline/run-a"
+    )
+    assert evidence["declared_run_name"] == "run-a"
+    assert evidence["expected_run_name"] == "offline/run-a"
 
 
 def test_discovery_uses_explicit_producer_schema_and_semantic_role_rules(
