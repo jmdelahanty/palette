@@ -16,6 +16,7 @@ import zarr
 
 from fisheye.cluster.clipped_inference import PLAN_SCHEMA
 from fisheye.shared.json_safety import write_json_atomic
+from fisheye.shared.zarr_run_completion import require_runs_parent
 from fisheye.utils.repair_clipped_proxy_crop_contract import (
     repair_clipped_proxy_crop_contract,
 )
@@ -262,7 +263,7 @@ def prepare_keypoint_recovery(
             if applied_repair.get("status") != "ok":
                 raise RuntimeError(f"Proxy repair apply failed for {report['target_id']}")
             root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
-            parent = root.require_group("keypoint_shard_runs")
+            parent = require_runs_parent(root, "keypoint_shard_runs")
             selected = {
                 str(clip["keypoint_shard_run"])
                 for clip in target["clips"]

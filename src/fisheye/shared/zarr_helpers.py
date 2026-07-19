@@ -12,7 +12,10 @@ import numpy as np
 import zarr
 
 from fisheye.shared.type_conversions import normalize_attr
-from fisheye.shared.zarr_run_completion import resolve_authoritative_run_name
+from fisheye.shared.zarr_run_completion import (
+    is_run_selector_eligible,
+    resolve_authoritative_run_name,
+)
 
 
 ParentPath: TypeAlias = str | Sequence[str]
@@ -466,6 +469,22 @@ def resolve_zarr_run(
 
     available = sorted(set(zarr_group_names(parent)) | set(direct_zarr_group_names(current_fs_path)))
 
+    def available_group(name: str) -> zarr.Group | None:
+        try:
+            if name in parent:
+                return parent[name]
+        except Exception:
+            pass
+        if current_fs_path is not None and name in available:
+            try:
+                return open_zarr_group_direct(
+                    current_fs_path / name,
+                    mode=zarr_open_mode(root),
+                )
+            except Exception:
+                return None
+        return None
+
     if requested is not None:
         if requested not in parent:
             if current_fs_path is not None and requested in available:
@@ -489,7 +508,12 @@ def resolve_zarr_run(
         if latest is None:
             raw_latest = latest_attr
             if raw_latest is not None and raw_latest not in parent:
-                latest = raw_latest
+                raw_latest_group = available_group(raw_latest)
+                if (
+                    raw_latest_group is not None
+                    and is_run_selector_eligible(raw_latest_group)
+                ):
+                    latest = raw_latest
     if latest is not None:
         if latest in parent:
             return parent[latest], latest
@@ -505,8 +529,20 @@ def resolve_zarr_run(
     if fallback_to_sorted is not None:
         if fallback_to_sorted not in {"first", "last"}:
             raise ValueError("fallback_to_sorted must be 'first', 'last', or None")
-        if available:
-            resolved = available[0] if fallback_to_sorted == "first" else available[-1]
+        selector_eligible = [
+            name
+            for name in available
+            if (
+                (candidate := available_group(name)) is not None
+                and is_run_selector_eligible(candidate)
+            )
+        ]
+        if selector_eligible:
+            resolved = (
+                selector_eligible[0]
+                if fallback_to_sorted == "first"
+                else selector_eligible[-1]
+            )
             if resolved in parent:
                 return parent[resolved], resolved
             if current_fs_path is not None:

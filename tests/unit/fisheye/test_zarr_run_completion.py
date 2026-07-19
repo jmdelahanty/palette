@@ -395,6 +395,52 @@ def test_mark_complete_publishes_latest_and_latest_complete() -> None:
     assert parent.attrs["latest_complete"] == "run_001"
 
 
+def test_nonselector_complete_run_never_escapes_into_stage_selection() -> None:
+    parent = FakeGroup()
+    normal = FakeGroup()
+    auxiliary = FakeGroup(attrs={"stage_selector_eligible": False})
+    parent["normal"] = normal
+    parent["zzz_auxiliary"] = auxiliary
+    mark_run_complete(normal, parent_group=parent, run_name="normal")
+    mark_run_started(
+        auxiliary,
+        run_name="zzz_auxiliary",
+        stage="crop_compatibility",
+    )
+    mark_run_pending(parent, "zzz_auxiliary")
+
+    mark_run_complete(
+        auxiliary,
+        parent_group=parent,
+        run_name="zzz_auxiliary",
+    )
+
+    assert parent.attrs["latest"] == "normal"
+    assert parent.attrs["latest_complete"] == "normal"
+    assert "latest_pending" not in parent.attrs
+    assert resolve_latest_complete_run_name(parent) == "normal"
+    with pytest.raises(ValueError, match="not eligible"):
+        set_authoritative_run(parent, "zzz_auxiliary", approved_by="jeremy")
+
+    parent.attrs.clear()
+    assert resolve_latest_complete_run_name(parent) == "normal"
+
+
+def test_malformed_selector_eligibility_marker_fails_closed() -> None:
+    parent = FakeGroup()
+    normal = FakeGroup()
+    malformed = FakeGroup(attrs={"stage_selector_eligible": "true"})
+    parent["normal"] = normal
+    parent["zzz_malformed"] = malformed
+    mark_run_complete(normal, parent_group=parent, run_name="normal")
+    mark_run_complete(malformed, parent_group=parent, run_name="zzz_malformed")
+
+    assert parent.attrs["latest"] == "normal"
+    assert resolve_latest_complete_run_name(parent) == "normal"
+    with pytest.raises(ValueError, match="not eligible"):
+        set_authoritative_run(parent, "zzz_malformed", approved_by="jeremy")
+
+
 def test_epoch_two_mark_complete_refuses_missing_run_provenance() -> None:
     parent = FakeGroup(attrs={COMPLETION_EPOCH_ATTR: COMPLETION_EPOCH_REQUIRE_PROVENANCE})
     run = FakeGroup()

@@ -232,8 +232,9 @@ def mark_run_complete(
         attrs[RUN_NAME_ATTR] = str(run_name)
     if parent_group is not None and run_name is not None:
         name = str(run_name)
-        parent_group.attrs[RUN_LATEST_COMPLETE_ATTR] = name
-        parent_group.attrs["latest"] = name
+        if is_run_selector_eligible(run_group):
+            parent_group.attrs[RUN_LATEST_COMPLETE_ATTR] = name
+            parent_group.attrs["latest"] = name
         if parent_group.attrs.get(RUN_LATEST_PENDING_ATTR) == name:
             try:
                 del parent_group.attrs[RUN_LATEST_PENDING_ATTR]
@@ -330,6 +331,20 @@ def is_run_complete_in_parent(
     return is_run_complete(run_group, legacy_default=effective_default)
 
 
+def is_run_selector_eligible(run_group: Any) -> bool:
+    """Return whether implicit or authoritative stage selection may choose a run.
+
+    Missing markers remain eligible for historical runs. Once the marker is
+    present it must be the JSON boolean ``true``; malformed values fail closed,
+    while auxiliary, shard, artifact, and compatibility outputs use ``false``.
+    """
+
+    attrs = getattr(run_group, "attrs", {})
+    if "stage_selector_eligible" not in attrs:
+        return True
+    return attrs.get("stage_selector_eligible") is True
+
+
 def _group_names(parent_group: Any) -> list[str]:
     if hasattr(parent_group, "group_keys"):
         names = parent_group.group_keys()
@@ -381,19 +396,27 @@ def resolve_latest_complete_run_name(
             continue
         name = str(candidate)
         child = _get_child(parent_group, name)
-        if child is not None and is_run_complete_in_parent(
-            parent_group,
-            child,
-            legacy_default=legacy_default,
+        if (
+            child is not None
+            and is_run_selector_eligible(child)
+            and is_run_complete_in_parent(
+                parent_group,
+                child,
+                legacy_default=legacy_default,
+            )
         ):
             return name
 
     for name in reversed(_group_names(parent_group)):
         child = _get_child(parent_group, name)
-        if child is not None and is_run_complete_in_parent(
-            parent_group,
-            child,
-            legacy_default=legacy_default,
+        if (
+            child is not None
+            and is_run_selector_eligible(child)
+            and is_run_complete_in_parent(
+                parent_group,
+                child,
+                legacy_default=legacy_default,
+            )
         ):
             return name
     return None
@@ -424,10 +447,13 @@ def _is_child_complete(
     child = _get_child(parent_group, run_name)
     if child is None:
         return None, False
-    return child, is_run_complete_in_parent(
-        parent_group,
-        child,
-        legacy_default=legacy_default,
+    return child, (
+        is_run_selector_eligible(child)
+        and is_run_complete_in_parent(
+            parent_group,
+            child,
+            legacy_default=legacy_default,
+        )
     )
 
 
@@ -506,6 +532,10 @@ def set_authoritative_run(
     )
     if child is None:
         raise ValueError(f"authoritative run {name!r} does not exist")
+    if not is_run_selector_eligible(child):
+        raise ValueError(
+            f"authoritative run {name!r} is not eligible for normal stage selection"
+        )
     if not complete:
         raise ValueError(f"authoritative run {name!r} is not complete")
 
@@ -620,6 +650,7 @@ def describe_run_parent(
                 "has_completion_contract": has_contract,
                 "completion_status": status or ("legacy_complete" if complete else "legacy_incomplete"),
                 "complete": complete,
+                "selector_eligible": is_run_selector_eligible(child),
             }
         )
 
