@@ -1,9 +1,10 @@
-"""Direction-explicit transform metadata kept separate from array descriptors.
+"""Historical-v1 directed-homography compatibility and migration support.
 
-Coordinate descriptors identify the native semantics of one persisted array.
-This module instead describes and validates a calibration-backed transform
-between two coordinate spaces.  The homography matrix remains a separate array;
-``matrix_sha256`` binds that array to the canonical transform metadata.
+Future transform publication uses :mod:`fisheye.shared.directed_transform_v2`
+with sealed typed endpoints and transform authorities.  The readers and
+application helpers here remain available for historical archives.  V1
+mutation/build helpers are intentionally absent from ``__all__`` and are used
+only by explicit compatibility or migration code.
 """
 
 from __future__ import annotations
@@ -860,13 +861,9 @@ __all__ = [
     "serialize_directed_homography",
     "canonical_directed_transform_json",
     "directed_transform_digest",
-    "directed_homography_attrs",
     "load_directed_homography_attrs",
     "validate_homography_matrix",
     "homography_matrix_sha256",
-    "stamp_directed_homography",
     "load_bound_directed_homography",
-    "build_directed_homography",
     "apply_directed_homography",
-    "invert_directed_homography",
 ]

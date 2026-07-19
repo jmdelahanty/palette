@@ -32,6 +32,8 @@ from fisheye.shared.selected_calibration import (
     PIXEL_TO_MM_DERIVATION,
     SELECTED_CALIBRATION_MANIFEST_ATTR,
     SELECTED_CALIBRATION_MANIFEST_DIGEST_SUFFIX,
+    SELECTED_CALIBRATION_TRANSFORM_ATTR,
+    SELECTED_CALIBRATION_TRANSFORM_DIGEST_ATTR,
     SELECTED_OUTPUT_GEOMETRY_ATTR,
     SELECTED_OUTPUT_NAME_ATTR,
     SELECTED_OUTPUT_TRANSFORM_TOKEN_ATTR,
@@ -295,6 +297,7 @@ SOURCE_CAMERA = _camera_evidence()
 SOURCE_DISPLAY = _display_evidence()
 SOURCE_HOMOGRAPHY = _homography_evidence()
 SOURCE_ARTIFACT = source_artifact_from_homography_evidence(SOURCE_HOMOGRAPHY)
+_ARCHIVE_TOKEN = object()
 
 
 class FakeGroup(dict[str, object]):
@@ -307,6 +310,7 @@ class FakeGroup(dict[str, object]):
         super().__init__()
         self.path = path
         self.attrs = attrs if attrs is not None else {}
+        self._coordinate_archive_token = _ARCHIVE_TOKEN
 
 
 class FakeArray:
@@ -314,6 +318,7 @@ class FakeArray:
         self.data = np.asarray(data, dtype=np.float64).copy()
         self.path = path
         self.attrs: dict[str, object] = {}
+        self._coordinate_archive_token = _ARCHIVE_TOKEN
 
     def __getitem__(self, key):
         return self.data[key]
@@ -353,6 +358,27 @@ class FailEveryUpdateAttrs(dict[str, object]):
             name = next(iter(incoming))
             dict.__setitem__(self, name, incoming[name])
         raise RuntimeError("injected persistent update failure")
+
+
+class ClearingUnrelatedAttrs(dict[str, object]):
+    def update(self, *args: object, **kwargs: object) -> None:
+        incoming = dict(*args, **kwargs)
+        self.pop("unrelated_keep_me", None)
+        super().update(incoming)
+
+
+class CoercingSelectedTransformAttrs(dict[str, object]):
+    def __init__(self, value: dict[str, object]) -> None:
+        super().__init__(value)
+        self.armed = True
+
+    def update(self, *args: object, **kwargs: object) -> None:
+        incoming = copy.deepcopy(dict(*args, **kwargs))
+        record = incoming.get(SELECTED_CALIBRATION_TRANSFORM_ATTR)
+        if self.armed and isinstance(record, dict):
+            self.armed = False
+            record["schema_version"] = 2.0
+        super().update(incoming)
 
 
 def _build_root(
@@ -397,11 +423,13 @@ def _build_root(
     analysis["stimulus_runs"] = runs
     root = FakeGroup(path="")
     root["analysis"] = analysis
+    calibration._root_node = root
     stamp_selected_calibration_snapshot(
         calibration,
         camera,
         display,
         matrix,
+        root_node=root,
         stimulus_run=STIMULUS_RUN,
         camera_id=CAMERA_ID,
         source_camera=source_camera,
@@ -444,6 +472,7 @@ def _stamp_again(
         camera,
         display,
         matrix,
+        root_node=calibration._root_node,
         **kwargs,
     )
 
@@ -482,8 +511,16 @@ def test_loads_one_valid_builder_bound_non_self_inverse_snapshot() -> None:
     assert display.attrs["source_display_dataset_digest_canonicalization"] == (
         SOURCE_DISPLAY_DATASET_DIGEST_CANONICALIZATION
     )
-    assert matrix.attrs[DIRECTED_TRANSFORM_ATTR]["from_space_id"] == (
+    assert matrix.attrs[SELECTED_CALIBRATION_TRANSFORM_ATTR]["from_space_id"] == (
         CANONICAL_HOMOGRAPHY_FROM_SPACE_ID
+    )
+    assert matrix.attrs[SELECTED_CALIBRATION_TRANSFORM_ATTR]["direction"] == (
+        "source_to_target"
+    )
+    assert DIRECTED_TRANSFORM_ATTR not in matrix.attrs
+    assert (
+        f"{DIRECTED_TRANSFORM_ATTR}{DIRECTED_TRANSFORM_DIGEST_SUFFIX}"
+        not in matrix.attrs
     )
     manifest_digest_name = (
         f"{SELECTED_CALIBRATION_MANIFEST_ATTR}"
@@ -984,13 +1021,13 @@ def test_stamper_derives_and_overwrites_stale_display_and_transform_attrs() -> N
             SOURCE_DISPLAY_DATASET_PATH_ATTR: "/wrong",
         }
     )
-    stale_transform = copy.deepcopy(matrix.attrs[DIRECTED_TRANSFORM_ATTR])
+    stale_transform = copy.deepcopy(
+        matrix.attrs[SELECTED_CALIBRATION_TRANSFORM_ATTR]
+    )
     stale_transform["from_space_id"] = CANONICAL_HOMOGRAPHY_TO_SPACE_ID
     stale_transform["to_space_id"] = CANONICAL_HOMOGRAPHY_FROM_SPACE_ID
-    matrix.attrs[DIRECTED_TRANSFORM_ATTR] = stale_transform
-    matrix.attrs[
-        f"{DIRECTED_TRANSFORM_ATTR}{DIRECTED_TRANSFORM_DIGEST_SUFFIX}"
-    ] = "f" * 64
+    matrix.attrs[SELECTED_CALIBRATION_TRANSFORM_ATTR] = stale_transform
+    matrix.attrs[SELECTED_CALIBRATION_TRANSFORM_DIGEST_ATTR] = "f" * 64
 
     _stamp_again(calibration, camera, display, matrix)
 
@@ -999,11 +1036,43 @@ def test_stamper_derives_and_overwrites_stale_display_and_transform_attrs() -> N
     assert display.attrs[SOURCE_DISPLAY_DATASET_PATH_ATTR] == (
         SOURCE_DISPLAY_DATASET_PATH
     )
-    transform = matrix.attrs[DIRECTED_TRANSFORM_ATTR]
+    transform = matrix.attrs[SELECTED_CALIBRATION_TRANSFORM_ATTR]
     assert transform["from_space_id"] == CANONICAL_HOMOGRAPHY_FROM_SPACE_ID
     assert transform["to_space_id"] == CANONICAL_HOMOGRAPHY_TO_SPACE_ID
     assert transform["target_reference_extent"]["width"] == 1920
     assert transform["target_reference_extent"]["height"] == 1080
+
+
+def test_future_stamper_refuses_historical_directed_transform_attrs() -> None:
+    _root, calibration, camera, display, matrix = _build_root()
+    matrix.attrs[DIRECTED_TRANSFORM_ATTR] = {"schema_version": 1}
+    matrix.attrs[
+        f"{DIRECTED_TRANSFORM_ATTR}{DIRECTED_TRANSFORM_DIGEST_SUFFIX}"
+    ] = "f" * 64
+    before = _attrs_snapshot(camera, calibration, display, matrix)
+
+    with pytest.raises(SelectedCalibrationError, match="explicit migration"):
+        _stamp_again(calibration, camera, display, matrix)
+
+    assert _attrs_snapshot(camera, calibration, display, matrix) == before
+
+
+@pytest.mark.parametrize("hostile", ["clear_unrelated", "coerce_transform"])
+def test_stamper_rejects_attr_clear_or_type_coercion_before_write(
+    hostile: str,
+) -> None:
+    _root, calibration, camera, display, matrix = _build_root()
+    if hostile == "clear_unrelated":
+        display.attrs["unrelated_keep_me"] = {"nested": [1, 2]}
+        display.attrs = ClearingUnrelatedAttrs(dict(display.attrs))
+    else:
+        matrix.attrs = CoercingSelectedTransformAttrs(dict(matrix.attrs))
+    before = _attrs_snapshot(camera, calibration, display, matrix)
+
+    with pytest.raises(SelectedCalibrationError, match="exact trusted.*no write"):
+        _stamp_again(calibration, camera, display, matrix)
+
+    assert _attrs_snapshot(camera, calibration, display, matrix) == before
 
 
 @pytest.mark.parametrize(
@@ -1062,7 +1131,7 @@ def test_stamper_failure_is_atomic_across_all_four_attr_targets(
         ("calibration", "update"),
     ],
 )
-def test_stamper_rolls_back_partial_attr_write_failures_and_can_retry(
+def test_stamper_rejects_hostile_attr_write_hooks_and_can_retry_with_plain_dict(
     target: str,
     operation: str,
 ) -> None:
@@ -1077,10 +1146,11 @@ def test_stamper_rolls_back_partial_attr_write_failures_and_can_retry(
     nodes = (camera, calibration, display, matrix)
     before = _attrs_snapshot(*nodes)
 
-    with pytest.raises(SelectedCalibrationError, match="exact pre-call state"):
+    with pytest.raises(SelectedCalibrationError, match="exact trusted.*no write"):
         _stamp_again(calibration, camera, display, matrix)
 
     assert _attrs_snapshot(*nodes) == before
+    selected.attrs = dict(selected.attrs)
     _stamp_again(calibration, camera, display, matrix)
     assert _load(root).manifest.digest() == load_selected_calibration_snapshot(
         root,
@@ -1093,12 +1163,15 @@ def test_stamper_rolls_back_partial_attr_write_failures_and_can_retry(
     ).manifest.digest()
 
 
-def test_stamper_reports_incomplete_rollback_without_claiming_success() -> None:
+def test_stamper_rejects_persistently_hostile_attrs_before_write() -> None:
     _root, calibration, camera, display, matrix = _build_root()
     display.attrs = FailEveryUpdateAttrs(copy.deepcopy(dict(display.attrs)))
+    before = _attrs_snapshot(camera, calibration, display, matrix)
 
-    with pytest.raises(SelectedCalibrationError, match="rollback was incomplete"):
+    with pytest.raises(SelectedCalibrationError, match="exact trusted.*no write"):
         _stamp_again(calibration, camera, display, matrix)
+
+    assert _attrs_snapshot(camera, calibration, display, matrix) == before
 
 
 def test_stamper_rejects_homography_for_different_camera_without_mutation() -> None:
@@ -1177,10 +1250,10 @@ def test_loader_rejects_tampered_display_transform_matrix_and_manifest() -> None
         _load(root)
 
     root, _calibration, _camera, _display, matrix = _build_root()
-    transform = copy.deepcopy(matrix.attrs[DIRECTED_TRANSFORM_ATTR])
+    transform = copy.deepcopy(matrix.attrs[SELECTED_CALIBRATION_TRANSFORM_ATTR])
     transform["transform_id"] = "tampered"
-    matrix.attrs[DIRECTED_TRANSFORM_ATTR] = transform
-    with pytest.raises(SelectedCalibrationError, match="digest does not match"):
+    matrix.attrs[SELECTED_CALIBRATION_TRANSFORM_ATTR] = transform
+    with pytest.raises(SelectedCalibrationError, match="digest is stale"):
         _load(root)
 
     root, _calibration, _camera, _display, matrix = _build_root()
@@ -1228,7 +1301,7 @@ def test_loader_rejects_wrong_direction_extent_and_active_camera_pointers() -> N
         units="px",
         authority=TARGET_EXTENT.authority,
     )
-    with pytest.raises(SelectedCalibrationError, match="Target reference extent"):
+    with pytest.raises(SelectedCalibrationError, match="extents"):
         _load(root, expected_target_reference_extent=wrong_target)
 
     calibration.attrs[ACTIVE_CAMERA_ID_ATTR] = "other"

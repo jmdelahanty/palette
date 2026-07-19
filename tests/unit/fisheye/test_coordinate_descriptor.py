@@ -3,28 +3,54 @@ from __future__ import annotations
 import copy
 import json
 
+import numpy as np
 import pytest
 
+from fisheye.shared import coordinate_descriptor as descriptor_mod
+from fisheye.shared.coordinate_identity import (
+    OBSERVATION_INSTANCE_DOMAIN,
+    build_row_identity_contract,
+)
+
 from fisheye.shared.coordinate_descriptor import (
+    CANONICAL_COORDINATE_DESCRIPTOR_SCHEMA_VERSION,
+    CANONICAL_COORDINATE_PROFILES,
+    CANONICAL_OVERLAY_DIRECT,
+    CANONICAL_OVERLAY_NOT_SUITABLE,
+    CANONICAL_OVERLAY_REQUIRES_TRANSFORM,
     COORDINATE_DESCRIPTOR_ATTR,
     COORDINATE_DESCRIPTOR_SCHEMA_ID,
+    FISH_BODY_FRAME_RECORD_KIND,
+    PIXEL_FRAME_AUTHORITY_RECORD_KIND,
+    PHYSICAL_FRAME_CALIBRATION_RECORD_KIND,
+    CanonicalFrameRecord,
     CoordinateDescriptorError,
     CoordinateRecordRef,
+    DigestBoundCoordinateRecordRef,
     LegacySpaceContext,
-    build_coordinate_descriptor,
+    build_canonical_coordinate_descriptor,
+    build_historical_coordinate_descriptor_v1,
+    canonical_coordinate_descriptor_v2_attrs,
+    canonical_coordinate_descriptor_v2_digest,
+    canonical_coordinate_descriptor_v2_json,
     canonical_coordinate_descriptor_json,
-    coordinate_descriptor_attrs,
+    historical_coordinate_descriptor_v1_attrs,
     coordinate_descriptor_digest,
+    load_canonical_coordinate_descriptor_attrs,
     load_coordinate_descriptor_attrs,
+    parse_canonical_coordinate_descriptor,
     parse_coordinate_descriptor,
+    parse_historical_coordinate_descriptor_v1,
     resolve_legacy_space_id,
-    stamp_coordinate_descriptor,
+    stamp_historical_coordinate_descriptor_v1,
+    validate_canonical_coordinate_descriptor,
     validate_coordinate_descriptor,
+    verify_canonical_coordinate_descriptor_identity,
 )
 
 
 def _camera_points_descriptor():
-    return build_coordinate_descriptor(
+    return build_historical_coordinate_descriptor_v1(
         space_id="source_camera_image_px",
         geometry_type="points_xy",
         components=("x", "y"),
@@ -49,6 +75,50 @@ def _camera_points_descriptor():
     )
 
 
+def _identity_contract(values=(9, 17, 42)):
+    return build_row_identity_contract(
+        domain=OBSERVATION_INSTANCE_DOMAIN,
+        values=np.asarray(values, dtype=np.uint64),
+    )
+
+
+def _record(ref: str, token: str = "a") -> DigestBoundCoordinateRecordRef:
+    return DigestBoundCoordinateRecordRef(
+        record_ref=ref,
+        record_sha256=token * 64,
+    )
+
+
+def _canonical_camera_descriptor(
+    *,
+    contract=None,
+    identity_ref: str = "/analysis/detect_runs/d1@row_identity_contract",
+):
+    identity = _identity_contract() if contract is None else contract
+    return build_canonical_coordinate_descriptor(
+        profile_id="source_camera_image_px.top_left_y_down.v1",
+        geometry_type="points_xy",
+        components=("x", "y"),
+        component_units=("px", "px"),
+        reference_width=4512,
+        reference_height=4512,
+        reference_authority=_record(
+            "/coordinate_frames/source_camera@pixel_frame_authority",
+            "1",
+        ),
+        reference_selector="record",
+        pixel_convention="pixel_center",
+        row_identity_contract=identity,
+        row_identity_record_ref=identity_ref,
+        source_camera_overlay_status=CANONICAL_OVERLAY_DIRECT,
+        frame_record=CanonicalFrameRecord(
+            kind=PIXEL_FRAME_AUTHORITY_RECORD_KIND,
+            record_ref="/coordinate_frames/source_camera@pixel_frame_authority",
+            record_sha256="1" * 64,
+        ),
+    )
+
+
 def test_round_trip_is_canonical_and_digest_is_deterministic() -> None:
     descriptor = _camera_points_descriptor()
     payload = descriptor.to_dict()
@@ -64,9 +134,34 @@ def test_round_trip_is_canonical_and_digest_is_deterministic() -> None:
     assert coordinate_descriptor_digest(reordered) == descriptor.digest()
 
 
+def test_schema_versions_require_exact_json_integers() -> None:
+    historical = _camera_points_descriptor().to_dict()
+    historical["schema_version"] = 1.0
+    with pytest.raises(CoordinateDescriptorError):
+        parse_coordinate_descriptor(historical)
+
+    canonical = _canonical_camera_descriptor().to_dict()
+    canonical["schema_version"] = 2.0
+    with pytest.raises(CoordinateDescriptorError):
+        parse_canonical_coordinate_descriptor(canonical)
+
+
+def test_historical_json_rejects_duplicate_keys_recursively() -> None:
+    raw = _camera_points_descriptor().canonical_json().replace(
+        '"space_id":"source_camera_image_px"',
+        '"space_id":"roi_local_px","space_id":"source_camera_image_px"',
+        1,
+    )
+    with pytest.raises(CoordinateDescriptorError) as exc_info:
+        parse_historical_coordinate_descriptor_v1(raw)
+    assert {issue.code for issue in exc_info.value.issues} == {
+        "descriptor_json_invalid"
+    }
+
+
 def test_attrs_are_compact_and_detect_tampering() -> None:
     descriptor = _camera_points_descriptor()
-    attrs = coordinate_descriptor_attrs(descriptor)
+    attrs = historical_coordinate_descriptor_v1_attrs(descriptor)
 
     assert set(attrs) == {
         COORDINATE_DESCRIPTOR_ATTR,
@@ -90,13 +185,16 @@ def test_stamp_helper_writes_only_descriptor_and_digest() -> None:
 
     node = Node()
     descriptor = _camera_points_descriptor()
-    assert stamp_coordinate_descriptor(node, descriptor) == descriptor
+    assert (
+        stamp_historical_coordinate_descriptor_v1(node, descriptor)
+        == descriptor
+    )
     assert node.attrs["existing"] is True
     assert load_coordinate_descriptor_attrs(node.attrs) == descriptor
 
 
 def test_lineage_and_transform_provenance_remain_separate_references() -> None:
-    descriptor = build_coordinate_descriptor(
+    descriptor = build_historical_coordinate_descriptor_v1(
         space_id="roi_local_px",
         geometry_type="bbox_xyxy",
         components=("x_min", "y_min", "x_max", "y_max"),
@@ -119,7 +217,10 @@ def test_lineage_and_transform_provenance_remain_separate_references() -> None:
             ),
         ),
         lineage_refs=(
-            CoordinateRecordRef(ref="/coordinate_records/crop_1/source_selection"),
+            CoordinateRecordRef(
+                ref="/coordinate_records/crop_1/source_selection",
+                sha256="b" * 64,
+            ),
         ),
     )
 
@@ -131,7 +232,10 @@ def test_lineage_and_transform_provenance_remain_separate_references() -> None:
         }
     ]
     assert payload["lineage_refs"] == [
-        {"ref": "/coordinate_records/crop_1/source_selection"}
+        {
+            "ref": "/coordinate_records/crop_1/source_selection",
+            "sha256": "b" * 64,
+        }
     ]
     assert "transform" not in payload
     assert "lineage" not in payload
@@ -191,12 +295,12 @@ def test_physical_mm_requires_named_physical_frame() -> None:
         source_camera_overlay="requires_transform",
     )
     with pytest.raises(CoordinateDescriptorError) as exc_info:
-        build_coordinate_descriptor(**kwargs)
+        build_historical_coordinate_descriptor_v1(**kwargs)
     assert "physical_frame_required" in {
         issue.code for issue in exc_info.value.issues
     }
 
-    descriptor = build_coordinate_descriptor(
+    descriptor = build_historical_coordinate_descriptor_v1(
         **kwargs,
         physical_frame="arena_1_mm",
     )
@@ -248,7 +352,7 @@ def test_current_bbox_layouts_have_explicit_component_contracts(
     geometry_type: str,
     components: tuple[str, ...],
 ) -> None:
-    descriptor = build_coordinate_descriptor(
+    descriptor = build_historical_coordinate_descriptor_v1(
         space_id="detector_normalized_xy",
         geometry_type=geometry_type,
         components=components,
@@ -343,3 +447,562 @@ def test_legacy_labels_resolve_only_with_matching_authoritative_evidence(
     assert "legacy_context_space_mismatch" in {
         issue.code for issue in exc_info.value.issues
     }
+
+
+def test_canonical_v2_round_trip_is_compact_digest_bound_and_deterministic() -> None:
+    descriptor = _canonical_camera_descriptor()
+    payload = descriptor.to_dict()
+
+    assert payload["schema_id"] == COORDINATE_DESCRIPTOR_SCHEMA_ID
+    assert payload["schema_version"] == CANONICAL_COORDINATE_DESCRIPTOR_SCHEMA_VERSION
+    assert set(payload["row_identity"]) == {"record_ref", "record_sha256"}
+    assert set(payload["reference_extent"]["authority"]) == {
+        "record_ref",
+        "record_sha256",
+        "selector",
+    }
+    assert payload["lineage_refs"] == [
+        {
+            "record_ref": "/coordinate_frames/source_camera@pixel_frame_authority",
+            "record_sha256": "1" * 64,
+        }
+    ]
+    assert parse_canonical_coordinate_descriptor(payload) == descriptor
+    assert parse_canonical_coordinate_descriptor(descriptor.canonical_json()) == descriptor
+    assert parse_canonical_coordinate_descriptor(
+        descriptor.canonical_json().encode("utf-8")
+    ) == descriptor
+
+    reordered = {name: payload[name] for name in reversed(tuple(payload))}
+    assert canonical_coordinate_descriptor_v2_digest(reordered) == descriptor.digest()
+    assert canonical_coordinate_descriptor_v2_json(reordered) == descriptor.canonical_json()
+
+
+def test_canonical_pixel_reference_extent_requires_exact_integers() -> None:
+    payload = _canonical_camera_descriptor().to_dict()
+    payload["reference_extent"]["width"] = 4512.5
+    payload["reference_extent"]["height"] = 999.25
+
+    assert "pixel_reference_extent_not_integer" in {
+        issue.code for issue in validate_canonical_coordinate_descriptor(payload)
+    }
+
+
+def test_historical_v1_and_canonical_v2_have_explicit_non_dispatching_apis() -> None:
+    historical = _camera_points_descriptor()
+    assert parse_historical_coordinate_descriptor_v1(historical.to_dict()) == historical
+
+    with pytest.raises(CoordinateDescriptorError) as exc_info:
+        parse_canonical_coordinate_descriptor(historical)
+    assert "canonical_schema_version_required" in {
+        issue.code for issue in exc_info.value.issues
+    }
+
+    with pytest.raises(CoordinateDescriptorError):
+        build_canonical_coordinate_descriptor(
+            profile_id="source_camera_image_px.top_left_y_down.v1",
+            geometry_type="points_xy",
+            components=("x", "y"),
+            component_units=("px", "px"),
+            reference_width=4512,
+            reference_height=4512,
+            reference_authority=_record(
+                "/raw_video/images_full@zarr_metadata",
+                "1",
+            ),
+            reference_selector="shape[-2:]",
+            pixel_convention="pixel_center",
+            row_identity_contract=historical,
+            row_identity_record_ref=(
+                "/analysis/detect_runs/d1@row_identity_contract"
+            ),
+            source_camera_overlay_status=CANONICAL_OVERLAY_DIRECT,
+        )
+
+
+@pytest.mark.parametrize(
+    ("surface", "expected_code"),
+    [
+        ("identity", "record_digest_required"),
+        ("authority", "record_digest_required"),
+        ("lineage", "record_digest_required"),
+    ],
+)
+def test_canonical_v2_rejects_missing_identity_authority_and_lineage_digests(
+    surface: str,
+    expected_code: str,
+) -> None:
+    payload = _canonical_camera_descriptor().to_dict()
+    if surface == "identity":
+        del payload["row_identity"]["record_sha256"]
+    elif surface == "authority":
+        del payload["reference_extent"]["authority"]["record_sha256"]
+    else:
+        del payload["lineage_refs"][0]["record_sha256"]
+
+    codes = {
+        issue.code for issue in validate_canonical_coordinate_descriptor(payload)
+    }
+    assert expected_code in codes
+
+
+def test_transform_required_overlay_names_an_ordered_digest_bound_chain() -> None:
+    contract = _identity_contract()
+    kwargs = dict(
+        profile_id="roi_local_px.top_left_y_down.v1",
+        geometry_type="points_xy",
+        components=("x", "y"),
+        component_units=("px", "px"),
+        reference_width=512,
+        reference_height=512,
+        reference_authority=_record(
+            "/analysis/crop_runs/c1@roi_pixel_frame_authority",
+            "2",
+        ),
+        reference_selector="record",
+        pixel_convention="pixel_center",
+        row_identity_contract=contract,
+        row_identity_record_ref="/analysis/crop_runs/c1@row_identity_contract",
+        source_camera_overlay_status=CANONICAL_OVERLAY_REQUIRES_TRANSFORM,
+        frame_record=CanonicalFrameRecord(
+            kind=PIXEL_FRAME_AUTHORITY_RECORD_KIND,
+            record_ref="/analysis/crop_runs/c1@roi_pixel_frame_authority",
+            record_sha256="2" * 64,
+        ),
+    )
+    with pytest.raises(CoordinateDescriptorError) as missing:
+        build_canonical_coordinate_descriptor(**kwargs)
+    assert "record_refs_invalid" in {issue.code for issue in missing.value.issues}
+
+    descriptor = build_canonical_coordinate_descriptor(
+        **kwargs,
+        overlay_transform_refs=(
+            _record(
+                "/analysis/crop_runs/c1@roi_to_source_image_transform",
+                "3",
+            ),
+        ),
+    )
+    overlay = descriptor.to_dict()["source_camera_overlay"]
+    assert overlay["chain_direction"] == "descriptor_to_source_camera_image"
+    assert overlay["transform_refs"][0]["record_sha256"] == "3" * 64
+
+    payload = descriptor.to_dict()
+    del payload["source_camera_overlay"]["transform_refs"][0]["record_sha256"]
+    assert "record_digest_required" in {
+        issue.code for issue in validate_canonical_coordinate_descriptor(payload)
+    }
+
+
+def test_direct_overlay_is_only_available_to_source_camera_image_profile() -> None:
+    contract = _identity_contract()
+    with pytest.raises(CoordinateDescriptorError) as exc_info:
+        build_canonical_coordinate_descriptor(
+            profile_id="roi_local_px.top_left_y_down.v1",
+            geometry_type="points_xy",
+            components=("x", "y"),
+            component_units=("px", "px"),
+            reference_width=512,
+            reference_height=512,
+            reference_authority=_record(
+                "/analysis/crop_runs/c1/roi_images@zarr_metadata",
+                "2",
+            ),
+            reference_selector="shape[-2:]",
+            pixel_convention="pixel_center",
+            row_identity_contract=contract,
+            row_identity_record_ref="/analysis/crop_runs/c1@row_identity_contract",
+            source_camera_overlay_status=CANONICAL_OVERLAY_DIRECT,
+        )
+    assert "profile_overlay_mismatch" in {
+        issue.code for issue in exc_info.value.issues
+    }
+
+
+def test_physical_mm_requires_exact_digest_bound_frame_calibration_record() -> None:
+    contract = _identity_contract()
+    authority = _record(
+        "/analysis/calibration/arena_1@physical_frame_calibration",
+        "4",
+    )
+    kwargs = dict(
+        profile_id="physical_mm.source_camera_y_down.v1",
+        geometry_type="points_xy",
+        components=("x", "y"),
+        component_units=("mm", "mm"),
+        reference_width=100.0,
+        reference_height=100.0,
+        reference_authority=authority,
+        reference_selector="record",
+        pixel_convention="not_applicable",
+        row_identity_contract=contract,
+        row_identity_record_ref="/analysis/tracks/t1@row_identity_contract",
+        source_camera_overlay_status=CANONICAL_OVERLAY_NOT_SUITABLE,
+    )
+    with pytest.raises(CoordinateDescriptorError) as missing:
+        build_canonical_coordinate_descriptor(**kwargs)
+    assert "frame_record_required" in {issue.code for issue in missing.value.issues}
+
+    mismatched_frame = CanonicalFrameRecord(
+        kind=PHYSICAL_FRAME_CALIBRATION_RECORD_KIND,
+        record_ref="/analysis/calibration/other@physical_frame_calibration",
+        record_sha256="5" * 64,
+    )
+    with pytest.raises(CoordinateDescriptorError) as mismatch:
+        build_canonical_coordinate_descriptor(
+            **kwargs,
+            frame_record=mismatched_frame,
+        )
+    assert "frame_authority_mismatch" in {
+        issue.code for issue in mismatch.value.issues
+    }
+
+    descriptor = build_canonical_coordinate_descriptor(
+        **kwargs,
+        frame_record=CanonicalFrameRecord(
+            kind=PHYSICAL_FRAME_CALIBRATION_RECORD_KIND,
+            record_ref=authority.record_ref,
+            record_sha256=authority.record_sha256,
+        ),
+    )
+    assert descriptor.frame_record is not None
+    assert descriptor.frame_record.kind == PHYSICAL_FRAME_CALIBRATION_RECORD_KIND
+
+
+@pytest.mark.parametrize(
+    "profile_id",
+    (
+        "physical_mm.arena_y_down.v1",
+        "physical_mm.cartesian_y_up.v1",
+    ),
+)
+def test_unsupported_physical_profiles_are_reserved_for_future_transforms(
+    profile_id: str,
+) -> None:
+    assert CANONICAL_COORDINATE_PROFILES[profile_id].publication_status != "available"
+    with pytest.raises(CoordinateDescriptorError) as exc_info:
+        build_canonical_coordinate_descriptor(
+            profile_id=profile_id,
+            geometry_type="points_xy",
+            components=("x", "y"),
+            component_units=("mm", "mm"),
+            reference_width=None,
+            reference_height=None,
+            reference_authority=_record(
+                "/analysis/calibration/reserved@physical_frame_calibration",
+                "4",
+            ),
+            reference_selector="record",
+            pixel_convention="not_applicable",
+            row_identity_contract=_identity_contract(),
+            row_identity_record_ref="/analysis/tracks/t1@row_identity_contract",
+            source_camera_overlay_status=CANONICAL_OVERLAY_NOT_SUITABLE,
+        )
+    assert {issue.code for issue in exc_info.value.issues} == {
+        "profile_publication_unavailable"
+    }
+
+
+def test_fish_body_coordinates_require_the_exact_body_frame_record() -> None:
+    contract = _identity_contract()
+    body = _record(
+        "/analysis/subject_shape_runs/s1@body_frame_contract",
+        "6",
+    )
+    descriptor = build_canonical_coordinate_descriptor(
+        profile_id="fish_anatomical_body_frame.px_anterior_left.v1",
+        geometry_type="points_xy",
+        components=("x", "y"),
+        component_units=("px", "px"),
+        reference_width=None,
+        reference_height=None,
+        reference_authority=body,
+        reference_selector="record",
+        pixel_convention="not_applicable",
+        row_identity_contract=contract,
+        row_identity_record_ref=(
+            "/analysis/subject_shape_runs/s1@row_identity_contract"
+        ),
+        source_camera_overlay_status=CANONICAL_OVERLAY_NOT_SUITABLE,
+        frame_record=CanonicalFrameRecord(
+            kind=FISH_BODY_FRAME_RECORD_KIND,
+            record_ref=body.record_ref,
+            record_sha256=body.record_sha256,
+        ),
+    )
+    assert descriptor.positive_directions.x == "anterior"
+    assert descriptor.positive_directions.y == "anatomical_left"
+
+    payload = descriptor.to_dict()
+    payload["frame_record"]["record_sha256"] = "7" * 64
+    assert {
+        "frame_record_lineage_missing",
+        "frame_authority_mismatch",
+    }.issubset(
+        {
+            issue.code
+            for issue in validate_canonical_coordinate_descriptor(payload)
+        }
+    )
+
+
+def test_px_and_mm_siblings_share_one_external_row_identity_record_exactly() -> None:
+    contract = _identity_contract()
+    identity_ref = "/analysis/tracks/t1@row_identity_contract"
+    pixels = _canonical_camera_descriptor(
+        contract=contract,
+        identity_ref=identity_ref,
+    )
+    physical = _record(
+        "/analysis/calibration/arena_1@physical_frame_calibration",
+        "8",
+    )
+    millimetres = build_canonical_coordinate_descriptor(
+        profile_id="physical_mm.source_camera_y_down.v1",
+        geometry_type="points_xy",
+        components=("x", "y"),
+        component_units=("mm", "mm"),
+        reference_width=100.0,
+        reference_height=100.0,
+        reference_authority=physical,
+        reference_selector="record",
+        pixel_convention="not_applicable",
+        row_identity_contract=contract,
+        row_identity_record_ref=identity_ref,
+        source_camera_overlay_status=CANONICAL_OVERLAY_NOT_SUITABLE,
+        frame_record=CanonicalFrameRecord(
+            kind=PHYSICAL_FRAME_CALIBRATION_RECORD_KIND,
+            record_ref=physical.record_ref,
+            record_sha256=physical.record_sha256,
+        ),
+    )
+
+    assert pixels.row_identity == millimetres.row_identity
+    assert pixels.to_dict()["row_identity"] == millimetres.to_dict()["row_identity"]
+    assert pixels.row_identity.record_sha256 == contract.digest()
+
+
+def test_canonical_unbound_attrs_load_verifies_identity_ref_and_row_count() -> None:
+    contract = _identity_contract()
+    identity_ref = "/analysis/detect_runs/d1@row_identity_contract"
+    descriptor = _canonical_camera_descriptor(
+        contract=contract,
+        identity_ref=identity_ref,
+    )
+
+    class Node:
+        def __init__(self, rows: int) -> None:
+            self.shape = (rows, 2)
+            self.attrs: dict[str, object] = {"keep": True}
+
+    node = Node(contract.leading_dimension)
+    node.attrs.update(canonical_coordinate_descriptor_v2_attrs(descriptor))
+    assert node.attrs["keep"] is True
+    assert load_canonical_coordinate_descriptor_attrs(
+        node.attrs,
+        row_identity_contract=contract,
+        expected_row_identity_record_ref=identity_ref,
+        owner_shape=node.shape,
+    ) == descriptor
+
+    with pytest.raises(CoordinateDescriptorError) as count_error:
+        load_canonical_coordinate_descriptor_attrs(
+            node.attrs,
+            row_identity_contract=contract,
+            expected_row_identity_record_ref=identity_ref,
+            owner_shape=(contract.leading_dimension - 1, 2),
+        )
+    assert "row_identity_count_mismatch" in {
+        issue.code for issue in count_error.value.issues
+    }
+
+    different_contract = _identity_contract((9, 17, 99))
+    with pytest.raises(CoordinateDescriptorError) as digest_error:
+        load_canonical_coordinate_descriptor_attrs(
+            node.attrs,
+            row_identity_contract=different_contract,
+            expected_row_identity_record_ref=identity_ref,
+            owner_shape=node.shape,
+        )
+    assert "row_identity_record_digest_mismatch" in {
+        issue.code for issue in digest_error.value.issues
+    }
+
+    wrong_layout = Node(contract.leading_dimension)
+    wrong_layout.shape = (contract.leading_dimension, 99)
+    with pytest.raises(CoordinateDescriptorError) as layout_error:
+        verify_canonical_coordinate_descriptor_identity(
+            descriptor,
+            row_identity_contract=contract,
+            expected_row_identity_record_ref=identity_ref,
+            owner_shape=wrong_layout.shape,
+        )
+    assert "geometry_owner_shape_mismatch" in {
+        issue.code for issue in layout_error.value.issues
+    }
+
+
+def test_canonical_descriptor_module_exposes_no_unsealed_write_bypass() -> None:
+    assert "stamp_canonical_coordinate_descriptor" not in descriptor_mod.__all__
+    assert not hasattr(descriptor_mod, "stamp_canonical_coordinate_descriptor")
+    for generic_v1_writer in (
+        "build_coordinate_descriptor",
+        "coordinate_descriptor_attrs",
+        "stamp_coordinate_descriptor",
+    ):
+        assert generic_v1_writer not in descriptor_mod.__all__
+        assert not hasattr(descriptor_mod, generic_v1_writer)
+
+
+def test_canonical_attrs_detect_descriptor_tampering() -> None:
+    descriptor = _canonical_camera_descriptor()
+    attrs = canonical_coordinate_descriptor_v2_attrs(descriptor)
+    attrs[COORDINATE_DESCRIPTOR_ATTR]["reference_extent"]["width"] = 640
+
+    with pytest.raises(CoordinateDescriptorError) as exc_info:
+        load_canonical_coordinate_descriptor_attrs(
+            attrs,
+            row_identity_contract=_identity_contract(),
+            expected_row_identity_record_ref=(
+                "/analysis/detect_runs/d1@row_identity_contract"
+            ),
+            owner_shape=(3, 2),
+        )
+    assert "descriptor_digest_mismatch" in {
+        issue.code for issue in exc_info.value.issues
+    }
+
+
+def test_canonical_attrs_require_exact_persisted_mapping_form() -> None:
+    descriptor = _canonical_camera_descriptor()
+    attrs = canonical_coordinate_descriptor_v2_attrs(descriptor)
+
+    class MappingSubclass(dict[str, object]):
+        pass
+
+    attrs[COORDINATE_DESCRIPTOR_ATTR] = MappingSubclass(
+        attrs[COORDINATE_DESCRIPTOR_ATTR]
+    )
+    with pytest.raises(CoordinateDescriptorError) as exc_info:
+        load_canonical_coordinate_descriptor_attrs(
+            attrs,
+            row_identity_contract=_identity_contract(),
+            expected_row_identity_record_ref=(
+                "/analysis/detect_runs/d1@row_identity_contract"
+            ),
+            owner_shape=(3, 2),
+        )
+    assert {issue.code for issue in exc_info.value.issues} == {
+        "descriptor_persisted_form_noncanonical"
+    }
+
+
+@pytest.mark.parametrize(
+    "space_id",
+    ("crimson_viewport_px", "display_px", "renderer_overlay_px"),
+)
+def test_canonical_viewport_and_presentation_spaces_fail_closed(
+    space_id: str,
+) -> None:
+    payload = _canonical_camera_descriptor().to_dict()
+    payload["space_id"] = space_id
+    assert "presentation_space_forbidden" in {
+        issue.code for issue in validate_canonical_coordinate_descriptor(payload)
+    }
+
+
+def test_profile_fields_cannot_be_recombined_into_impossible_semantics() -> None:
+    payload = _canonical_camera_descriptor().to_dict()
+    payload["component_units"] = ["mm", "mm"]
+    payload["origin"] = "physical_frame_origin"
+    payload["positive_directions"]["y"] = "up"
+    payload["reference_extent"]["units"] = "mm"
+
+    codes = {
+        issue.code for issue in validate_canonical_coordinate_descriptor(payload)
+    }
+    assert "profile_component_unit_mismatch" in codes
+    assert "profile_field_mismatch" in codes
+
+    bbox = _canonical_camera_descriptor().to_dict()
+    bbox["geometry_type"] = "bbox_xyxy"
+    bbox["components"] = ["x_min", "y_min", "x_max", "y_max"]
+    bbox["component_units"] = ["px", "px", "px", "px"]
+    assert "geometry_pixel_convention_mismatch" in {
+        issue.code for issue in validate_canonical_coordinate_descriptor(bbox)
+    }
+
+
+def test_roi_and_image_numeric_overlap_never_changes_declared_semantics() -> None:
+    coordinates = np.asarray([[10.0, 20.0], [100.0, 200.0]])
+    contract = build_row_identity_contract(
+        domain=OBSERVATION_INSTANCE_DOMAIN,
+        values=np.asarray([1, 2], dtype=np.uint64),
+    )
+    image = _canonical_camera_descriptor(contract=contract)
+    roi = build_canonical_coordinate_descriptor(
+        profile_id="roi_local_px.top_left_y_down.v1",
+        geometry_type="points_xy",
+        components=("x", "y"),
+        component_units=("px", "px"),
+        reference_width=4512,
+        reference_height=4512,
+        reference_authority=_record(
+            "/analysis/crop_runs/c1@roi_pixel_frame_authority",
+            "9",
+        ),
+        reference_selector="record",
+        pixel_convention="pixel_center",
+        row_identity_contract=contract,
+        row_identity_record_ref="/analysis/detect_runs/d1@row_identity_contract",
+        source_camera_overlay_status=CANONICAL_OVERLAY_REQUIRES_TRANSFORM,
+        overlay_transform_refs=(
+            _record("/analysis/crop_runs/c1@roi_to_source_image_transform", "a"),
+        ),
+        frame_record=CanonicalFrameRecord(
+            kind=PIXEL_FRAME_AUTHORITY_RECORD_KIND,
+            record_ref="/analysis/crop_runs/c1@roi_pixel_frame_authority",
+            record_sha256="9" * 64,
+        ),
+    )
+
+    assert coordinates.shape[0] == contract.leading_dimension
+    assert image.space_id == "source_camera_image_px"
+    assert roi.space_id == "roi_local_px"
+    assert image.digest() != roi.digest()
+
+
+@pytest.mark.parametrize(
+    ("needle", "replacement"),
+    [
+        (
+            '"space_id":"source_camera_image_px"',
+            '"space_id":"roi_local_px","space_id":"source_camera_image_px"',
+        ),
+        (
+            '"selector":"record"',
+            '"selector":"shape[-2:]","selector":"record"',
+        ),
+    ],
+)
+def test_canonical_json_rejects_duplicate_keys_recursively(
+    needle: str,
+    replacement: str,
+) -> None:
+    raw = _canonical_camera_descriptor().canonical_json().replace(
+        needle,
+        replacement,
+        1,
+    )
+    with pytest.raises(CoordinateDescriptorError) as exc_info:
+        parse_canonical_coordinate_descriptor(raw)
+    assert {issue.code for issue in exc_info.value.issues} == {
+        "descriptor_json_invalid"
+    }
+
+
+def test_future_builder_never_emits_legacy_camera_or_texture_labels() -> None:
+    payload = _canonical_camera_descriptor().to_dict()
+    assert "legacy_space_label" not in payload
+    assert payload["space_id"] not in {"camera", "texture"}
+    assert payload["profile_id"] not in {"camera", "texture"}

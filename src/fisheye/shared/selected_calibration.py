@@ -5,14 +5,14 @@ The schema intentionally has one authority and no compatibility fallbacks::
     analysis/stimulus_runs/<stimulus_run>/calibration
       attrs:
         schema_id = "palette.selected_calibration_snapshot"
-        schema_version = 1
+        schema_version = 2
         stimulus_run = <stimulus_run>
         active_camera_id = <camera_id>
         active_camera_calibration_ref =
           "analysis/stimulus_runs/<stimulus_run>/calibration/<camera_id>"
         active_camera_transform_ref =
           "analysis/stimulus_runs/<stimulus_run>/calibration/<camera_id>/homography_matrix"
-        active_camera_transform_sha256 = <directed-transform metadata digest>
+        active_camera_transform_sha256 = <selected transform-source digest>
         selected_calibration_manifest = <canonical manifest mapping>
         selected_calibration_manifest_sha256 = <manifest digest>
 
@@ -30,7 +30,9 @@ The schema intentionally has one authority and no compatibility fallbacks::
           z_eff_mm = <optional positive float>
 
         homography_matrix
-          attrs populated by ``stamp_directed_homography``
+          attrs:
+            selected_calibration_transform_v2 = <direction-explicit source record>
+            selected_calibration_transform_v2_sha256 = <record digest>
 
     analysis/stimulus_runs/<stimulus_run>/display_snapshot
       attrs:
@@ -55,7 +57,7 @@ root Zarr metadata.
 The manifest binds these camera/display fields, transform ref/digest, exact
 numeric and YAML matrix identities, their equality, the H5-declared
 source/destination frames, axes, origin, image space, camera and canvas, plus
-calibration-artifact lineage in one canonical digest.  Selected-calibration v1
+calibration-artifact lineage in one canonical digest.  Selected-calibration v2
 admits only source-camera-image to final stimulus-canvas direction.  Native
 dimensions and calibration scalars come only from a digest-bound, exact
 ``active_camera_id`` selection in ``/calibration_snapshot/arena_config_json``;
@@ -64,10 +66,11 @@ as the declared reciprocal of the bound camera pixels-per-mm value.
 
 The writer helper ``stamp_selected_calibration_snapshot`` preflights every
 mutation target and validates sealed, builder-produced camera, display, and
-homography source evidence before stamping any attrs.  Attr writes use exact
-pre-call snapshots and roll every target back if any write fails; an incomplete
-rollback is reported explicitly and never returned as success.  It does not
-open an H5 file.  An
+homography source evidence before stamping any attrs.  Only exact built-in
+``dict`` or exact Zarr ``Attributes`` stores are admitted.  Attr writes use
+exact pre-call snapshots and roll every target back if any write fails; an
+incomplete rollback is reported explicitly and never returned as success.  It
+does not open an H5 file.  An
 importer must call the three ``build_selected_*_source_evidence_from_h5_values``
 helpers with values read from the exact selected H5 nodes before any Zarr
 mutation.
@@ -87,23 +90,37 @@ from typing import Any, Mapping
 import numpy as np
 import yaml
 
+from fisheye.shared.archive_identity import (
+    ArchiveIdentity,
+    ArchiveIdentityError,
+    require_same_archive,
+)
 from fisheye.shared.directed_transform import (
-    BoundDirectedHomography,
-    DirectedTransformError,
     TransformReferenceExtent,
-    build_directed_homography,
-    directed_homography_attrs,
     homography_matrix_sha256,
-    load_bound_directed_homography,
+)
+from fisheye.shared.pixel_frame_authority import (
+    PROJECTIVE_XY_DIRECT_V1,
+    PixelFrameAuthorityError,
+    require_trusted_coordinate_attrs,
 )
 
 
 SELECTED_CALIBRATION_SCHEMA_ID = "palette.selected_calibration_snapshot"
-SELECTED_CALIBRATION_SCHEMA_VERSION = 1
+SELECTED_CALIBRATION_SCHEMA_VERSION = 2
 CAMERA_CALIBRATION_SCHEMA_ID = "palette.camera_calibration_snapshot"
 CAMERA_CALIBRATION_SCHEMA_VERSION = 1
 SELECTED_CALIBRATION_MANIFEST_SCHEMA_ID = "palette.selected_calibration_manifest"
-SELECTED_CALIBRATION_MANIFEST_SCHEMA_VERSION = 1
+SELECTED_CALIBRATION_MANIFEST_SCHEMA_VERSION = 2
+SELECTED_CALIBRATION_TRANSFORM_SCHEMA_ID = (
+    "palette.selected_calibration_transform_source"
+)
+SELECTED_CALIBRATION_TRANSFORM_SCHEMA_VERSION = 2
+SELECTED_CALIBRATION_TRANSFORM_ATTR = "selected_calibration_transform_v2"
+SELECTED_CALIBRATION_TRANSFORM_DIGEST_ATTR = (
+    "selected_calibration_transform_v2_sha256"
+)
+SELECTED_CALIBRATION_TRANSFORM_DIRECTION = "source_to_target"
 SOURCE_HOMOGRAPHY_SEMANTICS_SCHEMA_ID = (
     "palette.source_homography_semantics"
 )
@@ -148,6 +165,8 @@ SOURCE_DISPLAY_DATASET_PATH = "/display_snapshot/selected_output_block"
 SOURCE_DISPLAY_ATTRS_DIGEST_CANONICALIZATION = "canonical_json_sort_keys_v1"
 SOURCE_DISPLAY_EVIDENCE_ATTR = "source_display_evidence"
 SOURCE_DISPLAY_EVIDENCE_DIGEST_SUFFIX = "_sha256"
+SOURCE_CAMERA_EVIDENCE_ATTR = "source_camera_evidence"
+SOURCE_CAMERA_EVIDENCE_DIGEST_SUFFIX = "_sha256"
 SOURCE_ARENA_CONFIG_DATASET_PATH = "/calibration_snapshot/arena_config_json"
 SOURCE_ARENA_CONFIG_DIGEST_CANONICALIZATION = "utf8_bytes_v1"
 SOURCE_CAMERA_RECORD_DIGEST_CANONICALIZATION = "canonical_json_sort_keys_v1"
@@ -185,6 +204,7 @@ _SELECTED_OUTPUT_HEADER_RE = re.compile(
 # public constructor with all of the base fields.  This private, process-local
 # token is an API-misuse boundary (not a hostile-code security mechanism).
 _VERIFIED_SOURCE_EVIDENCE_SEAL = object()
+_BOUND_SELECTED_CALIBRATION_SEAL = object()
 
 
 class _UniqueKeySafeLoader(yaml.SafeLoader):
@@ -411,7 +431,7 @@ _SELECTED_HOMOGRAPHY_SOURCE_FIELDS = frozenset(
 )
 
 
-class SelectedCalibrationError(DirectedTransformError):
+class SelectedCalibrationError(ValueError):
     """Raised when a selected calibration snapshot is absent or incoherent."""
 
 
@@ -829,6 +849,93 @@ class SourceArtifactLineage:
 
 
 @dataclass(frozen=True)
+class SelectedCalibrationTransformSource:
+    """Direction-explicit imported homography source, independent of frame refs.
+
+    This is deliberately not a ``directed_transform_v2`` record.  Typed source
+    and canvas frame authorities are created *from* the selected snapshot, so
+    embedding those authorities here would make the evidence graph circular.
+    The later transform publisher binds this exact source record to both typed
+    endpoints and emits the canonical ``directed_transform_v2`` record.
+    """
+
+    transform_id: str
+    from_space_id: str
+    to_space_id: str
+    source_reference_extent: TransformReferenceExtent
+    target_reference_extent: TransformReferenceExtent
+    payload_ref: str
+    payload_sha256: str
+    camera_id: str
+    calibration_ref: str
+    source_homography_record_ref: str
+    source_homography_record_sha256: str
+
+    @property
+    def direction(self) -> str:
+        return SELECTED_CALIBRATION_TRANSFORM_DIRECTION
+
+    @property
+    def sampling_formula(self) -> str:
+        return PROJECTIVE_XY_DIRECT_V1
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_id": SELECTED_CALIBRATION_TRANSFORM_SCHEMA_ID,
+            "schema_version": SELECTED_CALIBRATION_TRANSFORM_SCHEMA_VERSION,
+            "transform_id": self.transform_id,
+            "kind": "homography_source",
+            "from_space_id": self.from_space_id,
+            "to_space_id": self.to_space_id,
+            "direction": self.direction,
+            "sampling_formula": self.sampling_formula,
+            "source_reference_extent": self.source_reference_extent.to_dict(),
+            "target_reference_extent": self.target_reference_extent.to_dict(),
+            "payload": {
+                "record_ref": self.payload_ref,
+                "record_sha256": self.payload_sha256,
+                "selector": "array_values",
+            },
+            "camera_id": self.camera_id,
+            "calibration_ref": self.calibration_ref,
+            "source_homography_evidence": {
+                "record_ref": self.source_homography_record_ref,
+                "record_sha256": self.source_homography_record_sha256,
+            },
+            "canonicalization": "canonical_json_sort_keys_v1",
+        }
+
+    def digest(self) -> str:
+        return _canonical_json_sha256(
+            self.to_dict(), field_name="selected_calibration_transform"
+        )
+
+
+@dataclass(frozen=True)
+class BoundSelectedCalibrationHomography:
+    """Persisted selected transform source plus an immutable matrix snapshot."""
+
+    record: SelectedCalibrationTransformSource
+    array_path: str
+    matrix_sha256: str
+    _matrix: np.ndarray = field(repr=False, compare=False)
+
+    @property
+    def transform(self) -> SelectedCalibrationTransformSource:
+        return self.record
+
+    @property
+    def transform_sha256(self) -> str:
+        return self.record.digest()
+
+    @property
+    def matrix(self) -> np.ndarray:
+        value = np.array(self._matrix, copy=True, order="C")
+        value.setflags(write=False)
+        return value
+
+
+@dataclass(frozen=True)
 class SelectedCalibrationManifest:
     """Canonical digest-bound identity for a selected calibration snapshot."""
 
@@ -867,14 +974,20 @@ class SelectedCalibrationManifest:
         return selected_calibration_manifest_digest(self)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class SelectedCalibrationSnapshot:
-    """One coherent selected-camera calibration with no inherited fields."""
+    """Sealed, live-verifiable persisted selected-camera calibration.
+
+    ``VerifiedSelected*`` values authorize the one-time H5 import only.  This
+    object is the fresh-process reader authority: it retains the exact Zarr
+    nodes and re-runs the complete persisted snapshot loader whenever a
+    downstream frame or transform authority consumes it.
+    """
 
     stimulus_run: str
     paths: SelectedCalibrationPaths
     camera_id: str
-    homography: BoundDirectedHomography
+    homography: BoundSelectedCalibrationHomography
     source_reference_extent: TransformReferenceExtent
     target_reference_extent: TransformReferenceExtent
     display_output_name: str
@@ -886,6 +999,118 @@ class SelectedCalibrationSnapshot:
     z_eff_mm: float | None
     manifest: SelectedCalibrationManifest
     manifest_sha256: str
+    _archive_identity: ArchiveIdentity = field(repr=False, compare=False)
+    _root_node: Any = field(repr=False, compare=False)
+    _calibration_node: Any = field(repr=False, compare=False)
+    _camera_node: Any = field(repr=False, compare=False)
+    _display_node: Any = field(repr=False, compare=False)
+    _matrix_node: Any = field(repr=False, compare=False)
+    _seal: object = field(repr=False, compare=False)
+
+    def __init__(
+        self,
+        *,
+        stimulus_run: str,
+        paths: SelectedCalibrationPaths,
+        camera_id: str,
+        homography: BoundSelectedCalibrationHomography,
+        source_reference_extent: TransformReferenceExtent,
+        target_reference_extent: TransformReferenceExtent,
+        display_output_name: str,
+        display_output_geometry: str,
+        display_output_transform_token: str,
+        pixels_per_mm_camera: float | None,
+        pixel_to_mm: float | None,
+        pixels_per_mm_projector: float | None,
+        z_eff_mm: float | None,
+        manifest: SelectedCalibrationManifest,
+        manifest_sha256: str,
+        archive: ArchiveIdentity,
+        root_node: Any,
+        calibration_node: Any,
+        camera_node: Any,
+        display_node: Any,
+        matrix_node: Any,
+        _verification_seal: object | None = None,
+    ) -> None:
+        if _verification_seal is not _BOUND_SELECTED_CALIBRATION_SEAL:
+            raise SelectedCalibrationError(
+                "Selected calibration snapshots cannot be constructed directly."
+            )
+        for name, value in (
+            ("stimulus_run", stimulus_run),
+            ("paths", paths),
+            ("camera_id", camera_id),
+            ("homography", homography),
+            ("source_reference_extent", source_reference_extent),
+            ("target_reference_extent", target_reference_extent),
+            ("display_output_name", display_output_name),
+            ("display_output_geometry", display_output_geometry),
+            ("display_output_transform_token", display_output_transform_token),
+            ("pixels_per_mm_camera", pixels_per_mm_camera),
+            ("pixel_to_mm", pixel_to_mm),
+            ("pixels_per_mm_projector", pixels_per_mm_projector),
+            ("z_eff_mm", z_eff_mm),
+            ("manifest", manifest),
+            ("manifest_sha256", manifest_sha256),
+        ):
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "_archive_identity", archive)
+        object.__setattr__(self, "_root_node", root_node)
+        object.__setattr__(self, "_calibration_node", calibration_node)
+        object.__setattr__(self, "_camera_node", camera_node)
+        object.__setattr__(self, "_display_node", display_node)
+        object.__setattr__(self, "_matrix_node", matrix_node)
+        object.__setattr__(self, "_seal", _verification_seal)
+
+    @property
+    def archive_identity(self) -> ArchiveIdentity:
+        return self._archive_identity
+
+    @property
+    def manifest_record_ref(self) -> str:
+        return f"/{self.paths.calibration_path}@{SELECTED_CALIBRATION_MANIFEST_ATTR}"
+
+    @property
+    def camera_record_ref(self) -> str:
+        return f"/{self.paths.camera_calibration_path}@{SOURCE_CAMERA_EVIDENCE_ATTR}"
+
+    @property
+    def display_record_ref(self) -> str:
+        return f"/{self.paths.display_snapshot_path}@{SOURCE_DISPLAY_EVIDENCE_ATTR}"
+
+    @property
+    def homography_record_ref(self) -> str:
+        return f"/{self.paths.homography_array_path}@{SOURCE_HOMOGRAPHY_EVIDENCE_ATTR}"
+
+    def assert_verified(self) -> None:
+        if self._seal is not _BOUND_SELECTED_CALIBRATION_SEAL:
+            raise SelectedCalibrationError(
+                "Selected calibration snapshot is not sealed persisted evidence."
+            )
+        current = load_selected_calibration_snapshot(
+            self._root_node,
+            stimulus_run=self.stimulus_run,
+            expected_camera_id=self.camera_id,
+            expected_from_space_id=CANONICAL_HOMOGRAPHY_FROM_SPACE_ID,
+            expected_to_space_id=CANONICAL_HOMOGRAPHY_TO_SPACE_ID,
+            expected_source_reference_extent=self.source_reference_extent,
+            expected_target_reference_extent=self.target_reference_extent,
+        )
+        if (
+            current.archive_identity != self.archive_identity
+            or current.paths != self.paths
+            or current.manifest != self.manifest
+            or current.manifest_sha256 != self.manifest_sha256
+            or current.homography.array_path != self.homography.array_path
+            or current.homography.matrix_sha256 != self.homography.matrix_sha256
+            or current.homography.transform_sha256
+            != self.homography.transform_sha256
+            or not np.array_equal(current.homography.matrix, self.homography.matrix)
+        ):
+            raise SelectedCalibrationError(
+                "Persisted selected calibration changed after binding."
+            )
 
 
 def _required_text(value: Any, *, field_name: str) -> str:
@@ -894,6 +1119,15 @@ def _required_text(value: Any, *, field_name: str) -> str:
             f"{field_name} must be a non-empty string without surrounding whitespace."
         )
     return value
+
+
+def _required_sha256(value: Any, *, field_name: str) -> str:
+    text = _required_text(value, field_name=field_name)
+    if _SHA256_RE.fullmatch(text) is None:
+        raise SelectedCalibrationError(
+            f"{field_name} must be a lowercase 64-character SHA-256 digest."
+        )
+    return text
 
 
 def _exact_mapping(
@@ -933,6 +1167,184 @@ def _canonical_json_sha256(value: Any, *, field_name: str) -> str:
     return hashlib.sha256(
         _canonical_json(value, field_name=field_name).encode("utf-8")
     ).hexdigest()
+
+
+def _exact_json_equal(left: Any, right: Any) -> bool:
+    """Compare persisted JSON values without bool/int or container coercion."""
+
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        return (
+            type(left) is type(right)
+            and set(left) == set(right)
+            and all(_exact_json_equal(left[name], right[name]) for name in left)
+        )
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(
+            _exact_json_equal(a, b) for a, b in zip(left, right, strict=True)
+        )
+    return type(left) is type(right) and left == right
+
+
+def _parse_selected_transform_extent(
+    value: Any,
+    *,
+    field_name: str,
+) -> TransformReferenceExtent:
+    payload = _exact_mapping(
+        value,
+        fields=frozenset({"width", "height", "units", "authority"}),
+        field_name=field_name,
+    )
+    if payload["units"] != "px":
+        raise SelectedCalibrationError(f"{field_name}.units must be 'px'.")
+    return TransformReferenceExtent(
+        width=_positive_int(payload["width"], field_name=f"{field_name}.width"),
+        height=_positive_int(payload["height"], field_name=f"{field_name}.height"),
+        units="px",
+        authority=_required_text(
+            payload["authority"], field_name=f"{field_name}.authority"
+        ),
+    )
+
+
+def parse_selected_calibration_transform_source(
+    value: Any,
+) -> SelectedCalibrationTransformSource:
+    if isinstance(value, SelectedCalibrationTransformSource):
+        value = value.to_dict()
+    payload = _exact_mapping(
+        value,
+        fields=frozenset(
+            {
+                "schema_id",
+                "schema_version",
+                "transform_id",
+                "kind",
+                "from_space_id",
+                "to_space_id",
+                "direction",
+                "sampling_formula",
+                "source_reference_extent",
+                "target_reference_extent",
+                "payload",
+                "camera_id",
+                "calibration_ref",
+                "source_homography_evidence",
+                "canonicalization",
+            }
+        ),
+        field_name="selected_calibration_transform",
+    )
+    if (
+        payload["schema_id"] != SELECTED_CALIBRATION_TRANSFORM_SCHEMA_ID
+        or type(payload["schema_version"]) is not int
+        or payload["schema_version"]
+        != SELECTED_CALIBRATION_TRANSFORM_SCHEMA_VERSION
+        or payload["kind"] != "homography_source"
+        or payload["direction"] != SELECTED_CALIBRATION_TRANSFORM_DIRECTION
+        or payload["sampling_formula"] != PROJECTIVE_XY_DIRECT_V1
+        or payload["canonicalization"] != "canonical_json_sort_keys_v1"
+    ):
+        raise SelectedCalibrationError(
+            "Selected calibration transform source schema/direction/formula is invalid."
+        )
+    if (
+        payload["from_space_id"] != CANONICAL_HOMOGRAPHY_FROM_SPACE_ID
+        or payload["to_space_id"] != CANONICAL_HOMOGRAPHY_TO_SPACE_ID
+    ):
+        raise SelectedCalibrationError(
+            "Selected calibration transform source has unsupported direction."
+        )
+    payload_pointer = _exact_mapping(
+        payload["payload"],
+        fields=frozenset({"record_ref", "record_sha256", "selector"}),
+        field_name="selected_calibration_transform.payload",
+    )
+    payload_ref = _required_text(
+        payload_pointer["record_ref"],
+        field_name="selected_calibration_transform.payload.record_ref",
+    )
+    if not payload_ref.startswith("/") or not payload_ref.endswith("@array_values"):
+        raise SelectedCalibrationError(
+            "Selected calibration transform payload must name exact array values."
+        )
+    if payload_pointer["selector"] != "array_values":
+        raise SelectedCalibrationError(
+            "Selected calibration transform payload selector is invalid."
+        )
+    source_pointer = _exact_mapping(
+        payload["source_homography_evidence"],
+        fields=frozenset({"record_ref", "record_sha256"}),
+        field_name="selected_calibration_transform.source_homography_evidence",
+    )
+    source_ref = _required_text(
+        source_pointer["record_ref"],
+        field_name="source_homography_evidence.record_ref",
+    )
+    if not source_ref.startswith("/") or not source_ref.endswith(
+        f"@{SOURCE_HOMOGRAPHY_EVIDENCE_ATTR}"
+    ):
+        raise SelectedCalibrationError(
+            "Selected calibration transform must bind exact persisted homography evidence."
+        )
+    return SelectedCalibrationTransformSource(
+        transform_id=_required_text(payload["transform_id"], field_name="transform_id"),
+        from_space_id=CANONICAL_HOMOGRAPHY_FROM_SPACE_ID,
+        to_space_id=CANONICAL_HOMOGRAPHY_TO_SPACE_ID,
+        source_reference_extent=_parse_selected_transform_extent(
+            payload["source_reference_extent"],
+            field_name="source_reference_extent",
+        ),
+        target_reference_extent=_parse_selected_transform_extent(
+            payload["target_reference_extent"],
+            field_name="target_reference_extent",
+        ),
+        payload_ref=payload_ref,
+        payload_sha256=_required_sha256(
+            payload_pointer["record_sha256"], field_name="payload.record_sha256"
+        ),
+        camera_id=_required_text(payload["camera_id"], field_name="camera_id"),
+        calibration_ref=_required_text(
+            payload["calibration_ref"], field_name="calibration_ref"
+        ),
+        source_homography_record_ref=source_ref,
+        source_homography_record_sha256=_required_sha256(
+            source_pointer["record_sha256"],
+            field_name="source_homography_evidence.record_sha256",
+        ),
+    )
+
+
+def selected_calibration_transform_source_attrs(
+    value: Any,
+) -> dict[str, Any]:
+    record = parse_selected_calibration_transform_source(value)
+    return {
+        SELECTED_CALIBRATION_TRANSFORM_ATTR: record.to_dict(),
+        SELECTED_CALIBRATION_TRANSFORM_DIGEST_ATTR: record.digest(),
+    }
+
+
+def load_selected_calibration_transform_source_attrs(
+    attrs: Mapping[str, Any],
+) -> SelectedCalibrationTransformSource:
+    if not isinstance(attrs, Mapping):
+        raise SelectedCalibrationError("Selected transform attrs must be a mapping.")
+    raw = attrs.get(SELECTED_CALIBRATION_TRANSFORM_ATTR)
+    record = parse_selected_calibration_transform_source(raw)
+    if not isinstance(raw, Mapping) or not _exact_json_equal(raw, record.to_dict()):
+        raise SelectedCalibrationError(
+            "Persisted selected transform source is not its exact canonical mapping."
+        )
+    digest = _required_sha256(
+        attrs.get(SELECTED_CALIBRATION_TRANSFORM_DIGEST_ATTR),
+        field_name=SELECTED_CALIBRATION_TRANSFORM_DIGEST_ATTR,
+    )
+    if digest != record.digest():
+        raise SelectedCalibrationError(
+            "Persisted selected transform source digest is stale."
+        )
+    return record
 
 
 def _exact_utf8_payload(value: Any, *, field_name: str) -> tuple[bytes, str]:
@@ -1150,7 +1562,7 @@ def parse_selected_display_source_evidence(
     if payload["schema_id"] != SELECTED_DISPLAY_SOURCE_SCHEMA_ID:
         raise SelectedCalibrationError("Unsupported selected-display source schema_id.")
     version = payload["schema_version"]
-    if isinstance(version, bool) or version != SELECTED_DISPLAY_SOURCE_SCHEMA_VERSION:
+    if type(version) is not int or version != SELECTED_DISPLAY_SOURCE_SCHEMA_VERSION:
         raise SelectedCalibrationError(
             "Unsupported selected-display source schema_version."
         )
@@ -1348,9 +1760,12 @@ def load_selected_display_evidence_attrs(
     )
     if SOURCE_DISPLAY_EVIDENCE_ATTR not in attrs or digest_name not in attrs:
         raise SelectedCalibrationError("Persisted source-display evidence is missing.")
-    evidence = parse_selected_display_source_evidence(
-        attrs[SOURCE_DISPLAY_EVIDENCE_ATTR]
-    )
+    raw = attrs[SOURCE_DISPLAY_EVIDENCE_ATTR]
+    evidence = parse_selected_display_source_evidence(raw)
+    if not isinstance(raw, Mapping) or not _exact_json_equal(raw, evidence.to_dict()):
+        raise SelectedCalibrationError(
+            "Persisted source-display evidence is not its exact canonical mapping."
+        )
     digest = _required_text(attrs[digest_name], field_name=digest_name)
     if _SHA256_RE.fullmatch(digest) is None or digest != evidence.digest():
         raise SelectedCalibrationError(
@@ -1544,7 +1959,7 @@ def parse_selected_homography_source_evidence(
             "Unsupported selected-homography source schema_id."
         )
     version = payload["schema_version"]
-    if isinstance(version, bool) or version != SELECTED_HOMOGRAPHY_SOURCE_SCHEMA_VERSION:
+    if type(version) is not int or version != SELECTED_HOMOGRAPHY_SOURCE_SCHEMA_VERSION:
         raise SelectedCalibrationError(
             "Unsupported selected-homography source schema_version."
         )
@@ -1858,9 +2273,12 @@ def load_selected_homography_evidence_attrs(
     )
     if SOURCE_HOMOGRAPHY_EVIDENCE_ATTR not in attrs or digest_name not in attrs:
         raise SelectedCalibrationError("Persisted source-homography evidence is missing.")
-    evidence = parse_selected_homography_source_evidence(
-        attrs[SOURCE_HOMOGRAPHY_EVIDENCE_ATTR]
-    )
+    raw = attrs[SOURCE_HOMOGRAPHY_EVIDENCE_ATTR]
+    evidence = parse_selected_homography_source_evidence(raw)
+    if not isinstance(raw, Mapping) or not _exact_json_equal(raw, evidence.to_dict()):
+        raise SelectedCalibrationError(
+            "Persisted source-homography evidence is not its exact canonical mapping."
+        )
     digest = _required_text(attrs[digest_name], field_name=digest_name)
     if _SHA256_RE.fullmatch(digest) is None or digest != evidence.digest():
         raise SelectedCalibrationError(
@@ -2076,7 +2494,7 @@ def parse_selected_camera_source_evidence(
     if payload["schema_id"] != SELECTED_CAMERA_SOURCE_SCHEMA_ID:
         raise SelectedCalibrationError("Unsupported selected-camera source schema_id.")
     version = payload["schema_version"]
-    if isinstance(version, bool) or version != SELECTED_CAMERA_SOURCE_SCHEMA_VERSION:
+    if type(version) is not int or version != SELECTED_CAMERA_SOURCE_SCHEMA_VERSION:
         raise SelectedCalibrationError(
             "Unsupported selected-camera source schema_version."
         )
@@ -2424,6 +2842,47 @@ def camera_calibration_attrs(
     return payload
 
 
+def selected_camera_evidence_attrs(
+    value: SelectedCameraSourceEvidence,
+) -> dict[str, Any]:
+    """Persist the exact selected-camera import record beside its scalars."""
+
+    if not isinstance(value, SelectedCameraSourceEvidence):
+        raise SelectedCalibrationError("Camera evidence must be parsed.")
+    evidence = parse_selected_camera_source_evidence(value)
+    mapping = evidence.to_dict()
+    return {
+        SOURCE_CAMERA_EVIDENCE_ATTR: mapping,
+        f"{SOURCE_CAMERA_EVIDENCE_ATTR}{SOURCE_CAMERA_EVIDENCE_DIGEST_SUFFIX}": (
+            _canonical_json_sha256(mapping, field_name="source_camera")
+        ),
+    }
+
+
+def load_selected_camera_evidence_attrs(
+    attrs: Mapping[str, Any],
+) -> SelectedCameraSourceEvidence:
+    digest_name = (
+        f"{SOURCE_CAMERA_EVIDENCE_ATTR}{SOURCE_CAMERA_EVIDENCE_DIGEST_SUFFIX}"
+    )
+    if SOURCE_CAMERA_EVIDENCE_ATTR not in attrs or digest_name not in attrs:
+        raise SelectedCalibrationError("Persisted source-camera evidence is missing.")
+    raw = attrs[SOURCE_CAMERA_EVIDENCE_ATTR]
+    evidence = parse_selected_camera_source_evidence(raw)
+    canonical = evidence.to_dict()
+    if not isinstance(raw, Mapping) or not _exact_json_equal(raw, canonical):
+        raise SelectedCalibrationError(
+            "Persisted source-camera evidence is not its exact canonical mapping."
+        )
+    digest = _required_text(attrs[digest_name], field_name=digest_name)
+    expected = _canonical_json_sha256(canonical, field_name="source_camera")
+    if _SHA256_RE.fullmatch(digest) is None or digest != expected:
+        raise SelectedCalibrationError(
+            "Persisted source-camera evidence digest does not match."
+        )
+    return evidence
+
+
 def _require_attrs(node: Any, *, path: str) -> Mapping[str, Any]:
     attrs = getattr(node, "attrs", None)
     if not isinstance(attrs, Mapping):
@@ -2451,7 +2910,7 @@ def _require_schema(
             f"{path!r} has unsupported or missing schema_id; expected {schema_id!r}."
         )
     version = attrs.get("schema_version")
-    if isinstance(version, bool) or version != schema_version:
+    if type(version) is not int or version != schema_version:
         raise SelectedCalibrationError(
             f"{path!r} has unsupported or missing schema_version; "
             f"expected {schema_version}."
@@ -2695,7 +3154,7 @@ def parse_source_homography_semantics(
         )
     version = payload["schema_version"]
     if (
-        isinstance(version, bool)
+        type(version) is not int
         or version != SOURCE_HOMOGRAPHY_SEMANTICS_SCHEMA_VERSION
     ):
         raise SelectedCalibrationError(
@@ -2928,7 +3387,7 @@ def parse_selected_calibration_manifest(value: Any) -> SelectedCalibrationManife
         raise SelectedCalibrationError("Unsupported selected-calibration manifest schema_id.")
     version = payload["schema_version"]
     if (
-        isinstance(version, bool)
+        type(version) is not int
         or version != SELECTED_CALIBRATION_MANIFEST_SCHEMA_VERSION
     ):
         raise SelectedCalibrationError(
@@ -3156,9 +3615,12 @@ def load_selected_calibration_manifest_attrs(
         raise SelectedCalibrationError(
             "Selected-calibration manifest digest attr is missing."
         )
-    manifest = parse_selected_calibration_manifest(
-        attrs[SELECTED_CALIBRATION_MANIFEST_ATTR]
-    )
+    raw = attrs[SELECTED_CALIBRATION_MANIFEST_ATTR]
+    manifest = parse_selected_calibration_manifest(raw)
+    if not isinstance(raw, Mapping) or not _exact_json_equal(raw, manifest.to_dict()):
+        raise SelectedCalibrationError(
+            "Persisted selected-calibration manifest is not its exact canonical mapping."
+        )
     stored_digest = _required_text(attrs[digest_name], field_name=digest_name)
     if _SHA256_RE.fullmatch(stored_digest) is None:
         raise SelectedCalibrationError("Selected-calibration manifest digest is invalid.")
@@ -3178,10 +3640,10 @@ def _require_exact_node_path(node: Any, *, expected_path: str) -> None:
 
 
 def _require_mutable_attrs(node: Any, *, path: str) -> Any:
-    attrs = getattr(node, "attrs", None)
-    if attrs is None or not hasattr(attrs, "update") or not hasattr(attrs, "__delitem__"):
-        raise SelectedCalibrationError(f"{path!r} must expose mutable attrs.")
-    return attrs
+    try:
+        return require_trusted_coordinate_attrs(node, label=path)
+    except PixelFrameAuthorityError as exc:
+        raise SelectedCalibrationError(str(exc)) from exc
 
 
 def _require_sealed_source_evidence(
@@ -3198,6 +3660,55 @@ def _require_sealed_source_evidence(
         raise SelectedCalibrationError(
             f"Stamper requires builder-validated {evidence_name} source evidence."
         )
+
+
+def require_verified_selected_camera_source_evidence(
+    value: Any,
+) -> VerifiedSelectedCameraSourceEvidence:
+    """Require exact builder-produced camera evidence and reject copied forgeries.
+
+    The seal is deliberately process-local.  Persisted mappings remain useful
+    lineage, but only the importer that read the exact external H5 nodes can
+    produce this live writer authority.  In particular, ``copy.deepcopy`` does
+    not preserve the private seal.
+    """
+
+    _require_sealed_source_evidence(
+        value,
+        verified_type=VerifiedSelectedCameraSourceEvidence,
+        evidence_name="selected-camera",
+    )
+    # Reparse to ensure mutable nested mappings have not changed since build.
+    parse_selected_camera_source_evidence(value)
+    return value
+
+
+def require_verified_selected_display_source_evidence(
+    value: Any,
+) -> VerifiedSelectedDisplaySourceEvidence:
+    """Require exact builder-produced selected-display evidence."""
+
+    _require_sealed_source_evidence(
+        value,
+        verified_type=VerifiedSelectedDisplaySourceEvidence,
+        evidence_name="selected-display",
+    )
+    parse_selected_display_source_evidence(value)
+    return value
+
+
+def require_verified_selected_homography_source_evidence(
+    value: Any,
+) -> VerifiedSelectedHomographySourceEvidence:
+    """Require exact builder-produced homography evidence."""
+
+    _require_sealed_source_evidence(
+        value,
+        verified_type=VerifiedSelectedHomographySourceEvidence,
+        evidence_name="selected-homography",
+    )
+    parse_selected_homography_source_evidence(value)
+    return value
 
 
 def _snapshot_attrs_for_transaction(
@@ -3227,11 +3738,24 @@ def _restore_attrs_after_failed_transaction(
                 if name not in snapshot:
                     del attrs[name]
             attrs.update(copy.deepcopy(snapshot))
-            if dict(attrs) != snapshot:
+            if not _exact_json_equal(dict(attrs), snapshot):
                 raise RuntimeError("restored attrs differ from the pre-call snapshot")
         except Exception as exc:  # pragma: no cover - exercised by hostile fakes
             failures.append(f"{path}: {type(exc).__name__}: {exc}")
     return tuple(failures)
+
+
+def _expected_attrs_after_update(
+    snapshot: Mapping[str, Any],
+    update: Mapping[str, Any],
+    *,
+    delete: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    expected = copy.deepcopy(dict(snapshot))
+    for name in delete:
+        expected.pop(name, None)
+    expected.update(copy.deepcopy(dict(update)))
+    return expected
 
 
 def stamp_selected_calibration_snapshot(
@@ -3240,13 +3764,14 @@ def stamp_selected_calibration_snapshot(
     display_snapshot_group: Any,
     homography_array: Any,
     *,
+    root_node: Any,
     stimulus_run: str,
     camera_id: str,
     source_camera: VerifiedSelectedCameraSourceEvidence,
     source_display: VerifiedSelectedDisplaySourceEvidence,
     source_homography: VerifiedSelectedHomographySourceEvidence,
-) -> SelectedCalibrationManifest:
-    """Derive and stamp one snapshot from three builder-verified H5 sources."""
+) -> SelectedCalibrationSnapshot:
+    """Derive, transactionally stamp, and fully reload one selected snapshot."""
 
     paths = selected_calibration_paths(
         stimulus_run=stimulus_run,
@@ -3259,6 +3784,18 @@ def stamp_selected_calibration_snapshot(
         (homography_array, paths.homography_array_path),
     ):
         _require_exact_node_path(node, expected_path=expected_path)
+    try:
+        require_same_archive(
+            root_node,
+            calibration_group,
+            camera_group,
+            display_snapshot_group,
+            homography_array,
+        )
+    except ArchiveIdentityError as exc:
+        raise SelectedCalibrationError(
+            "Selected-calibration mutation targets must belong to one exact archive."
+        ) from exc
 
     # Preflight every mutation target before validating any remaining evidence.
     # No attribute deletion or update may happen before all four targets pass.
@@ -3278,6 +3815,14 @@ def stamp_selected_calibration_snapshot(
         homography_array,
         path=paths.homography_array_path,
     )
+    historical_transform_attrs = {
+        "directed_transform",
+        "directed_transform_sha256",
+    } & set(homography_attrs)
+    if historical_transform_attrs:
+        raise SelectedCalibrationError(
+            "Future selected-calibration publication refuses historical directed-transform-v1 attrs; use an explicit migration path."
+        )
     _require_sealed_source_evidence(
         source_camera,
         verified_type=VerifiedSelectedCameraSourceEvidence,
@@ -3370,23 +3915,30 @@ def stamp_selected_calibration_snapshot(
         raise SelectedCalibrationError(
             "Persisted matrix does not match the canonical H5 numeric/YAML evidence."
         )
-    transform = build_directed_homography(
-        transform_id=f"camera_{camera_id}_to_stimulus_canvas_{stimulus_run}_v1",
-        matrix=selected_homography.matrix,
+    transform = SelectedCalibrationTransformSource(
+        transform_id=f"camera_{camera_id}_to_stimulus_canvas_{stimulus_run}_v2",
         from_space_id=CANONICAL_HOMOGRAPHY_FROM_SPACE_ID,
         to_space_id=CANONICAL_HOMOGRAPHY_TO_SPACE_ID,
         source_reference_extent=source_extent,
         target_reference_extent=target_extent,
-        calibration_ref=paths.camera_calibration_path,
+        payload_ref=f"/{paths.homography_array_path}@array_values",
+        payload_sha256=persisted_matrix_sha256,
         camera_id=camera_id,
+        calibration_ref=paths.camera_calibration_path,
+        source_homography_record_ref=(
+            f"/{paths.homography_array_path}@{SOURCE_HOMOGRAPHY_EVIDENCE_ATTR}"
+        ),
+        source_homography_record_sha256=selected_homography.digest(),
     )
+    transform = parse_selected_calibration_transform_source(transform)
     lineage = source_artifact_from_homography_evidence(selected_homography)
-    homography_payload = directed_homography_attrs(transform)
+    homography_payload = selected_calibration_transform_source_attrs(transform)
     homography_payload.update(
         selected_homography_evidence_attrs(selected_homography)
     )
 
     camera_payload = camera_calibration_attrs(selected_camera)
+    camera_payload.update(selected_camera_evidence_attrs(selected_camera))
     camera_manifest = _camera_manifest_from_attrs(camera_payload)
     manifest = build_selected_calibration_manifest(
         stimulus_run=stimulus_run,
@@ -3408,26 +3960,69 @@ def stamp_selected_calibration_snapshot(
             (paths.calibration_path, calibration_attrs),
         )
     )
+    camera_delete = (
+        *_SCALAR_ATTRS,
+        "native_width_px",
+        "native_height_px",
+        "pixel_to_mm_derivation",
+    )
+    calibration_payload = selected_calibration_pointer_attrs(
+        stimulus_run=stimulus_run,
+        camera_id=camera_id,
+        transform_sha256=transform.digest(),
+    )
+    calibration_payload.update(selected_calibration_manifest_attrs(manifest))
+    requested_updates = (
+        camera_payload,
+        display_payload,
+        homography_payload,
+        calibration_payload,
+    )
+    requested_deletes = (camera_delete, (), (), ())
+    expected_final_attrs = tuple(
+        _expected_attrs_after_update(snapshot, update, delete=delete)
+        for (_path, _attrs, snapshot), update, delete in zip(
+            transaction_snapshots,
+            requested_updates,
+            requested_deletes,
+            strict=True,
+        )
+    )
     try:
-        for name in (
-            *_SCALAR_ATTRS,
-            "native_width_px",
-            "native_height_px",
-            "pixel_to_mm_derivation",
-        ):
+        for name in camera_delete:
             if name in camera_attrs:
                 del camera_attrs[name]
         camera_attrs.update(camera_payload)
         display_attrs.update(display_payload)
         homography_attrs.update(homography_payload)
-        calibration_attrs.update(
-            selected_calibration_pointer_attrs(
-                stimulus_run=stimulus_run,
-                camera_id=camera_id,
-                transform_sha256=transform.digest(),
-            )
+        calibration_attrs.update(calibration_payload)
+        for (path, attrs, _snapshot), expected in zip(
+            transaction_snapshots,
+            expected_final_attrs,
+            strict=True,
+        ):
+            if not _exact_json_equal(dict(attrs), expected):
+                raise SelectedCalibrationError(
+                    f"Selected-calibration attrs for {path!r} differ from the exact pre-call snapshot plus intended changes."
+                )
+        loaded = load_selected_calibration_snapshot(
+            root_node,
+            stimulus_run=stimulus_run,
+            expected_camera_id=camera_id,
+            expected_from_space_id=CANONICAL_HOMOGRAPHY_FROM_SPACE_ID,
+            expected_to_space_id=CANONICAL_HOMOGRAPHY_TO_SPACE_ID,
+            expected_source_reference_extent=source_extent,
+            expected_target_reference_extent=target_extent,
         )
-        calibration_attrs.update(selected_calibration_manifest_attrs(manifest))
+        for (path, attrs, _snapshot), expected in zip(
+            transaction_snapshots,
+            expected_final_attrs,
+            strict=True,
+        ):
+            if not _exact_json_equal(dict(attrs), expected):
+                raise SelectedCalibrationError(
+                    f"Selected-calibration reload unexpectedly mutated attrs for {path!r}."
+                )
     except Exception as exc:
         rollback_failures = _restore_attrs_after_failed_transaction(
             transaction_snapshots
@@ -3442,7 +4037,7 @@ def stamp_selected_calibration_snapshot(
             "Selected-calibration attr stamping failed; all attr targets were "
             "restored to their exact pre-call state."
         ) from exc
-    return manifest
+    return loaded
 
 
 def load_selected_calibration_snapshot(
@@ -3462,7 +4057,7 @@ def load_selected_calibration_snapshot(
         or expected_to_space_id != CANONICAL_HOMOGRAPHY_TO_SPACE_ID
     ):
         raise SelectedCalibrationError(
-            "Canonical direction mismatch: selected-calibration v1 only supports "
+            "Canonical direction mismatch: selected-calibration v2 only supports "
             f"{CANONICAL_HOMOGRAPHY_FROM_SPACE_ID!r} to "
             f"{CANONICAL_HOMOGRAPHY_TO_SPACE_ID!r} direction."
         )
@@ -3477,10 +4072,15 @@ def load_selected_calibration_snapshot(
         stimulus_run,
         parent_path="analysis/stimulus_runs",
     )
+    _require_exact_node_path(run, expected_path=paths.stimulus_run_path)
     display_snapshot_group = _require_child(
         run,
         DISPLAY_SNAPSHOT_GROUP_NAME,
         parent_path=paths.stimulus_run_path,
+    )
+    _require_exact_node_path(
+        display_snapshot_group,
+        expected_path=paths.display_snapshot_path,
     )
     display_attrs = _require_attrs(
         display_snapshot_group,
@@ -3496,6 +4096,7 @@ def load_selected_calibration_snapshot(
         "calibration",
         parent_path=paths.stimulus_run_path,
     )
+    _require_exact_node_path(calibration, expected_path=paths.calibration_path)
     calibration_attrs = _require_attrs(calibration, path=paths.calibration_path)
     _require_schema(
         calibration_attrs,
@@ -3548,6 +4149,7 @@ def load_selected_calibration_snapshot(
         expected_camera_id,
         parent_path=paths.calibration_path,
     )
+    _require_exact_node_path(camera_group, expected_path=paths.camera_calibration_path)
     camera_attrs = _require_attrs(
         camera_group,
         path=paths.camera_calibration_path,
@@ -3568,6 +4170,11 @@ def load_selected_calibration_snapshot(
     if manifest.camera_calibration != camera_manifest:
         raise SelectedCalibrationError(
             "Persisted camera calibration attrs do not match the selected manifest."
+        )
+    persisted_camera_evidence = load_selected_camera_evidence_attrs(camera_attrs)
+    if manifest.source_camera != persisted_camera_evidence:
+        raise SelectedCalibrationError(
+            "Persisted camera evidence does not match the selected manifest."
         )
     source_extent = TransformReferenceExtent(
         width=camera_manifest.native_width_px,
@@ -3590,6 +4197,20 @@ def load_selected_calibration_snapshot(
         HOMOGRAPHY_ARRAY_NAME,
         parent_path=paths.camera_calibration_path,
     )
+    _require_exact_node_path(matrix_node, expected_path=paths.homography_array_path)
+    try:
+        common_archive = require_same_archive(
+            root,
+            run,
+            display_snapshot_group,
+            calibration,
+            camera_group,
+            matrix_node,
+        )
+    except ArchiveIdentityError as exc:
+        raise SelectedCalibrationError(
+            "Selected-calibration nodes do not belong to one exact archive."
+        ) from exc
     matrix_attrs = _require_attrs(matrix_node, path=paths.homography_array_path)
     persisted_homography_evidence = load_selected_homography_evidence_attrs(
         matrix_attrs
@@ -3598,36 +4219,81 @@ def load_selected_calibration_snapshot(
         raise SelectedCalibrationError(
             "Persisted homography evidence does not match the selected manifest."
         )
-    try:
-        homography = load_bound_directed_homography(
-            matrix_node,
-            array_path=paths.homography_array_path,
-            expected_from_space_id=CANONICAL_HOMOGRAPHY_FROM_SPACE_ID,
-            expected_to_space_id=CANONICAL_HOMOGRAPHY_TO_SPACE_ID,
-            expected_camera_id=expected_camera_id,
-            expected_source_reference_extent=expected_source_reference_extent,
-            expected_target_reference_extent=expected_target_reference_extent,
-            expected_transform_sha256=selected_digest,
-            expected_calibration_ref=paths.camera_calibration_path,
-        )
-    except DirectedTransformError as exc:
+    historical = {"directed_transform", "directed_transform_sha256"} & set(
+        matrix_attrs
+    )
+    if historical:
         raise SelectedCalibrationError(
-            f"Selected homography {paths.homography_array_path!r} is invalid: {exc}"
+            "Canonical selected-calibration v2 snapshots cannot carry historical directed-transform-v1 attrs."
+        )
+    transform = load_selected_calibration_transform_source_attrs(matrix_attrs)
+    try:
+        matrix = np.asarray(matrix_node[:])
+    except Exception as exc:
+        raise SelectedCalibrationError(
+            "Unable to read the exact selected homography payload."
         ) from exc
-    if homography.array_path != paths.homography_array_path:
-        raise SelectedCalibrationError("Selected homography array path mismatch.")
-    if homography.matrix_sha256 != manifest.matrix_sha256:
+    matrix_digest = homography_matrix_sha256(matrix)
+    expected_source = _parse_selected_transform_extent(
+        (
+            expected_source_reference_extent.to_dict()
+            if isinstance(expected_source_reference_extent, TransformReferenceExtent)
+            else expected_source_reference_extent
+        ),
+        field_name="expected_source_reference_extent",
+    )
+    expected_target = _parse_selected_transform_extent(
+        (
+            expected_target_reference_extent.to_dict()
+            if isinstance(expected_target_reference_extent, TransformReferenceExtent)
+            else expected_target_reference_extent
+        ),
+        field_name="expected_target_reference_extent",
+    )
+    if transform.payload_sha256 != matrix_digest:
+        raise SelectedCalibrationError(
+            "Selected homography matrix digest does not match its direction-labelled source record."
+        )
+    if (
+        transform.from_space_id != expected_from_space_id
+        or transform.to_space_id != expected_to_space_id
+        or transform.camera_id != expected_camera_id
+        or transform.source_reference_extent != expected_source
+        or transform.target_reference_extent != expected_target
+        or transform.calibration_ref != paths.camera_calibration_path
+        or transform.payload_ref != f"/{paths.homography_array_path}@array_values"
+        or transform.source_homography_record_ref
+        != f"/{paths.homography_array_path}@{SOURCE_HOMOGRAPHY_EVIDENCE_ATTR}"
+        or transform.source_homography_record_sha256
+        != persisted_homography_evidence.digest()
+    ):
+        raise SelectedCalibrationError(
+            "Selected homography source direction, extents, camera, payload, or evidence lineage is invalid."
+        )
+    if transform.digest() != selected_digest or transform.digest() != manifest.transform_sha256:
+        raise SelectedCalibrationError(
+            "Selected homography source digest does not match the active pointer/manifest."
+        )
+    if matrix_digest != manifest.matrix_sha256:
         raise SelectedCalibrationError(
             "Selected homography matrix digest does not match the manifest."
         )
-    if homography.transform.source_reference_extent != source_extent:
+    if transform.source_reference_extent != source_extent:
         raise SelectedCalibrationError(
             "Persisted camera extent does not match the directed transform."
         )
-    if homography.transform.target_reference_extent != target_extent:
+    if transform.target_reference_extent != target_extent:
         raise SelectedCalibrationError(
             "Persisted display extent does not match the directed transform."
         )
+    matrix_copy = np.array(matrix, copy=True, order="C")
+    matrix_copy.setflags(write=False)
+    homography = BoundSelectedCalibrationHomography(
+        record=transform,
+        array_path=paths.homography_array_path,
+        matrix_sha256=matrix_digest,
+        _matrix=matrix_copy,
+    )
 
     manifest_digest = manifest.digest()
     return SelectedCalibrationSnapshot(
@@ -3648,7 +4314,30 @@ def load_selected_calibration_snapshot(
         z_eff_mm=camera_manifest.z_eff_mm,
         manifest=manifest,
         manifest_sha256=manifest_digest,
+        archive=common_archive,
+        root_node=root,
+        calibration_node=calibration,
+        camera_node=camera_group,
+        display_node=display_snapshot_group,
+        matrix_node=matrix_node,
+        _verification_seal=_BOUND_SELECTED_CALIBRATION_SEAL,
     )
+
+
+def require_bound_selected_calibration_snapshot(
+    value: Any,
+) -> SelectedCalibrationSnapshot:
+    """Require a fresh-process persisted snapshot, never importer-only evidence."""
+
+    if (
+        type(value) is not SelectedCalibrationSnapshot
+        or value._seal is not _BOUND_SELECTED_CALIBRATION_SEAL
+    ):
+        raise SelectedCalibrationError(
+            "A sealed persisted selected-calibration snapshot is required."
+        )
+    value.assert_verified()
+    return value
 
 
 __all__ = [
@@ -3658,6 +4347,11 @@ __all__ = [
     "CAMERA_CALIBRATION_SCHEMA_VERSION",
     "SELECTED_CALIBRATION_MANIFEST_SCHEMA_ID",
     "SELECTED_CALIBRATION_MANIFEST_SCHEMA_VERSION",
+    "SELECTED_CALIBRATION_TRANSFORM_SCHEMA_ID",
+    "SELECTED_CALIBRATION_TRANSFORM_SCHEMA_VERSION",
+    "SELECTED_CALIBRATION_TRANSFORM_ATTR",
+    "SELECTED_CALIBRATION_TRANSFORM_DIGEST_ATTR",
+    "SELECTED_CALIBRATION_TRANSFORM_DIRECTION",
     "SOURCE_HOMOGRAPHY_SEMANTICS_SCHEMA_ID",
     "SOURCE_HOMOGRAPHY_SEMANTICS_SCHEMA_VERSION",
     "SELECTED_CAMERA_SOURCE_SCHEMA_ID",
@@ -3694,6 +4388,8 @@ __all__ = [
     "SOURCE_DISPLAY_ATTRS_DIGEST_CANONICALIZATION",
     "SOURCE_DISPLAY_EVIDENCE_ATTR",
     "SOURCE_DISPLAY_EVIDENCE_DIGEST_SUFFIX",
+    "SOURCE_CAMERA_EVIDENCE_ATTR",
+    "SOURCE_CAMERA_EVIDENCE_DIGEST_SUFFIX",
     "SOURCE_ARENA_CONFIG_DATASET_PATH",
     "SOURCE_ARENA_CONFIG_DIGEST_CANONICALIZATION",
     "SOURCE_CAMERA_RECORD_DIGEST_CANONICALIZATION",
@@ -3716,11 +4412,16 @@ __all__ = [
     "SelectedCameraSourceEvidence",
     "SelectedDisplaySourceEvidence",
     "SelectedHomographySourceEvidence",
+    "VerifiedSelectedCameraSourceEvidence",
+    "VerifiedSelectedDisplaySourceEvidence",
+    "VerifiedSelectedHomographySourceEvidence",
     "CameraCalibrationManifest",
     "DisplaySnapshotManifest",
     "SourceHomographySemantics",
     "SourceArtifactLineage",
     "SelectedCalibrationManifest",
+    "SelectedCalibrationTransformSource",
+    "BoundSelectedCalibrationHomography",
     "SelectedCalibrationSnapshot",
     "selected_calibration_paths",
     "parse_selected_output_geometry",
@@ -3730,28 +4431,37 @@ __all__ = [
     "camera_group_scalar_attrs_digest",
     "parse_selected_camera_source_evidence",
     "build_selected_camera_source_evidence_from_h5_values",
+    "require_verified_selected_camera_source_evidence",
     "parse_selected_display_source_evidence",
     "build_selected_display_source_evidence_from_h5_values",
+    "require_verified_selected_display_source_evidence",
     "selected_display_evidence_attrs",
     "load_selected_display_evidence_attrs",
     "parse_selected_homography_source_evidence",
     "build_selected_homography_source_evidence_from_h5_values",
+    "require_verified_selected_homography_source_evidence",
     "source_homography_semantics_from_evidence",
     "source_artifact_from_homography_evidence",
     "selected_homography_evidence_attrs",
     "load_selected_homography_evidence_attrs",
     "selected_calibration_pointer_attrs",
     "camera_calibration_attrs",
+    "selected_camera_evidence_attrs",
+    "load_selected_camera_evidence_attrs",
     "parse_source_homography_semantics",
     "canonical_source_homography_semantics_json",
     "source_homography_semantics_digest",
     "parse_source_artifact_lineage",
     "parse_selected_calibration_manifest",
+    "parse_selected_calibration_transform_source",
     "build_selected_calibration_manifest",
     "canonical_selected_calibration_manifest_json",
     "selected_calibration_manifest_digest",
     "selected_calibration_manifest_attrs",
+    "selected_calibration_transform_source_attrs",
+    "load_selected_calibration_transform_source_attrs",
     "load_selected_calibration_manifest_attrs",
     "stamp_selected_calibration_snapshot",
     "load_selected_calibration_snapshot",
+    "require_bound_selected_calibration_snapshot",
 ]

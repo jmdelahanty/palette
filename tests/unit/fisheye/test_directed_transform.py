@@ -7,6 +7,8 @@ import json
 import numpy as np
 import pytest
 
+from fisheye.shared import directed_transform as directed_transform_mod
+
 from fisheye.shared.directed_transform import (
     DIRECTED_TRANSFORM_ATTR,
     DIRECTED_TRANSFORM_DIGEST_SUFFIX,
@@ -35,6 +37,17 @@ CAMERA_EXTENT = TransformReferenceExtent(
     units="px",
     authority="/raw_video/images_full.shape[-2:]",
 )
+
+
+def test_historical_v1_writer_helpers_are_not_public_exports() -> None:
+    assert {
+        "directed_homography_attrs",
+        "stamp_directed_homography",
+        "build_directed_homography",
+        "invert_directed_homography",
+    }.isdisjoint(directed_transform_mod.__all__)
+
+
 CANVAS_EXTENT = TransformReferenceExtent(
     width=1920,
     height=1080,
