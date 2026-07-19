@@ -51,6 +51,54 @@ In that model:
 
 ## Entity Model
 
+### Canonical row keys and immediate-source lineage
+
+Entity identity and persisted row identity are separate contracts:
+
+- `instance_key` identifies one acquired observation row. It is the primary
+  row key for observation-level detection, crop, keypoint, and mask geometry;
+  it is not a fish, track, subject, frame, calibration, or transform identity.
+- `track_sample_key = (track_id, acquisition_frame_index)` identifies one
+  canonical track sample. Its acquisition-frame component is accepted only
+  with sealed temporal lineage; the column name or numerical range alone is
+  not evidence of the acquisition frame domain.
+- `stimulus_state_key` identifies a stimulus/log state. It is not an
+  observation instance or track sample.
+- `subject_id` is biological/experimental identity when known. It remains
+  orthogonal to all three row-key domains.
+- coordinate-frame, calibration, and directed-transform records have their own
+  record identities and digests. They do not reuse row keys.
+
+Canonical track temporal lineage version 1 is an exact subset/reorder of one
+explicit immediate source rowset. The source rowset persists a
+`source_row_temporal_authority` binding its canonical row-identity contract, an
+acquisition-camera authority, and an exact
+`source_acquisition_frame_index` array in the same archive. A track output then
+persists a unique, in-range `source_row_index` for every output row and proves:
+
+```text
+track_sample_key[:, acquisition_frame_index]
+    == output/source_acquisition_frame_index
+    == source/source_acquisition_frame_index[output/source_row_index]
+```
+
+Version 1 does not authorize track-stage interpolation. If the compatibility
+`source_frame_interpolation` array is present, every row must encode the exact
+source sample (`left == right == target`, `right_weight == 0`). Interpolated
+samples require a separately designed and versioned identity/lineage contract.
+
+`source_instance_key` on a track row is nullable lineage, never the track's
+primary identity. When the immediate source uses
+`observation_instance/instance_key`, Palette derives it mechanically as
+`source.instance_key[source_row_index]`; a writer cannot choose or propagate an
+arbitrary/transitive instance key. For every other source identity domain, the
+only canonical encoding is `valid=false, instance_key=0`.
+
+Future canonical writers must publish these typed records directly. Legacy
+positional or same-length inference belongs only in explicit audit/migration
+code; ambiguous archives fail closed rather than installing a normal-read
+adapter.
+
 ### `arena_id`
 
 Local spatial container identifier within one archive/run.
