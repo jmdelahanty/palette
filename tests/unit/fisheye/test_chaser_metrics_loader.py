@@ -9,7 +9,11 @@ from fisheye.analysis.chaser_metrics_loader import load_chaser_metrics
 from fisheye.shared.zarr.columnar import write_columnar_dataset
 
 
-def _write_minimal_stimulus_run(zarr_path: Path) -> None:
+def _write_minimal_stimulus_run(
+    zarr_path: Path,
+    *,
+    chaser_state_attrs: dict[str, object] | None = None,
+) -> None:
     root = zarr.open_group(str(zarr_path), mode="w")
     analysis = root.create_group("analysis")
     stimulus_parent = analysis.create_group("stimulus_runs")
@@ -44,7 +48,12 @@ def _write_minimal_stimulus_run(zarr_path: Path) -> None:
     chaser_states["trial_state"] = [1, 1, 1]
     chaser_states["chaser_pos_x"] = [1.0, 2.0, 3.0]
     chaser_states["chaser_pos_y"] = [4.0, 5.0, 6.0]
-    write_columnar_dataset(stim.create_group("tracking_data"), "chaser_states", chaser_states)
+    write_columnar_dataset(
+        stim.create_group("tracking_data"),
+        "chaser_states",
+        chaser_states,
+        chaser_state_attrs,
+    )
 
 
 def test_load_chaser_metrics_missing_legacy_metrics_group_is_read_only_safe(tmp_path: Path) -> None:
@@ -57,6 +66,43 @@ def test_load_chaser_metrics_missing_legacy_metrics_group_is_read_only_safe(tmp_
     np.testing.assert_allclose(bundle.online["chaser_pos_x"], [1.0, 2.0, 3.0])
     np.testing.assert_array_equal(bundle.offline["has_offline"], np.zeros(3, dtype=bool))
     assert bundle.provenance["metrics_run"] is None
+    assert bundle.online_coordinate_metadata["source_path"] == (
+        "analysis/stimulus_runs/stim_1/tracking_data/chaser_states"
+    )
+    source_attrs = bundle.online_coordinate_metadata["source_attrs"]
+    assert isinstance(source_attrs, dict)
+    assert "coordinate_frame" not in source_attrs
+    assert "position_fields" not in source_attrs
 
     root = zarr.open_group(str(zarr_path), mode="r")
     assert "chaser_fish_metrics" not in root["analysis"]
+
+
+def test_load_chaser_metrics_preserves_exact_online_coordinate_metadata(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "coordinate_metadata.zarr"
+    coordinate_attrs = {
+        "coordinate_frame": "arena_relative_canvas_px",
+        "coordinate_origin": "top_left_of_active_arena",
+        "position_fields": "chaser_pos_x,chaser_pos_y",
+        "x_axis_direction": "right",
+        "y_axis_direction": "down",
+    }
+    _write_minimal_stimulus_run(
+        zarr_path,
+        chaser_state_attrs=coordinate_attrs,
+    )
+
+    bundle = load_chaser_metrics(zarr_path)
+
+    source_path = "analysis/stimulus_runs/stim_1/tracking_data/chaser_states"
+    root = zarr.open_group(str(zarr_path), mode="r")
+    source_group = root[source_path]
+    assert bundle.online_coordinate_metadata == {
+        "source_path": source_path,
+        "source_attrs": dict(source_group.attrs),
+    }
+    assert bundle.online_coordinate_metadata["source_attrs"]["position_fields"] == (
+        "chaser_pos_x,chaser_pos_y"
+    )

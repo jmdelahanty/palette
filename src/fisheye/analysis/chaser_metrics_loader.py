@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Tuple, Union
 
@@ -41,6 +41,10 @@ class ChaserMetricsBundle:
     provenance:
         Provenance details such as the stimulus run, metrics run, keypoint source, and
         chaser index.
+    online_coordinate_metadata:
+        Exact source path and unmodified attributes returned for the selected
+        ``tracking_data/chaser_states`` dataset. The loader does not infer a
+        coordinate frame when those source attributes are absent.
     """
 
     camera_frame_ids: np.ndarray
@@ -51,6 +55,7 @@ class ChaserMetricsBundle:
     online: Dict[str, np.ndarray]
     offline: Dict[str, np.ndarray]
     provenance: Dict[str, object]
+    online_coordinate_metadata: Dict[str, object] = field(default_factory=dict)
 
 
 def load_chaser_metrics(
@@ -94,7 +99,7 @@ def load_chaser_metrics(
         timestamps = np.full(frames_sorted.shape, -1, dtype=np.int64)
 
     trial_state = np.full(frames_sorted.shape, -1, dtype=np.int16)
-    online_fields = _extract_online_fields(
+    online_fields, online_coordinate_metadata = _extract_online_fields(
         stim_group=stim_group,
         frames_sorted=frames_sorted,
         frame_to_index=frame_to_index,
@@ -144,6 +149,7 @@ def load_chaser_metrics(
         online=online_fields,
         offline=offline_fields,
         provenance=provenance,
+        online_coordinate_metadata=online_coordinate_metadata,
     )
 
 
@@ -256,14 +262,21 @@ def _extract_online_fields(
     trial_state: np.ndarray,
     chaser_index: int,
     stim_to_camera: Dict[int, int],
-) -> Dict[str, np.ndarray]:
+) -> Tuple[Dict[str, np.ndarray], Dict[str, object]]:
     tracking_group = stim_group.require_group("tracking_data")
     if "chaser_states" not in tracking_group:
         raise ValueError(
             "Stimulus run tracking_data group lacks chaser_states dataset."
         )
 
-    chaser_states, _ = load_structured_dataset(tracking_group, "chaser_states")
+    chaser_states, chaser_state_attrs = load_structured_dataset(
+        tracking_group,
+        "chaser_states",
+    )
+    online_coordinate_metadata: Dict[str, object] = {
+        "source_path": f"{tracking_group.path}/chaser_states",
+        "source_attrs": dict(chaser_state_attrs),
+    }
     dtype_names = chaser_states.dtype.names or ()
 
     frame_field = _resolve_optional_field(chaser_states, "frame_number", "stimulus_frame_num")
@@ -328,7 +341,7 @@ def _extract_online_fields(
             except Exception:
                 online_arrays[field][idx] = float(np.asarray(record[field]))
 
-    return online_arrays
+    return online_arrays, online_coordinate_metadata
 
 
 def _resolve_optional_field(array: np.ndarray, *candidates: str) -> Optional[str]:

@@ -99,6 +99,22 @@ TRACK_KINEMATICS_RUN_SCHEMA_VERSION = 1
 TRACK_KINEMATICS_METHOD_VERSION = "track_kinematics.v1"
 TRACK_KINEMATICS_ROW_AXIS = "track_samples"
 
+CAMERA_PIXEL_COORDINATE_SPACES = frozenset(
+    {
+        "camera",
+        "source_camera_image_px",
+    }
+)
+PROJECTOR_PIXEL_COORDINATE_SPACES = frozenset(
+    {
+        "texture",
+        "stimulus_texture_px",
+        "stimulus_canvas_px",
+        "projector_px",
+        "arena_relative_canvas_px",
+    }
+)
+
 SPEED_DERIVATIVE_LEVELS = (
     "speed_raw",
     "speed_filtered",
@@ -108,6 +124,42 @@ SPEED_DERIVATIVE_LEVELS = (
 SPEED_DERIVATIVES_SCHEMA_ID = "palette.track_speed_derivatives.v1"
 SPEED_DERIVATIVE_SCHEMA_ID = "palette.track_speed_derivative.v1"
 DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL = "speed_smoothed"
+
+
+def resolve_mm_per_pixel_for_coordinate_space(
+    coordinate_space: object,
+    *,
+    camera_mm_per_pixel: object = None,
+    pixels_per_mm_projector: object = None,
+) -> float:
+    """Resolve a multiplicative mm-per-pixel scale without cross-space fallback."""
+
+    if not isinstance(coordinate_space, str) or not coordinate_space.strip():
+        raise ValueError("A declared coordinate_space is required for px-to-mm conversion.")
+    space = coordinate_space.strip()
+
+    if space in CAMERA_PIXEL_COORDINATE_SPACES:
+        scale_name = "camera_mm_per_pixel"
+        scale_value = camera_mm_per_pixel
+        invert = False
+    elif space in PROJECTOR_PIXEL_COORDINATE_SPACES:
+        scale_name = "pixels_per_mm_projector"
+        scale_value = pixels_per_mm_projector
+        invert = True
+    else:
+        raise ValueError(
+            f"Unsupported coordinate_space {space!r} for px-to-mm conversion."
+        )
+
+    try:
+        scale = float(scale_value)
+    except (TypeError, ValueError):
+        scale = float("nan")
+    if not math.isfinite(scale) or scale <= 0:
+        raise ValueError(
+            f"coordinate_space {space!r} requires a positive finite {scale_name}."
+        )
+    return 1.0 / scale if invert else scale
 
 
 def _track_preload_chunks(shape: Tuple[int, ...] | Iterable[int]) -> Tuple[int, ...] | None:
@@ -2536,19 +2588,18 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 texture_to_camera_scale = refined_group.attrs.get("texture_to_camera_scale", 1.0)
 
                 # Get coordinate space and calibration
-                coordinate_space = refined_group.attrs.get("coordinate_space", "camera")
+                coordinate_space = refined_group.attrs.get("coordinate_space")
                 pixels_per_mm_projector = refined_group.attrs.get("pixels_per_mm_projector")
 
-                # Use projector calibration for texture-space positions
-                # (online positions are in texture space, so we need texture-space calibration)
-                pixel_to_mm_online = None
-                if pixels_per_mm_projector is not None and coordinate_space == "texture":
-                    pixel_to_mm_online = float(pixels_per_mm_projector)
-                    console.print(f"[cyan]Using projector calibration:[/cyan] {pixel_to_mm_online:.6f} pixels/mm (texture space)")
-                else:
-                    # Fall back to camera calibration if projector calibration not available
-                    pixel_to_mm_online = pixel_to_mm
-                    console.print(f"[yellow]Warning:[/yellow] Using camera calibration for online data (projector calibration not found)")
+                pixel_to_mm_online = resolve_mm_per_pixel_for_coordinate_space(
+                    coordinate_space,
+                    camera_mm_per_pixel=pixel_to_mm,
+                    pixels_per_mm_projector=pixels_per_mm_projector,
+                )
+                console.print(
+                    "[cyan]Using coordinate-specific calibration:[/cyan] "
+                    f"{pixel_to_mm_online:.6f} mm/pixel ({coordinate_space})"
+                )
 
                 # Use refined positions (in texture space for accurate distance calculations)
                 positions_online = positions_refined
@@ -2724,6 +2775,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         "calibration_used": saved_pixel_to_mm,
                         "texture_to_camera_scale": texture_to_camera_scale,
                     }
+                    if use_refined_online:
+                        online_params["mm_per_pixel"] = saved_pixel_to_mm
                     provenance = build_stage_provenance(
                         stage="track_kinematics",
                         created_at_utc=created_at,
@@ -2751,6 +2804,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             "smoothing_alignment": args.smoothing_alignment,
                             "savgol_polyorder": int(args.savgol_polyorder) if args.smoothing_method == "savitzky_golay" else None,
                             "pixel_to_mm": saved_pixel_to_mm,
+                            **(
+                                {"mm_per_pixel": saved_pixel_to_mm}
+                                if use_refined_online
+                                else {}
+                            ),
                             "calibration": calibration_info,
                             "inputs": inputs,
                             "texture_to_camera_scale": texture_to_camera_scale,
