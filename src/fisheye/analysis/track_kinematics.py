@@ -185,13 +185,17 @@ def load_positions_px_coordinate_descriptor(array: Any) -> CoordinateDescriptor:
     return load_coordinate_descriptor_attrs(attrs)
 
 
-def _bind_track_positions_px_descriptor(value: Any) -> CoordinateDescriptor:
+def _bind_track_positions_px_descriptor(
+    value: Any,
+    *,
+    has_instance_key: bool,
+) -> CoordinateDescriptor:
     """Bind inherited position semantics to one track's row identity array."""
 
     payload = parse_coordinate_descriptor(value).to_dict()
     payload["row_identity"] = {
-        "mode": "track_frame_indices",
-        "array_ref": "../frame_indices",
+        "mode": "instance_key" if has_instance_key else "track_frame_indices",
+        "array_ref": "instance_key" if has_instance_key else "frame_indices",
     }
     return parse_coordinate_descriptor(payload)
 
@@ -1170,12 +1174,26 @@ def build_track_datasets(
     smoothing_method: str = "moving_average",
     smoothing_alignment: str = DEFAULT_SMOOTHING_ALIGNMENT,
     savgol_polyorder: int = 3,
+    instance_key: Optional[np.ndarray] = None,
 ) -> Tuple[Dict[int, Dict[str, Any]], List[Dict[str, float]]]:
     """Assemble per-track data arrays and summary statistics.
 
     Optionally applies hysteresis filtering to remove micro-jitter during speed computation.
     Optionally applies Savitzky-Golay smoothing for shape-preserving filtering.
     """
+
+    instance_keys = None
+    if instance_key is not None:
+        raw_instance_keys = np.asarray(instance_key)
+        if raw_instance_keys.ndim != 1 or raw_instance_keys.shape[0] != track_ids.shape[0]:
+            raise ValueError("instance_key must be one-dimensional and row-aligned with track_ids.")
+        if raw_instance_keys.dtype.kind not in "iu":
+            raise ValueError("instance_key must use an integer dtype.")
+        if raw_instance_keys.dtype.kind == "i" and np.any(raw_instance_keys < 0):
+            raise ValueError("instance_key values must be nonnegative.")
+        instance_keys = raw_instance_keys.astype(np.uint64, copy=False)
+        if int(np.unique(instance_keys).shape[0]) != int(instance_keys.shape[0]):
+            raise ValueError("instance_key values must be unique across track observations.")
 
     unique_ids = np.unique(track_ids)
     tracks: Dict[int, Dict[str, np.ndarray]] = {}
@@ -1198,6 +1216,7 @@ def build_track_datasets(
             if detection_source is not None
             else np.zeros(mask.sum(), dtype=np.int8)
         )
+        instance_keys_track = instance_keys[mask] if instance_keys is not None else None
         sample_validity = _build_sample_validity_arrays(
             track_id=int(track_id),
             positions_px=coords_px,
@@ -1212,6 +1231,8 @@ def build_track_datasets(
         headings_track = headings_track[order]
         kp_success_track = kp_success_track[order]
         det_source_track = det_source_track[order]
+        if instance_keys_track is not None:
+            instance_keys_track = instance_keys_track[order]
         sample_validity = {
             name: values[order]
             for name, values in sample_validity.items()
@@ -1351,6 +1372,11 @@ def build_track_datasets(
             "frame_indices": track_frames.astype(np.int64),
             "time_seconds": _float32(time_seconds),
             "detection_indices": detection_indices_sorted.astype(np.int64),
+            **(
+                {"instance_key": instance_keys_track.astype(np.uint64, copy=False)}
+                if instance_keys_track is not None
+                else {}
+            ),
             "positions_px": _float32(coords_px),
             "positions_mm": _float32(coords_mm),
             "heading_degrees": _float32(headings_track),
@@ -1569,11 +1595,6 @@ def save_track_kinematics_tracks(
 ) -> List[int]:
     """Persist per-track data beneath the track kinematics run group."""
 
-    track_positions_px_descriptor = (
-        _bind_track_positions_px_descriptor(positions_px_descriptor)
-        if positions_px_descriptor is not None
-        else None
-    )
     tracks_parent = run_group.create_group("tracks")
     stamp_geometry_preload_attrs(run_group)
     stamp_geometry_preload_attrs(tracks_parent)
@@ -1606,16 +1627,26 @@ def save_track_kinematics_tracks(
         subgroup.create_array("frame_indices", data=data["frame_indices"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("time_seconds", data=data["time_seconds"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("detection_indices", data=data["detection_indices"], chunks=base_chunk, overwrite=True)
+        if "instance_key" in data:
+            subgroup.create_array(
+                "instance_key",
+                data=data["instance_key"],
+                chunks=base_chunk,
+                overwrite=True,
+            )
         positions_px_array = subgroup.create_array(
             "positions_px",
             data=data["positions_px"],
             chunks=(base_chunk[0], 2),
             overwrite=True,
         )
-        if track_positions_px_descriptor is not None:
+        if positions_px_descriptor is not None:
             stamp_coordinate_descriptor(
                 positions_px_array,
-                track_positions_px_descriptor,
+                _bind_track_positions_px_descriptor(
+                    positions_px_descriptor,
+                    has_instance_key="instance_key" in data,
+                ),
             )
         subgroup.create_array("positions_mm", data=data["positions_mm"], chunks=(base_chunk[0], 2), overwrite=True)
         subgroup.create_array("heading_degrees", data=data["heading_degrees"], chunks=base_chunk, overwrite=True)
@@ -3041,6 +3072,17 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             return_metadata=True,
         )
         track_ids_offline = track_ids_offline.astype(np.int64, copy=False)
+        instance_key_offline = position_source_offline.instance_key
+        if instance_key_offline is not None:
+            instance_key_offline = np.asarray(
+                instance_key_offline,
+                dtype=np.uint64,
+            ).reshape(-1)
+            if instance_key_offline.shape[0] != track_ids_offline.shape[0]:
+                raise ValueError(
+                    "Offline: instance_key length does not match the selected "
+                    "position-source row count."
+                )
         track_id_to_arena_id = {
             int(track_id): int(arena_id)
             for track_id, arena_id in (
@@ -3054,6 +3096,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             console.print("[yellow]Warning:[/yellow] No offline frames available; skipping.")
         else:
             proceed_offline = True
+            public_row_mask = (
+                np.ones(track_ids_offline.shape[0], dtype=bool)
+                if args.include_unassigned
+                else track_ids_offline >= 0
+            )
             (
                 track_ids_offline,
                 frame_indices_offline,
@@ -3070,6 +3117,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 detection_source=detection_source_offline,
                 include_unassigned=args.include_unassigned,
             )
+            if instance_key_offline is not None:
+                instance_key_offline = instance_key_offline[public_row_mask]
             if frame_indices_offline.size == 0:
                 console.print(
                     "[yellow]Warning:[/yellow] All offline detections are unassigned; skipping public offline track kinematics run."
@@ -3101,6 +3150,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                     smoothing_method=args.smoothing_method,
                     smoothing_alignment=args.smoothing_alignment,
                     savgol_polyorder=args.savgol_polyorder,
+                    instance_key=instance_key_offline,
                 )
 
                 if not summaries_offline:

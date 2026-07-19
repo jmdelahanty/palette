@@ -117,8 +117,60 @@ def test_writer_stamps_each_track_positions_array_with_rebound_row_identity() ->
         assert persisted.space_id == source_descriptor.space_id
         assert persisted.reference_extent == source_descriptor.reference_extent
         assert persisted.row_identity.mode == "track_frame_indices"
-        assert persisted.row_identity.array_ref == "../frame_indices"
+        assert persisted.row_identity.array_ref == "frame_indices"
         assert COORDINATE_DESCRIPTOR_ATTR not in track_group["positions_mm"].attrs
+
+
+def test_writer_copies_detection_instance_keys_and_uses_them_as_row_identity() -> None:
+    source_keys = np.asarray([101, 102, 201, 202], dtype=np.uint64)
+    tracks, summaries = mod.build_track_datasets(
+        track_ids=np.array([0, 0, 1, 1], dtype=np.int64),
+        frames=np.array([11, 10, 21, 20], dtype=np.int64),
+        positions_px=np.array(
+            [[1.0, 0.0], [0.0, 0.0], [5.0, 5.0], [4.0, 5.0]],
+            dtype=np.float32,
+        ),
+        headings_deg=np.zeros(4, dtype=np.float32),
+        keypoint_success=np.ones(4, dtype=bool),
+        detection_source=None,
+        fps=1.0,
+        smooth_seconds=1.0,
+        pixel_to_mm=0.25,
+        instance_key=source_keys,
+    )
+    run_group = zarr.open_group("memory://track-instance-key-contract", mode="w")
+
+    mod.save_track_kinematics_tracks(
+        run_group,
+        tracks,
+        summaries,
+        positions_px_descriptor=_refined_positions_descriptor(),
+    )
+
+    track_zero = run_group["tracks/id_0"]
+    np.testing.assert_array_equal(
+        track_zero["instance_key"][:],
+        np.asarray([102, 101], dtype=np.uint64),
+    )
+    descriptor = load_coordinate_descriptor_attrs(track_zero["positions_px"].attrs)
+    assert descriptor.row_identity.mode == "instance_key"
+    assert descriptor.row_identity.array_ref == "instance_key"
+
+
+def test_track_dataset_rejects_duplicate_instance_keys() -> None:
+    with pytest.raises(ValueError, match="must be unique"):
+        mod.build_track_datasets(
+            track_ids=np.array([0, 0], dtype=np.int64),
+            frames=np.array([10, 11], dtype=np.int64),
+            positions_px=np.zeros((2, 2), dtype=np.float32),
+            headings_deg=np.zeros(2, dtype=np.float32),
+            keypoint_success=np.ones(2, dtype=bool),
+            detection_source=None,
+            fps=1.0,
+            smooth_seconds=1.0,
+            pixel_to_mm=0.25,
+            instance_key=np.asarray([7, 7], dtype=np.uint64),
+        )
 
 
 def test_refined_source_descriptor_path_and_digest_are_normalized_in_provenance() -> None:

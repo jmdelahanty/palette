@@ -224,7 +224,13 @@ class ReferenceExtent:
 
 @dataclass(frozen=True)
 class RowIdentityReference:
-    """Reference to the array that identifies the descriptor's leading rows."""
+    """Reference to the array that identifies the descriptor's leading rows.
+
+    Relative references are resolved from the descriptor owner's parent group
+    when the owner is an array, and from the owner itself when it is a group.
+    This keeps sibling row arrays such as ``frame_indices`` addressable with the
+    same compact reference at every array surface.
+    """
 
     mode: str
     array_ref: str | None
