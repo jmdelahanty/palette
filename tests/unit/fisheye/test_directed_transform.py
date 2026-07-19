@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 
 import numpy as np
 import pytest
 
 from fisheye.shared.directed_transform import (
+    DIRECTED_TRANSFORM_ATTR,
+    DIRECTED_TRANSFORM_DIGEST_SUFFIX,
     DIRECTED_TRANSFORM_DIRECTION,
     DIRECTED_TRANSFORM_KIND,
     DIRECTED_TRANSFORM_SCHEMA_ID,
@@ -18,8 +21,10 @@ from fisheye.shared.directed_transform import (
     directed_transform_digest,
     homography_matrix_sha256,
     invert_directed_homography,
+    load_bound_directed_homography,
     parse_directed_homography,
     serialize_directed_homography,
+    stamp_directed_homography,
     validate_homography_matrix,
 )
 
@@ -31,11 +36,16 @@ CAMERA_EXTENT = TransformReferenceExtent(
     authority="/raw_video/images_full.shape[-2:]",
 )
 CANVAS_EXTENT = TransformReferenceExtent(
-    width=358,
-    height=358,
+    width=1920,
+    height=1080,
     units="px",
-    authority="/analysis/stimulus_runs/stim_1/calibration/arena_geometry",
+    authority=(
+        "analysis/stimulus_runs/stim_1/display_snapshot"
+        "@selected_output_geometry"
+    ),
 )
+CAMERA_CALIBRATION_PATH = "analysis/stimulus_runs/stim_1/calibration/2010093"
+HOMOGRAPHY_ARRAY_PATH = f"{CAMERA_CALIBRATION_PATH}/homography_matrix"
 NON_SELF_INVERSE = np.asarray(
     [
         [2.0, 0.25, 10.0],
@@ -46,6 +56,16 @@ NON_SELF_INVERSE = np.asarray(
 )
 
 
+class FakeArray:
+    def __init__(self, data: np.ndarray, *, path: str = HOMOGRAPHY_ARRAY_PATH) -> None:
+        self.data = np.asarray(data, dtype=np.float64).copy()
+        self.path = path
+        self.attrs: dict[str, object] = {}
+
+    def __getitem__(self, key):
+        return self.data[key]
+
+
 def _camera_to_canvas():
     return build_directed_homography(
         transform_id="camera_2010093_to_stimulus_canvas_v1",
@@ -54,7 +74,7 @@ def _camera_to_canvas():
         to_space_id="stimulus_canvas_px",
         source_reference_extent=CAMERA_EXTENT,
         target_reference_extent=CANVAS_EXTENT,
-        calibration_ref="/analysis/calibration",
+        calibration_ref=CAMERA_CALIBRATION_PATH,
         camera_id="2010093",
     )
 
@@ -89,10 +109,48 @@ def test_round_trip_serialization_and_digests_are_canonical() -> None:
     assert canonical_directed_transform_json(reordered) == transform.canonical_json()
 
 
+@pytest.mark.parametrize(
+    ("needle", "replacement"),
+    [
+        (
+            '"direction":"source_to_target"',
+            '"direction":"target_to_source","direction":"source_to_target"',
+        ),
+        (
+            '"from_space_id":"source_camera_image_px"',
+            '"from_space_id":"stimulus_canvas_px",'
+            '"from_space_id":"source_camera_image_px"',
+        ),
+        (
+            '"source_reference_extent":{"width":4512',
+            '"source_reference_extent":{"width":640,"width":4512',
+        ),
+        (
+            '"target_reference_extent":{"width":1920,"height":1080',
+            '"target_reference_extent":{"width":1920,"height":720,'
+            '"height":1080',
+        ),
+    ],
+)
+@pytest.mark.parametrize("as_bytes", [False, True])
+def test_parser_rejects_duplicate_json_direction_and_extent_fields_recursively(
+    needle: str,
+    replacement: str,
+    as_bytes: bool,
+) -> None:
+    raw = json.dumps(_camera_to_canvas().to_dict(), separators=(",", ":"))
+    assert needle in raw
+    raw = raw.replace(needle, replacement, 1)
+    value: str | bytes = raw.encode("utf-8") if as_bytes else raw
+
+    with pytest.raises(DirectedTransformError, match="duplicate key"):
+        parse_directed_homography(value)
+
+
 def test_transform_metadata_keeps_coordinate_and_calibration_records_separate() -> None:
     payload = _camera_to_canvas().to_dict()
 
-    assert payload["calibration_ref"] == "/analysis/calibration"
+    assert payload["calibration_ref"] == CAMERA_CALIBRATION_PATH
     assert "coordinate_descriptor" not in payload
     assert "lineage_refs" not in payload
     assert "matrix" not in payload
@@ -142,7 +200,7 @@ def test_camera_id_remains_optional_without_camera_bound_side() -> None:
         to_space_id="stimulus_canvas_px",
         source_reference_extent=CANVAS_EXTENT,
         target_reference_extent=CANVAS_EXTENT,
-        calibration_ref="/analysis/calibration",
+        calibration_ref=CAMERA_CALIBRATION_PATH,
     )
 
     assert transform.camera_id is None
@@ -253,7 +311,7 @@ def test_apply_rejects_near_zero_homogeneous_w() -> None:
         to_space_id="stimulus_canvas_px",
         source_reference_extent=CAMERA_EXTENT,
         target_reference_extent=CANVAS_EXTENT,
-        calibration_ref="/analysis/calibration",
+        calibration_ref=CAMERA_CALIBRATION_PATH,
         camera_id="2010093",
     )
 
@@ -299,6 +357,134 @@ def test_explicit_inverse_swaps_spaces_extents_and_records_source() -> None:
         target_reference_extent=CAMERA_EXTENT,
     )
     np.testing.assert_allclose(restored, points, rtol=1e-12, atol=1e-12)
+
+
+def _load_bound(node: FakeArray, **overrides):
+    kwargs = {
+        "array_path": HOMOGRAPHY_ARRAY_PATH,
+        "expected_from_space_id": "source_camera_image_px",
+        "expected_to_space_id": "stimulus_canvas_px",
+        "expected_camera_id": "2010093",
+        "expected_source_reference_extent": CAMERA_EXTENT,
+        "expected_target_reference_extent": CANVAS_EXTENT,
+        "expected_transform_sha256": _camera_to_canvas().digest(),
+        "expected_calibration_ref": CAMERA_CALIBRATION_PATH,
+    }
+    kwargs.update(overrides)
+    return load_bound_directed_homography(node, **kwargs)
+
+
+def test_stamp_and_load_bind_exact_array_metadata_and_non_self_inverse_matrix() -> None:
+    node = FakeArray(NON_SELF_INVERSE)
+    transform = _camera_to_canvas()
+
+    stamped = stamp_directed_homography(node, transform)
+    loaded = _load_bound(node)
+
+    assert stamped.array_path == HOMOGRAPHY_ARRAY_PATH
+    assert loaded.array_path == HOMOGRAPHY_ARRAY_PATH
+    assert loaded.transform == transform
+    assert loaded.transform_sha256 == transform.digest()
+    assert loaded.matrix_sha256 == homography_matrix_sha256(NON_SELF_INVERSE)
+    assert loaded.matrix.flags.writeable is False
+    assert node.attrs[DIRECTED_TRANSFORM_ATTR] == transform.to_dict()
+    assert node.attrs[
+        f"{DIRECTED_TRANSFORM_ATTR}{DIRECTED_TRANSFORM_DIGEST_SUFFIX}"
+    ] == transform.digest()
+    np.testing.assert_array_equal(loaded.matrix, NON_SELF_INVERSE)
+
+
+def test_bound_loader_rejects_wrong_camera_direction_and_extent() -> None:
+    node = FakeArray(NON_SELF_INVERSE)
+    stamp_directed_homography(node, _camera_to_canvas())
+
+    with pytest.raises(DirectedTransformError, match="camera mismatch"):
+        _load_bound(node, expected_camera_id="different_camera")
+    with pytest.raises(DirectedTransformError, match="direction mismatch"):
+        _load_bound(
+            node,
+            expected_from_space_id="stimulus_canvas_px",
+            expected_to_space_id="source_camera_image_px",
+            expected_source_reference_extent=CANVAS_EXTENT,
+            expected_target_reference_extent=CAMERA_EXTENT,
+        )
+    wrong_extent = TransformReferenceExtent(
+        width=640,
+        height=640,
+        units="px",
+        authority=CAMERA_EXTENT.authority,
+    )
+    with pytest.raises(DirectedTransformError, match="Source reference extent mismatch"):
+        _load_bound(node, expected_source_reference_extent=wrong_extent)
+
+
+def test_bound_loader_rejects_tampered_metadata_and_matrix() -> None:
+    metadata_node = FakeArray(NON_SELF_INVERSE)
+    stamp_directed_homography(metadata_node, _camera_to_canvas())
+    metadata_node.attrs[DIRECTED_TRANSFORM_ATTR]["transform_id"] = "tampered"
+    with pytest.raises(DirectedTransformError, match="digest does not match"):
+        _load_bound(metadata_node)
+
+    matrix_node = FakeArray(NON_SELF_INVERSE)
+    stamp_directed_homography(matrix_node, _camera_to_canvas())
+    matrix_node.data[0, 2] += 1.0
+    with pytest.raises(DirectedTransformError, match="matrix digest"):
+        _load_bound(matrix_node)
+
+
+def test_bound_loader_rejects_node_path_mismatch() -> None:
+    node = FakeArray(NON_SELF_INVERSE, path=f"{CAMERA_CALIBRATION_PATH}/other")
+    stamp_directed_homography(node, _camera_to_canvas())
+
+    with pytest.raises(DirectedTransformError, match="Array path mismatch"):
+        _load_bound(node)
+
+
+@pytest.mark.parametrize(
+    "calibration_ref",
+    [
+        "/analysis/stimulus_runs/stim_1/calibration/2010093",
+        "analysis/stimulus_runs/stim_1/calibration/2010093/",
+        "analysis/stimulus_runs//stim_1/calibration/2010093",
+        "analysis/stimulus_runs/../calibration/2010093",
+    ],
+)
+def test_parse_build_and_stamp_reject_noncanonical_calibration_ref(
+    calibration_ref: str,
+) -> None:
+    payload = _camera_to_canvas().to_dict()
+    payload["calibration_ref"] = calibration_ref
+    with pytest.raises(DirectedTransformError, match="canonical archive-relative"):
+        parse_directed_homography(payload)
+
+    with pytest.raises(DirectedTransformError, match="canonical archive-relative"):
+        build_directed_homography(
+            transform_id="invalid_calibration_ref",
+            matrix=NON_SELF_INVERSE,
+            from_space_id="source_camera_image_px",
+            to_space_id="stimulus_canvas_px",
+            source_reference_extent=CAMERA_EXTENT,
+            target_reference_extent=CANVAS_EXTENT,
+            calibration_ref=calibration_ref,
+            camera_id="2010093",
+        )
+
+    node = FakeArray(NON_SELF_INVERSE)
+    with pytest.raises(DirectedTransformError, match="canonical archive-relative"):
+        stamp_directed_homography(node, payload)
+
+
+def test_strict_bound_loader_requires_pointer_digest_and_calibration_ref() -> None:
+    signature = inspect.signature(load_bound_directed_homography)
+
+    assert (
+        signature.parameters["expected_transform_sha256"].default
+        is inspect.Parameter.empty
+    )
+    assert (
+        signature.parameters["expected_calibration_ref"].default
+        is inspect.Parameter.empty
+    )
 
 
 def test_parser_rejects_unknown_fields_and_unsupported_spaces() -> None:

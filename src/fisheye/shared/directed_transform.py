@@ -29,6 +29,8 @@ DIRECTED_TRANSFORM_SCHEMA_ID = "palette.directed_transform"
 DIRECTED_TRANSFORM_SCHEMA_VERSION = 1
 DIRECTED_TRANSFORM_KIND = "homography"
 DIRECTED_TRANSFORM_DIRECTION = "source_to_target"
+DIRECTED_TRANSFORM_ATTR = "directed_transform"
+DIRECTED_TRANSFORM_DIGEST_SUFFIX = "_sha256"
 DIRECTED_TRANSFORM_CANONICALIZATION = "canonical_json_sort_keys_v1"
 HOMOGRAPHY_MATRIX_CANONICALIZATION = "float64_little_endian_c_order_v1"
 CAMERA_BOUND_SPACE_IDS = frozenset(
@@ -145,6 +147,20 @@ class DirectedHomography:
         return directed_transform_digest(self)
 
 
+@dataclass(frozen=True)
+class BoundDirectedHomography:
+    """One exact persisted matrix bound to validated metadata and its array path."""
+
+    array_path: str
+    matrix: np.ndarray
+    transform: DirectedHomography
+    transform_sha256: str
+
+    @property
+    def matrix_sha256(self) -> str:
+        return self.transform.matrix_sha256
+
+
 def _required_text(value: Any, *, field_name: str) -> str:
     if not isinstance(value, str) or not value:
         raise DirectedTransformError(f"{field_name} must be a non-empty string.")
@@ -254,6 +270,27 @@ def _parse_source_transform(value: Any) -> SourceTransformReference:
     )
 
 
+def _load_json_without_duplicate_keys(value: str) -> Any:
+    """Parse transform JSON without last-key-wins ambiguity at any depth."""
+
+    def reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        for name, item in pairs:
+            if name in payload:
+                raise DirectedTransformError(
+                    f"Directed-transform JSON contains duplicate key {name!r}."
+                )
+            payload[name] = item
+        return payload
+
+    try:
+        return json.loads(value, object_pairs_hook=reject_duplicate_pairs)
+    except json.JSONDecodeError as exc:
+        raise DirectedTransformError(
+            f"Directed-transform JSON is invalid: {exc.msg}."
+        ) from exc
+
+
 def _payload_mapping(value: Any) -> Mapping[str, Any]:
     if isinstance(value, DirectedHomography):
         return value.to_dict()
@@ -265,12 +302,7 @@ def _payload_mapping(value: Any) -> Mapping[str, Any]:
                 "Directed-transform bytes must be UTF-8."
             ) from exc
     if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError as exc:
-            raise DirectedTransformError(
-                f"Directed-transform JSON is invalid: {exc.msg}."
-            ) from exc
+        value = _load_json_without_duplicate_keys(value)
     if not isinstance(value, Mapping):
         raise DirectedTransformError(
             "Directed-transform metadata must be a mapping or JSON object."
@@ -346,7 +378,7 @@ def parse_directed_homography(value: Any) -> DirectedHomography:
             field_name="target_reference_extent",
             space_id=to_space_id,
         ),
-        calibration_ref=_required_text(
+        calibration_ref=_canonical_node_path(
             payload["calibration_ref"],
             field_name="calibration_ref",
         ),
@@ -384,6 +416,50 @@ def directed_transform_digest(value: Any) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+def directed_homography_attrs(
+    value: Any,
+    *,
+    attr_name: str = DIRECTED_TRANSFORM_ATTR,
+) -> dict[str, Any]:
+    """Return the canonical metadata attr and its independent content digest."""
+
+    name = _required_text(attr_name, field_name="attr_name")
+    transform = parse_directed_homography(value)
+    return {
+        name: transform.to_dict(),
+        f"{name}{DIRECTED_TRANSFORM_DIGEST_SUFFIX}": transform.digest(),
+    }
+
+
+def load_directed_homography_attrs(
+    attrs: Mapping[str, Any],
+    *,
+    attr_name: str = DIRECTED_TRANSFORM_ATTR,
+) -> DirectedHomography:
+    """Load transform attrs and reject missing, malformed, or stale metadata."""
+
+    if not isinstance(attrs, Mapping):
+        raise DirectedTransformError("Transform attrs must be a mapping.")
+    name = _required_text(attr_name, field_name="attr_name")
+    digest_name = f"{name}{DIRECTED_TRANSFORM_DIGEST_SUFFIX}"
+    if name not in attrs:
+        raise DirectedTransformError(f"Directed-transform attr {name!r} is missing.")
+    if digest_name not in attrs:
+        raise DirectedTransformError(
+            f"Directed-transform digest attr {digest_name!r} is missing."
+        )
+    transform = parse_directed_homography(attrs[name])
+    stored_digest = _sha256(
+        attrs[digest_name],
+        field_name=digest_name,
+    )
+    if stored_digest != transform.digest():
+        raise DirectedTransformError(
+            "Stored directed-transform digest does not match canonical metadata."
+        )
+    return transform
+
+
 def validate_homography_matrix(matrix: Any) -> np.ndarray:
     """Return a float64 3x3 finite, nonsingular matrix or raise."""
 
@@ -408,6 +484,188 @@ def homography_matrix_sha256(matrix: Any) -> str:
     values = validate_homography_matrix(matrix).astype("<f8", copy=False)
     prefix = f"{HOMOGRAPHY_MATRIX_CANONICALIZATION}\0".encode("ascii")
     return hashlib.sha256(prefix + values.tobytes(order="C")).hexdigest()
+
+
+def _canonical_node_path(value: Any, *, field_name: str) -> str:
+    text = _required_text(value, field_name=field_name)
+    normalized = text.strip("/")
+    parts = normalized.split("/")
+    if (
+        text != normalized
+        or not normalized
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        raise DirectedTransformError(
+            f"{field_name} must be a canonical archive-relative path."
+        )
+    return normalized
+
+
+def _resolve_array_path(node: Any, *, array_path: str | None) -> str:
+    explicit = (
+        _canonical_node_path(array_path, field_name="array_path")
+        if array_path is not None
+        else None
+    )
+    raw_node_path = getattr(node, "path", None)
+    persisted = (
+        _canonical_node_path(raw_node_path, field_name="node.path")
+        if raw_node_path is not None and str(raw_node_path).strip("/")
+        else None
+    )
+    if explicit is None and persisted is None:
+        raise DirectedTransformError(
+            "An exact array_path is required when the node does not expose one."
+        )
+    if explicit is not None and persisted is not None and explicit != persisted:
+        raise DirectedTransformError(
+            f"Array path mismatch: requested {explicit!r}, node exposes {persisted!r}."
+        )
+    if explicit is not None:
+        return explicit
+    assert persisted is not None
+    return persisted
+
+
+def _read_homography_array(node: Any) -> np.ndarray:
+    try:
+        raw = node[:]
+    except Exception as exc:
+        raise DirectedTransformError("Unable to read persisted homography matrix.") from exc
+    return validate_homography_matrix(raw)
+
+
+def _readonly_matrix(matrix: Any) -> np.ndarray:
+    values = validate_homography_matrix(matrix)
+    values.setflags(write=False)
+    return values
+
+
+def stamp_directed_homography(
+    node: Any,
+    value: Any,
+    *,
+    array_path: str | None = None,
+    attr_name: str = DIRECTED_TRANSFORM_ATTR,
+) -> BoundDirectedHomography:
+    """Validate an existing matrix array and stamp its canonical transform attrs."""
+
+    attrs = getattr(node, "attrs", None)
+    if attrs is None or not hasattr(attrs, "update"):
+        raise TypeError("node must expose a mutable attrs mapping.")
+    path = _resolve_array_path(node, array_path=array_path)
+    matrix = _read_homography_array(node)
+    transform = parse_directed_homography(value)
+    if homography_matrix_sha256(matrix) != transform.matrix_sha256:
+        raise DirectedTransformError(
+            "Homography matrix digest does not match directed-transform metadata."
+        )
+    stamped = directed_homography_attrs(transform, attr_name=attr_name)
+    attrs.update(stamped)
+    digest = transform.digest()
+    return BoundDirectedHomography(
+        array_path=path,
+        matrix=_readonly_matrix(matrix),
+        transform=transform,
+        transform_sha256=digest,
+    )
+
+
+def load_bound_directed_homography(
+    node: Any,
+    *,
+    array_path: str | None = None,
+    expected_from_space_id: str,
+    expected_to_space_id: str,
+    expected_camera_id: str | None,
+    expected_source_reference_extent: TransformReferenceExtent | Mapping[str, Any],
+    expected_target_reference_extent: TransformReferenceExtent | Mapping[str, Any],
+    expected_transform_sha256: str,
+    expected_calibration_ref: str,
+    attr_name: str = DIRECTED_TRANSFORM_ATTR,
+) -> BoundDirectedHomography:
+    """Load one exact matrix/metadata binding and validate every caller expectation."""
+
+    path = _resolve_array_path(node, array_path=array_path)
+    attrs = getattr(node, "attrs", None)
+    if not isinstance(attrs, Mapping):
+        raise DirectedTransformError("Homography array must expose an attrs mapping.")
+    transform = load_directed_homography_attrs(attrs, attr_name=attr_name)
+
+    expected_from = _required_text(
+        expected_from_space_id,
+        field_name="expected_from_space_id",
+    )
+    expected_to = _required_text(
+        expected_to_space_id,
+        field_name="expected_to_space_id",
+    )
+    if (
+        transform.from_space_id != expected_from
+        or transform.to_space_id != expected_to
+    ):
+        raise DirectedTransformError(
+            "Transform direction mismatch: "
+            f"metadata maps {transform.from_space_id!r} to {transform.to_space_id!r}, "
+            f"loader expected {expected_from!r} to {expected_to!r}."
+        )
+
+    normalized_camera_id = (
+        _required_text(expected_camera_id, field_name="expected_camera_id")
+        if expected_camera_id is not None
+        else None
+    )
+    if transform.camera_id != normalized_camera_id:
+        raise DirectedTransformError(
+            "Transform camera mismatch: "
+            f"metadata names {transform.camera_id!r}, loader expected "
+            f"{normalized_camera_id!r}."
+        )
+
+    expected_source = _application_extent(
+        expected_source_reference_extent,
+        field_name="expected_source_reference_extent",
+        space_id=expected_from,
+    )
+    expected_target = _application_extent(
+        expected_target_reference_extent,
+        field_name="expected_target_reference_extent",
+        space_id=expected_to,
+    )
+    if transform.source_reference_extent != expected_source:
+        raise DirectedTransformError("Source reference extent mismatch.")
+    if transform.target_reference_extent != expected_target:
+        raise DirectedTransformError("Target reference extent mismatch.")
+
+    digest = transform.digest()
+    expected_digest = _sha256(
+        expected_transform_sha256,
+        field_name="expected_transform_sha256",
+    )
+    if digest != expected_digest:
+        raise DirectedTransformError(
+            "Directed-transform digest does not match the selected pointer."
+        )
+    calibration_ref = _canonical_node_path(
+        expected_calibration_ref,
+        field_name="expected_calibration_ref",
+    )
+    if transform.calibration_ref != calibration_ref:
+        raise DirectedTransformError(
+            "Transform calibration_ref does not match the selected calibration group."
+        )
+
+    matrix = _read_homography_array(node)
+    if homography_matrix_sha256(matrix) != transform.matrix_sha256:
+        raise DirectedTransformError(
+            "Homography matrix digest does not match directed-transform metadata."
+        )
+    return BoundDirectedHomography(
+        array_path=path,
+        matrix=_readonly_matrix(matrix),
+        transform=transform,
+        transform_sha256=digest,
+    )
 
 
 def build_directed_homography(
@@ -588,6 +846,8 @@ __all__ = [
     "DIRECTED_TRANSFORM_SCHEMA_VERSION",
     "DIRECTED_TRANSFORM_KIND",
     "DIRECTED_TRANSFORM_DIRECTION",
+    "DIRECTED_TRANSFORM_ATTR",
+    "DIRECTED_TRANSFORM_DIGEST_SUFFIX",
     "DIRECTED_TRANSFORM_CANONICALIZATION",
     "HOMOGRAPHY_MATRIX_CANONICALIZATION",
     "CAMERA_BOUND_SPACE_IDS",
@@ -595,12 +855,17 @@ __all__ = [
     "TransformReferenceExtent",
     "SourceTransformReference",
     "DirectedHomography",
+    "BoundDirectedHomography",
     "parse_directed_homography",
     "serialize_directed_homography",
     "canonical_directed_transform_json",
     "directed_transform_digest",
+    "directed_homography_attrs",
+    "load_directed_homography_attrs",
     "validate_homography_matrix",
     "homography_matrix_sha256",
+    "stamp_directed_homography",
+    "load_bound_directed_homography",
     "build_directed_homography",
     "apply_directed_homography",
     "invert_directed_homography",
