@@ -463,8 +463,11 @@ def _prepare_run_group(
             raise ValueError(
                 f"{output_parent}/{resolved_name} already exists. Pass --overwrite to replace it."
             )
-        if output_parent == SUBJECT_MASK_CANONICAL_OUTPUT_PARENT:
-            assert_subject_mask_run_unreferenced(parent, str(resolved_name))
+        assert_subject_mask_run_unreferenced(
+            root,
+            str(resolved_name),
+            base_parent_name=output_parent,
+        )
         del parent[resolved_name]
     run_group = parent.create_group(resolved_name)
     mark_run_started(run_group, run_name=str(resolved_name), stage="subject_masks")
@@ -1586,6 +1589,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 crop_group,
                 selected_crop_rows,
                 shard_rows=int(args.mask_probs_shard_rois or DEFAULT_MASK_PROBS_SHARD_ROIS),
+                root=root,
             )
         _copy_detection_source_array(
             run_group,

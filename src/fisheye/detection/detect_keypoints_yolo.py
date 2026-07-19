@@ -1201,6 +1201,7 @@ def detect_keypoints_yolo(
             crop_group,
             selected_crop_rows,
             shard_rows=int(keypoint_roi_shard_rows or DEFAULT_KEYPOINT_ROI_SHARD_ROWS),
+            root=root,
         )
     if "detection_indices" not in lineage_result.copied:
         console.print("[yellow]Crop run missing 'detection_indices'; YOLO keypoint run will omit them.[/yellow]")

@@ -664,6 +664,22 @@ def validate_run(group: zarr.Group, spec: StageSpec) -> ValidationResult:
             ):
                 if payload is None or name not in payload:
                     errors.append(f"subject_masks/composite_payload: missing required array '{name}'")
+            try:
+                composite_version = int(
+                    getattr(group, "attrs", {}).get(
+                        "composite_subject_mask_schema_version",
+                        1,
+                    )
+                )
+            except (TypeError, ValueError):
+                composite_version = -1
+            if composite_version >= 2 and (
+                payload is None or "source_run_indices" not in payload
+            ):
+                errors.append(
+                    "subject_masks/composite_payload: missing required array "
+                    "'source_run_indices' for schema v2"
+                )
         elif probabilities is None:
             errors.append("subject_masks: missing required array 'mask_probs_roi'")
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -17,6 +18,14 @@ from typing import Any
 import numpy as np
 
 from fisheye.refinement.finalize_subject_masks import _SUBJECT_MASK_SHARD_COMPAT_ATTRS
+from fisheye.shared.crop_snapshot_identity import (
+    CropSignatureSnapshot,
+    CropSnapshotIdentityError,
+    crop_detection_source,
+    crop_frame_counts,
+    require_crop_snapshot,
+    resolve_crop_source_signatures,
+)
 from fisheye.shared.composite_subject_mask import (
     COMPOSITE_SUBJECT_MASK_PAYLOAD_GROUP,
     COMPOSITE_SUBJECT_MASK_SCHEMA_ID,
@@ -57,6 +66,7 @@ from fisheye.shared.zarr_run_completion import (
 
 SUBJECT_MASK_PARENT = "subject_mask_runs"
 SUBJECT_MASK_SHARD_PARENT = "subject_mask_shard_runs"
+REFINED_SUBJECT_MASK_PARENT = "refined_subject_masks_runs"
 SUBJECT_MASK_COMPACTION_METHOD = "fisheye.utils.compact_subject_mask_deltas"
 SUBJECT_MASK_COMPACTION_SCHEMA_ID = "palette.subject_mask_keyed_compaction"
 SUBJECT_MASK_COMPACTION_SCHEMA_VERSION = 1
@@ -98,10 +108,40 @@ _TARGET_LINEAGE = (
     "detection_source",
     "instance_key",
 )
+_BASE_MANIFEST_LINEAGE = (
+    "frame_indices",
+    "source_frame_indices",
+    "source_clip_indices",
+    "source_clip_local_frame_indices",
+    "source_refined_row_ids",
+    "source_detect_row_index",
+    "detection_source",
+)
 
 
 class SubjectMaskCompactionError(RuntimeError):
     """Raised when a composite mask snapshot cannot be proven exact."""
+
+
+@dataclass(frozen=True)
+class _MaskBaseCollection:
+    """One logical immutable base backed by one or more physical raw runs."""
+
+    manifest_path: str
+    manifest_group: Any
+    run_paths: tuple[str, ...]
+    groups: tuple[Any, ...]
+    instance_keys: np.ndarray
+    source_signatures: np.ndarray
+    signature_spec_digest: str
+    signature_modes: tuple[str, ...]
+    instance_key_modes: tuple[str, ...]
+    flat_run_indices: np.ndarray
+    flat_local_rows: np.ndarray
+
+    @property
+    def primary(self) -> Any:
+        return self.groups[0]
 
 
 def _require_complete(parent: Any, name: str, *, label: str) -> Any:
@@ -125,27 +165,106 @@ def _keys(group: Any, *, label: str, rows: int) -> np.ndarray:
     return values
 
 
-def _source_signatures(root: Any, run: Any, *, label: str) -> tuple[np.ndarray, str]:
+def _bound_instance_keys(
+    root: Any,
+    run: Any,
+    *,
+    label: str,
+    rows: int,
+) -> tuple[np.ndarray, str]:
+    """Load modern keys or derive historical raw-shard keys from its crop."""
+
     crop_name = str(run.attrs.get("source_crop_run") or "").strip()
     crop_parent = root.get("crop_runs")
     if not crop_name or crop_parent is None:
         raise SubjectMaskCompactionError(f"{label} has no source_crop_run.")
-    crop = _require_complete(crop_parent, crop_name, label="Source crop run")
-    crop_rows = int(crop["instance_key"].shape[0]) if "instance_key" in crop else -1
-    crop_keys = _keys(crop, label=f"crop_runs/{crop_name}", rows=crop_rows)
-    if ROW_SOURCE_SIGNATURE_ARRAY not in crop:
-        raise SubjectMaskCompactionError(f"crop_runs/{crop_name} lacks signed source rows.")
-    validate_row_source_signature_array(crop[ROW_SOURCE_SIGNATURE_ARRAY], expected_row_count=crop_rows)
+    try:
+        crop = require_crop_snapshot(crop_parent, crop_name, label="Source crop run")
+    except CropSnapshotIdentityError as exc:
+        raise SubjectMaskCompactionError(str(exc)) from exc
+    crop_rows = int(crop["frame_indices"].shape[0]) if "frame_indices" in crop else -1
     if "source_crop_row_ids" not in run:
         raise SubjectMaskCompactionError(f"{label} lacks source_crop_row_ids.")
     source_rows = np.asarray(run["source_crop_row_ids"][:], dtype=np.int64).reshape(-1)
-    run_keys = _keys(run, label=label, rows=source_rows.shape[0])
+    if source_rows.shape != (rows,) or (
+        source_rows.size
+        and (source_rows.min() < 0 or source_rows.max() >= crop_rows)
+    ):
+        raise SubjectMaskCompactionError(f"{label} references invalid source crop rows.")
+    actual = _keys(run, label=label, rows=rows) if "instance_key" in run else None
+    if "instance_key" in crop:
+        crop_keys = _keys(crop, label=f"crop_runs/{crop_name}", rows=crop_rows)
+    elif actual is not None and np.array_equal(
+        np.sort(source_rows),
+        np.arange(crop_rows, dtype=np.int64),
+    ):
+        crop_keys = np.empty(crop_rows, dtype=np.uint64)
+        crop_keys[source_rows] = actual
+    else:
+        raise SubjectMaskCompactionError(
+            f"{label} cannot establish keys for keyless crop_runs/{crop_name}."
+        )
+    expected = crop_keys[source_rows]
+    if actual is None:
+        return expected, "derived_from_bound_crop_rows_v1"
+    if not np.array_equal(actual, expected):
+        raise SubjectMaskCompactionError(
+            f"{label} instance_key does not match its bound crop rows."
+        )
+    return actual, "persisted"
+
+
+def _source_signatures(
+    root: Any,
+    run: Any,
+    *,
+    label: str,
+) -> tuple[np.ndarray, str, str]:
+    crop_name = str(run.attrs.get("source_crop_run") or "").strip()
+    crop_parent = root.get("crop_runs")
+    if not crop_name or crop_parent is None:
+        raise SubjectMaskCompactionError(f"{label} has no source_crop_run.")
+    try:
+        crop = require_crop_snapshot(crop_parent, crop_name, label="Source crop run")
+    except CropSnapshotIdentityError as exc:
+        raise SubjectMaskCompactionError(str(exc)) from exc
+    if "source_crop_row_ids" not in run:
+        raise SubjectMaskCompactionError(f"{label} lacks source_crop_row_ids.")
+    source_rows = np.asarray(run["source_crop_row_ids"][:], dtype=np.int64).reshape(-1)
+    run_keys, _ = _bound_instance_keys(
+        root,
+        run,
+        label=label,
+        rows=source_rows.shape[0],
+    )
+    crop_rows = int(crop["frame_indices"].shape[0]) if "frame_indices" in crop else -1
+    if "instance_key" in crop:
+        crop_keys = _keys(crop, label=f"crop_runs/{crop_name}", rows=crop_rows)
+    else:
+        if not np.array_equal(
+            np.sort(source_rows),
+            np.arange(crop_rows, dtype=np.int64),
+        ):
+            raise SubjectMaskCompactionError(
+                f"{label} cannot supply complete keys for crop_runs/{crop_name}."
+            )
+        crop_keys = np.empty(crop_rows, dtype=np.uint64)
+        crop_keys[source_rows] = run_keys
+    try:
+        snapshot = resolve_crop_source_signatures(
+            root,
+            crop,
+            label=f"crop_runs/{crop_name}",
+            instance_keys=crop_keys,
+        )
+    except CropSnapshotIdentityError as exc:
+        raise SubjectMaskCompactionError(str(exc)) from exc
     if source_rows.size and (source_rows.min() < 0 or source_rows.max() >= crop_rows):
         raise SubjectMaskCompactionError(f"{label} references an out-of-range crop row.")
     if not np.array_equal(run_keys, crop_keys[source_rows]):
         raise SubjectMaskCompactionError(f"{label} keys do not match its source crop rows.")
-    signatures = np.asarray(crop[ROW_SOURCE_SIGNATURE_ARRAY][:], dtype=np.uint8)[source_rows]
-    return signatures, load_row_source_signature_spec(crop.attrs).spec_digest
+    signatures = snapshot.signatures[source_rows]
+    return signatures, snapshot.spec.spec_digest, snapshot.mode
 
 
 def _input_artifact_sha256(group: Any, *, role: str, label: str) -> str:
@@ -170,26 +289,240 @@ def _input_artifact_sha256(group: Any, *, role: str, label: str) -> str:
     return next(iter(fingerprints))
 
 
-def _validate_semantics(base: Any, replacements: Sequence[Any]) -> str:
-    for name in _REQUIRED_SEMANTIC_ATTRS:
-        if name not in base.attrs:
-            raise SubjectMaskCompactionError(f"Base subject-mask run lacks attr {name!r}.")
-    if "available_channels" not in base or "mask_probs_roi" not in base:
-        raise SubjectMaskCompactionError("Base subject-mask run lacks probability/channel payload.")
-    expected_available = np.asarray(base["available_channels"][:], dtype=bool)
-    expected_surface = base["mask_probs_roi"]
-    model_sha256 = _input_artifact_sha256(
-        base,
-        role="subject_mask_unet_checkpoint",
-        label="Base subject-mask run",
+def _resolve_raw_run_path(root: Any, path: str, *, label: str) -> Any:
+    parts = [part for part in str(path).strip().strip("/").split("/") if part]
+    if len(parts) != 2 or parts[0] not in {SUBJECT_MASK_PARENT, SUBJECT_MASK_SHARD_PARENT}:
+        raise SubjectMaskCompactionError(
+            f"{label} path {path!r} must name one raw subject-mask run."
+        )
+    parent = root.get(parts[0])
+    if parent is None:
+        raise SubjectMaskCompactionError(f"Missing raw subject-mask parent {parts[0]!r}.")
+    return _require_complete(parent, parts[1], label=label)
+
+
+def _resolve_base_collection(root: Any, base_run: str) -> _MaskBaseCollection:
+    mask_parent = root.get(SUBJECT_MASK_PARENT)
+    refined_parent = root.get(REFINED_SUBJECT_MASK_PARENT)
+    manifest_path: str
+    manifest: Any
+    run_paths: list[str]
+    if mask_parent is not None and base_run in mask_parent:
+        manifest = _require_complete(
+            mask_parent,
+            base_run,
+            label="Base subject-mask run",
+        )
+        manifest_path = f"{SUBJECT_MASK_PARENT}/{base_run}"
+        run_paths = [manifest_path]
+    elif refined_parent is not None and base_run in refined_parent:
+        manifest = _require_complete(
+            refined_parent,
+            base_run,
+            label="Base refined subject-mask collection manifest",
+        )
+        manifest_path = f"{REFINED_SUBJECT_MASK_PARENT}/{base_run}"
+        raw_paths = manifest.attrs.get("source_subject_mask_shard_run_paths")
+        if isinstance(raw_paths, (list, tuple)) and raw_paths:
+            run_paths = [str(value).strip().strip("/") for value in raw_paths]
+        else:
+            raw_names = manifest.attrs.get("source_subject_mask_shard_runs")
+            if not isinstance(raw_names, (list, tuple)) or not raw_names:
+                raise SubjectMaskCompactionError(
+                    "Refined base manifest lacks source subject-mask shard paths."
+                )
+            run_paths = [f"{SUBJECT_MASK_SHARD_PARENT}/{value}" for value in raw_names]
+    else:
+        raise SubjectMaskCompactionError(
+            f"Base run {base_run!r} is absent from both raw and refined subject-mask parents."
+        )
+    if len(set(run_paths)) != len(run_paths):
+        raise SubjectMaskCompactionError("Base collection declares duplicate raw run paths.")
+    groups = tuple(
+        _resolve_raw_run_path(root, path, label="Base subject-mask source")
+        for path in run_paths
     )
+    if not groups:
+        raise SubjectMaskCompactionError("Base subject-mask collection is empty.")
+
+    refined_manifest_identity: tuple[np.ndarray, np.ndarray, str, str] | None = None
+    if manifest_path.startswith(f"{REFINED_SUBJECT_MASK_PARENT}/"):
+        if "instance_key" not in manifest:
+            raise SubjectMaskCompactionError(
+                "Refined base manifest lacks instance_key."
+            )
+        manifest_rows = int(manifest["instance_key"].shape[0])
+        manifest_keys = _keys(
+            manifest,
+            label=manifest_path,
+            rows=manifest_rows,
+        )
+        manifest_signatures, manifest_digest, manifest_signature_mode = (
+            _source_signatures(root, manifest, label=manifest_path)
+        )
+        source_rows_total = sum(
+            int(group["mask_probs_roi"].shape[0]) for group in groups
+        )
+        if source_rows_total != manifest_rows:
+            raise SubjectMaskCompactionError(
+                "Refined base manifest row count differs from its declared raw shards."
+            )
+        refined_manifest_identity = (
+            manifest_keys,
+            manifest_signatures,
+            manifest_digest,
+            manifest_signature_mode,
+        )
+
+    key_parts: list[np.ndarray] = []
+    signature_parts: list[np.ndarray] = []
+    signature_digests: set[str] = set()
+    signature_modes: list[str] = []
+    instance_key_modes: list[str] = []
+    flat_run_indices: list[np.ndarray] = []
+    flat_local_rows: list[np.ndarray] = []
+    manifest_start = 0
+    for run_index, (path, group) in enumerate(zip(run_paths, groups, strict=True)):
+        if str(group.attrs.get("subject_mask_storage_mode") or "") == COMPOSITE_SUBJECT_MASK_STORAGE_MODE:
+            raise SubjectMaskCompactionError(
+                f"Base source {path!r} is composite; reference chains are forbidden."
+            )
+        if "mask_probs_roi" not in group:
+            raise SubjectMaskCompactionError(f"Base source {path!r} lacks mask_probs_roi.")
+        rows = int(group["mask_probs_roi"].shape[0])
+        if refined_manifest_identity is None:
+            keys, key_mode = _bound_instance_keys(
+                root,
+                group,
+                label=path,
+                rows=rows,
+            )
+            signatures, digest, mode = _source_signatures(
+                root,
+                group,
+                label=path,
+            )
+        else:
+            manifest_stop = manifest_start + rows
+            keys = refined_manifest_identity[0][manifest_start:manifest_stop]
+            signatures = refined_manifest_identity[1][manifest_start:manifest_stop]
+            digest = refined_manifest_identity[2]
+            mode = (
+                "exact_refined_collection_manifest_v1:"
+                f"{refined_manifest_identity[3]}"
+            )
+            key_mode = "derived_from_exact_refined_collection_manifest_v1"
+            compared = 0
+            for lineage_name in _BASE_MANIFEST_LINEAGE:
+                if lineage_name not in manifest or lineage_name not in group:
+                    continue
+                manifest_values = np.asarray(
+                    manifest[lineage_name][manifest_start:manifest_stop]
+                )
+                source_values = np.asarray(group[lineage_name][:])
+                if not np.array_equal(manifest_values, source_values):
+                    raise SubjectMaskCompactionError(
+                        f"Base source {path!r} does not match the refined manifest "
+                        f"for lineage {lineage_name!r}."
+                    )
+                compared += 1
+            if compared < 4:
+                raise SubjectMaskCompactionError(
+                    f"Base source {path!r} has insufficient shared lineage with its manifest."
+                )
+            manifest_start = manifest_stop
+        key_parts.append(keys)
+        signature_parts.append(signatures)
+        signature_digests.add(digest)
+        signature_modes.append(mode)
+        instance_key_modes.append(key_mode)
+        flat_run_indices.append(np.full(rows, run_index, dtype=np.int32))
+        flat_local_rows.append(np.arange(rows, dtype=np.int64))
+    if len(signature_digests) != 1:
+        raise SubjectMaskCompactionError(
+            "Base subject-mask shards use incompatible crop signature specifications."
+        )
+    keys = np.concatenate(key_parts) if key_parts else np.empty(0, dtype=np.uint64)
+    if np.unique(keys).shape[0] != keys.shape[0]:
+        raise SubjectMaskCompactionError(
+            "Base subject-mask collection contains duplicate instance_key values."
+        )
+    return _MaskBaseCollection(
+        manifest_path=manifest_path,
+        manifest_group=manifest,
+        run_paths=tuple(run_paths),
+        groups=groups,
+        instance_keys=keys,
+        source_signatures=(
+            np.concatenate(signature_parts, axis=0)
+            if signature_parts
+            else np.empty((0, 32), dtype=np.uint8)
+        ),
+        signature_spec_digest=next(iter(signature_digests)),
+        signature_modes=tuple(signature_modes),
+        instance_key_modes=tuple(instance_key_modes),
+        flat_run_indices=np.concatenate(flat_run_indices),
+        flat_local_rows=np.concatenate(flat_local_rows),
+    )
+
+
+def _validate_semantics(base: _MaskBaseCollection, replacements: Sequence[Any]) -> str:
+    primary = base.primary
+    for name in _REQUIRED_SEMANTIC_ATTRS:
+        if name not in primary.attrs:
+            raise SubjectMaskCompactionError(f"Base subject-mask run lacks attr {name!r}.")
+    if "available_channels" not in primary or "mask_probs_roi" not in primary:
+        raise SubjectMaskCompactionError("Base subject-mask run lacks probability/channel payload.")
+    expected_available = np.asarray(primary["available_channels"][:], dtype=bool)
+    expected_surface = primary["mask_probs_roi"]
+    model_fingerprints: set[str] = set()
     if len(expected_surface.shape) != 4:
         raise SubjectMaskCompactionError("Base mask_probs_roi must have shape (N,C,H,W).")
+    for index, source in enumerate(base.groups):
+        for name in _REQUIRED_SEMANTIC_ATTRS:
+            if name not in source.attrs:
+                raise SubjectMaskCompactionError(
+                    f"Base subject-mask source {index} lacks attr {name!r}."
+                )
+        for name in _SEMANTIC_ATTRS:
+            if stable_json(primary.attrs.get(name)) != stable_json(source.attrs.get(name)):
+                raise SubjectMaskCompactionError(
+                    f"Base subject-mask sources differ in semantic attr {name!r}."
+                )
+        if "available_channels" not in source or not np.array_equal(
+            np.asarray(source["available_channels"][:], dtype=bool),
+            expected_available,
+        ):
+            raise SubjectMaskCompactionError(
+                f"Base subject-mask source {index} available channels differ."
+            )
+        surface = source["mask_probs_roi"]
+        if (
+            tuple(surface.shape[1:]) != tuple(expected_surface.shape[1:])
+            or np.dtype(surface.dtype) != np.dtype(expected_surface.dtype)
+        ):
+            raise SubjectMaskCompactionError(
+                f"Base subject-mask source {index} probability shape or dtype differs."
+            )
+        model_fingerprints.add(
+            _input_artifact_sha256(
+                source,
+                role="subject_mask_unet_checkpoint",
+                label=f"Base subject-mask source {index}",
+            )
+        )
+    if len(model_fingerprints) != 1:
+        raise SubjectMaskCompactionError(
+            "Base subject-mask sources used different model fingerprints."
+        )
+    model_sha256 = next(iter(model_fingerprints))
     for index, replacement in enumerate(replacements):
         for name in _SEMANTIC_ATTRS:
             if name in _REQUIRED_SEMANTIC_ATTRS and name not in replacement.attrs:
                 raise SubjectMaskCompactionError(f"Replacement {index} lacks attr {name!r}.")
-            if stable_json(base.attrs.get(name)) != stable_json(replacement.attrs.get(name)):
+            if stable_json(primary.attrs.get(name)) != stable_json(
+                replacement.attrs.get(name)
+            ):
                 raise SubjectMaskCompactionError(
                     f"Subject-mask semantic attr {name!r} differs for replacement {index}."
                 )
@@ -213,13 +546,20 @@ def _validate_semantics(base: Any, replacements: Sequence[Any]) -> str:
     return model_sha256
 
 
-def _resolve_replacements(root: Any, names: Sequence[str], target: Any, target_name: str) -> list[Any]:
+def _resolve_replacements(
+    root: Any,
+    names: Sequence[str],
+    target: Any,
+    target_name: str,
+    target_keys: np.ndarray,
+    target_signature_snapshot: CropSignatureSnapshot,
+) -> list[Any]:
     parent = root.get(SUBJECT_MASK_SHARD_PARENT)
     if names and parent is None:
         raise SubjectMaskCompactionError(f"Missing {SUBJECT_MASK_SHARD_PARENT}.")
     if len(set(names)) != len(names):
         raise SubjectMaskCompactionError("Duplicate replacement run names were supplied.")
-    target_keys = np.asarray(target["instance_key"][:], dtype=np.uint64).reshape(-1)
+    target_keys = np.asarray(target_keys, dtype=np.uint64).reshape(-1)
     groups: list[Any] = []
     for name in names:
         group = _require_complete(parent, str(name), label="Replacement subject-mask run")
@@ -250,15 +590,13 @@ def _resolve_replacements(root: Any, names: Sequence[str], target: Any, target_n
             group[ROW_SOURCE_SIGNATURE_ARRAY], expected_row_count=rows
         )
         replacement_spec = load_row_source_signature_spec(group.attrs)
-        target_spec = load_row_source_signature_spec(target.attrs)
         replacement_signatures = np.asarray(
             group[ROW_SOURCE_SIGNATURE_ARRAY][:], dtype=np.uint8
         )
-        current_signatures = np.asarray(
-            target[ROW_SOURCE_SIGNATURE_ARRAY][:], dtype=np.uint8
-        )[target_rows]
+        current_signatures = target_signature_snapshot.signatures[target_rows]
         if (
-            replacement_spec.spec_digest != target_spec.spec_digest
+            replacement_spec.spec_digest
+            != target_signature_snapshot.spec.spec_digest
             or not np.array_equal(replacement_signatures, current_signatures)
         ):
             raise SubjectMaskCompactionError(
@@ -294,10 +632,15 @@ def _gather_replacement_rows(
     replacements: Sequence[Any],
     plan: KeyedReplacementPlan,
     target_rows: np.ndarray,
+    empty_template: Any | None = None,
 ) -> np.ndarray:
     target_rows = np.asarray(target_rows, dtype=np.int64).reshape(-1)
     if not target_rows.size:
-        source = replacements[0][name]
+        source = replacements[0][name] if replacements else empty_template
+        if source is None:
+            raise SubjectMaskCompactionError(
+                "Cannot determine the empty replacement payload shape."
+            )
         return np.empty((0, *tuple(source.shape[1:])), dtype=source.dtype)
     first_run = int(plan.source_run_indices[target_rows[0]])
     if first_run < 0:
@@ -315,18 +658,28 @@ def _gather_replacement_rows(
 def _gather_all_rows(
     name: str,
     *,
-    base: Any,
+    base: _MaskBaseCollection,
     replacements: Sequence[Any],
     plan: KeyedReplacementPlan,
     start: int,
     stop: int,
 ) -> np.ndarray:
-    source = base[name]
+    source = base.primary[name]
     output = np.empty((stop - start, *tuple(int(v) for v in source.shape[1:])), dtype=source.dtype)
     run_indices = plan.source_run_indices[start:stop]
     source_rows = plan.source_row_indices[start:stop]
     positions = np.flatnonzero(run_indices == REPLACEMENT_SOURCE_BASE)
-    _read_rows_into(source, source_rows[positions], output, positions)
+    flat_rows = source_rows[positions]
+    for base_run_index, group in enumerate(base.groups):
+        within = np.flatnonzero(base.flat_run_indices[flat_rows] == base_run_index)
+        if not within.size:
+            continue
+        _read_rows_into(
+            group[name],
+            base.flat_local_rows[flat_rows[within]],
+            output,
+            positions[within],
+        )
     for run_index, replacement in enumerate(replacements):
         positions = np.flatnonzero(run_indices == run_index)
         _read_rows_into(replacement[name], source_rows[positions], output, positions)
@@ -374,6 +727,65 @@ def _snapshot_digest(*arrays: np.ndarray) -> str:
     return digest.hexdigest()
 
 
+def _target_crop_keys(
+    target: Any,
+    *,
+    target_name: str,
+    base: _MaskBaseCollection,
+) -> tuple[np.ndarray, str]:
+    rows = int(target["frame_indices"].shape[0]) if "frame_indices" in target else -1
+    if "instance_key" in target:
+        return _keys(target, label=f"crop_runs/{target_name}", rows=rows), "persisted"
+    manifest = base.manifest_group
+    if (
+        not base.manifest_path.startswith(f"{REFINED_SUBJECT_MASK_PARENT}/")
+        or str(manifest.attrs.get("source_crop_run") or "") != target_name
+        or "instance_key" not in manifest
+        or "source_crop_row_ids" not in manifest
+    ):
+        raise SubjectMaskCompactionError(
+            f"crop_runs/{target_name} lacks instance_key and has no exact refined manifest binding."
+        )
+    manifest_rows = int(manifest["instance_key"].shape[0])
+    manifest_keys = _keys(
+        manifest,
+        label=base.manifest_path,
+        rows=manifest_rows,
+    )
+    target_rows = np.asarray(
+        manifest["source_crop_row_ids"][:], dtype=np.int64
+    ).reshape(-1)
+    if (
+        target_rows.shape != (manifest_rows,)
+        or not np.array_equal(
+            np.sort(target_rows),
+            np.arange(rows, dtype=np.int64),
+        )
+    ):
+        raise SubjectMaskCompactionError(
+            "Refined base manifest does not cover every target crop row exactly once."
+        )
+    keys = np.empty(rows, dtype=np.uint64)
+    keys[target_rows] = manifest_keys
+    compared = 0
+    for name in _BASE_MANIFEST_LINEAGE:
+        if name not in manifest or name not in target:
+            continue
+        if not np.array_equal(
+            np.asarray(manifest[name][:]),
+            np.asarray(target[name][:])[target_rows],
+        ):
+            raise SubjectMaskCompactionError(
+                f"Refined base manifest does not match target crop lineage {name!r}."
+            )
+        compared += 1
+    if compared < 4:
+        raise SubjectMaskCompactionError(
+            "Refined base manifest has insufficient shared target-crop lineage."
+        )
+    return keys, "derived_from_exact_refined_collection_manifest_v1"
+
+
 def compact_subject_mask_deltas(
     *,
     zarr_path: str | Path,
@@ -391,32 +803,64 @@ def compact_subject_mask_deltas(
     root = open_zarr_root(archive, mode="r" if dry_run else "a")
     if getattr(getattr(root, "metadata", None), "zarr_format", None) != 3:
         raise SubjectMaskCompactionError("Composite subject-mask compaction requires Zarr v3.")
-    mask_parent = root.get(SUBJECT_MASK_PARENT)
     crop_parent = root.get("crop_runs")
-    if mask_parent is None or crop_parent is None:
-        raise SubjectMaskCompactionError("Archive lacks subject_mask_runs or crop_runs.")
-    base = _require_complete(mask_parent, str(base_run), label="Base subject-mask run")
-    if str(base.attrs.get("subject_mask_storage_mode") or "") == COMPOSITE_SUBJECT_MASK_STORAGE_MODE:
-        raise SubjectMaskCompactionError("Composite bases are forbidden; compact against a standalone run.")
-    target = _require_complete(crop_parent, str(target_crop_run), label="Target crop run")
-    target_rows = int(target["instance_key"].shape[0]) if "instance_key" in target else -1
-    target_keys = _keys(target, label=f"crop_runs/{target_crop_run}", rows=target_rows)
-    if ROW_SOURCE_SIGNATURE_ARRAY not in target:
-        raise SubjectMaskCompactionError("Target crop lacks signed source rows.")
-    validate_row_source_signature_array(target[ROW_SOURCE_SIGNATURE_ARRAY], expected_row_count=target_rows)
-    target_signatures = np.asarray(target[ROW_SOURCE_SIGNATURE_ARRAY][:], dtype=np.uint8)
-    target_spec = load_row_source_signature_spec(target.attrs)
-    for required in ("frame_indices", "frame_counts", "detection_indices", "detection_source"):
+    if crop_parent is None:
+        raise SubjectMaskCompactionError("Archive lacks crop_runs.")
+    base = _resolve_base_collection(root, str(base_run))
+    try:
+        target = require_crop_snapshot(
+            crop_parent,
+            str(target_crop_run),
+            label="Target crop run",
+        )
+    except CropSnapshotIdentityError as exc:
+        raise SubjectMaskCompactionError(str(exc)) from exc
+    target_rows = int(target["frame_indices"].shape[0]) if "frame_indices" in target else -1
+    target_keys, target_key_mode = _target_crop_keys(
+        target,
+        target_name=str(target_crop_run),
+        base=base,
+    )
+    try:
+        target_signature_snapshot = resolve_crop_source_signatures(
+            root,
+            target,
+            label=f"crop_runs/{target_crop_run}",
+            instance_keys=target_keys,
+        )
+    except CropSnapshotIdentityError as exc:
+        raise SubjectMaskCompactionError(str(exc)) from exc
+    target_signatures = target_signature_snapshot.signatures
+    target_spec = target_signature_snapshot.spec
+    for required in ("frame_indices", "detection_indices"):
         if required not in target:
             raise SubjectMaskCompactionError(f"Target crop lacks lineage array {required!r}.")
 
-    base_rows = int(base["mask_probs_roi"].shape[0]) if "mask_probs_roi" in base else -1
-    base_keys = _keys(base, label=f"{SUBJECT_MASK_PARENT}/{base_run}", rows=base_rows)
-    base_signatures, base_spec_digest = _source_signatures(
-        root, base, label=f"{SUBJECT_MASK_PARENT}/{base_run}"
+    base_keys = base.instance_keys
+    base_signatures = base.source_signatures
+    base_spec_digest = base.signature_spec_digest
+    replacements = _resolve_replacements(
+        root,
+        replacement_runs,
+        target,
+        str(target_crop_run),
+        target_keys,
+        target_signature_snapshot,
     )
-    replacements = _resolve_replacements(root, replacement_runs, target, str(target_crop_run))
     model_sha256 = _validate_semantics(base, replacements)
+    try:
+        target_frame_counts = crop_frame_counts(
+            root,
+            target,
+            fallback_frame_count=(
+                int(base.manifest_group["frame_counts"].shape[0])
+                if "frame_counts" in base.manifest_group
+                else None
+            ),
+        )
+        target_detection_source = crop_detection_source(target)
+    except CropSnapshotIdentityError as exc:
+        raise SubjectMaskCompactionError(str(exc)) from exc
     replacement_keys = [np.asarray(group["instance_key"][:], dtype=np.uint64) for group in replacements]
     plan = build_keyed_replacement_plan(
         target_instance_keys=target_keys,
@@ -438,12 +882,22 @@ def compact_subject_mask_deltas(
         "output_run": output_name,
         "output_path": f"{SUBJECT_MASK_PARENT}/{output_name}",
         "base_run": str(base_run),
+        "base_manifest_path": base.manifest_path,
+        "base_run_paths": list(base.run_paths),
         "target_crop_run": str(target_crop_run),
         "replacement_runs": [str(value) for value in replacement_runs],
+        "source_signature_modes": {
+            "base": list(base.signature_modes),
+            "target": target_signature_snapshot.mode,
+        },
+        "base_instance_key_modes": list(base.instance_key_modes),
+        "target_instance_key_mode": target_key_mode,
         "plan": plan.summary(),
         "storage": {
             "mode": COMPOSITE_SUBJECT_MASK_STORAGE_MODE,
+            "schema_version": COMPOSITE_SUBJECT_MASK_SCHEMA_VERSION,
             "reference_depth": 1,
+            "base_source_count": len(base.run_paths),
             "unchanged_probability_bytes_rewritten": 0,
         },
     }
@@ -457,16 +911,35 @@ def compact_subject_mask_deltas(
         "latest": parent.attrs.get("latest"),
         RUN_LATEST_COMPLETE_ATTR: parent.attrs.get(RUN_LATEST_COMPLETE_ATTR),
     }
+    target_derived_arrays = {
+        "detection_source": target_detection_source,
+        "frame_counts": target_frame_counts,
+        "instance_key": target_keys,
+    }
     target_lineage_names = tuple(
-        name for name in (*_TARGET_LINEAGE, "frame_counts") if name in target
+        name
+        for name in (*_TARGET_LINEAGE, "frame_counts")
+        if name in target or name in target_derived_arrays
     )
-    target_lineage_snapshot = [np.asarray(target[name][:]) for name in target_lineage_names]
+    target_lineage_snapshot = [
+        np.asarray(
+            target[name][:]
+            if name in target
+            else target_derived_arrays[name]
+        )
+        for name in target_lineage_names
+    ]
     source_digest = _snapshot_digest(
         target_keys,
         target_signatures,
+        np.frombuffer(target_spec.spec_digest.encode("utf-8"), dtype=np.uint8),
         *target_lineage_snapshot,
         base_keys,
         base_signatures,
+        np.frombuffer(base_spec_digest.encode("utf-8"), dtype=np.uint8),
+        base.flat_run_indices,
+        base.flat_local_rows,
+        np.frombuffer(stable_json(base.run_paths).encode("utf-8"), dtype=np.uint8),
         *replacement_keys,
     )
     run_group = parent.create_group(output_name)
@@ -475,14 +948,15 @@ def compact_subject_mask_deltas(
     started = time.perf_counter()
     try:
         created_at = datetime.now(timezone.utc).isoformat()
+        primary_base = base.primary
         copied_attrs = {
-            name: json_ready(base.attrs.get(name))
+            name: json_ready(primary_base.attrs.get(name))
             for name in _SEMANTIC_ATTRS
-            if name in base.attrs
+            if name in primary_base.attrs
         }
-        if "source_checkpoint" in base.attrs:
+        if "source_checkpoint" in primary_base.attrs:
             copied_attrs["source_checkpoint"] = json_ready(
-                base.attrs.get("source_checkpoint")
+                primary_base.attrs.get("source_checkpoint")
             )
         run_group.attrs.update(
             {
@@ -496,7 +970,11 @@ def compact_subject_mask_deltas(
                 "composite_subject_mask_schema_id": COMPOSITE_SUBJECT_MASK_SCHEMA_ID,
                 "composite_subject_mask_schema_version": COMPOSITE_SUBJECT_MASK_SCHEMA_VERSION,
                 "composite_reference_depth": 1,
-                "composite_base_subject_mask_run": str(base_run),
+                "composite_base_subject_mask_run": (
+                    str(base_run) if len(base.run_paths) == 1 else None
+                ),
+                "composite_base_manifest_run_path": base.manifest_path,
+                "composite_base_subject_mask_run_paths": list(base.run_paths),
                 "source_crop_run": str(target_crop_run),
                 "source_subject_mask_replacement_runs": [str(value) for value in replacement_runs],
                 "source_subject_mask_replacement_run_paths": [
@@ -506,11 +984,11 @@ def compact_subject_mask_deltas(
                 "total_rois": int(target_rows),
                 "compaction_plan": plan.summary(),
                 "source_subject_mask_model_sha256": model_sha256,
-                "mask_probs_storage_layout": "composite_base_delta_v1",
-                "mask_probs_storage_policy": "immutable_depth_one_base_delta_v1",
+                "mask_probs_storage_layout": "composite_multi_base_delta_v2",
+                "mask_probs_storage_policy": "immutable_depth_one_multi_base_delta_v2",
                 "mask_probs_logical_shape": [
                     int(target_rows),
-                    *[int(value) for value in base["mask_probs_roi"].shape[1:]],
+                    *[int(value) for value in primary_base["mask_probs_roi"].shape[1:]],
                 ],
                 "mask_probs_delta_rows": int(delta_targets.shape[0]),
                 "mask_probs_reused_rows": int(target_rows - delta_targets.shape[0]),
@@ -520,6 +998,7 @@ def compact_subject_mask_deltas(
                 "row_identity_mode": "instance_key",
                 "row_identity_mode_schema": ROW_IDENTITY_MODE_SCHEMA,
                 "instance_key_status": "present",
+                "base_instance_key_modes": list(base.instance_key_modes),
                 "instance_key_alignment_status": "exact_full_target_crop",
                 "stage_selector_eligible": True,
                 "selection_policy": "complete_composite_snapshot",
@@ -527,9 +1006,13 @@ def compact_subject_mask_deltas(
             }
         )
         for name in _TARGET_LINEAGE:
-            if name not in target:
+            if name not in target and name not in target_derived_arrays:
                 continue
-            values = np.asarray(target[name][:])
+            values = np.asarray(
+                target[name][:]
+                if name in target
+                else target_derived_arrays[name]
+            )
             store_array(run_group, name, values, shard_rows=int(tabular_shard_rows))
         store_array(
             run_group,
@@ -540,12 +1023,12 @@ def compact_subject_mask_deltas(
         store_array(
             run_group,
             "frame_counts",
-            np.asarray(target["frame_counts"][:], dtype=np.int32),
+            target_frame_counts,
             shard_rows=int(tabular_shard_rows),
         )
         run_group.create_array(
             "available_channels",
-            data=np.asarray(base["available_channels"][:], dtype=bool),
+            data=np.asarray(primary_base["available_channels"][:], dtype=bool),
             overwrite=True,
         )
         store_array(
@@ -561,14 +1044,23 @@ def compact_subject_mask_deltas(
         reusable = plan.source_run_indices == REPLACEMENT_SOURCE_BASE
         source_codes[reusable] = COMPOSITE_SUBJECT_MASK_SOURCE_BASE
         source_rows = np.empty(target_rows, dtype=np.int64)
-        source_rows[reusable] = plan.source_row_indices[reusable]
+        source_run_indices = np.full(target_rows, -1, dtype=np.int32)
+        reusable_flat_rows = plan.source_row_indices[reusable]
+        source_run_indices[reusable] = base.flat_run_indices[reusable_flat_rows]
+        source_rows[reusable] = base.flat_local_rows[reusable_flat_rows]
         source_rows[~reusable] = np.arange(delta_targets.shape[0], dtype=np.int64)
         store_array(payload, "source_codes", source_codes, shard_rows=int(tabular_shard_rows))
+        store_array(
+            payload,
+            "source_run_indices",
+            source_run_indices,
+            shard_rows=int(tabular_shard_rows),
+        )
         store_array(payload, "source_row_indices", source_rows, shard_rows=int(tabular_shard_rows))
         store_array(payload, "delta_target_row_indices", delta_targets, shard_rows=int(tabular_shard_rows))
         store_array(payload, "delta_instance_key", target_keys[delta_targets], shard_rows=int(tabular_shard_rows))
 
-        base_surface = base["mask_probs_roi"]
+        base_surface = primary_base["mask_probs_roi"]
         surface_shape = (int(delta_targets.shape[0]), *tuple(int(v) for v in base_surface.shape[1:]))
         chunks, shards = _surface_layout(base_surface, int(delta_targets.shape[0]))
         kwargs: dict[str, Any] = {
@@ -589,6 +1081,7 @@ def compact_subject_mask_deltas(
                 replacements=replacements,
                 plan=plan,
                 target_rows=delta_targets[start:stop],
+                empty_template=base_surface,
             )
             _write_readback(delta_surface, start, stop, values, probability_digest)
         delta_surface.attrs.update(
@@ -601,12 +1094,18 @@ def compact_subject_mask_deltas(
             }
         )
 
-        metrics = base.get("metrics")
+        metrics = primary_base.get("metrics")
         if metrics is None:
             raise SubjectMaskCompactionError("Base subject-mask run lacks metrics.")
         output_metrics = run_group.create_group("metrics")
         metric_names = sorted(str(name) for name in metrics.array_keys())
         for name in metric_names:
+            if any(
+                source.get(f"metrics/{name}") is None for source in base.groups
+            ):
+                raise SubjectMaskCompactionError(
+                    f"Base source metrics are missing {name!r}."
+                )
             if any(replacement.get(f"metrics/{name}") is None for replacement in replacements):
                 raise SubjectMaskCompactionError(f"Replacement metrics are missing {name!r}.")
             source = metrics[name]
@@ -615,11 +1114,10 @@ def compact_subject_mask_deltas(
             physical_rows = int((output.shards or output.chunks)[0])
             for start in range(0, target_rows, physical_rows):
                 stop = min(start + physical_rows, target_rows)
-                metric_replacements = [replacement["metrics"] for replacement in replacements]
                 values = _gather_all_rows(
-                    name,
-                    base=metrics,
-                    replacements=metric_replacements,
+                    f"metrics/{name}",
+                    base=base,
+                    replacements=replacements,
                     plan=plan,
                     start=start,
                     stop=stop,
@@ -638,7 +1136,8 @@ def compact_subject_mask_deltas(
                 "tabular_shard_rows": int(tabular_shard_rows),
             },
             input_run_ids={
-                "subject_mask_base": str(base_run),
+                "subject_mask_base_manifest": base.manifest_path,
+                "subject_mask_base_runs": list(base.run_paths),
                 "subject_mask_replacements": [
                     f"{SUBJECT_MASK_SHARD_PARENT}/{value}" for value in replacement_runs
                 ],
@@ -647,7 +1146,7 @@ def compact_subject_mask_deltas(
             input_artifacts=[
                 {
                     "role": "subject_mask_unet_checkpoint",
-                    "path": str(base.attrs.get("source_checkpoint") or ""),
+                    "path": str(primary_base.attrs.get("source_checkpoint") or ""),
                     "sha256": model_sha256,
                     "fingerprint_source": "validated_compaction_inputs",
                 }
@@ -662,30 +1161,78 @@ def compact_subject_mask_deltas(
         if before_publish is not None:
             before_publish()
         refreshed_target = root[f"crop_runs/{target_crop_run}"]
-        refreshed_base = root[f"{SUBJECT_MASK_PARENT}/{base_run}"]
+        refreshed_base = _resolve_base_collection(root, str(base_run))
+        try:
+            refreshed_target_keys, _ = _target_crop_keys(
+                refreshed_target,
+                target_name=str(target_crop_run),
+                base=refreshed_base,
+            )
+            refreshed_target_signature_snapshot = resolve_crop_source_signatures(
+                root,
+                refreshed_target,
+                label=f"crop_runs/{target_crop_run}",
+                instance_keys=refreshed_target_keys,
+            )
+            refreshed_target_frame_counts = crop_frame_counts(
+                root,
+                refreshed_target,
+                fallback_frame_count=target_frame_counts.shape[0],
+            )
+            refreshed_target_detection_source = crop_detection_source(refreshed_target)
+        except CropSnapshotIdentityError as exc:
+            raise SubjectMaskCompactionError(str(exc)) from exc
         refreshed_replacements = _resolve_replacements(
             root,
             replacement_runs,
             refreshed_target,
             str(target_crop_run),
+            np.asarray(refreshed_target_keys, dtype=np.uint64),
+            refreshed_target_signature_snapshot,
         )
         if _validate_semantics(refreshed_base, refreshed_replacements) != model_sha256:
             raise SubjectMaskCompactionError(
                 "Subject-mask model identity changed before publication."
             )
-        refreshed_base_signatures, _ = _source_signatures(
-            root, refreshed_base, label=f"{SUBJECT_MASK_PARENT}/{base_run}"
-        )
         refreshed_replacement_keys = [
             np.asarray(group["instance_key"][:], dtype=np.uint64)
             for group in refreshed_replacements
         ]
         if source_digest != _snapshot_digest(
-            np.asarray(refreshed_target["instance_key"][:], dtype=np.uint64),
-            np.asarray(refreshed_target[ROW_SOURCE_SIGNATURE_ARRAY][:], dtype=np.uint8),
-            *[np.asarray(refreshed_target[name][:]) for name in target_lineage_names],
-            np.asarray(refreshed_base["instance_key"][:], dtype=np.uint64),
-            refreshed_base_signatures,
+            refreshed_target_keys,
+            refreshed_target_signature_snapshot.signatures,
+            np.frombuffer(
+                refreshed_target_signature_snapshot.spec.spec_digest.encode("utf-8"),
+                dtype=np.uint8,
+            ),
+            *[
+                np.asarray(
+                    refreshed_target[name][:]
+                    if name in refreshed_target
+                    else (
+                        refreshed_target_frame_counts
+                        if name == "frame_counts"
+                        else (
+                            refreshed_target_keys
+                            if name == "instance_key"
+                            else refreshed_target_detection_source
+                        )
+                    )
+                )
+                for name in target_lineage_names
+            ],
+            refreshed_base.instance_keys,
+            refreshed_base.source_signatures,
+            np.frombuffer(
+                refreshed_base.signature_spec_digest.encode("utf-8"),
+                dtype=np.uint8,
+            ),
+            refreshed_base.flat_run_indices,
+            refreshed_base.flat_local_rows,
+            np.frombuffer(
+                stable_json(refreshed_base.run_paths).encode("utf-8"),
+                dtype=np.uint8,
+            ),
             *refreshed_replacement_keys,
         ):
             raise SubjectMaskCompactionError("A compaction input changed before publication.")

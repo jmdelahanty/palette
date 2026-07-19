@@ -367,7 +367,11 @@ def _prepare_run_group(
             raise ValueError(
                 f"subject_mask_runs/{run_name} already exists. Pass --overwrite to replace it."
             )
-        assert_subject_mask_run_unreferenced(parent, str(run_name))
+        assert_subject_mask_run_unreferenced(
+            root,
+            str(run_name),
+            base_parent_name="subject_mask_runs",
+        )
         del parent[run_name]
     run_group = parent.create_group(run_name)
     mark_run_started(run_group, run_name=str(run_name), stage="subject_masks")

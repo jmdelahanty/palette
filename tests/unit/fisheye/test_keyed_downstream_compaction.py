@@ -8,6 +8,7 @@ import zarr
 
 from fisheye.refinement.finalize_subject_masks import _component_surface_rows
 from fisheye.shared.composite_subject_mask import (
+    COMPOSITE_SUBJECT_MASK_SCHEMA_VERSION,
     CompositeSubjectMaskArray,
     CompositeSubjectMaskError,
     assert_subject_mask_run_unreferenced,
@@ -297,6 +298,154 @@ def _fixture() -> Any:
     return root
 
 
+def _auxiliary_proxy_crop(
+    root: Any,
+    name: str,
+    *,
+    frames: list[int],
+    clip_indices: list[int],
+    clip_local_frames: list[int],
+    refined_rows: list[int],
+    detect_rows: list[int],
+    keys: list[int] | None = None,
+) -> Any:
+    parent = root.require_group("crop_runs")
+    group = parent.create_group(name)
+    rows = len(frames)
+    arrays = {
+        "frame_indices": np.asarray(frames, dtype=np.int64),
+        "source_frame_indices": np.asarray(frames, dtype=np.int64),
+        "source_clip_indices": np.asarray(clip_indices, dtype=np.int64),
+        "source_clip_local_frame_indices": np.asarray(
+            clip_local_frames, dtype=np.int64
+        ),
+        "source_refined_row_ids": np.asarray(refined_rows, dtype=np.int64),
+        "source_detect_row_index": np.asarray(detect_rows, dtype=np.int64),
+        "detection_indices": np.arange(rows, dtype=np.int64),
+        "source_crop_row_ids": np.arange(rows, dtype=np.int64),
+        "roi_coordinates_full": np.column_stack(
+            (np.arange(rows, dtype=np.int32), np.arange(rows, dtype=np.int32))
+        ),
+    }
+    if keys is not None:
+        arrays["instance_key"] = np.asarray(keys, dtype=np.uint64)
+    for array_name, values in arrays.items():
+        group.create_array(array_name, data=values)
+    group.attrs.update(
+        {
+            "palette_run_completion_contract": "palette.zarr_run_completion.v1",
+            "palette_run_completion_status": "auxiliary",
+            "proxy_crop_complete": True,
+            "stage_selector_eligible": False,
+            "crop_storage_mode": "geometry_only",
+            "stage": "crop_proxy",
+            "schema": "palette_clipped_collection_merged_proxy_crop_run_v1",
+            "source_collection_id": "fixture_collection",
+            "source_collection_path": "experiment_index/finalized_runs/fixture_collection",
+            "height": 8,
+            "width": 8,
+            "roi_shape": [2, 2],
+            "roi_size": [2, 2],
+            "crop_policy": "centered_refined_bbox",
+            "bbox_norm_coords_semantics": "bbox_xywh_normalized_to_full_frame",
+        }
+    )
+    return group
+
+
+def _multi_base_mask_fixture() -> Any:
+    root = _root()
+    root.attrs.update(
+        {
+            "recording_id": "fixture_recording",
+            "height": 8,
+            "width": 8,
+            "source_video_metadata": {"total_frames": 4},
+        }
+    )
+    target_name = "crop_proxy_collection"
+    target = _auxiliary_proxy_crop(
+        root,
+        target_name,
+        frames=[0, 1, 2, 3],
+        clip_indices=[0, 0, 1, 1],
+        clip_local_frames=[0, 1, 0, 1],
+        refined_rows=[100, 101, 200, 201],
+        detect_rows=[10, 11, 20, 21],
+    )
+    shard_parent = root.require_group("subject_mask_shard_runs")
+    shard_specs = (
+        ("mask_shard_0", [10, 20], [11, 12], 0, [0, 1], [100, 101], [10, 11]),
+        ("mask_shard_1", [30, 40], [13, 14], 1, [2, 3], [200, 201], [20, 21]),
+    )
+    paths: list[str] = []
+    for name, keys, values, clip_index, frames, refined_rows, detect_rows in shard_specs:
+        group = _mask_run(
+            shard_parent,
+            name,
+            crop_name=f"unused_clip_crop_{clip_index}",
+            keys=keys,
+            crop_rows=[0, 1],
+            values=values,
+        )
+        del group["instance_key"]
+        group["frame_indices"][:] = np.asarray(frames, dtype=np.int32)
+        group.create_array(
+            "source_frame_indices", data=np.asarray(frames, dtype=np.int64)
+        )
+        group.create_array(
+            "source_clip_indices",
+            data=np.full(2, clip_index, dtype=np.int64),
+        )
+        group.create_array(
+            "source_clip_local_frame_indices", data=np.asarray([0, 1], dtype=np.int64)
+        )
+        group.create_array(
+            "source_refined_row_ids", data=np.asarray(refined_rows, dtype=np.int64)
+        )
+        group.create_array(
+            "source_detect_row_index", data=np.asarray(detect_rows, dtype=np.int64)
+        )
+        paths.append(f"subject_mask_shard_runs/{name}")
+
+    refined_parent = root.require_group("refined_subject_masks_runs")
+    manifest = refined_parent.create_group("refined_manifest")
+    for name in (
+        "frame_indices",
+        "source_frame_indices",
+        "source_clip_indices",
+        "source_clip_local_frame_indices",
+        "source_refined_row_ids",
+        "source_detect_row_index",
+        "detection_source",
+    ):
+        values = (
+            np.zeros(4, dtype=np.int8)
+            if name == "detection_source"
+            else np.asarray(target[name][:])
+        )
+        manifest.create_array(name, data=values)
+    manifest.create_array(
+        "detection_indices", data=np.arange(4, dtype=np.int64)
+    )
+    manifest.create_array(
+        "source_crop_row_ids", data=np.arange(4, dtype=np.int64)
+    )
+    manifest.create_array(
+        "instance_key", data=np.asarray([10, 20, 30, 40], dtype=np.uint64)
+    )
+    manifest.create_array("frame_counts", data=np.ones(4, dtype=np.int32))
+    manifest.attrs.update(
+        {
+            "source_crop_run": target_name,
+            "source_subject_mask_shard_run_paths": paths,
+            "source_subject_mask_shard_runs": [path.split("/")[-1] for path in paths],
+        }
+    )
+    _complete(manifest)
+    return root
+
+
 def test_keypoint_compactor_writes_exact_target_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
     root = _fixture()
     monkeypatch.setattr("fisheye.utils.compact_keypoint_deltas.open_zarr_root", lambda *_a, **_k: root)
@@ -481,3 +630,102 @@ def test_subject_mask_compactor_rejects_model_fingerprint_mismatch(
             dry_run=True,
         )
     assert "mask_bad_model" not in root["subject_mask_runs"]
+
+
+def test_keypoint_dry_run_accepts_verified_auxiliary_proxy_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _root()
+    root.attrs.update(
+        {
+            "recording_id": "fixture_recording",
+            "height": 8,
+            "width": 8,
+            "source_video_metadata": {"total_frames": 2},
+        }
+    )
+    _auxiliary_proxy_crop(
+        root,
+        "proxy_crop",
+        frames=[0, 1],
+        clip_indices=[0, 0],
+        clip_local_frames=[0, 1],
+        refined_rows=[100, 101],
+        detect_rows=[10, 11],
+        keys=[10, 20],
+    )
+    base_parent = root.require_group("keypoints_runs")
+    _keypoint_run(
+        base_parent,
+        "kp_proxy_base",
+        crop_name="proxy_crop",
+        keys=[10, 20],
+        crop_rows=[0, 1],
+        values=[1.0, 2.0],
+    )
+    monkeypatch.setattr(
+        "fisheye.utils.compact_keypoint_deltas.open_zarr_root",
+        lambda *_a, **_k: root,
+    )
+
+    result = compact_keypoint_deltas(
+        zarr_path="fixture.zarr",
+        base_run="kp_proxy_base",
+        target_crop_run="proxy_crop",
+        output_run="kp_proxy_dry",
+        dry_run=True,
+    )
+
+    assert result["plan"]["base_row_count"] == 2
+    assert result["plan"]["replacement_row_count"] == 0
+    assert result["source_signature_modes"] == {
+        "base": "legacy_proxy_bootstrap_v1",
+        "target": "legacy_proxy_bootstrap_v1",
+    }
+
+
+def test_subject_mask_compactor_reads_keyless_multi_shard_manifest_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _multi_base_mask_fixture()
+    monkeypatch.setattr(
+        "fisheye.utils.compact_subject_mask_deltas.open_zarr_root",
+        lambda *_a, **_k: root,
+    )
+
+    result = compact_subject_mask_deltas(
+        zarr_path="fixture.zarr",
+        base_run="refined_manifest",
+        target_crop_run="crop_proxy_collection",
+        output_run="mask_multi_snapshot",
+        tabular_shard_rows=2,
+    )
+
+    output = root["subject_mask_runs/mask_multi_snapshot"]
+    assert result["plan"]["base_row_count"] == 4
+    assert result["plan"]["replacement_row_count"] == 0
+    assert result["storage"]["base_source_count"] == 2
+    assert (
+        output.attrs["composite_subject_mask_schema_version"]
+        == COMPOSITE_SUBJECT_MASK_SCHEMA_VERSION
+    )
+    np.testing.assert_array_equal(
+        output["composite_payload/source_run_indices"][:],
+        [0, 0, 1, 1],
+    )
+    probabilities = CompositeSubjectMaskArray.open(
+        root,
+        output,
+        run_name="mask_multi_snapshot",
+        verify_identity=True,
+    )
+    np.testing.assert_array_equal(
+        probabilities[:, 0, 0, 0],
+        [11, 12, 13, 14],
+    )
+    with pytest.raises(CompositeSubjectMaskError, match="composite dependents"):
+        assert_subject_mask_run_unreferenced(
+            root,
+            "mask_shard_0",
+            base_parent_name="subject_mask_shard_runs",
+        )

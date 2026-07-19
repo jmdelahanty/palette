@@ -575,27 +575,53 @@ def copy_selected_row_source_signatures(
     source_row_indices: np.ndarray,
     *,
     shard_rows: int = 131_072,
+    root: Any | None = None,
 ) -> np.ndarray:
     """Persist the exact signed source rows used by a subset inference run."""
 
-    if ROW_SOURCE_SIGNATURE_ARRAY not in source_group:
+    if ROW_SOURCE_SIGNATURE_ARRAY in source_group:
+        source_rows = int(source_group[ROW_SOURCE_SIGNATURE_ARRAY].shape[0])
+    elif "instance_key" in source_group:
+        source_rows = int(source_group["instance_key"].shape[0])
+    else:
         raise RowSourceSignatureError(
-            "Package-backed inference requires crop source_row_signature."
+            "Package source crop lacks both source_row_signature and instance_key."
         )
-    source_rows = int(source_group[ROW_SOURCE_SIGNATURE_ARRAY].shape[0])
-    validate_row_source_signature_array(
-        source_group[ROW_SOURCE_SIGNATURE_ARRAY], expected_row_count=source_rows
-    )
     rows = np.asarray(source_row_indices, dtype=np.int64).reshape(-1)
     if rows.size and (rows.min() < 0 or rows.max() >= source_rows):
         raise RowSourceSignatureError("Selected source signature row is out of bounds.")
-    source_array = source_group[ROW_SOURCE_SIGNATURE_ARRAY]
-    oindex = getattr(source_array, "oindex", None)
-    if oindex is not None:
-        signatures = np.asarray(oindex[rows.tolist(), :], dtype=np.uint8)
+    if ROW_SOURCE_SIGNATURE_ARRAY in source_group:
+        validate_row_source_signature_array(
+            source_group[ROW_SOURCE_SIGNATURE_ARRAY], expected_row_count=source_rows
+        )
+        source_array = source_group[ROW_SOURCE_SIGNATURE_ARRAY]
+        oindex = getattr(source_array, "oindex", None)
+        if oindex is not None:
+            signatures = np.asarray(oindex[rows.tolist(), :], dtype=np.uint8)
+        else:
+            signatures = np.asarray(source_array[:], dtype=np.uint8)[rows]
+        spec = load_row_source_signature_spec(source_group.attrs)
     else:
-        signatures = np.asarray(source_array[:], dtype=np.uint8)[rows]
-    spec = load_row_source_signature_spec(source_group.attrs)
+        if root is None:
+            raise RowSourceSignatureError(
+                "Package-backed inference requires crop source_row_signature or "
+                "an archive root for legacy proxy bootstrap."
+            )
+        from fisheye.shared.crop_snapshot_identity import (
+            CropSnapshotIdentityError,
+            resolve_crop_source_signatures,
+        )
+
+        try:
+            snapshot = resolve_crop_source_signatures(
+                root,
+                source_group,
+                label="Package source crop",
+            )
+        except CropSnapshotIdentityError as exc:
+            raise RowSourceSignatureError(str(exc)) from exc
+        signatures = snapshot.signatures[rows]
+        spec = snapshot.spec
     from fisheye.shared.zarr.columnar import store_array
 
     store_array(

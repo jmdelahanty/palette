@@ -1705,7 +1705,11 @@ def write_sam_subject_mask_run(
             f"subject_mask_runs/{output_run} already exists. Pass --overwrite to replace it."
         )
     if output_run in parent and overwrite:
-        assert_subject_mask_run_unreferenced(parent, str(output_run))
+        assert_subject_mask_run_unreferenced(
+            root,
+            str(output_run),
+            base_parent_name="subject_mask_runs",
+        )
         del parent[output_run]
 
     n_rows = int(inputs.row_count)

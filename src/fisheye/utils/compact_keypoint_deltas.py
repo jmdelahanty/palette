@@ -15,6 +15,14 @@ from typing import Any
 
 import numpy as np
 
+from fisheye.shared.crop_snapshot_identity import (
+    CropSignatureSnapshot,
+    CropSnapshotIdentityError,
+    crop_detection_source,
+    crop_frame_counts,
+    require_crop_snapshot,
+    resolve_crop_source_signatures,
+)
 from fisheye.shared.keyed_replacement import (
     REPLACEMENT_SOURCE_BASE,
     KeyedReplacementPlan,
@@ -148,19 +156,30 @@ def _require_unique_keys(group: Any, *, label: str, row_count: int) -> np.ndarra
     return keys
 
 
-def _source_signatures(root: Any, run_group: Any, *, label: str) -> tuple[np.ndarray, str]:
+def _source_signatures(
+    root: Any,
+    run_group: Any,
+    *,
+    label: str,
+) -> tuple[np.ndarray, str, str]:
     crop_name = str(run_group.attrs.get("source_crop_run") or "").strip()
     crop_parent = root.get("crop_runs")
     if not crop_name or crop_parent is None:
         raise KeypointCompactionError(f"{label} has no resolvable source_crop_run.")
-    crop = _require_complete(crop_parent, crop_name, label="Source crop run")
+    try:
+        crop = require_crop_snapshot(crop_parent, crop_name, label="Source crop run")
+    except CropSnapshotIdentityError as exc:
+        raise KeypointCompactionError(str(exc)) from exc
     crop_rows = int(crop["instance_key"].shape[0]) if "instance_key" in crop else -1
     _require_unique_keys(crop, label=f"crop_runs/{crop_name}", row_count=crop_rows)
-    if ROW_SOURCE_SIGNATURE_ARRAY not in crop:
-        raise KeypointCompactionError(
-            f"crop_runs/{crop_name} lacks {ROW_SOURCE_SIGNATURE_ARRAY}; keyed reuse is unsafe."
+    try:
+        snapshot = resolve_crop_source_signatures(
+            root,
+            crop,
+            label=f"crop_runs/{crop_name}",
         )
-    validate_row_source_signature_array(crop[ROW_SOURCE_SIGNATURE_ARRAY], expected_row_count=crop_rows)
+    except CropSnapshotIdentityError as exc:
+        raise KeypointCompactionError(str(exc)) from exc
     source_rows = _array(run_group, SOURCE_CROP_ROW_IDS_ARRAY, dtype=np.int64).reshape(-1)
     if source_rows.size and (source_rows.min() < 0 or source_rows.max() >= crop_rows):
         raise KeypointCompactionError(f"{label} references an out-of-range crop row.")
@@ -168,8 +187,8 @@ def _source_signatures(root: Any, run_group: Any, *, label: str) -> tuple[np.nda
     crop_keys = _array(crop, "instance_key", dtype=np.uint64).reshape(-1)
     if not np.array_equal(run_keys, crop_keys[source_rows]):
         raise KeypointCompactionError(f"{label} keys do not exactly match its source crop rows.")
-    signatures = np.asarray(crop[ROW_SOURCE_SIGNATURE_ARRAY][:], dtype=np.uint8)[source_rows]
-    return signatures, load_row_source_signature_spec(crop.attrs).spec_digest
+    signatures = snapshot.signatures[source_rows]
+    return signatures, snapshot.spec.spec_digest, snapshot.mode
 
 
 def _semantic_value(group: Any, name: str) -> object:
@@ -281,7 +300,13 @@ def _validate_row_array_contract(base: Any, replacements: Sequence[Any]) -> None
                 )
 
 
-def _resolve_replacements(root: Any, names: Sequence[str], target_crop: Any, target_crop_name: str) -> list[Any]:
+def _resolve_replacements(
+    root: Any,
+    names: Sequence[str],
+    target_crop: Any,
+    target_crop_name: str,
+    target_signature_snapshot: CropSignatureSnapshot,
+) -> list[Any]:
     parent = root.get(KEYPOINT_SHARD_PARENT)
     if names and parent is None:
         raise KeypointCompactionError(f"Missing {KEYPOINT_SHARD_PARENT}.")
@@ -319,16 +344,16 @@ def _resolve_replacements(root: Any, names: Sequence[str], target_crop: Any, tar
             group[ROW_SOURCE_SIGNATURE_ARRAY], expected_row_count=row_count
         )
         replacement_spec = load_row_source_signature_spec(group.attrs)
-        target_spec = load_row_source_signature_spec(target_crop.attrs)
         replacement_signatures = _array(
             group, ROW_SOURCE_SIGNATURE_ARRAY, dtype=np.uint8
         )
-        target_signatures = _array(
-            target_crop, ROW_SOURCE_SIGNATURE_ARRAY, dtype=np.uint8
-        )
         if (
-            replacement_spec.spec_digest != target_spec.spec_digest
-            or not np.array_equal(replacement_signatures, target_signatures[rows])
+            replacement_spec.spec_digest
+            != target_signature_snapshot.spec.spec_digest
+            or not np.array_equal(
+                replacement_signatures,
+                target_signature_snapshot.signatures[rows],
+            )
         ):
             raise KeypointCompactionError(
                 f"{KEYPOINT_SHARD_PARENT}/{name} was inferred from stale or incompatible crop rows."
@@ -464,15 +489,27 @@ def compact_keypoint_deltas(
     if keypoint_parent is None or crop_parent is None:
         raise KeypointCompactionError("Archive lacks keypoints_runs or crop_runs.")
     base = _require_complete(keypoint_parent, str(base_run), label="Base keypoint run")
-    target = _require_complete(crop_parent, str(target_crop_run), label="Target crop run")
+    try:
+        target = require_crop_snapshot(
+            crop_parent,
+            str(target_crop_run),
+            label="Target crop run",
+        )
+    except CropSnapshotIdentityError as exc:
+        raise KeypointCompactionError(str(exc)) from exc
     target_rows = int(target["instance_key"].shape[0]) if "instance_key" in target else -1
     target_keys = _require_unique_keys(target, label=f"crop_runs/{target_crop_run}", row_count=target_rows)
-    if ROW_SOURCE_SIGNATURE_ARRAY not in target:
-        raise KeypointCompactionError("Target crop lacks signed source rows.")
-    validate_row_source_signature_array(target[ROW_SOURCE_SIGNATURE_ARRAY], expected_row_count=target_rows)
-    target_signatures = _array(target, ROW_SOURCE_SIGNATURE_ARRAY, dtype=np.uint8)
-    target_spec = load_row_source_signature_spec(target.attrs)
-    for required in ("frame_indices", "frame_counts", "detection_indices", "detection_source"):
+    try:
+        target_signature_snapshot = resolve_crop_source_signatures(
+            root,
+            target,
+            label=f"crop_runs/{target_crop_run}",
+        )
+    except CropSnapshotIdentityError as exc:
+        raise KeypointCompactionError(str(exc)) from exc
+    target_signatures = target_signature_snapshot.signatures
+    target_spec = target_signature_snapshot.spec
+    for required in ("frame_indices", "detection_indices"):
         if required not in target:
             raise KeypointCompactionError(f"Target crop lacks required lineage array {required!r}.")
 
@@ -480,12 +517,29 @@ def compact_keypoint_deltas(
     base_keys = _require_unique_keys(base, label=f"{KEYPOINT_OUTPUT_PARENT}/{base_run}", row_count=base_rows)
     if SOURCE_CROP_ROW_IDS_ARRAY not in base:
         raise KeypointCompactionError("Base keypoint run lacks source_crop_row_ids.")
-    base_signatures, base_spec_digest = _source_signatures(
+    base_signatures, base_spec_digest, base_signature_mode = _source_signatures(
         root, base, label=f"{KEYPOINT_OUTPUT_PARENT}/{base_run}"
     )
-    replacements = _resolve_replacements(root, replacement_runs, target, str(target_crop_run))
+    replacements = _resolve_replacements(
+        root,
+        replacement_runs,
+        target,
+        str(target_crop_run),
+        target_signature_snapshot,
+    )
     model_sha256 = _validate_semantics(root, base, replacements)
     _validate_row_array_contract(base, replacements)
+    try:
+        target_frame_counts = crop_frame_counts(
+            root,
+            target,
+            fallback_frame_count=(
+                int(base["frame_counts"].shape[0]) if "frame_counts" in base else None
+            ),
+        )
+        target_detection_source = crop_detection_source(target)
+    except CropSnapshotIdentityError as exc:
+        raise KeypointCompactionError(str(exc)) from exc
     replacement_keys = [
         _array(group, "instance_key", dtype=np.uint64).reshape(-1) for group in replacements
     ]
@@ -510,6 +564,10 @@ def compact_keypoint_deltas(
         "base_run": str(base_run),
         "target_crop_run": str(target_crop_run),
         "replacement_runs": [str(value) for value in replacement_runs],
+        "source_signature_modes": {
+            "base": base_signature_mode,
+            "target": target_signature_snapshot.mode,
+        },
         "plan": plan.summary(),
         "storage": {
             "layout": "indexed_sharding_v1",
@@ -528,18 +586,32 @@ def compact_keypoint_deltas(
         "latest": parent.attrs.get("latest"),
         RUN_LATEST_COMPLETE_ATTR: parent.attrs.get(RUN_LATEST_COMPLETE_ATTR),
     }
+    target_derived_arrays = {
+        "detection_source": target_detection_source,
+        "frame_counts": target_frame_counts,
+    }
     target_lineage_names = tuple(
         name
         for name in (*sorted(_TARGET_LINEAGE_ARRAYS), "frame_counts")
-        if name != SOURCE_CROP_ROW_IDS_ARRAY and name in target
+        if name != SOURCE_CROP_ROW_IDS_ARRAY
+        and (name in target or name in target_derived_arrays)
     )
-    target_lineage_snapshot = [np.asarray(target[name][:]) for name in target_lineage_names]
+    target_lineage_snapshot = [
+        np.asarray(
+            target[name][:]
+            if name in target
+            else target_derived_arrays[name]
+        )
+        for name in target_lineage_names
+    ]
     source_digest = _snapshot_digest(
         target_keys,
         target_signatures,
+        np.frombuffer(target_spec.spec_digest.encode("utf-8"), dtype=np.uint8),
         *target_lineage_snapshot,
         base_keys,
         base_signatures,
+        np.frombuffer(base_spec_digest.encode("utf-8"), dtype=np.uint8),
         *replacement_keys,
     )
     run_group = parent.create_group(output_name)
@@ -570,10 +642,17 @@ def compact_keypoint_deltas(
         lineage_names = [
             name
             for name in dict.fromkeys((*REQUIRED_ROW_ARRAYS, *OPTIONAL_ROW_ARRAYS, *ROW_IDENTITY_ARRAYS))
-            if name in _TARGET_LINEAGE_ARRAYS and name != SOURCE_CROP_ROW_IDS_ARRAY and name in target
+            if name in _TARGET_LINEAGE_ARRAYS
+            and name != SOURCE_CROP_ROW_IDS_ARRAY
+            and (name in target or name in target_derived_arrays)
         ]
         for name in lineage_names:
-            source = target[name]
+            source = target[name] if name in target else base[name]
+            values = (
+                target[name]
+                if name in target
+                else target_derived_arrays[name]
+            )
             output = _create_empty_like(
                 run_group,
                 name,
@@ -585,7 +664,7 @@ def compact_keypoint_deltas(
             physical_rows = int((output.shards or output.chunks)[0])
             digests[name] = _write_batched(
                 output,
-                lambda start, stop, s=source: np.asarray(s[start:stop]),
+                lambda start, stop, s=values: np.asarray(s[start:stop]),
                 batch_rows=physical_rows,
             )
         source_crop_rows = np.arange(target_rows, dtype=np.int64)
@@ -622,7 +701,7 @@ def compact_keypoint_deltas(
             batch_rows=int((heading_output.shards or heading_output.chunks)[0]),
         )
 
-        frame_counts = _array(target, "frame_counts", dtype=np.int32).reshape(-1)
+        frame_counts = target_frame_counts
         frame_indices = _array(target, "frame_indices", dtype=np.int64).reshape(-1)
         keypoint_count = int(base["keypoints_roi"].shape[1])
         n_keypoints = np.bincount(
@@ -731,21 +810,39 @@ def compact_keypoint_deltas(
         run_group.attrs[RUN_PROVENANCE_ATTR] = provenance
         if before_publish is not None:
             before_publish()
-        refreshed_target_keys = _array(root[f"crop_runs/{target_crop_run}"], "instance_key", dtype=np.uint64)
-        refreshed_target_signatures = _array(root[f"crop_runs/{target_crop_run}"], ROW_SOURCE_SIGNATURE_ARRAY, dtype=np.uint8)
         refreshed_base = root[f"{KEYPOINT_OUTPUT_PARENT}/{base_run}"]
         refreshed_target = root[f"crop_runs/{target_crop_run}"]
+        refreshed_target_keys = _array(
+            refreshed_target,
+            "instance_key",
+            dtype=np.uint64,
+        )
+        try:
+            refreshed_target_signature_snapshot = resolve_crop_source_signatures(
+                root,
+                refreshed_target,
+                label=f"crop_runs/{target_crop_run}",
+            )
+            refreshed_target_frame_counts = crop_frame_counts(
+                root,
+                refreshed_target,
+                fallback_frame_count=target_frame_counts.shape[0],
+            )
+            refreshed_target_detection_source = crop_detection_source(refreshed_target)
+        except CropSnapshotIdentityError as exc:
+            raise KeypointCompactionError(str(exc)) from exc
         refreshed_replacements = _resolve_replacements(
             root,
             replacement_runs,
             refreshed_target,
             str(target_crop_run),
+            refreshed_target_signature_snapshot,
         )
         if _validate_semantics(root, refreshed_base, refreshed_replacements) != model_sha256:
             raise KeypointCompactionError("Keypoint model identity changed before publication.")
         _validate_row_array_contract(refreshed_base, refreshed_replacements)
         refreshed_base_keys = _array(refreshed_base, "instance_key", dtype=np.uint64)
-        refreshed_base_signatures, _ = _source_signatures(
+        refreshed_base_signatures, refreshed_base_spec_digest, _ = _source_signatures(
             root, refreshed_base, label=f"{KEYPOINT_OUTPUT_PARENT}/{base_run}"
         )
         refreshed_replacement_keys = [
@@ -754,10 +851,26 @@ def compact_keypoint_deltas(
         ]
         if source_digest != _snapshot_digest(
             refreshed_target_keys,
-            refreshed_target_signatures,
-            *[np.asarray(refreshed_target[name][:]) for name in target_lineage_names],
+            refreshed_target_signature_snapshot.signatures,
+            np.frombuffer(
+                refreshed_target_signature_snapshot.spec.spec_digest.encode("utf-8"),
+                dtype=np.uint8,
+            ),
+            *[
+                np.asarray(
+                    refreshed_target[name][:]
+                    if name in refreshed_target
+                    else (
+                        refreshed_target_frame_counts
+                        if name == "frame_counts"
+                        else refreshed_target_detection_source
+                    )
+                )
+                for name in target_lineage_names
+            ],
             refreshed_base_keys,
             refreshed_base_signatures,
+            np.frombuffer(refreshed_base_spec_digest.encode("utf-8"), dtype=np.uint8),
             *refreshed_replacement_keys,
         ):
             raise KeypointCompactionError("A compaction input changed before publication.")

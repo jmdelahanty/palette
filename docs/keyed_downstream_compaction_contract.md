@@ -19,7 +19,8 @@ specification.
 Each compaction binds:
 
 - one complete target `crop_runs/<run>` with unique `uint64 instance_key` and
-  signed source rows;
+  signed source rows, or one verified auxiliary clipped-collection proxy with
+  an exact historical-manifest identity bridge;
 - one complete immutable base raw run;
 - zero or more complete work-package inference runs carrying
   `incremental_materialization_role=delta_replacement_rows`;
@@ -47,6 +48,37 @@ crop generation produced the predictions.
 The resulting source map is computed with NumPy sort/search operations rather
 than a Python tuple/dictionary identity map. It therefore remains compact at
 recording scale.
+
+### Historical clipped proxy bootstrap
+
+Clipped collection proxy crops are intentionally marked
+`palette_run_completion_status=auxiliary`; they must never become ordinary
+crop selectors. They are nevertheless eligible immutable rowsets for keyed
+compaction only when `proxy_crop_complete=true`,
+`stage_selector_eligible=false`, `crop_storage_mode=geometry_only`, their
+versioned proxy schema is recognized, and their finalized collection identity
+is present.
+
+Historical proxies predate `source_row_signature`. Their compatibility
+signatures are derived under
+`palette.legacy_proxy_crop_signature_bootstrap` version 1 from stable
+`instance_key`, canonical frame index, ROI origin, clip index, clip-local frame
+index, recording identity, finalized collection identity, frame/ROI shape,
+and crop semantics. Frame plus ROI origin and fixed ROI shape fully determine
+the crop pixels; normalized bounding boxes are deliberately not required.
+
+When a historical mask proxy is also keyless, keys may be supplied only by a
+complete refined collection manifest that names the exact raw shard paths,
+binds the same target crop, covers every target row exactly once, and matches
+at least four stable lineage columns for every shard. Physical
+`detection_indices` are excluded because they legitimately reset inside each
+clip shard. This bridge is labeled
+`derived_from_exact_refined_collection_manifest_v1`; there is no positional
+fallback.
+
+Package-backed keypoint and mask inference persists the selected bootstrapped
+signatures in its replacement run. Subsequent compaction therefore validates
+the actual historical crop rows used by inference, not merely their keys.
 
 ## Keypoint snapshots
 
@@ -86,13 +118,17 @@ Omit `--dry-run` only in an LSF compute job to write and promote the snapshot.
 
 Decoded probability masks are too large to copy merely to obtain a new run
 name. `fisheye.utils.compact_subject_mask_deltas` therefore publishes a
-depth-one complete logical `subject_mask_runs/<run>`:
+depth-one complete logical `subject_mask_runs/<run>`. Schema version 2 permits
+one or more immutable physical raw bases:
 
 ```text
 target row
   -> source_codes[row]
-       0: standalone immutable base mask row
+       0: immutable base mask row
        1: local delta probability row
+  -> source_run_indices[row]
+       >=0: index into composite_base_subject_mask_run_paths
+       -1: delta payload
   -> source_row_indices[row]
 ```
 
@@ -110,17 +146,22 @@ four-dimensional probability surface. The unified subject-mask loader and the
 smart subject-mask finalizer use that resolver. The whole-recording validator
 also samples through it.
 
-Only a standalone probability run may be used as a base; composite-on-
-composite chains are rejected. Base deletion must be blocked while a composite
-dependent exists. Standalone export/materialization remains the compatibility
-path for external readers that cannot resolve the composite schema.
+Every physical base must be a standalone probability run; composite-on-
+composite chains are rejected. A completed refined collection run may act as
+the authoritative manifest for its explicitly declared
+`source_subject_mask_shard_run_paths`, without becoming a probability base
+itself. The output still has reference depth one because it points directly to
+the raw shard arrays. Base deletion or overwrite is blocked across both
+`subject_mask_runs` and `subject_mask_shard_runs` while a composite dependent
+exists. Standalone export/materialization remains the compatibility path for
+external readers that cannot resolve the composite schema.
 
 Dry-run:
 
 ```bash
 scripts/py -m fisheye.utils.compact_subject_mask_deltas \
   /path/to/recording_analysis.zarr \
-  --base-run <complete-standalone-mask-run> \
+  --base-run <complete-raw-run-or-refined-collection-manifest> \
   --target-crop-run <complete-target-crop> \
   --replacement-run <delta-mask-shard> \
   --output-run <new-mask-snapshot> \

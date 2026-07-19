@@ -211,6 +211,69 @@ def test_copy_selected_signatures_persists_exact_inference_binding() -> None:
     )
 
 
+def test_copy_selected_signatures_bootstraps_verified_auxiliary_proxy() -> None:
+    root = zarr.group(store=zarr.storage.MemoryStore(), zarr_format=3)
+    root.attrs.update(
+        {
+            "recording_id": "recording_fixture",
+            "height": 8,
+            "width": 8,
+        }
+    )
+    source = root.create_group("crop")
+    target = root.create_group("delta")
+    source.create_array(
+        "instance_key", data=np.asarray([11, 22, 33], dtype=np.uint64)
+    )
+    source.create_array(
+        "frame_indices", data=np.asarray([0, 1, 2], dtype=np.int64)
+    )
+    source.create_array(
+        "roi_coordinates_full",
+        data=np.asarray([[0, 0], [1, 1], [2, 2]], dtype=np.int32),
+    )
+    source.create_array(
+        "source_clip_indices", data=np.zeros(3, dtype=np.int64)
+    )
+    source.create_array(
+        "source_clip_local_frame_indices",
+        data=np.asarray([0, 1, 2], dtype=np.int64),
+    )
+    source.attrs.update(
+        {
+            "palette_run_completion_status": "auxiliary",
+            "proxy_crop_complete": True,
+            "stage_selector_eligible": False,
+            "crop_storage_mode": "geometry_only",
+            "stage": "crop_proxy",
+            "schema": "palette_clipped_collection_proxy_crop_run_v1",
+            "source_collection_id": "collection_fixture",
+            "source_collection_path": "experiment_index/finalized_runs/collection_fixture",
+            "height": 8,
+            "width": 8,
+            "roi_shape": [2, 2],
+            "crop_policy": "centered_refined_bbox",
+        }
+    )
+
+    copied = copy_selected_row_source_signatures(
+        target,
+        source,
+        np.asarray([2, 0], dtype=np.int64),
+        shard_rows=2,
+        root=root,
+    )
+
+    assert copied.shape == (2, 32)
+    assert target.attrs["source_row_signature_stage"] == "crop"
+    assert (
+        target.attrs["source_row_signature_spec"]["compatibility_context"][
+            "bootstrap_schema_id"
+        ]
+        == "palette.legacy_proxy_crop_signature_bootstrap"
+    )
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [

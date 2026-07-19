@@ -723,9 +723,15 @@ row source signature from the full normalized bbox, frame index, source pixel
 fingerprint, source rowset family, ROI size, frame shape, center-rounding rule,
 padding rule, and pixel representation. Optional clipped/refined lineage
 columns are copied from the target source rowset and revalidated before
-publication. A historical crop without the Phase 1 signature contract cannot
-silently become a reuse source; the first replacement computes every row and
-then becomes eligible as a base.
+publication. A historical materialized crop without the Phase 1 signature
+contract cannot silently become a reuse source; the first replacement computes
+every row and then becomes eligible as a base. The narrower downstream
+compatibility exception for immutable clipped collection proxies is specified
+in `keyed_downstream_compaction_contract.md`: a verified auxiliary proxy may
+use the versioned legacy bootstrap only when its finalized collection,
+recording, frame, ROI-origin, clip, and fixed crop semantics are all bound. A
+keyless proxy additionally requires an exact complete refined-manifest bridge;
+there is no general legacy positional fallback.
 
 Dense ROI pixels are streamed one complete logical output chunk at a time. The
 single driver owns every output chunk, group, attr, completion marker, and

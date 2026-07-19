@@ -70,9 +70,13 @@ Opening a package fails closed unless:
   geometry, crop signature/revision, signature-spec digest, and source pixel
   fingerprint still match the bound crop run.
 
-Package creation requires modern `instance_key` and `source_row_signature`
-arrays. Legacy `refined_roi_path` overrides are rejected: those pixels must be
-folded into the logical crop definition before a shared package can be cited.
+Package creation requires modern `instance_key` and either persisted
+`source_row_signature` arrays or the verified auxiliary-proxy bootstrap defined
+in `keyed_downstream_compaction_contract.md`. Package consumers persist the
+exact selected bootstrap signatures, so later compaction validates the rows
+actually used. Legacy `refined_roi_path` overrides are rejected: those pixels
+must be folded into the logical crop definition before a shared package can be
+cited.
 
 ## Consumer And Publication Rules
 
