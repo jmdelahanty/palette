@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from fisheye.shared import track_coordinate_publication as publication_module
 from fisheye.shared.canonical_coordinate_publication import (
     build_bound_canonical_coordinate_descriptor,
     load_bound_canonical_coordinate_descriptor,
@@ -377,6 +378,45 @@ def test_track_publication_rolls_back_derivation_when_descriptor_stamp_fails() -
     positions_before = dict(positions.attrs)
 
     with pytest.raises(ValueError):
+        publish_track_position_coordinates(
+            group,
+            positions,
+            source_rows,
+            track_row_identity=identity,
+            source_positions=source,
+            source_temporal_authority=temporal,
+        )
+
+    assert dict(group.attrs) == group_before
+    assert dict(positions.attrs) == positions_before
+
+
+def test_track_publication_keyboard_interrupt_restores_exact_attrs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _world(convention="pixel_center", archive_token=object())
+    _, _, source, temporal = _source(world)
+    group, source_rows, identity, positions = _track(world, temporal)
+    group.attrs["preexisting"] = {"version": 8}
+    positions.attrs["preexisting"] = ["preserve", 8]
+    group_before = dict(group.attrs)
+    positions_before = dict(positions.attrs)
+
+    def interrupt_publication(**kwargs):
+        kwargs["track_group"].attrs["partial"] = True
+        kwargs["positions_px_node"].attrs["partial"] = True
+        raise KeyboardInterrupt("synthetic track publication interruption")
+
+    monkeypatch.setattr(
+        publication_module,
+        "_stamp_publication_transaction",
+        interrupt_publication,
+    )
+
+    with pytest.raises(
+        KeyboardInterrupt,
+        match="synthetic track publication interruption",
+    ):
         publish_track_position_coordinates(
             group,
             positions,

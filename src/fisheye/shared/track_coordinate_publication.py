@@ -504,12 +504,12 @@ def publish_track_position_coordinates(
             physical=physical,
             derivation_record=derivation_record,
         )
-    except Exception as exc:
+    except BaseException as exc:
         failures: list[str] = []
         for attrs, snapshot in zip(attrs_targets, snapshots, strict=True):
             try:
                 _restore_attrs(attrs, snapshot)
-            except Exception as rollback_exc:  # pragma: no cover - hostile store
+            except BaseException as rollback_exc:  # pragma: no cover - hostile store
                 failures.append(str(rollback_exc))
         if failures:
             raise TrackCoordinatePublicationError(
