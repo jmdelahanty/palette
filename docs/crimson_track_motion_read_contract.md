@@ -30,19 +30,74 @@ Stimulus step details are specified in
 analysis-grade motion source. It owns gap-aware speed, distance, heading, and
 validity semantics.
 
-Required reader fields:
+For canonical future runs, Crimson must require both:
 
 ```text
-frame_indices
+run.attrs["coordinate_binding_status"] == "bound_canonical_v2"
+run.attrs["palette_run_completion_status"] == "complete"
+```
+
+An incomplete, staged, publishing, unsupported, or ambiguously labelled run is
+not selectable. Convenience `latest*` attrs do not override these gates.
+
+Required canonical identity and position fields:
+
+```text
+track_sample_key                       # int64 [track_id, acquisition_frame]
+source_acquisition_frame_index         # authoritative camera-frame mapping
+source_frame_interpolation             # exact acquisition-time lineage
+source_instance_key                    # nullable observation lineage
+source_row_index                       # exact selected immediate-source row
 time_seconds
 positions_px
-positions_mm
 heading_degrees
 smoothed_heading_degrees
 sample_valid
 transition_valid
 detection_source
 ```
+
+`frame_indices` remains a compatibility alias of
+`source_acquisition_frame_index`. Canonical consumers use `track_sample_key`
+and `source_acquisition_frame_index`; row offset and `frame_indices` alone are
+not identity.
+
+`positions_mm` and the `*_mm` motion fields are optional. They are present only
+when Palette bound an exact compatible typed physical-frame calibration. Their
+absence means physical output is unavailable, not that Crimson should infer a
+scale. Crimson must never apply a run-level `pixel_to_mm` scalar or a resolution
+ratio to create missing physical coordinates.
+
+### Position coordinate contract
+
+Every canonical `positions_px` or `positions_mm` array owns a
+`coordinate_descriptor` and digest. Crimson must validate the array-owned
+descriptor, its row identity, exact reference-extent/frame records, transform
+chain, and derivation records before use. See
+[`coordinate_metadata_framework.md`](./coordinate_metadata_framework.md).
+
+For `positions_px`:
+
+- `space_id == "source_camera_image_px"` with
+  `source_camera_overlay.status == "direct"` may be drawn directly on the exact
+  referenced source-camera frame;
+- `source_camera_overlay.status == "requires_transform"` requires applying the
+  persisted ordered direction-labelled chain;
+- `not_suitable`, an unsupported profile, a stale digest, or missing evidence
+  fails closed.
+
+Canonical offline track publication currently requires an exact dtype-preserving
+subset/reorder of the selected crop producer's persisted source-camera
+`centers_img_xy`. It does not reconstruct positions from normalized detection
+centres, root dimensions, ROI dimensions, or simple scale factors.
+
+Historical `coordinate_space = "camera"` or `"texture"` attrs are not
+coordinate authority. A legacy reader may resolve them only through an explicit
+compatibility mode with exact dimensions and lineage. New recordings and normal
+Crimson paths do not use that adapter.
+
+Renderer viewport/display coordinates remain ephemeral Crimson state. They are
+not written back as Palette coordinate metadata.
 
 Speed and distance fields may be exposed through the preferred grouped layout:
 
@@ -67,9 +122,11 @@ Reader fallback order:
 4. Use historical flat `acceleration_*` arrays only for older archives that
    predate source-scoped acceleration.
 
-`frame_indices` is sparse row-to-frame lineage. Crimson must not assume track
-row index equals video frame index. Build a frame-to-row lookup for interactive
-seeking.
+`source_acquisition_frame_index` is the authoritative sparse row-to-camera-frame
+lineage. Crimson must not assume track row index equals video frame index. Build
+a frame-to-row lookup for interactive seeking and cross-check it against column
+1 of `track_sample_key`. `frame_indices` is accepted only as the declared
+compatibility alias and must be numerically identical.
 
 Missing frames are gaps. Displaying them as zero speed is a UI choice, not the
 stored analysis semantics.
@@ -120,10 +177,12 @@ the run. Do not require a physical `<speed_level>` subgroup when
 `layout == "compact_tabular_v2"`.
 
 For detector traces, new run-schema-8 outputs resolve the frame axis from the
-versioned run-level `frame_axis_contract`. Its `authoritative_path` points to
-the exact source track-kinematics `frame_indices` array relative to the same
-Zarr root. Schema-7 runs continue to use embedded `signals/frame_indices`, and
-schema-8 runs may declare that same path as an embedded portability fallback.
+versioned run-level `frame_axis_contract`. Existing schema-8 outputs may point
+to the exact source track-kinematics compatibility `frame_indices` array
+relative to the same Zarr root; that source array must itself declare
+`source_acquisition_frame_index` as authority and match it exactly. Schema-7
+runs continue to use embedded `signals/frame_indices`, and schema-8 runs may
+declare that same path as an embedded portability fallback.
 Use the resolution and fail-closed checks in the detailed compact-v2 handoff;
 do not substitute a `latest` track pointer or reconstruct an `arange` axis.
 
@@ -249,7 +308,8 @@ derived preview values.
 
 1. Discover `analysis/track_kinematics_runs/<scope>/<run>/tracks/id_<track>/`.
 2. Let the user select track and speed level.
-3. Build a sparse frame-to-track-row lookup from `frame_indices`.
+3. Build a sparse frame-to-track-row lookup from
+   `source_acquisition_frame_index`, cross-checked against `track_sample_key`.
 4. Draw per-frame motion labels near the fish:
    - heading from `heading_degrees` or `smoothed_heading_degrees`
    - speed from selected `movement/speed/<level>/mm` or fallback flat arrays
