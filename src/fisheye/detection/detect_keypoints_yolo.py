@@ -10,11 +10,14 @@ keypoints.
 from __future__ import annotations
 
 import argparse
+import copy
+from contextvars import ContextVar
+from functools import wraps
 import hashlib
 import json
 import os
 import sys
-from queue import Queue
+from queue import Full, Queue
 from pathlib import Path
 from threading import Thread
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Sequence
@@ -35,6 +38,19 @@ from ..shared.frame_domains import FrameDomain, FrameDomainError, FrameDomains
 from ..shared.inference_timing import InferenceTimingProfiler
 from ..shared.immutable_yolo_storage import validate_immutable_yolo_storage
 from ..shared.keypoint_summary import build_frame_keypoint_counts
+from ..shared.keypoint_coordinate_publication import (
+    capture_keypoint_coordinate_publication_checkpoint,
+    derive_keypoint_coordinate_batch,
+    load_persisted_keypoint_coordinate_surfaces,
+    load_persisted_keypoint_crop_source,
+    model_input_batch_to_roi,
+    model_input_bbox_batch_to_roi,
+    prepare_keypoint_coordinate_context,
+    publish_keypoint_coordinate_surfaces,
+    revalidate_keypoint_coordinate_batch_context,
+    require_direct_keypoint_crop_pixel_source,
+    rollback_keypoint_coordinate_publication,
+)
 from ..shared.model_input_transform import MODEL_INPUT_TRANSFORM_CHOICES, ModelInputTransform, resolve_model_input_transform
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs, build_source_roi_pixel_attrs
 from ..registry.stage_complete import emit_stage_completion
@@ -53,7 +69,6 @@ from ..shared.run_provenance import (
     build_run_provenance,
 )
 from ..shared.type_conversions import normalize_attr
-from ..shared.zarr.schema import get_run_group
 from ..shared.zarr_run_completion import (
     COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     mark_run_complete,
@@ -74,6 +89,7 @@ TRADITIONAL_POSE_SCHEMA, TRADITIONAL_POSE_ATTR_PAYLOAD = schema_payload_from_pac
 _KEYPOINT_STEP_NAME = "keypoints"
 _KEYPOINT_STATUS_SOURCE = "runtime_keypoints_detect"
 _KEYPOINT_INPUT_MODES = ("numpy-list", "tensor", "auto")
+_KEYPOINT_COORDINATE_CONTRACT_MODES = ("canonical", "legacy_noncanonical")
 _KEYPOINT_PROGRESS_SCHEMA_ID = "palette.keypoint_inference_progress.v1"
 _DISABLE_REGISTRY_WRITES_ENV = "PALETTE_DISABLE_REGISTRY_WRITES"
 DEFAULT_KEYPOINT_OUTPUT_PARENT = "keypoints_runs"
@@ -81,6 +97,7 @@ KEYPOINT_OUTPUT_PARENTS = (DEFAULT_KEYPOINT_OUTPUT_PARENT, "keypoint_shard_runs"
 KEYPOINT_SHARD_WRITE_SCHEMA = "palette.keypoint_double_buffered_shards.v1"
 DEFAULT_KEYPOINT_ROI_SHARD_ROWS = 131_072
 DEFAULT_KEYPOINT_FRAME_SHARD_ROWS = 131_072
+KEYPOINT_SHARD_WRITER_QUIESCE_TIMEOUT_SECONDS = 300.0
 
 
 def _normalize_keypoint_output_parent(output_parent: Optional[str]) -> str:
@@ -89,6 +106,192 @@ def _normalize_keypoint_output_parent(output_parent: Optional[str]) -> str:
         allowed = ", ".join(KEYPOINT_OUTPUT_PARENTS)
         raise ValueError(f"Unsupported keypoint output parent '{parent}'. Expected one of: {allowed}")
     return parent
+
+
+def _snapshot_selected_attrs(node: Any, names: Sequence[str]) -> dict[str, tuple[bool, Any]]:
+    attrs = getattr(node, "attrs", None)
+    if attrs is None or not hasattr(attrs, "keys"):
+        raise RuntimeError("Cannot snapshot keypoint selector attrs.")
+    return {
+        name: (name in attrs, copy.deepcopy(attrs.get(name)))
+        for name in names
+    }
+
+
+def _restore_selected_attrs(
+    node: Any,
+    snapshot: Mapping[str, tuple[bool, Any]],
+) -> None:
+    attrs = node.attrs
+    failures: list[str] = []
+    for name, (present, value) in snapshot.items():
+        try:
+            if present:
+                attrs[name] = copy.deepcopy(value)
+            elif name in attrs:
+                del attrs[name]
+            if present:
+                if name not in attrs or attrs[name] != value:
+                    raise RuntimeError("restored value differs from snapshot")
+            elif name in attrs:
+                raise RuntimeError("attribute survived rollback")
+        except BaseException as exc:  # pragma: no cover - hostile store
+            failures.append(f"{name}: {exc}")
+    if failures:
+        raise RuntimeError(f"Keypoint selector rollback was incomplete: {failures!r}.")
+
+
+class _KeypointAttemptFailureBoundary:
+    """Fail one newly created keypoint attempt closed across the whole writer."""
+
+    def __init__(self) -> None:
+        self.root: Any | None = None
+        self.parent: Any | None = None
+        self.run: Any | None = None
+        self.run_name: str | None = None
+        self.run_path: str | None = None
+        self.parent_selector_snapshot: dict[str, tuple[bool, Any]] | None = None
+        self.root_pointer_snapshot: dict[str, tuple[bool, Any]] | None = None
+        self.crop_source: Any | None = None
+        self.shard_writer: _AlignedKeypointShardWriter | None = None
+        self.coordinate_checkpoint: Any | None = None
+        self.finalized = False
+
+    def prepare(self, *, root: Any, parent: Any) -> None:
+        if self.root is not None or self.parent is not None:
+            raise RuntimeError("A keypoint attempt cannot bind more than one run parent.")
+        self.root = root
+        self.parent = parent
+        self.parent_selector_snapshot = _snapshot_selected_attrs(
+            parent,
+            ("latest", "latest_complete", "latest_pending"),
+        )
+        self.root_pointer_snapshot = _snapshot_selected_attrs(
+            root,
+            ("current_keypoint_group_path",),
+        )
+
+    def bind_run(self, run: Any, run_name: str) -> None:
+        if self.run is not None:
+            raise RuntimeError("A keypoint attempt cannot bind more than one run.")
+        self.run = run
+        self.run_name = str(run_name)
+        self.run_path = str(getattr(run, "path", "")).strip("/") or None
+
+    def bind_crop_source(self, crop_source: Any) -> None:
+        self.crop_source = crop_source
+
+    def close_crop_source(self) -> None:
+        """Close the required scientific input before publication becomes authoritative."""
+
+        if self.crop_source is None:
+            return
+        self.crop_source.close()
+        self.crop_source = None
+
+    def bind_shard_writer(self, shard_writer: _AlignedKeypointShardWriter) -> None:
+        if self.shard_writer is not None:
+            raise RuntimeError("A keypoint attempt cannot bind more than one shard writer.")
+        self.shard_writer = shard_writer
+
+    def bind_coordinate_checkpoint(self, checkpoint: Any) -> None:
+        self.coordinate_checkpoint = checkpoint
+
+    def mark_finalized(self) -> None:
+        self.finalized = True
+        self.coordinate_checkpoint = None
+
+    def fail(self, original: BaseException) -> None:
+        failures: list[str] = []
+        writer_quiescent = True
+        if self.shard_writer is not None:
+            try:
+                self.shard_writer.abort()
+            except BaseException as exc:  # pragma: no cover - hostile worker/store
+                failures.append(f"shard writer quiescence: {exc}")
+            writer_quiescent = self.shard_writer.is_quiescent
+            if not writer_quiescent:
+                failures.append(
+                    "shard writer remains active; failed status cannot be published safely"
+                )
+        if self.run is not None and not self.finalized:
+            if writer_quiescent and self.coordinate_checkpoint is not None:
+                try:
+                    rollback_keypoint_coordinate_publication(
+                        self.coordinate_checkpoint
+                    )
+                except BaseException as exc:  # pragma: no cover - hostile store
+                    failures.append(f"coordinate publication: {exc}")
+            if writer_quiescent:
+                run_for_failure = self.run
+                if self.root is not None and self.run_path is not None:
+                    try:
+                        run_for_failure = self.root[self.run_path]
+                        self.run = run_for_failure
+                    except BaseException as exc:  # pragma: no cover - hostile store
+                        failures.append(f"fresh failed-run reload: {exc}")
+                try:
+                    mark_run_failed(
+                        run_for_failure,
+                        parent_group=self.parent,
+                        run_name=self.run_name,
+                        error=f"keypoint writer failed: {original}",
+                    )
+                except BaseException as exc:  # pragma: no cover - hostile store
+                    failures.append(f"run completion: {exc}")
+            if self.parent is not None and self.run_name is not None:
+                try:
+                    if self.parent.attrs.get("latest_pending") == self.run_name:
+                        del self.parent.attrs["latest_pending"]
+                except BaseException as exc:  # pragma: no cover - hostile store
+                    failures.append(f"pending selector: {exc}")
+            if self.parent is not None and self.parent_selector_snapshot is not None:
+                try:
+                    _restore_selected_attrs(
+                        self.parent,
+                        self.parent_selector_snapshot,
+                    )
+                except BaseException as exc:  # pragma: no cover - hostile store
+                    failures.append(f"parent selectors: {exc}")
+            if self.root is not None and self.root_pointer_snapshot is not None:
+                try:
+                    _restore_selected_attrs(
+                        self.root,
+                        self.root_pointer_snapshot,
+                    )
+                except BaseException as exc:  # pragma: no cover - hostile store
+                    failures.append(f"root compatibility pointer: {exc}")
+        if self.crop_source is not None:
+            try:
+                self.close_crop_source()
+            except BaseException as exc:  # pragma: no cover - hostile source
+                failures.append(f"crop source close: {exc}")
+        if failures:
+            raise RuntimeError(
+                "Keypoint attempt failed and fail-closed rollback was incomplete: "
+                f"{failures!r}."
+            ) from original
+
+
+_ACTIVE_KEYPOINT_ATTEMPT: ContextVar[
+    _KeypointAttemptFailureBoundary | None
+] = ContextVar("active_keypoint_attempt", default=None)
+
+
+def _fail_closed_keypoint_attempt(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        boundary = _KeypointAttemptFailureBoundary()
+        token = _ACTIVE_KEYPOINT_ATTEMPT.set(boundary)
+        try:
+            return function(*args, **kwargs)
+        except BaseException as exc:
+            boundary.fail(exc)
+            raise
+        finally:
+            _ACTIVE_KEYPOINT_ATTEMPT.reset(token)
+
+    return wrapped
 
 
 def _progress_json_ready(value: Any) -> Any:
@@ -124,6 +327,20 @@ def _write_keypoint_progress_jsonl(
     }
     with progress_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(_progress_json_ready(record), sort_keys=True) + "\n")
+
+
+def _warn_postcommit_failure(console: Console, *, label: str, error: BaseException) -> None:
+    """Report non-authoritative telemetry failures without invalidating science."""
+
+    try:
+        console.print(
+            "[yellow]Warning:[/yellow] keypoint publication is complete, "
+            f"but {label} failed: {error}"
+        )
+    except Exception:
+        # A broken console must not turn a durable, freshly verified publication
+        # into an apparent scientific rollback.
+        pass
 
 
 def _infer_roi_cache_source_tier(path: Optional[str]) -> Optional[str]:
@@ -220,28 +437,33 @@ def _prepare_run_group_for_parent(
         output_parent,
         completion_epoch=COMPLETION_EPOCH_REQUIRE_PROVENANCE,
     )
+    boundary = _ACTIVE_KEYPOINT_ATTEMPT.get()
+    if boundary is not None:
+        boundary.prepare(root=root, parent=parent)
     if run_name:
         if run_name in parent:
             raise ValueError(f"{output_parent}/{run_name} already exists")
         run_group = parent.create_group(run_name)
+        if boundary is not None:
+            boundary.bind_run(run_group, run_name)
         mark_run_started(run_group, run_name=run_name, stage="keypoints")
         note_pending_latest(parent, run_name)
         console.print(f"Created run group: [cyan]{output_parent}/{run_name}[/cyan]")
         return parent, run_group, run_name
-    if output_parent == DEFAULT_KEYPOINT_OUTPUT_PARENT:
-        run_group, resolved_name = get_run_group(root, "keypoints", console=console, create_new=True)
-        mark_run_started(run_group, run_name=resolved_name, stage="keypoints")
-        note_pending_latest(parent, resolved_name)
-        return parent, run_group, resolved_name
-
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
-    base_name = f"keypoint_shard_{timestamp}"
+    base_name = (
+        f"keypoints_{timestamp}"
+        if output_parent == DEFAULT_KEYPOINT_OUTPUT_PARENT
+        else f"keypoint_shard_{timestamp}"
+    )
     resolved_name = base_name
     suffix = 1
     while resolved_name in parent:
         resolved_name = f"{base_name}_{suffix:03d}"
         suffix += 1
     run_group = parent.create_group(resolved_name)
+    if boundary is not None:
+        boundary.bind_run(run_group, resolved_name)
     mark_run_started(run_group, run_name=resolved_name, stage="keypoints")
     note_pending_latest(parent, resolved_name)
     console.print(f"Created run group: [cyan]{output_parent}/{resolved_name}[/cyan]")
@@ -423,6 +645,24 @@ def _create_output_arrays(
             overwrite=True,
             **_shard_kwargs((chunk_len, 4), shard_rows),
         ),
+        "pose_bbox_xyxy_img": group.create_array(
+            "pose_bbox_xyxy_img",
+            shape=(total_rois, 4),
+            chunks=(chunk_len, 4),
+            dtype="f4",
+            fill_value=np.nan,
+            overwrite=True,
+            **_shard_kwargs((chunk_len, 4), shard_rows),
+        ),
+        "pose_bbox_xyxy_norm": group.create_array(
+            "pose_bbox_xyxy_norm",
+            shape=(total_rois, 4),
+            chunks=(chunk_len, 4),
+            dtype="f4",
+            fill_value=np.nan,
+            overwrite=True,
+            **_shard_kwargs((chunk_len, 4), shard_rows),
+        ),
         "heading_finite": group.create_array(
             "heading_finite",
             shape=(total_rois,),
@@ -509,6 +749,14 @@ class _AlignedKeypointShardWriter:
             name: hashlib.sha256() for name in self.destinations
         }
         self._write_seconds = 0.0
+        self._shutdown_started = False
+        self._sentinel_sent = False
+        self._quiescent = False
+        self._aborted = False
+        self._finish_summary: dict[str, object] | None = None
+        self._quiesce_timeout_seconds = (
+            KEYPOINT_SHARD_WRITER_QUIESCE_TIMEOUT_SECONDS
+        )
         self._worker = Thread(
             target=self._flush_worker,
             name="yolo-keypoint-shard-writer",
@@ -520,20 +768,32 @@ class _AlignedKeypointShardWriter:
         if self._errors:
             raise RuntimeError("YOLO keypoint shard writer failed.") from self._errors[0]
 
+    @property
+    def is_quiescent(self) -> bool:
+        """Return whether the flush queue is drained and its worker has exited."""
+
+        return bool(self._quiescent and not self._worker.is_alive())
+
     def _acquire(self, *, start: int) -> None:
         self._raise_error()
         self._active_index = int(self._free.get())
         self._active_start = int(start)
         self._active_rows = 0
 
-    def _submit(self) -> None:
+    def _submit(self, *, timeout: float | None = None) -> None:
         if self._active_index is None or self._active_rows <= 0:
             return
-        self._flush.put((self._active_index, self._active_start, self._active_rows))
+        item = (self._active_index, self._active_start, self._active_rows)
+        if timeout is None:
+            self._flush.put(item)
+        else:
+            self._flush.put(item, timeout=timeout)
         self._active_index = None
         self._active_rows = 0
 
     def write(self, start: int, values: Mapping[str, np.ndarray]) -> None:
+        if self._shutdown_started:
+            raise RuntimeError("Cannot write after keypoint shard-writer shutdown began.")
         self._raise_error()
         if int(start) != self._next_row:
             raise ValueError(
@@ -600,12 +860,75 @@ class _AlignedKeypointShardWriter:
                     self._free.put(int(item[0]))
                 self._flush.task_done()
 
+    def _shutdown(self, *, submit_active: bool) -> None:
+        """Signal, drain, and join exactly once before returning to the caller."""
+
+        if self.is_quiescent:
+            return
+        self._shutdown_started = True
+        deadline = time.monotonic() + self._quiesce_timeout_seconds
+        submission_error: BaseException | None = None
+        if not self._sentinel_sent:
+            if submit_active and not self._aborted:
+                try:
+                    self._submit(
+                        timeout=max(0.0, deadline - time.monotonic())
+                    )
+                except BaseException as exc:  # pragma: no cover - hostile queue
+                    submission_error = exc
+            else:
+                # An active buffer has never been submitted and therefore owns no
+                # durable rows.  Discard it on abort rather than publishing a
+                # partial logical shard after the attempt has already failed.
+                self._active_index = None
+                self._active_rows = 0
+            try:
+                self._flush.put(
+                    self._sentinel,
+                    timeout=max(0.0, deadline - time.monotonic()),
+                )
+            except Full as exc:  # pragma: no cover - requires a hung store write
+                raise RuntimeError(
+                    "Keypoint shard writer could not enqueue its shutdown sentinel "
+                    "before the quiescence deadline."
+                ) from exc
+            self._sentinel_sent = True
+        remaining = max(0.0, deadline - time.monotonic())
+        self._worker.join(timeout=remaining)
+        if self._worker.is_alive():  # pragma: no cover - requires a hung store write
+            raise RuntimeError(
+                "Keypoint shard writer did not quiesce before the shutdown deadline."
+            )
+        if self._flush.unfinished_tasks != 0:  # pragma: no cover - hostile worker
+            raise RuntimeError(
+                "Keypoint shard writer exited with unfinished queued writes."
+            )
+        self._quiescent = True
+        if submission_error is not None:
+            raise RuntimeError(
+                "Keypoint shard writer could not submit its final active buffer."
+            ) from submission_error
+
+    def abort(self) -> None:
+        """Idempotently discard unsubmitted rows and prove no worker remains live."""
+
+        if self.is_quiescent:
+            return
+        self._aborted = True
+        self._shutdown(submit_active=False)
+        if not self.is_quiescent:  # pragma: no cover - defensive contract check
+            raise RuntimeError("Keypoint shard writer abort did not prove quiescence.")
+
     def finish(self) -> dict[str, object]:
-        self._raise_error()
-        self._submit()
-        self._flush.put(self._sentinel)
-        self._flush.join()
-        self._worker.join()
+        if self._finish_summary is not None:
+            return dict(self._finish_summary)
+        if self._aborted:
+            raise RuntimeError("Cannot finish an aborted keypoint shard writer.")
+        if self._errors:
+            self._aborted = True
+            self._shutdown(submit_active=False)
+            self._raise_error()
+        self._shutdown(submit_active=True)
         self._raise_error()
         if self._next_row != self.total_rows:
             raise RuntimeError(
@@ -628,7 +951,7 @@ class _AlignedKeypointShardWriter:
         buffer_bytes_each = int(
             sum(array.nbytes for array in self.buffers[0].values())
         )
-        return {
+        self._finish_summary = {
             "schema_id": KEYPOINT_SHARD_WRITE_SCHEMA,
             "status": "complete",
             "write_mode": "double_buffered_direct",
@@ -643,6 +966,7 @@ class _AlignedKeypointShardWriter:
             "destination_sha256_by_array": destination_hashes,
             "exact_match": True,
         }
+        return dict(self._finish_summary)
 
 
 def _prepare_refined_roi_overrides(
@@ -860,6 +1184,104 @@ def _prepare_model_inputs(
     return tensor[:, None, :, :].expand(-1, 3, -1, -1).contiguous(), "tensor"
 
 
+def _resolve_effective_input_mode_contract(
+    requested_mode: str,
+    *,
+    model_input_transform: ModelInputTransform,
+) -> str:
+    mode = _normalize_input_mode(requested_mode)
+    native_height, native_width = model_input_transform.native_shape
+    shape_probe = np.empty((1, native_height, native_width), dtype=np.uint8)
+    blocker = _tensor_input_blocker(
+        shape_probe,
+        model_input_transform=model_input_transform,
+    )
+    if mode == "tensor" and blocker is not None:
+        raise ValueError(f"Cannot use keypoint tensor input mode: {blocker}")
+    return "numpy-list" if mode == "numpy-list" or blocker is not None else "tensor"
+
+
+def _require_prepared_model_input_contract(
+    model_inputs: object,
+    *,
+    effective_mode: str,
+    expected_mode: str,
+    batch_count: int,
+    model_input_transform: ModelInputTransform,
+) -> None:
+    if effective_mode != expected_mode:
+        raise ValueError(
+            "Prepared keypoint input mode differs from the exact persisted "
+            "pre-inference coordinate context."
+        )
+    height, width = model_input_transform.model_shape
+    if effective_mode == "numpy-list":
+        if not isinstance(model_inputs, list) or len(model_inputs) != batch_count:
+            raise ValueError("Prepared numpy-list input has the wrong batch cardinality.")
+        for item in model_inputs:
+            array = np.asarray(item)
+            if array.shape != (height, width, 3) or array.dtype != np.dtype("uint8"):
+                raise ValueError(
+                    "Prepared numpy-list pixels differ from the exact persisted "
+                    "uint8 submitted extent."
+                )
+            if not (
+                np.array_equal(array[..., 0], array[..., 1])
+                and np.array_equal(array[..., 0], array[..., 2])
+            ):
+                raise ValueError(
+                    "Prepared numpy-list pixels violate luma-repeated RGB channel semantics."
+                )
+        return
+    if not isinstance(model_inputs, torch.Tensor) or tuple(model_inputs.shape) != (
+        batch_count,
+        3,
+        height,
+        width,
+    ):
+        raise ValueError(
+            "Prepared tensor pixels differ from the exact persisted submitted extent."
+        )
+    if model_inputs.dtype != torch.float32 or not bool(torch.isfinite(model_inputs).all()):
+        raise ValueError("Prepared tensor input must be finite float32.")
+    if model_inputs.numel() and (
+        float(model_inputs.min()) < 0.0 or float(model_inputs.max()) > 1.0
+    ):
+        raise ValueError("Prepared tensor input must remain inside the closed [0,1] range.")
+    if not (
+        torch.equal(model_inputs[:, 0], model_inputs[:, 1])
+        and torch.equal(model_inputs[:, 0], model_inputs[:, 2])
+    ):
+        raise ValueError("Prepared tensor input violates luma-repeated RGB channel semantics.")
+
+
+def _require_model_result_coordinate_contract(
+    results: Sequence[Any],
+    *,
+    batch_count: int,
+    model_input_transform: ModelInputTransform,
+) -> None:
+    if len(results) != batch_count:
+        raise ValueError(
+            "Ultralytics result cardinality differs from the exact submitted "
+            f"keypoint batch: expected {batch_count}, got {len(results)}."
+        )
+    expected_shape = tuple(int(item) for item in model_input_transform.model_shape)
+    for index, result in enumerate(results):
+        raw_shape = getattr(result, "orig_shape", None)
+        if (
+            not isinstance(raw_shape, (tuple, list))
+            or len(raw_shape) != 2
+            or any(type(item) is not int for item in raw_shape)
+            or tuple(raw_shape) != expected_shape
+        ):
+            raise ValueError(
+                "Ultralytics result orig_shape differs from the persisted submitted "
+                f"model-input extent for batch row {index}: expected {expected_shape}, "
+                f"got {raw_shape!r}."
+            )
+
+
 def _select_detection(result) -> Optional[int]:
     boxes = getattr(result, "boxes", None)
     if boxes is None or boxes is False:
@@ -942,15 +1364,15 @@ def _extract_pose_bbox_xyxy_roi(
     if bbox.size < 4:
         return out
 
-    max_x = float(max(roi_width - 1, 0))
-    max_y = float(max(roi_height - 1, 0))
+    max_x = float(max(roi_width, 0))
+    max_y = float(max(roi_height, 0))
     x0 = float(np.clip(bbox[0], 0.0, max_x))
     y0 = float(np.clip(bbox[1], 0.0, max_y))
     x1 = float(np.clip(bbox[2], 0.0, max_x))
     y1 = float(np.clip(bbox[3], 0.0, max_y))
-    if roi_width > 1 and x1 <= x0:
+    if roi_width > 0 and x1 <= x0:
         x1 = min(max_x, x0 + 1.0)
-    if roi_height > 1 and y1 <= y0:
+    if roi_height > 0 and y1 <= y0:
         y1 = min(max_y, y0 + 1.0)
     if x1 <= x0 or y1 <= y0:
         return out
@@ -962,21 +1384,22 @@ def _clip_xyxy_to_roi(box_xyxy: np.ndarray, *, roi_height: int, roi_width: int) 
     out = np.asarray(box_xyxy, dtype=np.float32).reshape(-1).copy()
     if out.size < 4 or not np.all(np.isfinite(out[:4])):
         return np.full(4, np.nan, dtype=np.float32)
-    max_x = float(max(roi_width - 1, 0))
-    max_y = float(max(roi_height - 1, 0))
+    max_x = float(max(roi_width, 0))
+    max_y = float(max(roi_height, 0))
     out[0] = np.clip(out[0], 0.0, max_x)
     out[2] = np.clip(out[2], 0.0, max_x)
     out[1] = np.clip(out[1], 0.0, max_y)
     out[3] = np.clip(out[3], 0.0, max_y)
-    if roi_width > 1 and out[2] <= out[0]:
+    if roi_width > 0 and out[2] <= out[0]:
         out[2] = min(max_x, out[0] + 1.0)
-    if roi_height > 1 and out[3] <= out[1]:
+    if roi_height > 0 and out[3] <= out[1]:
         out[3] = min(max_y, out[1] + 1.0)
     if out[2] <= out[0] or out[3] <= out[1]:
         return np.full(4, np.nan, dtype=np.float32)
     return out[:4].astype(np.float32, copy=False)
 
 
+@_fail_closed_keypoint_attempt
 def detect_keypoints_yolo(
     zarr_path: str,
     model_path: str,
@@ -1005,6 +1428,7 @@ def detect_keypoints_yolo(
     roi_live_gpu_chunk_frames: int = 32,
     input_mode: str = "numpy-list",
     model_input_transform_mode: str = "auto",
+    coordinate_contract_mode: str = "canonical",
     profile_timings: bool = False,
     progress_jsonl: Optional[Path] = None,
     progress_every_batches: int = 1,
@@ -1024,6 +1448,34 @@ def detect_keypoints_yolo(
     console.rule("[bold cyan]YOLO Pose Inference[/bold cyan]")
 
     output_parent_name = _normalize_keypoint_output_parent(output_parent)
+    if coordinate_contract_mode not in _KEYPOINT_COORDINATE_CONTRACT_MODES:
+        raise ValueError(
+            "Unsupported coordinate_contract_mode "
+            f"{coordinate_contract_mode!r}; expected one of "
+            f"{_KEYPOINT_COORDINATE_CONTRACT_MODES}."
+        )
+    canonical_coordinates = coordinate_contract_mode == "canonical"
+    if output_parent_name == DEFAULT_KEYPOINT_OUTPUT_PARENT and not canonical_coordinates:
+        raise ValueError(
+            "Final keypoints_runs are canonical-only. Explicit legacy_noncanonical "
+            "output is permitted only for unbound keypoint_shard_runs."
+        )
+    if output_parent_name != DEFAULT_KEYPOINT_OUTPUT_PARENT and canonical_coordinates:
+        raise ValueError(
+            "Canonical coordinate publication is available only for final "
+            "keypoints_runs. Collection shards must explicitly use "
+            "coordinate_contract_mode='legacy_noncanonical' and cannot self-certify."
+        )
+    if canonical_coordinates and roi_cache_manifest is not None:
+        raise ValueError(
+            "Canonical base-keypoint inference requires direct persisted crop "
+            "roi_images and rejects ROI cache manifests."
+        )
+    if canonical_coordinates and roi_work_package_manifest is not None:
+        raise ValueError(
+            "Canonical base-keypoint inference rejects crop work packages; finalize "
+            "an exact materialized crop first."
+        )
     if roi_cache_manifest is not None and roi_work_package_manifest is not None:
         raise ValueError(
             "roi_cache_manifest and roi_work_package_manifest are mutually exclusive."
@@ -1080,7 +1532,10 @@ def detect_keypoints_yolo(
         crop_source = CropImageSource.open(
             root,
             crop_run=crop_run,
-            zarr_path=zarr_path,
+            # Canonical publication must retain the archive-root identity and
+            # path of crop_runs/<run>/roi_images.  Opening crop_runs as its own
+            # nested store erases that ownership even when bytes are identical.
+            zarr_path=None if canonical_coordinates else zarr_path,
             roi_cache_policy=roi_cache_policy,
             roi_live_acceleration=roi_live_acceleration,
             roi_live_gpu_chunk_frames=roi_live_gpu_chunk_frames,
@@ -1088,9 +1543,54 @@ def detect_keypoints_yolo(
             roi_cache_manifest=roi_cache_manifest,
             console=console,
         )
+    boundary = _ACTIVE_KEYPOINT_ATTEMPT.get()
+    if boundary is not None:
+        boundary.bind_crop_source(crop_source)
     crop_group = crop_source.crop_group
     latest_crop = crop_source.crop_run_name
     selected_crop_rows = getattr(crop_source, "source_crop_row_ids", None)
+
+    canonical_crop_source = None
+    canonical_selected_rows: Optional[np.ndarray] = None
+    if canonical_coordinates:
+        canonical_crop_path = f"crop_runs/{latest_crop}"
+        if getattr(crop_group, "path", None) != canonical_crop_path:
+            raise ValueError(
+                "Canonical keypoint inference requires the exact selected persisted "
+                f"crop rowset at {canonical_crop_path!r}."
+            )
+        canonical_crop_source = load_persisted_keypoint_crop_source(
+            root,
+            canonical_crop_path,
+        )
+        if selected_crop_rows is not None:
+            raise ValueError(
+                "Canonical base-keypoint inference requires the direct complete "
+                "materialized crop rowset and rejects selected-row proxy sources."
+            )
+        if (
+            getattr(crop_source, "storage_mode", None) != "materialized"
+            or getattr(crop_source, "frame_source_kind", None) != "roi_images"
+            or getattr(crop_source, "roi_read_mode", None) != "materialized_crop_run"
+            or bool(getattr(crop_source, "roi_cache_used", False))
+        ):
+            raise ValueError(
+                "Canonical base-keypoint inference requires direct root-owned "
+                "materialized roi_images; caches, live/composite pixels, and work "
+                "packages are unsupported."
+            )
+        require_direct_keypoint_crop_pixel_source(
+            canonical_crop_source,
+            getattr(crop_source, "_roi_images", None),
+        )
+        canonical_selected_rows = (
+            np.arange(
+                canonical_crop_source.crop_geometry.row_identity.leading_dimension,
+                dtype=np.int64,
+            )
+            if selected_crop_rows is None
+            else np.asarray(selected_crop_rows, dtype=np.int64).reshape(-1)
+        )
 
     roi_coords = crop_source.roi_coordinates_full.copy()
     frame_indices = crop_source.frame_indices.astype(np.int64, copy=True)
@@ -1101,6 +1601,32 @@ def detect_keypoints_yolo(
         return ""
 
     roi_h, roi_w = crop_source.roi_shape
+    if canonical_crop_source is not None:
+        assert canonical_selected_rows is not None
+        source_placement = np.asarray(
+            canonical_crop_source._placement_node[:]
+        )[canonical_selected_rows]
+        source_frames = np.asarray(
+            canonical_crop_source._rowset_node["source_acquisition_frame_index"][:],
+            dtype=np.int64,
+        )[canonical_selected_rows]
+        expected_roi_shape = (
+            int(canonical_crop_source.roi_frame.endpoint.height),
+            int(canonical_crop_source.roi_frame.endpoint.width),
+        )
+        if (
+            total_rois != int(canonical_selected_rows.shape[0])
+            or (roi_h, roi_w) != expected_roi_shape
+            or roi_coords.shape != source_placement[:, :2].shape
+            or not np.array_equal(roi_coords, source_placement[:, :2])
+            or not np.array_equal(frame_indices, source_frames)
+        ):
+            raise ValueError(
+                "Active crop pixels/rows do not equal the exact persisted canonical "
+                "crop selection, placement, ROI extent, and acquisition time mapping."
+            )
+        roi_coords = np.array(source_placement[:, :2], copy=True)
+        frame_indices = np.array(source_frames, copy=True)
     source_detect_run = crop_group.attrs.get("source_detect_run")
     source_refined_run = crop_group.attrs.get("source_refined_run")
     override_data = (
@@ -1113,6 +1639,11 @@ def detect_keypoints_yolo(
     override_map: Optional[np.ndarray] = None
     override_rois: Optional[np.ndarray] = None
     if override_data is not None:
+        if canonical_coordinates:
+            raise ValueError(
+                "Refined ROI overrides are not supported by canonical base-keypoint "
+                "publication; publish a new canonical crop with exact placement lineage."
+            )
         indices = override_data["indices"]
         roi_coords[indices] = override_data["coords"]
         frame_override = override_data["frame_indices"]
@@ -1131,6 +1662,10 @@ def detect_keypoints_yolo(
         model_hw=(int(imgsz), int(imgsz)),
     )
     resolved_input_mode = _normalize_input_mode(input_mode)
+    contracted_effective_input_mode = _resolve_effective_input_mode_contract(
+        resolved_input_mode,
+        model_input_transform=model_input_transform,
+    )
 
     run_parent, run_group, resolved_run_name = _prepare_run_group_for_parent(
         root,
@@ -1140,9 +1675,11 @@ def detect_keypoints_yolo(
     )
     run_group.attrs["output_parent"] = output_parent_name
     run_group.attrs["run_group_parent"] = output_parent_name
+    run_group.attrs["stage_selector_eligible"] = (
+        output_parent_name == DEFAULT_KEYPOINT_OUTPUT_PARENT
+    )
     if output_parent_name != DEFAULT_KEYPOINT_OUTPUT_PARENT:
         run_group.attrs["is_collection_shard"] = True
-        run_group.attrs["stage_selector_eligible"] = False
     run_group.attrs["keypoint_labels"] = list(pose_schema_obj.node_names)
     run_group.attrs["keypoint_confidence_labels"] = list(pose_schema_obj.node_names)
     run_group.attrs["skeleton_id"] = str(pose_schema_attrs["skeleton_id"])
@@ -1150,9 +1687,6 @@ def detect_keypoints_yolo(
     run_group.attrs["pose_schema"] = dict(pose_schema_attrs)
     if model_kpt_shape is not None:
         run_group.attrs["model_kpt_shape"] = list(model_kpt_shape)
-    if output_parent_name == DEFAULT_KEYPOINT_OUTPUT_PARENT:
-        root.attrs["current_keypoint_group_path"] = run_group.path
-
     arrays = _create_output_arrays(
         run_group,
         total_rois,
@@ -1193,6 +1727,36 @@ def detect_keypoints_yolo(
             total_rois=total_rois,
             shard_rows=keypoint_roi_shard_rows,
         )
+    keypoint_coordinate_context = None
+    if canonical_crop_source is not None:
+        assert canonical_selected_rows is not None
+        row_chunks = arrays["heading"].chunks
+        placement_chunks = (int(row_chunks[0]), 4)
+        run_group.create_array(
+            "source_acquisition_frame_index",
+            data=np.asarray(source_frames, dtype="<i8"),
+            chunks=row_chunks,
+            overwrite=True,
+            **_shard_kwargs(row_chunks, keypoint_roi_shard_rows),
+        )
+        run_group.create_array(
+            "source_crop_xywh",
+            data=np.asarray(source_placement),
+            chunks=placement_chunks,
+            overwrite=True,
+            **_shard_kwargs(placement_chunks, keypoint_roi_shard_rows),
+        )
+        keypoint_coordinate_context = prepare_keypoint_coordinate_context(
+            root,
+            f"keypoints_runs/{resolved_run_name}",
+            crop_path=f"crop_runs/{latest_crop}",
+            model_input_transform=model_input_transform,
+            preprocessing_input_mode=contracted_effective_input_mode,
+            model_artifact=model_artifact,
+        )
+        # The preflight intentionally reloads through the archive root.  Rebind
+        # here so a stale Zarr attrs handle cannot overwrite its new evidence.
+        run_group = root[f"keypoints_runs/{resolved_run_name}"]
     if getattr(crop_source, "pixel_materialization_id", None) is not None:
         if selected_crop_rows is None:
             raise ValueError("Package-backed keypoint inference lacks selected crop rows.")
@@ -1206,7 +1770,19 @@ def detect_keypoints_yolo(
     if "detection_indices" not in lineage_result.copied:
         console.print("[yellow]Crop run missing 'detection_indices'; YOLO keypoint run will omit them.[/yellow]")
 
-    full_img_shape, total_frames = _resolve_full_image_shape(root, crop_group)
+    if keypoint_coordinate_context is not None:
+        camera_frame = (
+            keypoint_coordinate_context.source.crop_geometry.source_geometry.frame_evidence.source_camera_frame
+        )
+        full_img_shape = (
+            int(camera_frame.endpoint.height),
+            int(camera_frame.endpoint.width),
+        )
+        total_frames = int(
+            keypoint_coordinate_context.source.crop_geometry.source_geometry.frame_evidence.acquisition_frame.record.source_total_frames
+        )
+    else:
+        full_img_shape, total_frames = _resolve_full_image_shape(root, crop_group)
 
     norm_factor = np.array([full_img_shape[1], full_img_shape[0]], dtype="f8")
 
@@ -1276,15 +1852,15 @@ def detect_keypoints_yolo(
     success_total = 0
     confidence_accum: List[float] = []
     timing_profiler = InferenceTimingProfiler(enabled=profile_timings)
-    shard_writer = (
-        _AlignedKeypointShardWriter(
+    shard_writer = None
+    if keypoint_roi_shard_rows is not None:
+        shard_writer = _AlignedKeypointShardWriter(
             {**arrays, "detection_source": detection_source_dst},
             shard_rows=int(keypoint_roi_shard_rows),
             buffer_count=2,
         )
-        if keypoint_roi_shard_rows is not None
-        else None
-    )
+        if boundary is not None:
+            boundary.bind_shard_writer(shard_writer)
     progress_jsonl_path = Path(progress_jsonl).expanduser() if progress_jsonl is not None else None
     progress_interval = max(1, int(progress_every_batches))
 
@@ -1297,6 +1873,12 @@ def detect_keypoints_yolo(
     )
 
     start_time = time.time()
+    effective_model_input_transform = (
+        keypoint_coordinate_context.model_input_transform
+        if keypoint_coordinate_context is not None
+        else model_input_transform
+    )
+    effective_input_mode = contracted_effective_input_mode
     _write_keypoint_progress_jsonl(
         progress_jsonl_path,
         "start",
@@ -1324,6 +1906,12 @@ def detect_keypoints_yolo(
             end = min(start + batch_size, total_rois)
             batch_coords = roi_coords[start:end]
             batch_count = end - start
+            if keypoint_coordinate_context is not None:
+                revalidate_keypoint_coordinate_batch_context(
+                    keypoint_coordinate_context,
+                    row_start=start,
+                    row_stop=end,
+                )
             with timing_profiler.time("roi_read", items=batch_count):
                 batch_roi_np = crop_source.read_slice(start, end)
             if override_map is not None and override_rois is not None:
@@ -1337,8 +1925,15 @@ def detect_keypoints_yolo(
                 model_inputs, effective_input_mode = _prepare_model_inputs(
                     batch_roi_np,
                     input_mode=resolved_input_mode,
-                    model_input_transform=model_input_transform,
+                    model_input_transform=effective_model_input_transform,
                     device=torch_device,
+                )
+                _require_prepared_model_input_contract(
+                    model_inputs,
+                    effective_mode=effective_input_mode,
+                    expected_mode=contracted_effective_input_mode,
+                    batch_count=batch_count,
+                    model_input_transform=effective_model_input_transform,
                 )
             with timing_profiler.time("model_predict", items=batch_count):
                 results = tuple(
@@ -1353,6 +1948,12 @@ def detect_keypoints_yolo(
                         stream=True,
                     )
                 )
+                if keypoint_coordinate_context is not None:
+                    _require_model_result_coordinate_contract(
+                        results,
+                        batch_count=batch_count,
+                        model_input_transform=effective_model_input_transform,
+                    )
 
             batch_keypoints_roi = np.full((batch_count, n_keypoints, 2), np.nan, dtype=np.float64)
             batch_keypoints_img = np.full_like(batch_keypoints_roi, np.nan)
@@ -1362,6 +1963,8 @@ def detect_keypoints_yolo(
             batch_keypoint_conf = np.full((batch_count, n_keypoints), np.nan, dtype=np.float64)
             batch_success = np.zeros(batch_count, dtype=bool)
             batch_pose_bbox_roi = np.full((batch_count, 4), np.nan, dtype=np.float32)
+            batch_pose_bbox_img = np.full_like(batch_pose_bbox_roi, np.nan)
+            batch_pose_bbox_norm = np.full_like(batch_pose_bbox_roi, np.nan)
 
             with timing_profiler.time("result_decode", items=batch_count):
                 for i, (res, top_left) in enumerate(zip(results, batch_coords)):
@@ -1380,16 +1983,24 @@ def detect_keypoints_yolo(
                         continue
                     if kp.shape[0] > n_keypoints:
                         kp = kp[:n_keypoints]
-                    kp = model_input_transform.invert_points_xy(kp)
+                    if keypoint_coordinate_context is not None:
+                        kp = model_input_batch_to_roi(
+                            np.asarray(kp, dtype=np.float64),
+                            context=keypoint_coordinate_context,
+                            output_dtype=np.float64,
+                        )
+                    else:
+                        kp = model_input_transform.invert_points_xy(kp)
 
                     kp[:, 0] = np.clip(kp[:, 0], 0.0, roi_w - 1)
                     kp[:, 1] = np.clip(kp[:, 1], 0.0, roi_h - 1)
 
                     batch_keypoints_roi[i] = kp
-                    top_left = np.asarray(top_left, dtype=np.float64)
-                    kp_img = kp + np.array([top_left[0], top_left[1]])
-                    batch_keypoints_img[i] = kp_img
-                    batch_keypoints_norm[i] = kp_img / norm_factor
+                    if keypoint_coordinate_context is None:
+                        top_left = np.asarray(top_left, dtype=np.float64)
+                        kp_img = kp + np.array([top_left[0], top_left[1]])
+                        batch_keypoints_img[i] = kp_img
+                        batch_keypoints_norm[i] = kp_img / norm_factor
                     batch_heading[i] = _compute_heading(kp, pose_schema_obj)
                     batch_keypoint_conf[i] = _extract_keypoint_confidences(
                         keypoints,
@@ -1407,12 +2018,23 @@ def detect_keypoints_yolo(
                         pose_bbox_model = _extract_pose_bbox_xyxy_roi(
                             boxes,
                             det_idx,
-                            roi_height=model_input_transform.model_height,
-                            roi_width=model_input_transform.model_width,
+                            roi_height=effective_model_input_transform.model_height,
+                            roi_width=effective_model_input_transform.model_width,
                         )
                         if np.all(np.isfinite(pose_bbox_model)):
+                            inverted_bbox = (
+                                model_input_bbox_batch_to_roi(
+                                    pose_bbox_model,
+                                    context=keypoint_coordinate_context,
+                                    output_dtype=np.float32,
+                                )
+                                if keypoint_coordinate_context is not None
+                                else model_input_transform.invert_boxes_xyxy(
+                                    pose_bbox_model
+                                )
+                            )
                             batch_pose_bbox_roi[i] = _clip_xyxy_to_roi(
-                                model_input_transform.invert_boxes_xyxy(pose_bbox_model),
+                                inverted_bbox,
                                 roi_height=roi_h,
                                 roi_width=roi_w,
                             )
@@ -1421,6 +2043,37 @@ def detect_keypoints_yolo(
                     batch_success[i] = True
                     success_total += 1
                     confidence_accum.append(det_conf)
+
+            if keypoint_coordinate_context is not None:
+                derived_coordinates = derive_keypoint_coordinate_batch(
+                    context=keypoint_coordinate_context,
+                    row_start=start,
+                    row_stop=end,
+                    keypoints_roi=batch_keypoints_roi,
+                    pose_bbox_xyxy_roi=batch_pose_bbox_roi,
+                )
+                batch_keypoints_img = derived_coordinates["keypoints_img"]
+                batch_keypoints_norm = derived_coordinates["keypoints_norm"]
+                batch_pose_bbox_img = derived_coordinates["pose_bbox_xyxy_img"]
+                batch_pose_bbox_norm = derived_coordinates["pose_bbox_xyxy_norm"]
+            else:
+                bbox_offsets = np.column_stack(
+                    (
+                        batch_coords[:, 0],
+                        batch_coords[:, 1],
+                        batch_coords[:, 0],
+                        batch_coords[:, 1],
+                    )
+                ).astype(np.float32, copy=False)
+                batch_pose_bbox_img = np.asarray(
+                    batch_pose_bbox_roi + bbox_offsets,
+                    dtype=np.float32,
+                )
+                batch_pose_bbox_norm = np.asarray(
+                    batch_pose_bbox_img
+                    / np.tile(norm_factor, 2),
+                    dtype=np.float32,
+                )
 
             with timing_profiler.time("output_write", items=batch_count):
                 if crop_detection_source is not None:
@@ -1451,6 +2104,8 @@ def detect_keypoints_yolo(
                     "keypoint_confidences": batch_keypoint_conf,
                     "detection_success": batch_success,
                     "pose_bbox_xyxy_roi": batch_pose_bbox_roi,
+                    "pose_bbox_xyxy_img": batch_pose_bbox_img,
+                    "pose_bbox_xyxy_norm": batch_pose_bbox_norm,
                     "effective_threshold": np.full(batch_count, np.nan, dtype=np.float64),
                     "effective_se2_radius": np.full(batch_count, np.nan, dtype=np.float64),
                     "heading_finite": heading_finite_chunk,
@@ -1564,6 +2219,7 @@ def detect_keypoints_yolo(
 
     run_group.attrs.update({
         "method": "yolo_pose",
+        "coordinate_contract_mode": coordinate_contract_mode,
         "keypoints_timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "model_path": str(model_path_resolved),
         "model_name": model_path.name,
@@ -1648,6 +2304,7 @@ def detect_keypoints_yolo(
             "input_mode_requested": resolved_input_mode,
             "input_mode_effective": effective_input_mode,
             "model_input_transform": model_input_transform.to_attrs(),
+            "coordinate_contract_mode": coordinate_contract_mode,
             # Maintained for API compatibility with pipeline/batch configs.
             "mask_threshold": float(mask_threshold),
             "keypoint_roi_shard_rows": (
@@ -1734,6 +2391,7 @@ def detect_keypoints_yolo(
                 ),
                 "roi_live_acceleration": roi_live_acceleration,
                 "model_input_transform_mode": model_input_transform_mode,
+                "coordinate_contract_mode": coordinate_contract_mode,
                 "input_mode": input_mode,
                 "keypoint_roi_shard_rows": keypoint_roi_shard_rows,
                 "keypoint_frame_shard_rows": (
@@ -1840,28 +2498,23 @@ def detect_keypoints_yolo(
         if override_data["duration"] is not None:
             run_group.attrs["refined_roi_generation_duration_seconds"] = float(override_data["duration"])
 
-    try:
-        validate_immutable_yolo_storage(
-            run_group,
-            stage="keypoints",
-            row_shard_rows=keypoint_roi_shard_rows,
-            frame_shard_rows=keypoint_frame_shard_rows,
-        )
-    except Exception as exc:
-        try:
-            mark_run_failed(
-                run_group,
-                parent_group=run_parent,
-                run_name=resolved_run_name,
-                error=f"immutable YOLO storage validation failed: {exc}",
-            )
-        finally:
-            crop_source.close()
-        raise
+    validate_immutable_yolo_storage(
+        run_group,
+        stage="keypoints",
+        row_shard_rows=keypoint_roi_shard_rows,
+        frame_shard_rows=keypoint_frame_shard_rows,
+    )
+    expected_coordinate_contract = (
+        "canonical_v2"
+        if keypoint_coordinate_context is not None
+        else "legacy_noncanonical_explicit_v1"
+    )
 
     status_details: Dict[str, object] = {
         "reason": "present",
         "run_group": output_parent_name,
+        "coordinate_contract_mode": coordinate_contract_mode,
+        "coordinate_contract": expected_coordinate_contract,
         "source_crop_run": latest_crop,
         **crop_snapshot_attrs,
         **crop_pixel_attrs,
@@ -1910,12 +2563,44 @@ def detect_keypoints_yolo(
         status_details["refined_roi_overrides"] = int(override_data["count"])
         status_details["refined_roi_source"] = str(override_data["path"])
 
+    # All input-derived arrays, provenance, and status details are now durable.
+    # Close the scientific pixel source before descriptors or selectors can make
+    # this attempt authoritative.
+    if boundary is not None:
+        boundary.close_crop_source()
+    else:  # pragma: no cover - the public writer is always boundary-decorated
+        crop_source.close()
+
+    run_path = f"{output_parent_name}/{resolved_run_name}"
+    if keypoint_coordinate_context is not None:
+        checkpoint = capture_keypoint_coordinate_publication_checkpoint(
+            root,
+            run_path,
+        )
+        if boundary is not None:
+            boundary.bind_coordinate_checkpoint(checkpoint)
+        publish_keypoint_coordinate_surfaces(root, run_path)
+        # Publication also writes through a fresh root-resolved group.  Complete
+        # only through another fresh handle so descriptors cannot be lost.
+        run_group = root[run_path]
+    else:
+        run_group.attrs["coordinate_contract"] = expected_coordinate_contract
+
     mark_run_complete(
         run_group,
         parent_group=run_parent,
         run_name=resolved_run_name,
         run_provenance=effective_run_provenance,
     )
+    if keypoint_coordinate_context is not None:
+        load_persisted_keypoint_coordinate_surfaces(root, run_path)
+        root.attrs["current_keypoint_group_path"] = run_path
+        if root.attrs.get("current_keypoint_group_path") != run_path:
+            raise RuntimeError(
+                "Canonical keypoint compatibility pointer did not persist exactly."
+            )
+    if boundary is not None:
+        boundary.mark_finalized()
 
     try:
         if output_parent_name == DEFAULT_KEYPOINT_OUTPUT_PARENT:
@@ -1929,48 +2614,71 @@ def detect_keypoints_yolo(
                 console=console,
                 registry=registry,
             )
-    finally:
-        crop_source.close()
-    _write_keypoint_progress_jsonl(
-        progress_jsonl_path,
-        "complete",
-        zarr_path=str(zarr_path.resolve()),
-        run_name=resolved_run_name,
-        crop_run=latest_crop,
-        total_rois=int(total_rois),
-        successful_detections=int(success_total),
-        failed_detections=int(failure_total),
-        success_rate_percent=round(float(success_rate), 2),
-        elapsed_seconds=float(total_time),
-        poses_per_second=float(inference_rate),
-        resolved_model_device=resolved_model_device,
-    )
-
-    summary_lines = [
-        "[green]✓[/green] Pose inference complete",
-        "",
-        f"[bold]Run:[/bold] {output_parent_name}/{resolved_run_name}",
-        f"[bold]Total ROIs:[/bold] {total_rois}",
-        f"[bold]Successful:[/bold] {success_total} ({success_rate:.2f}%)",
-        f"[bold]Failed:[/bold] {failure_total}",
-        f"[bold]Model:[/bold] {model_path_resolved}",
-        f"[bold]Duration:[/bold] {total_time:.1f}s ({inference_rate:.1f} poses/s)",
-    ]
-    if timing_profiler.enabled:
-        summary_lines.append("[bold]Timing Profile:[/bold]")
-        for line in timing_profiler.render_lines(total_items=total_rois, wall_seconds=total_time, limit=5):
-            summary_lines.append(f"[dim]{line}[/dim]")
-    if override_data is not None:
-        summary_lines.append(
-            f"[dim]Refined ROI overrides: {override_data['count']} from {override_data['path']}[/dim]"
+    except Exception as exc:  # telemetry is explicitly post-commit
+        _warn_postcommit_failure(
+            console,
+            label="registry/status telemetry",
+            error=exc,
         )
-    completion = Panel(
-        "\n".join(summary_lines),
-        title="YOLO Pose Inference",
-        border_style="green",
-    )
-    console.print("\n")
-    console.print(completion)
+    try:
+        _write_keypoint_progress_jsonl(
+            progress_jsonl_path,
+            "complete",
+            zarr_path=str(zarr_path.resolve()),
+            run_name=resolved_run_name,
+            crop_run=latest_crop,
+            total_rois=int(total_rois),
+            successful_detections=int(success_total),
+            failed_detections=int(failure_total),
+            success_rate_percent=round(float(success_rate), 2),
+            elapsed_seconds=float(total_time),
+            poses_per_second=float(inference_rate),
+            resolved_model_device=resolved_model_device,
+        )
+    except Exception as exc:  # telemetry is explicitly post-commit
+        _warn_postcommit_failure(
+            console,
+            label="completion progress telemetry",
+            error=exc,
+        )
+
+    try:
+        summary_lines = [
+            "[green]✓[/green] Pose inference complete",
+            "",
+            f"[bold]Run:[/bold] {output_parent_name}/{resolved_run_name}",
+            f"[bold]Total ROIs:[/bold] {total_rois}",
+            f"[bold]Successful:[/bold] {success_total} ({success_rate:.2f}%)",
+            f"[bold]Failed:[/bold] {failure_total}",
+            f"[bold]Model:[/bold] {model_path_resolved}",
+            f"[bold]Duration:[/bold] {total_time:.1f}s ({inference_rate:.1f} poses/s)",
+        ]
+        if timing_profiler.enabled:
+            summary_lines.append("[bold]Timing Profile:[/bold]")
+            for line in timing_profiler.render_lines(
+                total_items=total_rois,
+                wall_seconds=total_time,
+                limit=5,
+            ):
+                summary_lines.append(f"[dim]{line}[/dim]")
+        if override_data is not None:
+            summary_lines.append(
+                f"[dim]Refined ROI overrides: {override_data['count']} "
+                f"from {override_data['path']}[/dim]"
+            )
+        completion = Panel(
+            "\n".join(summary_lines),
+            title="YOLO Pose Inference",
+            border_style="green",
+        )
+        console.print("\n")
+        console.print(completion)
+    except Exception as exc:  # presentation is explicitly post-commit
+        _warn_postcommit_failure(
+            console,
+            label="completion presentation",
+            error=exc,
+        )
 
     return resolved_run_name
 
@@ -2112,6 +2820,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "'auto' is identity when sizes match and centered zero-padding when --imgsz is larger."
         ),
     )
+    parser.add_argument(
+        "--coordinate-contract-mode",
+        choices=_KEYPOINT_COORDINATE_CONTRACT_MODES,
+        default="canonical",
+        help=(
+            "Publish a canonical-v2 coordinate graph from an exact canonical crop "
+            "(default), or explicitly quarantine unsupported historical/shard output "
+            "as legacy_noncanonical."
+        ),
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose Ultralytics output")
     return parser
 
@@ -2143,6 +2861,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         roi_cache_staged_to_node_scratch=bool(args.roi_cache_staged_to_node_scratch),
         input_mode=args.input_mode,
         model_input_transform_mode=args.model_input_transform,
+        coordinate_contract_mode=args.coordinate_contract_mode,
         profile_timings=args.profile_timings,
         progress_jsonl=args.progress_jsonl,
         progress_every_batches=args.progress_every_batches,

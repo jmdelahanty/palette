@@ -10,15 +10,24 @@ import zarr
 
 from fisheye.detection import detect_keypoints_yolo as yolo_mod
 from fisheye.detection.detect_keypoints_yolo import (
+    _AlignedKeypointShardWriter,
     _create_output_arrays,
     _extract_keypoint_confidences,
     _extract_pose_bbox_xyxy_roi,
     _prepare_model_inputs,
+    _require_model_result_coordinate_contract,
+    _require_prepared_model_input_contract,
     detect_keypoints_yolo,
 )
 from fisheye.shared.run_provenance import RUN_PROVENANCE_ATTR, build_writer_run_provenance
 from fisheye.shared.immutable_yolo_storage import IMMUTABLE_YOLO_STORAGE_ATTR
+from fisheye.shared.keypoint_coordinate_publication import (
+    load_persisted_keypoint_coordinate_surfaces,
+)
 from fisheye.shared.model_input_transform import resolve_model_input_transform
+from tests.unit.fisheye.test_keypoint_coordinate_publication import (
+    _real_canonical_archive,
+)
 
 
 class _KeypointsWithConf:
@@ -87,6 +96,7 @@ class _FakeResult:
     def __init__(self, *, success: bool) -> None:
         self.boxes = _FakeBoxes(success=success)
         self.keypoints = _FakeKeypoints() if success else None
+        self.orig_shape = (8, 8)
 
 
 class _FakeYOLO:
@@ -109,6 +119,19 @@ class _FakeYOLO:
         out = self._results[:batch_count]
         self._results = self._results[batch_count:]
         return iter(out)
+
+
+class _CanonicalFakeYOLO(_FakeYOLO):
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        for result in self._results:
+            result.orig_shape = (40, 40)
+
+
+class _SecondBatchWrongShapeCanonicalFakeYOLO(_CanonicalFakeYOLO):
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        self._results[1].orig_shape = (39, 40)
 
 
 def test_extract_keypoint_confidences_returns_values_when_present() -> None:
@@ -169,6 +192,153 @@ def test_create_output_arrays_can_use_aligned_indexed_shards(tmp_path) -> None:
     assert arrays["confidence"].shards == (8,)
 
 
+def test_aligned_keypoint_shard_writer_finish_and_abort_are_idempotent(tmp_path) -> None:
+    root = zarr.open_group(store=str(tmp_path / "writer.zarr"), mode="w")
+    destination = root.create_array(
+        "values",
+        shape=(2,),
+        chunks=(1,),
+        dtype="i4",
+        fill_value=-1,
+    )
+    writer = _AlignedKeypointShardWriter(
+        {"values": destination},
+        shard_rows=1,
+    )
+    writer.write(0, {"values": np.asarray([10, 20], dtype="i4")})
+
+    first = writer.finish()
+    second = writer.finish()
+    writer.abort()
+
+    assert first == second
+    assert writer.is_quiescent
+    assert not writer._worker.is_alive()
+    np.testing.assert_array_equal(destination[:], np.asarray([10, 20], dtype="i4"))
+
+
+def test_aligned_keypoint_shard_writer_joins_with_preexisting_worker_error(
+    tmp_path,
+) -> None:
+    root = zarr.open_group(store=str(tmp_path / "writer-error.zarr"), mode="w")
+    destination = root.create_array(
+        "values",
+        shape=(1,),
+        chunks=(1,),
+        dtype="i4",
+        fill_value=-1,
+    )
+    writer = _AlignedKeypointShardWriter(
+        {"values": destination},
+        shard_rows=1,
+    )
+    writer._errors.append(RuntimeError("synthetic worker error"))
+
+    with pytest.raises(RuntimeError, match="shard writer failed"):
+        writer.finish()
+    writer.abort()
+
+    assert writer.is_quiescent
+    assert not writer._worker.is_alive()
+
+
+def test_failure_boundary_does_not_publish_failed_until_writer_is_quiescent(
+    tmp_path,
+) -> None:
+    root = zarr.open_group(store=str(tmp_path / "nonquiescent.zarr"), mode="w")
+    parent = root.create_group("keypoints_runs")
+    parent.attrs.update(
+        {
+            "latest": "prior",
+            "latest_complete": "prior",
+            "latest_pending": "prior_pending",
+        }
+    )
+    root.attrs["current_keypoint_group_path"] = "keypoints_runs/prior"
+    boundary = yolo_mod._KeypointAttemptFailureBoundary()
+    boundary.prepare(root=root, parent=parent)
+    run = parent.create_group("attempt")
+    boundary.bind_run(run, "attempt")
+    yolo_mod.mark_run_started(run, run_name="attempt", stage="keypoints")
+    yolo_mod.note_pending_latest(parent, "attempt")
+
+    class _NonQuiescentWriter:
+        is_quiescent = False
+
+        @staticmethod
+        def abort() -> None:
+            raise RuntimeError("synthetic inability to join")
+
+    boundary.bind_shard_writer(_NonQuiescentWriter())
+
+    with pytest.raises(RuntimeError, match="rollback was incomplete"):
+        boundary.fail(ValueError("synthetic inference failure"))
+
+    assert run.attrs["palette_run_completion_status"] == "running"
+    assert "palette_run_failed_at_utc" not in run.attrs
+    assert parent.attrs["latest"] == "prior"
+    assert parent.attrs["latest_complete"] == "prior"
+    assert parent.attrs["latest_pending"] == "prior_pending"
+    assert root.attrs["current_keypoint_group_path"] == "keypoints_runs/prior"
+
+
+def test_keypoint_attempt_keyboard_interrupt_quiesces_and_restores_selectors(
+    tmp_path,
+) -> None:
+    root = zarr.open_group(store=str(tmp_path / "interrupt.zarr"), mode="w")
+    parent = root.create_group("keypoints_runs")
+    parent.attrs.update(
+        {
+            "latest": "prior",
+            "latest_complete": "prior",
+            "latest_pending": "prior_pending",
+        }
+    )
+    root.attrs["current_keypoint_group_path"] = "keypoints_runs/prior"
+    writer_state = {"aborted": False}
+    source_state = {"closed": False}
+
+    class _InterruptWriter:
+        @property
+        def is_quiescent(self) -> bool:
+            return writer_state["aborted"]
+
+        @staticmethod
+        def abort() -> None:
+            writer_state["aborted"] = True
+
+    class _InterruptSource:
+        @staticmethod
+        def close() -> None:
+            source_state["closed"] = True
+
+    @yolo_mod._fail_closed_keypoint_attempt
+    def _interrupted_attempt() -> None:
+        boundary = yolo_mod._ACTIVE_KEYPOINT_ATTEMPT.get()
+        assert boundary is not None
+        boundary.prepare(root=root, parent=parent)
+        run = parent.create_group("attempt")
+        boundary.bind_run(run, "attempt")
+        yolo_mod.mark_run_started(run, run_name="attempt", stage="keypoints")
+        yolo_mod.note_pending_latest(parent, "attempt")
+        root.attrs["current_keypoint_group_path"] = "keypoints_runs/attempt"
+        boundary.bind_shard_writer(_InterruptWriter())
+        boundary.bind_crop_source(_InterruptSource())
+        raise KeyboardInterrupt("synthetic interrupt")
+
+    with pytest.raises(KeyboardInterrupt, match="synthetic interrupt"):
+        _interrupted_attempt()
+
+    run = parent["attempt"]
+    assert writer_state["aborted"] is True
+    assert source_state["closed"] is True
+    assert run.attrs["palette_run_completion_status"] == "failed"
+    assert parent.attrs["latest"] == "prior"
+    assert parent.attrs["latest_complete"] == "prior"
+    assert parent.attrs["latest_pending"] == "prior_pending"
+    assert root.attrs["current_keypoint_group_path"] == "keypoints_runs/prior"
+
+
 def test_detect_keypoints_yolo_sizes_n_keypoints_to_run_frame_counts(monkeypatch, tmp_path) -> None:
     zarr_path = tmp_path / "training.zarr"
     root = zarr.open_group(store=str(zarr_path), mode="w")
@@ -217,19 +387,22 @@ def test_detect_keypoints_yolo_sizes_n_keypoints_to_run_frame_counts(monkeypatch
             command="unit-keypoint-writer",
             params={"model_path": model_path},
         ),
-        run_name="keypoints_001",
+        run_name="keypoint_shard_001",
+        output_parent="keypoint_shard_runs",
         pose_schema="traditional_v3",
         batch_size=8,
         imgsz=8,
         input_mode="numpy-list",
+        coordinate_contract_mode="legacy_noncanonical",
         keypoint_roi_shard_rows=8,
         keypoint_frame_shard_rows=8,
         registry=None,
     )
 
-    run = zarr.open_group(store=str(zarr_path), mode="r")["keypoints_runs"][run_name]
+    run = zarr.open_group(store=str(zarr_path), mode="r")["keypoint_shard_runs"][run_name]
     assert run.attrs["keypoint_storage_layout"] == "indexed_sharding_v1"
     assert run.attrs["keypoint_storage_policy"] == "default_indexed_sharding_v1"
+    assert run.attrs["coordinate_contract"] == "legacy_noncanonical_explicit_v1"
     assert run.attrs[IMMUTABLE_YOLO_STORAGE_ATTR]["status"] == "ok"
     actual = run["n_keypoints"][:]
     assert actual.shape == run["frame_counts"].shape == (20,)
@@ -295,6 +468,42 @@ def _patch_keypoint_writer_dependencies(monkeypatch, model_path) -> None:
     model_path.write_bytes(b"fake")
 
 
+def _patch_canonical_writer_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    model_path,
+    *,
+    model_class: type[_FakeYOLO],
+) -> None:
+    monkeypatch.setattr(yolo_mod, "YOLO", model_class)
+    monkeypatch.setattr(
+        yolo_mod,
+        "_prepare_refined_roi_overrides",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        yolo_mod,
+        "get_git_info",
+        lambda: {
+            "commit_hash": "test",
+            "short_hash": "test",
+            "branch": "test",
+            "is_dirty": False,
+            "remote_url": None,
+        },
+    )
+    monkeypatch.setattr(
+        yolo_mod,
+        "get_environment_info",
+        lambda **_kwargs: {
+            "platform": {"hostname": "unit-test"},
+            "environment": {},
+            "gpu": {},
+        },
+    )
+    monkeypatch.setattr(yolo_mod, "_emit_keypoint_step_status", lambda **_kwargs: None)
+    model_path.write_bytes(b"fake")
+
+
 def _run_keypoint_count_writer(monkeypatch, tmp_path, *, name: str, legacy_count: bool):
     zarr_path = _make_keypoint_count_fixture(tmp_path, name)
     model_path = tmp_path / f"{name}.pt"
@@ -309,23 +518,27 @@ def _run_keypoint_count_writer(monkeypatch, tmp_path, *, name: str, legacy_count
                 command="unit-keypoint-writer",
                 params={"model_path": model_path},
             ),
-            run_name="keypoints_001",
+            run_name="keypoint_shard_001",
+            output_parent="keypoint_shard_runs",
             pose_schema="traditional_v3",
             batch_size=8,
             imgsz=8,
             input_mode="numpy-list",
+            coordinate_contract_mode="legacy_noncanonical",
             keypoint_roi_shard_rows=8,
             keypoint_frame_shard_rows=8,
             registry=None,
         )
-    run = zarr.open_group(store=str(zarr_path), mode="r")["keypoints_runs"][run_name]
+    run = zarr.open_group(store=str(zarr_path), mode="r")["keypoint_shard_runs"][run_name]
     return {
         "n_rois": np.asarray(run["n_rois"][:]),
         "frame_counts": np.asarray(run["frame_counts"][:]),
     }
 
 
-def test_detect_keypoints_yolo_can_write_collection_shard_without_canonical_pointer(monkeypatch, tmp_path) -> None:
+def test_detect_keypoints_yolo_can_write_collection_shard_without_stage_selectors_or_canonical_pointer(
+    monkeypatch, tmp_path
+) -> None:
     zarr_path = _make_keypoint_count_fixture(tmp_path, "shard")
     model_path = tmp_path / "shard.pt"
     emit_calls: list[dict[str, object]] = []
@@ -345,6 +558,7 @@ def test_detect_keypoints_yolo_can_write_collection_shard_without_canonical_poin
             batch_size=8,
             imgsz=8,
             input_mode="numpy-list",
+            coordinate_contract_mode="legacy_noncanonical",
             keypoint_roi_shard_rows=8,
             keypoint_frame_shard_rows=8,
             registry=None,
@@ -357,8 +571,8 @@ def test_detect_keypoints_yolo_can_write_collection_shard_without_canonical_poin
     assert "keypoints_runs" not in root or "latest" not in root["keypoints_runs"].attrs
 
     shard_parent = root["keypoint_shard_runs"]
-    assert shard_parent.attrs["latest"] == "keypoint_shard_001"
-    assert shard_parent.attrs["latest_complete"] == "keypoint_shard_001"
+    assert "latest" not in shard_parent.attrs
+    assert "latest_complete" not in shard_parent.attrs
     run = shard_parent[run_name]
     assert run.attrs["output_parent"] == "keypoint_shard_runs"
     assert run.attrs["run_group_parent"] == "keypoint_shard_runs"
@@ -371,6 +585,143 @@ def test_detect_keypoints_yolo_can_write_collection_shard_without_canonical_poin
     assert run.attrs["keypoint_storage_policy"] == "default_indexed_sharding_v1"
     assert run.attrs["keypoint_shard_write"]["exact_match"] is True
     assert run.attrs["keypoint_shard_write"]["buffer_count"] == 2
+    assert run.attrs["coordinate_contract"] == "legacy_noncanonical_explicit_v1"
+
+
+def test_detect_keypoints_yolo_default_writer_publishes_only_freshly_validated_canonical_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    root, _prior_run = _real_canonical_archive(tmp_path)
+    parent = root["keypoints_runs"]
+    parent.attrs["latest"] = "k1"
+    parent.attrs["latest_complete"] = "k1"
+    root.attrs["current_keypoint_group_path"] = "keypoints_runs/k1"
+    model_path = tmp_path / "canonical.pt"
+    telemetry_attempts: list[str] = []
+
+    with monkeypatch.context() as patch:
+        _patch_canonical_writer_dependencies(
+            patch,
+            model_path,
+            model_class=_CanonicalFakeYOLO,
+        )
+        patch.setattr(
+            yolo_mod,
+            "_emit_keypoint_step_status",
+            lambda **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("synthetic post-commit registry failure")
+            ),
+        )
+
+        def _progress_telemetry(_path, event, **_kwargs):
+            telemetry_attempts.append(str(event))
+            if event == "complete":
+                raise OSError("synthetic post-commit progress failure")
+
+        patch.setattr(yolo_mod, "_write_keypoint_progress_jsonl", _progress_telemetry)
+        run_name = detect_keypoints_yolo(
+            tmp_path / "canonical.zarr",
+            model_path,
+            run_provenance=build_writer_run_provenance(
+                command="unit-canonical-keypoint-writer",
+                params={"model_path": model_path},
+            ),
+            run_name="canonical_writer",
+            crop_run="c1",
+            pose_schema="traditional_v3",
+            batch_size=2,
+            imgsz=40,
+            input_mode="numpy-list",
+            keypoint_roi_shard_rows=None,
+            registry=None,
+        )
+
+    reopened = zarr.open_group(
+        store=str(tmp_path / "canonical.zarr"),
+        mode="r",
+        use_consolidated=False,
+    )
+    run = reopened["keypoints_runs"][run_name]
+    assert run.attrs["palette_run_completion_status"] == "complete"
+    assert run.attrs["coordinate_contract"] == "canonical_v2"
+    assert run.attrs["stage_selector_eligible"] is True
+    assert telemetry_attempts[-1] == "complete"
+    assert reopened["keypoints_runs"].attrs["latest"] == run_name
+    assert reopened["keypoints_runs"].attrs["latest_complete"] == run_name
+    assert reopened.attrs["current_keypoint_group_path"] == (
+        f"keypoints_runs/{run_name}"
+    )
+    surfaces = load_persisted_keypoint_coordinate_surfaces(
+        reopened,
+        f"keypoints_runs/{run_name}",
+    )
+    assert surfaces.keypoints_img.descriptor.space_id == "source_camera_image_px"
+
+
+def test_detect_keypoints_yolo_failed_canonical_attempt_preserves_prior_selectors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    root, _prior_run = _real_canonical_archive(tmp_path)
+    parent = root["keypoints_runs"]
+    parent.attrs["latest"] = "k1"
+    parent.attrs["latest_complete"] = "k1"
+    parent.attrs["latest_pending"] = "prior_pending_attempt"
+    root.attrs["current_keypoint_group_path"] = "keypoints_runs/k1"
+    model_path = tmp_path / "wrong-shape.pt"
+    writers = []
+
+    with monkeypatch.context() as patch:
+        _patch_canonical_writer_dependencies(
+            patch,
+            model_path,
+            model_class=_SecondBatchWrongShapeCanonicalFakeYOLO,
+        )
+        writer_class = yolo_mod._AlignedKeypointShardWriter
+
+        class _CapturedShardWriter(writer_class):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                writers.append(self)
+
+        patch.setattr(yolo_mod, "_AlignedKeypointShardWriter", _CapturedShardWriter)
+        with pytest.raises(ValueError, match="orig_shape"):
+            detect_keypoints_yolo(
+                tmp_path / "canonical.zarr",
+                model_path,
+                run_provenance=build_writer_run_provenance(
+                    command="unit-failed-canonical-keypoint-writer",
+                    params={"model_path": model_path},
+                ),
+                run_name="failed_canonical_writer",
+                crop_run="c1",
+                pose_schema="traditional_v3",
+                batch_size=1,
+                imgsz=40,
+                input_mode="numpy-list",
+                keypoint_roi_shard_rows=1,
+                keypoint_frame_shard_rows=1,
+                registry=None,
+            )
+
+    assert len(writers) == 1
+    assert writers[0].is_quiescent
+    assert not writers[0]._worker.is_alive()
+    assert writers[0]._flush.unfinished_tasks == 0
+    reopened = zarr.open_group(
+        store=str(tmp_path / "canonical.zarr"),
+        mode="r",
+        use_consolidated=False,
+    )
+    parent = reopened["keypoints_runs"]
+    failed = parent["failed_canonical_writer"]
+    assert failed.attrs["palette_run_completion_status"] == "failed"
+    assert "coordinate_contract" not in failed.attrs
+    assert parent.attrs["latest"] == "k1"
+    assert parent.attrs["latest_complete"] == "k1"
+    assert parent.attrs["latest_pending"] == "prior_pending_attempt"
+    assert reopened.attrs["current_keypoint_group_path"] == "keypoints_runs/k1"
 
 
 def test_detect_keypoints_yolo_can_opt_out_to_regular_chunks(monkeypatch, tmp_path) -> None:
@@ -385,16 +736,18 @@ def test_detect_keypoints_yolo_can_opt_out_to_regular_chunks(monkeypatch, tmp_pa
                 command="unit-keypoint-regular-writer",
                 params={"model_path": model_path},
             ),
-            run_name="keypoints_regular",
+            run_name="keypoint_shard_regular",
+            output_parent="keypoint_shard_runs",
             pose_schema="traditional_v3",
             batch_size=8,
             imgsz=8,
             input_mode="numpy-list",
+            coordinate_contract_mode="legacy_noncanonical",
             keypoint_roi_shard_rows=None,
             registry=None,
         )
 
-    run = zarr.open_group(store=str(zarr_path), mode="r")["keypoints_runs"][run_name]
+    run = zarr.open_group(store=str(zarr_path), mode="r")["keypoint_shard_runs"][run_name]
     assert run["keypoints_roi"].shards is None
     assert run.attrs["keypoint_storage_layout"] == "regular_chunks_v1"
     assert run.attrs["keypoint_storage_policy"] == "explicit_regular_chunks_override"
@@ -417,23 +770,27 @@ def test_detect_keypoints_yolo_fails_closed_without_instance_key(monkeypatch, tm
                     command="unit-keypoint-keyless",
                     params={"model_path": model_path},
                 ),
-                run_name="keypoints_keyless",
+                run_name="keypoint_shard_keyless",
+                output_parent="keypoint_shard_runs",
                 pose_schema="traditional_v3",
                 batch_size=8,
                 imgsz=8,
                 input_mode="numpy-list",
+                coordinate_contract_mode="legacy_noncanonical",
                 keypoint_roi_shard_rows=8,
                 keypoint_frame_shard_rows=8,
                 registry=None,
             )
 
     root = zarr.open_group(store=str(zarr_path), mode="r", use_consolidated=False)
-    parent = root["keypoints_runs"]
-    failed = parent["keypoints_keyless"]
+    parent = root["keypoint_shard_runs"]
+    failed = parent["keypoint_shard_keyless"]
     assert failed.attrs["palette_run_completion_status"] == "failed"
     assert failed.attrs[IMMUTABLE_YOLO_STORAGE_ATTR]["status"] == "error"
-    assert parent.attrs.get("latest_complete") != "keypoints_keyless"
-    assert parent.attrs.get("latest") != "keypoints_keyless"
+    assert parent.attrs.get("latest_pending") != "keypoint_shard_keyless"
+    assert parent.attrs.get("latest_complete") != "keypoint_shard_keyless"
+    assert parent.attrs.get("latest") != "keypoint_shard_keyless"
+    assert "current_keypoint_group_path" not in root.attrs
 
 
 def test_detect_keypoints_yolo_frame_count_writer_matches_legacy_arrays(monkeypatch, tmp_path) -> None:
@@ -470,7 +827,7 @@ def test_extract_pose_bbox_xyxy_roi_clips_to_roi_bounds() -> None:
 
     actual = _extract_pose_bbox_xyxy_roi(boxes, 0, roi_height=6, roi_width=8)
 
-    np.testing.assert_allclose(actual, np.array([0.0, 1.5, 7.0, 5.0], dtype=np.float32))
+    np.testing.assert_allclose(actual, np.array([0.0, 1.5, 8.0, 6.0], dtype=np.float32))
 
 
 def test_extract_pose_bbox_xyxy_roi_returns_nan_when_missing() -> None:
@@ -529,3 +886,57 @@ def test_prepare_model_inputs_auto_uses_tensor_for_padded_model_input() -> None:
     assert mode == "tensor"
     assert isinstance(actual, torch.Tensor)
     assert actual.shape == (2, 3, 64, 64)
+
+
+def test_prepared_model_input_contract_rejects_dtype_channels_and_range() -> None:
+    transform = resolve_model_input_transform((8, 8), model_hw=(8, 8))
+    with pytest.raises(ValueError, match="uint8 submitted extent"):
+        _require_prepared_model_input_contract(
+            [np.zeros((8, 8, 3), dtype=np.float32)],
+            effective_mode="numpy-list",
+            expected_mode="numpy-list",
+            batch_count=1,
+            model_input_transform=transform,
+        )
+
+    unequal_channels = np.zeros((8, 8, 3), dtype=np.uint8)
+    unequal_channels[..., 1] = 1
+    with pytest.raises(ValueError, match="channel semantics"):
+        _require_prepared_model_input_contract(
+            [unequal_channels],
+            effective_mode="numpy-list",
+            expected_mode="numpy-list",
+            batch_count=1,
+            model_input_transform=transform,
+        )
+
+    with pytest.raises(ValueError, match=r"closed \[0,1\] range"):
+        _require_prepared_model_input_contract(
+            torch.full((1, 3, 8, 8), 2.0, dtype=torch.float32),
+            effective_mode="tensor",
+            expected_mode="tensor",
+            batch_count=1,
+            model_input_transform=transform,
+        )
+
+
+def test_model_result_coordinate_contract_requires_exact_count_and_orig_shape() -> None:
+    transform = resolve_model_input_transform((8, 8), model_hw=(8, 8))
+    valid = SimpleNamespace(orig_shape=(8, 8))
+    _require_model_result_coordinate_contract(
+        (valid,),
+        batch_count=1,
+        model_input_transform=transform,
+    )
+    with pytest.raises(ValueError, match="result cardinality"):
+        _require_model_result_coordinate_contract(
+            (),
+            batch_count=1,
+            model_input_transform=transform,
+        )
+    with pytest.raises(ValueError, match="orig_shape"):
+        _require_model_result_coordinate_contract(
+            (SimpleNamespace(orig_shape=(7, 8)),),
+            batch_count=1,
+            model_input_transform=transform,
+        )
