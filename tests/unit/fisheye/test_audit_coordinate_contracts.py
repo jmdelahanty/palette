@@ -1977,6 +1977,7 @@ def test_surface_families_and_fail_closed_classifications(tmp_path: Path) -> Non
         },
     )
     _write_array(zarr_path, f"{online_run}/tracks/id_0/frame_indices", shape=[2])
+    _write_array(zarr_path, f"{online_run}/tracks/id_0/speed_raw_mm", shape=[2])
 
     registry = _make_registry(
         tmp_path / "registry.sqlite",
@@ -2019,6 +2020,45 @@ def test_surface_families_and_fail_closed_classifications(tmp_path: Path) -> Non
     assert online_mm["status"] == "ambiguous_fail_closed"
     assert "ONLINE_MM_CONVERSION_RECOMPUTATION_REQUIRED" in online_mm["issue_codes"]
     assert "LEGACY_SPACE_CONTEXT_INVALID" in online_mm["issue_codes"]
+    online_manifest = coordinate_audit.build_migration_manifest(
+        audit_registry(registry)
+    )
+    online_migration = next(
+        row
+        for row in online_manifest
+        if row["target_kind"] == "coordinate_surface"
+        and row["surface_path"] == online_mm["surface_path"]
+    )
+    assert online_migration["migration_class"] == "ambiguous_fail_closed"
+    assert online_migration["requires_recomputation"] is True
+    assert online_migration["requires_numerical_validation"] is False
+    online_run_target = next(
+        row
+        for row in online_manifest
+        if row["target_kind"] == "run"
+        and row["run_context"]["run_path"] == online_run
+    )
+    assert online_run_target["requires_recomputation"] is True
+    online_derived_targets = [
+        row
+        for row in online_manifest
+        if row["target_kind"] == "derived_surface"
+        and row["surface_path"].startswith(f"{online_run}/")
+    ]
+    assert online_derived_targets
+    assert all(row["requires_recomputation"] for row in online_derived_targets)
+
+    invalid_online_manifest = coordinate_audit.build_migration_manifest(
+        audit_registry(registry),
+        registry_snapshot={"registry_changed_after_scan": True},
+    )
+    invalid_online_targets = [
+        row
+        for row in invalid_online_manifest
+        if row.get("requires_recomputation")
+    ]
+    assert invalid_online_targets
+    assert all(row["migration_class"] == "ambiguous_fail_closed" for row in invalid_online_targets)
 
     assert not any(
         record["surface_path"].endswith("foo_bbox_vertices") for record in surfaces
@@ -2102,6 +2142,23 @@ def test_offline_crop_camera_reconstruction_requires_numerical_validation(tmp_pa
     )
     assert "UPSTREAM_POSITION_RISK_PROPAGATED" in positions_mm["issue_codes"]
     migration = coordinate_audit.build_migration_manifest(audit_registry(registry))
+    position_target = next(
+        row
+        for row in migration
+        if row["target_kind"] == "coordinate_surface"
+        and row["surface_path"] == surface["surface_path"]
+    )
+    assert position_target["migration_class"] == "ambiguous_fail_closed"
+    assert position_target["requires_numerical_validation"] is True
+    assert position_target["requires_recomputation"] is False
+    run_target = next(
+        row
+        for row in migration
+        if row["target_kind"] == "run"
+        and row["run_context"]["run_path"] == run
+    )
+    assert run_target["requires_numerical_validation"] is True
+    assert run_target["requires_recomputation"] is False
     derived = {
         row["surface_path"]: row
         for row in migration
@@ -2110,7 +2167,30 @@ def test_offline_crop_camera_reconstruction_requires_numerical_validation(tmp_pa
     assert derived[f"{run}/tracks/id_0/speed_raw_px"]["migration_class"] == (
         "ambiguous_fail_closed"
     )
+    assert (
+        derived[f"{run}/tracks/id_0/speed_raw_px"][
+            "requires_numerical_validation"
+        ]
+        is True
+    )
     assert derived[f"{run}/tracks/id_0/speed_raw_mm"]["must_fail_closed"] is True
+
+    invalid_migration = coordinate_audit.build_migration_manifest(
+        audit_registry(registry),
+        registry_snapshot={"registry_changed_after_scan": True},
+    )
+    invalid_required = [
+        row
+        for row in invalid_migration
+        if row.get("requires_numerical_validation")
+    ]
+    assert invalid_required
+    assert {row["target_kind"] for row in invalid_required} >= {
+        "coordinate_surface",
+        "derived_surface",
+        "run",
+    }
+    assert all(row["migration_class"] == "ambiguous_fail_closed" for row in invalid_required)
 
 
 def test_historical_value_risks_require_exact_producer_signatures(

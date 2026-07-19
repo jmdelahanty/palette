@@ -14975,6 +14975,29 @@ _MIGRATION_CLASS_BY_STATUS = {
     "not_applicable_unscanned": "not_applicable_unscanned",
 }
 
+_NUMERICAL_VALIDATION_MIGRATION_ISSUES = {
+    "OFFLINE_CROP_SOURCE_RECONSTRUCTION_NUMERICAL_VALIDATION_REQUIRED",
+}
+_RECOMPUTATION_MIGRATION_ISSUES = {
+    "ONLINE_MM_CONVERSION_RECOMPUTATION_REQUIRED",
+}
+
+
+def _migration_requirement_flags(
+    *,
+    migration_class: str,
+    issue_codes: Sequence[Any],
+) -> tuple[bool, bool]:
+    """Preserve value-risk requirements even under a stricter fail-closed class."""
+
+    codes = {str(code) for code in issue_codes}
+    return (
+        migration_class == "numerical_validation_required"
+        or bool(codes & _NUMERICAL_VALIDATION_MIGRATION_ISSUES),
+        migration_class == "recomputation_required"
+        or bool(codes & _RECOMPUTATION_MIGRATION_ISSUES),
+    )
+
 
 def _migration_class(record: Mapping[str, Any]) -> str:
     status = str(record.get("status"))
@@ -15131,6 +15154,13 @@ def _hierarchy_migration_target(
     run_context: Mapping[str, Any] | None = None,
     metadata_inventory_fingerprint: Any = None,
 ) -> dict[str, Any]:
+    normalized_issue_codes = sorted({str(code) for code in issue_codes})
+    requires_numerical_validation, requires_recomputation = (
+        _migration_requirement_flags(
+            migration_class=migration_class,
+            issue_codes=normalized_issue_codes,
+        )
+    )
     previous_state = {
         "scan_status": scan_status,
         "target_identity": _json_safe(identity),
@@ -15158,12 +15188,12 @@ def _hierarchy_migration_target(
         "scan_status": scan_status,
         "migration_class": migration_class,
         "safe_metadata_only_backfill": False,
-        "requires_numerical_validation": False,
-        "requires_recomputation": False,
+        "requires_numerical_validation": requires_numerical_validation,
+        "requires_recomputation": requires_recomputation,
         "must_fail_closed": migration_class
         in {"ambiguous_fail_closed", "missing_or_unreadable_fail_closed"},
         "automatic_apply_allowed": False,
-        "issue_codes": sorted({str(code) for code in issue_codes}),
+        "issue_codes": normalized_issue_codes,
         "descriptor_source": None,
         "metadata_inventory_fingerprint": metadata_inventory_fingerprint,
         "dependent_surface_paths": [],
@@ -15313,6 +15343,21 @@ def build_migration_manifest(
                 "surface_path": record.get("surface_path"),
                 "surface_type": record.get("surface_type"),
             }
+            target_issue_codes = sorted(
+                {
+                    *(str(code) for code in (record.get("issue_codes") or [])),
+                    *(
+                        str(code)
+                        for code in (record.get("archive_issue_codes") or [])
+                    ),
+                }
+            )
+            requires_numerical_validation, requires_recomputation = (
+                _migration_requirement_flags(
+                    migration_class=migration_class,
+                    issue_codes=target_issue_codes,
+                )
+            )
             manifest.append(
                 {
                     "schema_id": "palette.coordinate_contract_audit.migration_target",
@@ -15330,9 +15375,8 @@ def build_migration_manifest(
                     "migration_class": migration_class,
                     "safe_metadata_only_backfill": migration_class
                     == "safe_metadata_only_backfill",
-                    "requires_numerical_validation": migration_class
-                    == "numerical_validation_required",
-                    "requires_recomputation": migration_class == "recomputation_required",
+                    "requires_numerical_validation": requires_numerical_validation,
+                    "requires_recomputation": requires_recomputation,
                     "must_fail_closed": migration_class
                     in {
                         "ambiguous_fail_closed",
@@ -15340,15 +15384,7 @@ def build_migration_manifest(
                     },
                     # This module deliberately has no mutation/apply path.
                     "automatic_apply_allowed": False,
-                    "issue_codes": sorted(
-                        {
-                            *(str(code) for code in (record.get("issue_codes") or [])),
-                            *(
-                                str(code)
-                                for code in (record.get("archive_issue_codes") or [])
-                            ),
-                        }
-                    ),
+                    "issue_codes": target_issue_codes,
                     "archive_issue_codes": sorted(
                         str(code)
                         for code in (record.get("archive_issue_codes") or [])
@@ -15469,6 +15505,28 @@ def build_migration_manifest(
                 "surface_path": path,
                 "surface_type": "track_kinematics_derived",
             }
+            source_requirement_codes = sorted(
+                {
+                    str(code)
+                    for item in sources
+                    for code in (item.get("issue_codes") or [])
+                    if str(code)
+                    in (
+                        _NUMERICAL_VALIDATION_MIGRATION_ISSUES
+                        | _RECOMPUTATION_MIGRATION_ISSUES
+                    )
+                }
+            )
+            derived_issue_codes = [
+                "UPSTREAM_POSITION_RISK_PROPAGATED",
+                *source_requirement_codes,
+            ]
+            requires_numerical_validation, requires_recomputation = (
+                _migration_requirement_flags(
+                    migration_class=migration_class,
+                    issue_codes=derived_issue_codes,
+                )
+            )
             manifest.append(
                 {
                     "schema_id": "palette.coordinate_contract_audit.migration_target",
@@ -15484,14 +15542,12 @@ def build_migration_manifest(
                     "scan_status": status,
                     "migration_class": migration_class,
                     "safe_metadata_only_backfill": False,
-                    "requires_numerical_validation": migration_class
-                    == "numerical_validation_required",
-                    "requires_recomputation": migration_class
-                    == "recomputation_required",
+                    "requires_numerical_validation": requires_numerical_validation,
+                    "requires_recomputation": requires_recomputation,
                     "must_fail_closed": migration_class
                     in {"ambiguous_fail_closed", "missing_or_unreadable_fail_closed"},
                     "automatic_apply_allowed": False,
-                    "issue_codes": ["UPSTREAM_POSITION_RISK_PROPAGATED"],
+                    "issue_codes": derived_issue_codes,
                     "dependency_source_paths": source_paths,
                     "descriptor_source": None,
                     "metadata_inventory_fingerprint": dataset_record.get(
@@ -15520,8 +15576,6 @@ def build_migration_manifest(
             target["scan_status"] = "ambiguous_fail_closed"
             target["migration_class"] = "ambiguous_fail_closed"
             target["safe_metadata_only_backfill"] = False
-            target["requires_numerical_validation"] = False
-            target["requires_recomputation"] = False
             target["must_fail_closed"] = True
             target["validation_result"] = "registry_snapshot_invalid"
             target["values_changed"] = None
@@ -15536,6 +15590,13 @@ def build_migration_manifest(
                     *(str(code) for code in (target.get("issue_codes") or [])),
                     "REGISTRY_SNAPSHOT_INVALIDATES_MIGRATION",
                 }
+            )
+            (
+                target["requires_numerical_validation"],
+                target["requires_recomputation"],
+            ) = _migration_requirement_flags(
+                migration_class="ambiguous_fail_closed",
+                issue_codes=target["issue_codes"],
             )
     return manifest
 
