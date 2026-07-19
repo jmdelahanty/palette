@@ -12,6 +12,9 @@ source runs so downstream tooling can trace inputs.
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
+import json
 import math
 import sys
 from dataclasses import dataclass
@@ -34,12 +37,49 @@ from .compute_speed import (  # re-exported for compatibility
     load_arena_ids,
     resolve_dimensions,
 )
-from .chaser_metrics_loader import load_chaser_metrics
-from fisheye.shared.coordinate_descriptor import (
-    CoordinateDescriptor,
-    load_coordinate_descriptor_attrs,
-    parse_coordinate_descriptor,
-    stamp_coordinate_descriptor,
+from .chaser_metrics_loader import (
+    CanonicalOnlineCoordinateHandoff,
+    ChaserMetricsBundle,
+    load_canonical_online_coordinate_surface,
+    load_chaser_metrics,
+)
+from fisheye.shared.archive_identity import archive_identity
+from fisheye.shared.canonical_coordinate_publication import (
+    BoundCanonicalCoordinateDescriptor,
+    require_bound_canonical_coordinate_descriptor,
+)
+from fisheye.shared.coordinate_frame_record import (
+    PHYSICAL_FRAME_CALIBRATION_KIND,
+    BoundPhysicalFrameCalibration,
+    array_payload_sha256,
+    verify_bound_coordinate_frame,
+)
+from fisheye.shared.coordinate_identity import (
+    TRACK_SAMPLE_INTERPOLATION_DTYPE,
+    TRACK_SAMPLE_SOURCE_INSTANCE_KEY_DTYPE,
+    TRACK_SAMPLE_DOMAIN,
+    build_row_identity_contract,
+    build_track_sample_key,
+    derive_track_source_instance_values,
+    identity_array_content_sha256,
+    load_bound_row_identity_contract,
+    load_bound_source_row_temporal_authority,
+    load_bound_track_sample_time_lineage,
+    load_row_identity_contract_attrs,
+    require_bound_source_row_temporal_authority,
+    resolve_source_acquisition_frame_indices,
+    stamp_and_bind_row_identity_contract,
+    stamp_track_sample_time_lineage,
+)
+from fisheye.shared.pixel_frame_authority import (
+    PixelFrameAuthorityError,
+    load_persisted_acquisition_camera_authority,
+)
+from fisheye.shared.json_safety import json_attr_safe
+from fisheye.shared.observation_coordinate_publication import (
+    BoundSourceCameraPositionSurface,
+    load_persisted_source_camera_position_surface,
+    require_bound_source_camera_position_surface,
 )
 from fisheye.shared.stage_provenance import (
     build_stage_provenance,
@@ -49,6 +89,7 @@ from fisheye.shared.run_provenance import build_run_provenance_from_stage_record
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.shared.rowset_fingerprint import (
     RowsetFingerprint,
+    build_rowset_fingerprint,
     build_group_rowset_fingerprint,
     resolve_rowset_edit_revision,
 )
@@ -59,6 +100,10 @@ from fisheye.shared.zarr.chunk_profiles import (
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from fisheye.tracking.single_subject_per_arena import load_tracking_ids
 from fisheye.shared.system_metadata import get_git_info, get_environment_info
+from fisheye.shared.track_coordinate_publication import (
+    load_track_position_coordinates,
+    publish_track_position_coordinates,
+)
 from fisheye.shared.zarr_io import open_zarr_root
 from fisheye.shared.zarr.columnar import load_structured_dataset
 from .swim_bout_io import SwimBoutIOError, load_default_swim_bout_tables, load_swim_bout_tables
@@ -134,6 +179,19 @@ POSITIONS_MM_COORDINATE_DESCRIPTOR_GAP = (
     "not_persisted_missing_exact_physical_calibration_lineage_and_frame"
 )
 
+TRACK_KINEMATICS_STAGING_MANIFEST_ATTR = "track_kinematics_staging_manifest"
+TRACK_KINEMATICS_STAGING_MANIFEST_DIGEST_ATTR = (
+    "track_kinematics_staging_manifest_sha256"
+)
+TRACK_KINEMATICS_STAGING_MANIFEST_SCHEMA_ID = (
+    "palette.track_kinematics_staging_manifest.v1"
+)
+TRACK_KINEMATICS_STAGING_MANIFEST_SCHEMA_VERSION = 1
+TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR = "coordinate_binding_status"
+TRACK_KINEMATICS_UNBOUND_STAGE_STATUS = "unbound_numeric_stage_complete_v1"
+TRACK_KINEMATICS_PUBLISHING_BINDING_STATUS = "publishing_canonical_binding_v1"
+TRACK_KINEMATICS_BOUND_CANONICAL_STATUS = "bound_canonical_v2"
+
 
 def resolve_mm_per_pixel_for_coordinate_space(
     coordinate_space: object,
@@ -169,35 +227,6 @@ def resolve_mm_per_pixel_for_coordinate_space(
             f"coordinate_space {space!r} requires a positive finite {scale_name}."
         )
     return 1.0 / scale if invert else scale
-
-
-def load_positions_px_coordinate_descriptor(array: Any) -> CoordinateDescriptor:
-    """Load the descriptor owned by one ``positions_px`` array.
-
-    This intentionally accepts only the selected array, rather than a parent
-    group, so a compatibility ``coordinate_space`` group attr cannot override
-    array-specific coordinate authority.
-    """
-
-    attrs = getattr(array, "attrs", None)
-    if attrs is None:
-        raise TypeError("positions_px array must expose an attrs mapping.")
-    return load_coordinate_descriptor_attrs(attrs)
-
-
-def _bind_track_positions_px_descriptor(
-    value: Any,
-    *,
-    has_instance_key: bool,
-) -> CoordinateDescriptor:
-    """Bind inherited position semantics to one track's row identity array."""
-
-    payload = parse_coordinate_descriptor(value).to_dict()
-    payload["row_identity"] = {
-        "mode": "instance_key" if has_instance_key else "track_frame_indices",
-        "array_ref": "instance_key" if has_instance_key else "frame_indices",
-    }
-    return parse_coordinate_descriptor(payload)
 
 
 def _track_preload_chunks(shape: Tuple[int, ...] | Iterable[int]) -> Tuple[int, ...] | None:
@@ -348,13 +377,16 @@ class DetectionResolution:
 class OfflinePositionSource:
     """Row-aligned position arrays for offline track kinematics."""
 
-    bbox_norm_coords: np.ndarray
+    positions_px: np.ndarray
     frame_indices: np.ndarray
     detection_source: Optional[np.ndarray]
     path: str
     kind: str
+    geometry_path: str
     instance_key: Optional[np.ndarray]
     rowset_fingerprint: RowsetFingerprint
+    rowset_group: Any
+    position_surface: BoundSourceCameraPositionSurface | None = None
 
 
 def resolve_keypoint_group(
@@ -610,28 +642,104 @@ def load_offline_position_source(
     detection: Optional[DetectionResolution],
     root: Optional[zarr.Group] = None,
 ) -> OfflinePositionSource:
-    """Load the row-aligned bbox/frame source for offline keypoint motion.
+    """Load exact source-image centres for the selected offline rowset.
 
-    Refined keypoint runs are produced from crop rows, so their headings align
-    to ``crop_runs/<run>/bbox_norm_coords`` rather than necessarily aligning to
-    the sparse refined-detection variant referenced by the crop lineage.
+    Normalized boxes plus a root-level width/height are not an authority.  A
+    canonical track writer accepts only source-image ``bbox_img_xyxy`` values
+    already aligned to the crop rows, or an exact ``instance_key`` join to the
+    selected detection rowset that owns those boxes.  Historical normalized-
+    only archives must be handled by explicit audit/migration tooling.
     """
 
-    if "bbox_norm_coords" in crop_group and "frame_indices" in crop_group:
-        bbox_norm_coords = np.asarray(crop_group["bbox_norm_coords"][:])
-        frame_indices = np.asarray(crop_group["frame_indices"][:], dtype=np.int64)
-        if bbox_norm_coords.ndim != 2 or int(bbox_norm_coords.shape[1]) != 4:
+    def _bbox_centres(
+        group: zarr.Group,
+        *,
+        group_path: str,
+    ) -> tuple[np.ndarray, str]:
+        node = group.get("bbox_img_xyxy")
+        if node is None:
             raise ValueError(
-                f"crop_runs/{crop_run_name}/bbox_norm_coords must have shape (N, 4); "
-                f"got {tuple(int(v) for v in bbox_norm_coords.shape)}."
+                f"{group_path} lacks authoritative bbox_img_xyxy; refusing to "
+                "reconstruct camera coordinates from normalized values or root "
+                "dimensions. Run the coordinate audit/migration workflow."
             )
-        if int(frame_indices.shape[0]) != int(bbox_norm_coords.shape[0]):
+        boxes = np.asarray(node[:], dtype=np.float64)
+        if boxes.ndim != 2 or boxes.shape[1] != 4:
+            raise ValueError(
+                f"{group_path}/bbox_img_xyxy must have shape (N, 4); got "
+                f"{tuple(int(value) for value in boxes.shape)}."
+            )
+        centres = np.column_stack(
+            ((boxes[:, 0] + boxes[:, 2]) * 0.5, (boxes[:, 1] + boxes[:, 3]) * 0.5)
+        )
+        return centres, f"{group_path}/bbox_img_xyxy"
+
+    if "frame_indices" in crop_group and (
+        "bbox_img_xyxy" in crop_group or "bbox_norm_coords" in crop_group
+    ):
+        frame_indices = np.asarray(crop_group["frame_indices"][:], dtype=np.int64)
+        path = f"crop_runs/{crop_run_name}"
+        crop_instance_key = (
+            np.asarray(crop_group["instance_key"][:], dtype=np.uint64).reshape(-1)
+            if "instance_key" in crop_group
+            else None
+        )
+
+        if "bbox_img_xyxy" in crop_group:
+            positions_px, geometry_path = _bbox_centres(
+                crop_group,
+                group_path=path,
+            )
+        else:
+            if detection is None or crop_instance_key is None:
+                raise ValueError(
+                    f"{path} is normalized-only and lacks the exact detection "
+                    "instance-key join needed to resolve bbox_img_xyxy; refusing "
+                    "root-dimension reconstruction."
+                )
+            detection_group = detection.group
+            if "instance_key" not in detection_group:
+                raise ValueError(
+                    f"{detection.path} lacks instance_key required to align its "
+                    f"bbox_img_xyxy to {path}."
+                )
+            detection_centres, geometry_path = _bbox_centres(
+                detection_group,
+                group_path=detection.path,
+            )
+            detection_keys = np.asarray(
+                detection_group["instance_key"][:],
+                dtype=np.uint64,
+            ).reshape(-1)
+            if detection_keys.shape[0] != detection_centres.shape[0]:
+                raise ValueError(
+                    f"{detection.path} instance_key/bbox_img_xyxy row count mismatch."
+                )
+            if np.unique(detection_keys).shape[0] != detection_keys.shape[0]:
+                raise ValueError(f"{detection.path} contains duplicate instance_key values.")
+            row_by_key = {int(key): index for index, key in enumerate(detection_keys)}
+            missing = sorted(
+                int(key) for key in crop_instance_key if int(key) not in row_by_key
+            )
+            if missing:
+                raise ValueError(
+                    f"{path} instance_key values are absent from {detection.path}: "
+                    f"{missing!r}."
+                )
+            positions_px = detection_centres[
+                np.asarray([row_by_key[int(key)] for key in crop_instance_key])
+            ]
+
+        if int(frame_indices.shape[0]) != int(positions_px.shape[0]):
             raise ValueError(
                 f"crop_runs/{crop_run_name} row count mismatch: frame_indices has "
-                f"{int(frame_indices.shape[0])} rows but bbox_norm_coords has "
-                f"{int(bbox_norm_coords.shape[0])} rows."
+                f"{int(frame_indices.shape[0])} rows but authoritative source-image "
+                f"positions have {int(positions_px.shape[0])} rows."
             )
-        path = f"crop_runs/{crop_run_name}"
+        if crop_instance_key is not None and crop_instance_key.shape[0] != frame_indices.shape[0]:
+            raise ValueError(
+                f"{path} instance_key length does not match frame_indices."
+            )
         revision = resolve_rowset_edit_revision(crop_group.attrs)
         fingerprint = build_group_rowset_fingerprint(
             crop_group,
@@ -639,7 +747,7 @@ def load_offline_position_source(
             source_edit_revision=revision,
         )
         return OfflinePositionSource(
-            bbox_norm_coords=bbox_norm_coords,
+            positions_px=positions_px,
             frame_indices=frame_indices,
             detection_source=(
                 crop_group["detection_source"][:]
@@ -647,18 +755,16 @@ def load_offline_position_source(
                 else None
             ),
             path=path,
-            kind="crop_rows",
-            instance_key=(
-                np.asarray(crop_group["instance_key"][:], dtype=np.uint64).reshape(-1)
-                if "instance_key" in crop_group
-                else None
-            ),
+            kind="crop_rows_source_image_bbox",
+            geometry_path=geometry_path,
+            instance_key=crop_instance_key,
             rowset_fingerprint=fingerprint,
+            rowset_group=crop_group,
         )
 
     if detection is None:
         raise ValueError(
-            f"Crop run '{crop_run_name}' missing row-aligned bbox_norm_coords/frame_indices "
+            f"Crop run '{crop_run_name}' missing row-aligned geometry/frame_indices "
             "and no source_coords_path was available."
         )
 
@@ -672,23 +778,257 @@ def load_offline_position_source(
         source_rowset_path=detection.path,
         source_edit_revision=revision,
     )
+    positions_px, geometry_path = _bbox_centres(
+        detection_group,
+        group_path=detection.path,
+    )
+    frame_indices = np.asarray(
+        detection_group["frame_indices"][:],
+        dtype=np.int64,
+    )
+    if frame_indices.shape[0] != positions_px.shape[0]:
+        raise ValueError(
+            f"{detection.path} frame_indices/bbox_img_xyxy row count mismatch."
+        )
     return OfflinePositionSource(
-        bbox_norm_coords=detection_group["bbox_norm_coords"][:],
-        frame_indices=detection_group["frame_indices"][:].astype(np.int64, copy=False),
+        positions_px=positions_px,
+        frame_indices=frame_indices,
         detection_source=(
             detection_group["detection_source"][:]
             if "detection_source" in detection_group
             else None
         ),
         path=detection.path,
-        kind="detection_rows",
+        kind="detection_rows_source_image_bbox",
+        geometry_path=geometry_path,
         instance_key=(
             np.asarray(detection_group["instance_key"][:], dtype=np.uint64).reshape(-1)
             if "instance_key" in detection_group
             else None
         ),
         rowset_fingerprint=fingerprint,
+        rowset_group=detection_group,
     )
+
+
+def load_canonical_offline_position_source(
+    root: zarr.Group,
+    crop_group: zarr.Group,
+    *,
+    crop_run_name: str,
+) -> OfflinePositionSource:
+    """Load the exact persisted crop-center surface used by future track writers.
+
+    This path has no legacy inference branch.  The crop producer must already
+    have published canonical source-camera centers, observation identity,
+    acquisition-frame mapping, and exact detection/crop lineage.  Historical
+    bbox-only or normalized-only rows remain audit/migration inputs and cannot
+    enter normal track publication.
+    """
+
+    path = f"crop_runs/{crop_run_name}"
+    surface = require_bound_source_camera_position_surface(
+        load_persisted_source_camera_position_surface(root, path)
+    )
+    coordinate_node = surface.coordinates.coordinate_node
+    if (
+        archive_identity(root) != archive_identity(coordinate_node)
+        or archive_identity(crop_group) != archive_identity(coordinate_node)
+        or getattr(crop_group, "path", None) != path
+        or getattr(coordinate_node, "path", None) != f"{path}/centers_img_xy"
+        or surface.coordinates.row_identity.rowset_path != path
+        or surface.temporal_authority.record.source_rowset_ref != f"/{path}"
+    ):
+        raise ValueError(
+            "Canonical offline position evidence does not bind the exact selected "
+            f"crop rowset /{path}."
+        )
+    positions_px = np.array(coordinate_node[:], copy=True, order="C")
+    if (
+        positions_px.shape != coordinate_node.shape
+        or positions_px.dtype != np.dtype(coordinate_node.dtype)
+        or positions_px.ndim != 2
+        or positions_px.shape[1] != 2
+        or not np.issubdtype(positions_px.dtype, np.number)
+    ):
+        raise ValueError(
+            f"/{coordinate_node.path} must be one exact numeric (N, 2) canonical "
+            "source-camera center payload."
+        )
+    frame_node = crop_group["source_acquisition_frame_index"]
+    frame_indices = np.array(frame_node[:], copy=True, order="C")
+    instance_node = crop_group["instance_key"]
+    instance_key = np.array(instance_node[:], copy=True, order="C")
+    row_count = int(positions_px.shape[0])
+    if (
+        archive_identity(frame_node) != archive_identity(coordinate_node)
+        or archive_identity(instance_node) != archive_identity(coordinate_node)
+        or getattr(frame_node, "path", None)
+        != f"{path}/source_acquisition_frame_index"
+        or getattr(instance_node, "path", None) != f"{path}/instance_key"
+        or identity_array_content_sha256(frame_indices)
+        != surface.temporal_authority.record.source_acquisition_frame_index.content_sha256
+        or identity_array_content_sha256(instance_key)
+        != surface.coordinates.row_identity.contract.key_array.content_sha256
+        or frame_indices.dtype != np.dtype("<i8")
+        or frame_indices.shape != (row_count,)
+        or instance_key.dtype != np.dtype("<u8")
+        or instance_key.shape != (row_count,)
+    ):
+        raise ValueError(
+            f"/{path} canonical position, acquisition-frame, and instance-key "
+            "surfaces are not exactly row aligned."
+        )
+    revision = resolve_rowset_edit_revision(crop_group.attrs)
+    fingerprint = build_rowset_fingerprint(
+        source_rowset_path=path,
+        row_count=row_count,
+        instance_keys=instance_key,
+        source_edit_revision=revision,
+    )
+    get_child = getattr(crop_group, "get", None)
+    detection_source_node = (
+        get_child("detection_source") if callable(get_child) else None
+    )
+    return OfflinePositionSource(
+        positions_px=positions_px,
+        frame_indices=frame_indices,
+        detection_source=(
+            np.array(detection_source_node[:], copy=True, order="C")
+            if detection_source_node is not None
+            else None
+        ),
+        path=path,
+        kind="canonical_crop_rows_source_camera_centers",
+        geometry_path=coordinate_node.path,
+        instance_key=instance_key,
+        rowset_fingerprint=fingerprint,
+        rowset_group=crop_group,
+        position_surface=surface,
+    )
+
+
+def load_track_source_temporal_authority(
+    source_rowset: Any,
+    *,
+    acquisition_frame: Any,
+) -> Any:
+    """Load exact immediate-source identity/time authority for track input.
+
+    Normal track writing never upgrades historical ``frame_indices`` or
+    positional rows.  The selected source producer must already have
+    published its canonical row identity and ``source_acquisition_frame_index``
+    authority; audit/migration tooling handles older archives.
+    """
+
+    attrs = getattr(source_rowset, "attrs", None)
+    if attrs is None:
+        raise ValueError("Selected track source rowset has no persisted attrs.")
+    try:
+        contract = load_row_identity_contract_attrs(attrs)
+        key_node = source_rowset[contract.key_array.ref]
+        source_identity = load_bound_row_identity_contract(
+            source_rowset,
+            key_node,
+        )
+        source_frame_node = source_rowset["source_acquisition_frame_index"]
+        return load_bound_source_row_temporal_authority(
+            source_rowset,
+            source_frame_node,
+            source_row_identity=source_identity,
+            acquisition_frame=acquisition_frame,
+        )
+    except Exception as exc:
+        source_path = getattr(source_rowset, "path", "<unknown>")
+        raise ValueError(
+            f"Selected track source /{source_path} lacks an exact canonical "
+            "row/time authority. Historical frame_indices, equal row counts, "
+            "and nested provenance are not sufficient for future publication."
+        ) from exc
+
+
+def select_canonical_online_track_rows(
+    handoff: CanonicalOnlineCoordinateHandoff,
+    *,
+    chaser_index: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Select one chaser as an exact source-row subset for track publication.
+
+    The bundle-level camera arrays are presentation conveniences and may contain
+    rows without a stimulus state.  Track coordinates instead select directly
+    from the descriptor-owning point surface and carry those exact source row
+    indices into the track derivation record.
+    """
+
+    if isinstance(chaser_index, bool) or not isinstance(chaser_index, int):
+        raise ValueError("chaser_index must be a nonnegative integer.")
+    if chaser_index < 0:
+        raise ValueError("chaser_index must be a nonnegative integer.")
+    handoff.assert_verified()
+    source = require_bound_canonical_coordinate_descriptor(
+        handoff.coordinate_descriptor
+    )
+    keys = np.asarray(handoff.stimulus_state_key)
+    components = handoff.row_identity.contract.key_array.components
+    row_count = handoff.row_identity.leading_dimension
+    if keys.shape[0] != row_count:
+        raise ValueError("Stimulus-state key length differs from its sealed identity.")
+    if "chaser_index" in components:
+        component_index = components.index("chaser_index")
+        if keys.ndim == 1:
+            if len(components) != 1 or component_index != 0:
+                raise ValueError(
+                    "Rank-one stimulus-state keys do not match their components."
+                )
+            chaser_values = keys
+        elif keys.ndim == 2 and keys.shape[1] == len(components):
+            chaser_values = keys[:, component_index]
+        else:
+            raise ValueError(
+                "Stimulus-state key shape does not match its declared components."
+            )
+        selected_rows = np.flatnonzero(chaser_values == chaser_index).astype(
+            np.int64,
+            copy=False,
+        )
+    else:
+        if chaser_index != 0:
+            raise ValueError(
+                "Stimulus-state identity has no chaser_index component, so only "
+                "chaser_index=0 is addressable."
+            )
+        selected_rows = np.arange(row_count, dtype=np.int64)
+    if selected_rows.size == 0:
+        raise ValueError(
+            f"Stimulus-state source contains no rows for chaser_index={chaser_index}."
+        )
+
+    acquisition_frames = np.asarray(handoff.source_acquisition_frame_index)
+    if acquisition_frames.dtype != np.dtype("<i8") or acquisition_frames.shape != (
+        row_count,
+    ):
+        raise ValueError(
+            "Stimulus source acquisition-frame mapping is not exact int64 row data."
+        )
+    selected_frames = acquisition_frames[selected_rows]
+    if np.unique(selected_frames).shape[0] != selected_frames.shape[0]:
+        raise ValueError(
+            "Selected stimulus rows map ambiguously to duplicate acquisition frames."
+        )
+    order = np.argsort(selected_frames, kind="stable")
+    selected_rows = selected_rows[order]
+    selected_frames = selected_frames[order]
+
+    source_values = np.array(source.coordinate_node[:], copy=True, order="C")
+    if (
+        source_values.dtype != np.dtype(source.coordinate_node.dtype)
+        or source_values.shape != source.coordinate_node.shape
+        or source_values.shape != (row_count, 2)
+    ):
+        raise ValueError(
+            "Canonical stimulus position surface is not exact row-aligned (N, 2) data."
+        )
+    return selected_rows, selected_frames, source_values[selected_rows]
 
 
 def load_stimulus_run_frames(root: zarr.Group, stimulus_run: Optional[str] = None) -> Optional[np.ndarray]:
@@ -1174,7 +1514,8 @@ def build_track_datasets(
     smoothing_method: str = "moving_average",
     smoothing_alignment: str = DEFAULT_SMOOTHING_ALIGNMENT,
     savgol_polyorder: int = 3,
-    instance_key: Optional[np.ndarray] = None,
+    source_row_index: Optional[np.ndarray] = None,
+    source_temporal_authority: Any = None,
 ) -> Tuple[Dict[int, Dict[str, Any]], List[Dict[str, float]]]:
     """Assemble per-track data arrays and summary statistics.
 
@@ -1182,18 +1523,52 @@ def build_track_datasets(
     Optionally applies Savitzky-Golay smoothing for shape-preserving filtering.
     """
 
-    instance_keys = None
-    if instance_key is not None:
-        raw_instance_keys = np.asarray(instance_key)
-        if raw_instance_keys.ndim != 1 or raw_instance_keys.shape[0] != track_ids.shape[0]:
-            raise ValueError("instance_key must be one-dimensional and row-aligned with track_ids.")
-        if raw_instance_keys.dtype.kind not in "iu":
-            raise ValueError("instance_key must use an integer dtype.")
-        if raw_instance_keys.dtype.kind == "i" and np.any(raw_instance_keys < 0):
-            raise ValueError("instance_key values must be nonnegative.")
-        instance_keys = raw_instance_keys.astype(np.uint64, copy=False)
-        if int(np.unique(instance_keys).shape[0]) != int(instance_keys.shape[0]):
-            raise ValueError("instance_key values must be unique across track observations.")
+    source_row_indices = None
+    source_instance_rows = None
+    if source_row_index is not None:
+        raw_source_rows = np.asarray(source_row_index)
+        if (
+            raw_source_rows.dtype.kind not in "iu"
+            or raw_source_rows.ndim != 1
+            or raw_source_rows.shape[0] != track_ids.shape[0]
+        ):
+            raise ValueError(
+                "source_row_index must be a row-aligned one-dimensional integer array."
+            )
+        if raw_source_rows.size and (
+            int(raw_source_rows.min()) < 0
+            or int(raw_source_rows.max()) > np.iinfo(np.int64).max
+        ):
+            raise ValueError("source_row_index values must fit nonnegative int64.")
+        source_row_indices = raw_source_rows.astype(np.int64, copy=False)
+        if source_temporal_authority is None:
+            raise ValueError(
+                "source_row_index requires a sealed immediate-source temporal authority."
+            )
+        source_temporal_authority = require_bound_source_row_temporal_authority(
+            source_temporal_authority
+        )
+        resolved_frames = resolve_source_acquisition_frame_indices(
+            source_temporal_authority,
+            source_row_indices,
+        )
+        provided_frames = np.asarray(frames)
+        if provided_frames.dtype.kind not in "iu" or not np.array_equal(
+            provided_frames.astype(np.int64, copy=False),
+            resolved_frames,
+        ):
+            raise ValueError(
+                "frames must exactly equal the immediate source acquisition-frame "
+                "mapping selected by source_row_index."
+            )
+        source_instance_rows = derive_track_source_instance_values(
+            source_temporal_authority,
+            source_row_indices,
+        )
+    elif source_temporal_authority is not None:
+        raise ValueError(
+            "A source temporal authority cannot be supplied without source_row_index."
+        )
 
     unique_ids = np.unique(track_ids)
     tracks: Dict[int, Dict[str, np.ndarray]] = {}
@@ -1216,7 +1591,16 @@ def build_track_datasets(
             if detection_source is not None
             else np.zeros(mask.sum(), dtype=np.int8)
         )
-        instance_keys_track = instance_keys[mask] if instance_keys is not None else None
+        source_instance_track = (
+            source_instance_rows[mask]
+            if source_instance_rows is not None
+            else None
+        )
+        source_rows_track = (
+            source_row_indices[mask]
+            if source_row_indices is not None
+            else None
+        )
         sample_validity = _build_sample_validity_arrays(
             track_id=int(track_id),
             positions_px=coords_px,
@@ -1231,8 +1615,10 @@ def build_track_datasets(
         headings_track = headings_track[order]
         kp_success_track = kp_success_track[order]
         det_source_track = det_source_track[order]
-        if instance_keys_track is not None:
-            instance_keys_track = instance_keys_track[order]
+        if source_instance_track is not None:
+            source_instance_track = source_instance_track[order]
+        if source_rows_track is not None:
+            source_rows_track = source_rows_track[order]
         sample_validity = {
             name: values[order]
             for name, values in sample_validity.items()
@@ -1261,7 +1647,6 @@ def build_track_datasets(
         frame_path_distance_filtered_px = speeds.frame_path_distance_filtered
         frame_path_distance_smoothed_px = speeds.frame_path_distance_smoothed
         cumulative_path_px = speeds.cumulative_path_distance
-        seconds = speeds.seconds
         speed_per_second_px = speeds.speed_per_second
         delta_frames = speeds.delta_frames
         delta_seconds = speeds.delta_seconds
@@ -1368,17 +1753,56 @@ def build_track_datasets(
                 heading_per_second_resultant[idx] = np.float32(np.abs(mean_vector))
         heading_per_second_deg = np.rad2deg(heading_per_second_rad)
 
+        track_sample_key = build_track_sample_key(
+            np.full(track_frames.shape, int(track_id), dtype=np.int64),
+            track_frames,
+        )
+        if np.unique(track_sample_key, axis=0).shape[0] != track_sample_key.shape[0]:
+            raise ValueError(
+                "Track samples contain duplicate "
+                "(track_id, acquisition_frame_index) identities."
+            )
+
+        if source_rows_track is not None:
+            assert source_instance_track is not None
+            source_instance_lineage = np.array(source_instance_track, copy=True)
+            persisted_interpolation = np.zeros(
+                track_frames.shape,
+                dtype=TRACK_SAMPLE_INTERPOLATION_DTYPE,
+            )
+            persisted_interpolation["left_source_frame_index"] = track_frames
+            persisted_interpolation["right_source_frame_index"] = track_frames
+            persisted_interpolation["right_weight"] = 0.0
+        else:
+            source_instance_lineage = None
+            persisted_interpolation = None
+
         tracks[int(track_id)] = {
             "frame_indices": track_frames.astype(np.int64),
-            "time_seconds": _float32(time_seconds),
-            "detection_indices": detection_indices_sorted.astype(np.int64),
+            "track_sample_key": track_sample_key,
+            "source_acquisition_frame_index": track_frames.astype(np.int64),
             **(
-                {"instance_key": instance_keys_track.astype(np.uint64, copy=False)}
-                if instance_keys_track is not None
+                {"source_frame_interpolation": persisted_interpolation}
+                if persisted_interpolation is not None
                 else {}
             ),
-            "positions_px": _float32(coords_px),
-            "positions_mm": _float32(coords_mm),
+            **(
+                {"source_instance_key": source_instance_lineage}
+                if source_instance_lineage is not None
+                else {}
+            ),
+            "time_seconds": _float32(time_seconds),
+            **(
+                {"source_row_index": source_rows_track}
+                if source_rows_track is not None
+                else {}
+            ),
+            "detection_indices": detection_indices_sorted.astype(np.int64),
+            # Coordinate publication proves an exact dtype-preserving
+            # subset/reorder. Kinematic derivatives may use compact float32,
+            # but the authoritative positions must retain source precision.
+            "positions_px": np.array(coords_px, copy=True, order="C"),
+            "positions_mm": np.array(coords_mm, copy=True, order="C"),
             "heading_degrees": _float32(headings_track),
             "heading_radians": _float32(heading_rad),
             "delta_heading_degrees": _float32(delta_heading_degrees),
@@ -1585,20 +2009,338 @@ def build_track_datasets(
     return tracks, summaries
 
 
+_TRACK_STAGING_CRITICAL_ARRAYS = (
+    "frame_indices",
+    "track_sample_key",
+    "source_acquisition_frame_index",
+    "source_frame_interpolation",
+    "source_instance_key",
+    "source_row_index",
+    "positions_px",
+)
+
+
+def _canonical_json_sha256(value: Mapping[str, Any]) -> str:
+    try:
+        payload = json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Track staging manifest is not strict canonical JSON: {exc}.") from exc
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _archive_identity_manifest_record(node: Any) -> dict[str, Any]:
+    identity = archive_identity(node)
+    key: list[str | int] = []
+    for item in identity.key:
+        if type(item) not in {str, int}:
+            raise ValueError(
+                "Track staging supports only stable string/integer archive identity keys."
+            )
+        key.append(item)
+    return {"kind": identity.kind, "key": key}
+
+
+def _stage_array_payload_record(
+    node: Any,
+    *,
+    relative_ref: str,
+) -> dict[str, Any]:
+    dtype = np.dtype(getattr(node, "dtype"))
+    shape = tuple(int(item) for item in getattr(node, "shape"))
+    if dtype.hasobject:
+        raise ValueError(f"/{node.path} uses an unsupported object dtype.")
+    dtype_fields = None
+    if dtype.fields is not None:
+        dtype_fields = [
+            {
+                "name": str(name),
+                "dtype": np.dtype(field[0]).str,
+                "offset": int(field[1]),
+            }
+            for name, field in dtype.fields.items()
+        ]
+    return {
+        "relative_ref": relative_ref,
+        "dtype": dtype.str,
+        "dtype_fields": dtype_fields,
+        "itemsize": int(dtype.itemsize),
+        "shape": [int(item) for item in shape],
+        "content_sha256": array_payload_sha256(node),
+    }
+
+
+def _build_track_staging_manifest(
+    run_group: zarr.Group,
+    *,
+    ordered_ids: List[int],
+    source_positions: BoundCanonicalCoordinateDescriptor,
+    source_temporal_authority: Any,
+    keypoint_run: str,
+    run_name: str,
+) -> dict[str, Any]:
+    source = require_bound_canonical_coordinate_descriptor(source_positions)
+    temporal = require_bound_source_row_temporal_authority(
+        source_temporal_authority
+    )
+    source_coordinate_path = str(getattr(source.coordinate_node, "path", ""))
+    if not source_coordinate_path:
+        raise ValueError("Canonical source positions have no persisted array path.")
+    tracks_group = run_group["tracks"]
+    track_records: dict[str, Any] = {}
+    for track_id in ordered_ids:
+        name = f"id_{int(track_id)}"
+        subgroup = tracks_group[name]
+        arrays: dict[str, Any] = {}
+        for array_name in _TRACK_STAGING_CRITICAL_ARRAYS:
+            node = subgroup[array_name]
+            relative_ref = f"tracks/{name}/{array_name}"
+            if str(getattr(node, "path", "")) != f"{run_group.path}/{relative_ref}":
+                raise ValueError(
+                    f"Staged track array /{node.path} is outside its exact run path."
+                )
+            arrays[array_name] = _stage_array_payload_record(
+                node,
+                relative_ref=relative_ref,
+            )
+        track_records[name] = {
+            "track_id": int(track_id),
+            "row_count": int(subgroup.attrs["num_samples"]),
+            "arrays": arrays,
+        }
+    track_ids_node = run_group["track_ids"]
+    manifest = {
+        "schema_id": TRACK_KINEMATICS_STAGING_MANIFEST_SCHEMA_ID,
+        "schema_version": TRACK_KINEMATICS_STAGING_MANIFEST_SCHEMA_VERSION,
+        "run_name": str(run_name),
+        "keypoint_run": str(keypoint_run),
+        "run_ref": f"/{run_group.path}",
+        "source_archive": _archive_identity_manifest_record(
+            source.coordinate_node
+        ),
+        "source_positions": {
+            "array_ref": f"/{source_coordinate_path}",
+            "dtype": np.dtype(source.coordinate_node.dtype).str,
+            "shape": [int(item) for item in source.coordinate_node.shape],
+            "content_sha256": array_payload_sha256(source.coordinate_node),
+            "coordinate_descriptor_sha256": source.descriptor.digest(),
+            "row_identity_ref": source.row_identity.record_ref,
+            "row_identity_sha256": source.row_identity.record_sha256,
+        },
+        "source_temporal_authority": {
+            "record_ref": temporal.record_ref,
+            "record_sha256": temporal.record_sha256,
+        },
+        "track_ids": _stage_array_payload_record(
+            track_ids_node,
+            relative_ref="track_ids",
+        ),
+        "track_count": len(ordered_ids),
+        "tracks": track_records,
+    }
+    _canonical_json_sha256(manifest)
+    return manifest
+
+
 def save_track_kinematics_tracks(
     run_group: zarr.Group,
     tracks: Dict[int, Dict[str, Any]],
     summaries: List[Dict[str, float]],
     *,
+    source_temporal_authority: Any,
+    positions_px_source: BoundCanonicalCoordinateDescriptor,
+    physical_frame: BoundPhysicalFrameCalibration | None = None,
     track_id_to_arena_id: Optional[Dict[int, int]] = None,
-    positions_px_descriptor: Any = None,
+    defer_coordinate_binding: bool = False,
+    staging_keypoint_run: str | None = None,
+    staging_run_name: str | None = None,
 ) -> List[int]:
-    """Persist per-track data beneath the track kinematics run group."""
+    """Persist per-track data beneath the track kinematics run group.
+
+    Every normally published track row is bound to the exact
+    acquisition-camera frame domain.  The explicit deferred mode writes only
+    a numerically validated, fail-closed staging artifact; it is reserved for
+    the final-path materializer and contains no canonical coordinate claims.
+    ``source_instance_key`` remains nullable observation lineage and can never
+    substitute for the primary ``track_sample_key``.
+    """
+
+    if defer_coordinate_binding:
+        if physical_frame is not None:
+            raise ValueError(
+                "Deferred track staging cannot publish physical coordinates; "
+                "bind a typed calibration only at the authoritative final path."
+            )
+        if not staging_keypoint_run or not staging_run_name:
+            raise ValueError(
+                "Deferred track staging requires exact keypoint and run names."
+            )
+
+    source_temporal_authority = require_bound_source_row_temporal_authority(
+        source_temporal_authority
+    )
+    positions_px_source = require_bound_canonical_coordinate_descriptor(
+        positions_px_source
+    )
+    include_physical = physical_frame is not None
+    if physical_frame is not None:
+        verified_physical = verify_bound_coordinate_frame(
+            physical_frame,
+            expected_kind=PHYSICAL_FRAME_CALIBRATION_KIND,
+        )
+        if type(verified_physical) is not BoundPhysicalFrameCalibration:
+            raise ValueError(
+                "Track physical outputs require a sealed physical-frame calibration."
+            )
+        physical_frame = verified_physical
+    if (
+        positions_px_source.row_identity.record_ref
+        != source_temporal_authority.source_row_identity.record_ref
+        or positions_px_source.row_identity.record_sha256
+        != source_temporal_authority.source_row_identity.record_sha256
+    ):
+        raise ValueError(
+            "Selected positions and immediate-source temporal authority do not "
+            "bind the same exact row identity."
+        )
+    source_positions_values = np.array(
+        positions_px_source.coordinate_node[:],
+        copy=True,
+        order="C",
+    )
+    if (
+        source_positions_values.dtype
+        != np.dtype(positions_px_source.coordinate_node.dtype)
+        or source_positions_values.shape
+        != positions_px_source.coordinate_node.shape
+        or source_positions_values.ndim != 2
+        or source_positions_values.shape[1] != 2
+    ):
+        raise ValueError(
+            "Selected source positions must expose one exact numeric (N, 2) payload."
+        )
+    ordered_ids = sorted(int(track_id) for track_id in tracks.keys())
+    selected_source_rows: list[np.ndarray] = []
+    for track_id in ordered_ids:
+        data = tracks[track_id]
+        required = {
+            "frame_indices",
+            "track_sample_key",
+            "source_acquisition_frame_index",
+            "source_frame_interpolation",
+            "source_instance_key",
+            "source_row_index",
+        }
+        missing = sorted(required.difference(data))
+        if missing:
+            raise ValueError(
+                f"Track {track_id} lacks canonical identity/time-lineage arrays: "
+                f"{missing!r}."
+            )
+        frame_indices = np.asarray(data["frame_indices"])
+        key = np.asarray(data["track_sample_key"])
+        source_frames = np.asarray(data["source_acquisition_frame_index"])
+        interpolation = np.asarray(data["source_frame_interpolation"])
+        source_instances = np.asarray(data["source_instance_key"])
+        source_rows = np.asarray(data["source_row_index"])
+        row_count = int(frame_indices.shape[0]) if frame_indices.ndim == 1 else -1
+        if (
+            frame_indices.dtype != np.dtype("<i8")
+            or key.dtype != np.dtype("<i8")
+            or key.shape != (row_count, 2)
+            or source_frames.dtype != np.dtype("<i8")
+            or source_frames.shape != (row_count,)
+            or interpolation.dtype != TRACK_SAMPLE_INTERPOLATION_DTYPE
+            or interpolation.shape != (row_count,)
+            or source_instances.dtype != TRACK_SAMPLE_SOURCE_INSTANCE_KEY_DTYPE
+            or source_instances.shape != (row_count,)
+            or source_rows.dtype != np.dtype("<i8")
+            or source_rows.shape != (row_count,)
+        ):
+            raise ValueError(
+                f"Track {track_id} identity/time-lineage arrays do not use the "
+                "canonical dtypes and shapes."
+            )
+        if (
+            not np.array_equal(frame_indices, source_frames)
+            or not np.array_equal(key[:, 1], source_frames)
+            or np.any(key[:, 0] != track_id)
+        ):
+            raise ValueError(
+                f"Track {track_id} keys do not exactly equal its acquisition-frame mapping."
+            )
+        expected_frames = resolve_source_acquisition_frame_indices(
+            source_temporal_authority,
+            source_rows,
+        )
+        expected_instances = derive_track_source_instance_values(
+            source_temporal_authority,
+            source_rows,
+        )
+        if not np.array_equal(source_frames, expected_frames):
+            raise ValueError(
+                f"Track {track_id} acquisition frames are not the exact selected "
+                "immediate-source rows."
+            )
+        if not np.array_equal(source_instances, expected_instances):
+            raise ValueError(
+                f"Track {track_id} source instance lineage was not mechanically "
+                "derived from its immediate source row identity."
+            )
+        if np.any(~source_instances["valid"] & (source_instances["instance_key"] != 0)):
+            raise ValueError(
+                f"Track {track_id} uses a noncanonical nullable source-instance value."
+            )
+        positions_px = np.asarray(data["positions_px"])
+        if (
+            positions_px.dtype != source_positions_values.dtype
+            or positions_px.shape != (row_count, 2)
+            or not np.array_equal(
+                positions_px,
+                source_positions_values[source_rows],
+                equal_nan=True,
+            )
+        ):
+            raise ValueError(
+                f"Track {track_id} positions_px is not an exact dtype-preserving "
+                "subset/reorder of the selected source coordinate surface."
+            )
+        if physical_frame is not None:
+            positions_mm = np.asarray(data["positions_mm"])
+            scale = np.asarray(
+                physical_frame.record.mm_per_pixel,
+                dtype=positions_px.dtype,
+            )
+            expected_mm = np.asarray(
+                positions_px * scale,
+                dtype=positions_px.dtype,
+            )
+            if (
+                positions_mm.dtype != positions_px.dtype
+                or positions_mm.shape != positions_px.shape
+                or not np.array_equal(positions_mm, expected_mm, equal_nan=True)
+            ):
+                raise ValueError(
+                    f"Track {track_id} positions_mm does not use the exact typed "
+                    "physical-frame mm_per_pixel calibration."
+                )
+        selected_source_rows.append(source_rows)
+    if selected_source_rows:
+        all_source_rows = np.concatenate(selected_source_rows)
+        if np.unique(all_source_rows).shape[0] != all_source_rows.shape[0]:
+            raise ValueError(
+                "Canonical track publication requires a unique subset/reorder of "
+                "the immediate source rowset; source_row_index values repeat."
+            )
 
     tracks_parent = run_group.create_group("tracks")
     stamp_geometry_preload_attrs(run_group)
     stamp_geometry_preload_attrs(tracks_parent)
-    ordered_ids = sorted(int(track_id) for track_id in tracks.keys())
     track_ids_array = np.asarray(ordered_ids, dtype=np.int32)
     chunks = _track_preload_chunks(track_ids_array.shape) or (1,)
     run_group.create_array("track_ids", data=track_ids_array, chunks=chunks, overwrite=True)
@@ -1624,31 +2366,121 @@ def save_track_kinematics_tracks(
         sample_count = int(data["frame_indices"].size)
         base_chunk = _track_preload_chunks(data["frame_indices"].shape) or (1,)
 
-        subgroup.create_array("frame_indices", data=data["frame_indices"], chunks=base_chunk, overwrite=True)
+        frame_indices_array = subgroup.create_array(
+            "frame_indices",
+            data=data["frame_indices"],
+            chunks=base_chunk,
+            overwrite=True,
+        )
+        frame_indices_array.attrs.update(
+            {
+                "semantic_role": (
+                    "compatibility_alias_of_source_acquisition_frame_index"
+                ),
+                "authoritative_array_ref": (
+                    f"/{subgroup.path}/source_acquisition_frame_index"
+                ),
+                "canonical_consumers_must_use": (
+                    "track_sample_key_and_source_acquisition_frame_index"
+                ),
+            }
+        )
+        track_sample_key_array = subgroup.create_array(
+            "track_sample_key",
+            data=data["track_sample_key"],
+            chunks=(base_chunk[0], 2),
+            overwrite=True,
+        )
+        if "source_frame_interpolation" not in data:
+            raise ValueError(
+                "Canonical track publication requires explicit acquisition-frame "
+                "interpolation lineage for every sample."
+            )
+        source_acquisition_frame_array = subgroup.create_array(
+            "source_acquisition_frame_index",
+            data=data["source_acquisition_frame_index"],
+            chunks=base_chunk,
+            overwrite=True,
+        )
+        source_frame_interpolation_array = subgroup.create_array(
+            "source_frame_interpolation",
+            data=data["source_frame_interpolation"],
+            chunks=base_chunk,
+            overwrite=True,
+        )
+        source_instance_array = subgroup.create_array(
+            "source_instance_key",
+            data=data["source_instance_key"],
+            chunks=base_chunk,
+            overwrite=True,
+        )
+        source_row_index_array = subgroup.create_array(
+            "source_row_index",
+            data=data["source_row_index"],
+            chunks=base_chunk,
+            overwrite=True,
+        )
+        source_instance_array.attrs.update(
+            {
+                "semantic_role": "nullable_source_observation_identity_lineage",
+                "source_identity_domain": (
+                    source_temporal_authority.record.source_identity_domain
+                ),
+                "nullable_target_domain": "observation_instance",
+                "primary_row_identity": False,
+                "null_encoding": "valid_false_instance_key_zero",
+            }
+        )
+        bound_track_identity = None
+        if not defer_coordinate_binding:
+            track_time_lineage = stamp_track_sample_time_lineage(
+                subgroup,
+                track_sample_key_array,
+                source_row_index_array,
+                source_acquisition_frame_array,
+                source_frame_interpolation_array,
+                source_instance_array,
+                source_temporal_authority=source_temporal_authority,
+            )
+            track_identity = build_row_identity_contract(
+                domain=TRACK_SAMPLE_DOMAIN,
+                values=data["track_sample_key"],
+                track_time_lineage=track_time_lineage,
+            )
+            bound_track_identity = stamp_and_bind_row_identity_contract(
+                subgroup,
+                track_sample_key_array,
+                contract=track_identity,
+                track_time_lineage=track_time_lineage,
+            )
         subgroup.create_array("time_seconds", data=data["time_seconds"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("detection_indices", data=data["detection_indices"], chunks=base_chunk, overwrite=True)
-        if "instance_key" in data:
-            subgroup.create_array(
-                "instance_key",
-                data=data["instance_key"],
-                chunks=base_chunk,
-                overwrite=True,
-            )
         positions_px_array = subgroup.create_array(
             "positions_px",
             data=data["positions_px"],
             chunks=(base_chunk[0], 2),
             overwrite=True,
         )
-        if positions_px_descriptor is not None:
-            stamp_coordinate_descriptor(
-                positions_px_array,
-                _bind_track_positions_px_descriptor(
-                    positions_px_descriptor,
-                    has_instance_key="instance_key" in data,
-                ),
+        positions_mm_array = None
+        if physical_frame is not None:
+            positions_mm_array = subgroup.create_array(
+                "positions_mm",
+                data=data["positions_mm"],
+                chunks=(base_chunk[0], 2),
+                overwrite=True,
             )
-        subgroup.create_array("positions_mm", data=data["positions_mm"], chunks=(base_chunk[0], 2), overwrite=True)
+        if not defer_coordinate_binding:
+            assert bound_track_identity is not None
+            publish_track_position_coordinates(
+                subgroup,
+                positions_px_array,
+                source_row_index_array,
+                track_row_identity=bound_track_identity,
+                source_positions=positions_px_source,
+                source_temporal_authority=source_temporal_authority,
+                positions_mm_node=positions_mm_array,
+                physical_frame=physical_frame,
+            )
         subgroup.create_array("heading_degrees", data=data["heading_degrees"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("heading_radians", data=data["heading_radians"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("delta_heading_degrees", data=data["delta_heading_degrees"], chunks=base_chunk, overwrite=True)
@@ -1704,38 +2536,43 @@ def save_track_kinematics_tracks(
             overwrite=True,
         )
         subgroup.create_array("speed_raw_px", data=data["speed_raw_px"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("speed_raw_mm", data=data["speed_raw_mm"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("speed_filtered_px", data=data["speed_filtered_px"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("speed_filtered_mm", data=data["speed_filtered_mm"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("speed_smoothed_px", data=data["speed_smoothed_px"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("speed_smoothed_mm", data=data["speed_smoothed_mm"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("speed_averaged_px", data=data["speed_averaged_px"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("speed_averaged_mm", data=data["speed_averaged_mm"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("acceleration_px", data=data["acceleration_px"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("acceleration_mm", data=data["acceleration_mm"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("smoothed_acceleration_px", data=data["smoothed_acceleration_px"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("smoothed_acceleration_mm", data=data["smoothed_acceleration_mm"], chunks=base_chunk, overwrite=True)
+        if include_physical:
+            for name in (
+                "speed_raw_mm",
+                "speed_filtered_mm",
+                "speed_smoothed_mm",
+                "speed_averaged_mm",
+                "acceleration_mm",
+                "smoothed_acceleration_mm",
+            ):
+                subgroup.create_array(
+                    name,
+                    data=data[name],
+                    chunks=base_chunk,
+                    overwrite=True,
+                )
         subgroup.attrs["legacy_acceleration_source_speed_level"] = DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL
         subgroup.attrs["speed_derivatives_schema_id"] = SPEED_DERIVATIVES_SCHEMA_ID
         _write_speed_derivative_groups(
             subgroup,
             data["speed_derivatives"],
             chunks=base_chunk,
+            include_physical=include_physical,
         )
         _write_movement_speed_groups(
             subgroup,
             data,
             chunks=base_chunk,
+            include_physical=include_physical,
         )
         subgroup.create_array(
             "frame_path_distance_raw_px",
             data=data["frame_path_distance_raw_px"],
-            chunks=base_chunk,
-            overwrite=True,
-        )
-        subgroup.create_array(
-            "frame_path_distance_raw_mm",
-            data=data["frame_path_distance_raw_mm"],
             chunks=base_chunk,
             overwrite=True,
         )
@@ -1746,20 +2583,8 @@ def save_track_kinematics_tracks(
             overwrite=True,
         )
         subgroup.create_array(
-            "frame_path_distance_filtered_mm",
-            data=data["frame_path_distance_filtered_mm"],
-            chunks=base_chunk,
-            overwrite=True,
-        )
-        subgroup.create_array(
             "frame_path_distance_smoothed_px",
             data=data["frame_path_distance_smoothed_px"],
-            chunks=base_chunk,
-            overwrite=True,
-        )
-        subgroup.create_array(
-            "frame_path_distance_smoothed_mm",
-            data=data["frame_path_distance_smoothed_mm"],
             chunks=base_chunk,
             overwrite=True,
         )
@@ -1769,21 +2594,43 @@ def save_track_kinematics_tracks(
             chunks=base_chunk,
             overwrite=True,
         )
-        subgroup.create_array(
-            "cumulative_path_distance_mm",
-            data=data["cumulative_path_distance_mm"],
-            chunks=base_chunk,
-            overwrite=True,
-        )
+        if include_physical:
+            for name in (
+                "frame_path_distance_raw_mm",
+                "frame_path_distance_filtered_mm",
+                "frame_path_distance_smoothed_mm",
+                "cumulative_path_distance_mm",
+            ):
+                subgroup.create_array(
+                    name,
+                    data=data[name],
+                    chunks=base_chunk,
+                    overwrite=True,
+                )
 
         seconds = data["second_indices"]
         sec_chunk = _track_preload_chunks(seconds.shape) or (1,)
         subgroup.create_array("second_indices", data=seconds, chunks=sec_chunk, overwrite=True)
         subgroup.create_array("speed_per_second_px", data=data["speed_per_second_px"], chunks=sec_chunk, overwrite=True)
-        subgroup.create_array("speed_per_second_mm", data=data["speed_per_second_mm"], chunks=sec_chunk, overwrite=True)
+        if include_physical:
+            subgroup.create_array(
+                "speed_per_second_mm",
+                data=data["speed_per_second_mm"],
+                chunks=sec_chunk,
+                overwrite=True,
+            )
         subgroup.create_array("heading_per_second_degrees", data=data["heading_per_second_degrees"], chunks=sec_chunk, overwrite=True)
         subgroup.create_array("heading_per_second_resultant", data=data["heading_per_second_resultant"], chunks=sec_chunk, overwrite=True)
 
+        persisted_summary = json_attr_safe(
+            dict(summary)
+            if include_physical
+            else {
+                name: value
+                for name, value in summary.items()
+                if "_mm" not in name
+            }
+        )
         subgroup.attrs.update(
             {
                 "track_id": int(track_id),
@@ -1797,13 +2644,17 @@ def save_track_kinematics_tracks(
                 "sample_reason_codes": dict(SAMPLE_REASON_CODES),
                 "transition_validity_schema_id": "palette.track_transition_validity.v1",
                 "transition_reason_codes": dict(TRANSITION_REASON_CODES),
-                "summary": summary,
+                "summary": persisted_summary,
+                "physical_outputs_status": (
+                    "available_typed_source_camera_frame"
+                    if include_physical
+                    else "omitted_no_compatible_typed_physical_frame"
+                ),
             }
         )
         _stamp_geometry_preload_tree(subgroup)
 
-        manifest.append(
-            {
+        manifest_entry: Dict[str, Any] = {
                 "track_id": int(track_id),
                 "arena_id": (
                     int(track_id_to_arena_id[track_id])
@@ -1813,16 +2664,619 @@ def save_track_kinematics_tracks(
                 "group": f"tracks/id_{track_id}",
                 "samples": sample_count,
                 "total_distance_px": float(summary.get("total_distance_px", float("nan"))),
-                "total_distance_mm": float(summary.get("total_distance_mm", float("nan"))),
                 "heading_mean_deg": float(summary.get("heading_mean_deg", float("nan"))),
                 "heading_resultant": float(summary.get("heading_resultant", float("nan"))),
                 "mean_acceleration_px": float(summary.get("mean_acceleration_px", float("nan"))),
-                "mean_acceleration_mm": float(summary.get("mean_acceleration_mm", float("nan"))),
-            }
-        )
+        }
+        if include_physical:
+            manifest_entry.update(
+                {
+                    "total_distance_mm": float(
+                        summary.get("total_distance_mm", float("nan"))
+                    ),
+                    "mean_acceleration_mm": float(
+                        summary.get("mean_acceleration_mm", float("nan"))
+                    ),
+                }
+            )
+        manifest.append(manifest_entry)
 
     run_group.attrs["track_manifest"] = manifest
+    if defer_coordinate_binding:
+        assert staging_keypoint_run is not None
+        assert staging_run_name is not None
+        staging_manifest = _build_track_staging_manifest(
+            run_group,
+            ordered_ids=ordered_ids,
+            source_positions=positions_px_source,
+            source_temporal_authority=source_temporal_authority,
+            keypoint_run=staging_keypoint_run,
+            run_name=staging_run_name,
+        )
+        run_group.attrs.update(
+            {
+                TRACK_KINEMATICS_STAGING_MANIFEST_ATTR: staging_manifest,
+                TRACK_KINEMATICS_STAGING_MANIFEST_DIGEST_ATTR: (
+                    _canonical_json_sha256(staging_manifest)
+                ),
+                TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR: (
+                    TRACK_KINEMATICS_UNBOUND_STAGE_STATUS
+                ),
+            }
+        )
     return ordered_ids
+
+
+def _track_attr_values_equal(left: Any, right: Any) -> bool:
+    if type(left) is not type(right):
+        return False
+    if type(left) is dict:
+        return set(left) == set(right) and all(
+            _track_attr_values_equal(left[name], right[name]) for name in left
+        )
+    if type(left) in {list, tuple}:
+        return len(left) == len(right) and all(
+            _track_attr_values_equal(a, b)
+            for a, b in zip(left, right, strict=True)
+        )
+    if type(left) is float and math.isnan(left) and math.isnan(right):
+        return True
+    return bool(left == right)
+
+
+def _restore_track_attrs(attrs: Any, snapshot: Mapping[str, Any]) -> None:
+    for name in tuple(attrs.keys()):
+        del attrs[name]
+    attrs.update(copy.deepcopy(dict(snapshot)))
+    if not _track_attr_values_equal(dict(attrs), dict(snapshot)):
+        raise RuntimeError("Track coordinate attrs rollback was not exact.")
+
+
+def _manifest_source_rowset_ref(manifest: Mapping[str, Any]) -> str:
+    source = manifest.get("source_positions")
+    if type(source) is not dict:
+        raise ValueError("Track staging manifest lacks exact source_positions.")
+    array_ref = source.get("array_ref")
+    if type(array_ref) is not str or not array_ref.startswith("/"):
+        raise ValueError("Track staging source coordinate ref is not canonical.")
+    parts = array_ref[1:].split("/")
+    if (
+        len(parts) < 2
+        or any(not part or part in {".", ".."} for part in parts)
+        or parts[-1] != "centers_img_xy"
+    ):
+        raise ValueError("Track staging source coordinate ref is not canonical.")
+    return "/".join(parts[:-1])
+
+
+def _load_track_staging_manifest(
+    run_group: zarr.Group,
+    *,
+    expected_keypoint_run: str,
+    expected_run_name: str,
+) -> tuple[dict[str, Any], str]:
+    raw = run_group.attrs.get(TRACK_KINEMATICS_STAGING_MANIFEST_ATTR)
+    if type(raw) is not dict:
+        raise ValueError("Track run lacks one exact typed staging manifest.")
+    manifest = copy.deepcopy(raw)
+    expected_digest = _canonical_json_sha256(manifest)
+    if (
+        manifest.get("schema_id")
+        != TRACK_KINEMATICS_STAGING_MANIFEST_SCHEMA_ID
+        or type(manifest.get("schema_version")) is not int
+        or manifest.get("schema_version")
+        != TRACK_KINEMATICS_STAGING_MANIFEST_SCHEMA_VERSION
+        or manifest.get("run_name") != expected_run_name
+        or manifest.get("keypoint_run") != expected_keypoint_run
+        or manifest.get("run_ref") != f"/{run_group.path}"
+        or run_group.attrs.get(TRACK_KINEMATICS_STAGING_MANIFEST_DIGEST_ATTR)
+        != expected_digest
+    ):
+        raise ValueError(
+            "Track staging manifest schema, identity, path, or digest is invalid."
+        )
+    return manifest, expected_digest
+
+
+def _require_stage_source_surface(
+    authoritative_root: zarr.Group,
+    manifest: Mapping[str, Any],
+) -> BoundSourceCameraPositionSurface:
+    rowset_ref = _manifest_source_rowset_ref(manifest)
+    surface = require_bound_source_camera_position_surface(
+        load_persisted_source_camera_position_surface(
+            authoritative_root,
+            rowset_ref,
+        )
+    )
+    source = manifest["source_positions"]
+    descriptor = surface.coordinates
+    expected = {
+        "array_ref": f"/{descriptor.coordinate_node.path}",
+        "dtype": np.dtype(descriptor.coordinate_node.dtype).str,
+        "shape": [int(item) for item in descriptor.coordinate_node.shape],
+        "content_sha256": array_payload_sha256(descriptor.coordinate_node),
+        "coordinate_descriptor_sha256": descriptor.descriptor.digest(),
+        "row_identity_ref": descriptor.row_identity.record_ref,
+        "row_identity_sha256": descriptor.row_identity.record_sha256,
+    }
+    temporal = manifest.get("source_temporal_authority")
+    expected_temporal = {
+        "record_ref": surface.temporal_authority.record_ref,
+        "record_sha256": surface.temporal_authority.record_sha256,
+    }
+    if (
+        source != expected
+        or temporal != expected_temporal
+        or manifest.get("source_archive")
+        != _archive_identity_manifest_record(descriptor.coordinate_node)
+    ):
+        raise ValueError(
+            "Authoritative source positions, identity, time, descriptor, or "
+            "archive identity changed after numerical staging."
+        )
+    return surface
+
+
+def _stage_track_groups(
+    run_group: zarr.Group,
+    manifest: Mapping[str, Any],
+) -> list[tuple[int, zarr.Group]]:
+    tracks_manifest = manifest.get("tracks")
+    track_count = manifest.get("track_count")
+    if type(tracks_manifest) is not dict or type(track_count) is not int:
+        raise ValueError("Track staging manifest has invalid track inventory.")
+    try:
+        tracks_group = run_group["tracks"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("Track staging run has no tracks group.") from exc
+    if not callable(getattr(tracks_group, "group_keys", None)):
+        raise ValueError("Track staging run has no tracks group.")
+    live_names = sorted(str(name) for name in tracks_group.group_keys())
+    if live_names != sorted(tracks_manifest) or len(live_names) != track_count:
+        raise ValueError("Track staging manifest and live track groups disagree.")
+    track_ids = np.array(run_group["track_ids"][:], copy=True, order="C")
+    if (
+        track_ids.dtype != np.dtype("<i4")
+        or track_ids.shape != (track_count,)
+        or _stage_array_payload_record(
+            run_group["track_ids"],
+            relative_ref="track_ids",
+        )
+        != manifest.get("track_ids")
+    ):
+        raise ValueError("Track staging track_ids payload is invalid.")
+    result: list[tuple[int, zarr.Group]] = []
+    for index, track_id_value in enumerate(track_ids):
+        track_id = int(track_id_value)
+        name = f"id_{track_id}"
+        if index and track_id <= int(track_ids[index - 1]):
+            raise ValueError("Track staging track_ids must be strictly increasing.")
+        if name not in tracks_manifest:
+            raise ValueError("Track staging track_ids do not name exact track groups.")
+        result.append((track_id, tracks_group[name]))
+    return result
+
+
+def _validate_unbound_track_payloads(
+    authoritative_root: zarr.Group,
+    run_group: zarr.Group,
+    *,
+    expected_keypoint_run: str,
+    expected_run_name: str,
+    expected_binding_status: str,
+    require_complete: bool,
+) -> tuple[
+    dict[str, Any],
+    str,
+    BoundSourceCameraPositionSurface,
+    list[tuple[int, zarr.Group]],
+    int,
+]:
+    if str(run_group.path) != (
+        f"analysis/track_kinematics_runs/offline/{expected_run_name}"
+    ):
+        raise ValueError("Track staging run is not at its exact declared path.")
+    if run_group.attrs.get(TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR) != (
+        expected_binding_status
+    ):
+        raise ValueError("Track run has the wrong coordinate binding status.")
+    expected_completion = "complete" if require_complete else "running"
+    if run_group.attrs.get("palette_run_completion_status") != expected_completion:
+        raise ValueError("Track run has the wrong generic completion status.")
+    manifest, manifest_digest = _load_track_staging_manifest(
+        run_group,
+        expected_keypoint_run=expected_keypoint_run,
+        expected_run_name=expected_run_name,
+    )
+    surface = _require_stage_source_surface(authoritative_root, manifest)
+    source_values = np.array(
+        surface.coordinates.coordinate_node[:],
+        copy=True,
+        order="C",
+    )
+    groups = _stage_track_groups(run_group, manifest)
+    all_source_rows: list[np.ndarray] = []
+    total_rows = 0
+    for track_id, subgroup in groups:
+        name = f"id_{track_id}"
+        record = manifest["tracks"].get(name)
+        if type(record) is not dict or record.get("track_id") != track_id:
+            raise ValueError(f"{name} staging manifest identity is invalid.")
+        row_count = record.get("row_count")
+        if (
+            type(row_count) is not int
+            or row_count < 1
+            or subgroup.attrs.get("num_samples") != row_count
+        ):
+            raise ValueError(f"{name} staging row count is invalid.")
+        arrays_record = record.get("arrays")
+        if type(arrays_record) is not dict or set(arrays_record) != set(
+            _TRACK_STAGING_CRITICAL_ARRAYS
+        ):
+            raise ValueError(f"{name} staging critical-array inventory is invalid.")
+        nodes = {array_name: subgroup[array_name] for array_name in arrays_record}
+        for array_name, node in nodes.items():
+            live_record = _stage_array_payload_record(
+                node,
+                relative_ref=f"tracks/{name}/{array_name}",
+            )
+            if live_record != arrays_record[array_name]:
+                raise ValueError(
+                    f"{name}/{array_name} changed after numerical staging."
+                )
+        frame_indices = np.array(nodes["frame_indices"][:], copy=True, order="C")
+        track_key = np.array(nodes["track_sample_key"][:], copy=True, order="C")
+        source_frames = np.array(
+            nodes["source_acquisition_frame_index"][:], copy=True, order="C"
+        )
+        interpolation = np.array(
+            nodes["source_frame_interpolation"][:], copy=True, order="C"
+        )
+        source_instances = np.array(
+            nodes["source_instance_key"][:], copy=True, order="C"
+        )
+        source_rows = np.array(
+            nodes["source_row_index"][:], copy=True, order="C"
+        )
+        positions = np.array(nodes["positions_px"][:], copy=True, order="C")
+        if (
+            frame_indices.dtype != np.dtype("<i8")
+            or frame_indices.shape != (row_count,)
+            or track_key.dtype != np.dtype("<i8")
+            or track_key.shape != (row_count, 2)
+            or source_frames.dtype != np.dtype("<i8")
+            or source_frames.shape != (row_count,)
+            or interpolation.dtype != TRACK_SAMPLE_INTERPOLATION_DTYPE
+            or interpolation.shape != (row_count,)
+            or source_instances.dtype != TRACK_SAMPLE_SOURCE_INSTANCE_KEY_DTYPE
+            or source_instances.shape != (row_count,)
+            or source_rows.dtype != np.dtype("<i8")
+            or source_rows.shape != (row_count,)
+            or positions.dtype != source_values.dtype
+            or positions.shape != (row_count, 2)
+            or np.any(source_rows < 0)
+            or np.any(source_rows >= source_values.shape[0])
+            or not np.array_equal(frame_indices, source_frames)
+            or not np.array_equal(track_key[:, 1], source_frames)
+            or np.any(track_key[:, 0] != track_id)
+            or not np.array_equal(
+                source_frames,
+                resolve_source_acquisition_frame_indices(
+                    surface.temporal_authority,
+                    source_rows,
+                ),
+            )
+            or not np.array_equal(
+                source_instances,
+                derive_track_source_instance_values(
+                    surface.temporal_authority,
+                    source_rows,
+                ),
+            )
+            or not np.array_equal(
+                positions,
+                source_values[source_rows],
+                equal_nan=True,
+            )
+        ):
+            raise ValueError(
+                f"{name} is not an exact identity/time/position subset of its "
+                "authoritative source."
+            )
+        if "positions_mm" in subgroup:
+            raise ValueError(
+                "Staged v1 track runs cannot carry unbound physical coordinates."
+            )
+        all_source_rows.append(source_rows)
+        total_rows += row_count
+    if all_source_rows:
+        combined = np.concatenate(all_source_rows)
+        if np.unique(combined).shape[0] != combined.shape[0]:
+            raise ValueError(
+                "Staged track source_row_index values repeat across track groups."
+            )
+    return manifest, manifest_digest, surface, groups, total_rows
+
+
+def _load_bound_track_publication(
+    subgroup: zarr.Group,
+    *,
+    surface: BoundSourceCameraPositionSurface,
+) -> None:
+    time_lineage = load_bound_track_sample_time_lineage(
+        subgroup,
+        subgroup["track_sample_key"],
+        subgroup["source_row_index"],
+        subgroup["source_acquisition_frame_index"],
+        subgroup["source_frame_interpolation"],
+        subgroup["source_instance_key"],
+        source_temporal_authority=surface.temporal_authority,
+    )
+    identity = load_bound_row_identity_contract(
+        subgroup,
+        subgroup["track_sample_key"],
+        track_time_lineage=time_lineage,
+    )
+    load_track_position_coordinates(
+        subgroup,
+        subgroup["positions_px"],
+        subgroup["source_row_index"],
+        track_row_identity=identity,
+        source_positions=surface.coordinates,
+        source_temporal_authority=surface.temporal_authority,
+    )
+
+
+def stage_offline_track_kinematics_run(
+    source_zarr: str | Path,
+    staging_zarr: str | Path,
+    *,
+    keypoint_run: str,
+    run_name: str,
+    writer_arguments: Iterable[str] = (),
+) -> Mapping[str, Any]:
+    """Compute one fail-closed numeric stage with no coordinate publication."""
+
+    source_path = Path(source_zarr).expanduser().resolve()
+    staging_path = Path(staging_zarr).expanduser().resolve()
+    if not source_path.is_dir():
+        raise FileNotFoundError(f"Source analysis Zarr not found: {source_path}")
+    if staging_path.exists():
+        raise FileExistsError(f"Refusing existing staging Zarr: {staging_path}")
+    if source_path == staging_path:
+        raise ValueError("Track staging output must differ from the source archive.")
+    try:
+        staging_path.relative_to(source_path)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("Track staging output must not be inside the source archive.")
+    run_value = str(run_name).strip()
+    keypoint_value = str(keypoint_run).strip()
+    if (
+        not run_value
+        or run_value in {".", ".."}
+        or "/" in run_value
+        or "\\" in run_value
+        or not keypoint_value
+    ):
+        raise ValueError("Track staging requires safe nonempty run/keypoint names.")
+    forwarded = tuple(str(item) for item in writer_arguments)
+    managed = {
+        "--output-zarr-path",
+        "--offline-only",
+        "--online-only",
+        "--no-write",
+        "--keypoint-run",
+        "--offline-run-name",
+        "--_unbound-coordinate-stage",
+    }
+    forbidden = sorted(
+        item.split("=", 1)[0]
+        for item in forwarded
+        if item.split("=", 1)[0] in managed
+    )
+    if forbidden:
+        raise ValueError(
+            "Track staging owns these writer arguments: " + ", ".join(forbidden)
+        )
+    main(
+        [
+            str(source_path),
+            "--output-zarr-path",
+            str(staging_path),
+            "--offline-only",
+            "--keypoint-run",
+            keypoint_value,
+            "--offline-run-name",
+            run_value,
+            "--_unbound-coordinate-stage",
+            *forwarded,
+        ]
+    )
+    authoritative_root = open_zarr_root(source_path, mode="r")
+    staging_root = open_zarr_root(staging_path, mode="r")
+    run_group = staging_root[
+        f"analysis/track_kinematics_runs/offline/{run_value}"
+    ]
+    _, digest, _, groups, total_rows = _validate_unbound_track_payloads(
+        authoritative_root,
+        run_group,
+        expected_keypoint_run=keypoint_value,
+        expected_run_name=run_value,
+        expected_binding_status=TRACK_KINEMATICS_UNBOUND_STAGE_STATUS,
+        require_complete=True,
+    )
+    return {
+        "valid": True,
+        "status": TRACK_KINEMATICS_UNBOUND_STAGE_STATUS,
+        "run_name": run_value,
+        "track_count": len(groups),
+        "row_count": total_rows,
+        "staging_manifest_sha256": digest,
+    }
+
+
+def bind_staged_offline_track_kinematics_run(
+    authoritative_root: zarr.Group,
+    final_run_group: zarr.Group,
+    *,
+    expected_keypoint_run: str,
+    expected_run_name: str,
+) -> Mapping[str, Any]:
+    """Bind a validated stage only at its authoritative final archive path."""
+
+    if archive_identity(authoritative_root) != archive_identity(final_run_group):
+        raise ValueError(
+            "Final track run is not inside the supplied authoritative archive."
+        )
+    _, digest, surface, groups, total_rows = _validate_unbound_track_payloads(
+        authoritative_root,
+        final_run_group,
+        expected_keypoint_run=expected_keypoint_run,
+        expected_run_name=expected_run_name,
+        expected_binding_status=TRACK_KINEMATICS_PUBLISHING_BINDING_STATUS,
+        require_complete=False,
+    )
+    attrs_targets: list[Any] = [final_run_group.attrs]
+    for _, subgroup in groups:
+        attrs_targets.extend(
+            (
+                subgroup.attrs,
+                subgroup["track_sample_key"].attrs,
+                subgroup["positions_px"].attrs,
+            )
+        )
+    snapshots = [copy.deepcopy(dict(attrs)) for attrs in attrs_targets]
+    try:
+        for track_id, subgroup in groups:
+            time_lineage = stamp_track_sample_time_lineage(
+                subgroup,
+                subgroup["track_sample_key"],
+                subgroup["source_row_index"],
+                subgroup["source_acquisition_frame_index"],
+                subgroup["source_frame_interpolation"],
+                subgroup["source_instance_key"],
+                source_temporal_authority=surface.temporal_authority,
+            )
+            key_values = np.array(
+                subgroup["track_sample_key"][:],
+                copy=True,
+                order="C",
+            )
+            identity_contract = build_row_identity_contract(
+                domain=TRACK_SAMPLE_DOMAIN,
+                values=key_values,
+                track_time_lineage=time_lineage,
+            )
+            identity = stamp_and_bind_row_identity_contract(
+                subgroup,
+                subgroup["track_sample_key"],
+                contract=identity_contract,
+                track_time_lineage=time_lineage,
+            )
+            if np.any(key_values[:, 0] != track_id):
+                raise ValueError("Track identity changed during final-path binding.")
+            publish_track_position_coordinates(
+                subgroup,
+                subgroup["positions_px"],
+                subgroup["source_row_index"],
+                track_row_identity=identity,
+                source_positions=surface.coordinates,
+                source_temporal_authority=surface.temporal_authority,
+            )
+        for _, subgroup in groups:
+            _load_bound_track_publication(subgroup, surface=surface)
+        final_run_group.attrs[TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR] = (
+            TRACK_KINEMATICS_BOUND_CANONICAL_STATUS
+        )
+        validated = _validate_bound_offline_track_kinematics_run_or_raise(
+            authoritative_root,
+            final_run_group,
+            expected_keypoint_run=expected_keypoint_run,
+            expected_run_name=expected_run_name,
+            require_complete=False,
+        )
+        return {
+            **validated,
+            "status": TRACK_KINEMATICS_BOUND_CANONICAL_STATUS,
+            "track_count": len(groups),
+            "row_count": total_rows,
+            "binding_manifest_sha256": digest,
+        }
+    except Exception as exc:
+        rollback_errors: list[str] = []
+        for attrs, snapshot in zip(attrs_targets, snapshots, strict=True):
+            try:
+                _restore_track_attrs(attrs, snapshot)
+            except Exception as rollback_exc:  # pragma: no cover - hostile store
+                rollback_errors.append(str(rollback_exc))
+        if rollback_errors:
+            raise RuntimeError(
+                "Final-path track binding failed and attrs rollback was incomplete: "
+                f"{rollback_errors!r}."
+            ) from exc
+        raise
+
+
+def _validate_bound_offline_track_kinematics_run_or_raise(
+    authoritative_root: zarr.Group,
+    final_run_group: zarr.Group,
+    *,
+    expected_keypoint_run: str,
+    expected_run_name: str,
+    require_complete: bool,
+) -> dict[str, Any]:
+    if archive_identity(authoritative_root) != archive_identity(final_run_group):
+        raise ValueError(
+            "Bound track run is not inside the supplied authoritative archive."
+        )
+    _, digest, surface, groups, total_rows = _validate_unbound_track_payloads(
+        authoritative_root,
+        final_run_group,
+        expected_keypoint_run=expected_keypoint_run,
+        expected_run_name=expected_run_name,
+        expected_binding_status=TRACK_KINEMATICS_BOUND_CANONICAL_STATUS,
+        require_complete=require_complete,
+    )
+    for _, subgroup in groups:
+        _load_bound_track_publication(subgroup, surface=surface)
+    return {
+        "valid": True,
+        "status": TRACK_KINEMATICS_BOUND_CANONICAL_STATUS,
+        "run_name": expected_run_name,
+        "track_count": len(groups),
+        "row_count": total_rows,
+        "binding_manifest_sha256": digest,
+    }
+
+
+def validate_bound_offline_track_kinematics_run(
+    authoritative_root: zarr.Group,
+    final_run_group: zarr.Group,
+    *,
+    expected_keypoint_run: str,
+    expected_run_name: str,
+    require_complete: bool,
+) -> Mapping[str, Any]:
+    """Freshly validate a final-path canonical track publication."""
+
+    try:
+        return _validate_bound_offline_track_kinematics_run_or_raise(
+            authoritative_root,
+            final_run_group,
+            expected_keypoint_run=expected_keypoint_run,
+            expected_run_name=expected_run_name,
+            require_complete=bool(require_complete),
+        )
+    except Exception as exc:
+        return {
+            "valid": False,
+            "status": "invalid",
+            "run_name": str(expected_run_name),
+            "errors": [str(exc)],
+        }
 
 
 def _write_movement_speed_groups(
@@ -1830,6 +3284,7 @@ def _write_movement_speed_groups(
     data: Dict[str, Any],
     *,
     chunks: Tuple[int, ...],
+    include_physical: bool,
 ) -> None:
     """Write the grouped v2 movement/speed layout alongside flat v1 arrays."""
 
@@ -1864,34 +3319,38 @@ def _write_movement_speed_groups(
         derivative = derivatives[source_level]
         flat_px_key = f"{source_level}_px"
         flat_mm_key = f"{source_level}_mm"
-        level_group.attrs.update(
-            {
+        level_attrs: Dict[str, Any] = {
                 "schema_id": MOVEMENT_SPEED_LEVEL_SCHEMA_ID,
                 "source_speed_level": source_level,
                 "level": group_name,
                 "units_px": "px/s",
-                "units_mm": "mm/s",
                 "flat_speed_px_array": f"../../../{flat_px_key}",
-                "flat_speed_mm_array": f"../../../{flat_mm_key}",
                 "time_delta_array": "../../../delta_seconds",
                 "derivative_method": str(derivative.get("derivative_method", "first_difference")),
                 "post_smoothing_method": str(derivative.get("post_smoothing_method", "moving_average")),
                 "post_smoothing_alignment": str(derivative.get("post_smoothing_alignment", "centered")),
                 "post_smoothing_window_frames": int(derivative.get("post_smoothing_window_frames", 1)),
                 "post_smoothing_window_s": float(derivative.get("post_smoothing_window_s", 0.0)),
-            }
-        )
+        }
+        if include_physical:
+            level_attrs.update(
+                {
+                    "units_mm": "mm/s",
+                    "flat_speed_mm_array": f"../../../{flat_mm_key}",
+                }
+            )
+        level_group.attrs.update(level_attrs)
         level_group.create_array("px", data=data[flat_px_key], chunks=chunks, overwrite=True)
-        level_group.create_array("mm", data=data[flat_mm_key], chunks=chunks, overwrite=True)
+        if include_physical:
+            level_group.create_array(
+                "mm",
+                data=data[flat_mm_key],
+                chunks=chunks,
+                overwrite=True,
+            )
         level_group.create_array(
             "acceleration_px",
             data=_float32(np.asarray(derivative["acceleration_px"])),
-            chunks=chunks,
-            overwrite=True,
-        )
-        level_group.create_array(
-            "acceleration_mm",
-            data=_float32(np.asarray(derivative["acceleration_mm"])),
             chunks=chunks,
             overwrite=True,
         )
@@ -1901,30 +3360,40 @@ def _write_movement_speed_groups(
             chunks=chunks,
             overwrite=True,
         )
-        level_group.create_array(
-            "smoothed_acceleration_mm",
-            data=_float32(np.asarray(derivative["smoothed_acceleration_mm"])),
-            chunks=chunks,
-            overwrite=True,
-        )
+        if include_physical:
+            level_group.create_array(
+                "acceleration_mm",
+                data=_float32(np.asarray(derivative["acceleration_mm"])),
+                chunks=chunks,
+                overwrite=True,
+            )
+            level_group.create_array(
+                "smoothed_acceleration_mm",
+                data=_float32(np.asarray(derivative["smoothed_acceleration_mm"])),
+                chunks=chunks,
+                overwrite=True,
+            )
 
         path_keys = path_distance_by_level.get(source_level)
         if path_keys is not None:
             path_px_key, path_mm_key = path_keys
             level_group.attrs["flat_frame_path_distance_px_array"] = f"../../../{path_px_key}"
-            level_group.attrs["flat_frame_path_distance_mm_array"] = f"../../../{path_mm_key}"
             level_group.create_array(
                 "frame_path_distance_px",
                 data=data[path_px_key],
                 chunks=chunks,
                 overwrite=True,
             )
-            level_group.create_array(
-                "frame_path_distance_mm",
-                data=data[path_mm_key],
-                chunks=chunks,
-                overwrite=True,
-            )
+            if include_physical:
+                level_group.attrs["flat_frame_path_distance_mm_array"] = (
+                    f"../../../{path_mm_key}"
+                )
+                level_group.create_array(
+                    "frame_path_distance_mm",
+                    data=data[path_mm_key],
+                    chunks=chunks,
+                    overwrite=True,
+                )
 
 
 def _write_speed_derivative_groups(
@@ -1932,21 +3401,28 @@ def _write_speed_derivative_groups(
     derivatives: Dict[str, Dict[str, Any]],
     *,
     chunks: Tuple[int, ...],
+    include_physical: bool,
 ) -> None:
     """Write speed-derived acceleration arrays grouped by source speed level."""
 
     parent = track_group.create_group("speed_derivatives")
+    compatibility_aliases = {
+        "acceleration_px": f"speed_derivatives/{DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL}/acceleration_px",
+        "smoothed_acceleration_px": f"speed_derivatives/{DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL}/smoothed_acceleration_px",
+    }
+    if include_physical:
+        compatibility_aliases.update(
+            {
+                "acceleration_mm": f"speed_derivatives/{DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL}/acceleration_mm",
+                "smoothed_acceleration_mm": f"speed_derivatives/{DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL}/smoothed_acceleration_mm",
+            }
+        )
     parent.attrs.update(
         {
             "schema_id": SPEED_DERIVATIVES_SCHEMA_ID,
             "speed_levels": list(SPEED_DERIVATIVE_LEVELS),
             "default_source_speed_level": DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL,
-            "compatibility_alias_arrays": {
-                "acceleration_px": f"speed_derivatives/{DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL}/acceleration_px",
-                "acceleration_mm": f"speed_derivatives/{DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL}/acceleration_mm",
-                "smoothed_acceleration_px": f"speed_derivatives/{DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL}/smoothed_acceleration_px",
-                "smoothed_acceleration_mm": f"speed_derivatives/{DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL}/smoothed_acceleration_mm",
-            },
+            "compatibility_alias_arrays": compatibility_aliases,
         }
     )
 
@@ -1956,12 +3432,10 @@ def _write_speed_derivative_groups(
 
         level_group = parent.create_group(level)
         item = derivatives[level]
-        level_group.attrs.update(
-            {
+        level_attrs: Dict[str, Any] = {
                 "schema_id": SPEED_DERIVATIVE_SCHEMA_ID,
                 "source_speed_level": level,
                 "source_speed_px_array": f"../../{level}_px",
-                "source_speed_mm_array": f"../../{level}_mm",
                 "time_delta_array": "../../delta_seconds",
                 "derivative_method": str(item.get("derivative_method", "first_difference")),
                 "post_smoothing_method": str(item.get("post_smoothing_method", "moving_average")),
@@ -1973,17 +3447,13 @@ def _write_speed_derivative_groups(
                     "Use this group, not the legacy flat acceleration arrays, when "
                     "the source speed semantics matter."
                 ),
-            }
-        )
+        }
+        if include_physical:
+            level_attrs["source_speed_mm_array"] = f"../../{level}_mm"
+        level_group.attrs.update(level_attrs)
         level_group.create_array(
             "acceleration_px",
             data=_float32(np.asarray(item["acceleration_px"])),
-            chunks=chunks,
-            overwrite=True,
-        )
-        level_group.create_array(
-            "acceleration_mm",
-            data=_float32(np.asarray(item["acceleration_mm"])),
             chunks=chunks,
             overwrite=True,
         )
@@ -1993,12 +3463,19 @@ def _write_speed_derivative_groups(
             chunks=chunks,
             overwrite=True,
         )
-        level_group.create_array(
-            "smoothed_acceleration_mm",
-            data=_float32(np.asarray(item["smoothed_acceleration_mm"])),
-            chunks=chunks,
-            overwrite=True,
-        )
+        if include_physical:
+            level_group.create_array(
+                "acceleration_mm",
+                data=_float32(np.asarray(item["acceleration_mm"])),
+                chunks=chunks,
+                overwrite=True,
+            )
+            level_group.create_array(
+                "smoothed_acceleration_mm",
+                data=_float32(np.asarray(item["smoothed_acceleration_mm"])),
+                chunks=chunks,
+                overwrite=True,
+            )
 
 
 def _write_run_array(group: zarr.Group, name: str, data: np.ndarray) -> None:
@@ -2480,6 +3957,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         ),
     )
     parser.add_argument(
+        "--_unbound-coordinate-stage",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--keypoint-run",
         help="Keypoint run to use. Prefix with 'refined/' to target a refined run. Default: latest refined if available.",
     )
@@ -2625,6 +4107,19 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     separate_output = output_path != source_path
     if args.no_write and separate_output:
         raise ValueError("--no-write cannot be combined with --output-zarr-path.")
+    deferred_coordinate_stage = bool(args._unbound_coordinate_stage)
+    if deferred_coordinate_stage and (
+        not separate_output
+        or args.no_write
+        or not args.offline_only
+        or args.online_only
+        or not args.keypoint_run
+        or not args.offline_run_name
+    ):
+        raise ValueError(
+            "Internal unbound coordinate staging requires one separate output "
+            "archive, --offline-only, --keypoint-run, and --offline-run-name."
+        )
     root = open_zarr_root(
         source_path,
         mode="r" if args.no_write or separate_output else "a",
@@ -2632,6 +4127,20 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     output_root = (
         open_zarr_root(output_path, mode="a") if separate_output else root
     )
+
+    output_acquisition_frame = None
+    if not args.no_write and not deferred_coordinate_stage:
+        try:
+            _, output_acquisition_frame = (
+                load_persisted_acquisition_camera_authority(output_root)
+            )
+        except PixelFrameAuthorityError as exc:
+            raise ValueError(
+                "Canonical track publication requires a persisted acquisition-camera "
+                "authority in the exact output archive. Historical archives must be "
+                "classified and migrated explicitly; track kinematics will not infer "
+                "frame identity from dimensions or row counts."
+            ) from exc
 
     render_online = not args.offline_only
     render_offline = not args.online_only
@@ -2647,13 +4156,17 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     pixel_to_mm, calibration_info = resolve_calibration(root)
 
     if render_online:
-        # Online track kinematics: prefer refined positions, fall back to raw if unavailable
-        # Try to use refined online positions by default
+        # Online track kinematics prefers the sealed refined surface and otherwise
+        # selects an exact row subset from the sealed stimulus point surface.
         use_refined_online = False
         refined_run_name = None
-        refined_positions_px_descriptor: CoordinateDescriptor | None = None
-        refined_positions_px_source_path: str | None = None
-        refined_positions_px_descriptor_sha256: str | None = None
+        online_positions_px_source: BoundCanonicalCoordinateDescriptor | None = None
+        online_positions_px_source_path: str | None = None
+        online_positions_px_descriptor_sha256: str | None = None
+        online_source_row_index: np.ndarray | None = None
+        online_source_temporal_authority = None
+        raw_online_rowset: zarr.Group | None = None
+        handoff: CanonicalOnlineCoordinateHandoff | None = None
 
         # Check for refined online data (use by default if available)
         if "refined_online_runs" in root:
@@ -2671,46 +4184,54 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 refined_group = refined_runs[refined_run_name]
                 console.print(f"[cyan]Using refined online run:[/cyan] {refined_run_name}")
 
-                # Load refined positions from interpolated group (final refined data)
+                from fisheye.refinement.refine_online_detect import (
+                    load_bound_refined_online_coordinate_evidence,
+                )
+
+                refined_evidence = load_bound_refined_online_coordinate_evidence(
+                    root,
+                    refined_group,
+                    require_complete=True,
+                )
+                refined_evidence.assert_verified()
                 interp_grp = refined_group["interpolated"]
-                positions_refined_array = interp_grp["positions_px"]
-                refined_positions_px_descriptor = (
-                    load_positions_px_coordinate_descriptor(
-                        positions_refined_array
-                    )
+                online_positions_px_source = refined_evidence.descriptor_for(
+                    "interpolated"
                 )
-                refined_positions_px_source_path = (
-                    f"refined_online_runs/{refined_run_name}/"
-                    "interpolated/positions_px"
+                positions_refined_array = online_positions_px_source.coordinate_node
+                online_positions_px_source_path = positions_refined_array.path
+                online_positions_px_descriptor_sha256 = (
+                    online_positions_px_source.descriptor.digest()
                 )
-                refined_positions_px_descriptor_sha256 = (
-                    refined_positions_px_descriptor.digest()
+                frames_all = np.array(
+                    refined_evidence.source_acquisition_frame_index,
+                    copy=True,
                 )
-                frames_all = interp_grp["camera_frame_ids"][:]
-                positions_refined = positions_refined_array[:]
+                positions_refined = np.array(
+                    positions_refined_array[:],
+                    copy=True,
+                    order="C",
+                )
                 valid_mask_refined = interp_grp["valid_mask"][:]
+                online_source_row_index = np.arange(
+                    positions_refined.shape[0],
+                    dtype=np.int64,
+                )
+                online_source_temporal_authority = (
+                    refined_evidence.source_temporal_authority
+                )
 
                 # Get source stimulus run for provenance
                 stimulus_run_name = refined_group.attrs.get("source_stimulus_run")
-                texture_to_camera_scale = refined_group.attrs.get("texture_to_camera_scale", 1.0)
+                texture_to_camera_scale = None
 
-                # The selected positions array owns coordinate authority. The
-                # refined run's historical coordinate_space attr is only a
-                # compatibility mirror and cannot override this descriptor.
-                coordinate_space = refined_positions_px_descriptor.space_id
-                pixels_per_mm_projector = refined_group.attrs.get("pixels_per_mm_projector")
+                coordinate_space = online_positions_px_source.descriptor.space_id
+                # A numeric projector scale alone does not define a physical
+                # frame for arena-relative/canvas coordinates.  Preserve px
+                # coordinates and fail closed on physical publication until a
+                # sealed direction-labelled physical authority exists.
+                pixel_to_mm_online = None
 
-                pixel_to_mm_online = resolve_mm_per_pixel_for_coordinate_space(
-                    coordinate_space,
-                    camera_mm_per_pixel=pixel_to_mm,
-                    pixels_per_mm_projector=pixels_per_mm_projector,
-                )
-                console.print(
-                    "[cyan]Using coordinate-specific calibration:[/cyan] "
-                    f"{pixel_to_mm_online:.6f} mm/pixel ({coordinate_space})"
-                )
-
-                # Use refined positions (in texture space for accurate distance calculations)
                 positions_online = positions_refined
                 use_refined_online = True
 
@@ -2724,78 +4245,70 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             console.print("[yellow]Note:[/yellow] No refined_online_runs found; using raw online data.")
 
         if not use_refined_online:
-            console.print("[blue]Building online track kinematics run from stimulus_runs (H5-imported data)...[/blue]")
+            console.print(
+                "[blue]Building online track kinematics directly from the "
+                "canonical stimulus coordinate surface...[/blue]"
+            )
 
-            # For raw online data, use camera calibration (positions will be transformed to camera space)
-            pixel_to_mm_online = pixel_to_mm
+            pixel_to_mm_online = None
 
             try:
-                bundle = load_chaser_metrics(
-                    args.zarr_path,
-                    stimulus_run=args.stimulus_run,
-                    metrics_run=None,  # Online uses chaser positions from stimulus_runs, not metrics
-                    chaser_index=args.chaser_index,
+                analysis_group = root["analysis"]
+                stimulus_runs = analysis_group["stimulus_runs"]
+                stimulus_run_name = args.stimulus_run or stimulus_runs.attrs.get(
+                    "latest_complete"
+                )
+                if (
+                    not isinstance(stimulus_run_name, str)
+                    or stimulus_run_name not in stimulus_runs
+                ):
+                    raise ValueError(
+                        "No exact complete canonical stimulus run is selected."
+                    )
+                stimulus_group = stimulus_runs[stimulus_run_name]
+                raw_online_rowset = stimulus_group["tracking_data/chaser_states"]
+                _, _, handoff = load_canonical_online_coordinate_surface(
+                    root,
+                    stimulus_group,
+                    raw_online_rowset,
                 )
             except Exception as exc:
                 console.print(f"[yellow]Warning:[/yellow] Unable to load stimulus run data ({exc}).")
                 console.print("[yellow]Skipping online track kinematics run.[/yellow]")
                 render_online = False
 
+            if render_online:
+                if handoff is None:
+                    raise ValueError(
+                        "Canonical online track publication requires the exact "
+                        "stimulus coordinate handoff."
+                    )
+                online_positions_px_source = (
+                    require_bound_canonical_coordinate_descriptor(
+                        handoff.coordinate_descriptor
+                    )
+                )
+                (
+                    online_source_row_index,
+                    frames_all,
+                    positions_online,
+                ) = select_canonical_online_track_rows(
+                    handoff,
+                    chaser_index=args.chaser_index,
+                )
+                online_source_temporal_authority = handoff.source_temporal_authority
+                online_positions_px_source_path = (
+                    online_positions_px_source.coordinate_node.path
+                )
+                online_positions_px_descriptor_sha256 = (
+                    online_positions_px_source.descriptor.digest()
+                )
+                coordinate_space = online_positions_px_source.descriptor.space_id
+
         if render_online and not use_refined_online:
-            frames_all = np.asarray(bundle.camera_frame_ids, dtype=np.int64)
-
-            # Use online target positions (fish/target from H5) for movement tracking
-            # These are logged for ALL trial states: PRE, TRAINING, and POST
-            target_positions_x = bundle.online.get("target_pos_x")
-            target_positions_y = bundle.online.get("target_pos_y")
-
-            if target_positions_x is None or target_positions_y is None:
-                console.print("[yellow]Warning:[/yellow] No target position data in stimulus run; skipping online track kinematics.")
-                render_online = False
-            else:
-                target_pos_x = np.asarray(target_positions_x, dtype=np.float64)
-                target_pos_y = np.asarray(target_positions_y, dtype=np.float64)
-
-                # Transform online positions from texture space to camera space
-                # Online target positions are in texture/arena space (358x358) but need to be
-                # in camera space (4512x4512) to match offline positions and get correct distances
-                texture_to_camera_scale = 1.0  # default: no transformation
-                stimulus_run_name = bundle.provenance.get("stimulus_run")
-                if stimulus_run_name:
-                    try:
-                        import json
-                        analysis_group = root.get("analysis")
-                        stimulus_parent = (
-                            analysis_group.get("stimulus_runs") if analysis_group is not None else None
-                        )
-                        if stimulus_parent is not None and stimulus_run_name in stimulus_parent:
-                            stim_group = stimulus_parent[stimulus_run_name]
-                            coord_transform_raw = stim_group.attrs.get("coordinate_transform")
-
-                            # Parse JSON string to dict if needed
-                            coord_transform = None
-                            if isinstance(coord_transform_raw, str):
-                                try:
-                                    coord_transform = json.loads(coord_transform_raw)
-                                except json.JSONDecodeError:
-                                    console.print("[yellow]Warning:[/yellow] coordinate_transform is not valid JSON.")
-                            elif isinstance(coord_transform_raw, dict):
-                                coord_transform = coord_transform_raw
-
-                            if coord_transform and "texture_to_camera_scale" in coord_transform:
-                                texture_to_camera_scale = float(coord_transform["texture_to_camera_scale"])
-                                console.print(f"[cyan]Applying coordinate transformation:[/cyan] texture_to_camera_scale = {texture_to_camera_scale:.6f}")
-                            else:
-                                console.print("[yellow]Warning:[/yellow] No coordinate_transform/texture_to_camera_scale found in stimulus run; using raw positions.")
-                    except Exception as exc:
-                        console.print(f"[yellow]Warning:[/yellow] Failed to load coordinate transformation: {exc}")
-
-                # Apply transformation
-                target_pos_x = target_pos_x * texture_to_camera_scale
-                target_pos_y = target_pos_y * texture_to_camera_scale
-
-                # Create position array - includes PRE, TRAINING, and POST periods
-                positions_online = np.column_stack([target_pos_x, target_pos_y])
+            # Scalar texture/canvas ratios are not calibration or transform
+            # authority. The exact native stimulus coordinates remain unchanged.
+            texture_to_camera_scale = None
 
         if render_online:
             # Get heading from online fields if available, otherwise NaN
@@ -2803,9 +4316,19 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 # Refined data doesn't have heading, use NaN
                 heading_online = np.full(frames_all.shape, np.nan, dtype=np.float64)
             else:
-                heading_online = bundle.online.get("visual_angle_deg")
-                if heading_online is not None:
-                    heading_online = np.asarray(heading_online, dtype=np.float64)
+                assert raw_online_rowset is not None
+                heading_node = raw_online_rowset.get("visual_angle_deg")
+                if heading_node is not None:
+                    heading_values = np.asarray(heading_node[:], dtype=np.float64)
+                    assert online_source_row_index is not None
+                    if heading_values.shape != (
+                        online_positions_px_source.row_identity.leading_dimension,
+                    ):
+                        raise ValueError(
+                            "Stimulus visual_angle_deg is not aligned to the exact "
+                            "coordinate row identity."
+                        )
+                    heading_online = heading_values[online_source_row_index]
                 else:
                     heading_online = np.full(frames_all.shape, np.nan, dtype=np.float64)
 
@@ -2832,6 +4355,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 smoothing_method=args.smoothing_method,
                 smoothing_alignment=args.smoothing_alignment,
                 savgol_polyorder=args.savgol_polyorder,
+                source_row_index=(
+                    online_source_row_index
+                ),
+                source_temporal_authority=online_source_temporal_authority,
             )
 
             if not summaries_online:
@@ -2842,6 +4369,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 if args.no_write:
                     console.print("[green]Skipping online write (--no-write).[/green]")
                 else:
+                    if online_positions_px_source is None:
+                        raise ValueError(
+                            "Canonical online track publication lacks a sealed "
+                            "positions source."
+                        )
                     run_name, run_group = ensure_track_kinematics_run_group(
                         output_root, args.run_name, run_type="online"
                     )
@@ -2849,11 +4381,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         run_group,
                         tracks_online,
                         summaries_online,
-                        positions_px_descriptor=(
-                            refined_positions_px_descriptor
-                            if use_refined_online
-                            else None
+                        source_temporal_authority=(
+                            online_source_temporal_authority
                         ),
+                        positions_px_source=online_positions_px_source,
                     )
 
                     created_at = datetime.now(timezone.utc).isoformat()
@@ -2867,9 +4398,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             "refined_online_run": refined_run_name,
                             "stimulus_run": stimulus_run_name,
                             "chaser_index": args.chaser_index,
-                            "positions_px_source_path": refined_positions_px_source_path,
+                            "positions_px_source_path": online_positions_px_source_path,
                             "positions_px_coordinate_descriptor_sha256": (
-                                refined_positions_px_descriptor_sha256
+                                online_positions_px_descriptor_sha256
                             ),
                         }
                         method = "track_kinematics_online_refined"
@@ -2878,13 +4409,16 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         saved_pixel_to_mm = pixel_to_mm_online
                     else:
                         inputs = {
-                            "stimulus_run": bundle.provenance.get("stimulus_run"),
-                            "chaser_index": int(bundle.provenance.get("chaser_index", args.chaser_index)),
+                            "stimulus_run": stimulus_run_name,
+                            "chaser_index": int(args.chaser_index),
+                            "positions_px_source_path": online_positions_px_source_path,
+                            "positions_px_coordinate_descriptor_sha256": (
+                                online_positions_px_descriptor_sha256
+                            ),
                         }
                         method = "track_kinematics_online"
-                        # For raw online data, positions are transformed to camera space
-                        saved_coordinate_space = "camera" if texture_to_camera_scale != 1.0 else "texture"
-                        saved_pixel_to_mm = pixel_to_mm
+                        saved_coordinate_space = coordinate_space
+                        saved_pixel_to_mm = None
 
                     # Canonical stage provenance.
                     online_params = {
@@ -2935,18 +4469,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             "inputs": inputs,
                             "texture_to_camera_scale": texture_to_camera_scale,
                             "coordinate_space": saved_coordinate_space,
-                            **(
-                                {
-                                    "positions_px_source_path": refined_positions_px_source_path,
-                                    "positions_px_source_coordinate_descriptor_sha256": (
-                                        refined_positions_px_descriptor_sha256
-                                    ),
-                                    "positions_mm_coordinate_descriptor_status": (
-                                        POSITIONS_MM_COORDINATE_DESCRIPTOR_GAP
-                                    ),
-                                }
-                                if use_refined_online
-                                else {}
+                            "positions_px_source_path": online_positions_px_source_path,
+                            "positions_px_source_coordinate_descriptor_sha256": (
+                                online_positions_px_descriptor_sha256
+                            ),
+                            "positions_mm_coordinate_descriptor_status": (
+                                POSITIONS_MM_COORDINATE_DESCRIPTOR_GAP
                             ),
                             "summary": summaries_online,
                             "num_tracks": len(ordered_track_ids),
@@ -2976,8 +4504,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         console.print("[blue]Building offline track kinematics run from all keypoint frames...[/blue]")
 
         keypoints_offline = resolve_keypoint_group(root, args.keypoint_run, console)
-        kp_parent_name = "refined_keypoints_runs" if keypoints_offline.is_refined else "keypoints_runs"
-
         crop_group_offline = root[f"crop_runs/{keypoints_offline.crop_run}"]
         detection_path_offline = crop_group_offline.attrs.get("source_coords_path")
         crop_row_source_label = _crop_row_source_label(crop_group_offline.attrs)
@@ -2993,7 +4519,13 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             )
             detection_offline = preferred_detection_offline
         else:
-            if "bbox_norm_coords" not in crop_group_offline or "frame_indices" not in crop_group_offline:
+            if (
+                "frame_indices" not in crop_group_offline
+                or (
+                    "bbox_img_xyxy" not in crop_group_offline
+                    and "bbox_norm_coords" not in crop_group_offline
+                )
+            ):
                 raise ValueError(
                     f"Crop run '{keypoints_offline.crop_run}' missing 'source_coords_path'; cannot determine detection source."
                 )
@@ -3009,29 +4541,39 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             )
             detection_offline = None
 
-        position_source_offline = load_offline_position_source(
+        position_source_offline = load_canonical_offline_position_source(
+            root,
             crop_group_offline,
             crop_run_name=keypoints_offline.crop_run,
-            detection=detection_offline,
-            root=root,
         )
-        bbox_norm_offline = position_source_offline.bbox_norm_coords
+        positions_offline = position_source_offline.positions_px
         frame_indices_offline = position_source_offline.frame_indices
         detection_source_offline = position_source_offline.detection_source
+        canonical_position_surface = position_source_offline.position_surface
+        if canonical_position_surface is None:
+            raise ValueError(
+                "Canonical offline track publication requires a sealed source-camera "
+                "position surface."
+            )
+        offline_source_temporal_authority = (
+            canonical_position_surface.temporal_authority
+            if not args.no_write
+            else None
+        )
 
         heading_offline = keypoints_offline.group["heading"][:]
-        if heading_offline.shape[0] != bbox_norm_offline.shape[0]:
+        if heading_offline.shape[0] != positions_offline.shape[0]:
             raise ValueError(
                 "Offline: Heading array length does not match position source row count "
                 f"(heading={heading_offline.shape[0]}, "
-                f"position_source={bbox_norm_offline.shape[0]}, "
+                f"position_source={positions_offline.shape[0]}, "
                 f"position_source_path={position_source_offline.path})."
             )
-        if frame_indices_offline.shape[0] != bbox_norm_offline.shape[0]:
+        if frame_indices_offline.shape[0] != positions_offline.shape[0]:
             raise ValueError(
                 "Offline: Frame-index array length does not match position source row count "
                 f"(frame_indices={frame_indices_offline.shape[0]}, "
-                f"position_source={bbox_norm_offline.shape[0]}, "
+                f"position_source={positions_offline.shape[0]}, "
                 f"position_source_path={position_source_offline.path})."
             )
 
@@ -3041,11 +4583,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 expected_length=heading_offline.shape[0],
             )
         )
-
-        width_offline, height_offline = resolve_dimensions(root)
-        positions_offline = np.empty((bbox_norm_offline.shape[0], 2), dtype=np.float64)
-        positions_offline[:, 0] = bbox_norm_offline[:, 0] * width_offline
-        positions_offline[:, 1] = bbox_norm_offline[:, 1] * height_offline
 
         if detection_offline is not None:
             expected_detect_run = (
@@ -3072,17 +4609,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             return_metadata=True,
         )
         track_ids_offline = track_ids_offline.astype(np.int64, copy=False)
-        instance_key_offline = position_source_offline.instance_key
-        if instance_key_offline is not None:
-            instance_key_offline = np.asarray(
-                instance_key_offline,
-                dtype=np.uint64,
-            ).reshape(-1)
-            if instance_key_offline.shape[0] != track_ids_offline.shape[0]:
-                raise ValueError(
-                    "Offline: instance_key length does not match the selected "
-                    "position-source row count."
-                )
         track_id_to_arena_id = {
             int(track_id): int(arena_id)
             for track_id, arena_id in (
@@ -3101,6 +4627,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 if args.include_unassigned
                 else track_ids_offline >= 0
             )
+            source_row_index_offline = np.flatnonzero(public_row_mask).astype(
+                np.int64,
+                copy=False,
+            )
             (
                 track_ids_offline,
                 frame_indices_offline,
@@ -3117,8 +4647,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 detection_source=detection_source_offline,
                 include_unassigned=args.include_unassigned,
             )
-            if instance_key_offline is not None:
-                instance_key_offline = instance_key_offline[public_row_mask]
             if frame_indices_offline.size == 0:
                 console.print(
                     "[yellow]Warning:[/yellow] All offline detections are unassigned; skipping public offline track kinematics run."
@@ -3150,7 +4678,14 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                     smoothing_method=args.smoothing_method,
                     smoothing_alignment=args.smoothing_alignment,
                     savgol_polyorder=args.savgol_polyorder,
-                    instance_key=instance_key_offline,
+                    source_row_index=(
+                        source_row_index_offline
+                        if offline_source_temporal_authority is not None
+                        else None
+                    ),
+                    source_temporal_authority=(
+                        offline_source_temporal_authority
+                    ),
                 )
 
                 if not summaries_offline:
@@ -3180,23 +4715,41 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             offline_group,
                             tracks_offline,
                             summaries_offline,
+                            source_temporal_authority=(
+                                offline_source_temporal_authority
+                            ),
+                            positions_px_source=canonical_position_surface.coordinates,
                             track_id_to_arena_id=track_id_to_arena_id,
+                            defer_coordinate_binding=deferred_coordinate_stage,
+                            staging_keypoint_run=(
+                                str(args.keypoint_run)
+                                if deferred_coordinate_stage
+                                else None
+                            ),
+                            staging_run_name=(
+                                offline_run_name
+                                if deferred_coordinate_stage
+                                else None
+                            ),
                         )
 
                         metrics_metadata: Optional[Dict[str, object]] = None
                         swim_bout_mirror: Optional[str] = None
-                        try:
-                            chaser_bundle = load_chaser_metrics(
-                                args.zarr_path,
-                                stimulus_run=args.stimulus_run,
-                                metrics_run=args.metrics_run,
-                                chaser_index=args.chaser_index,
-                            )
-                        except Exception as exc:
-                            console.print(
-                                f"[yellow]Warning:[/yellow] Failed to load chaser metrics for offline run: {exc}"
-                            )
+                        if deferred_coordinate_stage:
                             chaser_bundle = None
+                        else:
+                            try:
+                                chaser_bundle = load_chaser_metrics(
+                                    args.zarr_path,
+                                    stimulus_run=args.stimulus_run,
+                                    metrics_run=args.metrics_run,
+                                    chaser_index=args.chaser_index,
+                                )
+                            except Exception as exc:
+                                console.print(
+                                    f"[yellow]Warning:[/yellow] Failed to load chaser metrics for offline run: {exc}"
+                                )
+                                chaser_bundle = None
 
                         if chaser_bundle is not None:
                             has_offline = chaser_bundle.offline.get("has_offline")
@@ -3220,19 +4773,20 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                                     "skipping shared metrics write."
                                 )
 
-                        try:
-                            swim_bout_mirror = _mirror_swim_bouts_to_tracks(
-                                root,
-                                offline_group,
-                                ordered_ids_offline,
-                                args.swim_bout_run,
-                                console,
-                                expected_track_kinematics_run=offline_run_name,
-                            )
-                        except Exception as exc:
-                            console.print(
-                                f"[yellow]Warning:[/yellow] Failed to mirror swim bouts: {exc}"
-                            )
+                        if not deferred_coordinate_stage:
+                            try:
+                                swim_bout_mirror = _mirror_swim_bouts_to_tracks(
+                                    root,
+                                    offline_group,
+                                    ordered_ids_offline,
+                                    args.swim_bout_run,
+                                    console,
+                                    expected_track_kinematics_run=offline_run_name,
+                                )
+                            except Exception as exc:
+                                console.print(
+                                    f"[yellow]Warning:[/yellow] Failed to mirror swim bouts: {exc}"
+                                )
 
                         created_at = datetime.now(timezone.utc).isoformat()
 
@@ -3263,6 +4817,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             ),
                             "position_source_path": position_source_offline.path,
                             "position_source_kind": position_source_offline.kind,
+                            "position_geometry_path": (
+                                position_source_offline.geometry_path
+                            ),
                             "keypoint_run": keypoints_offline.run_name,
                             "keypoint_variant": "refined" if keypoints_offline.is_refined else "raw",
                             "base_keypoint_run": keypoints_offline.base_run_name,
@@ -3360,11 +4917,14 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 __all__ = [
     "TrackSpeeds",
     "_ordered_track_arena_ids",
+    "bind_staged_offline_track_kinematics_run",
     "compute_track_speed",
     "find_fps",
     "_filter_public_track_rows",
     "load_arena_ids",
     "resolve_dimensions",
+    "stage_offline_track_kinematics_run",
+    "validate_bound_offline_track_kinematics_run",
     "main",
 ]
 

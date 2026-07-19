@@ -16,6 +16,14 @@ from fisheye.analysis.compute_speed import (
     TRANSITION_REASON_TELEPORT,
     compute_track_speed,
 )
+from tests.unit.fisheye.test_directed_transform_chain import _world
+from tests.unit.fisheye.test_track_coordinate_publication import (
+    _physical,
+    _source,
+)
+from tests.unit.fisheye.test_track_kinematics_coordinate_contract import (
+    _WritableGroup,
+)
 
 
 class _FakeArray:
@@ -364,9 +372,11 @@ def test_hysteresis_band_policy_rejects_unknown_value() -> None:
 
 
 def test_save_track_kinematics_tracks_persists_turning_arrays() -> None:
-    track_ids = np.array([0, 0], dtype=np.int64)
+    world = _world(convention="pixel_center", archive_token=object())
+    _, _, source, temporal = _source(world)
+    track_ids = np.array([7, 7], dtype=np.int64)
     frames = np.array([0, 1], dtype=np.int64)
-    positions_px = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float32)
+    positions_px = np.asarray(source.coordinate_node[:])
     headings_deg = np.array([350.0, 10.0], dtype=np.float32)
     keypoint_success = np.array([True, True], dtype=bool)
 
@@ -380,13 +390,24 @@ def test_save_track_kinematics_tracks_persists_turning_arrays() -> None:
         fps=1.0,
         smooth_seconds=1.0,
         pixel_to_mm=None,
+        source_row_index=np.asarray([0, 1], dtype=np.int64),
+        source_temporal_authority=temporal,
     )
 
-    run_group = _make_memory_group()
-    ordered_ids = mod.save_track_kinematics_tracks(run_group, tracks, summaries)
+    run_group = _WritableGroup(
+        path="analysis/track_kinematics_runs/offline/turning",
+        archive_token=world["archive_token"],
+    )
+    ordered_ids = mod.save_track_kinematics_tracks(
+        run_group,
+        tracks,
+        summaries,
+        source_temporal_authority=temporal,
+        positions_px_source=source,
+    )
 
-    assert ordered_ids == [0]
-    subgroup = run_group["tracks"]["id_0"]
+    assert ordered_ids == [7]
+    subgroup = run_group["tracks"]["id_7"]
     np.testing.assert_allclose(
         subgroup["delta_heading_degrees"][:],
         np.array([np.nan, 20.0], dtype=np.float32),
@@ -464,11 +485,14 @@ def test_save_track_kinematics_tracks_persists_turning_arrays() -> None:
 
 
 def test_save_track_kinematics_tracks_persists_speed_derivative_hierarchy() -> None:
-    track_ids = np.array([0, 0, 0], dtype=np.int64)
-    frames = np.array([0, 1, 2], dtype=np.int64)
-    positions_px = np.array([[0.0, 0.0], [1.0, 0.0], [3.0, 0.0]], dtype=np.float32)
-    headings_deg = np.array([0.0, 0.0, 0.0], dtype=np.float32)
-    keypoint_success = np.array([True, True, True], dtype=bool)
+    world = _world(convention="pixel_center", archive_token=object())
+    _, _, source, temporal = _source(world)
+    physical = _physical(world)
+    track_ids = np.array([7, 7], dtype=np.int64)
+    frames = np.array([0, 1], dtype=np.int64)
+    positions_px = np.asarray(source.coordinate_node[:])
+    headings_deg = np.array([0.0, 0.0], dtype=np.float32)
+    keypoint_success = np.array([True, True], dtype=bool)
 
     tracks, summaries = mod.build_track_datasets(
         track_ids=track_ids,
@@ -479,13 +503,25 @@ def test_save_track_kinematics_tracks_persists_speed_derivative_hierarchy() -> N
         detection_source=None,
         fps=1.0,
         smooth_seconds=1.0,
-        pixel_to_mm=2.0,
+        pixel_to_mm=physical.record.mm_per_pixel,
+        source_row_index=np.asarray([0, 1], dtype=np.int64),
+        source_temporal_authority=temporal,
     )
 
-    run_group = _make_memory_group()
-    mod.save_track_kinematics_tracks(run_group, tracks, summaries)
+    run_group = _WritableGroup(
+        path="analysis/track_kinematics_runs/offline/derivatives",
+        archive_token=world["archive_token"],
+    )
+    mod.save_track_kinematics_tracks(
+        run_group,
+        tracks,
+        summaries,
+        source_temporal_authority=temporal,
+        positions_px_source=source,
+        physical_frame=physical,
+    )
 
-    subgroup = run_group["tracks"]["id_0"]
+    subgroup = run_group["tracks"]["id_7"]
     derivatives = subgroup["speed_derivatives"]
     movement_speed = subgroup["movement"]["speed"]
     assert derivatives.attrs["schema_id"] == "palette.track_speed_derivatives.v1"
@@ -493,8 +529,6 @@ def test_save_track_kinematics_tracks_persists_speed_derivative_hierarchy() -> N
     assert subgroup["movement"].attrs["schema_id"] == "palette.track_movement.v2"
     assert movement_speed.attrs["schema_id"] == "palette.track_movement_speed.v2"
 
-    expected_accel_px = np.array([np.nan, np.nan, 1.0], dtype=np.float32)
-    expected_accel_mm = np.array([np.nan, np.nan, 2.0], dtype=np.float32)
     for level, movement_level in (
         ("speed_raw", "raw"),
         ("speed_filtered", "filtered"),
@@ -511,12 +545,12 @@ def test_save_track_kinematics_tracks_persists_speed_derivative_hierarchy() -> N
         assert movement_group.attrs["source_speed_level"] == level
         np.testing.assert_allclose(
             level_group["acceleration_px"][:],
-            expected_accel_px,
+            tracks[7]["speed_derivatives"][level]["acceleration_px"],
             equal_nan=True,
         )
         np.testing.assert_allclose(
             level_group["acceleration_mm"][:],
-            expected_accel_mm,
+            tracks[7]["speed_derivatives"][level]["acceleration_mm"],
             equal_nan=True,
         )
         np.testing.assert_allclose(

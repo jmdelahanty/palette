@@ -1,23 +1,28 @@
-"""Materialize track kinematics on node-local storage and publish atomically.
+"""Stage track kinematics locally and bind coordinates only after publication.
 
-The authoritative recording is opened read-only during computation.  The
-legacy track writer produces a completed local run, that run is copied into
-Zarr v3 indexed shards, and only then is it copied to a hidden sibling on the
-shared filesystem and atomically renamed into the canonical run family.
+The authoritative recording remains read-only during numerical computation.
+The writer emits an explicitly *unbound* node-local stage, which is copied into
+Zarr-v3 indexed shards and changed to a fail-closed publishing state.  Under the
+per-recording publication lock, the sharded run is renamed to its final path;
+only then may the track writer bind row identity, coordinate descriptors, and
+derivations against nodes in the authoritative archive.  Completion and latest
+pointers follow two fresh validations of that final-path binding.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
-import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+import numpy as np
 import zarr
 
 from ...analysis import track_kinematics as track_writer
@@ -28,8 +33,20 @@ from ...shared.zarr_sharded_copy import copy_completed_run_to_sharded
 from .atomic_run_publisher import AtomicRunPublishSpec, atomic_publish_run_group
 
 
-MATERIALIZATION_SCHEMA_ID = "palette.track_kinematics_materialization.v1"
-PUBLISH_SCHEMA_ID = "palette.track_kinematics_run_publish.v1"
+MATERIALIZATION_SCHEMA_ID = "palette.track_kinematics_materialization.v2"
+PUBLISH_SCHEMA_ID = "palette.track_kinematics_run_publish.v2"
+COORDINATE_BINDING_STATUS_ATTR = (
+    track_writer.TRACK_KINEMATICS_COORDINATE_BINDING_STATUS_ATTR
+)
+UNBOUND_STAGE_STATUS = track_writer.TRACK_KINEMATICS_UNBOUND_STAGE_STATUS
+PUBLISHING_BINDING_STATUS = (
+    track_writer.TRACK_KINEMATICS_PUBLISHING_BINDING_STATUS
+)
+BOUND_CANONICAL_STATUS = track_writer.TRACK_KINEMATICS_BOUND_CANONICAL_STATUS
+STAGING_MANIFEST_ATTR = track_writer.TRACK_KINEMATICS_STAGING_MANIFEST_ATTR
+STAGING_MANIFEST_DIGEST_ATTR = (
+    track_writer.TRACK_KINEMATICS_STAGING_MANIFEST_DIGEST_ATTR
+)
 DEFAULT_OUTPUT_SHARD_ROWS = 262_144
 MANAGED_WRITER_ARGUMENTS = {
     "--keypoint-run",
@@ -45,7 +62,7 @@ MANAGED_WRITER_ARGUMENTS = {
 class TrackKinematicsMaterializationPlan:
     source_zarr: Path
     scratch_root: Path
-    local_zarr: Path
+    staging_zarr: Path
     sharded_run: Path
     keypoint_run: str
     run_name: str
@@ -56,7 +73,7 @@ class TrackKinematicsMaterializationPlan:
     @property
     def local_run_path(self) -> Path:
         return (
-            self.local_zarr
+            self.staging_zarr
             / "analysis"
             / "track_kinematics_runs"
             / "offline"
@@ -78,7 +95,7 @@ class TrackKinematicsMaterializationPlan:
             "schema_id": MATERIALIZATION_SCHEMA_ID,
             "source_zarr": str(self.source_zarr),
             "scratch_root": str(self.scratch_root),
-            "local_zarr": str(self.local_zarr),
+            "staging_zarr": str(self.staging_zarr),
             "local_run_path": str(self.local_run_path),
             "sharded_run": str(self.sharded_run),
             "target_run_path": str(self.target_run_path),
@@ -142,7 +159,7 @@ def build_track_kinematics_materialization_plan(
     return TrackKinematicsMaterializationPlan(
         source_zarr=source,
         scratch_root=scratch,
-        local_zarr=scratch / "track-output.zarr",
+        staging_zarr=scratch / "track-staging.zarr",
         sharded_run=scratch / "track-run-sharded",
         keypoint_run=keypoints,
         run_name=name,
@@ -153,18 +170,167 @@ def build_track_kinematics_materialization_plan(
 
 
 def _iter_arrays(group: zarr.Group, prefix: str = ""):
-    for name, array in group.arrays():
+    for name, array in sorted(group.arrays(), key=lambda item: str(item[0])):
         yield f"{prefix}/{name}" if prefix else str(name), array
-    for name, child in group.groups():
+    for name, child in sorted(group.groups(), key=lambda item: str(item[0])):
         child_prefix = f"{prefix}/{name}" if prefix else str(name)
         yield from _iter_arrays(child, child_prefix)
 
 
-def _validate_track_run(path: Path, *, require_sharded: bool) -> dict[str, Any]:
+def _iter_nodes(group: zarr.Group, prefix: str = ""):
+    yield prefix, group
+    for name, array in sorted(group.arrays(), key=lambda item: str(item[0])):
+        yield f"{prefix}/{name}" if prefix else str(name), array
+    for name, child in sorted(group.groups(), key=lambda item: str(item[0])):
+        child_prefix = f"{prefix}/{name}" if prefix else str(name)
+        yield from _iter_nodes(child, child_prefix)
+
+
+_CANONICAL_PAYLOAD_LEAVES = frozenset(
+    {
+        "track_ids",
+        "track_arena_ids",
+        "frame_indices",
+        "track_sample_key",
+        "source_acquisition_frame_index",
+        "source_frame_interpolation",
+        "source_instance_key",
+        "source_row_index",
+        "positions_px",
+        "positions_mm",
+    }
+)
+
+
+def _contains_detached_coordinate_descriptor(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        if value.get("schema_id") == "palette.coordinate_descriptor":
+            return True
+        return any(
+            _contains_detached_coordinate_descriptor(item)
+            for item in value.values()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_contains_detached_coordinate_descriptor(item) for item in value)
+    return False
+
+
+def _canonical_binding_attr(name: str, value: Any) -> bool:
+    key = str(name)
+    return (
+        key in {
+            "coordinate_descriptor",
+            "coordinate_descriptor_sha256",
+            "coordinate_descriptors",
+            "track_position_derivation",
+            "track_position_derivation_sha256",
+            "track_sample_time_lineage",
+        }
+        or key.endswith("_coordinate_descriptor")
+        or key.endswith("_coordinate_descriptor_sha256")
+        or key.startswith("row_identity_")
+        or key.startswith("track_sample_time_lineage_")
+        or _contains_detached_coordinate_descriptor(value)
+    )
+
+
+def _canonical_mapping_sha256(value: Mapping[str, Any]) -> str:
+    payload = json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _decoded_array_record(array: zarr.Array) -> dict[str, Any]:
+    dtype = np.dtype(array.dtype)
+    if dtype.hasobject:
+        raise TypeError("object dtype has no stable decoded-byte contract")
+    shape = tuple(int(value) for value in array.shape)
+    digest = hashlib.sha256()
+    decoded_bytes = 0
+    if int(array.ndim) == 0:
+        blocks = (np.asarray(array[...]),)
+    else:
+        chunks = getattr(array, "chunks", None)
+        block_rows = (
+            max(1, int(chunks[0]))
+            if chunks is not None and len(chunks) >= 1
+            else max(1, shape[0])
+        )
+        trailing = (slice(None),) * (int(array.ndim) - 1)
+        blocks = (
+            np.asarray(array[(slice(start, min(start + block_rows, shape[0])), *trailing)])
+            for start in range(0, shape[0], block_rows)
+        )
+    for values in blocks:
+        if values.dtype != dtype:
+            raise TypeError("decoded dtype differs from declared array dtype")
+        contiguous = np.ascontiguousarray(values)
+        payload = contiguous.tobytes(order="C")
+        digest.update(payload)
+        decoded_bytes += len(payload)
+    return {
+        "dtype": np.lib.format.dtype_to_descr(dtype),
+        "shape": list(shape),
+        "decoded_bytes": int(decoded_bytes),
+        "decoded_sha256": digest.hexdigest(),
+    }
+
+
+def _decoded_contract_payloads(group: zarr.Group) -> dict[str, Any]:
+    arrays: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+    for path, array in _iter_arrays(group):
+        if path.rsplit("/", 1)[-1] not in _CANONICAL_PAYLOAD_LEAVES:
+            continue
+        try:
+            arrays[path] = _decoded_array_record(array)
+        except Exception as exc:
+            errors.append(f"{path}: decoded payload validation failed: {exc}")
+    digest = hashlib.sha256()
+    for path, record in sorted(arrays.items()):
+        digest.update(path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(
+            json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        )
+        digest.update(b"\n")
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "scope": "track_coordinate_identity_and_position_decoded_payloads_v1",
+        "array_count": len(arrays),
+        "aggregate_sha256": digest.hexdigest(),
+        "arrays": arrays,
+    }
+
+
+def _validate_track_run(
+    path: Path,
+    *,
+    require_sharded: bool,
+    expected_binding_status: str,
+    require_complete: bool,
+) -> dict[str, Any]:
     errors: list[str] = []
     group = open_zarr_root(path, mode="r")
-    if str(group.attrs.get("palette_run_completion_status")) != "complete":
-        errors.append("run is not complete")
+    expected_completion = "complete" if require_complete else "running"
+    observed_completion = str(group.attrs.get("palette_run_completion_status"))
+    if observed_completion != expected_completion:
+        errors.append(
+            "generic completion status mismatch: "
+            f"expected={expected_completion!r}, observed={observed_completion!r}"
+        )
+    observed_binding = str(group.attrs.get(COORDINATE_BINDING_STATUS_ATTR))
+    if observed_binding != expected_binding_status:
+        errors.append(
+            "coordinate binding status mismatch: "
+            f"expected={expected_binding_status!r}, observed={observed_binding!r}"
+        )
     if str(group.attrs.get("schema_id")) != "analysis.track_kinematics_runs":
         errors.append("missing or invalid track-kinematics schema_id")
     if int(group.attrs.get("schema_version", -1)) != 1:
@@ -177,6 +343,33 @@ def _validate_track_run(path: Path, *, require_sharded: bool) -> dict[str, Any]:
         errors.append("missing track-kinematics source_refs")
     if not isinstance(group.attrs.get("parameters"), dict):
         errors.append("missing track-kinematics parameters")
+    staging_manifest = group.attrs.get(STAGING_MANIFEST_ATTR)
+    if not isinstance(staging_manifest, dict):
+        errors.append(f"missing typed {STAGING_MANIFEST_ATTR}")
+    manifest_digest = group.attrs.get(STAGING_MANIFEST_DIGEST_ATTR)
+    if (
+        type(manifest_digest) is not str
+        or len(manifest_digest) != 64
+        or any(character not in "0123456789abcdef" for character in manifest_digest)
+    ):
+        errors.append(f"missing or invalid {STAGING_MANIFEST_DIGEST_ATTR}")
+    elif isinstance(staging_manifest, dict):
+        try:
+            expected_manifest_digest = _canonical_mapping_sha256(staging_manifest)
+        except (TypeError, ValueError) as exc:
+            errors.append(f"{STAGING_MANIFEST_ATTR} is not strict canonical JSON: {exc}")
+        else:
+            if manifest_digest != expected_manifest_digest:
+                errors.append(f"{STAGING_MANIFEST_DIGEST_ATTR} does not match manifest")
+
+    if expected_binding_status in {UNBOUND_STAGE_STATUS, PUBLISHING_BINDING_STATUS}:
+        for node_path, node in _iter_nodes(group):
+            for attr_name, value in node.attrs.items():
+                if _canonical_binding_attr(str(attr_name), value):
+                    errors.append(
+                        f"{node_path or '/'}: unbound stage contains canonical "
+                        f"binding attr {attr_name!r}"
+                    )
     tracks = group.get("tracks")
     if not isinstance(tracks, zarr.Group):
         errors.append("missing tracks group")
@@ -187,6 +380,11 @@ def _validate_track_run(path: Path, *, require_sharded: bool) -> dict[str, Any]:
         errors.append("no track groups")
     required = (
         "frame_indices",
+        "track_sample_key",
+        "source_acquisition_frame_index",
+        "source_frame_interpolation",
+        "source_instance_key",
+        "source_row_index",
         "positions_px",
         "speed_raw_px",
         "speed_filtered_px",
@@ -211,8 +409,14 @@ def _validate_track_run(path: Path, *, require_sharded: bool) -> dict[str, Any]:
             item = track.get(array_name)
             if not isinstance(item, zarr.Array):
                 errors.append(f"{name}: missing {array_name}")
-            elif int(item.shape[0]) != row_count:
+            elif int(item.ndim) < 1 or int(item.shape[0]) != row_count:
                 errors.append(f"{name}: row mismatch for {array_name}")
+        positions = track.get("positions_px")
+        if isinstance(positions, zarr.Array) and tuple(positions.shape) != (row_count, 2):
+            errors.append(f"{name}: positions_px must have shape (N, 2)")
+        sample_key = track.get("track_sample_key")
+        if isinstance(sample_key, zarr.Array) and tuple(sample_key.shape) != (row_count, 2):
+            errors.append(f"{name}: track_sample_key must have shape (N, 2)")
 
     array_count = 0
     sharded_count = 0
@@ -230,6 +434,10 @@ def _validate_track_run(path: Path, *, require_sharded: bool) -> dict[str, Any]:
     layout = group.attrs.get("physical_storage_layout")
     if require_sharded and not isinstance(layout, dict):
         errors.append("missing physical_storage_layout")
+    elif require_sharded and layout.get("exact_decoded_validation") is not True:
+        errors.append("physical_storage_layout lacks exact decoded validation")
+    decoded_payloads = _decoded_contract_payloads(group)
+    errors.extend(str(error) for error in decoded_payloads["errors"])
     return {
         "valid": not errors,
         "errors": errors,
@@ -237,7 +445,43 @@ def _validate_track_run(path: Path, *, require_sharded: bool) -> dict[str, Any]:
         "array_count": array_count,
         "sharded_array_count": sharded_count,
         "require_sharded": bool(require_sharded),
+        "require_complete": bool(require_complete),
+        "expected_binding_status": expected_binding_status,
+        "decoded_payload_validation": decoded_payloads,
     }
+
+
+def _writer_result_summary(value: Any, *, label: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{label} must return a mapping, got {type(value).__name__}.")
+    summary: dict[str, Any] = {}
+    for raw_name, raw_value in value.items():
+        name = str(raw_name)
+        if (
+            name in {
+                "valid",
+                "status",
+                "schema_id",
+                "schema_version",
+                "run_name",
+                "track_count",
+                "row_count",
+                "duration_seconds",
+            }
+            or name.endswith("_sha256")
+            or name.endswith("_count")
+        ) and type(raw_value) in {str, int, float, bool, type(None)}:
+            summary[name] = raw_value
+        elif name == "errors" and isinstance(raw_value, (list, tuple)):
+            summary[name] = [str(item) for item in raw_value]
+    return summary
+
+
+def _require_valid_writer_result(value: Any, *, label: str) -> dict[str, Any]:
+    summary = _writer_result_summary(value, label=label)
+    if summary.get("valid") is not True:
+        raise RuntimeError(f"{label} did not report valid=true: {summary}")
+    return summary
 
 
 def publish_track_kinematics_run(
@@ -246,10 +490,61 @@ def publish_track_kinematics_run(
     materialization_payload: dict[str, Any],
     copy_backend: str,
 ) -> dict[str, Any]:
-    """Copy to a hidden sibling, validate, rename, then update pointers."""
+    """Publish, bind final-path coordinates, validate, then update pointers."""
+
+    transaction = {"binding_complete": False, "completion_published": False}
 
     def validate(path: Path) -> dict[str, Any]:
-        return _validate_track_run(path, require_sharded=True)
+        if not transaction["binding_complete"]:
+            return _validate_track_run(
+                path,
+                require_sharded=True,
+                expected_binding_status=PUBLISHING_BINDING_STATUS,
+                require_complete=False,
+            )
+        if path.resolve() != plan.target_run_path.resolve():
+            return {
+                "valid": False,
+                "errors": [
+                    "bound canonical validation is permitted only at the exact "
+                    "authoritative target path"
+                ],
+                "expected_target_path": str(plan.target_run_path),
+                "observed_path": str(path),
+            }
+        structural = _validate_track_run(
+            path,
+            require_sharded=True,
+            expected_binding_status=BOUND_CANONICAL_STATUS,
+            require_complete=transaction["completion_published"],
+        )
+        if not structural["valid"]:
+            return structural
+        try:
+            authoritative_root = open_zarr_root(plan.source_zarr, mode="r")
+            run_group = authoritative_root[
+                f"analysis/track_kinematics_runs/offline/{plan.run_name}"
+            ]
+            canonical = track_writer.validate_bound_offline_track_kinematics_run(
+                authoritative_root,
+                run_group,
+                expected_keypoint_run=plan.keypoint_run,
+                expected_run_name=plan.run_name,
+                require_complete=transaction["completion_published"],
+            )
+            canonical_summary = _writer_result_summary(
+                canonical,
+                label="Canonical track validation",
+            )
+        except Exception as exc:
+            canonical_summary = {"valid": False, "errors": [str(exc)]}
+        structural["canonical_validation"] = canonical_summary
+        if canonical_summary.get("valid") is not True:
+            structural["valid"] = False
+            structural["errors"].append(
+                "writer-owned canonical validation did not report valid=true"
+            )
+        return structural
 
     def prepare(root: zarr.Group) -> tuple[zarr.Group, zarr.Group]:
         track_parent = require_runs_parent(
@@ -258,17 +553,57 @@ def publish_track_kinematics_run(
         )
         return track_parent, track_parent.require_group("offline")
 
+    def after_rename(
+        root: zarr.Group,
+        run: zarr.Group,
+    ) -> dict[str, Any]:
+        if transaction["binding_complete"] or transaction["completion_published"]:
+            raise RuntimeError("Track publication transaction state is inconsistent.")
+        if str(run.attrs.get(COORDINATE_BINDING_STATUS_ATTR)) != PUBLISHING_BINDING_STATUS:
+            raise RuntimeError(
+                "Final-path binder requires exact publishing coordinate status."
+            )
+        if str(run.attrs.get("palette_run_completion_status")) != "running":
+            raise RuntimeError(
+                "Final-path binder requires a generically incomplete run."
+            )
+        result = track_writer.bind_staged_offline_track_kinematics_run(
+            root,
+            run,
+            expected_keypoint_run=plan.keypoint_run,
+            expected_run_name=plan.run_name,
+        )
+        summary = _require_valid_writer_result(
+            result,
+            label="Final-path canonical track binding",
+        )
+        if str(run.attrs.get(COORDINATE_BINDING_STATUS_ATTR)) != BOUND_CANONICAL_STATUS:
+            raise RuntimeError(
+                "Canonical binder returned without setting exact bound status."
+            )
+        if str(run.attrs.get("palette_run_completion_status")) != "running":
+            raise RuntimeError(
+                "Canonical binder must not mark the run complete or update pointers."
+            )
+        transaction["binding_complete"] = True
+        return {"canonical_binding": summary}
+
     def complete(
         root: zarr.Group,
         _parent: zarr.Group,
         run: zarr.Group,
     ) -> None:
+        if not transaction["binding_complete"] or transaction["completion_published"]:
+            raise RuntimeError(
+                "Track completion requires exactly one successful final-path binding."
+            )
         track_writer.mark_track_kinematics_run_complete(
             root,
             run,
             run_name=plan.run_name,
             run_type="offline",
         )
+        transaction["completion_published"] = True
 
     def verify(root: zarr.Group) -> None:
         pointer_parent = root["analysis/track_kinematics_runs"]
@@ -278,6 +613,18 @@ def publish_track_kinematics_run(
             or str(pointer_parent.attrs.get("latest_complete")) != f"offline/{plan.run_name}"
             or str(pointer_parent.attrs.get("latest_offline")) != plan.run_name
             or str(pointer_offline.attrs.get("latest")) != plan.run_name
+            or str(
+                pointer_offline[plan.run_name].attrs.get(
+                    COORDINATE_BINDING_STATUS_ATTR
+                )
+            )
+            != BOUND_CANONICAL_STATUS
+            or str(
+                pointer_offline[plan.run_name].attrs.get(
+                    "palette_run_completion_status"
+                )
+            )
+            != "complete"
         ):
             raise RuntimeError("Track-kinematics parent pointers were not updated consistently.")
 
@@ -289,14 +636,20 @@ def publish_track_kinematics_run(
             run_name=plan.run_name,
             lock_suffix="track-kinematics-publish",
             publish_schema_id=PUBLISH_SCHEMA_ID,
-            policy="node_local_output_sharded_atomic_run_group_publish",
-            rollback_policy="remove_new_target_and_restore_both_parent_attr_sets",
+            policy=(
+                "read_only_compute_unbound_stage_shard_final_path_bind_then_publish"
+            ),
+            rollback_policy=(
+                "remove_incomplete_or_bound_target_and_restore_both_parent_attr_sets"
+            ),
+            content_checksum=True,
         ),
         copy_backend=copy_backend,
         validate_run=validate,
         prepare_parents=prepare,
         complete_run=complete,
         verify_pointers=verify,
+        after_rename=after_rename,
         payload_metadata={
             "local_run_path": str(plan.local_run_path),
             "sharded_run_path": str(plan.sharded_run),
@@ -341,23 +694,33 @@ def materialize_track_kinematics(
     plan.scratch_root.mkdir(parents=True)
     succeeded = False
     try:
-        writer_argv = [
-            str(plan.source_zarr),
-            "--output-zarr-path",
-            str(plan.local_zarr),
-            "--offline-only",
-            "--keypoint-run",
-            plan.keypoint_run,
-            "--offline-run-name",
-            plan.run_name,
-            *plan.writer_arguments,
-        ]
         compute_started = time.perf_counter()
-        track_writer.main(writer_argv)
+        stage_result = track_writer.stage_offline_track_kinematics_run(
+            plan.source_zarr,
+            plan.staging_zarr,
+            keypoint_run=plan.keypoint_run,
+            run_name=plan.run_name,
+            writer_arguments=plan.writer_arguments,
+        )
         compute_seconds = float(time.perf_counter() - compute_started)
-        regular_validation = _validate_track_run(plan.local_run_path, require_sharded=False)
+        stage_summary = _writer_result_summary(
+            stage_result,
+            label="Offline track numerical staging",
+        )
+        if stage_summary.get("valid") is False:
+            raise RuntimeError(
+                f"Offline track numerical staging reported invalid: {stage_summary}"
+            )
+        regular_validation = _validate_track_run(
+            plan.local_run_path,
+            require_sharded=False,
+            expected_binding_status=UNBOUND_STAGE_STATUS,
+            require_complete=True,
+        )
         if not regular_validation["valid"]:
-            raise RuntimeError(f"Local regular track run is invalid: {regular_validation}")
+            raise RuntimeError(
+                f"Local unbound numerical track stage is invalid: {regular_validation}"
+            )
         sharded_copy = copy_completed_run_to_sharded(
             plan.local_run_path,
             plan.sharded_run,
@@ -365,15 +728,45 @@ def materialize_track_kinematics(
             shard_rows=plan.output_shard_rows,
             workers=plan.shard_workers,
         )
+        if sharded_copy.get("exact_decoded_validation") is not True:
+            raise RuntimeError(
+                "Sharded track copy did not report exact decoded validation."
+            )
         local_payload = {
             "source_access": "authoritative_zarr_read_only",
-            "compute_output": "node_local_zarr",
+            "compute_output": "node_local_unbound_numeric_stage",
             "compute_duration_seconds": compute_seconds,
-            "writer_arguments": writer_argv,
+            "writer_arguments": list(plan.writer_arguments),
+            "stage_result": stage_summary,
             "regular_validation": regular_validation,
             "sharded_copy": sharded_copy,
         }
         sharded = open_zarr_root(plan.sharded_run, mode="a")
+        if str(sharded.attrs.get(COORDINATE_BINDING_STATUS_ATTR)) != UNBOUND_STAGE_STATUS:
+            raise RuntimeError(
+                "Sharded copy did not preserve exact unbound coordinate status."
+            )
+        if str(sharded.attrs.get("palette_run_completion_status")) != "complete":
+            raise RuntimeError(
+                "Sharded copy did not preserve generic stage completion."
+            )
+        sharded.attrs[COORDINATE_BINDING_STATUS_ATTR] = PUBLISHING_BINDING_STATUS
+        sharded.attrs["palette_run_completion_status"] = "running"
+        if "palette_run_completed_at_utc" in sharded.attrs:
+            del sharded.attrs["palette_run_completed_at_utc"]
+        sharded.attrs["node_local_materialization"] = json_attr_safe(local_payload)
+        publishing_validation = _validate_track_run(
+            plan.sharded_run,
+            require_sharded=True,
+            expected_binding_status=PUBLISHING_BINDING_STATUS,
+            require_complete=False,
+        )
+        if not publishing_validation["valid"]:
+            raise RuntimeError(
+                "Sharded publishing-stage track run is invalid: "
+                f"{publishing_validation}"
+            )
+        local_payload["publishing_validation"] = publishing_validation
         sharded.attrs["node_local_materialization"] = json_attr_safe(local_payload)
         publish = publish_track_kinematics_run(
             plan,
