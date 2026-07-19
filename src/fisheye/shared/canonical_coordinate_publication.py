@@ -1262,10 +1262,13 @@ def load_bound_canonical_coordinate_descriptor(
     if attrs is None:
         _fail("coordinate_attrs_unavailable", "$.coordinate_node.attrs", "Coordinate attrs are missing.")
     raw_descriptor = attrs.get(attr_name) if isinstance(attrs, Mapping) else None
-    if (
-        not isinstance(raw_descriptor, Mapping)
-        or type(raw_descriptor.get("schema_version")) is not int
-    ):
+    if not isinstance(raw_descriptor, Mapping):
+        _fail(
+            "descriptor_attr_missing",
+            f"$.{attr_name}",
+            "Persisted canonical coordinate-array descriptor attr is missing.",
+        )
+    if type(raw_descriptor.get("schema_version")) is not int:
         _fail(
             "canonical_schema_version_required",
             f"$.{attr_name}.schema_version",

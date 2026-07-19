@@ -374,6 +374,21 @@ def test_loader_rejects_noninteger_schema_version_at_publication_boundary() -> N
     }
 
 
+def test_loader_reports_missing_array_descriptor_before_schema_validation() -> None:
+    positions, _, binding = _direct_binding()
+
+    with pytest.raises(CanonicalCoordinatePublicationError) as exc_info:
+        load_bound_canonical_coordinate_descriptor(
+            positions,
+            row_identity=binding.row_identity,
+            reference_frame_authority=binding.reference_frame_authority,
+        )
+
+    assert {issue.code for issue in exc_info.value.issues} == {
+        "descriptor_attr_missing"
+    }
+
+
 def test_stamping_rejects_reference_or_identity_changed_after_binding() -> None:
     positions, camera, binding = _direct_binding()
     camera.shape = (3, 4512, 4511)
