@@ -35,6 +35,12 @@ from .compute_speed import (  # re-exported for compatibility
     resolve_dimensions,
 )
 from .chaser_metrics_loader import load_chaser_metrics
+from fisheye.shared.coordinate_descriptor import (
+    CoordinateDescriptor,
+    load_coordinate_descriptor_attrs,
+    parse_coordinate_descriptor,
+    stamp_coordinate_descriptor,
+)
 from fisheye.shared.stage_provenance import (
     build_stage_provenance,
     write_stage_provenance,
@@ -124,6 +130,9 @@ SPEED_DERIVATIVE_LEVELS = (
 SPEED_DERIVATIVES_SCHEMA_ID = "palette.track_speed_derivatives.v1"
 SPEED_DERIVATIVE_SCHEMA_ID = "palette.track_speed_derivative.v1"
 DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL = "speed_smoothed"
+POSITIONS_MM_COORDINATE_DESCRIPTOR_GAP = (
+    "not_persisted_missing_exact_physical_calibration_lineage_and_frame"
+)
 
 
 def resolve_mm_per_pixel_for_coordinate_space(
@@ -160,6 +169,31 @@ def resolve_mm_per_pixel_for_coordinate_space(
             f"coordinate_space {space!r} requires a positive finite {scale_name}."
         )
     return 1.0 / scale if invert else scale
+
+
+def load_positions_px_coordinate_descriptor(array: Any) -> CoordinateDescriptor:
+    """Load the descriptor owned by one ``positions_px`` array.
+
+    This intentionally accepts only the selected array, rather than a parent
+    group, so a compatibility ``coordinate_space`` group attr cannot override
+    array-specific coordinate authority.
+    """
+
+    attrs = getattr(array, "attrs", None)
+    if attrs is None:
+        raise TypeError("positions_px array must expose an attrs mapping.")
+    return load_coordinate_descriptor_attrs(attrs)
+
+
+def _bind_track_positions_px_descriptor(value: Any) -> CoordinateDescriptor:
+    """Bind inherited position semantics to one track's row identity array."""
+
+    payload = parse_coordinate_descriptor(value).to_dict()
+    payload["row_identity"] = {
+        "mode": "track_frame_indices",
+        "array_ref": "../frame_indices",
+    }
+    return parse_coordinate_descriptor(payload)
 
 
 def _track_preload_chunks(shape: Tuple[int, ...] | Iterable[int]) -> Tuple[int, ...] | None:
@@ -211,6 +245,16 @@ def _track_kinematics_source_refs(
             "analysis/stimulus_runs",
             inputs.get("stimulus_run"),
         )
+        positions_path = inputs.get("positions_px_source_path")
+        if positions_path not in (None, ""):
+            refs["source_positions_px_path"] = str(positions_path)
+        descriptor_digest = inputs.get(
+            "positions_px_coordinate_descriptor_sha256"
+        )
+        if descriptor_digest not in (None, ""):
+            refs["source_positions_px_coordinate_descriptor_sha256"] = str(
+                descriptor_digest
+            )
         if inputs.get("chaser_index") is not None:
             refs["source_chaser_index"] = int(inputs["chaser_index"])
         return refs
@@ -1521,9 +1565,15 @@ def save_track_kinematics_tracks(
     summaries: List[Dict[str, float]],
     *,
     track_id_to_arena_id: Optional[Dict[int, int]] = None,
+    positions_px_descriptor: Any = None,
 ) -> List[int]:
     """Persist per-track data beneath the track kinematics run group."""
 
+    track_positions_px_descriptor = (
+        _bind_track_positions_px_descriptor(positions_px_descriptor)
+        if positions_px_descriptor is not None
+        else None
+    )
     tracks_parent = run_group.create_group("tracks")
     stamp_geometry_preload_attrs(run_group)
     stamp_geometry_preload_attrs(tracks_parent)
@@ -1556,7 +1606,17 @@ def save_track_kinematics_tracks(
         subgroup.create_array("frame_indices", data=data["frame_indices"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("time_seconds", data=data["time_seconds"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("detection_indices", data=data["detection_indices"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("positions_px", data=data["positions_px"], chunks=(base_chunk[0], 2), overwrite=True)
+        positions_px_array = subgroup.create_array(
+            "positions_px",
+            data=data["positions_px"],
+            chunks=(base_chunk[0], 2),
+            overwrite=True,
+        )
+        if track_positions_px_descriptor is not None:
+            stamp_coordinate_descriptor(
+                positions_px_array,
+                track_positions_px_descriptor,
+            )
         subgroup.create_array("positions_mm", data=data["positions_mm"], chunks=(base_chunk[0], 2), overwrite=True)
         subgroup.create_array("heading_degrees", data=data["heading_degrees"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("heading_radians", data=data["heading_radians"], chunks=base_chunk, overwrite=True)
@@ -2560,6 +2620,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         # Try to use refined online positions by default
         use_refined_online = False
         refined_run_name = None
+        refined_positions_px_descriptor: CoordinateDescriptor | None = None
+        refined_positions_px_source_path: str | None = None
+        refined_positions_px_descriptor_sha256: str | None = None
 
         # Check for refined online data (use by default if available)
         if "refined_online_runs" in root:
@@ -2579,16 +2642,31 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
                 # Load refined positions from interpolated group (final refined data)
                 interp_grp = refined_group["interpolated"]
-                frames_all = refined_group["camera_frame_ids"][:]
-                positions_refined = interp_grp["positions_px"][:]
+                positions_refined_array = interp_grp["positions_px"]
+                refined_positions_px_descriptor = (
+                    load_positions_px_coordinate_descriptor(
+                        positions_refined_array
+                    )
+                )
+                refined_positions_px_source_path = (
+                    f"refined_online_runs/{refined_run_name}/"
+                    "interpolated/positions_px"
+                )
+                refined_positions_px_descriptor_sha256 = (
+                    refined_positions_px_descriptor.digest()
+                )
+                frames_all = interp_grp["camera_frame_ids"][:]
+                positions_refined = positions_refined_array[:]
                 valid_mask_refined = interp_grp["valid_mask"][:]
 
                 # Get source stimulus run for provenance
                 stimulus_run_name = refined_group.attrs.get("source_stimulus_run")
                 texture_to_camera_scale = refined_group.attrs.get("texture_to_camera_scale", 1.0)
 
-                # Get coordinate space and calibration
-                coordinate_space = refined_group.attrs.get("coordinate_space")
+                # The selected positions array owns coordinate authority. The
+                # refined run's historical coordinate_space attr is only a
+                # compatibility mirror and cannot override this descriptor.
+                coordinate_space = refined_positions_px_descriptor.space_id
                 pixels_per_mm_projector = refined_group.attrs.get("pixels_per_mm_projector")
 
                 pixel_to_mm_online = resolve_mm_per_pixel_for_coordinate_space(
@@ -2736,7 +2814,16 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                     run_name, run_group = ensure_track_kinematics_run_group(
                         output_root, args.run_name, run_type="online"
                     )
-                    ordered_track_ids = save_track_kinematics_tracks(run_group, tracks_online, summaries_online)
+                    ordered_track_ids = save_track_kinematics_tracks(
+                        run_group,
+                        tracks_online,
+                        summaries_online,
+                        positions_px_descriptor=(
+                            refined_positions_px_descriptor
+                            if use_refined_online
+                            else None
+                        ),
+                    )
 
                     created_at = datetime.now(timezone.utc).isoformat()
 
@@ -2749,6 +2836,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             "refined_online_run": refined_run_name,
                             "stimulus_run": stimulus_run_name,
                             "chaser_index": args.chaser_index,
+                            "positions_px_source_path": refined_positions_px_source_path,
+                            "positions_px_coordinate_descriptor_sha256": (
+                                refined_positions_px_descriptor_sha256
+                            ),
                         }
                         method = "track_kinematics_online_refined"
                         # For refined online data, save the coordinate space and calibration used
@@ -2813,6 +2904,19 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             "inputs": inputs,
                             "texture_to_camera_scale": texture_to_camera_scale,
                             "coordinate_space": saved_coordinate_space,
+                            **(
+                                {
+                                    "positions_px_source_path": refined_positions_px_source_path,
+                                    "positions_px_source_coordinate_descriptor_sha256": (
+                                        refined_positions_px_descriptor_sha256
+                                    ),
+                                    "positions_mm_coordinate_descriptor_status": (
+                                        POSITIONS_MM_COORDINATE_DESCRIPTOR_GAP
+                                    ),
+                                }
+                                if use_refined_online
+                                else {}
+                            ),
                             "summary": summaries_online,
                             "num_tracks": len(ordered_track_ids),
                             "total_distance_px": total_px_online,
