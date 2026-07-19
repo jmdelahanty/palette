@@ -19,8 +19,13 @@ from typing import Any, Optional, Sequence
 from fisheye.shared.system_metadata import get_git_info
 from fisheye.utils.run_detection_artifact import (
     ARTIFACT_SCHEMA,
+    DETECTION_ARTIFACT_FAMILY_CONTRACT,
+    DETECTION_ARTIFACT_LAYOUT,
+    DO_NOT_SET_LATEST,
     LATEST_POLICY_CHOICES,
     REQUIRED_DETECT_ARRAYS,
+    RUN_FAMILY,
+    artifact_run_metadata_report,
     required_arrays_report,
     strict_json_report,
     tree_hash,
@@ -28,8 +33,8 @@ from fisheye.utils.run_detection_artifact import (
 
 
 SUPPORTED_LAYOUTS = {
-    "detect_yolo_sparse_v1": {
-        "run_family": "detect_runs",
+    DETECTION_ARTIFACT_LAYOUT: {
+        "run_family": RUN_FAMILY,
         "required_arrays": REQUIRED_DETECT_ARRAYS,
     },
 }
@@ -60,6 +65,34 @@ def _write_zarr_group_metadata(path: Path) -> None:
             "attributes": {},
         },
     )
+
+
+def _stamp_artifact_family_metadata(path: Path) -> None:
+    """Persist the dedicated family as an explicit non-selector namespace."""
+
+    _write_zarr_group_metadata(path)
+    zarr_json = path / "zarr.json"
+    payload = _read_json_strict(zarr_json)
+    if not isinstance(payload, dict):
+        raise ValueError(f"{zarr_json} is not a JSON object")
+    attrs = payload.setdefault("attributes", {})
+    if not isinstance(attrs, dict):
+        raise ValueError(f"{zarr_json} attributes must be an object")
+    attrs["artifact_family_contract"] = DETECTION_ARTIFACT_FAMILY_CONTRACT
+    attrs["stage_selector_eligible"] = False
+    for forbidden in (
+        "latest",
+        "latest_complete",
+        "latest_pending",
+        "authoritative_run",
+        "authoritative_run_provenance",
+    ):
+        if forbidden in attrs:
+            raise ValueError(
+                "Detection artifact family cannot carry selector attr "
+                f"{forbidden!r}."
+            )
+    _write_json(zarr_json, payload)
 
 
 def _status_from_errors(errors: list[str]) -> str:
@@ -159,6 +192,18 @@ def _validate_manifest_shape(manifest: Any) -> tuple[Optional[dict[str, Any]], l
         errors.append(f"unsupported layout: {layout!r}")
     if latest_policy not in LATEST_POLICY_CHOICES:
         errors.append(f"latest_policy must be one of {LATEST_POLICY_CHOICES}")
+    elif latest_policy != DO_NOT_SET_LATEST:
+        errors.append(
+            "detection_artifact_runs forbids latest or authoritative promotion"
+        )
+    if manifest.get("selector_policy") != "never_select_or_promote_v1":
+        errors.append("selector_policy must be 'never_select_or_promote_v1'")
+    if manifest.get("artifact_family_contract") != DETECTION_ARTIFACT_FAMILY_CONTRACT:
+        errors.append(
+            f"artifact_family_contract must be {DETECTION_ARTIFACT_FAMILY_CONTRACT!r}"
+        )
+    if manifest.get("stage_selector_eligible") is not False:
+        errors.append("stage_selector_eligible must be false")
     if isinstance(run_family, str) and isinstance(run_name, str) and isinstance(target_group_path, str):
         expected = f"{run_family}/{run_name}"
         if target_group_path != expected:
@@ -213,6 +258,74 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _copy_file_snapshot(source: Path, destination: Path) -> str:
+    """Copy one immutable transaction snapshot and return its SHA-256 digest."""
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+    return _sha256_file(destination)
+
+
+def _atomic_move(source: Path, destination: Path) -> None:
+    """Atomically rename one import path within the target archive filesystem."""
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(source, destination)
+
+
+def _verified_atomic_move(source: Path, destination: Path) -> None:
+    """Rename and reconcile a move that may report an error after taking effect."""
+
+    if destination.exists():
+        raise FileExistsError(f"atomic-move destination already exists: {destination}")
+    try:
+        _atomic_move(source, destination)
+    except Exception:
+        if not source.exists() and destination.exists():
+            return
+        raise
+    if source.exists() or not destination.exists():  # pragma: no cover - hostile FS
+        raise RuntimeError(
+            f"atomic move did not reach one exact destination: {source} -> {destination}"
+        )
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
+
+
+def _verified_remove_path(path: Path) -> None:
+    """Remove a path and reconcile errors reported after removal completed."""
+
+    try:
+        _remove_path(path)
+    except Exception:
+        if not path.exists():
+            return
+        raise
+    if path.exists():  # pragma: no cover - hostile FS
+        raise RuntimeError(f"path removal did not complete: {path}")
+
+
+def _orphaned_import_transaction_paths(family_path: Path, run_name: str) -> list[Path]:
+    incoming_parent = family_path / ".incoming"
+    if not incoming_parent.is_dir():
+        return []
+    prefixes = (
+        f".{run_name}_previous_",
+        f".{run_name}_previous_receipt_",
+        f".{run_name}_import_receipt_",
+    )
+    return sorted(
+        path
+        for path in incoming_parent.iterdir()
+        if any(path.name.startswith(prefix) for prefix in prefixes)
+    )
+
+
 def _update_latest_attr(family_path: Path, run_name: str) -> None:
     _write_zarr_group_metadata(family_path)
     zarr_json = family_path / "zarr.json"
@@ -251,6 +364,10 @@ def build_import_plan(
             "planned_actions": [],
         }
 
+    staging_owner = tempfile.TemporaryDirectory(prefix="palette_run_group_plan_source_")
+    staged_tarball = Path(staging_owner.name) / "artifact.tar"
+    source_tarball_sha256: Optional[str] = None
+    manifest_sha256: Optional[str] = None
     temp_owner: Optional[tempfile.TemporaryDirectory[str]] = None
     if keep_extracted is None:
         temp_owner = tempfile.TemporaryDirectory(prefix="palette_run_group_import_")
@@ -262,7 +379,8 @@ def build_import_plan(
         extract_root.mkdir(parents=True)
 
     try:
-        artifact_root = _safe_extract_artifact(tarball_path, extract_root)
+        source_tarball_sha256 = _copy_file_snapshot(tarball_path, staged_tarball)
+        artifact_root = _safe_extract_artifact(staged_tarball, extract_root)
         manifest_path = artifact_root / "artifact_manifest.json"
         run_group_dir = artifact_root / "run_group"
 
@@ -272,6 +390,7 @@ def build_import_plan(
             manifest_errors.append("artifact_manifest.json is missing")
         else:
             try:
+                manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
                 manifest_payload = _read_json_strict(manifest_path)
             except Exception as exc:
                 manifest_errors.append(f"artifact_manifest.json is not strict JSON: {exc}")
@@ -324,6 +443,29 @@ def build_import_plan(
         array_errors = [] if arrays_report["status"] == "pass" else ["required array validation failed"]
         _add_validation(validations, "required_arrays", array_errors, report=arrays_report)
         errors.extend(f"required_arrays: {error}" for error in array_errors)
+
+        metadata_report = (
+            artifact_run_metadata_report(run_group_dir)
+            if run_group_dir.exists()
+            else {
+                "status": "fail",
+                "errors": ["run_group directory is missing"],
+            }
+        )
+        metadata_errors = (
+            []
+            if metadata_report["status"] == "pass"
+            else list(metadata_report.get("errors") or ["artifact metadata invalid"])
+        )
+        _add_validation(
+            validations,
+            "artifact_run_metadata",
+            metadata_errors,
+            report=metadata_report,
+        )
+        errors.extend(
+            f"artifact_run_metadata: {error}" for error in metadata_errors
+        )
 
         hash_errors: list[str] = []
         expected_hash = None
@@ -440,6 +582,7 @@ def build_import_plan(
                         "checks": [
                             "strict_json",
                             "required_arrays",
+                            "artifact_run_metadata",
                             "run_group_tree_hash",
                             "target_paths",
                         ],
@@ -453,7 +596,7 @@ def build_import_plan(
                     {
                         "action": "update_latest",
                         "policy": latest_policy,
-                        "would_update": latest_policy != "do_not_set_latest",
+                        "would_update": False,
                     },
                     {
                         "action": "write_import_receipt",
@@ -466,6 +609,8 @@ def build_import_plan(
             "status": "ok" if not errors else "failed",
             "apply": False,
             "source_tarball": str(tarball_path),
+            "source_tarball_sha256": source_tarball_sha256,
+            "manifest_sha256": manifest_sha256,
             "target_archive_path": str(resolved_target) if resolved_target is not None else None,
             "target_group_path": target_group_path or None,
             "manifest_target_group_path": manifest_target_group_path or None,
@@ -493,6 +638,8 @@ def build_import_plan(
             "status": "failed",
             "apply": False,
             "source_tarball": str(tarball_path),
+            "source_tarball_sha256": source_tarball_sha256,
+            "manifest_sha256": manifest_sha256,
             "errors": [str(exc)],
             "validations": validations,
             "planned_actions": planned_actions,
@@ -500,6 +647,7 @@ def build_import_plan(
     finally:
         if temp_owner is not None:
             temp_owner.cleanup()
+        staging_owner.cleanup()
 
 
 def apply_import(
@@ -533,23 +681,95 @@ def apply_import(
     receipt_path = Path(str(plan["receipt_path"]))
     family_path = target_archive / run_family_path
     failed_base = family_path / ".failed"
-    failed_path = failed_base / f"{run_name}_{_utc_now_label()}"
+    failed_path: Optional[Path] = None
+    failed_container: Optional[Path] = None
+    transaction_label = _utc_now_label()
+    previous_final_path = (
+        family_path / ".incoming" / f".{run_name}_previous_{transaction_label}"
+    )
+    pending_receipt_path = (
+        family_path
+        / ".incoming"
+        / f".{run_name}_import_receipt_{transaction_label}.json.pending"
+    )
+    previous_receipt_path = (
+        family_path
+        / ".incoming"
+        / f".{run_name}_previous_receipt_{transaction_label}.json"
+    )
     apply_validations: dict[str, dict[str, Any]] = {}
     apply_errors: list[str] = []
     latest_updated = False
     imported = False
+    new_final_installed = False
+    receipt_installed = False
+    transaction_owned = False
+    incoming_owned = False
+    cleanup_warnings: list[str] = []
+    had_final_before = final_path.exists()
+    had_receipt_before = receipt_path.exists()
+    previous_final_hash: Optional[str] = None
+    previous_receipt_hash: Optional[str] = None
 
     temp_owner = tempfile.TemporaryDirectory(prefix="palette_run_group_apply_")
     try:
-        extract_root = Path(temp_owner.name)
-        artifact_root = _safe_extract_artifact(tarball_path, extract_root)
+        if had_final_before:
+            previous_final_hash = tree_hash(final_path)
+        if had_receipt_before:
+            if not receipt_path.is_file():
+                raise ValueError(f"import receipt is not a regular file: {receipt_path}")
+            previous_receipt_hash = _sha256_file(receipt_path)
+
+        transaction_root = Path(temp_owner.name)
+        staged_tarball = transaction_root / "source_snapshot.tar"
+        staged_tarball_sha256 = _copy_file_snapshot(tarball_path, staged_tarball)
+        if staged_tarball_sha256 != plan.get("source_tarball_sha256"):
+            raise ValueError(
+                "source tarball changed after import planning; refusing to apply "
+                "a different artifact snapshot"
+            )
+        extract_root = transaction_root / "extracted"
+        artifact_root = _safe_extract_artifact(staged_tarball, extract_root)
         manifest_path = artifact_root / "artifact_manifest.json"
-        manifest = _read_json_strict(manifest_path)
+        manifest_payload = _read_json_strict(manifest_path)
+        manifest, manifest_shape_errors = _validate_manifest_shape(manifest_payload)
+        if manifest_shape_errors or manifest is None:
+            raise ValueError(
+                "apply artifact manifest is invalid: "
+                + "; ".join(manifest_shape_errors or ["manifest is not an object"])
+            )
+        apply_manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        if apply_manifest_sha256 != plan.get("manifest_sha256"):
+            raise ValueError(
+                "artifact manifest differs from the validated import plan"
+            )
         run_group_dir = artifact_root / "run_group"
         expected_hash = manifest.get("checksums", {}).get("run_group_tree_hash")
 
+        if plan.get("run_family") != RUN_FAMILY:
+            raise ValueError(
+                f"Artifact imports are restricted to {RUN_FAMILY!r}."
+            )
+        if latest_policy != DO_NOT_SET_LATEST:
+            raise ValueError(
+                "Detection artifact imports cannot update latest or authoritative "
+                "selectors."
+            )
+
+        orphaned_paths = _orphaned_import_transaction_paths(family_path, run_name)
+        if orphaned_paths:
+            raise RuntimeError(
+                "orphaned import transaction paths require explicit recovery: "
+                + ", ".join(str(path) for path in orphaned_paths)
+            )
+        if previous_final_path.exists() or pending_receipt_path.exists() or previous_receipt_path.exists():
+            raise FileExistsError(
+                "import transaction path already exists; explicit recovery is "
+                "required before retrying"
+            )
+
         family_path.mkdir(parents=True, exist_ok=True)
-        _write_zarr_group_metadata(family_path)
+        _stamp_artifact_family_metadata(family_path)
         (family_path / ".incoming").mkdir(exist_ok=True)
         failed_base.mkdir(exist_ok=True)
 
@@ -558,9 +778,20 @@ def apply_import(
         if final_path.exists():
             if not overwrite:
                 raise FileExistsError(f"final target already exists: {final_path}")
-            shutil.rmtree(final_path)
 
-        shutil.copytree(run_group_dir, incoming_path)
+        incoming_path.mkdir()
+        incoming_owned = True
+        # Acquiring the shared incoming path is the transaction lock for this
+        # run name. Recheck generated paths after acquisition so a concurrent
+        # loser cannot make us claim or mutate its recovery evidence.
+        post_acquire_orphans = _orphaned_import_transaction_paths(family_path, run_name)
+        if post_acquire_orphans:
+            raise RuntimeError(
+                "import transaction paths appeared while acquiring incoming: "
+                + ", ".join(str(path) for path in post_acquire_orphans)
+            )
+        transaction_owned = True
+        shutil.copytree(run_group_dir, incoming_path, dirs_exist_ok=True)
 
         strict_report = strict_json_report(incoming_path)
         strict_errors = [] if strict_report["status"] == "pass" else ["strict JSON validation failed"]
@@ -571,6 +802,23 @@ def apply_import(
         array_errors = [] if arrays_report["status"] == "pass" else ["required array validation failed"]
         _add_validation(apply_validations, "incoming_required_arrays", array_errors, report=arrays_report)
         apply_errors.extend(f"incoming_required_arrays: {error}" for error in array_errors)
+
+        metadata_report = artifact_run_metadata_report(incoming_path)
+        metadata_errors = (
+            []
+            if metadata_report["status"] == "pass"
+            else list(metadata_report.get("errors") or ["artifact metadata invalid"])
+        )
+        _add_validation(
+            apply_validations,
+            "incoming_artifact_run_metadata",
+            metadata_errors,
+            report=metadata_report,
+        )
+        apply_errors.extend(
+            f"incoming_artifact_run_metadata: {error}"
+            for error in metadata_errors
+        )
 
         actual_hash = tree_hash(incoming_path)
         hash_errors = []
@@ -587,18 +835,13 @@ def apply_import(
         if apply_errors:
             raise ValueError("; ".join(apply_errors))
 
-        shutil.move(str(incoming_path), str(final_path))
-        imported = True
-
-        if latest_policy != "do_not_set_latest":
-            _update_latest_attr(family_path, run_name)
-            latest_updated = True
-
+        # Build and serialize the receipt before replacing any existing run.
+        # Receipt promotion itself is the final commit point.
         receipt = {
             "schema_version": 1,
             "imported_at": datetime.now(timezone.utc).isoformat(),
             "source_tarball": str(tarball_path),
-            "source_tarball_sha256": _sha256_file(tarball_path),
+            "source_tarball_sha256": staged_tarball_sha256,
             "target_archive_path": str(target_archive),
             "target_group_path": plan["target_group_path"],
             "manifest_target_group_path": plan.get("manifest_target_group_path"),
@@ -613,9 +856,7 @@ def apply_import(
             "latest_policy": latest_policy,
             "latest_updated": latest_updated,
             "manifest": manifest,
-            "manifest_sha256": hashlib.sha256(
-                manifest_path.read_bytes()
-            ).hexdigest(),
+            "manifest_sha256": apply_manifest_sha256,
             "importer": {
                 "command": " ".join(sys.argv),
                 "git": get_git_info(),
@@ -625,15 +866,42 @@ def apply_import(
                 **apply_validations,
             },
         }
-        _write_json(receipt_path, receipt)
+        _write_json(pending_receipt_path, receipt)
+
+        if final_path.exists():
+            _verified_atomic_move(final_path, previous_final_path)
+        _verified_atomic_move(incoming_path, final_path)
+        new_final_installed = True
+        if receipt_path.exists():
+            _verified_atomic_move(receipt_path, previous_receipt_path)
+        _verified_atomic_move(pending_receipt_path, receipt_path)
+        receipt_installed = True
+        imported = True
+
+        # Cleanup happens only after both final run and receipt are committed.
+        # Failure to remove a recoverable backup is reported but does not roll
+        # back an already complete transaction.
+        for label, stale_path in (
+            ("previous final", previous_final_path),
+            ("previous receipt", previous_receipt_path),
+        ):
+            if not stale_path.exists():
+                continue
+            try:
+                _verified_remove_path(stale_path)
+            except Exception as cleanup_exc:  # pragma: no cover - hostile store
+                cleanup_warnings.append(f"{label}: {cleanup_exc}")
 
         return {
             **plan,
             "status": "ok",
             "apply": True,
             "applied": True,
+            "imported": True,
+            "final_state": "committed",
             "latest_updated": latest_updated,
             "receipt_path": str(receipt_path),
+            "cleanup_warnings": cleanup_warnings,
             "validations": {
                 **plan["validations"],
                 **apply_validations,
@@ -641,23 +909,128 @@ def apply_import(
             "errors": [],
         }
     except Exception as exc:
-        if incoming_path.exists():
-            failed_base.mkdir(parents=True, exist_ok=True)
-            if failed_path.exists():
-                failed_path = failed_base / f"{run_name}_{_utc_now_label()}_1"
-            shutil.move(str(incoming_path), str(failed_path))
+        rollback_errors: list[str] = []
+        attempted_path: Optional[Path] = None
+        if new_final_installed and final_path.exists():
+            attempted_path = final_path
+        elif incoming_owned and incoming_path.exists():
+            attempted_path = incoming_path
+        if attempted_path is not None:
+            try:
+                failed_base.mkdir(parents=True, exist_ok=True)
+                failed_container = Path(
+                    tempfile.mkdtemp(
+                        prefix=f"{run_name}_{_utc_now_label()}_",
+                        dir=failed_base,
+                    )
+                )
+                failed_path = failed_container / "run_group"
+                _verified_atomic_move(attempted_path, failed_path)
+            except Exception as rollback_exc:  # pragma: no cover - hostile store
+                rollback_errors.append(f"quarantine attempted import: {rollback_exc}")
+        try:
+            if transaction_owned and previous_final_path.exists():
+                if final_path.exists():
+                    raise RuntimeError("replacement final path is still occupied")
+                _verified_atomic_move(previous_final_path, final_path)
+        except Exception as rollback_exc:  # pragma: no cover - hostile store
+            rollback_errors.append(f"restore previous final: {rollback_exc}")
+        try:
+            if transaction_owned and receipt_installed and receipt_path.exists():
+                _verified_remove_path(receipt_path)
+            if transaction_owned and previous_receipt_path.exists():
+                if receipt_path.exists():
+                    raise RuntimeError("replacement receipt path is still occupied")
+                _verified_atomic_move(previous_receipt_path, receipt_path)
+            if transaction_owned and pending_receipt_path.exists():
+                _verified_remove_path(pending_receipt_path)
+        except Exception as rollback_exc:  # pragma: no cover - hostile store
+            rollback_errors.append(f"restore receipt: {rollback_exc}")
+
+        # Do not claim a clean failure unless the externally visible run and
+        # receipt are exactly the pre-transaction versions and no transaction
+        # paths remain. Ambiguous state must fail closed for manual recovery.
+        state_errors: list[str] = []
+        if incoming_owned and incoming_path.exists():
+            state_errors.append(f"incoming path remains: {incoming_path}")
+        if transaction_owned and pending_receipt_path.exists():
+            state_errors.append(f"pending receipt remains: {pending_receipt_path}")
+        if transaction_owned and previous_final_path.exists():
+            state_errors.append(f"previous final backup remains: {previous_final_path}")
+        if transaction_owned and previous_receipt_path.exists():
+            state_errors.append(f"previous receipt backup remains: {previous_receipt_path}")
+        try:
+            if had_final_before:
+                if not final_path.exists():
+                    state_errors.append("previous final is missing")
+                elif previous_final_hash is not None and tree_hash(final_path) != previous_final_hash:
+                    state_errors.append("final path does not match the previous run")
+            elif final_path.exists():
+                state_errors.append("replacement run remains at the final path")
+        except Exception as state_exc:  # pragma: no cover - hostile store
+            state_errors.append(f"could not verify restored final: {state_exc}")
+        try:
+            if had_receipt_before:
+                if not receipt_path.is_file():
+                    state_errors.append("previous import receipt is missing")
+                elif (
+                    previous_receipt_hash is not None
+                    and _sha256_file(receipt_path) != previous_receipt_hash
+                ):
+                    state_errors.append("import receipt does not match the previous receipt")
+            elif receipt_path.exists():
+                state_errors.append("replacement import receipt remains")
+        except Exception as state_exc:  # pragma: no cover - hostile store
+            state_errors.append(f"could not verify restored receipt: {state_exc}")
+
+        rollback_errors.extend(f"state verification: {error}" for error in state_errors)
+        rollback_complete = not rollback_errors
+        imported = False if rollback_complete else None
         return {
             **plan,
-            "status": "failed",
+            "status": "failed" if rollback_complete else "rollback_incomplete",
             "apply": True,
-            "applied": False,
+            "applied": False if rollback_complete else None,
             "imported": imported,
-            "failed_path": str(failed_path) if failed_path.exists() else None,
+            "final_state": (
+                "restored_pre_transaction_state"
+                if rollback_complete
+                else "ambiguous_manual_recovery_required"
+            ),
+            "failed_path": (
+                str(failed_path)
+                if failed_path is not None and failed_path.exists()
+                else None
+            ),
+            "recovery_paths": {
+                "final": str(final_path) if final_path.exists() else None,
+                "incoming": str(incoming_path) if incoming_path.exists() else None,
+                "previous_final": (
+                    str(previous_final_path) if previous_final_path.exists() else None
+                ),
+                "receipt": str(receipt_path) if receipt_path.exists() else None,
+                "pending_receipt": (
+                    str(pending_receipt_path) if pending_receipt_path.exists() else None
+                ),
+                "previous_receipt": (
+                    str(previous_receipt_path) if previous_receipt_path.exists() else None
+                ),
+                "quarantine_container": (
+                    str(failed_container)
+                    if failed_container is not None and failed_container.exists()
+                    else None
+                ),
+            },
+            "rollback_errors": rollback_errors,
             "validations": {
                 **plan.get("validations", {}),
                 **apply_validations,
             },
-            "errors": [*plan.get("errors", []), str(exc)],
+            "errors": [
+                *plan.get("errors", []),
+                str(exc),
+                *(f"rollback: {error}" for error in rollback_errors),
+            ],
         }
     finally:
         temp_owner.cleanup()
