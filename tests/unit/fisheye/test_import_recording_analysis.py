@@ -191,7 +191,8 @@ def test_apply_video_metadata_stamps_source_h5_fingerprint(monkeypatch, tmp_path
     zarr_path.parent.mkdir(parents=True)
     video.write_bytes(b"video")
     h5_path.write_bytes(b"h5")
-    zarr.open_group(str(zarr_path), mode="w", zarr_format=3)
+    root = zarr.open_group(str(zarr_path), mode="w", zarr_format=3)
+    root.attrs.update({"recording_id": "rec", "camera_id": "2010093"})
 
     def _fake_probe(_path: Path) -> dict[str, object]:
         return {
@@ -233,6 +234,13 @@ def test_apply_video_metadata_stamps_source_h5_fingerprint(monkeypatch, tmp_path
         "kind": "recording_relative",
         "relative_path": f"cams/{video.name}",
     }
+    assert root.attrs["source_video_metadata"]["camera_id"] == "2010093"
+    authority = root["analysis/acquisition_camera_frames/2010093"]
+    assert authority.attrs["acquisition_import_ownership"]["mode"] == (
+        "external_video_v1"
+    )
+    assert authority.attrs["acquisition_camera_frame"]["width_px"] == 4512
+    assert authority.attrs["acquisition_camera_frame"]["height_px"] == 4512
 
 
 def test_ensure_analysis_archive_imports_acquisition_video_stream_inventory(

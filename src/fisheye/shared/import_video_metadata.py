@@ -12,12 +12,30 @@ import cv2
 import imageio.v3 as iio
 import zarr
 
+from fisheye.shared.acquisition_publication_status import (
+    ACQUISITION_AUTHORITY_PENDING,
+    ACQUISITION_AUTHORITY_PUBLISHED,
+    ACQUISITION_AUTHORITY_STATUS_ATTR,
+    EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+    EXTERNAL_ACQUISITION_PENDING_REASON,
+    EXTERNAL_ACQUISITION_PUBLISHED_REASON,
+    AcquisitionPublicationStatusError,
+    build_acquisition_authority_publication_status,
+    parse_acquisition_authority_publication_status,
+    stamp_acquisition_authority_publication_status,
+)
 from fisheye.shared.encoder_tags import parse_encoder_comment
 from fisheye.shared.import_profile_contract import (
     IMPORT_PROFILE_SCHEMA_ID,
     PROFILE_METADATA_ONLY_ANALYSIS,
 )
 from fisheye.shared.import_source_fingerprint import optional_source_stat_fingerprint_attrs
+from fisheye.shared.pixel_frame_authority import (
+    PixelFrameAuthorityError,
+    parse_source_video_metadata,
+    stamp_acquisition_camera_frame,
+    stamp_acquisition_import_ownership,
+)
 from fisheye.shared.source_video_metadata import build_source_video_metadata_v2
 
 
@@ -243,8 +261,12 @@ def _write_metadata(
         source_path = Path(str(meta["source_path"])).expanduser().resolve()
         if source_path.parent.name == "cams":
             resolved_recording_path = source_path.parent.parent
+    source_metadata_input = dict(meta)
+    camera_id = root.attrs.get("camera_id")
+    if isinstance(camera_id, str) and camera_id.strip():
+        source_metadata_input["camera_id"] = camera_id.strip()
     versioned_source_video_metadata = build_source_video_metadata_v2(
-        meta,
+        source_metadata_input,
         recording_path=resolved_recording_path,
         fingerprint_attrs=source_video_fingerprint_attrs,
     )
@@ -328,6 +350,153 @@ def _write_metadata(
         root_updates.setdefault("imageio_metadata", meta["imageio_metadata"])
 
     return {"raw_video": raw_updates, "root": root_updates}
+
+
+def publish_external_video_acquisition_authority(root: zarr.Group) -> dict[str, str]:
+    """Publish the canonical acquisition frame for a metadata-only archive.
+
+    This boundary is intentionally external-video-only. A materialized
+    ``raw_video/images_full`` archive must be finalized by its pixel writer with
+    exact encoded physical-chunk evidence; metadata import cannot upgrade it.
+    """
+
+    raw = root.get("raw_video")
+    if raw is None:
+        raw = root.require_group("raw_video")
+    if not isinstance(raw, zarr.Group):
+        raise PixelFrameAuthorityError("raw_video must be an exact Zarr group.")
+    if "images_full" in raw:
+        raise PixelFrameAuthorityError(
+            "Metadata-only acquisition publication cannot authorize materialized "
+            "raw_video/images_full; the pixel importer must publish exact chunk "
+            "evidence."
+        )
+    recording_id = root.attrs.get("recording_id")
+    camera_id = root.attrs.get("camera_id")
+    if (
+        not isinstance(recording_id, str)
+        or not recording_id.strip()
+        or recording_id != recording_id.strip()
+        or not isinstance(camera_id, str)
+        or not camera_id.strip()
+        or camera_id != camera_id.strip()
+    ):
+        raise PixelFrameAuthorityError(
+            "External-video acquisition authority requires exact recording_id "
+            "and camera_id root attrs from recording context."
+        )
+    try:
+        metadata = parse_source_video_metadata(
+            root.attrs.get("source_video_metadata")
+        )
+    except PixelFrameAuthorityError as exc:
+        raise PixelFrameAuthorityError(
+            "source_video_metadata must satisfy the exact acquisition source contract."
+        ) from exc
+    if metadata.get("camera_id") != camera_id:
+        raise PixelFrameAuthorityError(
+            "source_video_metadata must carry the exact recording camera_id before "
+            "acquisition authority is published."
+        )
+    if "manifests" in raw:
+        manifests = raw["manifests"]
+        if isinstance(manifests, zarr.Group) and "images_full_materialization" in manifests:
+            raise PixelFrameAuthorityError(
+                "External-video authority cannot coexist with a materialization manifest."
+            )
+    authority_path = f"analysis/acquisition_camera_frames/{camera_id}"
+    try:
+        pending_status = build_acquisition_authority_publication_status(
+            status=ACQUISITION_AUTHORITY_PENDING,
+            reason_code=EXTERNAL_ACQUISITION_PENDING_REASON,
+            authority_mode=EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+            authority_path=authority_path,
+        )
+        published_status = build_acquisition_authority_publication_status(
+            status=ACQUISITION_AUTHORITY_PUBLISHED,
+            reason_code=EXTERNAL_ACQUISITION_PUBLISHED_REASON,
+            authority_mode=EXTERNAL_ACQUISITION_AUTHORITY_MODE,
+            authority_path=authority_path,
+        )
+        root_status_value = root.attrs.get(ACQUISITION_AUTHORITY_STATUS_ATTR)
+        raw_status_value = raw.attrs.get(ACQUISITION_AUTHORITY_STATUS_ATTR)
+        if (root_status_value is None) != (raw_status_value is None):
+            raise AcquisitionPublicationStatusError(
+                "Root/raw acquisition publication status is incomplete."
+            )
+        existing_status = None
+        if root_status_value is not None:
+            root_status = parse_acquisition_authority_publication_status(
+                root_status_value
+            )
+            raw_status = parse_acquisition_authority_publication_status(
+                raw_status_value
+            )
+            if root_status != raw_status or root_status not in {
+                pending_status,
+                published_status,
+            }:
+                raise AcquisitionPublicationStatusError(
+                    "Existing acquisition publication status conflicts with external mode."
+                )
+            existing_status = root_status
+    except AcquisitionPublicationStatusError as exc:
+        raise PixelFrameAuthorityError(
+            "External-video acquisition publication status is malformed or conflicting."
+        ) from exc
+
+    analysis = root.require_group("analysis")
+    authorities = analysis.require_group("acquisition_camera_frames")
+    if any(name != camera_id for name in authorities.keys()):
+        raise PixelFrameAuthorityError(
+            "External-video publication found another acquisition-camera authority."
+        )
+    if existing_status is None and camera_id in authorities:
+        raise PixelFrameAuthorityError(
+            "Preexisting external acquisition authority without publication status "
+            "is ambiguous and requires explicit repair."
+        )
+    authority_node = authorities.require_group(camera_id)
+    if existing_status != published_status:
+        try:
+            stamp_acquisition_authority_publication_status(
+                root,
+                raw,
+                status=pending_status.status,
+                reason_code=pending_status.reason_code,
+                authority_mode=pending_status.authority_mode,
+                authority_path=pending_status.authority_path,
+            )
+        except AcquisitionPublicationStatusError as exc:
+            raise PixelFrameAuthorityError(
+                "External-video acquisition pending status could not be persisted."
+            ) from exc
+    ownership = stamp_acquisition_import_ownership(root, authority_node)
+    frame = stamp_acquisition_camera_frame(
+        root,
+        authority_node,
+        import_ownership=ownership,
+    )
+    try:
+        stamp_acquisition_authority_publication_status(
+            root,
+            raw,
+            status=published_status.status,
+            reason_code=published_status.reason_code,
+            authority_mode=published_status.authority_mode,
+            authority_path=published_status.authority_path,
+        )
+    except AcquisitionPublicationStatusError as exc:
+        raise PixelFrameAuthorityError(
+            "External-video acquisition published status could not be persisted."
+        ) from exc
+    return {
+        "authority_path": authority_path,
+        "ownership_record_ref": ownership.record_ref,
+        "ownership_record_sha256": ownership.record_sha256,
+        "frame_record_ref": frame.record_ref,
+        "frame_record_sha256": frame.record_sha256,
+    }
 
 
 def probe_video_metadata(video_path: Path) -> Dict[str, Any]:

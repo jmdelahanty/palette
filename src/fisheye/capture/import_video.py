@@ -17,6 +17,7 @@ os.environ["KVIKIO_COMPAT_MODE"] = "OFF"
 
 import json
 import copy
+import re
 import zarr
 import torch
 import imageio.v3 as iio
@@ -34,6 +35,32 @@ from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, 
 from ..shared.encoder_tags import parse_encoder_comment
 from ..shared.frame_domains import FRAME_DOMAIN_MAPS_GROUP, STORED_ZARR_TO_ACQUISITION_MAP
 from ..shared.grayscale import LUMA_BT601_MATLAB, rgb_to_gray_bt601_matlab_torch
+from ..shared.acquisition_publication_status import (
+    ACQUISITION_AUTHORITY_NOT_PUBLISHED,
+    ACQUISITION_AUTHORITY_PENDING,
+    ACQUISITION_AUTHORITY_PUBLISHED,
+    ACQUISITION_AUTHORITY_STATUS_ATTR,
+    ACQUISITION_AUTHORITY_STATUS_SCHEMA_ID,  # noqa: F401 - compatibility re-export
+    ACQUISITION_AUTHORITY_STATUS_SCHEMA_VERSION,  # noqa: F401 - compatibility re-export
+    ACQUISITION_NONCANONICAL_REASON_CODES,
+    MATERIALIZED_ACQUISITION_AUTHORITY_MODE,
+    MATERIALIZED_ACQUISITION_PENDING_REASON,
+    MATERIALIZED_ACQUISITION_PUBLISHED_REASON,
+    AcquisitionPublicationStatusError,
+    build_acquisition_authority_publication_status,
+    parse_acquisition_authority_publication_status,
+    stamp_acquisition_authority_publication_status,
+)
+from ..shared.import_source_fingerprint import source_stat_fingerprint_attrs
+from ..shared.pixel_frame_authority import (
+    PixelFrameAuthorityError,
+    build_verified_acquisition_materialization,
+    collect_acquisition_importer_physical_object_evidence,
+    stamp_acquisition_camera_frame,
+    stamp_acquisition_import_ownership,
+    stamp_acquisition_import_writer_materialization_manifest,
+)
+from ..shared.source_video_metadata import build_source_video_metadata_v2
 
 # Optional deps
 try:
@@ -55,8 +82,8 @@ except Exception as exc:  # pragma: no cover - depends on CUDA stack
     _CUPY_IMPORT_ERROR = exc
 
 try:
-    import kvikio
-    import kvikio.zarr
+    import kvikio  # noqa: F401 - availability probe for the optional GDS path
+    import kvikio.zarr as _kvikio_zarr  # noqa: F401 - availability probe
     _HAVE_KVIKIO = True
 except Exception:
     _HAVE_KVIKIO = False
@@ -65,7 +92,21 @@ from ..shared.system_metadata import get_git_info, get_environment_info, get_gds
 from ..shared.zarr.schema import create_palette_zarr, update_import_duration
 
 
+COMPLETE_ENCODED_OBJECT_WRITE_POLICY = "write_empty_chunks_true_v1"
+_CANONICAL_ID_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.:+-]+$")
+_NONCANONICAL_IMPORT_REASON_CODES = ACQUISITION_NONCANONICAL_REASON_CODES
+
+
 # ---------------- GDS support helpers ---------------- #
+
+def _is_canonical_id_segment(value: Any) -> bool:
+    return (
+        type(value) is str
+        and bool(value)
+        and value == value.strip()
+        and value not in {".", ".."}
+        and _CANONICAL_ID_SEGMENT_RE.fullmatch(value) is not None
+    )
 
 def _compute_frame_indices(
     total_frames: int,
@@ -121,6 +162,476 @@ def stamp_stored_zarr_frame_identity_mapping(raw_group: Any, frame_count: int) -
     raw_group.attrs["stored_zarr_frame_to_acquisition_frame_map"] = (
         f"{FRAME_DOMAIN_MAPS_GROUP}/{STORED_ZARR_TO_ACQUISITION_MAP}"
     )
+
+
+def _load_organized_recording_context(video_path: Path) -> Optional[Dict[str, str]]:
+    """Load exact recording/camera identity without guessing from path names.
+
+    A video outside an organized ``<recording>/cams`` layout, or an organized
+    layout without a manifest, is an ad-hoc import and therefore has no
+    canonical acquisition identity.  Once a manifest is present, malformed or
+    incomplete identity is an error: silently downgrading that case would hide
+    bad future recording metadata.
+    """
+
+    # Detect the organized layout without following a possible source-file
+    # symlink; otherwise a present manifest could be silently skipped.
+    source = video_path.expanduser().absolute()
+    if source.parent.name != "cams":
+        return None
+    recording_path = source.parent.parent.resolve()
+    manifest_path = recording_path / "recording_manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"Cannot load organized recording identity from {manifest_path}: {exc}"
+        ) from exc
+    if type(manifest) is not dict:
+        raise ValueError("recording_manifest.json must contain one exact JSON object.")
+
+    identity: Dict[str, str] = {}
+    for field_name in ("recording_id", "camera_id"):
+        value = manifest.get(field_name)
+        if not _is_canonical_id_segment(value):
+            raise ValueError(
+                "Organized recording manifests must declare exact nonempty "
+                f"canonical-path-segment {field_name}."
+            )
+        identity[field_name] = value
+    identity["recording_path"] = str(recording_path)
+    identity["recording_manifest_path"] = str(manifest_path)
+    return identity
+
+
+def _build_import_source_video_metadata(
+    video_metadata: Dict[str, Any],
+    *,
+    organized_context: Optional[Dict[str, str]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build exact v2 source metadata and a persisted stat fingerprint."""
+
+    source_path = Path(str(video_metadata["source_path"])).expanduser().resolve()
+    canonical_input: Dict[str, Any] = {
+        "source_video": str(video_metadata.get("source_video") or source_path.name),
+        "source_path": str(source_path),
+        "width": int(video_metadata["width"]),
+        "height": int(video_metadata["height"]),
+        "total_frames": int(video_metadata["total_frames"]),
+        "fps": float(video_metadata.get("fps", 0.0)),
+        "duration_seconds": float(video_metadata.get("duration_seconds", 0.0)),
+        "codec": str(video_metadata.get("codec", "unknown")),
+        "pix_fmt": str(video_metadata.get("pix_fmt", "unknown")),
+    }
+    if organized_context is not None:
+        canonical_input["camera_id"] = organized_context["camera_id"]
+    fingerprint_attrs = source_stat_fingerprint_attrs(
+        source_path,
+        attr_prefix="source_video",
+        extra={
+            "codec": canonical_input["codec"],
+            "pix_fmt": canonical_input["pix_fmt"],
+            "width": canonical_input["width"],
+            "height": canonical_input["height"],
+            "fps": canonical_input["fps"],
+            "frame_count": canonical_input["total_frames"],
+        },
+    )
+    metadata = build_source_video_metadata_v2(
+        canonical_input,
+        recording_path=(
+            organized_context["recording_path"]
+            if organized_context is not None
+            else None
+        ),
+        fingerprint_attrs=fingerprint_attrs,
+    )
+    return metadata, fingerprint_attrs
+
+
+def _stamp_import_source_context(
+    root: Any,
+    raw: Any,
+    *,
+    source_video_metadata: dict[str, Any],
+    fingerprint_attrs: dict[str, Any],
+    organized_context: Optional[Dict[str, str]],
+) -> None:
+    """Persist exact source context before any authority can be published."""
+
+    source_path = str(source_video_metadata["source_path"])
+    root_payload: Dict[str, Any] = {
+        "source_video_metadata": source_video_metadata,
+        "source_video": source_video_metadata.get("source_video"),
+        "source_video_path": source_path,
+        "source_path": source_path,
+        "width": int(source_video_metadata["width"]),
+        "height": int(source_video_metadata["height"]),
+        "total_frames": int(source_video_metadata["total_frames"]),
+        **fingerprint_attrs,
+    }
+    if organized_context is not None:
+        root_payload.update(organized_context)
+    root.attrs.update(root_payload)
+    raw.attrs.update(
+        {
+            "source_path": source_path,
+            "source_video": source_video_metadata.get("source_video"),
+            **fingerprint_attrs,
+        }
+    )
+
+
+def _publication_status_record(
+    *,
+    status: str,
+    reason_code: str,
+    authority_path: Optional[str] = None,
+) -> dict[str, Any]:
+    return build_acquisition_authority_publication_status(
+        status=status,
+        reason_code=reason_code,
+        authority_mode=(
+            None
+            if status == ACQUISITION_AUTHORITY_NOT_PUBLISHED
+            else MATERIALIZED_ACQUISITION_AUTHORITY_MODE
+        ),
+        authority_path=authority_path,
+    ).to_dict()
+
+
+def _stamp_acquisition_authority_status(
+    root: Any,
+    raw: Any,
+    *,
+    status: str,
+    reason_code: str,
+    authority_path: Optional[str] = None,
+) -> None:
+    try:
+        stamp_acquisition_authority_publication_status(
+            root,
+            raw,
+            status=status,
+            reason_code=reason_code,
+            authority_mode=(
+                None
+                if status == ACQUISITION_AUTHORITY_NOT_PUBLISHED
+                else MATERIALIZED_ACQUISITION_AUTHORITY_MODE
+            ),
+            authority_path=authority_path,
+        )
+    except AcquisitionPublicationStatusError as exc:
+        raise PixelFrameAuthorityError(
+            f"Acquisition authority status write failed: {exc}"
+        ) from exc
+
+
+def _canonical_import_ineligibility(
+    *,
+    organized_context: Optional[Dict[str, str]],
+    create_full: bool,
+    training_data_mode: bool,
+    frame_step: Optional[int],
+    skip_tail_frames: int,
+    imported_frames: int,
+    source_frames: int,
+) -> Optional[str]:
+    if organized_context is None:
+        return "organized_recording_identity_absent"
+    if not create_full:
+        return "images_full_not_materialized"
+    if training_data_mode or frame_step not in (None, 1):
+        return "sampled_or_training_import"
+    if skip_tail_frames != 0 or imported_frames != source_frames:
+        return "incomplete_source_frame_import"
+    return None
+
+
+def _close_store(node: Any) -> None:
+    store = getattr(node, "store", None)
+    close = getattr(store, "close", None)
+    if callable(close):
+        close()
+
+
+def publish_completed_materialized_acquisition_authority(
+    zarr_path: str | Path,
+) -> dict[str, str]:
+    """Publish canonical acquisition authority from a completed local import.
+
+    The archive is reopened through ``LocalStore`` and every expected encoded
+    outer shard/chunk object is hashed before the immutable manifest is stamped.
+    This function is deliberately strict: it never upgrades sampled, partial,
+    identity-ambiguous, or non-local imports.
+    """
+
+    requested_path = Path(zarr_path).expanduser().absolute()
+    try:
+        if requested_path.is_symlink() or not requested_path.is_dir():
+            raise PixelFrameAuthorityError(
+                "Canonical materialized acquisition publication requires a "
+                "non-symlink local Zarr directory."
+            )
+        path = requested_path.resolve()
+        store = LocalStore(str(path))
+        root = zarr.open_group(
+            store=store,
+            mode="r+",
+            use_consolidated=False,
+        )
+        raw = root["raw_video"]
+        frame_node = raw["images_full"]
+        frame_index_node = raw[
+            f"{FRAME_DOMAIN_MAPS_GROUP}/{STORED_ZARR_TO_ACQUISITION_MAP}"
+        ]
+
+        root_status = root.attrs.get(ACQUISITION_AUTHORITY_STATUS_ATTR)
+        raw_status = raw.attrs.get(ACQUISITION_AUTHORITY_STATUS_ATTR)
+        if (root_status is None) != (raw_status is None):
+            raise PixelFrameAuthorityError(
+                "Root/raw acquisition publication status is incomplete or conflicting; "
+                "explicit repair is required."
+            )
+        if root_status is not None:
+            try:
+                parsed_root_status = parse_acquisition_authority_publication_status(
+                    root_status
+                )
+                parsed_raw_status = parse_acquisition_authority_publication_status(
+                    raw_status
+                )
+            except AcquisitionPublicationStatusError as exc:
+                raise PixelFrameAuthorityError(
+                    "A malformed import cannot be silently upgraded to canonical "
+                    "acquisition authority."
+                ) from exc
+            if parsed_root_status != parsed_raw_status:
+                raise PixelFrameAuthorityError(
+                    "Root/raw acquisition publication status is conflicting; "
+                    "explicit repair is required."
+                )
+
+        root_recording_id = root.attrs.get("recording_id")
+        root_camera_id = root.attrs.get("camera_id")
+        metadata = root.attrs.get("source_video_metadata")
+        if (
+            not _is_canonical_id_segment(root_recording_id)
+            or not _is_canonical_id_segment(root_camera_id)
+            or type(metadata) is not dict
+            or metadata.get("schema_id") != "palette.source_video_metadata.v2"
+            or metadata.get("camera_id") != root_camera_id
+        ):
+            raise PixelFrameAuthorityError(
+                "Canonical materialized acquisition publication requires exact "
+                "recording_id, camera_id, and matching source_video_metadata v2."
+            )
+        authority_path = f"analysis/acquisition_camera_frames/{root_camera_id}"
+        if root_status is None and any(
+            path in root
+            for path in (
+                authority_path,
+                "raw_video/manifests/images_full_materialization",
+            )
+        ):
+            raise PixelFrameAuthorityError(
+                "Preexisting acquisition authority/manifest evidence without a "
+                "publication status is ambiguous and requires explicit repair."
+            )
+        allowed_existing_statuses = (
+            _publication_status_record(
+                status=ACQUISITION_AUTHORITY_PENDING,
+                reason_code=MATERIALIZED_ACQUISITION_PENDING_REASON,
+                authority_path=authority_path,
+            ),
+            _publication_status_record(
+                status=ACQUISITION_AUTHORITY_PUBLISHED,
+                reason_code=MATERIALIZED_ACQUISITION_PUBLISHED_REASON,
+                authority_path=authority_path,
+            ),
+        )
+        if root_status is not None and root_status not in allowed_existing_statuses:
+            raise PixelFrameAuthorityError(
+                "A noncanonical or malformed import cannot be silently upgraded "
+                "to canonical acquisition authority."
+            )
+        if root.attrs.get("zarr_purpose") == "training":
+            raise PixelFrameAuthorityError(
+                "Training archives cannot publish canonical acquisition authority."
+            )
+        if raw.attrs.get("complete_encoded_object_write_policy") != (
+            COMPLETE_ENCODED_OBJECT_WRITE_POLICY
+        ) or raw.attrs.get("write_empty_chunks") is not True:
+            raise PixelFrameAuthorityError(
+                "Canonical acquisition publication requires write_empty_chunks=True "
+                "for complete encoded-object coverage."
+            )
+        if raw.attrs.get("import_mode") != "full" or raw.attrs.get(
+            "import_stage"
+        ) not in {"complete", "full_resolution"}:
+            raise PixelFrameAuthorityError(
+                "Canonical acquisition publication requires completed full-import semantics."
+            )
+        skip_tail_value = raw.attrs.get("skip_tail_frames", 0)
+        frame_step_value = raw.attrs.get("frame_step")
+        command_line_args = root.attrs.get("command_line_args")
+        if (
+            type(skip_tail_value) is not int
+            or skip_tail_value != 0
+            or (
+                frame_step_value is not None
+                and (type(frame_step_value) is not int or frame_step_value != 1)
+            )
+            or raw.attrs.get("import_purpose") == "training_data"
+            or (
+                type(command_line_args) is dict
+                and command_line_args.get("training_data") is True
+            )
+            or "original_frame_indices" in raw
+        ):
+            raise PixelFrameAuthorityError(
+                "Sampled or tail-truncated imports cannot publish canonical acquisition authority."
+            )
+        shape = tuple(int(item) for item in frame_node.shape)
+        if (
+            len(shape) != 3
+            or np.dtype(frame_node.dtype) != np.dtype("uint8")
+            or shape[0] != metadata.get("total_frames")
+            or shape[1] != metadata.get("height")
+            or shape[2] != metadata.get("width")
+        ):
+            raise PixelFrameAuthorityError(
+                "images_full shape/dtype must exactly match complete source-video metadata."
+            )
+        indices = np.asarray(frame_index_node[:])
+        if (
+            indices.ndim != 1
+            or indices.dtype != np.dtype("<i8")
+            or indices.shape[0] != shape[0]
+            or not np.array_equal(indices.astype(np.int64), np.arange(shape[0]))
+            or frame_index_node.attrs.get("source_domain") != "stored_zarr_frame"
+            or frame_index_node.attrs.get("target_domain") != "acquisition_frame"
+            or frame_index_node.attrs.get("semantics")
+            != "identity_map_zero_based_full_import"
+        ):
+            raise PixelFrameAuthorityError(
+                "Canonical full imports require an exact identity stored-Zarr to "
+                "acquisition-frame map."
+            )
+
+        evidence = collect_acquisition_importer_physical_object_evidence(frame_node)
+        _stamp_acquisition_authority_status(
+            root,
+            raw,
+            status=ACQUISITION_AUTHORITY_PENDING,
+            reason_code=MATERIALIZED_ACQUISITION_PENDING_REASON,
+            authority_path=authority_path,
+        )
+        manifest_node = raw.require_group("manifests").require_group(
+            "images_full_materialization"
+        )
+        stamp_acquisition_import_writer_materialization_manifest(
+            root,
+            frame_node=frame_node,
+            frame_index_node=frame_index_node,
+            manifest_node=manifest_node,
+            import_operation_attrs=raw.attrs,
+            physical_object_evidence=evidence,
+        )
+        materialization = build_verified_acquisition_materialization(
+            root,
+            frame_node=frame_node,
+            frame_index_node=frame_index_node,
+            import_operation_attrs=raw.attrs,
+        )
+        authority_node = (
+            root.require_group("analysis")
+            .require_group("acquisition_camera_frames")
+            .require_group(root_camera_id)
+        )
+        ownership = stamp_acquisition_import_ownership(
+            root,
+            authority_node,
+            frame_node=frame_node,
+            frame_index_node=frame_index_node,
+            materialization=materialization,
+        )
+        frame = stamp_acquisition_camera_frame(
+            root,
+            authority_node,
+            import_ownership=ownership,
+        )
+        _stamp_acquisition_authority_status(
+            root,
+            raw,
+            status=ACQUISITION_AUTHORITY_PUBLISHED,
+            reason_code=MATERIALIZED_ACQUISITION_PUBLISHED_REASON,
+            authority_path=authority_path,
+        )
+        return {
+            "authority_path": authority_path,
+            "ownership_record_ref": ownership.record_ref,
+            "ownership_record_sha256": ownership.record_sha256,
+            "frame_record_ref": frame.record_ref,
+            "frame_record_sha256": frame.record_sha256,
+        }
+    finally:
+        if "root" in locals():
+            _close_store(root)
+
+
+def mark_materialized_import_noncanonical(
+    zarr_path: str | Path,
+    *,
+    reason_code: str,
+) -> None:
+    """Persist why an intentional legacy/ad-hoc import has no authority."""
+
+    if reason_code not in _NONCANONICAL_IMPORT_REASON_CODES:
+        raise PixelFrameAuthorityError(
+            "Noncanonical acquisition import status requires one controlled reason code."
+        )
+
+    store = LocalStore(str(Path(zarr_path).expanduser().resolve()))
+    root = zarr.open_group(
+        store=store,
+        mode="r+",
+        use_consolidated=False,
+    )
+    try:
+        raw = root["raw_video"]
+        intended_status = _publication_status_record(
+            status=ACQUISITION_AUTHORITY_NOT_PUBLISHED,
+            reason_code=reason_code,
+        )
+        existing_statuses = (
+            root.attrs.get(ACQUISITION_AUTHORITY_STATUS_ATTR),
+            raw.attrs.get(ACQUISITION_AUTHORITY_STATUS_ATTR),
+        )
+        if any(
+            status is not None and status != intended_status
+            for status in existing_statuses
+        ) or any(
+            path in root
+            for path in (
+                "raw_video/manifests/images_full_materialization",
+                "analysis/acquisition_camera_frames",
+            )
+        ):
+            raise PixelFrameAuthorityError(
+                "An in-progress or persisted acquisition authority cannot be "
+                "downgraded to noncanonical status."
+            )
+        _stamp_acquisition_authority_status(
+            root,
+            raw,
+            status=ACQUISITION_AUTHORITY_NOT_PUBLISHED,
+            reason_code=reason_code,
+        )
+    finally:
+        _close_store(root)
 
 
 def _default_import_config() -> Dict[str, Any]:
@@ -519,7 +1030,9 @@ def _process_video_gpu_kvikio(
                 # Periodically free CUDA/CPU caches every 20 chunk writes
                 if write_idx_start > 0 and write_idx_start % (frames_per_write * 20) == 0:
                     torch.cuda.empty_cache()
-                    import gc; gc.collect()
+                    import gc
+
+                    gc.collect()
     
     return write_times
 
@@ -556,7 +1069,7 @@ def _finalize_kvikio_zarr_metadata(
     using the LocalStore view of the archive.
     """
     store = LocalStore(str(zarr_path))
-    root = zarr.open_group(store=store, mode='r+')
+    root = zarr.open_group(store=store, mode='r+', use_consolidated=False)
     raw = root.require_group("raw_video")
 
     if create_full and full_shape:
@@ -601,6 +1114,7 @@ def _finalize_kvikio_zarr_metadata(
         fill_value=float("nan"),
         compressors=[],
     )
+    _close_store(root)
 
 def _setup_video_reader(video_path: Path, use_gpu: bool, force_cpu: bool, console: Console) -> Tuple[str, decord.VideoReader]:
     _decord = _require_decord()
@@ -757,6 +1271,7 @@ def import_video(
     if pid == 0:
         # === CHILD PROCESS ===
         # This is where all the actual import work happens
+        root_local = None
         try:
             video_path = Path(video_path)
             if not video_path.exists():
@@ -773,7 +1288,6 @@ def import_video(
             use_sharding = bool(ip.get("use_sharding", False))
             
             resolutions_mode = ip.get("resolutions", "full")
-            full_config = ip.get("full", {})
             down_config = ip.get("downsampled", {})
             down_formats = _normalize_downsample_formats(down_config.get("formats"))
             store_gray = "gray" in down_formats
@@ -875,22 +1389,39 @@ def import_video(
             # Check if we should use kvikIO Zarr
             kvikio_available = False
             if use_kvikio_zarr and device == "cuda:0":
-                try:
-                    import kvikio.zarr
-                    import cupy as cp
+                if _HAVE_KVIKIO and _HAVE_CUPY:
                     kvikio_available = True
                     console.print("[green]kvikIO available for direct GPU --> Zarr writes[/green]")
-                except ImportError as e:
-                    console.print(f"[yellow]kvikIO not available: {e}, using standard path[/yellow]")
+                else:
+                    console.print(
+                        "[yellow]kvikIO/CuPy not available; using standard path[/yellow]"
+                    )
                     use_kvikio_zarr = False
 
             # ---- Create Zarr structure -----------------------------------------------
             vid_meta = _get_video_metadata(video_path, vr, full_w, full_h, n_frames)
+            organized_context = _load_organized_recording_context(video_path)
+            source_video_metadata, source_fingerprint_attrs = (
+                _build_import_source_video_metadata(
+                    vid_meta,
+                    organized_context=organized_context,
+                )
+            )
+
+            # Canonical publication requires an encoded object for every outer
+            # chunk/shard grid cell, including valid all-zero camera frames.
+            # The child exits hard, so this process-local setting needs no reset.
+            _write_empty_chunks_config = zarr.config.set(
+                {"array.write_empty_chunks": True}
+            )
+            if zarr.config.get("array.write_empty_chunks") is not True:
+                raise RuntimeError(
+                    "Cannot enable complete encoded-object writes for video import."
+                )
 
             if kvikio_available and use_kvikio_zarr:
                 import kvikio.zarr
                 import kvikio.defaults
-                import cupy as cp
 
                 kvikio_config = {
                     "num_threads": 8,
@@ -902,20 +1433,29 @@ def import_video(
                 kvikio.defaults.set(kvikio_config)
                 
                 # Verify configuration took effect
-                console.print(f"[cyan]kvikIO configured:[/cyan]")
+                console.print("[cyan]kvikIO configured:[/cyan]")
                 console.print(f"  Threads: {kvikio.defaults.get('num_threads')}")
                 console.print(f"  Task size: {kvikio.defaults.get('task_size')/(1024*1024):.1f} MB")
                 console.print(f"  Bounce buffer: {kvikio.defaults.get('bounce_buffer_size')/(1024*1024):.1f} MB")
                 console.print(f"  GDS mode: {not kvikio.defaults.get('compat_mode')}")
 
                 # Enable GPU support in Zarr
-                zarr.config.enable_gpu()
-                console.print(f"[cyan]Zarr GPU support enabled[/cyan]")
+                _gpu_buffer_config = zarr.config.enable_gpu()
+                if zarr.config.get("buffer") != "zarr.buffer.gpu.Buffer":
+                    raise RuntimeError("Cannot enable the Zarr GPU buffer for GDS import.")
+                console.print("[cyan]Zarr GPU support enabled[/cyan]")
 
                 # Create GDS store and root group
                 store = kvikio.zarr.GDSStore(str(zarr_path))
                 root = zarr.open_group(store, mode='w', zarr_format=3)
                 raw = root.create_group("raw_video", overwrite=True)
+                _stamp_import_source_context(
+                    root,
+                    raw,
+                    source_video_metadata=source_video_metadata,
+                    fingerprint_attrs=source_fingerprint_attrs,
+                    organized_context=organized_context,
+                )
 
                                 # Create arrays based on resolution mode
                 arrays = {}
@@ -1015,6 +1555,10 @@ def import_video(
                     "source_video": str(video_path.name),
                     "source_path": str(video_path.absolute()),
                     "import_timestamp": datetime.now(timezone.utc).isoformat(),
+                    "write_empty_chunks": True,
+                    "complete_encoded_object_write_policy": (
+                        COMPLETE_ENCODED_OBJECT_WRITE_POLICY
+                    ),
                 }
                 metadata.update(_decode_contract_metadata(device))
 
@@ -1081,7 +1625,13 @@ def import_video(
                 
                 root = create_palette_zarr(str(zarr_path), vid_meta, cfg2, cli_args=cli_args)
                 raw = root["raw_video"]
-                arr_full = raw["images_full"]
+                _stamp_import_source_context(
+                    root,
+                    raw,
+                    source_video_metadata=source_video_metadata,
+                    fingerprint_attrs=source_fingerprint_attrs,
+                    organized_context=organized_context,
+                )
                 
                 metadata = {
                     "import_method": "standard_zarr",
@@ -1097,6 +1647,10 @@ def import_video(
                     "source_video": str(video_path.name),
                     "source_path": str(video_path.absolute()),
                     "import_timestamp": datetime.now(timezone.utc).isoformat(),
+                    "write_empty_chunks": True,
+                    "complete_encoded_object_write_policy": (
+                        COMPLETE_ENCODED_OBJECT_WRITE_POLICY
+                    ),
                 }
                 metadata.update(_decode_contract_metadata(device))
 
@@ -1161,6 +1715,20 @@ def import_video(
                     gpu_fp16, arrays, config, console,
                     frame_indices=frame_indices_to_import
                 )
+                _cpu_completion_config = zarr.config.set(
+                    {
+                        "buffer": "zarr.buffer.cpu.Buffer",
+                        "ndbuffer": "zarr.buffer.cpu.NDBuffer",
+                    }
+                )
+                if (
+                    zarr.config.get("buffer") != "zarr.buffer.cpu.Buffer"
+                    or zarr.config.get("array.write_empty_chunks") is not True
+                ):
+                    raise RuntimeError(
+                        "Cannot switch the completed GDS import to strict local "
+                        "metadata finalization."
+                    )
                 _finalize_kvikio_zarr_metadata(
                     Path(zarr_path),
                     n_frames=n_import_frames,
@@ -1179,7 +1747,11 @@ def import_video(
                     training_data_mode and frame_step
                 ):
                     store_local = LocalStore(str(zarr_path))
-                    root_local = zarr.open_group(store=store_local, mode='r+')
+                    root_local = zarr.open_group(
+                        store=store_local,
+                        mode='r+',
+                        use_consolidated=False,
+                    )
                     raw_local = root_local['raw_video']
                 if training_data_mode and frame_step and frame_indices_to_import:
                     console.print("[cyan]Creating original_frame_indices array...[/cyan]")
@@ -1404,12 +1976,43 @@ def import_video(
                     # Also store the complete environment info as a JSON attribute for full reproducibility
                     raw.attrs["_full_environment_info"] = json.dumps(env_info, default=str)
                     
-                    console.print(f"[green]✓ System metadata collected and stored[/green]")
+                    console.print("[green]✓ System metadata collected and stored[/green]")
                     
                 except Exception as e:
                     console.print(f"[yellow]Could not collect full system info: {e}[/yellow]")
                     import traceback
                     console.print(f"[dim]{traceback.format_exc()}[/dim]")
+
+            # The canonical boundary is post-close/reopen: authority binds the
+            # completed LocalStore objects, never in-memory writer assumptions.
+            authority_ineligibility = _canonical_import_ineligibility(
+                organized_context=organized_context,
+                create_full=create_full,
+                training_data_mode=training_data_mode,
+                frame_step=frame_step,
+                skip_tail_frames=skip_tail_frames,
+                imported_frames=n_import_frames,
+                source_frames=n_frames,
+            )
+            _close_store(root_local)
+            _close_store(root)
+            if authority_ineligibility is None:
+                authority_result = publish_completed_materialized_acquisition_authority(
+                    zarr_path
+                )
+                console.print(
+                    "[green]✓ Published canonical acquisition authority:[/green] "
+                    f"{authority_result['authority_path']}"
+                )
+            else:
+                mark_materialized_import_noncanonical(
+                    zarr_path,
+                    reason_code=authority_ineligibility,
+                )
+                console.print(
+                    "[yellow]Canonical acquisition authority not published:[/yellow] "
+                    f"{authority_ineligibility}"
+                )
 
             # ---- Display completion info ---------------------------------------------
             output_arrays = []
@@ -1440,31 +2043,33 @@ def import_video(
             perf_lines.append(f"  Throughput: {throughput_gbps:.2f} GB/s")
 
             console.print(Panel(
-                f"[green]✓ Import completed successfully[/green]\n\n"
-                f"[yellow]Performance:[/yellow]\n"
+                "[green]✓ Import completed successfully[/green]\n\n"
+                "[yellow]Performance:[/yellow]\n"
                 + "\n".join(perf_lines)
                 + "\n\n"
-                f"[yellow]Output:[/yellow]\n"
+                "[yellow]Output:[/yellow]\n"
                 f"  Path: {zarr_path}\n"
-                f"[yellow]Arrays created:[/yellow]\n" + "\n".join(output_arrays),
+                "[yellow]Arrays created:[/yellow]\n" + "\n".join(output_arrays),
                 title="Import Complete",
                 expand=False
             ))
 
             # ---- Explicit cleanup before hard exit ----------------------------------
             console.print("[dim]Performing pre-exit cleanup...[/dim]")
-            
-            # Close the Zarr store explicitly
-            root.store.close()
+
+            # Stores were closed before the authority completion pass. This is
+            # intentionally idempotent for branches without a secondary handle.
+            _close_store(root_local)
+            _close_store(root)
             
             # This terminates the child process immediately WITHOUT running
             # any atexit handlers, avoiding the segmentation fault
             console.print("[dim]Worker process performing hard exit...[/dim]")
             _exit(0)
 
-        except Exception as e:
+        except Exception:
             # If any error occurs, print it and exit with error code
-            console.print(f"[bold red]Error in import worker process:[/bold red]")
+            console.print("[bold red]Error in import worker process:[/bold red]")
             console.print_exception()
             _exit(1)
 
