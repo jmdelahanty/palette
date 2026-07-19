@@ -1297,7 +1297,9 @@ def _component_surface_rows(
     stop_row: int,
 ) -> tuple[np.ndarray, bool, str, Optional[str], float, int]:
     component_idx = _require_available_component(source, component_name, "subject_mask_runs")
-    probabilities = source.group.get("mask_probs_roi")
+    probabilities = source.probabilities_roi
+    if probabilities is None:
+        probabilities = source.group.get("mask_probs_roi")
     threshold = _component_threshold(source, component_name, component_idx)
     if probabilities is not None:
         encoding = source.probability_encoding or _probability_encoding_for_group(source.group)

@@ -375,7 +375,12 @@ def validate_target(
             "subject_mask_shard_runs",
             str(clip["subject_mask_shard_run"]),
         )
-        raw_report = _validate_raw_masks(raw, sample_rows=sample_rows)
+        raw_report = _validate_raw_masks(
+            root,
+            raw,
+            run_name=str(clip["subject_mask_shard_run"]),
+            sample_rows=sample_rows,
+        )
         raw_identity, raw_keys = _instance_key_values(
             raw,
             label=f"subject_mask_shard_runs/{clip['subject_mask_shard_run']}",

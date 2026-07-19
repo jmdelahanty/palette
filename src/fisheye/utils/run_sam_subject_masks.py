@@ -12,7 +12,6 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
@@ -22,6 +21,7 @@ import zarr
 from fisheye.pose.schema import schema_from_metadata
 from fisheye.shared.crop_geometry import resolve_full_frame_shape
 from fisheye.shared.crop_image_source import CropImageSource
+from fisheye.shared.composite_subject_mask import assert_subject_mask_run_unreferenced
 from fisheye.shared.inference_timing import InferenceTimingProfiler
 from fisheye.shared.provenance_attrs import (
     build_source_crop_snapshot_attrs,
@@ -1705,6 +1705,7 @@ def write_sam_subject_mask_run(
             f"subject_mask_runs/{output_run} already exists. Pass --overwrite to replace it."
         )
     if output_run in parent and overwrite:
+        assert_subject_mask_run_unreferenced(parent, str(output_run))
         del parent[output_run]
 
     n_rows = int(inputs.row_count)

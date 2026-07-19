@@ -269,6 +269,11 @@ The third strategy is not the same as partial materialization. Every target key
 already has a terminal payload; some payloads are resolved from an immutable
 base rather than duplicated into the new run.
 
+Palette now applies the first strategy to compact keypoint coordinates and the
+third strategy to raw subject-mask probabilities. The concrete source maps,
+publication gates, and operator interfaces are specified in
+`docs/keyed_downstream_compaction_contract.md`.
+
 Composite runs require explicit contracts:
 
 - exact base-run and base-row references;

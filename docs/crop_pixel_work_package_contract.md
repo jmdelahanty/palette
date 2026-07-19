@@ -100,12 +100,14 @@ pointers, or publish registry success. These runs are stamped
 finalizers reject that role because a subset is not a complete collection
 partition.
 
-A keyed incremental compactor must combine compatible rows from the exact prior
+A keyed incremental compactor combines compatible rows from the exact prior
 complete base with replacement rows from these shards, order the result on the
 target crop rowset, validate complete `source_crop_row_ids` and `instance_key`
-coverage, and publish a new complete snapshot. The subset writer and lineage
-contract are implemented; that base-plus-delta keypoint/mask compactor is the
-next implementation phase.
+coverage, and publish a new complete snapshot. Keypoints are published as a
+bounded, physically standalone sharded snapshot. Raw probability masks use a
+depth-one immutable base-plus-delta snapshot so unchanged probability pixels
+are not decoded and rewritten. See
+`docs/keyed_downstream_compaction_contract.md`.
 
 Subject-mask inference does not depend on keypoints. Both inference branches
 may therefore fan out from the same completed package. Eye assignment and any

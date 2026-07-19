@@ -22,6 +22,7 @@ from ..shared.roi_background import (
     _resolve_run_name,
 )
 from ..shared.crop_image_source import CropImageSource
+from ..shared.composite_subject_mask import assert_subject_mask_run_unreferenced
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs, build_source_roi_pixel_attrs
 from ..shared.row_lineage import copy_row_lineage_arrays, write_direct_source_crop_row_ids
 from ..shared.run_provenance import build_run_provenance_from_stage_record
@@ -366,6 +367,7 @@ def _prepare_run_group(
             raise ValueError(
                 f"subject_mask_runs/{run_name} already exists. Pass --overwrite to replace it."
             )
+        assert_subject_mask_run_unreferenced(parent, str(run_name))
         del parent[run_name]
     run_group = parent.create_group(run_name)
     mark_run_started(run_group, run_name=str(run_name), stage="subject_masks")

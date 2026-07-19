@@ -43,6 +43,7 @@ from ..shared.row_lineage import (
     copy_selected_crop_row_lineage_arrays,
     write_direct_source_crop_row_ids,
 )
+from ..shared.row_source_signature import copy_selected_row_source_signatures
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.artifact_fingerprint import fingerprint_artifact
 from ..shared.run_provenance import (
@@ -1191,6 +1192,15 @@ def detect_keypoints_yolo(
             run_group,
             total_rois=total_rois,
             shard_rows=keypoint_roi_shard_rows,
+        )
+    if getattr(crop_source, "pixel_materialization_id", None) is not None:
+        if selected_crop_rows is None:
+            raise ValueError("Package-backed keypoint inference lacks selected crop rows.")
+        copy_selected_row_source_signatures(
+            run_group,
+            crop_group,
+            selected_crop_rows,
+            shard_rows=int(keypoint_roi_shard_rows or DEFAULT_KEYPOINT_ROI_SHARD_ROWS),
         )
     if "detection_indices" not in lineage_result.copied:
         console.print("[yellow]Crop run missing 'detection_indices'; YOLO keypoint run will omit them.[/yellow]")

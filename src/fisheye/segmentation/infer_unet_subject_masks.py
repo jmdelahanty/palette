@@ -23,6 +23,7 @@ from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 
 from ..pose.schema import resolve_required_keypoint_indices_from_attrs
 from ..shared.crop_image_source import CropImageSource
+from ..shared.composite_subject_mask import assert_subject_mask_run_unreferenced
 from ..shared.artifact_fingerprint import fingerprint_artifact
 from ..shared.inference_timing import InferenceTimingProfiler
 from ..shared.model_input_transform import MODEL_INPUT_TRANSFORM_CHOICES, ModelInputTransform, resolve_model_input_transform
@@ -37,6 +38,7 @@ from ..shared.row_lineage import (
     copy_selected_crop_row_lineage_arrays,
     write_direct_source_crop_row_ids,
 )
+from ..shared.row_source_signature import copy_selected_row_source_signatures
 from ..shared.run_provenance import append_input_artifacts, build_run_provenance_from_stage_record
 from ..shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
@@ -461,6 +463,8 @@ def _prepare_run_group(
             raise ValueError(
                 f"{output_parent}/{resolved_name} already exists. Pass --overwrite to replace it."
             )
+        if output_parent == SUBJECT_MASK_CANONICAL_OUTPUT_PARENT:
+            assert_subject_mask_run_unreferenced(parent, str(resolved_name))
         del parent[resolved_name]
     run_group = parent.create_group(resolved_name)
     mark_run_started(run_group, run_name=str(resolved_name), stage="subject_masks")
@@ -1574,6 +1578,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         else:
             copy_row_lineage_arrays(run_group, crop_group, total_rois=total_rois)
             write_direct_source_crop_row_ids(run_group, total_rois=total_rois)
+        if getattr(crop_source, "pixel_materialization_id", None) is not None:
+            if selected_crop_rows is None:
+                raise ValueError("Package-backed subject-mask inference lacks selected crop rows.")
+            copy_selected_row_source_signatures(
+                run_group,
+                crop_group,
+                selected_crop_rows,
+                shard_rows=int(args.mask_probs_shard_rois or DEFAULT_MASK_PROBS_SHARD_ROIS),
+            )
         _copy_detection_source_array(
             run_group,
             crop_group,

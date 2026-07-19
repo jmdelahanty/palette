@@ -43,6 +43,10 @@ from ..shared.mask_probability_encoding import (
     decode_probability_values,
     probabilities_encoding_from_attrs,
 )
+from ..shared.composite_subject_mask import (
+    COMPOSITE_SUBJECT_MASK_STORAGE_MODE,
+    CompositeSubjectMaskArray,
+)
 from ..shared.provenance_attrs import (
     build_source_crop_snapshot_attrs,
     build_source_keypoints_attrs,
@@ -182,6 +186,7 @@ class SourceSubjectMaskRun:
     mask_surface_path: str = "masks_roi"
     probability_thresholds: tuple[float, ...] = ()
     probability_encoding: Optional[str] = None
+    probabilities_roi: Any | None = None
 
 
 class _ThresholdedProbabilityMaskArray:
@@ -1272,6 +1277,7 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
     available = group.get("available_channels")
     if available is None:
         raise RuntimeError(f"subject_mask_runs/{run_name} missing available_channels.")
+    probabilities_roi: Any | None = None
     masks_roi = group.get("masks_roi")
     mask_surface_kind = "binary"
     mask_surface_path = "masks_roi"
@@ -1279,6 +1285,17 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
     probability_encoding: Optional[str] = None
     if masks_roi is None:
         probabilities = group.get("mask_probs_roi")
+        if (
+            probabilities is None
+            and str(group.attrs.get("subject_mask_storage_mode") or "").strip()
+            == COMPOSITE_SUBJECT_MASK_STORAGE_MODE
+        ):
+            probabilities = CompositeSubjectMaskArray.open(
+                root,
+                group,
+                run_name=run_name,
+                verify_identity=False,
+            )
         if probabilities is not None:
             if len(probabilities.shape) != 4:
                 raise RuntimeError(
@@ -1292,6 +1309,7 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
                 source_path=probability_source_path,
                 observed_dtype=probabilities.dtype,
             )
+            probabilities_roi = probabilities
             masks_roi = _ThresholdedProbabilityMaskArray(
                 probabilities,
                 thresholds=probability_thresholds,
@@ -1363,6 +1381,7 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
         mask_surface_path=mask_surface_path,
         probability_thresholds=probability_thresholds,
         probability_encoding=probability_encoding,
+        probabilities_roi=probabilities_roi,
     )
 
 

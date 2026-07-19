@@ -569,6 +569,45 @@ def validate_row_source_signature_array(
     return shape[0]
 
 
+def copy_selected_row_source_signatures(
+    target_group: Any,
+    source_group: Any,
+    source_row_indices: np.ndarray,
+    *,
+    shard_rows: int = 131_072,
+) -> np.ndarray:
+    """Persist the exact signed source rows used by a subset inference run."""
+
+    if ROW_SOURCE_SIGNATURE_ARRAY not in source_group:
+        raise RowSourceSignatureError(
+            "Package-backed inference requires crop source_row_signature."
+        )
+    source_rows = int(source_group[ROW_SOURCE_SIGNATURE_ARRAY].shape[0])
+    validate_row_source_signature_array(
+        source_group[ROW_SOURCE_SIGNATURE_ARRAY], expected_row_count=source_rows
+    )
+    rows = np.asarray(source_row_indices, dtype=np.int64).reshape(-1)
+    if rows.size and (rows.min() < 0 or rows.max() >= source_rows):
+        raise RowSourceSignatureError("Selected source signature row is out of bounds.")
+    source_array = source_group[ROW_SOURCE_SIGNATURE_ARRAY]
+    oindex = getattr(source_array, "oindex", None)
+    if oindex is not None:
+        signatures = np.asarray(oindex[rows.tolist(), :], dtype=np.uint8)
+    else:
+        signatures = np.asarray(source_array[:], dtype=np.uint8)[rows]
+    spec = load_row_source_signature_spec(source_group.attrs)
+    from fisheye.shared.zarr.columnar import store_array
+
+    store_array(
+        target_group,
+        ROW_SOURCE_SIGNATURE_ARRAY,
+        signatures,
+        shard_rows=int(shard_rows),
+    )
+    target_group.attrs.update(spec.to_attrs())
+    return signatures
+
+
 def assert_row_source_signature_specs_match(
     expected: RowSourceSignatureSpec,
     actual: RowSourceSignatureSpec,
@@ -598,5 +637,6 @@ __all__ = [
     "build_row_source_signatures",
     "load_row_source_signature_spec",
     "validate_row_source_signature_array",
+    "copy_selected_row_source_signatures",
     "assert_row_source_signature_specs_match",
 ]

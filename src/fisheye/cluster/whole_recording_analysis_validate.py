@@ -11,6 +11,10 @@ import numpy as np
 
 from fisheye.cluster.lsf import write_json_snapshot
 from fisheye.cluster.whole_recording_analysis import PLAN_SCHEMA
+from fisheye.shared.composite_subject_mask import (
+    COMPOSITE_SUBJECT_MASK_STORAGE_MODE,
+    CompositeSubjectMaskArray,
+)
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.shared.zarr_run_completion import is_run_complete_in_parent
@@ -61,13 +65,24 @@ def _require_complete_run(root: Any, parent_name: str, run_name: str) -> Any:
     return run
 
 
-def _validate_raw_masks(run: Any, *, sample_rows: int) -> dict[str, Any]:
+def _validate_raw_masks(root: Any, run: Any, *, run_name: str, sample_rows: int) -> dict[str, Any]:
     labels = _labels(run.attrs.get("mask_labels"))
     if labels != RAW_LABELS:
         raise RuntimeError(
             f"Raw mask labels {labels!r} do not match expected {RAW_LABELS!r}."
         )
     probabilities = run.get("mask_probs_roi")
+    if (
+        probabilities is None
+        and str(run.attrs.get("subject_mask_storage_mode") or "").strip()
+        == COMPOSITE_SUBJECT_MASK_STORAGE_MODE
+    ):
+        probabilities = CompositeSubjectMaskArray.open(
+            root,
+            run,
+            run_name=run_name,
+            verify_identity=True,
+        )
     if probabilities is None:
         raise RuntimeError("Raw run is missing mask_probs_roi.")
     shape = tuple(int(value) for value in probabilities.shape)
@@ -248,7 +263,12 @@ def _validate_target(
         "refined_subject_mask_run": refined_run_name,
         "assignment_keypoint_group": actual_assignment[0],
         "assignment_keypoint_run": actual_assignment[1],
-        "raw_masks": _validate_raw_masks(subject_run, sample_rows=sample_rows),
+        "raw_masks": _validate_raw_masks(
+            root,
+            subject_run,
+            run_name=subject_run_name,
+            sample_rows=sample_rows,
+        ),
         "refined_masks": _validate_refined_masks(
             refined_run,
             sample_rows=sample_rows,

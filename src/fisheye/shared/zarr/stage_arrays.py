@@ -648,6 +648,25 @@ def validate_run(group: zarr.Group, spec: StageSpec) -> ValidationResult:
     if spec.stage_name == "refined_subject_masks":
         _validate_refined_subject_mask_storage(group, errors=errors, warnings=warnings)
 
+    if spec.stage_name == "subject_masks":
+        storage_mode = str(getattr(group, "attrs", {}).get("subject_mask_storage_mode") or "").strip()
+        probabilities = group.get("mask_probs_roi") if hasattr(group, "get") else None
+        if storage_mode == "composite":
+            if probabilities is not None:
+                errors.append("subject_masks: composite run must not expose top-level 'mask_probs_roi'")
+            payload = group.get("composite_payload") if hasattr(group, "get") else None
+            for name in (
+                "source_codes",
+                "source_row_indices",
+                "delta_target_row_indices",
+                "delta_instance_key",
+                "mask_probs_roi_delta",
+            ):
+                if payload is None or name not in payload:
+                    errors.append(f"subject_masks/composite_payload: missing required array '{name}'")
+        elif probabilities is None:
+            errors.append("subject_masks: missing required array 'mask_probs_roi'")
+
     return ValidationResult(valid=not errors, errors=errors, warnings=warnings)
 
 
@@ -1442,7 +1461,13 @@ SUBJECT_MASKS_SPEC = StageSpec(
         ArraySpec("instance_key", "uint64", ("n_rois",), required=False),
         ArraySpec("detection_source", "int8", ("n_rois",)),
         ArraySpec("masks_roi", "uint8", ("n_rois", "n_channels", "H", "W"), required=False),
-        ArraySpec("mask_probs_roi", "float16/float32/uint8", ("n_rois", "n_channels", "H", "W")),
+        ArraySpec(
+            "mask_probs_roi",
+            "float16/float32/uint8",
+            ("n_rois", "n_channels", "H", "W"),
+            required=False,
+            description="Required for standalone runs; composite runs resolve base plus delta payloads.",
+        ),
         ArraySpec("available_channels", "bool", ("n_channels",)),
     ),
     subgroups={"metrics": _SUBJECT_MASK_METRICS},

@@ -215,5 +215,6 @@ Production apply operations belong in LSF compute jobs, never on a login node.
 Version 1 supports Zarr v3, grayscale `uint8 raw_video/images_full`, an exact
 modern detection/refined-detection source row group, and one Phase-1 standalone
 crop base. External-video decode, clipped proxy resolution, registry projection,
-standalone compaction/export, and downstream keypoint/mask base-plus-delta
-formats are subsequent adapters.
+standalone crop compaction/export and external-video decode remain subsequent
+adapters. Downstream keypoint and raw subject-mask base-plus-delta publication
+is implemented in `docs/keyed_downstream_compaction_contract.md`.

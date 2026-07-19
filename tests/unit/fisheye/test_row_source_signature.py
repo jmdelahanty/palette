@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import zarr
 
 from fisheye.shared.row_source_signature import (
     ROW_SOURCE_SIGNATURE_BASIS_CONTENT,
@@ -10,6 +11,7 @@ from fisheye.shared.row_source_signature import (
     RowSourceSignatureError,
     assert_row_source_signature_specs_match,
     build_row_source_signatures,
+    copy_selected_row_source_signatures,
     load_row_source_signature_spec,
     validate_row_source_signature_array,
 )
@@ -179,6 +181,34 @@ def test_signature_array_metadata_validation_does_not_read_payload() -> None:
         validate_row_source_signature_array(np.empty((7, 32), dtype=np.uint64))
     with pytest.raises(RowSourceSignatureError, match="row count"):
         validate_row_source_signature_array(signatures, expected_row_count=8)
+
+
+def test_copy_selected_signatures_persists_exact_inference_binding() -> None:
+    root = zarr.group(store=zarr.storage.MemoryStore(), zarr_format=3)
+    source = root.create_group("crop")
+    target = root.create_group("delta")
+    batch = _build(
+        np.asarray([11, 22, 33], dtype=np.uint64),
+        np.arange(12, dtype=np.float32).reshape(3, 4),
+    )
+    source.create_array(
+        "source_row_signature", data=batch.signatures, chunks=(1, 32)
+    )
+    source.attrs.update(batch.spec.to_attrs())
+
+    copied = copy_selected_row_source_signatures(
+        target,
+        source,
+        np.asarray([2, 0], dtype=np.int64),
+        shard_rows=2,
+    )
+
+    np.testing.assert_array_equal(copied, batch.signatures[[2, 0]])
+    np.testing.assert_array_equal(target["source_row_signature"][:], copied)
+    assert (
+        target.attrs["source_row_signature_spec_digest"]
+        == batch.spec.spec_digest
+    )
 
 
 @pytest.mark.parametrize(
